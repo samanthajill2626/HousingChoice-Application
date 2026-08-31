@@ -53,26 +53,51 @@ D13. Merge everything including the unpause; the human runs the sweep against
 
 ## 3. Ordering - the part that texts people if it is wrong
 
-The pause is a code constant, so emptying `MANUAL_ONLY_REMINDER_KINDS` turns
-sending on the moment the branch DEPLOYS. Merge is not deploy in this repo;
-deploy is a separate human-driven `scripts/deploy.mjs` step. So:
+The pause is a code constant, so lifting it turns sending on the moment the
+branch DEPLOYS. Merge is not deploy in this repo; deploy is a separate
+human-driven `scripts/deploy.mjs` step.
 
-1. Merge the whole branch, unpause included.
+### 3.1 The ordering hazard, and why the design removes it rather than sequencing around it
+
+An earlier draft of this spec sequenced the deploy after the sweep and claimed a
+re-run would catch stragglers. **That was a race, not a fix** (design review R1,
+M4). A tour booked between the sweep and the deploy runs the OLD code, arms a
+`confirmation` with `dueAt = now`, and that row is past-due from birth - so it
+fires on the FIRST post-deploy tick, before any human could re-run anything.
+
+**So `MANUAL_ONLY_REMINDER_KINDS` is NOT emptied.** It is emptied of the three
+live rungs - `day_before`, `morning_of`, `en_route` - and `confirmation` STAYS in
+it permanently, re-commented as a discontinued kind that must never auto-send.
+
+That is the guard, not dead state. With it, no `confirmation` row fires
+regardless of when or by what code path it was armed, the ordering dependency
+between the sweep and the deploy disappears, and the sweep becomes panel cleanup
+rather than a deadline. Section 5's disposal of the kind is therefore about
+ARMING only.
+
+Its docblock must be rewritten, not deleted: the current text says "TO RESTORE:
+empty this set. Nothing else has to change," which stops being true the moment
+the set means two different things for two different kinds.
+
+### 3.2 The remaining sequence
+
+1. Merge the whole branch.
 2. The human runs the retirement sweep against dev, then prod, from their own
    machine (`--dry-run` first). NOT an agent action - see section 4.4.
 3. The human deploys.
 
-Between step 2 and step 3, prod rows carry the two new skip reasons while the
-RUNNING dashboard has no labels for them.
-`dashboard/src/routes/tours/RemindersPanel.tsx:107` falls back to a bare
-"Skipped" chip on an unrecognized reason, so this degrades cleanly and resolves
-itself at deploy. Stated here so it is not diagnosed as a bug.
+Steps 2 and 3 may now be taken in either order without a burst; this order is
+still preferred because it keeps the panel honest from the first moment the new
+dashboard is live.
 
-The sweep is idempotent and conditional-write, so re-running it after the deploy
-is safe and catches anything armed in between.
+Between them, prod rows carry the new skip reasons while the RUNNING dashboard
+has no labels for them. `dashboard/src/routes/tours/RemindersPanel.tsx:107` falls
+back to a bare "Skipped" chip on an unrecognized reason, so this degrades
+cleanly and resolves itself at deploy. Stated here so it is not diagnosed as a
+bug.
 
 **Within the branch**, the build order is: the sweep script, then the test
-vehicle conversion, then the unpause. The vehicle must exist before
+vehicle conversion, then the manual-only change. The vehicle must exist before
 `confirmation` stops arming, because it is what the suites currently ride.
 
 ## 4. The retirement sweep
@@ -104,21 +129,44 @@ nothing to rows that already exist.
 
 A row in both populations takes population A's token.
 
-### 4.3 Two new `ReminderSkipReason` tokens
+**Population A retires a documented operator affordance, knowingly.**
+`app/src/repos/tourRemindersRepo.ts:152-158` describes restoring a canceled rung
+to pending as a deliberate "send it after all", explicitly including a past-due
+one. Population A sweeps those too, with no lower bound - a tour that ended ten
+minutes ago qualifies. RULED: sweep them. A restored rung on a tour that has
+already happened is the same stale text as any other, and the operator retains
+Send now on every rung of a tour that has NOT happened. Recorded so the reversal
+is visible rather than incidental (design review R1, M17).
+
+### 4.3 Three new `ReminderSkipReason` tokens
 
 `past_event` is NOT reused. It means "would land at or after the tour starts",
 which is false of these rows, and spec 8.2 of Phase A already called that reuse
 a lie for this row shape.
 
-| token | dashboard label | population |
+| token | dashboard label | added by |
 |---|---|---|
-| `tour_already_passed` | `the tour had already happened` | A |
-| `kind_retired` | `this reminder is no longer sent` | B |
+| `tour_already_passed` | `the tour had already happened` | section 4, population A |
+| `kind_retired` | `this reminder is no longer sent` | section 4, population B |
+| `names_unavailable` | `couldn't look up the names` | section 7 |
 
-Both are added to `ReminderSkipReason` (`app/src/repos/tourRemindersRepo.ts`)
-and to `REMINDER_SKIP_REASON_LABELS` (`dashboard/src/api/types.ts`). The
-existing label-completeness test (`dashboard/src/api/types.test.ts:119`) pins
-that the two maps agree, so a missing label fails the build.
+**EACH token touches FOUR sites, and the build does not catch a missed one.**
+An earlier draft claimed the existing label test was a safety net; it is not
+(design review R1, M6). `dashboard/src/api/types.test.ts:87-106` HAND-COPIES the
+reason vocabulary as plain strings, and its own comment states the failure
+direction it cannot catch: an app-side token added without touching the
+dashboard "fails no build and degrades the chip to a reason-less Skipped".
+
+Per token:
+
+1. `ReminderSkipReason` - `app/src/repos/tourRemindersRepo.ts:38`
+2. the dashboard wire union - `dashboard/src/api/types.ts:1191` (`TourReminderView`)
+3. `REMINDER_SKIP_REASON_LABELS` - `dashboard/src/api/types.ts:1271`
+4. `SKIP_REASONS` - `dashboard/src/api/types.test.ts:95`
+
+Site 4 is what makes sites 2 and 3 enforceable, so it is not optional
+bookkeeping. `names_unavailable` is listed here rather than only in section 7
+because it is the same edit in the same four places.
 
 Separate tokens rather than one because the panel chip is operator-facing copy.
 A swept confirmation for next Tuesday's tour showing "the tour had already
@@ -159,9 +207,13 @@ a bug: the first `day_before` may fire at the old `scheduledAt - 24h`.
 Remove `'confirmation'` from `REMINDER_KINDS` ONLY - the `no_show_checkin`
 pattern. The kind stays valid in the `ReminderKind` union, in `computeDueAt`, in
 `LADDER_ORDER` and in the catalog, so an in-flight row still composes and still
-displays. `MANUAL_ONLY_REMINDER_KINDS` is emptied in the same change, at which
-point its `confirmation` entry is dead state and its docblock is false - correct
-both.
+displays.
+
+This is about ARMING only. `MANUAL_ONLY_REMINDER_KINDS` keeps its `confirmation`
+entry permanently as the send-side guard - see section 3.1, which is where the
+reasoning lives. The two changes are complementary: one stops new rows, the
+other stops every row that already exists or that an older deployed binary might
+still write.
 
 Founder authority: Sam's 2026-08-24 doc, verbatim - "Turned off:
 tour.confirmation and tour.confirmation_no_address. No confirmation text at all
@@ -177,14 +229,15 @@ They become unreachable from `armTourReminders` only.
 Sam approved this explicitly. It must be built at **both** sites; one without
 the other reopens the hole. This is Phase A spec 7.3's cut hook.
 
-1. **Arm-time clamp** (`armTourReminders`, `clampOutOfQuietHours`): the
-   `en_route` rung's dueAt is stored UNCLAMPED. Every other rung clamps as
+1. **Arm-time clamp** (`armTourReminders`, `app/src/jobs/tourReminders.ts:306`):
+   the `en_route` rung's dueAt is stored UNCLAMPED. Every other rung clamps as
    today.
-2. **Fire-time backstop** (`sendOneReminder`, the `isQuietTime(now, window)`
-   branch): `en_route` is not deferred.
+2. **Fire-time backstop** (the `isQuietTime(now, window)` branch at
+   `app/src/jobs/tourReminders.ts:910`): `en_route` is not deferred.
 
 The exemption must NOT change `clampOutOfQuietHours` itself - that helper is
-shared. Exempt at the call sites, by kind.
+shared with the placement ladder and the timeline. Exempt at the call sites, by
+kind.
 
 ### 6.1 What this changes for Sam, and what she must be told
 
@@ -192,32 +245,90 @@ Her email documents the current overnight behaviour: a 9am tour yields one text
 at 8am with the 4-hour reminder skipped, and **a tour at 8am or earlier gets NO
 automated reminder at all**. The exemption changes that second half - an 8am
 tour now gets its 7am `en_route`. That is the outcome she approved, but she was
-given the old explanation. FLAG IT IN THE HANDBACK.
+given the old explanation.
 
-### 6.2 Interaction with the supersession rules
+**There is no floor.** An exempt `en_route` for a 04:00 tour sends at 03:00.
+That is the decision working as directed, not a defect, but it is the unbounded
+consequence of it and it was never stated to her. BOTH of these go in the
+handback (section 15).
 
-Un-clamping `en_route` REMOVES collisions rather than creating them: a clamped
-`en_route` was one of the rungs that could land on another's slot. The
-`past_event` rule still applies (`en_route`'s raw dueAt is `scheduledAt - 1h`,
-always before the tour), and `staleDayBefore` does not involve `en_route`. No
-precedence change.
+### 6.2 Interaction with supersession - THE ONE RULE CHANGE THIS MISSION MAKES
+
+An earlier draft claimed un-clamping `en_route` only REMOVES collisions. **That
+is wrong** (design review R1, M2), and the counter-example is not an edge case -
+it is the 08:00-09:00 band the founder was specifically told about.
+
+Default window 21:00-08:00, tour at 08:30 local:
+
+| rung | raw | today (clamped) | with the exemption |
+|---|---|---|---|
+| `morning_of` | 04:30 | 08:00 | 08:00 |
+| `en_route` | 07:30 | 08:00 | **07:30** |
+
+Today both clamp onto 08:00, `supersededBySlot`
+(`app/src/jobs/tourReminders.ts:412-417`) sees `otherDue === dueAt` and retires
+`morning_of`, and ONE text goes out. Un-clamping `en_route` separates the slots,
+the equality no longer holds, and BOTH send: `en_route` at 07:30 ("she is headed
+that way shortly") followed by `morning_of` at 08:00 ("looking forward to having
+you tour at 8:30 today"). Two texts, in reverse ladder order, on exactly the
+tours this exemption exists to serve.
+
+**RULED: generalize the predicate from equality to `otherDue <= dueAt`.** An
+earlier rung is stale when a LATER rung fires at or BEFORE it. Equality was only
+ever a proxy for that; clamping is what used to make the two coincide, and the
+exemption is what breaks the coincidence.
+
+This is deliberately NOT a precedence reorder. Phase A spec 8.1 warns that
+reordering rule EVALUATION reopens the vanishing-row problem; this changes no
+ordering and no rule's position. It widens one comparison, and only in cases
+where clamping has inverted the ladder. On an unclamped ladder the rungs are
+strictly increasing in time, so the widened predicate is false for every pair
+and nothing changes - which is the regression test.
+
+`supersededInBatch` (the fire-time twin, `app/src/jobs/tourReminders.ts:889-894`)
+already retires an earlier rung whenever a later one is in the same batch, so it
+covers the resurrected `morning_of` on a catch-up tick without a change. Stated
+so the builder does not "make it symmetric" and alter behaviour that is already
+correct.
+
+`past_event` still applies (`en_route`'s raw dueAt is `scheduledAt - 1h`, always
+before the tour) and `staleDayBefore` does not involve `en_route`.
 
 ## 7. Bounding the names-read re-list
 
 Ledger item 7, and the one item whose acceptance was explicitly conditioned on
 the pause. When name resolution's contact or unit read THROWS on a rung whose
 copy renders what was lost, `composeBodyForRow` raises
-`ReminderNamesUnavailableError` and `sendOneReminder`
-(`app/src/jobs/tourReminders.ts:1037-1043`) logs and returns WITHOUT claiming.
+`ReminderNamesUnavailableError`, and the poll logs and returns WITHOUT claiming.
 There is no bound: a persistently failing read re-lists every tick forever, and
 the panel keeps calling the rung `upcoming` because there is no overdue state.
+
+**THERE ARE TWO SUCH SITES AND BOTH NEED THE BOUND** (design review R1, M1). An
+earlier draft cited only the first and named a function `sendOneReminder` that
+does not exist in the codebase at all:
+
+| site | route | note |
+|---|---|---|
+| `app/src/jobs/tourReminders.ts:1037-1043` | tenant 1:1 | |
+| `app/src/jobs/tourReminders.ts:1210-1216` | relay GROUP | carries the ledger-item-7 comment verbatim |
+
+The group site is the one that matters most: a landlord-led or PM-led `en_route`
+rung is the ONLY rung whose copy forks on the property-contact name, so it is the
+single rung-differential names failure in the whole ladder - the same fact
+section 12 relies on when disposing of ledger item 8. Bounding the 1:1 route and
+leaving the group route unbounded would close the smaller half of the hole and
+leave the reasoned-about half open.
 
 ### 7.1 The failure this actually guards
 
 Not a poisoned row. Absence never throws - a missing contact, a deleted unit or
 a nameless contact all return `undefined` and compose the fallbacks. Only a
-THROWN read counts, and the empty-string key case is guarded at the door
-(`routes/tours.ts:315` rejects an empty `unitId`).
+THROWN read counts. The obvious poisoned-key candidate, an empty-string key
+(which DynamoDB rejects identically on every attempt), is rejected by the tour
+create route (`routes/tours.ts:315`). That is ONE writer, not proof that no
+writer can produce one - seeds and importers reach the repo directly - so the
+claim here is narrow: a poisoned row is not the failure this bound is designed
+for, whether or not one is reachable.
 
 What throws repeatedly is a **sustained failure of the contacts or units
 table**: an IAM permission lost in a deploy, a table misconfiguration, a long
@@ -228,10 +339,12 @@ the panel says so" instead of "these sent at the wrong time".
 
 ### 7.2 The fix - mirror the twin exactly
 
-`roster_unavailable` was bounded for precisely this reason. Reuse its shape:
-past `ROSTER_UNAVAILABLE_GRACE_MS` (one hour, `app/src/lib/rosterResolution.ts:100`)
-after the row's `dueAt`, claim-skip with a new `names_unavailable`
-`ReminderSkipReason`. Dashboard label: `couldn't look up the names`.
+`roster_unavailable` was bounded for precisely this reason. Reuse its shape, at
+BOTH sites identically: past `ROSTER_UNAVAILABLE_GRACE_MS` (one hour,
+`app/src/lib/rosterResolution.ts:100`) after the row's `dueAt`, claim-skip with a
+new `names_unavailable` `ReminderSkipReason`. Dashboard label:
+`couldn't look up the names`. Its four edit sites are in section 4.3 with the
+other two tokens.
 
 `names_unavailable` ALREADY exists in the force-send REFUSAL union
 (`app/src/jobs/tourReminders.ts:1478`) - the same dual-union shape
@@ -251,9 +364,10 @@ long as the rung stays pending.
 ## 8. The `overdue` flag
 
 A rung is `'upcoming' | 'sent' | 'canceled' | 'skipped'`
-(`app/src/routes/tourReminders.ts:143`), derived by `stateOf` from terminal
-markers alone - `dueAt` is not consulted. So a rung stuck behind any pre-claim
-deferral reads "upcoming" with a dueAt weeks in the past, and nothing says so.
+(`app/src/routes/tourReminders.ts:138` `TourReminderView`), derived by `stateOf`
+(`:157`) from terminal markers alone - `dueAt` is not consulted. So a rung stuck
+behind any pre-claim deferral reads "upcoming" with a dueAt weeks in the past,
+and nothing says so.
 
 ### 8.1 An ADDITIVE BOOLEAN, never a fifth state value
 
@@ -262,8 +376,8 @@ Do NOT widen the `state` union. Two predicates test `'upcoming'` by equality -
 and an `'overdue'` value would silently drop overdue rungs out of exactly the
 places that surface them.
 
-Add to `TourReminderView` (and its dashboard twin at
-`dashboard/src/api/types.ts:1196`):
+Add to `TourReminderView` (`app/src/routes/tourReminders.ts:138`) and its
+dashboard twin (`dashboard/src/api/types.ts:1191`):
 
 ```
 /** Derived, never stored: this rung's send time has passed and it still has
@@ -271,14 +385,41 @@ Add to `TourReminderView` (and its dashboard twin at
 overdue?: boolean;
 ```
 
-set at the view-build site (`routes/tourReminders.ts:598-609`) as
-`state === 'upcoming' && row.dueAt < nowIso`. Omitted when false, matching the
-file's existing conditional-spread style.
+as `state === 'upcoming' && row.dueAt < nowIso`, omitted when false to match the
+file's conditional-spread style.
 
-It composes with `suppression` rather than competing: a quiet-hours-deferred
-rung is overdue AND carries `{reason: 'quiet_hours'}`. Chip copy pairs them.
+### 8.2 EVERY builder and EVERY renderer - enumerated
 
-### 8.2 Scope boundary
+There are TWO builders of `TourReminderView`, not one (design review R1, M5). A
+flag set in one is a view that disagrees with itself depending on which request
+produced it.
+
+| site | what it is | disposition |
+|---|---|---|
+| `routes/tourReminders.ts:598-609` | the GET list projection | SET `overdue` |
+| `routes/tourReminders.ts:336-345` (`viewOf`) | the PATCH state-echo projection | SET `overdue` |
+
+`viewOf` is sync and takes its body from the handler; `overdue` needs only
+`row.dueAt` and a `now`, so the handler passes the same `nowIso` it already
+computes. No new I/O on either path.
+
+Two OTHER surfaces render the same pending rungs and are EXPLICITLY EXCLUDED
+rather than left unmentioned:
+
+| site | why excluded |
+|---|---|
+| `routes/contactTimeline.ts` (upcoming bucket) | a different wire shape with its own reason vocabulary; it aggregates across tours and placements, and a per-rung staleness flag there is the placement-twin's problem, not this one's |
+| `routes/relayGroups.ts` (group scheduled view) | same shape argument; it renders a group's scheduled sends, not the tour ladder |
+
+Both are named in `docs/issues/placement-nudge-overdue-invisible-on-card.md` as
+part of that item's scope. An unmentioned reader is where a rule silently
+disagrees with itself, so the exclusion is recorded, not assumed.
+
+`overdue` composes with `suppression` rather than competing: a quiet-hours
+deferred rung is overdue AND carries `{reason: 'quiet_hours'}`. Chip copy pairs
+them.
+
+### 8.3 Scope boundary
 
 `routes/placementNudges.ts` has the identical four-value union, the identical
 `stateOf` (`:176`) and the identical blind spot, with its own `'upcoming'`
@@ -287,6 +428,33 @@ equality predicates at `:376` and `:419`. It is FILED, not built:
 touch the placement surface.
 
 ## 9. Relay group templates
+
+### 9.0 EVERY call site of the two composers - enumerate before changing either
+
+Both composers have a JOB caller and a PREVIEW caller, and the preview's stated
+contract is parity with the job (`app/src/services/rosterEdits.ts:21-22`: previews
+must go through the same composers "or a template edit silently diverges"). An
+earlier draft named only the jobs (design review R1, M3).
+
+| composer | job | preview |
+|---|---|---|
+| `composeIntroBody` | `jobs/relayFanOut.ts:634` | `services/rosterEdits.ts:473` |
+| `composeMemberAddedBody` | `jobs/relayFanOut.ts:683` | `services/rosterEdits.ts:673` (`buildAddPreview`) |
+
+**RULED: the preview shows the same variant the job would send.** Anything else
+breaks the escape hatch section 9.5 depends on, and worse: intro precedence rule
+1 pins `intro_body` from what the operator EDITED, so an operator who tweaks a
+previewed naked intro would pin the wrong variant permanently.
+
+For `buildAddPreview` specifically, where the job now produces two bodies: the
+preview shows the **GROUP** body. That is what the operator is authoring and
+announcing; the new member's body is the fixed naked intro and needs no preview.
+Its docblock currently says it previews "the body the WHOLE group receives" -
+still true of what it shows, but it must be amended to say the new member
+receives something different and where that is defined.
+
+Both previews therefore need the same owner-and-names resolution the jobs get
+(section 9.3).
 
 ### 9.1 Three intro variants, routed on the conversation's owner
 
@@ -334,6 +502,28 @@ Hey {tenantFirstName}! Excited to have you move into {where}. Please use this gr
 **Naked intro** - the live copy, rewritten only to drop `{members}` per 9.2. The
 sent text is BYTE-IDENTICAL to today's.
 
+**Two notes on the founder copy, neither of which changes a word of it.**
+
+*Sender identity.* The naked intro opens "Hey, it's Sam." - and section 9.4's
+argument for giving a new member that body rests on exactly that: a relay intro
+carries no brand and no STOP, so "it's Sam" is the only thing telling a stranger
+who is texting them from an unknown number. **Sam's tour and placement intros
+carry no sender identity at all**, so the same argument applies to them and the
+same exposure is real (design review R1, M8). Engineering has stated this
+exposure before and the founder directed it anyway
+(`app/src/messages/catalog.ts:240-250`). We do NOT invent a sentence for her:
+this goes to her as a question (section 15), and until she rules, her copy ships
+as written.
+
+*The housing-authority sentence.* `app/src/messages/catalog.ts:250-252` records a
+dated 2026-08-20 removal of a housing-authority sentence from `relay.intro`, on
+the rationale that "updates come from the landlord, not from Sam". Sam's
+placement copy reinstates such a sentence in a form that HONOURS that rationale -
+it attributes the updates to the property contact, not to Sam - and the existing
+assertion is scoped to `relay.intro`, so nothing breaks. Recorded with its date
+here so the next reader of that comment does not file the placement intro as
+drift (design review R1, M16).
+
 ### 9.2 `{members}` is removed; `{names}` replaces it
 
 `{members}` is a whole computed SENTENCE
@@ -349,12 +539,52 @@ Hey, it's Sam. You're now connected with {names} on this number. Reply here and 
 ```
 
 `composeConnectionSentence` becomes a name-list builder. Its no-names branch
-today RESTRUCTURES the sentence; as a token it resolves to the noun phrase
-`2 other people` / `1 other person` so the one sentence still works. The
-degenerate zero-others case ("You're now connected on this number.") is dropped
-- a relay group with no other members is not a group.
+today RESTRUCTURES the sentence; as a token it resolves to a noun phrase instead,
+so the one sentence in the template always works.
+
+**`{names}` is TOTAL - it never returns the empty string.** An earlier draft
+dropped the zero-others branch on the grounds that "a relay group with no other
+members is not a group". That is an assumption, the PREVIEW builder can reach the
+branch, and a `{names}` with no value in a strict catalog DEFAULT does not
+degrade - it THROWS (`app/src/messages/resolve.ts:36`). A crash on a preview, not
+a clumsy sentence (design review R1, M12).
+
+| roster | `{names}` |
+|---|---|
+| names known | `Alice, Bob, and Carol` (Oxford list, FIRST names) |
+| no names, 2+ others | `2 other people` |
+| no names, 1 other | `1 other person` |
+| no names, 0 others | `1 other person` |
+
+The last row is deliberately not "unreachable": it returns a sentence that is
+mildly wrong rather than a throw that takes out the preview.
 
 Never a phone number, ever, in any branch. That rule is unchanged.
+
+### 9.2a Catalog metadata for the five new entries
+
+Constrained by existing invariants - `app/test/messages/catalog.test.ts:35-41`
+(every `{token}` in a default is declared in `vars`), `:43-52` (a NON-editable
+entry uses every var it declares - no dead tokens), and `:62-69` (the two relay
+entries are `editable: false` with a written rationale). Stated so a builder does
+not guess (design review R1, M15).
+
+| id | `vars` (in order) | class | channel | editable |
+|---|---|---|---|---|
+| `relay.intro` | `names` | operational | sms | false |
+| `relay.intro_tour_today` | `tenantFirstName`, `propertyContactFirstName`, `time`, `where` | operational | sms | false |
+| `relay.intro_tour` | `tenantFirstName`, `propertyContactFirstName`, `when`, `where` | operational | sms | false |
+| `relay.intro_placement` | `tenantFirstName`, `propertyContactFirstName`, `where` | operational | sms | false |
+| `relay.member_added` | `name` | operational | sms | false |
+| `relay.member_added_role` | `name`, `role` | operational | sms | false |
+
+`editable: false` for the same reason the existing entries carry it: nothing can
+store or route an override for a relay entry, and advertising a capability the
+system cannot honour is what that flag was flipped to stop.
+
+The no-dead-tokens rule is why the two tour variants split `{time}` and `{when}`
+rather than declaring both - a single entry declaring both would fail `:43-52`.
+`{where}` is declared LAST in every entry per 9.3.
 
 ### 9.3 Token contract for the relay entries
 
@@ -377,9 +607,27 @@ ordering costs nothing and the address is the one value that is not
 brace-stripped.
 
 The composer stays PURE and synchronous, mirroring Phase A's split: a resolver
-in the job handler gathers owner -> tour/placement -> unit + names, and hands
-plain values to a pure entry-selection-and-interpolate function. No repo reads
-below the composer.
+gathers owner -> tour/placement -> unit + names + roster role, and hands plain
+values to a pure entry-selection-and-interpolate function. No repo reads below
+the composer.
+
+**The resolver is SHARED and it needs a dependency neither call site has today**
+(design review R1, M7). `{role}` comes from `UnitContact.role`, which requires
+the unit; the member-added job (`jobs/relayFanOut.ts:669-698`) currently reads
+only the conversation, and `buildAddPreview` takes `RosterResolutionDeps` with no
+units handle either. So:
+
+- one exported async resolver - conversation -> `getOwner` -> tour or placement
+  -> `unitsRepo.getById` + `resolveTourContactNames` -> a plain
+  `RelayIntroInputs` / `RelayMemberAddedInputs` value;
+- `unitsRepo` (and, for the tour variant, `toursRepo`; for placement,
+  `placementsRepo`) added to the job's dep wiring AND to the preview's;
+- all four call sites in 9.0 go through it, so the preview cannot drift from the
+  job by construction rather than by discipline.
+
+A read failure in the resolver is NOT a throw: it degrades to missing inputs,
+which 9.5 turns into the naked intro. A relay intro must never be lost over a
+failed unit read, and the preview must never 500.
 
 ### 9.4 `member_added` splits per recipient
 
@@ -466,6 +714,13 @@ selector alongside `body`; `body` remains what is persisted and previewed. The
 default (no selector) is byte-identical to today's behaviour, so every existing
 caller - tour reminders included - is unaffected.
 
+**In `persist: false` legs-only mode** (the dev intro replay seam) the selector
+still drives per-member bodies and there is simply no row - the rule degrades
+rather than being undefined (design review R1, M13). Only the intro job uses that
+mode today; the member-added job does not. Stated so a builder does not read
+"the persisted body is the new member's copy" as a precondition that mode
+violates.
+
 Per-recipient DELIVERY (rows and chips) already exists and does NOT help here:
 that is delivery state, not bodies.
 
@@ -484,10 +739,26 @@ Recorded so a reviewer does not read the founder doc and file them as gaps.
 
 ## 10. Test vehicles - no new dev seam
 
-`confirmation` is the suites' only immediate-send vehicle today: roughly 40
-sites in `app/test/tourReminders.test.ts` and roughly 14 across
-`e2e/tests/scenarios/scheduled-visibility.spec.ts`, `e2e/tests/tour-roster.spec.ts`
-and `e2e/tests/scenarios/tours.spec.ts`, all riding its `dueAt = now`.
+`confirmation` is the suites' only immediate-send vehicle today.
+
+**The plan owes a DERIVED, ENUMERATED inventory - not the ledger's counts, which
+this spec inherited without re-deriving and which are materially incomplete**
+(design review R1, M9). It must be split three ways, because the sites are not
+one kind of thing and "convert them" is wrong for two of the three:
+
+1. **Immediate-send rides** - tests that use `confirmation` only because it is
+   due at arm time. These CONVERT, per the vehicles below.
+2. **Arm-time and ladder-position assertions** - tests that assert `confirmation`
+   ARMS, or that depend on its position as the next rung
+   (`e2e/tests/tour-roster.spec.ts:488-501` and
+   `e2e/tests/scenarios/scheduled-visibility.spec.ts:234-259` are two).
+   These are DELETIONS or re-baselines, not conversions: the behaviour they pin
+   is being removed on purpose.
+3. **Seeds** - the seed files that arm or expect a `confirmation` rung. These
+   need re-baselining or the fixtures stop matching the ladder.
+
+The plan enumerates every file and site by name and assigns each to one of the
+three. A count is not an inventory.
 
 The ledger recommended budgeting for a new dev seam. **That is not needed**, and
 the correction is load-bearing enough to state with its evidence:
@@ -507,6 +778,16 @@ E2E runs `workers: 1, fullyParallel: false`, so there is no concurrent-spec
 hazard; the residual risk of clock-travel ticks is that a future `now` also
 fires seeded rows, and assertions are already phone-scoped.
 
+**A clock-travel tick is NOT behaviour-neutral, and the converted specs must
+expect that** (design review R1, M10). Ticking with a future `now` pulls every
+EARLIER same-tour rung into the same `listDue` batch, where `supersededInBatch`
+(`app/src/jobs/tourReminders.ts:889-894`) claim-skips them. So a spec converted
+to fire `en_route` will find its `morning_of` retired
+`quiet_hours_superseded` as a side effect. That is the machinery working, not a
+flake - the converted specs ASSERT the retirement rather than being surprised by
+it. Note this reaches the same code as section 6.2's widening from the other
+direction; the two need to be tested together.
+
 **If a spec genuinely cannot be made deterministic this way, RAISE IT** rather
 than building a `POST /__dev/tour-reminders/fire` seam speculatively. Adding a
 second code path through the send machinery in the change that turns the send
@@ -520,7 +801,7 @@ its comment both go.
 
 ## 11. The shared `interpolate` re-expansion fix
 
-`interpolate` (`app/src/messages/resolve.ts:30-44`) substitutes declared tokens
+`interpolate` (`app/src/messages/resolve.ts:24-45`) substitutes declared tokens
 SEQUENTIALLY into an accumulating string, so a value inserted for an earlier
 token is rescanned for later ones. Live today in `relay.member_added`
 (`vars: ['joined', 'members']`, both fed from contact display names): a member
@@ -532,6 +813,16 @@ every message in the app.
 **FIX IT (Cameron approved).** Replace the per-token loop with a SINGLE pass
 that fills every declared token simultaneously, so a substituted value can never
 be rescanned.
+
+**USE A FUNCTION REPLACEMENT, NEVER A STRING ONE.** This is the sharpest thing
+round 1 found (M11) and it would have turned the fix into a new vulnerability.
+Today's `split(needle).join(value)` is IMMUNE to `$`-patterns. A naive
+`template.replace(/\{(\w+)\}/g, value)` with a STRING replacement interprets
+`$&`, `$1`, `` $` `` and `$'` inside the substituted value - so a contact who
+names themselves `$&$&$&` gets expansion again, through a different door. The
+replacement MUST be a callback (`(match, token) => ...`), which never interprets
+`$`-patterns, and the regression test MUST include a value carrying `$&` and
+`$1`.
 
 Both existing behaviours must be preserved EXACTLY, and each needs its own
 regression test:
@@ -553,7 +844,7 @@ is what makes it a small risk, but the test coverage above is not optional.
 | item | disposition |
 |---|---|
 | 1. retirement sweep | BUILT - section 4, plus the second population the ledger missed |
-| 2. empty manual-only + stop arming `confirmation` | BUILT - section 5 |
+| 2. empty manual-only + stop arming `confirmation` | BUILT WITH A CORRECTION - sections 3.1 and 5. The set is NOT emptied; `confirmation` stays in it permanently as the send-side guard |
 | 3. replacement immediate-send vehicle | BUILT differently - section 10; no seam needed |
 | 4. quiet-hours exemption hook, both sites | BUILT - section 6 |
 | 5. the founder's open `en_route` question | ANSWERED - exempt; section 6 |
@@ -598,15 +889,22 @@ same class, rather than left pointing at a closed ledger.
 ## 14. Testing
 
 - **Unit.** The sweep planner (pure, both populations, the not-past-tour
-  negative, and idempotency against an already-skipped row). The `en_route`
-  exemption at both sites. The one-hour names bound, including the
-  force-send path still refusing rather than retiring. `overdue` true/false/
-  absent. Every relay entry's composition including all four fallbacks.
-  `interpolate`'s three preserved behaviours plus a re-expansion regression.
-- **E2E.** The converted immediate-send sites. A tour relay intro and a
+  negative, the operator-restored past-tour rung, and idempotency against an
+  already-skipped row). The `en_route` exemption at both sites. **The section 6.2
+  widening: the 08:30-tour double-send as a regression test, AND a normal
+  unclamped ladder proving the widened predicate changes nothing there.** The
+  one-hour names bound at BOTH the 1:1 and GROUP sites, including the force-send
+  path still refusing rather than retiring. `overdue` true/false/absent in BOTH
+  view builders. Every relay entry's composition including all four fallbacks and
+  the total `{names}` table. `interpolate`'s three preserved behaviours, a
+  re-expansion regression, and a `$&`/`$1`-bearing value.
+- **E2E.** The converted immediate-send sites, each asserting the same-tour
+  retirements a clock-travel tick causes (section 10). A tour relay intro and a
   placement relay intro landing in every member's fake thread with resolved
-  names. `member_added` proving the new member's fake thread carries the naked
-  intro while the others carry Sam's line, and that ONE row is persisted.
+  names, AND the operator PREVIEW showing the same variant. `member_added`
+  proving the new member's fake thread carries the naked intro while the others
+  carry Sam's line, that the preview shows the GROUP line, and that ONE row is
+  persisted carrying the new member's body.
 - **Catalog.** The existing "no dead tokens" and label-completeness tests cover
   the new entries; add a case pinning the naked intro's composed output is
   byte-identical to the pre-change body.
@@ -614,12 +912,20 @@ same class, rather than left pointing at a closed ledger.
 ## 15. Owed to the founder (handback items, not build work)
 
 1. `en_route`'s quiet-hours exemption changes what her email told her about
-   tours at 8am or earlier. Tell her the new outcome (section 6.1).
-2. Confirm that `pm` on a unit roster is what she means by "property manager"
+   tours at 8am or earlier - they now get a reminder where the email said they
+   get none. It also has NO FLOOR: a 4am tour texts at 3am. Tell her both
+   (section 6.1).
+2. **Her tour and placement intros carry no sender identity**, where the naked
+   intro opens "Hey, it's Sam." A relay intro carries no brand and no STOP, so
+   on those two variants a stranger's first text from an unknown number says
+   nothing about who it is from. Engineering has stated this exposure before and
+   she directed it anyway; this is the same class of decision and it is hers.
+   Her copy ships as written unless she says otherwise (section 9.1).
+3. Confirm that `pm` on a unit roster is what she means by "property manager"
    (section 9.4).
-3. The placement intro runs about 370 characters, roughly three SMS segments.
+4. The placement intro runs about 370 characters, roughly three SMS segments.
    Phase A spec section 5 rules that a cost note, not a gate. Do not shorten her
    words.
-4. Her question "please also confirm {landlord} is wired to tour templates and
+5. Her question "please also confirm {landlord} is wired to tour templates and
    not just to relays" - it is, as `{propertyContactFirstName}` on
    `tour.en_route_landlord_led`.

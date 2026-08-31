@@ -115,13 +115,49 @@ The nine items, in the order Phase B should meet them:
    excludes `past_event` rungs. So before rule (e), a confirmation retired
    `quiet_hours_superseded` ALWAYS cited a rung that really armed.
 
-   REACHABLE BAND: arming inside the org quiet window, on the TOUR'S OWN local
-   date (so between local midnight and the window's end), for a tour starting
-   roughly 08:00-12:00 local, booked under six hours out. Both `confirmation`
-   and `morning_of` clamp to the same window-end slot; `morning_of` is then
-   retired `booked_too_late`, and the confirmation has already been retired
-   citing it. The evening side of the window is safe - `localDateOf(now)` is
-   then the day BEFORE the tour, so rule (e) does not fire for `morning_of`.
+   REACHABLE BAND - MEASURED, not reasoned. An earlier revision of this
+   paragraph reasoned the band out from `morning_of` alone and got three things
+   wrong; it was replaced with the results of an exhaustive sweep of
+   `armTourReminders` (every tour local hour 00..23, arm instants walked back
+   minute by minute over 12 hours, EDT and EST, quiet window ON / OFF /
+   `start:'19:00'`), classifying every rung retired `quiet_hours_superseded` by
+   whether its same-slot superseder was itself retired.
+
+   - Arming inside the quiet window is NOT required. Corpses occur with
+     `quietHoursEnabled: false`: clamping is only one route to a slot
+     collision, and `confirmation.dueAt` is literally `now`, so it collides
+     with any rung whose RAW dueAt equals the arm instant.
+   - There are TWO corpse families, not one. Besides
+     `confirmation <- morning_of:booked_too_late`, rule (e) also retires
+     `day_before`, which has a FIXED 19:30 org-local anchor - giving
+     `confirmation <- day_before:booked_too_late` on the EVENING side, at every
+     tour hour, window disabled included.
+   - Under the DEFAULT window the wide contiguous band is tours 10:00-12:00
+     local, not "roughly 08:00-12:00": 10:00 tours corpse for arm instants
+     04:01-08:00 local (240 min), 11:00 for 05:01-08:00 (180 min), 12:00 for
+     06:01-08:00 (120 min). 08:00 and 09:00 tours produce NO corpse - both
+     rungs clamp at/after the tour start and go `past_event`, which
+     `supersededBySlot` already excludes. Every other tour hour collides only
+     on a millisecond-exact instant.
+   - THE PART THAT MATTERS: `quietHoursStart: '19:00'` is a SUPPORTED setting
+     that this very branch deliberately refuses to validate (spec 7.1 - "quiet
+     hours are a general setting and must not be constrained by one rung"), and
+     it is the config `tourReminders.test.ts` case 8 exercises. Under it 19:30
+     is inside the window, so EVERY `day_before` clamps onto the 08:00
+     tour-morning slot - the same slot a pre-08:00 arm instant clamps the
+     confirmation to. Measured band: tour 13:00 local corpses for arm
+     01:00-08:00 (about SEVEN HOURS), tour 14:00 for 02:00-08:00, and so on
+     across tour hours 10:00-20:00, taking the confirmation down with every
+     `day_before`. So for such an org this is a daily occurrence, not an edge.
+
+   A millisecond-exact collision still matters in practice: `armTourReminders`
+   takes `now` as a parameter and `routes/tours.ts` threads `deps.now`, so
+   seeds, fixtures and any injected clock land on round instants routinely.
+
+   A FIX MUST COVER BOTH PREDICATES, not just the one named above.
+   `supersededInBatch` (the RELEASE-time twin) has the identical blind spot and
+   is weaker still - it carries no armability check at all. A Phase B fix scoped
+   to `supersededBySlot` alone fixes half the problem.
 
    WHY IT SHIPPED UNFIXED: spec 8.1 puts the cross-rung supersession machinery
    OUT OF SCOPE for Phase A in terms, and the fix - requiring a superseder to be

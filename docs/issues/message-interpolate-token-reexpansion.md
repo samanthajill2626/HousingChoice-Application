@@ -23,20 +23,36 @@ Reachability is real, not theoretical: `POST /public/housing-fair`
 arbitrary string, trimmed and length-capped only, then creates or dedupes a
 tenant contact from it. AI extraction and staff free text reach the same field.
 
-**Why it is NARROW today.** The two other catalog entries that carry a
-contact-supplied name declare exactly ONE token each, so there is no second
-token for a value to leak into:
+**IT IS ALREADY LIVE IN RELAY - this is not only a tour-path hazard.** An
+earlier revision of this issue claimed the only other contact-name entries
+"declare exactly ONE token each, so there is no second token to leak into". A
+re-review disproved that:
 
-- `welcome.sms` declares `['firstName']`.
-- `relay.media_only` (`'{name} sent an attachment.'`) declares `['name']`. The
-  adversarial review that found this called it `notification.attachment`; that
-  id does not exist - `relay.media_only` is the entry it meant.
+- `relay.member_added` (`'Hey! {joined} {members}'`, `catalog.ts:299-306`)
+  declares TWO tokens, `['joined', 'members']`, and BOTH are fed from contact
+  display names. A group member named `{members}` therefore has that token
+  expanded by the later pass, into an SMS sent to the WHOLE GROUP. That is
+  reachable today, with no tour involved, and it is `editable: false` so no
+  override is needed. It is the strongest argument for the single-pass fix.
+- `welcome.sms` declares `['firstName']` - genuinely single-token.
+- `relay.media_only` (`'{name} sent an attachment.'`) declares `['name']` -
+  genuinely single-token. The adversarial review that found the original issue
+  called it `notification.attachment`; that id does not exist.
 
 The tour entries are what changed the picture: `TOUR_NAME_VARS` plus
 `where` / `addressLine` means every `tour.*` entry declares six to eight tokens,
 with the name tokens ahead of `where` / `addressLine` in the list. A tenant
 named `{propertyContactFirstName}` is texted the landlord's first name; a tenant
 named `{where}` or `{addressLine}` is texted the unit's street.
+
+**RESIDUE on the tour path after the stopgap.** `lib/tourContacts.ts` strips
+braces from resolved NAMES, which closes the re-expansion vector there. It does
+NOT sanitize the unit ADDRESS, which lands in the same sentence as
+`{addressLine}` / `{where}`. That one is order-SAFE - the address is substituted
+after every name token, so nothing re-expands it - so it is not a disclosure
+vector; the residue is only that a braced address would emit a literal `{token}`
+into a tenant SMS. Fix it with the single-pass change rather than by bolting a
+second sanitizer onto address rendering.
 
 **Stopgap already in place - do not read it as the fix.** The tour path is
 sanitized AT ITS SOURCE: `firstNameOf` / `fullNameOf` in

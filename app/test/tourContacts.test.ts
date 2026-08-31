@@ -154,6 +154,26 @@ describe('resolveTourContactNames', () => {
     expect(r.tenantReadFailed).toBe(false);
   });
 
+  it('the tenant being their own property contact is NO property contact, never a self-named body', async () => {
+    // The de-dupe rosterResolution.ts:279-281 carries one line below the rule
+    // spec 6.1 says to reuse. Without it, a unit whose landlordId is the tour's
+    // own tenant composes "Hey Alice, Alice will be headed that way shortly."
+    // and texts it to Alice. Absence is the right answer: idFor() then degrades
+    // the rung to the self-guided entry (spec 6.3).
+    const calls: string[] = [];
+    const r = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({ unitId: 'u1', landlordId: 'c-t' }),
+      contactsRepo: repoOf({ 'c-t': TENANT }, calls),
+    });
+    expect(r.names.tenantFirstName).toBe('Alice');
+    expect(r.names.propertyContactFirstName).toBeUndefined();
+    expect(r.names.propertyContactName).toBeUndefined();
+    expect(r.propertyReadFailed).toBe(false);
+    // Read ONCE, for the tenant - not a second time under the property role.
+    expect(calls).toEqual(['c-t']);
+  });
+
   it('a supplied tenantContact skips the tenant read', async () => {
     const calls: string[] = [];
     const r = await resolveTourContactNames({

@@ -40,9 +40,19 @@ export interface ResolvedTourNames {
  * TOUR_NAME_VARS plus `where` / `addressLine`), with the NAME tokens ahead of
  * the rest, so there is plenty to leak into: a tenant naming themselves
  * `{propertyContactFirstName}` would be texted the landlord's first name.
- * Sanitizing at THIS source closes the tour path without touching the shared
+ * Sanitizing at THIS source closes the NAME vector without touching the shared
  * interpolator, which every message in the app runs through. The general
  * single-pass fix is filed as `message-interpolate-token-reexpansion`.
+ *
+ * SCOPE, stated precisely because an earlier revision of this docblock
+ * overclaimed: this closes the NAME tokens, NOT the whole tour path. The unit
+ * ADDRESS lands in the same sentence as `{addressLine}` / `{where}` and is not
+ * sanitized here. That one is order-SAFE - the address is substituted after
+ * every name token, so nothing re-expands it - so it is not the vulnerability
+ * above; the residue is only that a braced address would emit a literal
+ * `{token}` into a tenant SMS. Recorded on the filed issue rather than fixed,
+ * because sanitizing the address is a change to address RENDERING and belongs
+ * with that issue's single-pass fix.
  *
  * A name that is nothing BUT braces collapses to '' and is therefore read as
  * absence by the callers below - which is right; it was never a name.
@@ -117,13 +127,23 @@ export async function resolveTourContactNames(args: {
         ? args.unit.landlordId
         : undefined;
     const propertyContactId = primary?.contactId ?? landlordId;
-    if (typeof propertyContactId === 'string' && propertyContactId.length > 0) {
+    // DE-DUPE the degenerate case where the tenant IS the property contact -
+    // the guard rosterResolution.ts:279-281 carries one line below the rule
+    // spec 6.1 told us to reuse, and which an earlier revision of this module
+    // copied the rule without. Without it a unit whose landlordId is the tour's
+    // own tenant composes "Hey Alice, Alice will be headed that way shortly."
+    // and sends it to Alice. Treating it as NO property contact is the right
+    // outcome rather than a special case: idFor() then degrades the rung to the
+    // self-guided entry, which is exactly spec 6.3's absence fallback.
+    const usablePropertyContactId =
+      propertyContactId === args.tenantId ? undefined : propertyContactId;
+    if (typeof usablePropertyContactId === 'string' && usablePropertyContactId.length > 0) {
       try {
-        propertyContact = await args.contactsRepo.getById(propertyContactId);
+        propertyContact = await args.contactsRepo.getById(usablePropertyContactId);
       } catch (err) {
         propertyReadFailed = true;
         log.warn(
-          { err, unitId: args.unit.unitId, propertyContactId },
+          { err, unitId: args.unit.unitId, propertyContactId: usablePropertyContactId },
           'tour names: property contact read failed',
         );
       }

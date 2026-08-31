@@ -84,10 +84,10 @@ Task order satisfies spec 3.2's build order: sweep (4) before vehicle conversion
 - Consumes: nothing new.
 - Produces: `interpolate` keeps its exact signature `(template: string, vars: Record<string,string>|undefined, allowed: readonly string[], strict: boolean): string` and `resolveMessage` is untouched. Every later task relies on: substituted values are NEVER rescanned, `$`-patterns in values are inert.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests.** `app/test/messages/resolve.test.ts` EXISTS (~134 lines) - READ it first, APPEND the describe block below, and keep every existing case (they pin behaviour this task must preserve). Never overwrite the file.
 
 ```ts
-// app/test/messages/resolve.test.ts
+// APPENDED to app/test/messages/resolve.test.ts
 import { describe, expect, it } from 'vitest';
 import { resolveMessage } from '../../src/messages/resolve.js';
 
@@ -173,7 +173,7 @@ function interpolate(
 }
 ```
 
-Keep the existing docblock, appending one paragraph explaining single-pass + callback (cite the issue slug). Note the token charset: every declared token in `catalog.ts` matches `[A-Za-z][A-Za-z0-9_]*`; verify with `grep -o "vars: \[[^]]*\]" app/src/messages/catalog.ts` before assuming.
+Keep the existing docblock, appending one paragraph explaining single-pass + callback (cite the issue slug). The token-charset assumption (`[A-Za-z][A-Za-z0-9_]*`) is guarded STRUCTURALLY, not by grep (seven `vars` arrays are spread-built and grep cannot see them): add one test iterating `MESSAGE_CATALOG` and asserting every declared var of every entry matches `/^[A-Za-z][A-Za-z0-9_]*$/` - it guards future entries too.
 
 - [ ] **Step 4: Run the full messages suite** - `cd app && npx vitest run test/messages/ test/tourCopy.test.ts`. Expected: PASS (tour copy composes through this function; a behaviour change here shows up there first).
 - [ ] **Step 5: Commit** - `git add app/src/messages/resolve.ts app/test/messages/resolve.test.ts && git commit` with message `fix(messages): single-pass interpolate - substituted values are never rescanned`.
@@ -311,15 +311,14 @@ export function retiredByTourStart(
 
 ```ts
 it('past-tour gate: a pre-tour rung due after the tour started is claim-skipped tour_already_passed on the FIRST tick', async () => {
-  // Arm a normal future ladder, then tick with now AFTER the tour.
-  // (Uses the Task 5 helper createDueReminder if already merged; otherwise
-  // armTourReminders with a near tour and a post-tour `now` works.)
+  // Arm a normal future ladder via armTourReminders, then tick with now AFTER
+  // the tour (this task is SELF-SUFFICIENT - do not depend on Task 5's helper).
   // Assert: the en_route row has skippedAt defined, skipReason 'tour_already_passed',
   // world.sent stays empty, and a SECOND tick sends nothing and re-skips nothing.
 });
 it('past-tour gate outranks supersededInBatch: a post-tour catch-up batch gives BOTH rungs tour_already_passed', async () => {
-  // Seed morning_of AND en_route both pending and due, tour already past
-  // (repo.create directly - see Task 5 helper). Tick once.
+  // Seed morning_of AND en_route both pending and due via tourRemindersRepo
+  // .create directly (self-sufficient), tour already past. Tick once.
   // Assert BOTH rows carry skipReason 'tour_already_passed' and NEITHER
   // carries 'quiet_hours_superseded' - the ledger-item-8 chip shape must not
   // appear (spec 6.1a precedence table).
@@ -366,7 +365,9 @@ Write them as real tests against the rigs in the file (copy the seeding idioms o
   }
 ```
 
-Check `RunDueTourRemindersDeps` for the tours repo member name (`grep -n "toursRepo" app/src/jobs/tourReminders.ts`) and match the existing tour-missing behaviour inside `resolveReminderTarget` (mirror its claim-skip reason exactly - read it before writing this). Thread `tour` into `resolveReminderTarget(row, deps, log, tour)` and have it skip its own fetch when the argument is present. In `forceSendReminder`, after target resolution succeeds and BEFORE compose/claim:
+**The tours repo method is `get`, not `getById`** (`toursRepo.ts:131`) - the snippet above uses `deps.toursRepo` naming; verify the deps member name AND use `.get(row.tourId)`. Match the existing tour-missing behaviour inside `resolveReminderTarget` (mirror its claim-skip reason exactly - read it before writing this), and grep the comments around its tour fetch for any the hoist falsifies. STATED CONSEQUENCE OF THE HOIST, pin it in a test: a row that is both superseded-in-batch AND tour-missing now takes `tour_missing` (previously `quiet_hours_superseded`) - more truthful, accepted. Thread `tour` into `resolveReminderTarget(row, deps, log, tour)` and have it skip its own fetch when the argument is present.
+
+In `forceSendReminder`, READ THE FUNCTION'S STRUCTURE FIRST and place the refusal where the local `refuse` helper is in scope, after target resolution succeeds and BEFORE compose/claim:
 
 ```ts
   if (retiredByTourStart(row, target.tour.scheduledAt, nowIso)) {
@@ -377,11 +378,11 @@ Check `RunDueTourRemindersDeps` for the tours repo member name (`grep -n "toursR
   }
 ```
 
-In `routes/tourReminders.ts`, extend the send-now refusal mapping (the per-reason 409 handling around `:654-690`) with `tour_already_passed` following the `names_unavailable` pattern exactly (`res.status(409).json({ error: 'tour_already_passed' })`).
+**NO route edit.** The send-now handler (`routes/tourReminders.ts:421-472`) passes `result.reason` through generically at `:466` with the honest re-read view attached - a new refusal reason reaches the wire and the dashboard copy map (Task 2) with zero route changes. (An earlier draft pointed at `:654-690`, which is the no-show-DRAFT route, and prescribed a shape that would have dropped the `reminder` field the panel needs.) Refusal PRECEDENCE, pinned by a test in Task 7: `kind_retired` (row lookup, Task 7) outranks `tour_already_passed` (post-target-resolution, here) outranks `names_unavailable` (compose).
 
 - [ ] **Step 7: Also rewrite the two comments the gate falsifies** - the `beforeStart` docblock's "can never be held past the tour" sentence (`:944-951`) now holds because of THIS gate; say so. And the `claimSkipRow` docblock (`:640-643`) gains the third reason-category sentence: sweep-only tokens (`kind_retired`) that no poll path passes.
 - [ ] **Step 8: Fix the cat-4 e2e site NOW, in this task** - `e2e/tests/scenarios/tours.spec.ts:283-287` ticks past the tour and documents that earlier rungs fire. Rewrite that block's comment and assertions: the tick now RETIRES pre-tour rungs `tour_already_passed`; assert the retirement (panel or API state), not arrival. Do not leave a green-but-wrong spec for Task 6 to find.
-- [ ] **Step 9: Run** `cd app && npx vitest run test/tourReminders.test.ts` - PASS. Commit (`feat(reminders): fire-time past-tour gate, first in precedence`).
+- [ ] **Step 9: Run** `cd app && npx vitest run test/tourReminders.test.ts`, then the FULL app suite (`cd app && npx vitest run`) so red from this task is attributed here, not discovered at Task 9. PASS both. Commit (`feat(reminders): fire-time past-tour gate, first in precedence`).
 
 ### Task 4: Retirement sweep script + RUNBOOK (spec 4)
 
@@ -453,7 +454,7 @@ export function planReminderRetirement(
 
 Script body: copy `backfill-relay-optout-flag.ts`'s frame verbatim (Scan pages over reminder rows, resolve each row's tour once via a `Map<tourId, TourItem|undefined>` cache, plan, then a CONDITIONAL `UpdateCommand` setting `skippedAt`/`skipReason` with `attribute_not_exists(sentAt) AND attribute_not_exists(canceledAt) AND attribute_not_exists(skippedAt)`, catching `ConditionalCheckFailedException` as a logged skip). `--dry-run` prints counts per token and writes nothing. Logs COUNTS + tourId/reminderId only - never a name, phone, or body. Header comment: the run instructions, the "human runs this against real envs, agents hermetic-local only" rule, and that re-running after the deploy is safe and expected. Check the reminder rows' actual key/table layout in `tourRemindersRepo.ts` BEFORE writing the Scan (do not guess the PK shape).
 
-- [ ] **Step 3: PASS the planner tests**, then a smoke of the script against a LOCAL lane only if one is already warm - otherwise the planner tests plus typecheck suffice for this task (the human proves it on real dev data at unpause time, spec 4.4).
+- [ ] **Step 3: REQUIRED - integration-test the mutating half against DynamoDB Local** (the repo's standard dynamo-backed test idiom - `hc-test-*` tables, same as the repo suites). Export the script's apply function and, in `retirePausedTourReminders.test.ts`, seed one row per planner outcome plus one already-skipped row, then assert: `--dry-run` writes NOTHING and reports the right counts; a real run stamps exactly the planned rows with the planned tokens; a rung that went `sentAt` between plan and write is left untouched (the conditional); a SECOND run is a no-op. The scan pagination, tour cache, conditional write, and PII-safe logging are exactly the parts the pure planner tests cannot see - they do not ship untested.
 - [ ] **Step 4: RUNBOOK entry** - add a section "One-time: retire tour reminders armed during the 2026-08 pause": the exact command for dev and prod (`tsx app/scripts/retire-paused-tour-reminders.ts --dry-run` first), what the two tokens mean, safe-to-re-run note, and the spec 3.2 preferred order (sweep, then deploy).
 - [ ] **Step 5: Commit** all three files, message `feat(scripts): one-time sweep retiring reminders armed during the pause`.
 
@@ -495,8 +496,10 @@ async function createDueReminder(
 
 - [ ] **Step 1: Classify the 15 e2e sites** (6+6+1 spec sites + 2 steps.ts) into the worklist file. Known cat-2 anchors: `tour-roster.spec.ts:488-501` and `scheduled-visibility.spec.ts:234-259` (arm-time/next-rung semantics - Task 9 territory; leave green now). `tours.spec.ts:283-287` was already rewritten in Task 3 step 8.
 - [ ] **Step 2: Convert the cat-1 sites** to the existing vehicle: `await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')))` (both helpers exist, `steps.ts:2013-2046`). EVERY converted site adds the supersession expectation (spec 10): a clock-travel tick past a later rung's dueAt claim-skips the earlier same-tour rungs `quiet_hours_superseded` - assert the retirement (via the reminders API or the panel chip) in the same spec instead of being surprised by it. Where a spec only needs "a reminder arrived", prefer ticking the EARLIEST still-pending rung so nothing else is pulled into the batch.
-- [ ] **Step 3: Do not run the full e2e suite here** (gate-time); run the three touched specs once if a lane is warm: `npm run e2e -- --grep` does NOT work from the root (memory: root eats --grep) - use the e2e workspace invocation documented in `e2e/README.md`, or defer to the gate.
-- [ ] **Step 4: Commit** (`test(e2e): reminder specs ride the future-rung tick vehicle`).
+- [ ] **Step 2a: LIVE-WORKER AUDIT (the unpause races the suite).** With the pause lifted (Task 7), the e2e stack's REAL worker poll becomes a live wall-clock sender for the first time since 2026-08-20. The harness's standing discipline already covers arrivals (`steps.ts:1711-1713`: assert ARRIVAL, never which trigger fired), but a rung a spec leaves PENDING and asserts as `upcoming` can now be fired mid-spec if its dueAt passes during the run. Audit EVERY touched spec (and `quiet-hours.spec.ts`) for pending-rung assertions whose dueAt could fall inside the spec's runtime window; fixtures for rungs meant to stay upcoming use far-future dueAts (`tourSchedule(72)`-style), never near-now ones. Record the audit's per-spec outcome in the conversion worklist.
+- [ ] **Step 3: Update the shared docblocks this conversion falsifies** - `tickTourReminders`'s docblock (`steps.ts:2034-2038`) says "Omitting `now` ... fires the just-armed 'confirmation' rung", which Task 9 makes false; rewrite it now to describe the future-rung idiom as the primary use.
+- [ ] **Step 4: Do not run the full e2e suite here** (Task 9 runs it); the conversions are proven by that run.
+- [ ] **Step 5: Commit** (`test(e2e): reminder specs ride the future-rung tick vehicle`).
 
 ### Task 7: `DISCONTINUED_REMINDER_KINDS` - app side (spec 3.1, 5-interlock)
 
@@ -522,6 +525,9 @@ describe('DISCONTINUED_REMINDER_KINDS', () => {
   });
   it('forceSendReminder REFUSES kind_retired for a discontinued kind, pre-claim', async () => {
     // outcome 'refused', reason 'kind_retired'; row untouched.
+  });
+  it('refusal precedence: a discontinued rung on a PAST tour refuses kind_retired, not tour_already_passed', async () => {
+    // Pins the order Task 3 stated: kind check at row lookup runs first.
   });
   it('the dev tick does NOT bypass the discontinued set', async () => {
     // runDueTourReminders with manualOnlyKinds: new Set() (the old override
@@ -559,19 +565,21 @@ export const DISCONTINUED_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<Re
 ]);
 ```
 
-Poll filter becomes `const blocked = (r: TourReminderItem) => manualOnly.has(r.kind) || DISCONTINUED_REMINDER_KINDS.has(r.kind);` applied where `:603` filters today (keep the held-back log line; count both causes separately in its fields). `forceSendReminder` refuses immediately after the row lookup: `if (DISCONTINUED_REMINDER_KINDS.has(row.kind)) return refuse('kind_retired');`. Route 409 mapping for `kind_retired`, same pattern as Task 3. Empty `MANUAL_ONLY_REMINDER_KINDS` (`new Set<ReminderKind>([])`) and REWRITE its whole docblock (spec 3.1/R3-9): what the set is FOR (a temporary human hold with Send now intact), that it is empty = fully automatic today, the 2026-08-20..2026-08-31 pause as history with the founder attributions kept, "TO PAUSE AGAIN: add kinds here. Nothing else has to change." and a pointer: "a kind that must NEVER send belongs in DISCONTINUED_REMINDER_KINDS below, not here."
+Poll filter becomes `const blocked = (r: TourReminderItem) => manualOnly.has(r.kind) || DISCONTINUED_REMINDER_KINDS.has(r.kind);` applied where `:603` filters today (keep the held-back log line; count both causes separately in its fields). `forceSendReminder` refuses immediately after the row lookup - CHECK where the local `refuse` helper is declared first and place the guard where it is in scope: `if (DISCONTINUED_REMINDER_KINDS.has(row.kind)) return refuse('kind_retired');`. This position (before target resolution) IS the refusal precedence Task 3 stated - the precedence test above pins it. NO route edit (the send-now handler's generic `result.reason` passthrough at `routes/tourReminders.ts:466` carries it). Empty `MANUAL_ONLY_REMINDER_KINDS` (`new Set<ReminderKind>([])`) and REWRITE its whole docblock (spec 3.1/R3-9): what the set is FOR (a temporary human hold with Send now intact), that it is empty = fully automatic today, the 2026-08-20..2026-08-31 pause as history with the founder attributions kept, "TO PAUSE AGAIN: add kinds here. Nothing else has to change." and a pointer: "a kind that must NEVER send belongs in DISCONTINUED_REMINDER_KINDS below, not here."
 
 - [ ] **Step 3: Delete the dev-tick divergence** - `app/src/routes/dev.ts:404-422`: remove `manualOnlyKinds: new Set()` and the whole DELIBERATE DIVERGENCE comment (its own text orders this deletion); the tick now runs production semantics. Fix `app/test/devGating.test.ts` expectations accordingly (classified in Task 5's worklist).
-- [ ] **Step 4: Sweep the other `manualOnlyKinds` injectors** - `grep -rn "manualOnlyKinds\|manualOnlyReminderKinds" app/src e2e` and re-read each: injection seams REMAIN (tests inject non-empty sets to test pause behaviour - the capability is kept), but any comment claiming "production holds everything back" is now false; rewrite those comments (`routes/api.ts:389`, `routes/contactTimeline.ts:115`, `routes/tourReminders.ts:110` at minimum).
-- [ ] **Step 5: Run** `cd app && npx vitest run test/tourReminders.test.ts test/devGating.test.ts test/tourRemindersApi.test.ts` - PASS. Commit (`feat(reminders): discontinued-kind guard; MANUAL_ONLY emptied - the unpause`).
+- [ ] **Step 4: Sweep the other `manualOnlyKinds` injectors** - `grep -rn "manualOnlyKinds\|manualOnlyReminderKinds" app/src e2e` and re-read each: injection seams REMAIN, and their documented purpose CHANGES with the empty default - they are now the way tests exercise pause-mode behaviour that production no longer exhibits by default. Rewrite each seam docblock to say exactly that (`routes/api.ts:389`, `routes/contactTimeline.ts:115`, `routes/tourReminders.ts:110` at minimum), and rewrite any comment claiming "production holds everything back".
+- [ ] **Step 5: Run** `cd app && npx vitest run test/tourReminders.test.ts test/devGating.test.ts test/tourRemindersApi.test.ts`, then the FULL app suite (`cd app && npx vitest run`) - the unpause fans out further than its named files. PASS both. Commit (`feat(reminders): discontinued-kind guard; MANUAL_ONLY emptied - the unpause`).
 
 ### Task 8: Discontinued on the read surfaces (spec 3.1 rows 3-4, 3.1a)
 
 **Files:**
-- Modify: `app/src/services/scheduledSendSuppression.ts:1-4` (union), `dashboard/src/api/types.ts:1144-1177` (union + lead), `app/src/routes/tourReminders.ts:576-597` (chip branch), `app/src/routes/contactTimeline.ts:1091` region (its own read), `dashboard/src/routes/tours/RemindersPanel.tsx` (chip copy), `dashboard/src/routes/placements/DeadlinesNudgesCard.tsx:64` (ONE label entry)
+- Modify: `app/src/services/scheduledSendSuppression.ts:1-4` (union), `dashboard/src/api/types.ts` (union `:1144-1177`, lead `:1167`, **`REMINDER_SUPPRESSION_LABELS` `:1259-1268`** - the map that actually renders the TOUR panel chip), `app/src/routes/tourReminders.ts:576-597` (chip branch), `app/src/routes/contactTimeline.ts` (its own read - see step 2a), `dashboard/src/routes/tours/RemindersPanel.tsx` (chip copy), **the contact timeline's scheduled-card renderer** (its own exhaustive `Record` over the same union - find it: `grep -rln "suppressionNote\|TimelineScheduled" dashboard/src/routes/contact/`), `dashboard/src/routes/placements/DeadlinesNudgesCard.tsx:64` (ONE label entry)
 - Test: `app/test/tourRemindersApi.test.ts`, `app/test/contactTimeline.test.ts`, `dashboard/src/api/types.test.ts`
 
-- [ ] **Step 1: Failing tests.** (a) Route test: GET reminders for a tour with a pending `confirmation` row returns `suppression: { reason: 'discontinued' }` on that rung - for BOTH a self_guided AND a landlord_led tour (the group-routed case is the one `suppressionOf` would lose, spec 3.1a). (b) Timeline test: the upcoming bucket's confirmation card carries the discontinued suppression, not `paused`, with the timeline's OWN read (inject nothing). (c) Dashboard: extend the types test - `suppressionLead('discontinued')` returns `'No longer sent'`.
+**Widening the union breaks THREE exhaustive `Record`s at compile time - all three get an entry, and only the placement one is compile-completeness-only:** `REMINDER_SUPPRESSION_LABELS` (`discontinued: 'no longer sent'` - the tour chip pairs `suppressionLead` + this label), the timeline scheduled-card's record (same label; this is the FOURTH unenumerated reader the spec's standing hazard predicted), and `DeadlinesNudgesCard`'s (`discontinued: 'no longer sent'`, nothing else on the placement surface - spec 3.1a's scope ruling). `npm run typecheck` after the union edit is the enumerator: every red site is a reader; fix each, and if it finds a record this list missed, add it to the findings for the handback.
+
+- [ ] **Step 1: Failing tests.** (a) Route test: GET reminders for a tour with a pending `confirmation` row returns `suppression: { reason: 'discontinued' }` on that rung - for BOTH a self_guided AND a landlord_led tour (the group-routed case is the one `suppressionOf` would lose, spec 3.1a). (b) Timeline test: the upcoming bucket's confirmation card carries the discontinued suppression, not `paused`, with the timeline's OWN read (inject nothing). (c) Dashboard: extend the types test - `suppressionLead('discontinued')` returns `'No longer sent'` and `REMINDER_SUPPRESSION_LABELS['discontinued']` is defined and underscore-free.
 - [ ] **Step 2: Implement.** Widen both unions with `| 'discontinued'`. `suppressionLead`: add `if (reason === 'discontinued') return 'No longer sent';` with a docblock line (terminal - neither a deferral nor a human hold; never "Paused"). Route chip branch (`:589-597`) - discontinued FIRST, outside the evaluator:
 
 ```ts
@@ -589,7 +597,8 @@ Poll filter becomes `const blocked = (r: TourReminderItem) => manualOnly.has(r.k
                   : undefined;
 ```
 
-Mirror the same discontinued-first branch in `contactTimeline.ts`'s reminder-card suppression derivation (find it via `grep -n "manualOnlyReminderKinds" app/src/routes/contactTimeline.ts` and read the consuming expression before editing). `RemindersPanel.tsx`: the suppression chip for `discontinued` renders "No longer sent" (plain-hyphen copy rules apply) and MUST NOT render the Paused chip or the send-manually note. `DeadlinesNudgesCard.tsx:64`: add `discontinued: 'no longer sent',` to the exhaustive record - COMPILE COMPLETENESS ONLY, one line, nothing else on the placement surface (spec 3.1a's explicit scope ruling).
+- [ ] **Step 2a: The timeline's derivation is NOT a copy of the tour panel's - READ IT FIRST.** `grep -n "manualOnlyReminderKinds" app/src/routes/contactTimeline.ts`, then read the whole consuming expression. It covers 1:1-routed rungs only and computes suppression in a single call-shaped formula, so the discontinued branch there is a simpler short-circuit ahead of that call, not a transplant of the tour route's ternary. Assert through the file's existing test idiom.
+- [ ] **Step 2b: Renderers.** `RemindersPanel.tsx`: the suppression chip for `discontinued` renders "No longer sent" (plain-hyphen copy rules apply) and MUST NOT render the Paused chip or the send-manually note. The timeline scheduled card: its record gains the entry and its comment lines (which explain each reason's lead) gain one for discontinued (terminal). `DeadlinesNudgesCard.tsx:64`: `discontinued: 'no longer sent',` - compile completeness only.
 
 - [ ] **Step 3: Run** the three test files + `npm run typecheck` (the exhaustive Record is the compile check). PASS. Commit (`feat(reminders): discontinued reads on all four surfaces`).
 
@@ -601,9 +610,10 @@ Mirror the same discontinued-first branch in `contactTimeline.ts`'s reminder-car
 - Modify: `app/src/lib/seed/matrix.ts:880-990`, `live.ts:9,506-523`, `lean.ts:423` (comments + pending confirmation rows)
 
 - [ ] **Step 1: Remove `'confirmation'` from `REMINDER_KINDS`** with a comment mirroring the `no_show_checkin` note above it: the kind stays in the union / `computeDueAt` / `LADDER_ORDER` / catalog so in-flight and seeded rows still compose and display; arming stopped 2026-08-31 (founder decision 2026-08-24); sending is separately guarded by `DISCONTINUED_REMINDER_KINDS`.
-- [ ] **Step 2: Run the app suite; re-baseline every red site by RE-DERIVING it** (never flip an expectation blind): arm-set assertions drop `confirmation` from expected pending sets ("the whole ladder" is now three auto rungs); "next rung" assertions shift to `day_before`. Same for the two e2e anchors: `scheduled-visibility.spec.ts:111-165` (its confirmation panel walk becomes a day_before walk or asserts the discontinued chip on a seeded row, whichever the spec's intent was - read the spec file's own comments) and `tour-roster.spec.ts:488-501`.
+- [ ] **Step 2: Run the app suite; re-baseline every red site by RE-DERIVING it** (never flip an expectation blind): arm-set assertions drop `confirmation` from expected pending sets ("the whole ladder" is now three auto rungs); "next rung" assertions shift to `day_before`.
+- [ ] **Step 2a: The two e2e anchors are REDESIGNS, not re-baselines** - both mix cat-1 ticks with cat-2 position assertions and their PROOF STRATEGY dies with the kind. `scheduled-visibility.spec.ts:225-259`: its re-arm proof rides "the fresh confirmation arrives on a tick" - rebuild it on `day_before` (reschedule cancels the pending old row, a fresh one arms off the new time, and a FUTURE tick at `justAfter(armedReminderDueAt('day_before'))` proves arrival with a body composed off the new time - the block's own 2026-08-26 re-derivation comment shows the reasoning shape to follow, and the comment must be re-derived with it). Its `:111-165` confirmation panel walk becomes a `day_before` walk. `tour-roster.spec.ts:488-501`: same treatment - read the block's intent from its comments, rebuild on a live kind.
 - [ ] **Step 3: Seeds.** `matrix.ts:987` seeds a pending confirmation row directly - decide per its own comment at `:880`: rows seeded to demo the PANEL keep the row (it now demos the "no longer sent" chip - update the comment to say that); rows seeded to be SENT by a tick must convert to a live kind. `live.ts:9,506-523`: the "four auto-armed rungs" comment becomes three; its armed-at-now confirmation expectations go. `lean.ts:423`: comment references the confirmation clamp - rewrite. `cast.ts:769-784` seeds SENT rows - keep, historical.
-- [ ] **Step 4: Run** `cd app && npx vitest run` (full app suite - the arming change fans out) - PASS. Commit (`feat(reminders): confirmation no longer arms`).
+- [ ] **Step 4: Run** `cd app && npx vitest run` (full app suite - the arming change fans out) - PASS. Then run the FULL e2e suite (`npm run e2e` from the worktree root) - this is the tour half's checkpoint: Tasks 3-9 made a dozen e2e edits and this is their first pass/fail signal; do not let it wait for the final gate. PASS. Commit (`feat(reminders): confirmation no longer arms`).
 
 ### Task 10: `en_route` quiet-hours exemption + supersession widening (spec 6, 6.2)
 
@@ -656,8 +666,9 @@ describe('en_route quiet-hours exemption (spec 6) + widened supersession (6.2)',
 
 Rewrite the `LADDER_ORDER` docblock (`:158-164`): the old "clamping can only push an earlier rung forward onto a later one's slot" sentence is now false and is exactly what a reader would use to revert the predicate - replace with the inequality rationale. Leave `supersededInBatch` UNTOUCHED (spec 6.2 last paragraph - it already covers the catch-up case; do not "make it symmetric").
 
-- [ ] **Step 3:** Re-read `e2e/tests/scenarios/quiet-hours.spec.ts` end to end against the new behaviour (its `:58` comment reasons about batches) and re-baseline any assertion the exemption changes - re-derive, never flip.
-- [ ] **Step 4: Run** `cd app && npx vitest run test/tourReminders.test.ts test/seedLive.test.ts` - PASS (seedLive pins arm results and may need the exemption's dueAts re-derived). Commit (`feat(reminders): en_route quiet-hours exemption; supersession predicate widened`).
+- [ ] **Step 3: THE THIRD SITE - the panel's quiet-hours suppression ESTIMATE** (spec 6 addendum, plan review P5). The route's estimate (`routes/tourReminders.ts:558-564`) evaluates the quiet-window disjuncts for EVERY rung, so an `en_route` due inside the window would chip "Will wait" while the poll now sends it - a promise the machinery immediately breaks. Exempt `en_route` from the QUIET disjuncts (not from the whole evaluator - opt-out / kill-switch / manual-mode reasons still apply) at BOTH tour surfaces that compute the estimate: `routes/tourReminders.ts` and `routes/contactTimeline.ts` (the shared-formula comment at `tourReminders.ts:527-528` names all three surfaces; `placementNudges.ts` has no `en_route` and is untouched). Failing test first: a pending `en_route` with dueAt inside the window carries NO `quiet_hours` suppression, while its `day_before` sibling does.
+- [ ] **Step 4:** Re-read `e2e/tests/scenarios/quiet-hours.spec.ts` end to end against the new behaviour (its `:58` comment reasons about batches) and re-baseline any assertion the exemption changes - re-derive, never flip.
+- [ ] **Step 5: Run** `cd app && npx vitest run test/tourReminders.test.ts test/tourRemindersApi.test.ts test/contactTimeline.test.ts test/seedLive.test.ts` - PASS (seedLive pins arm results and may need the exemption's dueAts re-derived). Commit (`feat(reminders): en_route quiet-hours exemption; supersession predicate widened`).
 
 ### Task 11: Bound the names re-list at BOTH sites (spec 7)
 
@@ -760,9 +771,13 @@ describe('relay catalog entries (spec 9.2a)', () => {
 
 Derive the byte-identity literal by RUNNING the pre-change `composeIntroBody(['Alicia Reyes','Marcus Webb'])` first (one-off `npx tsx -e` from `app/`) and pasting its exact output - do not hand-assemble it.
 
-- [ ] **Step 2: FAIL, then implement.** `composeConnectionSentence` becomes `composeNameList` (rename; grep every import). Catalog: rewrite `relay.intro` default to the spec 9.2 fenced text with `vars: ['names']`; add the three intro variants and `relay.member_added_role` with the EXACT fenced copy and the 9.2a metadata table's vars order (`{where}` LAST); rewrite `relay.member_added` to `'Hey, adding {name} to the group.'` `vars: ['name']`. Every new/changed entry gets a docblock: founder wording 2026-08-24; the "on" vs "at" ruling; the 2026-07-14 member_added reversal WITH DATE (spec 9.4); the housing-authority reinstatement note beside `relay.intro_placement` (spec 9.1); STOP omitted per changelog 1.2.1 #7. Delete `ANONYMOUS_JOINED_LABEL` (replaced by `joinedName`, spec 9.4 - never left beside it).
-- [ ] **Step 3: Rewrite the tripwires this breaks NOW:** `catalog.test.ts:66-69` (the `{members}` override pin - re-target to `{names}` with the same editable-flag intent); any catalog test asserting `{members}`/`{joined}` declarations. Run `cd app && npx vitest run test/messages/catalog.test.ts test/relayFanOut.test.ts` - `relayFanOut.test.ts:703-716` composer pins go red here and are re-baselined to the new copy IN THIS TASK only where they pin the pure helpers; job-level pins wait for Task 14.
-- [ ] **Step 4: Run, PASS on the two files, commit** (`feat(relay): founder template rewrite - names/name tokens, five catalog entries`).
+- [ ] **Step 2: FAIL, then implement - AND KEEP EVERY CALL SITE GREEN IN THIS TASK** (plan review P6: an earlier draft rewrote the catalog while `composeIntroBody` still passed `members`, leaving every intro send and preview THROWING until Task 14). So this task delivers the catalog rewrite plus the MINIMAL composer rewiring that keeps output byte-identical:
+  - `composeConnectionSentence` becomes `composeNameList` (rename; grep every import AND the two comments that name the old symbol - `grep -rn "composeConnectionSentence" app dashboard e2e` until zero hits).
+  - `composeIntroBody(memberNames)` keeps its CURRENT signature in this task and internally becomes `resolveMessage('relay.intro', { names: composeNameList(memberNames) })` - the byte-identity pin proves the seam. Task 14 changes the signature.
+  - `composeMemberAddedBody(newMemberName, memberNames)` keeps its signature and internally becomes `resolveMessage('relay.member_added', { name: joinedName(newMemberName) })` - note the GROUP line no longer carries the connection sentence (founder copy); the job/preview pins that asserted it are re-baselined HERE.
+  - Catalog: rewrite `relay.intro` to the spec 9.2 fenced text with `vars: ['names']`; add the three intro variants and `relay.member_added_role` with the EXACT fenced copy and the 9.2a metadata (vars order, `{where}` LAST, `MessageId` union); rewrite `relay.member_added` to `'Hey, adding {name} to the group.'` `vars: ['name']`. Docblocks: founder wording 2026-08-24; the "on" vs "at" ruling; the 2026-07-14 member_added reversal WITH DATE; the housing-authority note beside `relay.intro_placement`; STOP omitted per changelog 1.2.1 #7. Delete `ANONYMOUS_JOINED_LABEL` (replaced by `joinedName` - never left beside it).
+- [ ] **Step 3: Rewrite the tripwires this breaks NOW:** `catalog.test.ts:66-69` (the `{members}` override pin - re-target to `{names}` with the same editable-flag intent); any catalog test asserting `{members}`/`{joined}` declarations; `relayFanOut.test.ts:703-716` composer pins re-baselined to the new copy. Cross-ref: `resolve.test.ts`'s Task 1 probe rides `relay.member_added`'s OLD two-token shape - switch its probe per the note inside that test file (to `relay.member_added_role` with `{ name, role }`).
+- [ ] **Step 4: Run** `cd app && npx vitest run test/messages/ test/relayFanOut.test.ts test/toursApi.test.ts test/placementsApi.test.ts test/relayGroupPreview.test.ts` - the LAST three must be GREEN at this task's commit (byte-identical naked intro; member_added pins re-baselined). PASS, commit (`feat(relay): founder template rewrite - names/name tokens, five catalog entries`).
 
 ### Task 14: Relay resolver, intro routing, member_added split, preview parity (spec 9.0, 9.3, 9.4, 9.5, 9.6)
 
@@ -770,7 +785,7 @@ Derive the byte-identity literal by RUNNING the pre-change `composeIntroBody(['A
 - Modify: `app/src/jobs/relayFanOut.ts` (resolver + both job handlers + composer signatures)
 - Modify: `app/src/services/relayAnnouncements.ts` (`bodyFor` selector)
 - Modify: `app/src/services/rosterEdits.ts` (`buildOpenPreviewFromParts` callers, `buildOpenPreview`, `buildAddPreview` + docblock)
-- Modify: `app/src/routes/tours.ts`, `app/src/routes/placements.ts`, standalone preview route (wire the new deps - find via `grep -rn "buildOpenPreview\|buildAddPreview" app/src/routes`)
+- Modify: the preview ROUTES and call sites - derive the true set first: `grep -rn "buildOpenPreview\|buildAddPreview\|buildStandaloneOpenPreview" app/src` (plan review P14: there are TWO routes but FOUR call sites, `buildStandaloneOpenPreview` included - a fifth composer path an earlier draft missed. The standalone preview has NO owner, takes the resolver's null-owner path, and composes the naked intro BYTE-IDENTICAL to today: its pins are re-baselined to UNCHANGED, i.e. verified, not moved)
 - Modify: `e2e/scenarios/steps.ts:1887,1930-1949`, `e2e/tests/tour-roster.spec.ts:252-269`
 - Test: `app/test/relayFanOut.test.ts`, `app/test/toursApi.test.ts:3989-4096`, `app/test/placementsApi.test.ts:989,1007`, `app/test/relayGroupPreview.test.ts:151,208`; one new e2e spec
 
@@ -780,13 +795,21 @@ Derive the byte-identity literal by RUNNING the pre-change `composeIntroBody(['A
 ```ts
 export interface RelayComposeInputs {
   variant: 'tour_today' | 'tour' | 'placement' | 'naked';
-  tenantFirstName?: string;        // absent -> in-sentence degradation is the
-  propertyContactFirstName?: string; // COMPOSER's job only for tenant name; any
-  where?: string;                  // other absence forced variant: 'naked' (9.5)
+  tenantFirstName?: string;        // absent -> composer substitutes 'there'
+  propertyContactFirstName?: string; // absence forces variant: 'naked' (9.5)
+  where?: string;                  // ditto
   when?: string;
   time?: string;
   role?: 'property manager' | 'landlord' | 'tenant'; // member_added only
 }
+// TOTALITY (plan review P3, the round's unique BLOCKING find): the tour and
+// placement entries open "Hey {tenantFirstName}!" and are STRICT non-editable
+// defaults - an absent tenant name must NEVER reach resolveMessage undefined
+// (it throws AFTER the intro job's idempotency marker, losing the
+// announcement). The composer builds its vars with the SAME fallback Phase A
+// uses (tourCopy.ts:80-85): tenantFirstName: inputs.tenantFirstName ?? 'there'.
+// Test: a tour-variant compose with no tenant name yields "Hey there! ..."
+// and does not throw.
 export async function resolveRelayComposeInputs(
   owner: { type: 'tour' | 'placement'; id: string } | { type: null },
   deps: {
@@ -810,9 +833,9 @@ export function composeMemberAddedGroupBody(inputs: RelayComposeInputs, newMembe
 - [ ] **Step 3: Job handlers.** Intro job (`:608-657`): after the existing `edited` check (precedence 1 verbatim - operator body still wins), `getOwner(conversation)` -> resolver -> `composeIntroBody(inputs, roster.map(m => m.name))`. Wire `units ??= createUnitsRepo(...)`, `tours ??= createToursRepo(...)`, `placements ??= createPlacementsRepo(...)`, `settings ??= createSettingsRepo(...)` in the handler closure, matching the existing lazy pattern. Member-added job (`:664-698`): resolver with `addedContactId` from the payload's member key -> group body via `composeMemberAddedGroupBody`, new-member body via `composeIntroBody(inputs-with-variant-naked, postAddRoster)`; call `sendRelayAnnouncement` with `body` = the NEW MEMBER's body (persisted - spec 9.6) and `bodyFor: (m) => relayMemberKey(m) === payload.addedMemberKey ? newMemberBody : groupBody`.
 - [ ] **Step 4: `sendRelayAnnouncement`** - add the optional `bodyFor` to `RelayAnnouncementInput` with the spec 9.6 docblock (named dated exception to the 2026-07-14 visibility rule; one row, persisted body = `body`; `bodyFor` overrides per LEG only; works identically in `persist:false` legs-only mode); in the roster loop, `const legBody = input.bodyFor?.(member) ?? body;` used for the adapter send - persistence, `touchLastActivity` preview, and slots all keep `body`. Default byte-identical: assert in a test that omitting `bodyFor` sends `body` to every member.
 - [ ] **Step 5: Preview parity** (spec 9.0/9.3). `buildOpenPreview`: derive `{ type: owner.type, id: owner.id }` from its `RosterOwner`, call the resolver, pass `inputs` through `OpenPreviewParts` into `buildOpenPreviewFromParts`, which calls the new `composeIntroBody(inputs, ...)`. `buildAddPreview`: resolver (owner + `candidate.contactId`), preview body = `composeMemberAddedGroupBody(...)` (the GROUP body - spec 9.0 ruling); amend its docblock: the new member receives the naked intro instead, defined at `jobs/relayFanOut.ts` member-added handler. Extend `RosterResolutionDeps` (or thread a second deps arg - follow whichever the routes can wire with least churn) with `tours`/`placements`/`settings` picks; update the three preview routes' construction sites.
-- [ ] **Step 6: Re-baseline the parity pins** (`toursApi.test.ts:3989-3998,4096`, `placementsApi.test.ts:989,1007`, `relayGroupPreview.test.ts:151,208`, `relayFanOut.test.ts` job cases): each now expects the OWNER-ROUTED body; add one NEW pin per file for the parity contract itself (preview body === what the job would compose for the same owner/roster).
-- [ ] **Step 7: E2E.** `steps.ts:1887` and `expectGroupIntros` (`:1930-1949`): parameterize by expected variant - tour-owned groups assert Sam's tour wording (`Putting you in a group text with`), placement-owned assert `Excited to have you move into`, naked keep `/You're now connected with/`. `tour-roster.spec.ts:252-269`: re-target the literal split from `'{members}'` to `'{names}'` AND move its assertion to the tour-intro entry the preview now returns (keep its guard-comment intent: the tail-empty tripwire survives, aimed at the new token). Add one new e2e scenario spec (or extend `tour-roster.spec.ts`): open a tour relay -> every member's fake thread gets the tour intro with resolved names; add a member -> new member's thread carries the naked intro, existing members carry `Hey, adding <name> to the group as the landlord.`, dashboard thread shows ONE bubble whose body is the NEW member's, preview-add showed the GROUP body.
-- [ ] **Step 8: Run** `cd app && npx vitest run test/relayFanOut.test.ts test/toursApi.test.ts test/placementsApi.test.ts test/relayGroupPreview.test.ts test/messages/catalog.test.ts` - PASS. Commit (`feat(relay): owner-routed intros and per-recipient member_added`).
+- [ ] **Step 6: Re-baseline the parity pins** (`toursApi.test.ts:3989-3998,4096`, `placementsApi.test.ts:989,1007`, `relayGroupPreview.test.ts:151,208`, `relayFanOut.test.ts` job cases): each now expects the OWNER-ROUTED body; standalone-preview pins re-verify UNCHANGED. The new parity-contract pins are SPLIT PER MESSAGE (plan review P13 - a single "preview === job" pin contradicts spec 9.6): INTRO - preview body === the body the intro job composes for the same owner/roster. MEMBER_ADDED - preview body === the job's GROUP body, AND the persisted row's body === the job's NEW-MEMBER body. Pin both directions.
+- [ ] **Step 7: E2E.** `steps.ts:1887` and `expectGroupIntros` (`:1930-1949`): parameterize by expected variant - tour-owned groups assert Sam's tour wording (`Putting you in a group text with`), placement-owned assert `Excited to have you move into`, naked keep `/You're now connected with/`. `tour-roster.spec.ts:252-269`: the split-on-literal tripwire stays aimed at the NAKED entry (`relay.intro`) with `'{names}'` - its guard works because `{names}` sits MID-template there. Do NOT transplant the split trick to the tour entries: they OPEN with a token, so `introHead` would be empty - the exact failure the guard's own message names (plan review P9). The tour-preview half of that block becomes resolved-copy assertions instead: body starts with `Hey <tenant first name>!`, contains the street and `Putting you in a group text with`. Add one new e2e scenario spec (or extend `tour-roster.spec.ts`): open a tour relay -> every member's fake thread gets the tour intro with resolved names; add a member -> new member's thread carries the naked intro, existing members carry `Hey, adding <name> to the group as the landlord.`, dashboard thread shows ONE bubble whose body is the NEW member's, preview-add showed the GROUP body.
+- [ ] **Step 8: Run** `cd app && npx vitest run test/relayFanOut.test.ts test/toursApi.test.ts test/placementsApi.test.ts test/relayGroupPreview.test.ts test/messages/catalog.test.ts` - PASS. Then the FULL e2e suite (`npm run e2e`) - the relay half's checkpoint, same rationale as Task 9's. PASS. Commit (`feat(relay): owner-routed intros and per-recipient member_added`).
 
 ### Task 15: Docs closure
 
@@ -822,7 +845,8 @@ export function composeMemberAddedGroupBody(inputs: RelayComposeInputs, newMembe
 - Verify: `npm run issues` regenerates the index cleanly
 
 - [ ] **Step 1:** Make both edits; the ledger's resolution paragraph is a nine-row list, one line each, citing the spec section that discharged or re-deferred it (copy spec section 12's table).
-- [ ] **Step 2:** `npm run issues` (regenerates gitignored INDEX; do not commit the index). Commit the two files (`docs(issues): discharge the Phase B unpause ledger`).
+- [ ] **Step 2: The founder items get an artifact** (plan review P20). Write `docs/superpowers/reviews/2026-08-31-tour-reminder-ladder-phase-b/founder-handback-items.md` carrying spec section 15's five items verbatim - including item 2's SEQUENCING line (Sam can be asked about sender identity BEFORE the deploy that first sends a tour/placement intro). Committed with this task; the mission handback references the file rather than restating the items.
+- [ ] **Step 3:** `npm run issues` (regenerates gitignored INDEX; do not commit the index). Commit the files (`docs(issues): discharge the Phase B unpause ledger`).
 
 ---
 

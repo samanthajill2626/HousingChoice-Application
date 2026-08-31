@@ -360,6 +360,15 @@ The exemption must NOT change `clampOutOfQuietHours` itself - that helper is
 shared with the placement ladder and the timeline. Exempt at the call sites, by
 kind.
 
+**ADDENDUM (2026-08-31, plan review P5): there is a THIRD site.** The panel's
+quiet-hours suppression ESTIMATE (`routes/tourReminders.ts:558-564`, mirrored by
+`routes/contactTimeline.ts` per the shared-formula comment) evaluates the
+quiet-window disjuncts for every rung regardless of kind - so without a kind
+exemption there it would chip "Will wait" on an `en_route` the poll now sends,
+a promise the machinery immediately breaks. Exempt `en_route` from the QUIET
+disjuncts only (opt-out, kill switch and manual mode still apply) at both tour
+surfaces; `placementNudges.ts` has no `en_route` and is untouched.
+
 ### 6.1 What this changes for Sam, and what she must be told
 
 Her email documents the current overnight behaviour: a 9am tour yields one text

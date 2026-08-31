@@ -5,6 +5,7 @@ import {
   DECLARABLE_MEDIA_TYPES,
   INLINE_MEDIA_TYPES,
   isAcceptedExtension,
+  isHandoffMediaType,
   isInlineMediaType,
   normalizeStoredMediaType,
   resolveMediaTier,
@@ -156,6 +157,44 @@ describe('normalizeStoredMediaType (widened)', () => {
 
   it('returns the canonical member for a parameterized type', () => {
     expect(normalizeStoredMediaType('text/csv; charset=utf-8')).toBe('text/csv');
+  });
+});
+
+describe('isHandoffMediaType', () => {
+  it('hands off every video and audio type', () => {
+    for (const t of ['video/mp4', 'video/quicktime', 'video/webm', 'audio/mpeg', 'audio/wav']) {
+      expect(isHandoffMediaType(resolveMediaTier(t))).toBe(true);
+    }
+  });
+
+  it('hands off the whole inline tier, which already behaved this way', () => {
+    for (const t of ['image/png', 'image/jpeg', 'application/pdf']) {
+      expect(isHandoffMediaType(resolveMediaTier(t))).toBe(true);
+    }
+  });
+
+  it('does NOT hand off declarable types a browser cannot usefully open', () => {
+    // HEIC/TIFF are declarable BECAUSE the browser cannot decode them; a
+    // vCard or spreadsheet is more useful saved than rendered.
+    for (const t of [
+      'image/heic',
+      'image/tiff',
+      'text/vcard',
+      'text/csv',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ]) {
+      expect(isHandoffMediaType(resolveMediaTier(t))).toBe(false);
+    }
+  });
+
+  it('NEVER hands off an opaque or script-capable type', () => {
+    for (const t of ['text/html', 'image/svg+xml', 'application/x-made-up', undefined]) {
+      expect(isHandoffMediaType(resolveMediaTier(t))).toBe(false);
+    }
+  });
+
+  it('matches on the ESSENCE, like every other decision here', () => {
+    expect(isHandoffMediaType(resolveMediaTier('video/mp4; codecs=avc1'))).toBe(true);
   });
 });
 

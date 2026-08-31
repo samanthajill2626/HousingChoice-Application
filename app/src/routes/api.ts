@@ -20,7 +20,7 @@ import {
 } from '../adapters/mediaStore.js';
 import type { Semaphore } from '../lib/semaphore.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
-import { isTwilioDeliverableType, resolveMediaTier } from '../lib/mediaTypes.js';
+import { isHandoffMediaType, isTwilioDeliverableType, resolveMediaTier } from '../lib/mediaTypes.js';
 import { buildMediaFilenameParts, contentDispositionHeader } from '../lib/mediaFilename.js';
 import { renditionFor } from '../lib/mmsRenditions.js';
 import { planMmsBatches } from '../lib/mmsBatching.js';
@@ -2321,20 +2321,27 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // on an authenticated transport. resolveMediaTier is the ONE place that
     // decides what we do with it:
     //   inline      - allowlisted raster images + PDF, rendered same-origin
-    //   declarable  - not script-capable, so served TRUTHFULLY, but always as
-    //                 a download (attachment) - never rendered
+    //   declarable  - not script-capable, so served TRUTHFULLY. Video and audio
+    //                 are handed OFF (inline) so the phone opens them in its own
+    //                 player; every other declarable type is a download.
     //   opaque      - anything else, including every script-capable type and
     //                 anything unrecognised: octet-stream + .bin
     // It runs on the OBJECT's own type, not the message record's: objects
     // mirrored before the 2026-06-18 normalize fix can still carry text/html
     // at rest, and that population is why this gate exists at all.
+    //
+    // DISPOSITION IS NOT A RENDERING DECISION WE MAKE. `inline` means "browser,
+    // this is yours" - the browser or OS opens it however it natively does, the
+    // same mechanism that already opens a PDF in a tab without us shipping a
+    // PDF viewer. What keeps a hostile file harmless is the TYPE allowlist plus
+    // nosniff and the CSP below, not the disposition.
     // Belt-and-braces regardless of tier: nosniff + a restrictive CSP.
     const resolved = resolveMediaTier(object.contentType);
     const filename = buildMediaFilenameParts(attachments[idx]?.filename, idx, resolved);
     res.setHeader('Content-Type', resolved.canonical);
     res.setHeader(
       'Content-Disposition',
-      contentDispositionHeader(resolved.tier === 'inline' ? 'inline' : 'attachment', filename),
+      contentDispositionHeader(isHandoffMediaType(resolved) ? 'inline' : 'attachment', filename),
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");

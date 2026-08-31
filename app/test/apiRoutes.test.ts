@@ -709,9 +709,12 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     };
   }
 
-  it('serves a declarable type truthfully, as a download, with a real extension', async () => {
-    // The reported bug: a relay member's video downloaded as an untyped,
-    // extensionless blob the OS could not open.
+  it('HANDS OFF a video: true type, real extension, inline so the phone opens it', async () => {
+    // The reported bug was that this downloaded as an untyped, extensionless
+    // blob. It now carries its true type AND `inline`, which is not a
+    // rendering decision on our part - it is "browser, this is yours", the
+    // same mechanism that already opens a PDF without us shipping a viewer.
+    // A tenant's video should open in the phone's player, not land in Files.
     const { app } = makeMediaApp({
       message: mediaMessage({ contentType: 'video/mp4' }),
       object: { contentType: 'video/mp4' },
@@ -719,9 +722,42 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     const res = await get(app, 'MM1', 0);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toBe('video/mp4');
-    expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.mp4"');
+    expect(res.headers['content-disposition']).toBe('inline; filename="attachment-1.mp4"');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['content-security-policy']).toBe("default-src 'none'; sandbox");
+  });
+
+  it('hands off audio the same way', async () => {
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'audio/mpeg' }),
+      object: { contentType: 'audio/mpeg' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('audio/mpeg');
+    expect(res.headers['content-disposition']).toBe('inline; filename="attachment-1.mp3"');
+  });
+
+  it('keeps a HEIC as a DOWNLOAD, not a hand-off', async () => {
+    // HEIC is on the declarable tier precisely BECAUSE browsers cannot decode
+    // it. Handing it off would produce a broken viewer where a saved file the
+    // OS can route to Photos is the useful outcome.
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'image/heic' }),
+      object: { contentType: 'image/heic' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('image/heic');
+    expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.heic"');
+  });
+
+  it('keeps a spreadsheet as a DOWNLOAD, not a hand-off', async () => {
+    const xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: xlsx, filename: 'Q3.xlsx' }),
+      object: { contentType: xlsx },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="Q3.xlsx"');
   });
 
   it('still forces an unknown stored type to an opaque download', async () => {
@@ -765,7 +801,9 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
       object: { contentType: 'video/mp4' },
     });
     const res = await get(app, 'MM1', 0);
-    expect(res.headers['content-disposition']).toBe('attachment; filename="invoice.mp4"');
+    // `inline` because video is a hand-off type; the point of this test is the
+    // FILENAME - the sender's `.exe` is discarded for our own `.mp4`.
+    expect(res.headers['content-disposition']).toBe('inline; filename="invoice.mp4"');
   });
 
   it('keeps a recognised stored extension when the type is unrecoverable', async () => {
@@ -801,7 +839,7 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     });
     const res = await get(app, 'MM1', 0);
     expect(res.headers['content-disposition']).toBe(
-      "attachment; filename=\"bud_get.mp4\"; filename*=UTF-8''bud%C3%A9get.mp4",
+      "inline; filename=\"bud_get.mp4\"; filename*=UTF-8''bud%C3%A9get.mp4",
     );
   });
 });

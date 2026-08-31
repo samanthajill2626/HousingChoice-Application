@@ -192,6 +192,44 @@ export function isAcceptedExtension(ext: string): boolean {
 }
 
 /**
+ * Declarable types the browser should HAND OFF rather than save: video and
+ * audio. These are served `Content-Disposition: inline`, which does NOT mean
+ * we render anything - it means "browser, this is yours", and the browser or
+ * phone opens it in its own native player, exactly as it already does for the
+ * PDFs on the inline tier. We build no viewer.
+ *
+ * Why only these two. A HEIC or TIFF handed to a browser inline is a broken
+ * image on most platforms (they are on the declarable tier precisely BECAUSE
+ * the browser cannot decode them), and a vCard or spreadsheet rendered in a
+ * tab is worse than a saved file the OS can route to the right app. Video and
+ * audio are the types where "open it" is unambiguously better than "save it",
+ * and their decoders execute no script - which is why widening the disposition
+ * for them does not widen the stored-XSS surface the way an active type would.
+ */
+const HANDOFF_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  'video/mp4',
+  'video/quicktime',
+  'video/3gpp',
+  'video/3gpp2',
+  'video/webm',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/aac',
+  'audio/ogg',
+  'audio/amr',
+  'audio/wav',
+]);
+
+/**
+ * True when a resolved type should be served `inline` rather than `attachment`.
+ * The inline TIER always is (images + PDF); on the declarable tier only the
+ * hand-off types above are. Everything else keeps `attachment`.
+ */
+export function isHandoffMediaType(resolved: ResolvedMediaType): boolean {
+  return resolved.tier === 'inline' || HANDOFF_MEDIA_TYPES.has(resolved.canonical);
+}
+
+/**
  * Normalize a sender-supplied Content-Type for STORAGE: keep the CANONICAL
  * allowlist member when the type resolves to the inline OR the declarable tier,
  * otherwise collapse to `application/octet-stream` - so an attacker-controlled

@@ -1,9 +1,15 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
+import userEvent from '@testing-library/user-event';
 import { Timeline } from './Timeline.js';
 import { ApiError } from '../../api/index.js';
 import type { MmsMediaAttachment, TimelineItem } from '../../api/index.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
 
 // Mock ONLY the three upload-flow fns; everything else in the api barrel stays
 // real (ApiError, types) so the composer's error mapping and the render side are
@@ -53,6 +59,23 @@ function renderComposer(props: Partial<React.ComponentProps<typeof Timeline>> = 
         onSend={vi.fn()}
         {...props}
       />
+    </MemoryRouter>,
+  );
+}
+
+function renderImageTimeline(items: TimelineItem[]) {
+  return render(
+    <MemoryRouter>
+      <ImageViewerProvider>
+        <Timeline
+          status="ready"
+          items={items}
+          source="server"
+          replyToPhone="+14705550148"
+          canSend={false}
+          onSend={vi.fn()}
+        />
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -397,5 +420,58 @@ describe('Timeline outbound MMS composer', () => {
     // The other channel shows NONE of the first channel's chips.
     expect(screen.queryByText('a-only.png')).not.toBeInTheDocument();
     expect(screen.queryByRole('list', { name: 'Attachments' })).not.toBeInTheDocument();
+  });
+});
+
+describe('Timeline MMS image attachments', () => {
+  it('opens an eligible image in the shared viewer while PDF and HEIC stay file links', async () => {
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    const user = userEvent.setup();
+    try {
+      renderImageTimeline([
+        {
+          kind: 'message',
+          id: 'mms-viewer',
+          at: '2026-08-27T12:00:00.000Z',
+          conversationId: 'conversation-1',
+          tsMsgId: '2026-08-27T12:00:00.000Z#MMFRONT1',
+          direction: 'inbound',
+          author: 'tenant',
+          type: 'mms',
+          delivery_status: 'delivered',
+          body: 'Three attachments',
+          media_attachments: [
+            {
+              s3Key: 'inbound/MMFRONT1/0',
+              contentType: 'image/png',
+              filename: 'Front porch.jpg',
+            },
+            {
+              s3Key: 'inbound/MMFRONT1/1',
+              contentType: 'application/pdf',
+              filename: 'Lease.pdf',
+            },
+            {
+              s3Key: 'inbound/MMFRONT1/2',
+              contentType: 'image/heic',
+              filename: 'Original.heic',
+            },
+          ],
+        },
+      ]);
+
+      const trigger = screen.getByRole('button', { name: 'View Front porch.jpg' });
+      expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+      expect(screen.queryByRole('link', { name: 'Front porch.jpg' })).not.toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /Lease\.pdf/ })).toHaveAttribute('target', '_blank');
+      expect(screen.getByRole('link', { name: /Original\.heic/ })).toHaveAttribute('target', '_blank');
+
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Front porch.jpg' });
+      const viewerImage = await loadViewerImage(dialog, 'Front porch.jpg');
+      expect(viewerImage).toHaveAttribute('src', expect.stringContaining('/media/0'));
+    } finally {
+      restoreResizeObserver();
+    }
   });
 });

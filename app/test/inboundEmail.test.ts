@@ -990,6 +990,41 @@ describe('threaded attachments', () => {
     expect(m.attachments_truncated).toBeUndefined();
   });
 
+  it('stores an inbound docx attachment with its real type', async () => {
+    // Same defect, different channel: an inbound .docx collapsed to
+    // octet-stream exactly like an MMS video did. The x-weird case in the
+    // sibling test above still collapses - the allowlist did not become a
+    // passthrough.
+    const docx =
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const w = makeWorld({
+      raw: mime({
+        attachments: [{ filename: 'lease.docx', contentType: docx, base64: 'AAAA' }],
+      }),
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    const m = w.appended[0]!;
+    expect(m.mediaAttachments?.[0]).toMatchObject({ contentType: docx, filename: 'lease.docx' });
+  });
+
+  it('still stores an inbound text/html attachment as octet-stream', async () => {
+    // The security half of the same widening: a script-capable part must never
+    // reach S3 wearing its own Content-Type, whichever channel carried it.
+    const w = makeWorld({
+      raw: mime({
+        attachments: [{ filename: 'payload.html', contentType: 'text/html', base64: 'AAAA' }],
+      }),
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    const m = w.appended[0]!;
+    expect(m.mediaAttachments?.[0]).toMatchObject({
+      contentType: 'application/octet-stream',
+      filename: 'payload.html',
+    });
+  });
+
   it('skips attachments past the 25MB per-message total and marks attachments_truncated', async () => {
     const w = makeWorld({
       parseMime: async () =>

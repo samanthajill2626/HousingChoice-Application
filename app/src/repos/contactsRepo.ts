@@ -91,6 +91,8 @@ export interface ContactEmail {
 export interface ContactItem {
   contactId: string;
   type: ContactType;
+  /** Monotonic fence for committed type or role classifications. */
+  classification_revision?: number;
   /**
    * The contact's SINGLE lifecycle status — type-scoped (STATUS-MODEL.md §5):
    *   - tenant: the §5 lifecycle (TENANT_STATUSES) —
@@ -307,6 +309,18 @@ export function isDeleted(contact: Pick<ContactItem, 'deleted_at'>): boolean {
   return typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
 }
 
+/** Legacy contacts without a persisted fence are logically at revision zero. */
+export function contactClassificationRevision(
+  contact: Pick<ContactItem, 'classification_revision'>,
+): number {
+  const revision = contact.classification_revision;
+  return typeof revision === 'number'
+    && Number.isSafeInteger(revision)
+    && revision >= 0
+    ? revision
+    : 0;
+}
+
 /** contactId prefix for a phone-pointer item: `phoneref#<E.164>`. */
 export const PHONE_REF_PREFIX = 'phoneref#';
 
@@ -419,6 +433,57 @@ export const INDEX_KEY_ATTRIBUTES: ReadonlySet<string> = new Set(
 );
 
 /**
+ * The index-key attributes a contact may never be WITHOUT - a STRICT SUBSET of
+ * INDEX_KEY_ATTRIBUTES above.
+ *
+ * `byTypeStatus` is (hash: `type`, range: `status`), and DynamoDB does not index
+ * an item that is missing a key attribute. Every read that ENUMERATES contacts
+ * of a kind goes through that index - the Unknown triage tab, the Today triage
+ * block, `GET /api/contacts?type=`, and audienceResolution - so a row that loses
+ * `type` or `status` still reads back fine by id while ceasing to exist for all
+ * of them. No error, no empty page, no counter: silent invisibility, which is
+ * the worst failure class this codebase has met.
+ *
+ * The other three contacts GSIs are deliberately NOT here. byPhone, byEmail and
+ * byHousingAuthority key on OPTIONAL attributes, and leaving their partition is
+ * the CORRECT meaning of clearing the field: the contact edit form clears
+ * housingAuthority with exactly this null -> REMOVE (routes/contacts.ts), and
+ * removePhone/removeEmail unset those scalars by design. Guarding them would
+ * break the very convention EmptyIndexKeyError's own message tells callers to
+ * use.
+ *
+ * Derived from the table spec by index name rather than hand-listed; the
+ * contents are PINNED in contactsRepo.integration.test.ts so renaming that
+ * index cannot quietly empty the set and take the guard with it.
+ */
+const typeStatusGsi = getTableSpec('contacts').gsis.find(
+  (gsi) => gsi.indexName === 'byTypeStatus',
+);
+export const REQUIRED_INDEX_KEY_ATTRIBUTES: ReadonlySet<string> = new Set(
+  typeStatusGsi === undefined
+    ? []
+    : [
+        typeStatusGsi.hashKey.name,
+        ...(typeStatusGsi.rangeKey ? [typeStatusGsi.rangeKey.name] : []),
+      ],
+);
+
+/**
+ * Base for the two ways one update() patch can break a contact's GSI
+ * membership. One family so a caller or a test double can catch the whole
+ * class; each subclass names WHICH way and what to do instead.
+ */
+export class IndexKeyWriteError extends Error {
+  constructor(
+    public readonly attribute: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'IndexKeyWriteError';
+  }
+}
+
+/**
  * Thrown by update() when a patch would SET '' on a GSI key attribute.
  *
  * DynamoDB rejects that with a ValidationException ("The AttributeValue for a
@@ -430,13 +495,45 @@ export const INDEX_KEY_ATTRIBUTES: ReadonlySet<string> = new Set(
  * unaffected: DynamoDB has allowed empty strings there since 2020, and the
  * plain text fields (notes/company/agency/...) rely on that.
  */
-export class EmptyIndexKeyError extends Error {
-  constructor(public readonly attribute: string) {
+export class EmptyIndexKeyError extends IndexKeyWriteError {
+  constructor(attribute: string) {
     super(
+      attribute,
       `cannot set the indexed attribute '${attribute}' to an empty string; ` +
         'pass null to REMOVE it instead',
     );
     this.name = 'EmptyIndexKeyError';
+  }
+}
+
+/**
+ * Thrown by update() when a patch would REMOVE (null) an index key a contact
+ * may not be without - today `type` or `status`, the byTypeStatus keys.
+ *
+ * The sibling above refuses ONE way of un-indexing a row ('' on a key
+ * attribute); this refuses the other. They sat in ADJACENT LINES with only the
+ * first guarded, so `update(id, { status: null })` returned a healthy-looking
+ * ContactItem for a contact that had just stopped existing for every listByType
+ * reader - the Unknown tab included - with no throw, no log and no counter.
+ *
+ * Deliberately NOT raised for phone/email/housingAuthority, whose sparse
+ * partitions a contact is meant to be able to leave. See
+ * REQUIRED_INDEX_KEY_ATTRIBUTES.
+ */
+export class RequiredIndexKeyRemovalError extends IndexKeyWriteError {
+  constructor(
+    attribute: string,
+    public readonly contactId: string,
+  ) {
+    super(
+      attribute,
+      `cannot REMOVE the indexed attribute '${attribute}' from contact ${contactId}: ` +
+        'it is a byTypeStatus key, so a contact missing it is invisible to every ' +
+        'listByType read (the Unknown tab, triage, GET /api/contacts?type=) while ' +
+        'still reading back by id. Write a real value instead, or soft-delete the ' +
+        'contact if it should leave the lists.',
+    );
+    this.name = 'RequiredIndexKeyRemovalError';
   }
 }
 
@@ -1158,6 +1255,9 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       const removes: string[] = [];
       const names: Record<string, string> = {};
       const values: Record<string, unknown> = {};
+      const changesKind = Object.entries(patch).some(
+        ([key, value]) => value !== undefined && (key === 'type' || key === 'role'),
+      );
       let i = 0;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
@@ -1169,6 +1269,15 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
           throw new EmptyIndexKeyError(key);
         }
+        // The OTHER half of the same hazard, in the same place and for the same
+        // reason. null is the documented REMOVE path, and on a byTypeStatus key
+        // a REMOVE un-indexes the row: it still reads back by id and is gone
+        // from every listByType (the Unknown tab included), silently. The
+        // sparse lookup keys (phone/email/housingAuthority) stay clearable this
+        // way on purpose - REQUIRED_INDEX_KEY_ATTRIBUTES is the narrow set.
+        if (value === null && REQUIRED_INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new RequiredIndexKeyRemovalError(key, contactId);
+        }
         const nameKey = `#k${i}`;
         names[nameKey] = key;
         if (value === null) {
@@ -1179,6 +1288,14 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
           sets.push(`${nameKey} = ${valueKey}`);
         }
         i += 1;
+      }
+      if (changesKind) {
+        names['#classificationRevision'] = 'classification_revision';
+        values[':classificationRevisionZero'] = 0;
+        values[':classificationRevisionOne'] = 1;
+        sets.push(
+          '#classificationRevision = if_not_exists(#classificationRevision, :classificationRevisionZero) + :classificationRevisionOne',
+        );
       }
       if (sets.length === 0 && removes.length === 0) {
         // Nothing to change — read the current item back (still 404s if gone).

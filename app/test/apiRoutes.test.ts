@@ -645,7 +645,7 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     const res = await get(app, 'MM1', 0);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/^image\/png/);
-    expect(res.headers['content-disposition']).toBeUndefined();
+    expect(res.headers['content-disposition']).toMatch(/^inline; filename="/);
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(getCalls).toEqual(['media/c1/MM1/0']);
   });
@@ -658,7 +658,7 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     const res = await get(app, 'MM2', 0);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/^application\/pdf/);
-    expect(res.headers['content-disposition']).toBeUndefined();
+    expect(res.headers['content-disposition']).toMatch(/^inline; filename="/);
   });
 
   it('forces a download for a non-allowlisted stored type', async () => {
@@ -698,5 +698,110 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     const res = await get(app, 'NOPE', 0);
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'message_not_found' });
+  });
+
+  function mediaMessage(attachment: Record<string, unknown>) {
+    return {
+      conversationId: 'c1',
+      tsMsgId: '2026-08-01T00:00:00.000Z#MM1',
+      provider_sid: 'MM1',
+      media_attachments: [{ s3Key: 'media/c1/MM1/0', ...attachment }],
+    };
+  }
+
+  it('serves a declarable type truthfully, as a download, with a real extension', async () => {
+    // The reported bug: a relay member's video downloaded as an untyped,
+    // extensionless blob the OS could not open.
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'video/mp4' }),
+      object: { contentType: 'video/mp4' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('video/mp4');
+    expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.mp4"');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['content-security-policy']).toBe("default-src 'none'; sandbox");
+  });
+
+  it('still forces an unknown stored type to an opaque download', async () => {
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'application/x-made-up' }),
+      object: { contentType: 'application/x-made-up' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('application/octet-stream');
+    expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.bin"');
+  });
+
+  it('refuses to render a script-capable type stored on the OBJECT', async () => {
+    // The stored-XSS guard, exercised where it actually lives. An object
+    // mirrored before the write-side normalizer existed can still carry
+    // text/html at rest, which is the population this gate is for - so the
+    // OBJECT's type is text/html here even though no write path would produce
+    // it today.
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'application/octet-stream' }),
+      object: { contentType: 'text/html' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('application/octet-stream');
+    expect(res.headers['content-disposition']).toMatch(/^attachment/);
+  });
+
+  it('names an inline attachment without forcing a download', async () => {
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'image/png' }),
+      object: { contentType: 'image/png' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('image/png');
+    expect(res.headers['content-disposition']).toBe('inline; filename="attachment-1.png"');
+  });
+
+  it('takes a stored filename stem but never its extension', async () => {
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'video/mp4', filename: 'invoice.exe' }),
+      object: { contentType: 'video/mp4' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="invoice.mp4"');
+  });
+
+  it('keeps a recognised stored extension when the type is unrecoverable', async () => {
+    // Historical inbound email: octet-stream at rest, real name still present.
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'application/octet-stream', filename: 'budget.xlsx' }),
+      object: { contentType: 'application/octet-stream' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="budget.xlsx"');
+  });
+
+  it('serves an OUTBOUND email attachment on the declarable tier', async () => {
+    // Not the reported bug, but the same route: outbound email attachments are
+    // already stored as their real type, so they change tier the moment this
+    // lands with no backfill at all. Spec section 8.6.
+    const xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: xlsx, filename: 'Q3.xlsx' }),
+      object: { contentType: xlsx },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe(xlsx);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="Q3.xlsx"');
+  });
+
+  it('emits filename* for a non-ASCII stored name', async () => {
+    // Built, not written as a literal - the ASCII-only source rule.
+    const stored = `bud${String.fromCharCode(0xe9)}get.mov`;
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'video/mp4', filename: stored }),
+      object: { contentType: 'video/mp4' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-disposition']).toBe(
+      "attachment; filename=\"bud_get.mp4\"; filename*=UTF-8''bud%C3%A9get.mp4",
+    );
   });
 });

@@ -1,9 +1,15 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter, Route, Routes } from 'react-router-dom';
+import userEvent from '@testing-library/user-event';
 import { Timeline, type TimelinePaging } from './Timeline.js';
 import { ApiError } from '../../api/index.js';
 import { buildTimelineFallback } from './buildTimelineFallback.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
 import type {
   ConversationSummary,
   Message,
@@ -27,6 +33,26 @@ function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = 
         {...props}
       />
     </MemoryRouter>,
+  );
+}
+
+function imageTimeline(props: Partial<React.ComponentProps<typeof Timeline>>): React.JSX.Element {
+  const items: TimelineItem[] = props.items ?? [];
+  return (
+    <MemoryRouter>
+      <ImageViewerProvider>
+        <Timeline
+          status="ready"
+          items={items}
+          source="server"
+          replyToPhone="+14705550148"
+          replyToLabel="most recent"
+          canSend={false}
+          onSend={vi.fn()}
+          {...props}
+        />
+      </ImageViewerProvider>
+    </MemoryRouter>
   );
 }
 
@@ -535,7 +561,9 @@ describe('Timeline', () => {
     expect(screen.getByText(/No messages yet/i)).toBeInTheDocument();
   });
 
-  it('renders an MMS image inline and a PDF as a viewer link via the authed endpoint', () => {
+  it('requires closing one image before another Timeline thumbnail can open', async () => {
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    const user = userEvent.setup();
     const mms: TimelineItem = {
       ...MESSAGE_OUT,
       id: 'mms1',
@@ -543,18 +571,151 @@ describe('Timeline', () => {
       type: 'mms',
       body: 'see attached',
       media_attachments: [
-        { s3Key: 'k0', contentType: 'image/jpeg' },
-        { s3Key: 'k1', contentType: 'application/pdf' },
+        { s3Key: 'k0', contentType: 'image/jpeg', filename: 'Front.jpg' },
+        { s3Key: 'k1', contentType: 'image/png', filename: 'Kitchen.jpg' },
       ],
     };
+    try {
+      render(imageTimeline({ items: [mms] }));
+      await user.click(screen.getByRole('button', { name: 'View Front.jpg' }));
+      const frontDialog = screen.getByRole('dialog', { name: 'Front.jpg' });
+      const frontImage = await loadViewerImage(frontDialog, 'Front.jpg');
+      expect(frontImage).toHaveAttribute('src', '/api/messages/SM123/media/0');
+      expect(within(frontDialog).queryByRole('button', { name: /Previous|Next/ })).not.toBeInTheDocument();
+      expect(within(frontDialog).queryByRole('button', { name: 'View Kitchen.jpg' })).not.toBeInTheDocument();
+
+      await user.click(within(frontDialog).getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      await user.click(screen.getByRole('button', { name: 'View Kitchen.jpg' }));
+      const kitchenDialog = screen.getByRole('dialog', { name: 'Kitchen.jpg' });
+      const kitchenImage = await loadViewerImage(kitchenDialog, 'Kitchen.jpg');
+      expect(kitchenImage).toHaveAttribute('src', '/api/messages/SM123/media/1');
+      expect(within(kitchenDialog).queryByRole('img', { name: 'Front.jpg' })).not.toBeInTheDocument();
+    } finally {
+      restoreResizeObserver();
+    }
+  });
+
+  it('keeps a loaded viewer alive through retry collapse and leaves normal Back history', async () => {
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    const user = userEvent.setup();
+    const failedMms: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'failed-mms',
+      tsMsgId: '2026-08-27T12:00:00.000Z#MMFRONT1',
+      at: '2026-08-27T12:00:00.000Z',
+      type: 'mms',
+      delivery_status: 'failed',
+      body: 'Retry this image',
+      media_attachments: [
+        {
+          s3Key: 'inbound/MMFRONT1/0',
+          contentType: 'image/png',
+          filename: 'Front porch.jpg',
+        },
+      ],
+    };
+    const deliveredRetry: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'delivered-retry',
+      tsMsgId: '2026-08-27T12:05:00.000Z#MMRETRY1',
+      at: '2026-08-27T12:05:00.000Z',
+      delivery_status: 'delivered',
+      retry_of: failedMms.tsMsgId,
+      body: 'Retry this image',
+    };
+    const routeTree = (items: TimelineItem[]): React.JSX.Element => (
+      <BrowserRouter>
+        <ImageViewerProvider>
+          <Routes>
+            <Route path="/prior" element={<div>PRIOR ROUTE</div>} />
+            <Route
+              path="/timeline"
+              element={(
+                <Timeline
+                  status="ready"
+                  items={items}
+                  source="server"
+                  replyToPhone="+14705550148"
+                  replyToLabel="most recent"
+                  canSend={false}
+                  onSend={vi.fn()}
+                />
+              )}
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </BrowserRouter>
+    );
+
+    window.history.replaceState({ usr: null, key: 'prior', idx: 0 }, '', '/prior');
+    window.history.pushState({ usr: null, key: 'timeline', idx: 1 }, '', '/timeline');
+    try {
+      const view = render(routeTree([failedMms]));
+      const sourceTrigger = screen.getByRole('button', { name: 'View Front porch.jpg' });
+      await user.click(sourceTrigger);
+      const dialog = screen.getByRole('dialog', { name: 'Front porch.jpg' });
+      const viewerImage = await loadViewerImage(dialog, 'Front porch.jpg');
+
+      view.rerender(routeTree([failedMms, deliveredRetry]));
+      expect(sourceTrigger.isConnected).toBe(false);
+      expect(dialog).toBeInTheDocument();
+      expect(viewerImage).toBeInTheDocument();
+      const disconnectedFocus = vi.spyOn(sourceTrigger, 'focus');
+
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(disconnectedFocus).not.toHaveBeenCalled();
+      expect(window.history.state.idx).toBe(1);
+
+      act(() => window.history.back());
+      expect(await screen.findByText('PRIOR ROUTE')).toBeInTheDocument();
+      expect(window.history.state.idx).toBe(0);
+    } finally {
+      restoreResizeObserver();
+      window.history.replaceState({ usr: null, key: 'test-cleanup', idx: 0 }, '', '/');
+    }
+  });
+
+  /** The MMS bubble above, parameterized over its attachments, so a type-tier
+   *  case differs from the known-good image/PDF bubble in exactly one
+   *  dimension.
+   *
+   *  An ARROW is load-bearing: it keeps the narrowing of MESSAGE_OUT (a
+   *  `kind: 'message'` const of the TimelineItem union), which a hoisted
+   *  `function` declaration discards - the spread would then distribute over
+   *  every union member and tsc rejects `tsMsgId` against TimelineCall. */
+  const mmsWith = (
+    attachments: { s3Key: string; contentType: string; filename?: string }[],
+  ): TimelineItem => {
+    const mms: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'mms1',
+      tsMsgId: '2026-06-08T09:20:00#SM123', // <provider_ts>#<sid>
+      type: 'mms',
+      body: 'see attached',
+      media_attachments: attachments,
+    };
+    return mms;
+  };
+
+  it('renders a HEIC attachment as a file link, not a broken image', () => {
+    const mms = mmsWith([{ s3Key: 'k', contentType: 'image/heic' }]);
     renderTimeline({ items: [mms] });
-    // Image → inline <img> pointing at the authed same-origin endpoint.
-    const img = screen.getByRole('img', { name: /Attachment 1/i });
-    expect(img).toHaveAttribute('src', '/api/messages/SM123/media/0');
-    // PDF → a viewer link (new tab), not an <img>.
-    const pdf = screen.getByRole('link', { name: /PDF attachment 2/i });
-    expect(pdf).toHaveAttribute('href', '/api/messages/SM123/media/1');
-    expect(pdf).toHaveAttribute('target', '_blank');
+    expect(screen.queryByRole('img', { name: /Attachment 1/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Attachment 1/i })).toBeInTheDocument();
+  });
+
+  it('labels a declarable attachment with its kind', () => {
+    const mms = mmsWith([{ s3Key: 'k', contentType: 'video/mp4' }]);
+    renderTimeline({ items: [mms] });
+    expect(screen.getByRole('link', { name: /Video - Attachment 1/i })).toBeInTheDocument();
+  });
+
+  it('leaves an opaque attachment labelled bare', () => {
+    const mms = mmsWith([{ s3Key: 'k', contentType: 'application/octet-stream' }]);
+    renderTimeline({ items: [mms] });
+    expect(screen.getByRole('link', { name: /^\W*Attachment 1$/i })).toBeInTheDocument();
   });
 
   it('falls back to a count chip when no provider sid can be derived', () => {
@@ -565,7 +726,7 @@ describe('Timeline', () => {
       type: 'mms',
       media_attachments: [{ s3Key: 'k', contentType: 'image/png' }],
     };
-    renderTimeline({ items: [mms] });
+    render(imageTimeline({ items: [mms] }));
     expect(screen.getByText(/1 attachment/i)).toBeInTheDocument();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
   });

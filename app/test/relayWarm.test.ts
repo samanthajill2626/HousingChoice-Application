@@ -84,6 +84,9 @@ function makeAdapter(opts: {
     async getMediaStream() {
       throw new Error('not used');
     },
+    async getMediaContentType() {
+      return undefined;
+    },
     async getRecordingStream() {
       throw new Error('not used');
     },

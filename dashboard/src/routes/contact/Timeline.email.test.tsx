@@ -1,14 +1,30 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
+import userEvent from '@testing-library/user-event';
 import { Timeline } from './Timeline.js';
 import type { TimelineItem } from '../../api/index.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
 
 function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = {}) {
   const items: TimelineItem[] = props.items ?? [];
   return render(
     <MemoryRouter>
       <Timeline status="ready" items={items} source="server" canSend={false} onSend={vi.fn()} {...props} />
+    </MemoryRouter>,
+  );
+}
+
+function renderImageTimeline(items: TimelineItem[]) {
+  return render(
+    <MemoryRouter>
+      <ImageViewerProvider>
+        <Timeline status="ready" items={items} source="server" canSend={false} onSend={vi.fn()} />
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -86,6 +102,48 @@ describe('AttachmentGallery filename labels (fix-wave R1)', () => {
     // The named attachment shows its filename; the unnamed one keeps the fallback.
     expect(screen.getByText(/lease agreement\.pdf/)).toBeInTheDocument();
     expect(screen.getByText(/Attachment 2/)).toBeInTheDocument();
+  });
+
+  it('opens an eligible email image in the shared viewer while PDF and HEIC stay file links', async () => {
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    const user = userEvent.setup();
+    try {
+      renderImageTimeline([
+        {
+          ...EMAIL_IN,
+          media_attachments: [
+            {
+              s3Key: 'inbound/EM123/0',
+              contentType: 'image/png',
+              filename: 'Front porch.jpg',
+            },
+            {
+              s3Key: 'inbound/EM123/1',
+              contentType: 'application/pdf',
+              filename: 'Application.pdf',
+            },
+            {
+              s3Key: 'inbound/EM123/2',
+              contentType: 'image/heic',
+              filename: 'Camera original.heic',
+            },
+          ],
+        },
+      ]);
+
+      const trigger = screen.getByRole('button', { name: 'View Front porch.jpg' });
+      expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+      expect(screen.queryByRole('link', { name: 'Front porch.jpg' })).not.toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /Application\.pdf/ })).toHaveAttribute('target', '_blank');
+      expect(screen.getByRole('link', { name: /Camera original\.heic/ })).toHaveAttribute('target', '_blank');
+
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Front porch.jpg' });
+      const viewerImage = await loadViewerImage(dialog, 'Front porch.jpg');
+      expect(viewerImage).toHaveAttribute('src', expect.stringContaining('/media/0'));
+    } finally {
+      restoreResizeObserver();
+    }
   });
 
   it('keeps MMS behavior unchanged when a filename is absent', () => {

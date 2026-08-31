@@ -15,7 +15,12 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Contact, ContactTimelinePage, PlacementItem } from '../../api/index.js';
+import type { Contact, ContactTimelinePage, PlacementItem, TimelineItem } from '../../api/index.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
 
 const getContactTimeline = vi.fn();
 const getAllConversations = vi.fn();
@@ -79,6 +84,24 @@ function landlordContact(): Contact {
   };
 }
 
+const HOST_MEDIA_ATTACHMENTS = [
+  { s3Key: 'inbound/MMHOST1/0', contentType: 'image/png', filename: 'Host proof.png' },
+];
+
+const HOST_TIMELINE_MESSAGE: TimelineItem = {
+  kind: 'message',
+  id: 'host-image-message',
+  at: '2026-08-27T12:00:00.000Z',
+  conversationId: 'conv-host',
+  tsMsgId: '2026-08-27T12:00:00.000Z#MMHOST1',
+  direction: 'inbound',
+  author: 'tenant',
+  type: 'mms',
+  body: 'Host image',
+  delivery_status: 'delivered',
+  media_attachments: HOST_MEDIA_ATTACHMENTS,
+};
+
 /** What PlacementDetail resolves today: the tenant + the property's landlord,
  *  keyed by contactId and labelled with the DISPLAY NAME (never a role word). */
 function people(): PersonChannel[] {
@@ -125,7 +148,9 @@ function renderConvo(props: PlacementConversationProps) {
   // MemoryRouter: a milestone pin with a refId renders a <Link>.
   return render(
     <MemoryRouter>
-      <PlacementConversation {...props} />
+      <ImageViewerProvider>
+        <PlacementConversation {...props} />
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -159,6 +184,34 @@ beforeEach(() => {
 });
 
 describe('PlacementConversation - tabs and 1:1 panes', () => {
+  it('keeps the tenant person tab selected while its Timeline image uses the shared viewer', async () => {
+    const user = userEvent.setup();
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    getContactTimeline.mockResolvedValue({ items: [HOST_TIMELINE_MESSAGE], nextCursor: null });
+
+    try {
+      renderConvo(baseProps());
+      const selectedTab = screen.getByRole('tab', { name: /Ann Tenant/ });
+      await user.click(selectedTab);
+      expect(selectedTab).toHaveAttribute('aria-selected', 'true');
+
+      const trigger = await screen.findByRole('button', { name: 'View Host proof.png' });
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Host proof.png' });
+      await loadViewerImage(dialog, 'Host proof.png');
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+
+      expect(trigger).toHaveFocus();
+      expect(selectedTab).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('button', { name: /Comms only/i })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      );
+    } finally {
+      restoreResizeObserver();
+    }
+  });
+
   it('defaults to the tenant with no group thread and lazily loads ONLY that feed', async () => {
     renderConvo(baseProps());
 
@@ -390,7 +443,9 @@ describe('PlacementConversation - 1:1 mark-read gates', () => {
 
     rerender(
       <MemoryRouter>
-        <PlacementConversation {...props} commsVisible={true} />
+        <ImageViewerProvider>
+          <PlacementConversation {...props} commsVisible={true} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
     await waitFor(() =>

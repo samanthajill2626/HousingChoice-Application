@@ -13,6 +13,35 @@ import { LEDGER_ENV_VAR, ledgerDir } from './test/helpers/dynamoKeyLedger.js';
 // Respect-if-set: an explicitly exported AWS_ACCESS_KEY_ID still wins.
 export default defineConfig({
   test: {
+    // CAP THE POOL. Unset, vitest defaults maxThreads to availableParallelism()
+    // - 16 threads on a 16-core box - which leaves the MAIN process no core to
+    // run on. That process is what answers worker RPCs, and birpc's bundled
+    // timeout is 60s, so under any external load it starves and the run dies
+    // with `[vitest-worker]: Timeout calling "onTaskUpdate"`. Vitest then exits
+    // NON-ZERO with ZERO failing tests, which reads as a broken test that does
+    // not exist. See docs/issues/npm-test-runner-rpc-starves-under-concurrent-e2e.md.
+    //
+    // 4 is measured, not guessed. All four runs, 336 files / 5977 tests:
+    //
+    //   quiet box, 16 threads   249.8s   0 errors   exit 0
+    //   quiet box,  4 threads   253.1s   0 errors   exit 0   (+1.3%)
+    //   under load, 16 threads  347.8s   1 error    exit 1   <- the failure
+    //   under load,  4 threads  361.7s   0 errors   exit 0
+    //
+    // So the parallelism above 4 was buying ~nothing even on an idle box: this
+    // suite is bound by DynamoDB Local I/O, not CPU. It was only ever costing
+    // the coordinator its core. Raising this number is not a speed win; it is a
+    // way to reintroduce the false red.
+    // MUST be top-level `maxWorkers`, NOT poolOptions.threads.maxThreads. A
+    // first attempt used the latter and was INERT: vitest 3's default pool is
+    // `forks` (defaults.B7q_naMc.js), and each pool reads only its own key -
+    //   forks:   poolOptions.maxForks  ?? config.maxWorkers ?? threadsCount
+    //   threads: poolOptions.maxThreads ?? config.maxWorkers ?? threadsCount
+    // - so a threads key configures a pool that is not running, silently. The
+    // A/B below was measured with the CLI's --maxWorkers, which resolves to
+    // this option and works for either pool; shipping the poolOptions form
+    // changed the mechanism without re-testing it, and the failure recurred.
+    maxWorkers: 4,
     // Timeouts under cross-worktree load are contention, never hangs — keep a
     // generous budget (belt-and-braces alongside the per-key isolation; this
     // mirrors the feat/tours-sequence mitigation and must survive the merge).

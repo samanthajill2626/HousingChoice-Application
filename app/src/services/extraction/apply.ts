@@ -14,7 +14,7 @@
 //
 // PII: never log message bodies or phone numbers - only ids/field names/counts.
 import type { ContactItem, ContactType, createContactsRepo } from '../../repos/contactsRepo.js';
-import { contactPhones } from '../../repos/contactsRepo.js';
+import { contactClassificationRevision, contactPhones } from '../../repos/contactsRepo.js';
 import { SuggestionDismissedError } from '../../repos/extractionRepo.js';
 import type { createExtractionRepo, SuggestionItem } from '../../repos/extractionRepo.js';
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
@@ -32,10 +32,10 @@ import type { Logger } from '../../lib/logger.js';
 import type { DropReason } from './runTypes.js';
 
 export interface ApplyDeps {
-  contacts: Pick<ReturnType<typeof createContactsRepo>, 'update' | 'addPhone' | 'findByPhone'>;
+  contacts: Pick<ReturnType<typeof createContactsRepo>, 'getById' | 'update' | 'addPhone' | 'findByPhone'>;
   extraction: Pick<
     ReturnType<typeof createExtractionRepo>,
-    'putSuggestion' | 'deleteSuggestion' | 'hasDismissal'
+    'putSuggestion' | 'deleteSuggestion' | 'deleteTypeSuggestionIfCurrentAtContactRevision' | 'hasDismissal'
   >;
   audit: { append(entityKey: string, type: string, payload?: Record<string, unknown>): Promise<unknown> };
   events: { emit(name: string, payload: unknown): void };
@@ -180,6 +180,7 @@ export async function applyExtraction(
   const wrote: string[] = [];
   const suggested: string[] = [];
   const displaced: ApplyOutcome['displaced'] = [];
+  let suggestionStateChanged = false;
   const decisions: ApplyDecision[] = [];
   const pendingDecisions: ApplyDecision[] = [];
   const decide = (decision: ApplyDecision): void => {
@@ -534,6 +535,7 @@ export async function applyExtraction(
   // --- 6. typeSuggestion ---------------------------------------------------
   if (result.typeSuggestion) {
     if (contact.type === 'unknown') {
+      const sourceRevision = contactClassificationRevision(contact);
       const put = await putSuggestionSafe(deps, {
         ownerContactId: contactId,
         target: 'type',
@@ -543,18 +545,31 @@ export async function applyExtraction(
         conversationId,
         ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
         ...(ctx.runId !== undefined && { runId: ctx.runId }),
+        contactClassificationRevision: sourceRevision,
       });
       if (put.ok) {
-        suggested.push('type');
+        suggestionStateChanged = true;
         noteDisplaced('type', put.displaced);
-        decide({
-          target: 'type',
-          outcome: 'suggested',
-          proposedValue: result.typeSuggestion.value,
-          coercedValue: result.typeSuggestion.value,
-          previousValue: contact.type,
-          ...(result.typeSuggestion.reason !== undefined && { reason: result.typeSuggestion.reason }),
-        });
+        const reconciliation = await reconcileTypeSuggestionAfterPut(deps, put.item, sourceRevision);
+        if (reconciliation.state === 'pending') {
+          suggested.push('type');
+          decide({
+            target: 'type',
+            outcome: 'suggested',
+            proposedValue: result.typeSuggestion.value,
+            coercedValue: result.typeSuggestion.value,
+            previousValue: contact.type,
+            ...(result.typeSuggestion.reason !== undefined && { reason: result.typeSuggestion.reason }),
+          });
+        } else {
+          decide({
+            target: 'type',
+            outcome: 'dropped',
+            dropReason: reconciliation.dropReason,
+            proposedValue: result.typeSuggestion.value,
+            ...(result.typeSuggestion.reason !== undefined && { reason: result.typeSuggestion.reason }),
+          });
+        }
       } else {
         decide({
           target: 'type',
@@ -695,7 +710,7 @@ export async function applyExtraction(
   }
 
   // --- 10. emit once when anything changed ---------------------------------
-  if (wrote.length + suggested.length + notedLines > 0) {
+  if (wrote.length + suggested.length + notedLines > 0 || suggestionStateChanged) {
     deps.events.emit('suggestion.updated', { contactId });
   }
 
@@ -706,8 +721,64 @@ export async function applyExtraction(
  * Best-effort putSuggestion. The displaced row remains available to the job,
  * while a failure remains isolated from the rest of the apply pass.
  */
+const TYPE_RECONCILE_ATTEMPTS = 4;
+
+type TypeReconcileOutcome =
+  | { state: 'pending' }
+  | {
+      state: 'dropped';
+      dropReason: 'type_already_classified' | 'type_classification_changed';
+    };
+
+async function reconcileTypeSuggestionAfterPut(
+  deps: ApplyDeps,
+  item: SuggestionItem,
+  sourceRevision: number,
+): Promise<TypeReconcileOutcome> {
+  let liveRevision: number | undefined;
+  try {
+    for (let attempt = 0; attempt < TYPE_RECONCILE_ATTEMPTS; attempt += 1) {
+      const live = await deps.contacts.getById(item.ownerContactId, { consistentRead: true });
+      if (live === undefined) {
+        deps.logger.warn(
+          { contactId: item.ownerContactId, sourceRevision },
+          'type suggestion reconciliation found no live contact (best-effort)',
+        );
+        return { state: 'pending' };
+      }
+
+      liveRevision = contactClassificationRevision(live);
+      if (live.type === 'unknown' && liveRevision === sourceRevision) {
+        return { state: 'pending' };
+      }
+
+      const deleted = await deps.extraction
+        .deleteTypeSuggestionIfCurrentAtContactRevision(item, liveRevision);
+      if (deleted === 'deleted') {
+        return {
+          state: 'dropped',
+          dropReason: live.type === 'unknown'
+            ? 'type_classification_changed'
+            : 'type_already_classified',
+        };
+      }
+      if (deleted === 'suggestion_changed_or_absent') return { state: 'pending' };
+    }
+  } catch {
+    deps.logger.warn(
+      {
+        contactId: item.ownerContactId,
+        sourceRevision,
+        ...(liveRevision !== undefined && { liveRevision }),
+      },
+      'type suggestion reconciliation failed (best-effort)',
+    );
+  }
+  return { state: 'pending' };
+}
+
 type SafePutResult =
-  | { ok: true; displaced?: SuggestionItem }
+  | { ok: true; item: SuggestionItem; displaced?: SuggestionItem }
   | { ok: false; dropReason: 'dismissed_before' | 'repo_error' };
 
 async function putSuggestionSafe(
@@ -726,8 +797,8 @@ async function putSuggestionSafe(
       );
       return { ok: false, dropReason: 'dismissed_before' };
     }
-    const { displaced } = await deps.extraction.putSuggestion(s);
-    return { ok: true, ...(displaced !== undefined && { displaced }) };
+    const { item, displaced } = await deps.extraction.putSuggestion(s);
+    return { ok: true, item, ...(displaced !== undefined && { displaced }) };
   } catch (err) {
     if (err instanceof SuggestionDismissedError) {
       deps.logger.debug(

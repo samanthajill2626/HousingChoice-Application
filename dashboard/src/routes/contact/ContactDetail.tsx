@@ -8,7 +8,7 @@
 // UnknownFile) and pill colour; the pill/badge LABEL is `displayKind` = role ??
 // type, so a custom kind (e.g. "Case worker", base type tenant) reads its role.
 // Custom kinds layer on a base type — see 2026-06-18-extensible-contact-creation.
-// UnknownFile leads with a triage CTA (Mark as Tenant/Landlord → PATCH type).
+// UnknownFile leads with a four-kind triage CTA through the canonical PATCH map.
 //
 // Type-AGNOSTIC cards rendered here for every kind: Relationships, Custom fields.
 // Comms: the LEFT pane is ContactCommsPane (extracted 2026-08-03 and shared with
@@ -40,7 +40,6 @@ import {
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
   type AiRunCompletedEvent,
-  type ContactType,
   type ConversationUpdatedEvent,
   type LandlordStatus,
   type TenantStatus,
@@ -79,7 +78,12 @@ import { useMarkContactRead } from './useMarkContactRead.js';
 import { contactDisplayName } from './format.js';
 import { contactPhones, defaultPhone } from './contactPhones.js';
 import { landlordUnits } from './buildContactFile.js';
-import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
+import {
+  CONTACT_TYPE_LABEL,
+  displayKind,
+  patchForSuggestedContactKind,
+  type SuggestedContactKind,
+} from './contactProfile.js';
 import { RelationshipsCard } from './RelationshipsCard.js';
 import { CustomFieldsCard } from './CustomFieldsCard.js';
 import styles from './ContactDetail.module.css';
@@ -634,10 +638,10 @@ export function ContactDetail(): React.JSX.Element {
       })
       .finally(() => setVoiceOptOutBusy(false));
   };
-  const onTriage = (type: ContactType): void => {
+  const onTriage = (kind: SuggestedContactKind): void => {
     if (triaging) return;
     setTriaging(true);
-    void updateContact(contact.contactId, { type })
+    void updateContact(contact.contactId, patchForSuggestedContactKind(kind))
       .then((updated) => setContact(updated))
       .catch(() => {
         /* stay on the unknown view; the buttons re-enable for a retry */

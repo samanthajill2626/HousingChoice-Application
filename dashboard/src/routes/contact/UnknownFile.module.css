@@ -6,6 +6,7 @@
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   margin-top: var(--sp-2);
 }

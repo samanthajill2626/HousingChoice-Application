@@ -49,12 +49,13 @@ import {
   senderLabel as resolveSenderLabel,
 } from '../../lib/memberAttribution.js';
 import { resolveRecipientLabel, type RecipientLabel } from '../../lib/recipientLabel.js';
-import { messageMediaSrc, messageSid } from './media.js';
+import { isInlineRenderable, mediaKindWord, messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
 import type { ReplyTarget } from './replyTargets.js';
 import { EmailComposer, type EmailComposerSendInput } from './EmailComposer.js';
 import { EmailHtmlFrame } from './EmailHtmlFrame.js';
+import { useImageViewer } from '../../ui/imageViewer/ImageViewerProvider.js';
 import styles from './Timeline.module.css';
 
 /** A send refusal → a clear, human reason. The server returns a machine-readable
@@ -607,17 +608,40 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 const ICON_CLIP = String.fromCodePoint(0x1f4ce);
 const ICON_PAGE = String.fromCodePoint(0x1f4c4);
 
-/** The visible label for one non-image attachment: the persisted original
- *  filename when present (fix-wave R1 - inbound email + outbound both carry it),
- *  else the positional "Attachment N" / "PDF attachment N" fallback (unchanged
- *  MMS behavior when no filename was stored). */
-function attachmentLabel(filename: string | undefined, isPdf: boolean, i: number): string {
+/** The visible label for one attachment: the persisted original filename when
+ *  present, else a positional fallback. The fallback names the KIND when we
+ *  know it ("Video - Attachment 1"); PDF keeps its existing wording; and the
+ *  opaque tier stays bare, because there is no honest kind word for
+ *  application/octet-stream. */
+function attachmentLabel(
+  filename: string | undefined,
+  contentType: string,
+  isPdf: boolean,
+  i: number,
+): string {
   if (filename !== undefined && filename.trim().length > 0) return filename;
-  return isPdf ? `PDF attachment ${i + 1}` : `Attachment ${i + 1}`;
+  if (isPdf) return `PDF attachment ${i + 1}`;
+  const kind = mediaKindWord(contentType);
+  return kind !== undefined ? `${kind} - Attachment ${i + 1}` : `Attachment ${i + 1}`;
+}
+
+function ImageAttachmentButton({ src, label }: { src: string; label: string }): React.JSX.Element {
+  const { openImage } = useImageViewer();
+  return (
+    <button
+      type="button"
+      className={styles.mediaButton}
+      aria-label={`View ${label}`}
+      aria-haspopup="dialog"
+      onClick={(event) => openImage({ src, alt: label, title: label }, event.currentTarget)}
+    >
+      <img className={styles.mediaImg} src={src} alt={label} loading="lazy" />
+    </button>
+  );
 }
 
 /** The mirrored-attachment gallery for a message (MMS bubble AND email card).
- *  Images render inline (open full-size in a new tab); PDFs/other files are links
+ *  Renderable images open in the shared viewer; PDFs/other files are links
  *  to the authed serve endpoint. Without a derivable provider SID there's no
  *  servable URL, so it falls back to a count chip. Factored so MessageBubble and
  *  EmailCard render attachments identically. `stopPropagation` keeps opening media
@@ -637,23 +661,9 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
     <div className={styles.mediaGallery} onClick={(e) => e.stopPropagation()}>
       {attachments.map((att, i) => {
         const src = messageMediaSrc(sid, i);
-        if (att.contentType.startsWith('image/')) {
-          return (
-            <a
-              key={i}
-              className={styles.mediaLink}
-              href={src}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img
-                className={styles.mediaImg}
-                src={src}
-                alt={attachmentLabel(att.filename, false, i)}
-                loading="lazy"
-              />
-            </a>
-          );
+        if (isInlineRenderable(att.contentType)) {
+          const label = attachmentLabel(att.filename, att.contentType, false, i);
+          return <ImageAttachmentButton key={i} src={src} label={label} />;
         }
         const isPdf = att.contentType === 'application/pdf';
         return (
@@ -664,7 +674,7 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
             target="_blank"
             rel="noopener noreferrer"
           >
-            {isPdf ? ICON_PAGE : ICON_CLIP} {attachmentLabel(att.filename, isPdf, i)}
+            {isPdf ? ICON_PAGE : ICON_CLIP} {attachmentLabel(att.filename, att.contentType, isPdf, i)}
           </a>
         );
       })}

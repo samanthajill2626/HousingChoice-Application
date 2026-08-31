@@ -63,6 +63,20 @@ describe('EXTRACTION_SCHEMA', () => {
   it('stays within the structured-outputs optional-parameter limit (Anthropic caps at 24)', () => {
     expect(countOptionalParams(EXTRACTION_SCHEMA)).toBeLessThanOrEqual(24);
   });
+
+  it('pins the complete staff-facing kind enum plus the none sentinel', () => {
+    const typeSuggestion = (
+      EXTRACTION_SCHEMA.properties as Record<string, Record<string, unknown>>
+    )['typeSuggestion'];
+    const properties = typeSuggestion?.['properties'] as Record<string, Record<string, unknown>>;
+    expect(properties['value']?.['enum']).toEqual([
+      'tenant',
+      'landlord',
+      'property_manager',
+      'partner',
+      'none',
+    ]);
+  });
 });
 
 describe('HOUSING_AUTHORITY_VOCAB', () => {
@@ -111,6 +125,33 @@ describe('parseExtractionText', () => {
       noteLines: ['Has a stairs concern'],
     };
     expect(parseExtractionText(JSON.stringify(payload))).toEqual(payload);
+  });
+
+  it.each(['partner', 'property_manager'] as const)(
+    'parses the canonical %s kind',
+    (kind) => {
+      const result = parseExtractionText(JSON.stringify({
+        fields: {},
+        typeSuggestion: { value: kind, reason: 'clear self-identification' },
+      }));
+      expect(result.typeSuggestion).toEqual({
+        value: kind,
+        reason: 'clear self-identification',
+      });
+    },
+  );
+
+  it('folds none and an unsupported kind to no applicable type suggestion', () => {
+    const none = parseExtractionText(JSON.stringify({
+      fields: {},
+      typeSuggestion: { value: 'none', reason: '' },
+    }));
+    const unsupported = parseExtractionText(JSON.stringify({
+      fields: {},
+      typeSuggestion: { value: 'caseworker', reason: 'off enum' },
+    }));
+    expect(none.typeSuggestion).toBeUndefined();
+    expect(unsupported.typeSuggestion).toBeUndefined();
   });
 
   it('clamps 7 noteLines to 5 and truncates long strings to 200 chars', () => {
@@ -314,6 +355,50 @@ describe('prompt builders', () => {
         .digest('hex')
         .slice(0, 12),
     );
+  });
+
+  it('classifies the current external contact into four mutually exclusive kinds', () => {
+    const sys = buildExtractionSystemPrompt();
+    expect(sys).toContain('CURRENT external contact');
+    expect(sys).toMatch(/existing wire label "client" means the CURRENT external\s+contact/);
+    expect(sys).not.toContain('person seeking housing help');
+    const examples = [
+      ['I am looking for a two-bedroom home for my family', 'Tenant'],
+      ['I own three rental properties', 'Landlord'],
+      ['I manage three properties for the owner', 'Property Manager'],
+      ['I am her caseworker at Hope Atlanta', 'Partner'],
+      ['I am calling about a client', 'none'],
+    ] as const;
+    for (const [phrase, expected] of examples) {
+      const line = sys.split('\n').find((candidate) => candidate.includes(phrase));
+      expect(line, phrase).toBeDefined();
+      expect(line).toContain(`-> ${expected}`);
+    }
+    const managerLine = sys.split('\n')
+      .find((line) => line.includes('I manage three properties for the owner'));
+    expect(managerLine).toContain('not Landlord and not Partner');
+    const mentionedCaseworkerLine = sys.split('\n')
+      .find((line) => line.includes('My caseworker at Hope Atlanta told me to call'));
+    expect(mentionedCaseworkerLine).toContain('mentioned caseworker is not the contact');
+    expect(mentionedCaseworkerLine).toContain(
+      'only when other current-transcript evidence establishes the caller seeks housing for themselves or their household',
+    );
+    expect(mentionedCaseworkerLine).toContain('This sentence alone -> none');
+    const representedClientLine = sys.split('\n')
+      .find((line) => line.includes('I am calling about a client'));
+    expect(representedClientLine).toContain(
+      'unless other current-transcript evidence clearly establishes an outside service, program, or navigation role',
+    );
+    expect(sys).toContain('value "none"');
+  });
+
+  it('requires current-transcript evidence and preserves concise role notes', () => {
+    const sys = buildExtractionSystemPrompt();
+    expect(sys).toContain('current transcript');
+    expect(sys).toContain('Identified as a caseworker at Hope Atlanta');
+    expect(sys).toContain('Identified as property manager for Example Homes');
+    expect(sys).toContain('never infer an organization');
+    expect(sys).toContain('RECONCILE every noteLine against the profile notes');
   });
 
   it('renderUtteranceLine is the SINGLE renderer buildExtractionUserContent uses', () => {

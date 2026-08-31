@@ -29,9 +29,12 @@ import {
   EmptyIndexKeyError,
   INDEX_KEY_ATTRIBUTES,
   isDeleted,
+  contactClassificationRevision,
   phoneRefId,
   PrimaryEmailRemovalError,
   PrimaryPhoneRemovalError,
+  REQUIRED_INDEX_KEY_ATTRIBUTES,
+  RequiredIndexKeyRemovalError,
   type ContactEmail,
   type ContactFlag,
   type ContactItem,
@@ -40,7 +43,9 @@ import {
 } from '../../src/repos/contactsRepo.js';
 import {
   SuggestionDismissedError,
+  sameSuggestionIdentity,
   type ExtractionRepo,
+  type SuggestionIdentity,
   type SuggestionItem,
 } from '../../src/repos/extractionRepo.js';
 import {
@@ -336,6 +341,18 @@ export interface FakeWorld {
   pendingRosterActionsRepo: PendingRosterActionsRepo;
   /** In-memory AI suggestions (conversation-fact-extraction T8), keyed by itemId. */
   suggestions: Map<string, SuggestionItem>;
+  /** Hooks at the real extraction read/delete boundaries for race tests. */
+  suggestionHooks: {
+    beforeGetSuggestion?: (
+      contactId: string,
+      target: string,
+      opts?: { consistentRead?: boolean },
+    ) => Promise<void> | void;
+    beforeDeleteTypeSuggestion?: (
+      suggestion: SuggestionIdentity,
+      expectedContactRevision: number,
+    ) => Promise<void> | void;
+  };
   /** scheduleExtraction calls through the world extraction repo, in order (the
    *  API-side schedule sites, e.g. the triage re-extraction hook). The WEBHOOK
    *  schedule path keeps asserting via opts.extractionRepo. */
@@ -1681,6 +1698,14 @@ export function createFakeWorld(): FakeWorld {
           .map((contact) => [contact.contactId, contact] as const),
       );
     },
+    // FROZEN, and frozen for a named reason: the today.ts triage pins are
+    // calibrated against THIS fake's semantics, so changing them moves pins
+    // that have nothing to do with whatever you came here for. Do NOT add
+    // `filter=unknown` / unknown-queue coverage here - use
+    // test/helpers/contactsPartitionFake.ts, which is the shared helper
+    // positioned as the authority on partition semantics (it models the sparse
+    // index, filter-after-limit, the limit-reached LEK rule, and the range-key
+    // sort). Noted 2026-08-25, round-2 finding C3.
     async listByType(type, opts = {}) {
       const partition = contacts
         // BE1/A1: pointer items carry no real type/status -> invisible to this GSI.
@@ -1689,11 +1714,19 @@ export function createFakeWorld(): FakeWorld {
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
         // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
         .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)));
-      // MODELS `Limit` AS DYNAMODB APPLIES IT (fix wave 2, adversarial 6): the
-      // page is drawn FIRST and any FilterExpression is applied to what came
-      // back, so a filtered-out row still spends a page slot. A fake that
-      // filtered before slicing could never see the defect the Today fill loop
-      // exists to close.
+      // MODELS `Limit` AS DYNAMODB APPLIES IT (fix wave 2, adversarial 6) FOR
+      // `excludeOrigin` ONLY - the page is drawn FIRST and that filter is
+      // applied to what came back, so an excluded-origin row still spends a
+      // page slot, which is the defect the Today fill loop exists to close.
+      //
+      // IT IS NOT TRUE OF THE OTHER TWO (corrected 2026-08-25, round-2 finding
+      // C3; the claim above was unqualified and read as covering all of them).
+      // `deleted` and `status` are filtered ABOVE, before the slice, so this
+      // fake charges no page slot for a soft-deleted or wrong-status row where
+      // DynamoDB would. It also does not model the range-key SORT that
+      // contactsPartitionFake.ts gained in the same fix wave: this partition
+      // comes back in SEED-ARRAY order, not `status`-ascending. All three gaps
+      // are why new coverage belongs on the shared helper (see the note above).
       const start = typeof opts.exclusiveStartKey?.['contactId'] === 'string'
         ? partition.findIndex((c) => c.contactId === opts.exclusiveStartKey?.['contactId']) + 1
         : 0;
@@ -1770,6 +1803,7 @@ export function createFakeWorld(): FakeWorld {
       if (!contact) {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
       }
+      const changesKind = patch.type !== undefined || patch.role !== undefined;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
         // Mirror the real repo's GSI-key guard (F6). A fake that happily stores
@@ -1778,8 +1812,17 @@ export function createFakeWorld(): FakeWorld {
         if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
           throw new EmptyIndexKeyError(key);
         }
+        // Mirror the other half too. A fake that lets `status: null` through
+        // would keep the contact in this array and so keep it "visible", which
+        // is precisely the illusion the real byTypeStatus GSI does not offer.
+        if (value === null && REQUIRED_INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new RequiredIndexKeyRemovalError(key, contactId);
+        }
         if (value === null) delete contact[key]; // null → REMOVE the attribute
         else contact[key] = value;
+      }
+      if (changesKind) {
+        contact.classification_revision = contactClassificationRevision(contact) + 1;
       }
       return contact;
     },
@@ -3094,6 +3137,7 @@ export function createFakeWorld(): FakeWorld {
   // conversation-fact-extraction (T8): pending AI suggestions, keyed by itemId
   // (`sugg#<contactId>#<target>`).
   const suggestions = new Map<string, SuggestionItem>();
+  const suggestionHooks: FakeWorld['suggestionHooks'] = {};
   // API-side scheduleExtraction calls (triage re-extraction hook), in order.
   const extractionSchedules: FakeWorld['extractionSchedules'] = [];
   // API-side requestManualExtraction calls (the manual trigger route), in order.
@@ -3244,6 +3288,9 @@ export function createFakeWorld(): FakeWorld {
         conversationId: s.conversationId,
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
         ...(s.runId !== undefined && { runId: s.runId }),
+        ...(s.contactClassificationRevision !== undefined && {
+          contactClassificationRevision: s.contactClassificationRevision,
+        }),
         _pendingPartition: 'pending',
         createdAt: s.createdAt ?? new Date().toISOString(),
         revision: randomUUID(),
@@ -3253,7 +3300,8 @@ export function createFakeWorld(): FakeWorld {
       suggestions.set(itemId, item);
       return { item: { ...item }, ...(prior !== undefined && { displaced: prior }) };
     },
-    async getSuggestion(contactId, target) {
+    async getSuggestion(contactId, target, opts) {
+      await suggestionHooks.beforeGetSuggestion?.(contactId, target, opts);
       const hit = suggestions.get(`sugg#${contactId}#${target}`);
       return hit ? { ...hit } : undefined;
     },
@@ -3282,6 +3330,21 @@ export function createFakeWorld(): FakeWorld {
       ) return false;
       suggestions.delete(itemId);
       return true;
+    },
+    async deleteTypeSuggestionIfCurrentAtContactRevision(suggestion, expectedRevision) {
+      await suggestionHooks.beforeDeleteTypeSuggestion?.(suggestion, expectedRevision);
+      const contact = contacts.find((item) => item.contactId === suggestion.ownerContactId);
+      if (
+        contact === undefined
+        || contactClassificationRevision(contact) !== expectedRevision
+      ) return 'contact_revision_changed';
+      const itemId = `sugg#${suggestion.ownerContactId}#${suggestion.target}`;
+      const current = suggestions.get(itemId);
+      if (current === undefined || !sameSuggestionIdentity(current, suggestion)) {
+        return 'suggestion_changed_or_absent';
+      }
+      suggestions.delete(itemId);
+      return 'deleted';
     },
     async restoreSuggestionIfAbsent(suggestion) {
       if (suggestions.has(suggestion.itemId)) return false;
@@ -3347,7 +3410,43 @@ export function createFakeWorld(): FakeWorld {
     async listByEntity() {
       return { entries: [] };
     },
-    async setVerdict() {
+    async setVerdict(runId, target, verdict, opts = {}) {
+      const at = opts.at ?? new Date().toISOString();
+      const existing = aiRunRows.get(runId);
+      if (existing !== undefined) {
+        const decision = existing.decisions[target];
+        if (
+          decision === undefined
+          || (opts.expectedVerdict !== undefined && decision.verdict !== opts.expectedVerdict)
+        ) return false;
+        aiRunRows.set(runId, {
+          ...existing,
+          decisions: {
+            ...existing.decisions,
+            [target]: {
+              ...decision,
+              verdict,
+              verdictAt: at,
+              ...(opts.by !== undefined && { verdictBy: opts.by }),
+            },
+          },
+        });
+        return true;
+      }
+      const marker = aiRunMarkers.get(runId);
+      if (marker !== undefined) {
+        if (marker[target] !== undefined) return false;
+        marker[target] = { verdict, at, ...(opts.by !== undefined && { by: opts.by }) };
+        return true;
+      }
+      const freshAt = opts.freshSuggestionCreatedAt;
+      const freshAtMs = freshAt === undefined ? Number.NaN : Date.parse(freshAt);
+      if (!Number.isFinite(freshAtMs) || runExpiresAt(freshAt!) <= Math.floor(Date.now() / 1000)) {
+        return false;
+      }
+      aiRunMarkers.set(runId, {
+        [target]: { verdict, at, ...(opts.by !== undefined && { by: opts.by }) },
+      });
       return true;
     },
   };
@@ -3372,6 +3471,11 @@ export function createFakeWorld(): FakeWorld {
         throw new MediaFetchHttpError('fake media fetch failed: 404 (not served yet)', 404);
       }
       return Readable.from([Buffer.from(`media-bytes-for:${mediaUrl}`)]);
+    },
+    // Stub: only the one-time content-type backfill reads this, and nothing in
+    // this harness runs it. Undefined = "Twilio no longer has the media".
+    async getMediaContentType() {
+      return undefined;
     },
     async getRecordingStream(recordingUrl) {
       // M1.9c: simulate the authed recording-media fetch. A URL in
@@ -3549,6 +3653,9 @@ export function createFakeWorld(): FakeWorld {
       mediaObjects.delete(key);
       deletedMediaKeys.push(key);
     },
+    // Stub: the in-place Content-Type rewrite is used only by the one-time
+    // backfill, which no webhook-harness test drives.
+    async setContentType() {},
   };
 
   const suggestionResolutionFake = createSuggestionResolutionFake({
@@ -3680,6 +3787,7 @@ export function createFakeWorld(): FakeWorld {
     pendingRosterActionsMap,
     pendingRosterActionsRepo,
     suggestions,
+    suggestionHooks,
     extractionSchedules,
     manualExtractionRequests,
     failManualExtractionFor,

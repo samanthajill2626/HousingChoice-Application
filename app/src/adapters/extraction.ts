@@ -70,10 +70,16 @@ export interface ExtractionAddress {
   reason?: string;
 }
 
+export type SuggestedContactKind =
+  | 'tenant'
+  | 'landlord'
+  | 'property_manager'
+  | 'partner';
+
 export interface ExtractionResult {
   fields: Partial<Record<ExtractableField, ExtractionFieldOp>>;
   statusAdvance?: { suggest: boolean; reason?: string };
-  typeSuggestion?: { value: 'tenant' | 'landlord'; reason?: string };
+  typeSuggestion?: { value: SuggestedContactKind; reason?: string };
   phoneAddition?: { phone: string; label?: string; reason?: string };
   /** The client's current address as structured parts (parsed from the wire's
    *  all-required address block; absent when op "none" or no usable parts). */

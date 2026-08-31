@@ -35,6 +35,17 @@ describe('POST /api/media/presign', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('unsupported_media_type');
   });
+  it('still rejects video/mp4 - the DECLARABLE tier did NOT widen this gate', async () => {
+    // The media-content-type-fidelity feature made video/mp4 a truthfully
+    // SERVED type (inbound, download-only). This ROUTE is the OUTBOUND upload
+    // gate and reads isInlineMediaType, which was deliberately left alone -
+    // Twilio cannot carry an mp4 as MMS and the transcode ladder has no video
+    // path. Pinned at the route, not just at the predicate, because that is the
+    // surface an operator can actually reach.
+    const res = await request(harness({})).post('/api/media/presign').send({ contentType: 'video/mp4' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('unsupported_media_type');
+  });
 });
 
 describe('POST /api/media/confirm', () => {

@@ -151,7 +151,20 @@ export default defineConfig({
     // fake-phones host, or the backend API directly via resolved env vars.
     // 127.0.0.1 everywhere — never bare localhost (IPv6/IPv4 mismatch risk).
     baseURL: resolvedDashboardUrl,
-    trace: 'on-first-retry',
+    // DEAD CONFIG MADE LIVE. `on-first-retry` fires only on a RETRY, and
+    // `retries` is 0 above - so this collected NOTHING, ever, and a gate
+    // failure carried a screenshot and a video but no network data at all.
+    // That gap is why four sightings of a "hung placement page" could not be
+    // told apart from a slow one for days: the question that settles it is
+    // "was the request even sent?", and only a trace answers that. (It was
+    // neither - the tests were running out of clock. See
+    // docs/issues/placement-detail-bundle-fetch-stall.md.)
+    //
+    // The default is deliberately NOT changed to 'retain-on-failure': that
+    // records continuously, which cost ~17% wall clock when measured and would
+    // perturb the timing of exactly the load-sensitive failures worth tracing.
+    // E2E_TRACE=1 opts in for a hunt; a normal run behaves as before.
+    trace: process.env['E2E_TRACE'] === '1' ? 'retain-on-failure' : 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     navigationTimeout: 15_000,

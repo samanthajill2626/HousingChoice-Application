@@ -4,7 +4,12 @@
 // items 1-11 is pinned by at least one test.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import { SuggestionDismissedError, type PutSuggestionResult } from '../src/repos/extractionRepo.js';
+import {
+  SuggestionDismissedError,
+  type GuardedTypeDeleteResult,
+  type PutSuggestionResult,
+  type SuggestionItem,
+} from '../src/repos/extractionRepo.js';
 import type { ExtractionResult } from '../src/adapters/extraction.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -19,7 +24,7 @@ function makeContact(overrides: Partial<ContactItem> = {}): ContactItem {
 
 interface StubRecords {
   updates: Array<{ id: string; patch: Record<string, unknown> }>;
-  suggestions: unknown[];
+  suggestions: SuggestionItem[];
   audits: Array<{ entityKey: string; type: string; payload?: Record<string, unknown> }>;
   emits: Array<{ name: string; payload: unknown }>;
 }
@@ -27,14 +32,20 @@ interface StubRecords {
 function makeDeps(opts: {
   findByPhone?: (phone: string) => Promise<ContactItem | undefined>;
   putSuggestionImpl?: (s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0]) => Promise<PutSuggestionResult>;
+  getByIdImpl?: (contactId: string, opts?: { consistentRead?: boolean }) => Promise<ContactItem | undefined>;
+  guardedDeleteImpl?: (suggestion: SuggestionItem, revision: number) => Promise<GuardedTypeDeleteResult>;
   updateImpl?: (id: string, patch: Record<string, unknown>) => Promise<ContactItem>;
   /** Tombstoned values as `target#normValue` pairs (hasDismissal stub). */
   dismissedValues?: string[];
-} = {}): { deps: ApplyDeps; records: StubRecords; logger: Logger } {
+} = {}): { deps: ApplyDeps; records: StubRecords; logger: Logger; logCapture: ReturnType<typeof createLogCapture> } {
   const records: StubRecords = { updates: [], suggestions: [], audits: [], emits: [] };
-  const logger = createLogger({ destination: createLogCapture().stream, level: 'debug' });
+  const logCapture = createLogCapture();
+  const logger = createLogger({ destination: logCapture.stream, level: 'debug' });
 
   const contacts: ApplyDeps['contacts'] = {
+    getById: vi.fn(async (contactId: string, getOpts?: { consistentRead?: boolean }) =>
+      opts.getByIdImpl ? opts.getByIdImpl(contactId, getOpts) : undefined,
+    ),
     update: vi.fn(async (id: string, patch: Record<string, unknown>) => {
       if (opts.updateImpl) return opts.updateImpl(id, patch);
       records.updates.push({ id, patch });
@@ -48,13 +59,23 @@ function makeDeps(opts: {
 
   const extraction: ApplyDeps['extraction'] = {
     putSuggestion: vi.fn(async (s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0]): Promise<PutSuggestionResult> => {
-      if (opts.putSuggestionImpl) return opts.putSuggestionImpl(s);
-      records.suggestions.push(s);
-      return {
-        item: { ...s, itemId: `sugg#${s.ownerContactId}#${s.target}`, _pendingPartition: 'pending', createdAt: NOW },
+      const item: SuggestionItem = {
+        ...s,
+        itemId: `sugg#${s.ownerContactId}#${s.target}`,
+        _pendingPartition: 'pending',
+        createdAt: NOW,
       };
+      const result: PutSuggestionResult = opts.putSuggestionImpl
+        ? await opts.putSuggestionImpl(s)
+        : { item };
+      records.suggestions.push(result.item);
+      return result;
     }),
     deleteSuggestion: vi.fn(async () => {}),
+    deleteTypeSuggestionIfCurrentAtContactRevision: vi.fn(
+      async (suggestion: SuggestionItem, revision: number) =>
+        opts.guardedDeleteImpl ? opts.guardedDeleteImpl(suggestion, revision) : 'deleted' as const,
+    ),
     hasDismissal: vi.fn(async (_contactId: string, target: string, normValue: string) =>
       (opts.dismissedValues ?? []).includes(`${target}#${normValue}`),
     ),
@@ -73,7 +94,7 @@ function makeDeps(opts: {
   };
 
   const deps: ApplyDeps = { contacts, extraction, audit, events, logger, now: () => NOW };
-  return { deps, records, logger };
+  return { deps, records, logger, logCapture };
 }
 
 function run(
@@ -412,6 +433,152 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
     });
     expect(outcome.suggested).toEqual([]);
     expect(records.suggestions).toHaveLength(0);
+  });
+
+  it.each(['partner', 'property_manager'] as const)(
+    'persists a %s type suggestion at the source contact revision',
+    async (kind) => {
+      const { deps, records } = makeDeps();
+      const out = await run(
+        deps,
+        makeContact({ type: 'unknown', classification_revision: 4 }),
+        { fields: {}, typeSuggestion: { value: kind, reason: 'stated role' } },
+        'ts-9',
+        'run-kind',
+      );
+
+      expect(records.suggestions[0]).toMatchObject({
+        target: 'type',
+        suggestedValue: kind,
+        contactClassificationRevision: 4,
+        runId: 'run-kind',
+      });
+      expect(out.suggested).toEqual(['type']);
+      expect(out.decisions[0]).toMatchObject({ outcome: 'suggested', proposedValue: kind });
+    },
+  );
+
+  it('uses logical revision zero for a legacy unknown contact', async () => {
+    const { deps, records } = makeDeps();
+    await run(deps, makeContact({ type: 'unknown' }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(records.suggestions[0]).toMatchObject({ contactClassificationRevision: 0 });
+  });
+
+  it('retracts its row and drops when the live contact is classified', async () => {
+    const { deps, records } = makeDeps({
+      getByIdImpl: async () => makeContact({ type: 'tenant', classification_revision: 1 }),
+    });
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+
+    expect(out.suggested).toEqual([]);
+    expect(out.decisions).toContainEqual(expect.objectContaining({
+      target: 'type', outcome: 'dropped', dropReason: 'type_already_classified',
+    }));
+    expect(deps.extraction.deleteTypeSuggestionIfCurrentAtContactRevision)
+      .toHaveBeenCalledWith(records.suggestions[0], 1);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
+    expect(records.emits).toEqual([{ name: 'suggestion.updated', payload: { contactId: 'c1' } }]);
+  });
+
+  it('retracts its row when an unknown contact moved to a newer classification epoch', async () => {
+    const { deps } = makeDeps({
+      getByIdImpl: async () => makeContact({ type: 'unknown', classification_revision: 4 }),
+    });
+    const out = await run(deps, makeContact({ type: 'unknown', classification_revision: 2 }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(out.decisions[0]).toMatchObject({
+      outcome: 'dropped', dropReason: 'type_classification_changed',
+    });
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
+  });
+
+  it('preserves a pending decision when guarded cleanup finds a replacement or marker', async () => {
+    const { deps } = makeDeps({
+      getByIdImpl: async () => makeContact({ type: 'tenant', classification_revision: 1 }),
+      guardedDeleteImpl: async () => 'suggestion_changed_or_absent',
+    });
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(out.suggested).toEqual(['type']);
+    expect(out.decisions[0]).toMatchObject({ target: 'type', outcome: 'suggested' });
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
+  });
+
+  it('re-reads after a contact revision conflict and retries against the newer revision', async () => {
+    const getById = vi.fn()
+      .mockResolvedValueOnce(makeContact({ type: 'tenant', classification_revision: 1 }))
+      .mockResolvedValueOnce(makeContact({ type: 'tenant', classification_revision: 2 }));
+    const guardedDelete = vi.fn()
+      .mockResolvedValueOnce('contact_revision_changed' as const)
+      .mockResolvedValueOnce('deleted' as const);
+    const { deps } = makeDeps({ getByIdImpl: getById, guardedDeleteImpl: guardedDelete });
+    await run(deps, makeContact({ type: 'unknown' }), { fields: {}, typeSuggestion: { value: 'tenant' } });
+    expect(getById).toHaveBeenCalledTimes(2);
+    expect(getById).toHaveBeenNthCalledWith(1, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(2, 'c1', { consistentRead: true });
+    expect(guardedDelete).toHaveBeenNthCalledWith(1, expect.anything(), 1);
+    expect(guardedDelete).toHaveBeenNthCalledWith(2, expect.anything(), 2);
+  });
+
+  it('leaves a stable unknown contact pending without guarded cleanup', async () => {
+    const { deps } = makeDeps({
+      getByIdImpl: async () => makeContact({ type: 'unknown', classification_revision: 2 }),
+    });
+    const out = await run(deps, makeContact({ type: 'unknown', classification_revision: 2 }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(out.suggested).toEqual(['type']);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
+    expect(deps.extraction.deleteTypeSuggestionIfCurrentAtContactRevision).not.toHaveBeenCalled();
+  });
+
+  it('keeps a pending decision and warns when the live contact is missing', async () => {
+    const { deps, logCapture } = makeDeps({ getByIdImpl: async () => undefined });
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(out.suggested).toEqual(['type']);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
+    expect(deps.extraction.deleteTypeSuggestionIfCurrentAtContactRevision).not.toHaveBeenCalled();
+    expect(logCapture.atLevel(40)).toContainEqual(expect.objectContaining({
+      msg: 'type suggestion reconciliation found no live contact (best-effort)',
+    }));
+  });
+
+  it('keeps a pending decision and warns when the reconciliation read fails', async () => {
+    const { deps, logCapture } = makeDeps({
+      getByIdImpl: async () => { throw new Error('read unavailable'); },
+    });
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(out.suggested).toEqual(['type']);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
+    expect(logCapture.atLevel(40)).toContainEqual(expect.objectContaining({
+      msg: 'type suggestion reconciliation failed (best-effort)',
+    }));
+  });
+
+  it('stops after four contact-revision conflicts and preserves the pending decision', async () => {
+    const getById = vi.fn(async () => makeContact({ type: 'tenant', classification_revision: 1 }));
+    const guardedDelete = vi.fn(async () => 'contact_revision_changed' as const);
+    const { deps } = makeDeps({ getByIdImpl: getById, guardedDeleteImpl: guardedDelete });
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(out.suggested).toEqual(['type']);
+    expect(getById).toHaveBeenCalledTimes(4);
+    expect(getById).toHaveBeenNthCalledWith(1, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(2, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(3, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(4, 'c1', { consistentRead: true });
+    expect(guardedDelete).toHaveBeenCalledTimes(4);
   });
 });
 

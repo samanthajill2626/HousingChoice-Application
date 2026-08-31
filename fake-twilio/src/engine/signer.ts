@@ -35,6 +35,11 @@ function inferMediaContentType(url: string): string {
   if (path.endsWith('.webp')) return 'image/webp';
   if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'image/jpeg';
   if (path.endsWith('.pdf')) return 'application/pdf';
+  // A vCard is the DECLARABLE tier's fixture: typed truthfully by the serve
+  // route but always downloaded. `text/vcard` (RFC 6350), not the legacy
+  // `text/x-vcard` express's mime table picks for the fake's own static serve -
+  // the app reads THIS param, never that header.
+  if (path.endsWith('.vcf')) return 'text/vcard';
   return 'application/octet-stream';
 }
 

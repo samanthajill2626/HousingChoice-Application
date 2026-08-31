@@ -4,11 +4,46 @@
 // Also exports normalizeRelationships / normalizeCustomFields: pure helpers
 // that strip invalid rows before submitting to the API. Both the Create and
 // Edit forms use these to avoid drifting from each other or the backend rules.
-import type { Contact, ContactType, Relationship, CustomField } from '../../api/index.js';
+import type { Contact, ContactPatch, ContactType, Relationship, CustomField } from '../../api/index.js';
 
 /** Canonical custom-kind role for a property manager. "Property Manager" is a
  *  custom kind on the `landlord` base type (there is no `pm` ContactType). */
 export const PM_ROLE = 'Property Manager';
+
+export type SuggestedContactKind =
+  | 'tenant'
+  | 'landlord'
+  | 'property_manager'
+  | 'partner';
+
+export const SUGGESTED_CONTACT_KIND_LABEL: Record<SuggestedContactKind, string> = {
+  tenant: 'Tenant',
+  landlord: 'Landlord',
+  partner: 'Partner',
+  property_manager: PM_ROLE,
+};
+
+const KIND_PATCH: Record<
+  SuggestedContactKind,
+  Required<Pick<ContactPatch, 'type' | 'role'>>
+> = {
+  tenant: { type: 'tenant', role: '' },
+  landlord: { type: 'landlord', role: '' },
+  partner: { type: 'partner', role: '' },
+  property_manager: { type: 'landlord', role: PM_ROLE },
+};
+
+export function suggestedContactKindLabel(value: string): string {
+  return Object.prototype.hasOwnProperty.call(SUGGESTED_CONTACT_KIND_LABEL, value)
+    ? SUGGESTED_CONTACT_KIND_LABEL[value as SuggestedContactKind]
+    : value;
+}
+
+export function patchForSuggestedContactKind(
+  kind: SuggestedContactKind,
+): Required<Pick<ContactPatch, 'type' | 'role'>> {
+  return { ...KIND_PATCH[kind] };
+}
 
 /** A human label for a contact's type badge. Single source of truth, imported
  *  by ContactsList (list badges) and ContactDetail (header pill). */

@@ -6,7 +6,11 @@
 // Picking Other reveals a Role text input + a base-type sub-choice.
 import { useEffect, useId, useState } from 'react';
 import { type ContactType } from '../../api/index.js';
-import { PM_ROLE } from './contactProfile.js';
+import {
+  patchForSuggestedContactKind,
+  PM_ROLE,
+  type SuggestedContactKind,
+} from './contactProfile.js';
 import styles from './KindPicker.module.css';
 
 export interface KindPickerValue {
@@ -98,18 +102,11 @@ export function KindPicker({
         setOtherSelected(true);
         onChange({ type: null, role: value.role });
       }
-    } else if (seg === 'pm') {
-      // Property Manager preset: a custom kind on the landlord base.
-      setOtherSelected(false);
-      onChange({ type: 'landlord', role: PM_ROLE });
     } else {
+      const canonicalKind: SuggestedContactKind = seg === 'pm' ? 'property_manager' : seg;
+      const patch = patchForSuggestedContactKind(canonicalKind);
       setOtherSelected(false);
-      const typeMap: Record<'tenant' | 'landlord' | 'partner', ContactType> = {
-        tenant: 'tenant',
-        landlord: 'landlord',
-        partner: 'partner',
-      };
-      onChange({ type: typeMap[seg], role: '' });
+      onChange({ type: patch.type, role: patch.role });
     }
   }
 

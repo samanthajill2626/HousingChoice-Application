@@ -13,7 +13,7 @@ describe('runTypes - the decision vocabulary', () => {
     ]);
   });
 
-  it('carries exactly the eleven drop reasons a run can record', () => {
+  it('carries exactly the twelve drop reasons a run can record', () => {
     expect([...DROP_REASONS].sort()).toEqual([
       'dismissed_before',
       'empty_value_at_parse',
@@ -25,6 +25,7 @@ describe('runTypes - the decision vocabulary', () => {
       'repo_error',
       'status_not_onboarding_tenant',
       'type_already_classified',
+      'type_classification_changed',
       'wrong_contact_type',
     ]);
   });

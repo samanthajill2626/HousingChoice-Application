@@ -8,6 +8,11 @@ import type {
   ConversationParticipant,
   Message,
 } from '../../api/index.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
 // The row timestamp is asserted through the SAME formatter the component uses,
 // so the expectation cannot drift with the developer's UTC offset.
 import { formatTime } from '../contact/format.js';
@@ -117,6 +122,26 @@ function relayHeader(over: Partial<ConversationHeader> = {}): ConversationHeader
   };
 }
 
+const HOST_MEDIA_ATTACHMENTS = [
+  { s3Key: 'inbound/MMHOST1/0', contentType: 'image/png', filename: 'Host proof.png' },
+];
+
+function wireImageMessage(conversationId: string): Message {
+  return {
+    conversationId,
+    tsMsgId: '2026-08-27T12:00:00.000Z#MMHOST1',
+    provider_sid: 'MMHOST1',
+    provider_ts: '2026-08-27T12:00:00.000Z',
+    created_at: '2026-08-27T12:00:00.000Z',
+    direction: 'inbound',
+    author: 'tenant',
+    type: 'mms',
+    body: 'Host image',
+    delivery_status: 'delivered',
+    media_attachments: HOST_MEDIA_ATTACHMENTS,
+  };
+}
+
 const CANDIDATE: Contact = {
   contactId: 'c-new',
   type: 'tenant',
@@ -128,11 +153,13 @@ const CANDIDATE: Contact = {
 function renderAt(conversationId: string) {
   return render(
     <MemoryRouter initialEntries={[`/conversations/${conversationId}`]}>
-      <Routes>
-        <Route path="/conversations/:conversationId" element={<ConversationDetail />} />
-        <Route path="/contacts/:contactId" element={<div>CONTACT PAGE</div>} />
-        <Route path="/inbox" element={<div>INBOX</div>} />
-      </Routes>
+      <ImageViewerProvider>
+        <Routes>
+          <Route path="/conversations/:conversationId" element={<ConversationDetail />} />
+          <Route path="/contacts/:contactId" element={<div>CONTACT PAGE</div>} />
+          <Route path="/inbox" element={<div>INBOX</div>} />
+        </Routes>
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -214,6 +241,33 @@ describe('ConversationDetail dispatch', () => {
     // deep link does not.
     expect(noteRowsCleared).not.toHaveBeenCalled();
     expect(rollbackRowsCleared).not.toHaveBeenCalled();
+  });
+
+  it('keeps the relay route and Conversation tab while its Timeline image uses the shared viewer', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    getConversation.mockResolvedValue(relayHeader());
+    getConversationMessages.mockResolvedValue([wireImageMessage('conv-g1')]);
+
+    try {
+      renderAt('conv-g1');
+      const routeLabel = await screen.findByText('Relay group');
+      const selectedTab = screen.getByRole('button', { name: 'Conversation' });
+      expect(selectedTab).toHaveAttribute('aria-pressed', 'true');
+
+      const trigger = await screen.findByRole('button', { name: 'View Host proof.png' });
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Host proof.png' });
+      await loadViewerImage(dialog, 'Host proof.png');
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+
+      expect(trigger).toHaveFocus();
+      expect(routeLabel).toBeInTheDocument();
+      expect(selectedTab).toHaveAttribute('aria-pressed', 'true');
+    } finally {
+      restoreResizeObserver();
+    }
   });
 
   it('shows the pinned Upcoming section for group-routed scheduled reminders', async () => {

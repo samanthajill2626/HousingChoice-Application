@@ -2,6 +2,11 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import { PartnerFile } from './PartnerFile.js';
@@ -71,23 +76,25 @@ describe('TenantFile', () => {
   ) {
     return render(
       <MemoryRouter>
-        <TenantFile
-          contact={opts.contact ?? contact}
-          phones={[{ phone: '+14040100007', primary: true }]}
-          placements={[TENANT_CASE]}
-          tours={opts.tours ?? []}
-          units={opts.units ?? [UNIT]}
-          listingsSentPending={opts.listingsSentPending ?? true}
-          listingsSent={opts.listingsSent ?? []}
-          relayGroupsPending={opts.relayGroupsPending ?? true}
-          relayGroups={opts.relayGroups ?? []}
-          groupThreadsPending={opts.groupThreads === undefined}
-          groupThreads={opts.groupThreads ?? []}
-          groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
-          media={opts.media ?? []}
-          onSendProperty={opts.onSendProperty}
-          onCreateRelayGroup={opts.onCreateRelayGroup}
-        />
+        <ImageViewerProvider>
+          <TenantFile
+            contact={opts.contact ?? contact}
+            phones={[{ phone: '+14040100007', primary: true }]}
+            placements={[TENANT_CASE]}
+            tours={opts.tours ?? []}
+            units={opts.units ?? [UNIT]}
+            listingsSentPending={opts.listingsSentPending ?? true}
+            listingsSent={opts.listingsSent ?? []}
+            relayGroupsPending={opts.relayGroupsPending ?? true}
+            relayGroups={opts.relayGroups ?? []}
+            groupThreadsPending={opts.groupThreads === undefined}
+            groupThreads={opts.groupThreads ?? []}
+            groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
+            media={opts.media ?? []}
+            onSendProperty={opts.onSendProperty}
+            onCreateRelayGroup={opts.onCreateRelayGroup}
+          />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
   }
@@ -321,13 +328,23 @@ describe('TenantFile', () => {
     expect(screen.getByText(/No media yet/i)).toBeInTheDocument();
   });
 
-  it('renders a media-from-comms thumbnail linking to the authed media URL', () => {
-    renderIt({
-      media: [{ key: 'MM1:0', src: '/api/messages/MM1/media/0', contentType: 'image/png', at: '2026-06-17T10:00:00Z' }],
-    });
-    const img = screen.getByRole('img', { name: /Attachment/i });
-    expect(img).toHaveAttribute('src', '/api/messages/MM1/media/0');
-    expect(screen.queryByText(/No media yet/i)).not.toBeInTheDocument();
+  it('opens a media-from-comms thumbnail in the shared viewer', async () => {
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    const user = userEvent.setup();
+    try {
+      renderIt({
+        media: [{ key: 'MM1:0', src: '/api/messages/MM1/media/0', contentType: 'image/png', at: '2026-06-17T10:00:00Z' }],
+      });
+      const trigger = screen.getByRole('button', { name: 'View image attachment' });
+      expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Image attachment' });
+      const viewerImage = await loadViewerImage(dialog, 'Image attachment');
+      expect(viewerImage).toHaveAttribute('src', '/api/messages/MM1/media/0');
+      expect(screen.queryByText(/No media yet/i)).not.toBeInTheDocument();
+    } finally {
+      restoreResizeObserver();
+    }
   });
 });
 

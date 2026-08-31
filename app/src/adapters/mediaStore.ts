@@ -5,7 +5,14 @@
 // guideline 1): @aws-sdk/lib-storage's Upload consumes the Readable in
 // bounded parts — no whole-body buffering, ever.
 import { Readable } from 'node:stream';
-import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  CopyObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  S3Client,
+  type S3ClientConfig,
+} from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
@@ -133,6 +140,17 @@ export interface MediaStore {
    * access errors; callers degrade failures to a WARN, never a 500.
    */
   deleteObject(key: string): Promise<void>;
+  /**
+   * Rewrite an existing object's Content-Type IN PLACE, preserving the bytes.
+   * Implemented as a same-key CopyObject with MetadataDirective REPLACE - the
+   * documented S3 case for a metadata-only change - so no bytes move through
+   * this process. Idempotent. Needs s3:GetObject AND s3:PutObject.
+   *
+   * Used ONLY by the one-time content-type backfill
+   * (scripts/backfill-media-content-types.ts). Nothing in the request path
+   * calls this: the runtime writes the right type at put() time.
+   */
+  setContentType(key: string, contentType: string): Promise<void>;
 }
 
 export class S3MediaStore implements MediaStore {
@@ -253,6 +271,25 @@ export class S3MediaStore implements MediaStore {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
+  async setContentType(key: string, contentType: string): Promise<void> {
+    await this.client.send(
+      new CopyObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        // CopySource is a URL PATH, so a key containing characters that are
+        // special in a path would need encoding. Every key this method is
+        // called with is machine-minted (media/<uuid>/<SID>/<int>), so plain
+        // interpolation is correct today - encode if that ever stops being
+        // true.
+        CopySource: `${this.bucket}/${key}`,
+        ContentType: contentType,
+        // Without REPLACE, S3 COPIES the source object's metadata and the call
+        // silently succeeds having changed nothing.
+        MetadataDirective: 'REPLACE',
+      }),
+    );
+  }
+
   async createPresignedPost(
     key: string,
     opts: { contentType: string; maxBytes?: number },
@@ -282,6 +319,20 @@ export interface CreateMediaStoreDeps {
   config?: AppConfig;
   /** Test seam — a fake S3 client. */
   client?: S3Client;
+  /**
+   * Explicit AWS credentials for the S3Client this factory builds (the shape
+   * `S3Client` itself accepts: a static identity OR a provider such as the one
+   * `scripts/lib/hcAws.mjs`'s `hcCredentials()` returns). Ignored when `client`
+   * is supplied, since the caller then owns the client.
+   *
+   * ONLY the one-time content-type backfill passes this: an ops script must
+   * pin its writes to the HousingChoice profile rather than whatever the
+   * default credential chain resolves to, and reaching for the `client` seam
+   * instead would put an `@aws-sdk/client-s3` import in `app/scripts`, which
+   * the adapter rule forbids. Unset (every runtime caller) = unchanged
+   * behavior: the default chain / instance role.
+   */
+  credentials?: S3ClientConfig['credentials'];
 }
 
 /**
@@ -304,7 +355,10 @@ export const LOCAL_S3_SECRET_KEY = 'locallocal';
 export function createMediaStore(deps: CreateMediaStoreDeps = {}): MediaStore | undefined {
   const config = deps.config ?? loadConfig();
   if (!config.mediaBucket) return undefined;
-  return new S3MediaStore(config.mediaBucket, deps.client ?? buildS3Client(config, 'createMediaStore'));
+  return new S3MediaStore(
+    config.mediaBucket,
+    deps.client ?? buildS3Client(config, 'createMediaStore', deps.credentials),
+  );
 }
 
 /**
@@ -314,7 +368,11 @@ export function createMediaStore(deps: CreateMediaStoreDeps = {}): MediaStore | 
  * production, even if a caller hands in a config that bypassed loadConfig. The
  * fixed creds must never reach a real AWS S3Client.
  */
-function buildS3Client(config: AppConfig, caller: string): S3Client {
+function buildS3Client(
+  config: AppConfig,
+  caller: string,
+  credentials?: S3ClientConfig['credentials'],
+): S3Client {
   const useLocalEndpoint = Boolean(config.mediaS3Endpoint) && config.nodeEnv !== 'production';
   if (config.mediaS3Endpoint && config.nodeEnv === 'production') {
     throw new Error(`${caller}: refusing local S3 endpoint + dev credentials in production.`);
@@ -328,6 +386,13 @@ function buildS3Client(config: AppConfig, caller: string): S3Client {
           credentials: { accessKeyId: LOCAL_S3_ACCESS_KEY, secretAccessKey: LOCAL_S3_SECRET_KEY },
         }
       : {}),
+    // LAST, so an EXPLICIT credential is honored on both branches rather than
+    // silently dropped on the local one. Dropping it is the dangerous
+    // direction: the client would fall back to the default chain, which is a
+    // different AWS account in some dev environments. Unset = the spread above
+    // decides (fixed MinIO creds locally, default chain / instance role
+    // otherwise) - byte-identical to before this parameter existed.
+    ...(credentials !== undefined && { credentials }),
   });
 }
 
@@ -345,6 +410,9 @@ export function createInboundMailRawStore(deps: CreateMediaStoreDeps = {}): Medi
   if (!config.inboundMailBucket) return undefined;
   return new S3MediaStore(
     config.inboundMailBucket,
-    deps.client ?? buildS3Client(config, 'createInboundMailRawStore'),
+    // Same passthrough as createMediaStore: this factory shares
+    // CreateMediaStoreDeps, so forwarding here is what keeps a supplied
+    // `credentials` from being silently dropped on the second call site.
+    deps.client ?? buildS3Client(config, 'createInboundMailRawStore', deps.credentials),
   );
 }

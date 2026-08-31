@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { TEST_ADMIN_COOKIE, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 import { SuggestionDismissedError, type SuggestionItem } from '../src/repos/extractionRepo.js';
+import type { AiRunRecordInput } from '../src/repos/aiRunsRepo.js';
 import { makeCompletedResolution } from '../src/repos/suggestionResolutionRepo.js';
 import type { DecisionTarget, Verdict } from '../src/services/extraction/runTypes.js';
 
@@ -74,6 +75,57 @@ async function seedSuggestion(
       runId: stored.runId,
     });
   }
+}
+
+/**
+ * Model the extraction job's post-record displaced-run stamp. A type
+ * replacement first performs the same repository CAS as production, then its
+ * producing job terminally marks the exact displaced pending decision.
+ */
+async function replaceTypeSuggestionFromExtraction(
+  world: ReturnType<typeof makeWebhookHarness>['world'],
+  suggestion: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'> & { createdAt?: string },
+): Promise<void> {
+  const { displaced } = await world.extractionRepo.putSuggestion(suggestion);
+  if (displaced?.runId === undefined) return;
+  await world.aiRuns.setVerdict(displaced.runId, 'type', 'superseded', {
+    at: new Date().toISOString(),
+    expectedVerdict: 'pending',
+    freshSuggestionCreatedAt: displaced.createdAt,
+  });
+}
+
+function pendingTypeRun(
+  runId: string,
+  createdAt: string,
+  proposedValue: 'tenant' | 'landlord' | 'partner',
+): AiRunRecordInput {
+  return {
+    runId,
+    startedAt: createdAt,
+    finishedAt: createdAt,
+    durationMs: 0,
+    conversationId: `conv-${runId}`,
+    contactId: 'c1',
+    trigger: 'sms',
+    outcome: 'applied',
+    driver: 'fake',
+    decisions: {
+      type: {
+        proposedOp: 'suggest',
+        proposedValue,
+        outcome: 'suggested',
+        verdict: 'pending',
+      },
+    },
+    notedLines: 0,
+  };
+}
+
+function makeFaithfulRouteWorld() {
+  const { app, world } = makeWebhookHarness();
+  const setVerdict = vi.spyOn(world.aiRuns, 'setVerdict');
+  return { app, world, setVerdict };
 }
 
 function makeWorld(setVerdictImpl?: SetVerdict) {
@@ -1871,6 +1923,321 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     await patch(app, 'c1', { type: 'landlord' }).expect(200);
 
     expect(setVerdict).toHaveBeenCalledWith('run-1', 'type', 'superseded_by_human_edit', expect.anything());
+  });
+
+  it('emits suggestion.updated when a human field edit deletes a pending suggestion', async () => {
+    const { app, world } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats',
+      conversationId: 'conv-1', runId: 'run-pets',
+    });
+
+    await patch(app, 'c1', { pets: 'a dog' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toBeUndefined();
+    expect(world.emitted.filter(({ event }) => event === 'suggestion.updated')).toEqual([
+      { event: 'suggestion.updated', payload: { contactId: 'c1' } },
+    ]);
+  });
+
+  it('emits suggestion.updated when a classification PATCH drains a type suggestion', async () => {
+    const { app, world } = makeWorld();
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'partner',
+      conversationId: 'conv-1', runId: 'run-type', contactClassificationRevision: 0,
+    });
+
+    await patch(app, 'c1', { type: 'partner' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(world.emitted.filter(({ event }) => event === 'suggestion.updated')).toEqual([
+      { event: 'suggestion.updated', payload: { contactId: 'c1' } },
+    ]);
+  });
+
+  it.each([
+    ['property_manager', { type: 'landlord', role: 'Property Manager' }, 'accepted'],
+    ['property_manager', { type: 'landlord', role: 'property manager' }, 'superseded_by_human_edit'],
+    ['property_manager', { type: 'landlord', role: '' }, 'superseded_by_human_edit'],
+    ['partner', { type: 'partner', role: '' }, 'accepted'],
+    ['landlord', { type: 'landlord', role: 'Leasing Agent' }, 'superseded_by_human_edit'],
+  ] as const)('%s plus %o produces %s', async (suggestedValue, patchBody, verdict) => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1',
+      target: 'type',
+      suggestedValue,
+      conversationId: 'conv-1',
+      runId: 'run-kind',
+      contactClassificationRevision: 0,
+      createdAt: '2026-08-26T12:00:00.000Z',
+    });
+
+    await patch(app, 'c1', patchBody).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-kind',
+      'type',
+      verdict,
+      expect.objectContaining({
+        at: expect.any(String),
+        expectedVerdict: 'pending',
+        freshSuggestionCreatedAt: '2026-08-26T12:00:00.000Z',
+        by: ACTOR,
+      }),
+    );
+  });
+
+  it('accepts the role-only dashboard PATCH that makes a landlord a Property Manager', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world, { type: 'landlord', status: 'interested' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'property_manager',
+      conversationId: 'conv-1', runId: 'run-role-only', contactClassificationRevision: 0,
+    });
+
+    await patch(app, 'c1', { role: 'Property Manager' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-role-only', 'type', 'accepted', expect.anything());
+  });
+
+  it('accepts the role-only dashboard PATCH that clears a Property Manager to landlord', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world, { type: 'landlord', role: 'Property Manager', status: 'interested' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'landlord',
+      conversationId: 'conv-1', runId: 'run-role-clear', contactClassificationRevision: 0,
+    });
+
+    await patch(app, 'c1', { role: '' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-role-clear', 'type', 'accepted', expect.anything());
+  });
+
+  it('deletes a safely fenced legacy type suggestion without stamping a nonexistent run', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'partner',
+      conversationId: 'conv-legacy', contactClassificationRevision: 0,
+    });
+
+    await patch(app, 'c1', { type: 'partner' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(setVerdict).not.toHaveBeenCalled();
+  });
+
+  it('drains an older replacement published during contacts.update from the repository, Today, and run verdict', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'tenant', conversationId: 'conv-old',
+      runId: 'run-old', contactClassificationRevision: 0,
+    });
+    const originalUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (contactId, body) => {
+      const updated = await originalUpdate(contactId, body);
+      await seedSuggestion(world, {
+        ownerContactId: contactId, target: 'type', suggestedValue: 'landlord', conversationId: 'conv-new',
+        runId: 'run-new', contactClassificationRevision: 0,
+      });
+      return updated;
+    };
+
+    await patch(app, 'c1', { type: 'tenant' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    const today = await request(app)
+      .get('/api/today')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(200);
+    expect(today.body.items).not.toContainEqual(expect.objectContaining({
+      group: 'ai_suggestions', refId: 'c1',
+    }));
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-new', 'type', 'superseded_by_human_edit', expect.objectContaining({
+        expectedVerdict: 'pending', by: ACTOR,
+      }),
+    );
+  });
+
+  it('drains an older row injected after an empty pre-write type snapshot and stamps its stored run', async () => {
+    const { app, world, setVerdict } = makeFaithfulRouteWorld();
+    const createdAt = '2026-08-26T13:00:00.000Z';
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await world.aiRuns.putRun(pendingTypeRun('run-empty-snapshot', createdAt, 'tenant'));
+    let consistentTypeReads = 0;
+    world.suggestionHooks.beforeGetSuggestion = async (_contactId, target, opts) => {
+      if (target !== 'type' || opts?.consistentRead !== true) return;
+      consistentTypeReads += 1;
+      if (consistentTypeReads !== 2) return;
+      await world.extractionRepo.putSuggestion({
+        ownerContactId: 'c1',
+        target: 'type',
+        suggestedValue: 'tenant',
+        conversationId: 'conv-empty-snapshot',
+        runId: 'run-empty-snapshot',
+        contactClassificationRevision: 0,
+        createdAt,
+      });
+    };
+
+    await patch(app, 'c1', { type: 'partner' }).expect(200);
+
+    const routeConsistentTypeReads = consistentTypeReads;
+    // Pre-write snapshot, injection/read after the committed PATCH, then the
+    // bounded drain's final no-row read after it deletes the injected row.
+    expect(routeConsistentTypeReads).toBe(3);
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    await expect(list(app, 'c1')).resolves.toMatchObject({ body: { suggestions: [] } });
+    const today = await request(app).get('/api/today')
+      .set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).expect(200);
+    expect(today.body.items).not.toContainEqual(expect.objectContaining({ group: 'ai_suggestions', refId: 'c1' }));
+    expect((await world.aiRuns.getRun('run-empty-snapshot'))?.decisions.type).toMatchObject({
+      proposedValue: 'tenant', outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
+    });
+    expect(setVerdict).toHaveBeenCalledWith('run-empty-snapshot', 'type', 'superseded_by_human_edit', expect.objectContaining({
+      by: ACTOR, freshSuggestionCreatedAt: createdAt, expectedVerdict: 'pending',
+    }));
+  });
+
+  it('re-reads and exact-deletes the second older replacement after two guarded delete identity misses', async () => {
+    const { app, world, setVerdict } = makeFaithfulRouteWorld();
+    const createdAtA = '2026-08-26T14:00:00.000Z';
+    const createdAtB = '2026-08-26T14:01:00.000Z';
+    const createdAtC = '2026-08-26T14:02:00.000Z';
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await Promise.all([
+      world.aiRuns.putRun(pendingTypeRun('run-race-a', createdAtA, 'tenant')),
+      world.aiRuns.putRun(pendingTypeRun('run-race-b', createdAtB, 'landlord')),
+      world.aiRuns.putRun(pendingTypeRun('run-race-c', createdAtC, 'partner')),
+    ]);
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'tenant', conversationId: 'conv-race-a',
+      runId: 'run-race-a', contactClassificationRevision: 0, createdAt: createdAtA,
+    });
+    const getSuggestion = vi.spyOn(world.extractionRepo, 'getSuggestion');
+    const guardedDelete = vi.spyOn(world.extractionRepo, 'deleteTypeSuggestionIfCurrentAtContactRevision');
+    let deleteBoundary = 0;
+    world.suggestionHooks.beforeDeleteTypeSuggestion = async () => {
+      deleteBoundary += 1;
+      if (deleteBoundary === 1) {
+        await replaceTypeSuggestionFromExtraction(world, {
+          ownerContactId: 'c1', target: 'type', suggestedValue: 'landlord', conversationId: 'conv-race-b',
+          runId: 'run-race-b', contactClassificationRevision: 0, createdAt: createdAtB,
+        });
+      }
+      if (deleteBoundary === 2) {
+        await replaceTypeSuggestionFromExtraction(world, {
+          ownerContactId: 'c1', target: 'type', suggestedValue: 'partner', conversationId: 'conv-race-c',
+          runId: 'run-race-c', contactClassificationRevision: 0, createdAt: createdAtC,
+        });
+      }
+    };
+
+    await patch(app, 'c1', { type: 'partner' }).expect(200);
+
+    const routeConsistentReads = getSuggestion.mock.calls
+      .filter(([, target, opts]) => target === 'type' && opts?.consistentRead === true);
+    // The last read is the bounded drain proving C stayed gone after its CAS.
+    expect(routeConsistentReads).toHaveLength(4);
+    expect(guardedDelete).toHaveBeenCalledTimes(3);
+    expect(guardedDelete.mock.calls.map(([candidate]) => candidate.runId)).toEqual([
+      'run-race-a', 'run-race-b', 'run-race-c',
+    ]);
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    await expect(list(app, 'c1')).resolves.toMatchObject({ body: { suggestions: [] } });
+    const today = await request(app).get('/api/today')
+      .set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).expect(200);
+    expect(today.body.items).not.toContainEqual(expect.objectContaining({ group: 'ai_suggestions', refId: 'c1' }));
+    expect((await world.aiRuns.getRun('run-race-a'))?.decisions.type).toMatchObject({
+      proposedValue: 'tenant', outcome: 'suggested', verdict: 'superseded',
+    });
+    expect((await world.aiRuns.getRun('run-race-b'))?.decisions.type).toMatchObject({
+      proposedValue: 'landlord', outcome: 'suggested', verdict: 'superseded',
+    });
+    expect((await world.aiRuns.getRun('run-race-c'))?.decisions.type).toMatchObject({
+      proposedValue: 'partner', outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
+    });
+    expect(setVerdict).toHaveBeenCalledWith('run-race-a', 'type', 'superseded', expect.objectContaining({
+      at: expect.any(String), expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAtA,
+    }));
+    expect(setVerdict).toHaveBeenCalledWith('run-race-b', 'type', 'superseded', expect.objectContaining({
+      at: expect.any(String), expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAtB,
+    }));
+    expect(setVerdict).toHaveBeenCalledWith('run-race-c', 'type', 'superseded_by_human_edit', expect.objectContaining({
+      at: expect.any(String), by: ACTOR, freshSuggestionCreatedAt: createdAtC, expectedVerdict: 'pending',
+    }));
+    const cVerdictOptions = setVerdict.mock.calls.find(([runId]) => runId === 'run-race-c')?.[3];
+    expect((await world.aiRuns.getRun('run-race-c'))?.decisions.type?.verdictAt)
+      .toBe(cVerdictOptions?.at);
+  });
+
+  it('banks the real PATCH superseded verdict during finalization and merges it into the pending type run', async () => {
+    const { app, world, setVerdict } = makeFaithfulRouteWorld();
+    const createdAt = '2026-08-26T15:00:00.000Z';
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    expect(await world.aiRuns.beginFinalization('run-finalizing', createdAt)).toBe(true);
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'tenant', conversationId: 'conv-finalizing',
+      runId: 'run-finalizing', contactClassificationRevision: 0, createdAt,
+    });
+
+    await patch(app, 'c1', { type: 'partner' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    await expect(list(app, 'c1')).resolves.toMatchObject({ body: { suggestions: [] } });
+    const today = await request(app).get('/api/today')
+      .set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).expect(200);
+    expect(today.body.items).not.toContainEqual(expect.objectContaining({ group: 'ai_suggestions', refId: 'c1' }));
+    expect(setVerdict).toHaveBeenCalledWith('run-finalizing', 'type', 'superseded_by_human_edit', expect.objectContaining({
+      at: expect.any(String), by: ACTOR, expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAt,
+    }));
+    const verdictOptions = setVerdict.mock.calls.find(([runId]) => runId === 'run-finalizing')?.[3];
+    await world.aiRuns.putRun(pendingTypeRun('run-finalizing', createdAt, 'tenant'));
+    expect((await world.aiRuns.getRun('run-finalizing'))?.decisions.type).toMatchObject({
+      proposedValue: 'tenant', outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
+      verdictAt: verdictOptions?.at,
+    });
+  });
+
+  it('preserves a later Unknown epoch, then accepts its matching later classification', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'tenant', conversationId: 'conv-old',
+      runId: 'run-old', contactClassificationRevision: 0,
+    });
+    let injected = false;
+    world.suggestionHooks.beforeDeleteTypeSuggestion = async () => {
+      if (injected) return;
+      injected = true;
+      await patch(app, 'c1', { type: 'unknown' }).expect(200);
+      await seedSuggestion(world, {
+        ownerContactId: 'c1', target: 'type', suggestedValue: 'partner', conversationId: 'conv-later',
+        runId: 'run-later', contactClassificationRevision: 2,
+      });
+    };
+
+    await patch(app, 'c1', { type: 'tenant' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toMatchObject({
+      runId: 'run-later', contactClassificationRevision: 2,
+    });
+    expect(setVerdict).not.toHaveBeenCalledWith('run-later', 'type', expect.anything(), expect.anything());
+
+    world.suggestionHooks.beforeDeleteTypeSuggestion = undefined;
+    await patch(app, 'c1', { type: 'partner' }).expect(200);
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-later', 'type', 'accepted', expect.anything());
   });
 
   // F10: the value-match is CONFINED to `type` (frozen spec 7.3, lines 609-616:

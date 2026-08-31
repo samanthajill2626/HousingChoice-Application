@@ -41,9 +41,12 @@ import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/audit
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import type { Address } from '../lib/address.js';
 import {
+  assessNamesReadFailure,
   composeTourReminderBody,
   UncomposableReminderError,
+  type TourContactNames,
 } from '../messages/tourCopy.js';
+import { resolveTourContactNames, type ResolvedTourNames } from '../lib/tourContacts.js';
 import {
   flushComposeFailTally,
   newComposeFailTally,
@@ -712,20 +715,57 @@ interface ScheduledGatherRepos {
  */
 // DUPLICATED SHAPE (3 copies, keep in sync) - twins in routes/tourReminders.ts
 // (bodyFor) and routes/relayGroups.ts (the scheduled-bucket map). See the note
-// on bodyFor for why they are deliberately not consolidated.
+// on bodyFor for why they are deliberately not consolidated. TWO `body: ''`
+// rules now live in each copy: the entry-fork WITHHOLD below and the
+// UncomposableReminderError containment under it - change either one here and
+// change it in all three.
+//
+// THE THREE COPIES DIFFER IN BRANCH ORDER: relayGroups has NO sentBody
+// snapshot branch (its bucket is pending-only), so its withhold check is
+// unconditionally first; here and on the reminders route the snapshot renders
+// above both.
+//
+// NAME RESOLUTION IS HOISTED TO THE CALLER on all three copies (spec 6.3a):
+// the composer is synchronous, so the names arrive already resolved - here
+// from namesOnce, memoized per unitId inside gatherUpcoming, which carries the
+// three failure flags with them.
 function tourReminderBodyOrEmpty(
   row: TourReminderItem,
   tour: TourItem,
   timezone: string,
   address: Address | string | undefined,
+  names: TourContactNames,
+  flags: {
+    tenantReadFailed: boolean;
+    propertyReadFailed: boolean;
+    unitReadFailed: boolean;
+  },
   tally: ComposeFailTally,
 ): string {
   if (row.sentAt !== undefined && typeof row.sentBody === 'string') return row.sentBody;
+  // Spec 6.3a "never a different ENTRY": a failed read that would change WHICH
+  // ENTRY composes renders NO body rather than a wrong one. A failure that
+  // merely blanks a token does NOT withhold - per 6.3b the preview degrades to
+  // the absence fallbacks while the SEND side waits. No warn: the resolver and
+  // unitOnce already logged the underlying failure once per request.
+  if (
+    assessNamesReadFailure({
+      kind: row.kind,
+      tourType: tour.tourType,
+      tenantReadFailed: flags.tenantReadFailed,
+      propertyReadFailed: flags.propertyReadFailed,
+      unitReadFailed: flags.unitReadFailed,
+    }).withholdPreview
+  ) {
+    return '';
+  }
   try {
     return composeTourReminderBody({
       kind: row.kind,
       scheduledAt: tour.scheduledAt ?? '',
       timezone,
+      tourType: tour.tourType,
+      names,
       ...(address !== undefined && { address }),
     });
   } catch (err) {
@@ -755,6 +795,11 @@ async function gatherUpcoming(params: {
   contact: ContactItem;
   config: AppConfig;
   conversationsRepo: ConversationsRepo;
+  /** The PROPERTY contact behind {propertyContactFirstName} in landlord-led
+   *  reminder copy (spec 6.3a). Threaded the same way conversationsRepo is -
+   *  the gather's repo bundle is the FIVE scheduled-walk repos and this is not
+   *  one of them. The TENANT costs no read here: it IS `contact`. */
+  contactsRepo: Pick<ContactsRepo, 'getById'>;
   repos: ScheduledGatherRepos;
   /** Will quiet hours hold a rung due at `dueAt`? The caller builds it once per
    *  request from the org window + the wall clock (this gather stays
@@ -775,6 +820,7 @@ async function gatherUpcoming(params: {
     contact,
     config,
     conversationsRepo,
+    contactsRepo,
     repos,
     quietFor,
     timezone,
@@ -856,15 +902,58 @@ async function gatherUpcoming(params: {
   // One unit read PER UNIT (not per tour): a contact with several tours at the
   // same property must not pay for the same address twice on a page load. The
   // promise is memoized, so parallel walkers share the single in-flight read.
-  const unitReads = new Map<string, Promise<UnitItem | undefined>>();
-  const unitOnce = (unitId: string): Promise<UnitItem | undefined> => {
+  // The memo carries the FAILURE distinctly (spec 6.3a): swallowing a failed
+  // read into `undefined` collapses failure into absence, and a failed read
+  // feeding name resolution would compose the SELF-GUIDED entry for a
+  // landlord-led tour - a preview disagreeing with the send. Task 5 consumes
+  // `failed` through namesOnce; Task 4 only carries it.
+  interface UnitRead {
+    unit: UnitItem | undefined;
+    failed: boolean;
+  }
+  const unitReads = new Map<string, Promise<UnitRead>>();
+  const unitOnce = (unitId: string): Promise<UnitRead> => {
     let pending = unitReads.get(unitId);
     if (pending === undefined) {
-      pending = repos.unitsRepo.getById(unitId).catch((err: unknown) => {
-        log.warn({ err, unitId }, 'contact timeline: unit read failed - composing without an address');
-        return undefined;
-      });
+      pending = repos.unitsRepo
+        .getById(unitId)
+        .then((unit): UnitRead => ({ unit, failed: false }))
+        .catch((err: unknown): UnitRead => {
+          log.warn({ err, unitId }, 'contact timeline: unit read failed - composing without an address');
+          return { unit: undefined, failed: true };
+        });
       unitReads.set(unitId, pending);
+    }
+    return pending;
+  };
+
+  // The two NAMES behind this unit's reminder copy, memoized per UNIT (spec
+  // 6.3a): the property contact varies per tour, so one per-request value
+  // would stamp one name onto every row. The TENANT is constant for this
+  // request - it IS the contact whose timeline this is, already in hand, so it
+  // costs zero reads.
+  //
+  // KEYED BY unitId ONLY, while assessNamesReadFailure also takes a
+  // tourType and this walk admits tours of DIFFERENT types at the SAME unit.
+  // Safe because the RESOLVER does not branch on tour type - only the flags
+  // and the names are memoized here, and the assessor is called per TOUR. A
+  // future resolver that does branch on tour type must key this map on the
+  // pair, or two tours at one property will cross-contaminate.
+  type UnitNames = ResolvedTourNames & { unitReadFailed: boolean };
+  const nameReads = new Map<string, Promise<UnitNames>>();
+  const namesOnce = (unitId: string): Promise<UnitNames> => {
+    let pending = nameReads.get(unitId);
+    if (pending === undefined) {
+      pending = unitOnce(unitId).then((read) =>
+        resolveTourContactNames({
+          tenantId: contactId,
+          unit: read.unit,
+          tenantContact: contact,
+          contactsRepo,
+          logger: log,
+        }).then((r): UnitNames => ({ ...r, unitReadFailed: read.failed })),
+      );
+      nameReads.set(unitId, pending);
     }
     return pending;
   };
@@ -897,7 +986,11 @@ async function gatherUpcoming(params: {
           routes1to1 = group === undefined;
         }
         if (!routes1to1) return [];
-        const address = (await unitOnce(tour.unitId))?.address;
+        const read = await unitOnce(tour.unitId);
+        const address = read.unit?.address;
+        // `read.failed` is the same boolean as the memo's `unitReadFailed` -
+        // take the MEMO's, so the assessor sees exactly one source.
+        const { names, ...nameFlags } = await namesOnce(tour.unitId);
         return upcomingRows.map((row: TourReminderItem): TimelineScheduled => {
           // The manual-only hold-back rides the shared evaluator here too, so a
           // rung the poll will never pick up cannot chip "sends in 3h" on the
@@ -917,7 +1010,15 @@ async function gatherUpcoming(params: {
             at: row.dueAt,
             source: 'tour_reminder',
             reminderKind: row.kind,
-            body: tourReminderBodyOrEmpty(row, tour, timezone, address, composeFails),
+            body: tourReminderBodyOrEmpty(
+              row,
+              tour,
+              timezone,
+              address,
+              names,
+              nameFlags,
+              composeFails,
+            ),
             ...(tenantConv !== undefined && { conversationId: tenantConv.conversationId }),
             ...(suppression !== undefined && { suppression }),
             refType: 'tour',
@@ -1199,6 +1300,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
           contact,
           config,
           conversationsRepo: conversations,
+          contactsRepo: contacts,
           repos: scheduledRepos,
           quietFor: (dueAt: string) =>
             (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),

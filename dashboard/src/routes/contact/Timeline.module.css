@@ -720,6 +720,17 @@ a.pill:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* The WITHHELD-preview note that replaces an empty `.scheduledBody`. Same
+ * metrics as the body it stands in for, italic + subtle so it reads as an app
+ * state rather than as the message text. Deliberately NOT .scheduledSkipMuted:
+ * that class is scoped by its own comment to the quiet-hours deferral note. */
+.scheduledBodyUnavailable {
+  margin-top: var(--sp-1);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-sm);
+  font-style: italic;
+}
+
 /* Armed-but-will-be-skipped note — amber, so it's clearly a warning. */
 .scheduledSkip {
   margin: var(--sp-1) 0 0;

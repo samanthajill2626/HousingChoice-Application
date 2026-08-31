@@ -1225,9 +1225,29 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
   // clamped dueAt lands at/after the tour), so a real `now` would arm nothing
   // once that date expires. 10:00 EDT - outside the quiet window.
   const ARM_NOW = '2026-07-13T14:00:00.000Z';
+  // PENDING = the rungs still waiting to fire. A row born SKIPPED has neither
+  // sentAt nor canceledAt, so it has to be excluded explicitly - and it must
+  // be, because cancelForTour deliberately leaves skipped rows alone (they are
+  // already terminal), so a cancel can never drive their count to zero.
   const pendingRows = (world: FakeWorld, tourId: string) =>
     [...world.tourRemindersMap.values()].filter(
-      (r) => r.tourId === tourId && r.sentAt === undefined && r.canceledAt === undefined,
+      (r) =>
+        r.tourId === tourId &&
+        r.sentAt === undefined &&
+        r.canceledAt === undefined &&
+        r.skippedAt === undefined,
+    );
+  /**
+   * Arm-time SKIPPED rows for a tour, keyed by kind. pendingRows above cannot
+   * serve this: a row born skipped has neither sentAt nor canceledAt, so it
+   * counts as "pending" there. The booked-too-late rules (spec section 8) write
+   * exactly this shape, so asserting the chip needs its own accessor.
+   */
+  const skippedByKind = (world: FakeWorld, tourId: string) =>
+    Object.fromEntries(
+      [...world.tourRemindersMap.values()]
+        .filter((r) => r.tourId === tourId && r.skippedAt !== undefined)
+        .map((r) => [r.kind, r]),
     );
 
   it('PATCH {scheduledAt, status:canceled} cancels — it must NOT arm a ladder on a dead tour', async () => {
@@ -1280,6 +1300,84 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
     expect(res.status).toBe(200);
     expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task 7 case 7 - the booked-too-late rules re-evaluate at EVERY arm instant.
+  //
+  // `armTourReminders` is called on booking, on reschedule and on a status
+  // revival, and `now` is the ARM instant in all three. So a tour nobody booked
+  // late can still collect the chip - which is why the operator label says
+  // "booked too late for THIS REMINDER" (when the reminder was armed too late),
+  // not that the operator was slow (spec 11).
+  // ---------------------------------------------------------------------------
+  it('case 7a: a RESCHEDULE onto a near time re-evaluates both rules and stamps booked_too_late', async () => {
+    const FIXED_NOW = '2026-07-13T14:00:00.000Z'; // 10:00 EDT Jul 13
+    const FAR = '2026-07-20T18:00:00.000Z'; // 14:00 EDT Jul 20 - a clean 4-rung ladder
+    const NEAR = '2026-07-13T16:00:00.000Z'; // 12:00 EDT Jul 13 - two hours out
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+    // Nothing is skipped on the first arm - the whole ladder clears the window.
+    expect(skippedByKind(world, tourId)).toEqual({});
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: NEAR });
+    expect(res.status).toBe(200);
+
+    const skipped = skippedByKind(world, tourId);
+    // day_before RAW = 19:30 EDT Jul 12 = Jul 12 23:30Z; rule-1 cutoff Jul 12
+    // 19:30Z is a day behind FIXED_NOW.
+    expect(skipped['day_before']?.skipReason).toBe('booked_too_late');
+    expect(skipped['day_before']?.skippedAt).toBe(FIXED_NOW);
+    expect(skipped['day_before']?.dueAt).toBe('2026-07-12T23:30:00.000Z');
+    // morning_of RAW = NEAR - 4h = 08:00 EDT Jul 13 (the quiet window's END is
+    // exclusive, so this does not clamp); sameDay, and 14:00Z > NEAR - 6h.
+    expect(skipped['morning_of']?.skipReason).toBe('booked_too_late');
+    expect(skipped['morning_of']?.dueAt).toBe('2026-07-13T12:00:00.000Z');
+    // en_route has no rule and still clears `now`; confirmation arms at `now`.
+    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual([
+      'confirmation',
+      'en_route',
+    ]);
+  });
+
+  it('case 7b: a status REVIVAL onto the stored (near) time stamps the same chips', async () => {
+    const REVIVAL_TOUR = '2026-07-15T18:00:00.000Z'; // 14:00 EDT Jul 15
+    const REVIVAL_NOW = '2026-07-15T13:00:00.000Z'; // 09:00 EDT Jul 15, five hours out
+    let clock = ARM_NOW;
+    const { app, world } = makeWebhookHarness({ toursNow: () => clock });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: REVIVAL_TOUR });
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+    // Two days out at ARM_NOW: four clean rungs, no chip anywhere.
+    expect(skippedByKind(world, tourId)).toEqual({});
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+
+    // The clock moves to five hours before the tour; NOTHING about the booking
+    // changed. The revival is the new ARM instant, so both rules re-run.
+    clock = REVIVAL_NOW;
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
+    expect(res.status).toBe(200);
+
+    const skipped = skippedByKind(world, tourId);
+    expect(skipped['day_before']?.skipReason).toBe('booked_too_late');
+    expect(skipped['day_before']?.skippedAt).toBe(REVIVAL_NOW);
+    expect(skipped['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
+    expect(skipped['morning_of']?.skipReason).toBe('booked_too_late');
+    expect(skipped['morning_of']?.dueAt).toBe('2026-07-15T14:00:00.000Z');
+    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual([
+      'confirmation',
+      'en_route',
+    ]);
   });
 
   it("status-only {status:'no_show'} cancels the pending rows (the check-in is a manual send now)", async () => {
@@ -1408,10 +1506,11 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 
     // confirmation = FIXED_NOW
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = SCHEDULED_AT - 24h = '2026-07-14T18:00:00.000Z'
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T18:00:00.000Z');
-    // morning_of = 08:00 ORG-LOCAL (EDT) on 2026-07-15 = '2026-07-15T12:00:00.000Z'
-    expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T12:00:00.000Z');
+    // day_before = 19:30 ORG-LOCAL (EDT) on 2026-07-14, the day before the
+    // tour's local date = '2026-07-14T23:30:00.000Z'
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
+    // morning_of = SCHEDULED_AT - 4h = '2026-07-15T14:00:00.000Z'
+    expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T14:00:00.000Z');
     // en_route = SCHEDULED_AT - 1h = '2026-07-15T17:00:00.000Z' (was 2h before
     // the founder decision of 2026-08-18; its copy now says "see you soon").
     expect(byKind['en_route']?.dueAt).toBe('2026-07-15T17:00:00.000Z');
@@ -1446,8 +1545,8 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 
     // confirmation = FIXED_NOW (injected)
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = NEW_SCHEDULED - 24h = '2026-07-19T18:00:00.000Z'
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-19T18:00:00.000Z');
+    // day_before = 19:30 EDT Jul 19, the day before NEW_SCHEDULED's local date
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-19T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
@@ -1491,10 +1590,14 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 // ============================================================================
 
 describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
-  it('returns the templated no-show check-in copy', async () => {
-    // The copy is tour-independent, but mirror the sibling tour routes: book a
-    // tour and read the draft off its id. The route resolves the editable
-    // catalog entry (tour.no_show_checkin) via resolveMessage, no override set.
+  it('returns the templated no-show check-in copy, greeting the tenant', async () => {
+    // Book a tour and read the draft off its id. Since the 2026-08-26 founder
+    // rewrite the copy is TENANT-SPECIFIC, so the route resolves the tenant and
+    // goes through composeTourReminderBody (a bare resolveMessage would throw on
+    // the missing {tenantFirstName}). BASE_CREATE_BODY's 'contact-tenant-1' is
+    // never seeded onto world.contacts, so the read finds nothing and the copy
+    // takes the ABSENCE fallback - the "greets by name" half is pinned in
+    // tourRemindersApi.test.ts, which seeds a named tenant.
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     expect(created.status).toBe(201);
@@ -1503,7 +1606,7 @@ describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
     const res = await authed(app).get(`/api/tours/${tourId}/no-show-checkin-draft`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      body: 'Hi! Do you need to reschedule?',
+      body: 'Hi there! Do you need to reschedule?',
     });
   });
 
@@ -1590,8 +1693,8 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
     expect(rows.every((r) => r.canceledAt === undefined)).toBe(true);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = BOOKED_AT - 24h
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T18:00:00.000Z');
+    // day_before = 19:30 EDT Jul 14, the day before BOOKED_AT's local date
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
@@ -2725,10 +2828,11 @@ describe('PATCH /api/tours — requested → scheduled transition', () => {
     // FIXED_NOW is 08:00 EDT - exactly quiet-END, so the confirmation is stored
     // unclamped (the window is end-EXCLUSIVE).
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before raw = NEW_SCHED - 24h = 06:00 EDT, INSIDE the default quiet
-    // window -> stored pre-clamped at 08:00 EDT. (NEW_SCHED is a 06:00-EDT
-    // tour, so morning_of/en_route land at/after its start and are skipped.)
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-24T12:00:00.000Z');
+    // day_before = 19:30 EDT Jul 24, the day before NEW_SCHED's local date
+    // (Jul 25). 19:30 local is OUTSIDE the default 21:00-08:00 window, so it is
+    // stored unclamped. (NEW_SCHED is a 06:00-EDT tour, so morning_of/en_route
+    // clamp forward to 08:00 EDT, at/after its start, and are skipped.)
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-24T23:30:00.000Z');
     expect(byKind['no_show_checkin']).toBeUndefined(); // manual-send only, not auto-armed
   });
 

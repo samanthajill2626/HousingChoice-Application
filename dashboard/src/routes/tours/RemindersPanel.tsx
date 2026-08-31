@@ -338,13 +338,19 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   <StateChip rung={rung} timezone={state.timezone} />
                   {/* Send now: only a PENDING rung can be forced out. Distinct
                       accessible name per rung (A10) - a bare repeated "Send now"
-                      would be a strict-mode violation for the e2e harness. */}
+                      would be a strict-mode violation for the e2e harness.
+                      The "the" is load-bearing English, not decoration: the
+                      kind label is interpolated, and the 2026-08-26 relabel of
+                      morning_of to "4 hours before" turns the older bare form
+                      into "Send 4 hours before reminder now". Both aria
+                      sentences below carry it, uniformly for every kind, and
+                      e2e/support/selectors.md pins the send-now pattern. */}
                   {rung.state === 'upcoming' ? (
                     <button
                       type="button"
                       className={styles.action}
                       disabled={busyId !== null}
-                      aria-label={`Send ${kindLabel} reminder now`}
+                      aria-label={`Send the ${kindLabel} reminder now`}
                       onClick={() => onSendNow(rung)}
                     >
                       Send now
@@ -355,16 +361,34 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                       type="button"
                       className={styles.action}
                       disabled={busyId !== null}
-                      aria-label={`${rung.state === 'upcoming' ? 'Cancel' : 'Restore'} ${kindLabel} reminder`}
+                      aria-label={`${rung.state === 'upcoming' ? 'Cancel' : 'Restore'} the ${kindLabel} reminder`}
                       onClick={() => onToggleCanceled(rung)}
                     >
                       {rung.state === 'upcoming' ? 'Cancel' : 'Restore'}
                     </button>
                   ) : null}
                 </div>
-                <p className={`${styles.body} ${rung.state === 'canceled' ? styles.struck : ''}`}>
-                  {rung.body}
-                </p>
+                {/* GIVE THE BLANK A SENTENCE. The server empties `body` for two
+                    reasons - an unusable tour time, and a read the copy needed
+                    that threw (the entry-fork withhold) - and BOTH leave Send
+                    now refusing, so one cause-agnostic sentence is true for
+                    both. Without it the row shows a kind label, a chip, a LIVE
+                    Send-now button and no text, which reads as a broken app
+                    rather than a degraded read.
+
+                    DELIBERATELY STATE-AGNOSTIC: an empty body can ride any
+                    state, and a bare empty paragraph under a "Skipped -" chip
+                    or a struck-through canceled row reads just as broken as the
+                    upcoming case. */}
+                {rung.body === '' ? (
+                  <p className={styles.bodyUnavailable}>
+                    Preview unavailable - this message cannot be composed right now.
+                  </p>
+                ) : (
+                  <p className={`${styles.body} ${rung.state === 'canceled' ? styles.struck : ''}`}>
+                    {rung.body}
+                  </p>
+                )}
                 {suppression !== undefined ? (
                   // Quiet hours is a calm "sends later", not a problem - muted
                   // tone (Cameron 2026-08-04); every real suppression stays amber.

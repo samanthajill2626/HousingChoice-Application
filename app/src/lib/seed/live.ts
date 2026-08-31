@@ -6,7 +6,10 @@
 //   TOUR-A  self-guided tour scheduled TODAY at 14:00 UTC → surfaces in Today's
 //           tours_today group. Its reminders are armed via the real armTourReminders.
 //   TOUR-B  landlord-led tour TOMORROW at 14:00 UTC + a relay group conv + pool
-//           number. Full 5-rung reminder ladder armed via armTourReminders.
+//           number. The four auto-armed rungs (confirmation, day_before at
+//           19:30 org-local the evening before, morning_of at scheduledAt - 4h,
+//           en_route at scheduledAt - 1h) are armed via armTourReminders;
+//           no_show_checkin is a MANUAL send and never auto-arms.
 //   TOUR-C  scheduled tour +2 days (no new contacts - reuses live tenant/unit).
 //
 //   PLACEMENT-A  overdue RTA deadline (rta_window placementDeadlines item in the
@@ -363,7 +366,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         createdAt: iso,
         updatedAt: iso,
       },
-      // TOUR-B: landlord-led TOMORROW — group thread + full reminder ladder
+      // TOUR-B: landlord-led TOMORROW - group thread + all four auto-armed rungs
       {
         tourId: LIVE_IDS.tourTomorrow,
         tenantId: LIVE_IDS.tenantA,
@@ -498,10 +501,16 @@ export async function seedLive(
     const tourTomorrow = toursArr[1] as TourItem;
     const tourUpcoming = toursArr[2] as TourItem;
 
-    // Arm TOUR-A (today, self-guided): confirmation always fires; day_before/
-    // morning_of/en_route/no_show_checkin are skipped if their dueAt < now
-    // (which is likely for a tour at 14:00 UTC if now is already past those
-    // offsets). This mirrors real behavior exactly.
+    // Arm TOUR-A (today, self-guided): a SAME-DAY booking, so most of the
+    // ladder is retired at arm time and this is the demo's example of that.
+    // confirmation is always armed at `now` (clamped out of quiet hours);
+    // day_before (19:30 org-local yesterday) and morning_of (scheduledAt - 4h)
+    // are both past their booked-too-late cutoffs and are retired as VISIBLE
+    // booked_too_late rows (founder retiming 2026-08-26, spec section 8) rather
+    // than silently dropped; en_route (scheduledAt - 1h) survives. Rungs whose
+    // clamped dueAt lands at/past the tour are still dropped silently.
+    // no_show_checkin is a manual send and never auto-arms. This mirrors real
+    // behavior exactly.
     const armedToday = await armTourReminders(tourToday, nowIso, {
       tourRemindersRepo: remindersRepo,
       settingsRepo,
@@ -510,9 +519,12 @@ export async function seedLive(
       `  seeded   tourReminders (live tour-today): ${armedToday.length} reminder${armedToday.length === 1 ? '' : 's'}`,
     );
 
-    // Arm TOUR-B (tomorrow, landlord-led): full ladder. confirmation is armed
-    // now; day_before/morning_of/en_route/no_show_checkin all have future dueAts
-    // (because scheduledAt is tomorrow at 14:00 UTC) — so all 5 rungs should arm.
+    // Arm TOUR-B (tomorrow, landlord-led): the full auto-armed ladder.
+    // confirmation is armed now; day_before (19:30 org-local today), morning_of
+    // (scheduledAt - 4h) and en_route (scheduledAt - 1h) all have future dueAts
+    // and clear both booked-too-late cutoffs, because scheduledAt is tomorrow at
+    // 14:00 UTC - so all FOUR auto-armed rungs arm. no_show_checkin is a manual
+    // send and is never auto-armed.
     const armedTomorrow = await armTourReminders(tourTomorrow, nowIso, {
       tourRemindersRepo: remindersRepo,
       settingsRepo,
@@ -521,8 +533,8 @@ export async function seedLive(
       `  seeded   tourReminders (live tour-tomorrow): ${armedTomorrow.length} reminder${armedTomorrow.length === 1 ? '' : 's'}`,
     );
 
-    // Arm TOUR-C (+2 days, scheduled): similar to tomorrow - all 5 rungs should
-    // arm since scheduledAt is 2 days in the future.
+    // Arm TOUR-C (+2 days, scheduled): similar to tomorrow - all FOUR
+    // auto-armed rungs arm since scheduledAt is 2 days in the future.
     const armedUpcoming = await armTourReminders(tourUpcoming, nowIso, {
       tourRemindersRepo: remindersRepo,
       settingsRepo,

@@ -85,9 +85,17 @@ async function bookedSelfGuidedTour(
   await flow.tenantAsksToTour(unit);
   await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
   // Full-ladder-safe booking (14:00 local, 2 days out): Part A asserts EVERY
-  // rung upcoming, and a now-relative tourSchedule() run between 00:00 and
-  // 08:00 local books a pre-08:00 tour whose morning_of is born skipped
-  // (past_event) - the 00:00-08:00 wall-clock flake, root-caused 2026-08-04.
+  // rung upcoming. The fixed hour is still load-bearing, but NOT for the reason
+  // it was: the 00:00-08:00 wall-clock flake (a now-relative tourSchedule()
+  // booking a pre-08:00 tour whose 08:00-org-local morning_of was born skipped
+  // past_event, root-caused 2026-08-04) CANNOT recur - the 2026-08-26 retiming
+  // made morning_of a pure scheduledAt - 4h offset. What the fixed hour buys
+  // now is that every rung instant is identical run to run (day_before 19:30
+  // D-1 < morning_of 10:00 D < en_route 13:00 D < start 14:00 D), which is what
+  // the quiet-hours case anchors its stored window to, and it keeps day_before
+  // - the rung that INHERITED the wall-clock sensitivity - off whatever clock
+  // the suite happens to run at. Full history: tourScheduleFullLadder's docblock
+  // in e2e/scenarios/steps.ts.
   const times = tourScheduleFullLadder();
   await flow.teamBooksTour(times);
   return { tenant, tenantId, unit, times };
@@ -98,18 +106,32 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { unit, times } = await bookedSelfGuidedTour(flow, 'Ladder');
+  const { tenant, unit, times } = await bookedSelfGuidedTour(flow, 'Ladder');
 
   // The whole ladder is armed and upcoming right after booking; confirmation
   // (dueAt = arm-time now) is the earliest → the highlighted NEXT rung.
   await flow.openTourReminders();
   await flow.expectReminderRung('confirmation', 'next');
   await flow.expectReminderRung('day_before', 'upcoming');
+  // The morning_of row is now found by the relabelled staff string
+  // ('Morning of' -> '4 hours before', REMINDER_KIND_LABELS). Verified at the
+  // relabel: nothing else the Reminders card renders contains "4 hours" - no
+  // tour.* body says "hour" at all, and the nearest skip-reason label is
+  // roster_unavailable's "gave up after an hour" - so the substring filter still
+  // selects exactly this row.
   await flow.expectReminderRung('morning_of', 'upcoming');
   await flow.expectReminderRung('en_route', 'upcoming');
   // no_show_checkin is no longer auto-armed (manual send only), so its rung never
   // appears in the panel. Assert its ABSENCE where expectReminderRung would look:
   // the Reminders card listitems, keyed by the staff label.
+  // RE-DERIVED 2026-08-26 against the new skip rules, because `booked_too_late`
+  // writes a VISIBLE row where the old past-dueAt branch wrote none, so near-term
+  // ladders got LONGER, not shorter: this count still holds because
+  // no_show_checkin is absent from REMINDER_KINDS entirely - the arm loop never
+  // reaches a skip rule for it - and in any case a 14:00 booking two days out
+  // trips neither booked-too-late rule (day_before's RAW is ~19:30 D-1, far more
+  // than 4h out; morning_of's rule needs the ARM to fall on the tour's own local
+  // date). The four rungs asserted upcoming above are the whole panel.
   const reminders = page
     .locator('section')
     .filter({ has: page.getByRole('heading', { name: 'Reminders' }) });
@@ -126,7 +148,15 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   // composing-zone half is pinned by the app's unit tests.
   await expect(
     reminders.getByRole('listitem').filter({ hasText: REMINDER_KIND_LABELS.day_before }),
-  ).toContainText(tourReminderBody('day_before', tourReminderContext(unit, times)));
+  ).toContainText(
+    tourReminderBody(
+      'day_before',
+      tourReminderContext(unit, times, {
+        tourType: 'self_guided',
+        names: { tenantFirstName: tenant.firstName },
+      }),
+    ),
+  );
 
   // Fire the confirmation rung → the panel now reads it SENT, and day_before is
   // still upcoming (a future rung the tick left untouched).
@@ -145,7 +175,13 @@ test('(a)+(b) tour reminder: future item on the tenant timeline → tick → lea
   // The exact text this tour's day_before rung composes to - address + org-local
   // time - so both the Upcoming preview and the sent bubble are matched against
   // the real body rather than a template.
-  const dayBefore = tourReminderBody('day_before', tourReminderContext(unit, times));
+  const dayBefore = tourReminderBody(
+    'day_before',
+    tourReminderContext(unit, times, {
+      tourType: 'self_guided',
+      names: { tenantFirstName: tenant.firstName },
+    }),
+  );
 
   // BEFORE any tick: the day_before rung is a pinned Upcoming item on the tenant's
   // timeline — its body, a "Tour reminder" tag, and an honest state line. Since
@@ -159,8 +195,21 @@ test('(a)+(b) tour reminder: future item on the tenant timeline → tick → lea
   });
 
   // Tick past the day_before dueAt → the rung fires 1:1 (proof-of-send in the fake
-  // thread), and it TRANSITIONS out of Upcoming into a real sent bubble.
-  await flow.tickTourReminders(justAfter(times.dayBefore));
+  // thread), and it TRANSITIONS out of Upcoming into a real sent bubble. The
+  // dueAt is READ BACK from the server (2026-08-26): day_before now fires 19:30
+  // ORG-LOCAL the evening before, which no host-local mirror can compute.
+  // SAFE AT ANY WALL CLOCK: this books via tourScheduleFullLadder() (14:00, two
+  // days out), so at 19:30 D-1 the later rungs are morning_of 10:00 D and
+  // en_route 13:00 D - neither is due yet, so release supersession cannot
+  // retire the rung being asserted. (confirmation IS due in the same batch, but
+  // it is EARLIER in the ladder, so supersession retires IT, not day_before.)
+  // HONEST ABOUT THE ZONE: timesFor builds its instants from HOST-local datetime
+  // strings while 19:30 is ORG-local, so that ordering argument assumes host
+  // zone == ORG_TIMEZONE. That assumption is PRE-EXISTING harness-wide (see the
+  // note above about this box running on America/New_York); nothing in e2e/
+  // asserts it. The TICK itself does not depend on it - it is read back from
+  // the server - only the "nothing supersedes" margin does.
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
   await flow.expectReminderTo1to1('day_before', tenant);
   await flow.expectScheduledSent(tenantId, dayBefore);
 });
@@ -183,6 +232,18 @@ test('(c) reschedule: tick a rung → panel states → reschedule cancels + re-a
   // Reschedule to a new time → the pending ladder is CANCELED and a fresh one is
   // armed off the new time. The panel now shows an old canceled rung AND a fresh
   // upcoming ladder whose confirmation is the new NEXT rung.
+  //
+  // RE-DERIVED 2026-08-26 for the retimed ladder (this path drives no tick, so
+  // it needs no read-back - but its premises moved). The old day_before row was
+  // pending, so the reschedule cancels it: the `canceled` assertion below rides
+  // that row. The fresh ladder arms in full off now+72h - day_before's RAW is
+  // 19:30 the evening before that date, roughly 2.8 days out, so the
+  // booked-too-late rule (RAW minus 4h) cannot fire, and morning_of's rule needs
+  // the ARM instant to fall on the tour's own local date, which +72h never is.
+  // `next` is the earliest-dueAt UPCOMING row (routes/tourReminders.ts): the
+  // fresh confirmation's dueAt is the re-arm instant, i.e. now, which beats
+  // every other fresh rung, and the old confirmation is SENT rather than
+  // upcoming - so confirmation is still the NEXT rung.
   await flow.teamReschedulesTour(tourSchedule(72));
   await flow.openTourReminders();
   await flow.expectReminderRung('day_before', 'canceled'); // the retired old rung
@@ -218,14 +279,21 @@ test('(d) suppression: an opted-out tenant → the Upcoming item is marked will-
   // "Will be skipped — contact opted out".
   await flow.expectUpcomingSuppressed(
     tenantId,
-    tourReminderBody('day_before', tourReminderContext(unit, times)),
+    tourReminderBody(
+      'day_before',
+      tourReminderContext(unit, times, {
+        tourType: 'self_guided',
+        names: { tenantFirstName: tenant.firstName },
+      }),
+    ),
   );
 
   // Tick past its dueAt → the poller refuses the send (honest suppression): the
   // day_before body never reaches the opted-out tenant. ABSENCE, so this rides the
   // kind-distinctive MARKER, not a composed body - a mis-composed exact string
-  // would make "nothing arrived" true for the wrong reason.
-  await flow.tickTourReminders(justAfter(times.dayBefore));
+  // would make "nothing arrived" true for the wrong reason. Same read-back and
+  // the same supersession safety as (a)+(b) above.
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
   await flow.expectNoOutboxMessageContaining(tenant, REMINDER_BODY_MARKERS.day_before);
 });
 

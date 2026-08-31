@@ -9,6 +9,8 @@ Legend: quoted defaults show the EXACT source spelling, including whether the
 source used single- or double-quotes and `\'` escapes (JS string *value* is what
 must be preserved, not the quote style).
 
+> **STALE 2026-08-26 (tour rungs only):** every `tour.*` body quoted below is the pre-rewrite string; `feat/tour-reminder-ladder` replaced them all and dropped the `_no_address` twins - read `app/src/messages/catalog.ts` for current copy, not this frozen research artifact.
+
 ---
 
 ## 1. Literals to MOVE into the catalog (spec §4)

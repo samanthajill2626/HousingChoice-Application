@@ -131,7 +131,22 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   await flow.expectReminderInGroup('confirmation', [tenant, owner]);
   // 2026-07-14: the rung is ALSO visible in the dashboard group thread.
   await flow.expectReminderVisibleInGroupThread('confirmation');
-  await flow.tickTourReminders(justAfter(times.dayBefore));
+  // day_before's dueAt is READ BACK from the server (2026-08-26): the rung now
+  // fires at 19:30 ORG-LOCAL the evening before the tour, which no host-local
+  // mirror can compute.
+  // SAFE AT ANY WALL CLOCK. tourSchedule() books now+48h, i.e. the same
+  // time-of-day T on day D. day_before fires 19:30 on D-1; the next rung,
+  // morning_of, fires T-4h on D, which lands back on D-1 only when T < 04:00,
+  // and the WORST case in that band is T = 00:00 -> 20:00 on D-1, still 30
+  // minutes after this tick. (At T = 23:31, T-4h is 19:31 on D - a full day
+  // clear, not the 60-second collision an earlier review claimed.) So nothing
+  // later is ever in the same batch and release supersession cannot retire the
+  // rung asserted below.
+  // HONEST ABOUT THE ZONE: that 30-minute worst case is thin, and it compares a
+  // HOST-local booking time against an ORG-local 19:30 - it assumes host zone ==
+  // ORG_TIMEZONE (America/New_York). The assumption is PRE-EXISTING harness-wide
+  // rather than introduced here, and no assertion in e2e/ enforces it.
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
   await flow.expectReminderInGroup('day_before', [tenant, owner]);
 
   // Tour day: the tenant is on the way → the landlord gets the heads-up in-group.

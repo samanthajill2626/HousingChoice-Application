@@ -95,7 +95,19 @@ export function ScheduledCard({
         <span className={styles.scheduledFire}>{scheduledLabel(item, now, timezone)}</span>
         <span className={styles.scheduledTag}>{SOURCE_TAG[item.source]}</span>
       </div>
-      <div className={styles.scheduledBody}>{item.body}</div>
+      {/* GIVE THE BLANK A SENTENCE (the RemindersPanel twin). The server
+          empties a tour-reminder body for two reasons - an unusable tour time,
+          and a read the copy needed that threw - and both mean the same thing
+          to a navigator, so the wording is deliberately cause-agnostic. Scoped
+          to tour reminders: nudge bodies come from a different composer with no
+          withhold rule, so an empty one is not this sentence's story. */}
+      {item.body === '' && item.source === 'tour_reminder' ? (
+        <div className={styles.scheduledBodyUnavailable}>
+          Preview unavailable - this message cannot be composed right now.
+        </div>
+      ) : (
+        <div className={styles.scheduledBody}>{item.body}</div>
+      )}
       {suppression !== undefined ? (
         // Quiet hours is a calm "sends later", not a problem - muted tone;
         // every real suppression stays amber.

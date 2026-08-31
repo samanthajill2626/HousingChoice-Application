@@ -131,8 +131,12 @@ export interface OrgSettings {
   /** "HH:MM" 24h local wall clock - window end (end-exclusive). */
   quietHoursEnd: string;
   /** IANA org timezone - the FIRST server-side timezone; also used by the
-   *  morning_of tour reminder. Per-recipient override rides the
-   *  resolveQuietHoursTimezone seam (lib/quietHours.ts), not extra fields here. */
+   *  day_before tour reminder, which anchors to 19:30 org-local the evening
+   *  before the tour's local date. (Retiming 2026-08-26: morning_of used to be
+   *  the tour rung that read this field, at 08:00 org-local; it is now a pure
+   *  scheduledAt - 4h offset and reads no timezone at all.) Per-recipient
+   *  override rides the resolveQuietHoursTimezone seam (lib/quietHours.ts), not
+   *  extra fields here. */
   timezone: string;
   /**
    * OPTIONAL — the housing-fair welcome SMS body; {firstName} is interpolated.

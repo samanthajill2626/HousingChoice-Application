@@ -29,8 +29,11 @@ import { describe, expect, it } from 'vitest';
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 /** The ONE module allowed to resolve a tokenized tour.* id. */
 const COMPOSER = join('messages', 'tourCopy.ts');
-/** Token-free by design (spec D2), so direct resolution stays legal. */
-const ALLOWED_DIRECT = 'tour.no_show_checkin';
+// NO EXCEPTIONS ANY MORE. `tour.no_show_checkin` used to be whitelisted here as
+// "token-free by design (spec D2)", which let the no-show DRAFT route resolve it
+// directly. The 2026-08-26 founder rewrite reversed that justification: the copy
+// now greets by first name, so a bare resolveMessage would throw a strict-mode
+// missing-var Error and 500 the route. Both paths go through the composer.
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -46,7 +49,6 @@ describe('only tourCopy.ts may resolve a tokenized tour.* message', () => {
     const text = readFileSync(file, 'utf8');
     for (const m of text.matchAll(/resolveMessage\(\s*[`'"]?(tour\.[A-Za-z_.${}]*)/g)) {
       const id = m[1] ?? '';
-      if (id === ALLOWED_DIRECT) continue;
       offenders.push(`${file}: ${id}`);
     }
   }

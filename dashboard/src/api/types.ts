@@ -123,7 +123,10 @@ export interface OrgSettings {
   /** "HH:MM" 24h local wall clock - window end (end-exclusive). */
   quietHoursEnd: string;
   /** IANA org timezone - the FIRST server-side timezone; also used by the
-   *  morning_of tour reminder. Displayed read-only in the UI this phase. */
+   *  day_before tour reminder (19:30 org-local the evening before the tour's
+   *  local date). Retiming 2026-08-26: morning_of used to be that rung, at
+   *  08:00 org-local; it is now a pure scheduledAt - 4h offset and reads no
+   *  timezone. Displayed read-only in the UI this phase. */
   timezone: string;
   /** OPTIONAL housing-fair welcome SMS body; {firstName} is interpolated.
    *  Absent → the backend falls back to WELCOME_TEXT_TEMPLATE. */
@@ -1213,7 +1216,11 @@ export interface TourReminderView {
     | 'roster_unavailable'
     // The tour has no usable scheduledAt, so no body could be composed for the
     // rung - the poll retires it rather than sending a half-written text.
-    | 'invalid_schedule';
+    | 'invalid_schedule'
+    // ARM time: the tour was booked (or rescheduled) too close to this rung's
+    // raw due time for it to usefully fire, so it was born skipped as a
+    // visible trace rather than leaving a gap in the ladder.
+    | 'booked_too_late';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -1239,7 +1246,9 @@ export interface TourRemindersPage {
 export const REMINDER_KIND_LABELS: Readonly<Record<ReminderKind, string>> = {
   confirmation: 'Confirmation',
   day_before: 'Day before',
-  morning_of: 'Morning of',
+  // Relabelled 2026-08-26: the rung fires at scheduledAt - 4h;
+  // the persisted kind keeps its name (in-flight rows).
+  morning_of: '4 hours before',
   en_route: 'En route',
   no_show_checkin: 'No-show check-in',
 };
@@ -1271,6 +1280,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   tenant_not_on_roster: "tenant not on this tour's roster",
   roster_unavailable: "couldn't read who is on the relay group - gave up after an hour",
   invalid_schedule: 'schedule unusable',
+  booked_too_late: 'booked too late for this reminder',
 };
 
 /**
@@ -1296,6 +1306,16 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   // Reminder-only: the tour has no usable date and time, so no body could be
   // composed. Nothing was claimed and the rung is still pending.
   invalid_schedule: 'That tour has no usable date and time, so nothing was sent.',
+  // Reminder-only (spec 2026-08-26 6.3b): a repo read this send needed
+  // failed - the compose gate's name resolution, OR any read inside the
+  // force-send's target resolution (tour / recipient / conversation lookups
+  // share this refusal). Nothing was claimed. The copy is deliberately
+  // cause-agnostic ("everything this message needs", not "the names"):
+  // three of the four target-resolution reads are not name reads, and
+  // telling an operator "could not look up the names" during a tours-table
+  // outage sends them to the wrong next action.
+  names_unavailable:
+    'Could not look up everything this message needs, so nothing was sent - please try again.',
   placement_missing: 'That placement is gone, so nothing was sent.',
   unit_missing: 'That property is gone, so nothing was sent.',
   no_landlord: 'That property has no landlord on file, so nothing was sent.',

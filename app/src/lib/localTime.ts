@@ -60,3 +60,18 @@ export function formatLocalDate(iso: string, timezone: string): string {
 export function formatLocalTime(iso: string, timezone: string): string {
   return toAscii(timeFormatterFor(timezone).format(new Date(iso)));
 }
+
+/** Shift a 'YYYY-MM-DD' CALENDAR date by whole days. Pure string arithmetic
+ *  via Date.UTC - no zone is involved, so it cannot drift across a DST
+ *  boundary. Pair with instantAtLocalTime (lib/quietHours.ts) to anchor a
+ *  local wall-clock time on the shifted day. */
+export function shiftLocalDate(localDate: string, days: number): string {
+  const [y, m, d] = localDate.split('-').map(Number);
+  if (
+    y === undefined || m === undefined || d === undefined ||
+    !Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)
+  ) {
+    throw new Error(`shiftLocalDate: unparseable local date "${localDate}"`);
+  }
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}

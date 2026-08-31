@@ -3,9 +3,11 @@
 // Manual "Send no-show check-in" - the end-to-end proof for the de-automated
 // no_show_checkin rung (docs/superpowers/plans/2026-07-21-tour-no-show-checkin-manual.md,
 // Task 6). Two halves, both asserted here:
-//   - NO AUTO-SEND: a scheduled tour whose start time is in the PAST arms the
-//     reminder ladder, but the reminder poll never sends the "may have missed
-//     your tour" check-in - it is no longer auto-armed (app/src/jobs/tourReminders.ts).
+//   - NO AUTO-SEND: a scheduled tour whose start time is in the PAST arms NO
+//     PENDING rung at all - every rung is either born a visible SKIPPED row or
+//     dropped silently (the derivation is at the PATCH below) - and the no-show
+//     check-in is not even considered: it is absent from REMINDER_KINDS and has
+//     never been auto-armed (app/src/jobs/tourReminders.ts).
 //   - MANUAL SEND: staff send it by hand from the tour header kebab ("Send
 //     no-show check-in"), which switches to the Tenant channel and PREFILLS the
 //     1:1 composer with the editable template; sending delivers exactly one copy
@@ -24,11 +26,19 @@
 // stack.
 import { test, expect } from '@playwright/test';
 import { Scenario, freshTenant, APP_NUMBER } from '../scenarios/steps.js';
-import { listThreads } from '../fixtures/fakeTwilio.js';
+import { listThreads, getOutboundTo } from '../fixtures/fakeTwilio.js';
 
 // The distinctive no_show_checkin substring (app/src/messages/catalog.ts,
 // 'tour.no_show_checkin') - unique to this rung, so a body match cleanly
 // identifies the check-in among the other four reminder bodies.
+//
+// It is the TAIL of the body now, not the whole of it: the 2026-08-26 rewrite
+// made the copy 'Hi {tenantFirstName}! Do you need to reschedule?'. That does
+// not weaken it as an ABSENCE marker - the phrase still appears in every variant
+// of this rung (there is only one, and the name is a prefix), and it is still
+// unique to it among the five bodies. The exact prefill asserted in half 2 is
+// BUILT from this constant rather than restating it, so the phrase lives in
+// exactly two places repo-wide: here and REMINDER_BODY_MARKERS in steps.ts.
 const CHECKIN_PHRASE = 'Do you need to reschedule?';
 
 test('no_show_checkin is not auto-sent; staff send it manually with prefilled copy', async ({
@@ -60,8 +70,23 @@ test('no_show_checkin is not auto-sent; staff send it manually with prefilled co
   const tourId = await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
 
   // Put the tour in the PAST + 'scheduled' (the manual-send gate = start passed &&
-  // scheduled/no_show). A scheduledAt PATCH arms the ladder off the new time - but
-  // only the four remaining rungs; no_show_checkin is no longer auto-armed.
+  // scheduled/no_show). A scheduledAt PATCH re-arms the ladder off the new time.
+  //
+  // WHAT THAT ACTUALLY ARMS, re-derived 2026-08-26 against the retimed ladder and
+  // the new skip rules (the lean seed has quiet hours OFF, so nothing clamps):
+  //   - confirmation: dueAt IS the arm instant, which is 26h AFTER the tour
+  //     start, so the at-or-past-start rule fires and it is born a VISIBLE
+  //     `past_event` skipped row. It is NOT pending and it does NOT fire.
+  //   - day_before: its RAW time is 19:30 org-local the evening before the tour's
+  //     local date - about two days ago - so the arm instant is far past
+  //     (RAW - 4h) and it is born a VISIBLE `booked_too_late` skipped row.
+  //   - morning_of: RAW is start - 4h, i.e. 30h ago. Its booked-too-late rule
+  //     needs the ARM to fall on the tour's OWN local date, and 26h back always
+  //     crosses a local date boundary, so that rule never fires here; the dueAt
+  //     is simply already past, which is the one SILENT drop - no row.
+  //   - en_route: start - 1h, 27h ago - the same silent drop, no row.
+  //   - no_show_checkin: absent from REMINDER_KINDS, never considered at all.
+  // So NOTHING is pending, and the wall-clock tick in half 1 fires NOTHING.
   const pastIso = new Date(Date.now() - 26 * 3_600_000).toISOString();
   const patched = await page.request.patch(`${dashboard}/api/tours/${tourId}`, {
     data: { scheduledAt: pastIso, status: 'scheduled' },
@@ -69,11 +94,21 @@ test('no_show_checkin is not auto-sent; staff send it manually with prefilled co
   expect(patched.ok(), await patched.text()).toBeTruthy();
 
   // --- Half 1: NO AUTO-SEND ---
-  // Run the reminder poll past every armed rung's due time (start was 26h ago, so
-  // the wall-clock tick fires everything due). The four legit rungs may land 1:1
-  // (unasserted noise), but the de-armed no_show_checkin never does.
+  // Run the reminder poll on the wall clock. Per the derivation above there is
+  // nothing pending for it to pick up, so it sends NOTHING - not the never-armed
+  // no-show check-in and not any other rung either.
+  //
+  // TWO assertions, deliberately. The phrase-scoped one is the named proof, but
+  // on its own a WRONG derivation would fail SILENTLY: an absence check for one
+  // phrase passes just as happily when four other rungs did fire. The count
+  // comparison is what makes the derivation itself falsifiable.
+  const outboundBefore = (await getOutboundTo(request, { to: tenant.phone })).length;
   await flow.tickTourReminders();
   await flow.expectNoOutboxMessageContaining(tenant, CHECKIN_PHRASE);
+  expect(
+    (await getOutboundTo(request, { to: tenant.phone })).length,
+    'the tick must send nothing at all - no rung of this tour is pending',
+  ).toBe(outboundBefore);
 
   // --- Half 2: MANUAL SEND from the tour header kebab ---
   await page.goto(`${dashboard}/tours/${tourId}`);
@@ -94,8 +129,11 @@ test('no_show_checkin is not auto-sent; staff send it manually with prefilled co
   await expect(
     page.getByRole('tab', { name: new RegExp(`^${tenant.firstName}\\b`), selected: true }),
   ).toBeVisible({ timeout: 10_000 });
+  // EXACT, not a regex: the tenant's first name reaching this prefill is the
+  // whole point of the 2026-08-26 name threading, and a /phrase/ match cannot
+  // see it. Built from CHECKIN_PHRASE so the phrase stays a single literal.
   await expect(page.getByRole('textbox', { name: 'Reply message' })).toHaveValue(
-    new RegExp(CHECKIN_PHRASE),
+    `Hi ${tenant.firstName}! ${CHECKIN_PHRASE}`,
   );
 
   // Send it (the normal 1:1 send path).

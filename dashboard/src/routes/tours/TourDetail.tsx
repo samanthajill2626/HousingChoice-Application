@@ -32,6 +32,7 @@ import {
   getNoShowCheckinDraft,
   patchTour,
   previewTourRosterOpen,
+  sendNowErrorMessage,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
   type Contact,
@@ -342,7 +343,18 @@ function TourDetailLoaded({
       .then(({ body }) => setNoShowSeed((prev) => ({ body, nonce: (prev?.nonce ?? 0) + 1 })))
       .catch((err: unknown) => {
         if (ac.signal.aborted) return; // unmounted or superseded - nothing to surface
-        setActionError(err instanceof ApiError ? err.message : 'Could not load the check-in message');
+        // NEVER err.message - that is the raw machine code (RemindersPanel
+        // precedent: client.ts builds message as `code + ' (detail)'`, so the
+        // two diverge the moment any handler adds a detail). Only the
+        // names_unavailable refusal is send-shaped; every other failure here is
+        // a LOAD failure and keeps load copy - a 404 is `tour_not_found`, which
+        // is not a send-map key at all, and "Couldn't send that just now" would
+        // be the wrong sentence for an operation that sent nothing.
+        setActionError(
+          err instanceof ApiError && err.code === 'names_unavailable'
+            ? sendNowErrorMessage(err.code)
+            : 'Could not load the check-in message',
+        );
       });
   };
 

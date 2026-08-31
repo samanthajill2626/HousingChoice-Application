@@ -2936,6 +2936,17 @@ export function createFakeWorld(): FakeWorld {
         kind: input.kind,
         dueAt: input.dueAt,
         _reminderPartition: 'reminders',
+        // BORN SKIPPED: armTourReminders retires past_event /
+        // quiet_hours_superseded / booked_too_late rungs by CREATING a row that
+        // already carries the stamp (the visible-trace posture, 2026-08-04).
+        // This fake used to drop input.skipped on the floor, which made every
+        // arm-time skip look like a live rung to route-level suites and left
+        // `booked_too_late` unassertable anywhere off DynamoDB Local. Mirrors
+        // the real repo's create (repos/tourRemindersRepo.ts).
+        ...(input.skipped !== undefined && {
+          skippedAt: input.skipped.at,
+          skipReason: input.skipped.reason,
+        }),
         createdAt: now,
       };
       tourRemindersMap.set(item.reminderId, { ...item });

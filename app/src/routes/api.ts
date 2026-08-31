@@ -933,11 +933,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         manualOnlyKinds: deps.tourReminderManualOnlyKinds,
       }),
       conversationsRepo: conversations,
-      // ONE unit read, TWO consumers: D11 (contact-rosters) - send-now resolves
-      // the tour's roster, whose DEFAULT rung is the property's primary contact
-      // - AND the unit address behind the composed reminder copy. Forwarded as
-      // the RESOLVED local (same rationale as the timeline gather above) so
-      // prod/e2e read a real repo while injected fakes still win.
+      // ONE unit read, THREE consumers: D11 (contact-rosters) - send-now
+      // resolves the tour's roster, whose DEFAULT rung is the property's
+      // primary contact - the unit address behind the composed reminder copy,
+      // and (2026-08-26) the PROPERTY CONTACT the landlord-led en_route copy
+      // names. Forwarded as the RESOLVED local (same rationale as the timeline
+      // gather above) so prod/e2e read a real repo while injected fakes still
+      // win.
       unitsRepo: units,
       // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
       // window through the SAME repo the armers use.

@@ -35,6 +35,12 @@ import {
 // the module is PURE (no repo/AWS deps - resolve.ts's settings dependency was
 // split out into resolveWithSettings.ts), so the e2e bundle stays light.
 import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
+// TYPE-ONLY, and it must stay that way. TourContactNames is re-exported by the
+// composer precisely so the harness never reaches for app/src/lib/tourContacts.js
+// directly: that module VALUE-imports unitContacts from repos/unitsRepo.js, which
+// would drag the AWS SDK into the e2e bundle. toursModel.ts has zero imports.
+import type { TourContactNames } from '../../app/src/messages/tourCopy.js';
+import type { TourType } from '../../app/src/lib/toursModel.js';
 import { expectTodayReady } from '../support/today.js';
 
 // Read the resolved dashboard URL from the env (set by playwright.config.ts at
@@ -136,10 +142,14 @@ export type ReminderKind =
 export const ORG_TIMEZONE = 'America/New_York';
 
 /** What a rung body is composed FROM: the tour's instant, the zone the app
- *  renders it in, and the unit's street (absent -> the `_no_address` variant). */
+ *  renders it in, the unit's street (absent -> the address clause is dropped),
+ *  the tour TYPE (the en_route rung forks on it) and the resolved NAMES the
+ *  copy greets with. */
 export interface TourReminderContext {
   scheduledAt: string;
   timezone: string;
+  tourType: TourType;
+  names: TourContactNames;
   address?: string;
 }
 
@@ -161,8 +171,18 @@ export function instantOf(times: TourTimes): string {
 /** The composition context behind a booking, for specs that need an expected body
  *  outside the reminder step helpers (the helpers derive their own from the tour
  *  the Scenario is driving). */
-export function tourReminderContext(unit: Unit, times: TourTimes): TourReminderContext {
-  return { scheduledAt: instantOf(times), timezone: ORG_TIMEZONE, address: unit.addressLine1 };
+export function tourReminderContext(
+  unit: Unit,
+  times: TourTimes,
+  extra: { tourType: TourType; names: TourContactNames },
+): TourReminderContext {
+  return {
+    scheduledAt: instantOf(times),
+    timezone: ORG_TIMEZONE,
+    address: unit.addressLine1,
+    tourType: extra.tourType,
+    names: extra.names,
+  };
 }
 
 /** A rung body composed by the APP's OWN composer (the single source of truth),
@@ -175,6 +195,8 @@ export function tourReminderBody(kind: ReminderKind, ctx: TourReminderContext): 
     kind,
     scheduledAt: ctx.scheduledAt,
     timezone: ctx.timezone,
+    tourType: ctx.tourType,
+    names: ctx.names,
     ...(ctx.address !== undefined && { address: ctx.address }),
   });
 }
@@ -185,34 +207,67 @@ export function tourReminderBody(kind: ReminderKind, ctx: TourReminderContext): 
  *  "did not send" is always asserted against a fragment that is stable across
  *  times and addresses AND present in both the addressed and `_no_address`
  *  variants. (tour-no-show-checkin.spec.ts already uses this idiom.) */
-// Re-picked 2026-08-18 for the founder's rewritten copy. Each fragment is still
-// chosen to appear in BOTH the addressed and `_no_address` variant of its rung,
-// which is what keeps an absence assertion from passing vacuously.
+// Re-picked 2026-08-26 for the founder's rewritten copy. The invariant is that
+// each fragment appears in EVERY variant of its rung - address forks AND
+// tour-type forks (spec 13) - which is what keeps an absence assertion from
+// passing vacuously.
 export const REMINDER_BODY_MARKERS: Record<ReminderKind, string> = {
   confirmation: 'your tour is set for',
   day_before: 'confirming your tour tomorrow at',
-  morning_of: 'excited for you to see',
-  en_route: "let me know when you're on the way",
+  morning_of: 'looking forward to having you tour at',
+  // The marker invariant (spec 13): the fragment must appear in EVERY
+  // variant of its rung. Byte-check both en_route entries: self-guided ends
+  // "...text me when you're on the way?" and landlord-led ends "...text here
+  // when you're on the way?", so "when you're on the way" is a shared
+  // substring of BOTH - the invariant holds. It is preferred over the bare
+  // "on the way" tail because markers back ABSENCE assertions and this
+  // suite relays tenant-authored "On my way!" texts; the longer fragment is
+  // not something a tenant types, so an absence check cannot collide with
+  // relayed traffic.
+  en_route: "when you're on the way",
   no_show_checkin: 'Do you need to reschedule?',
 };
 
 /** The staff-facing rung labels the Reminders panel renders (verbatim mirror of
  *  dashboard REMINDER_KIND_LABELS) — the pinned accessible-name contract for the
- *  scheduled-message-visibility Part A panel assertions. */
+ *  scheduled-message-visibility Part A panel assertions.
+ *
+ *  VERBATIM MIRROR - it must move in LOCKSTEP with
+ *  dashboard/src/api/types.ts REMINDER_KIND_LABELS. Nothing in the build
+ *  enforces the agreement: the harness never imports the dashboard map, and
+ *  these strings are only ever used as Playwright text filters, so a drifted
+ *  value does not fail to compile - it silently matches NOTHING and the
+ *  failure surfaces as a rung "missing" from the panel.
+ *
+ *  morning_of relabelled 'Morning of' -> '4 hours before' on 2026-08-26: the
+ *  rung now fires at scheduledAt - 4h. The persisted ReminderKind is
+ *  unchanged (renaming it would orphan in-flight rows). */
 export const REMINDER_KIND_LABELS: Record<ReminderKind, string> = {
   confirmation: 'Confirmation',
   day_before: 'Day before',
-  morning_of: 'Morning of',
+  morning_of: '4 hours before',
   en_route: 'En route',
   no_show_checkin: 'No-show check-in',
 };
+
+/** The Tour type SELECT's option labels, mapped to the stored TourType the
+ *  composer forks on. `satisfies` keeps the values honest against the app's
+ *  own union without widening the keys. */
+const TOUR_TYPE_BY_LABEL = {
+  'Self-guided': 'self_guided',
+  'Landlord-led': 'landlord_led',
+  'PM team': 'pm_team',
+} as const satisfies Record<string, TourType>;
 
 /** A booking time + the reminder-ladder dueAts the backend will arm off it. */
 export interface TourTimes {
   /** The raw datetime-local value the Book/Reschedule forms send ('YYYY-MM-DDTHH:mm'). */
   scheduledAtLocal: string;
-  /** dueAt of each pre-computed rung, full-ms ISO — feed `justAfter(x)` to the tick. */
-  dayBefore: string;
+  /** dueAt of each pre-computed rung, full-ms ISO - feed `justAfter(x)` to the tick.
+   *  `day_before` is NOT here: since the 2026-08-26 retiming it fires at 19:30
+   *  ORG-LOCAL, which no host-local helper can compute - read it back from the
+   *  server with `Scenario.armedReminderDueAt('day_before')` instead. */
+  morningOf: string;
   enRoute: string;
   noShowCheckin: string;
 }
@@ -225,19 +280,24 @@ function toDatetimeLocal(d: Date): string {
 
 /**
  * Pick a tour time `hoursFromNow` out (default 48h — far enough that EVERY rung
- * is in the future at booking, so the whole ladder arms; day_before = sched-24h
- * must beat the wall clock) and pre-compute the rung dueAts EXACTLY as the
+ * is in the future at booking, so the whole ladder arms; two days out, no
+ * booked-too-late rule can fire at any time of day) and pre-compute the rung
+ * dueAts EXACTLY as the
  * backend does (tourReminders.ts computeDueAt): the dashboard forms send the raw
  * datetime-local value and the app parses it with new Date() (host-local tz), so
  * parsing the same string here yields byte-identical dueAt ISO strings.
  * `confirmation` is not computed — its dueAt is the server's arm-time "now"
  * (tick with no `now` fires it immediately).
  *
- * `morning_of` is deliberately NOT mirrored here (worklist A13): since the
- * quiet-hours change it fires at 08:00 ORG-LOCAL (America/New_York) on the
- * tour's local day, which this host-local helper cannot compute. The field it
- * used to expose was 08:00 UTC and was never read by any spec, so it was
- * removed rather than left as a wrong answer waiting to be used.
+ * `day_before` is deliberately NOT mirrored here (the 2026-08-26 retiming
+ * INVERTED which rung can be): it now fires at 19:30 ORG-LOCAL
+ * (America/New_York) on the evening before the tour's local date, which this
+ * host-local helper cannot compute. Rather than leave a wrong answer waiting to
+ * be used, the field is gone - read the instant the server actually armed via
+ * `Scenario.armedReminderDueAt('day_before')` and drive the tick from that.
+ * `morning_of` made the opposite trip in the same retiming: it stopped being
+ * 08:00 org-local and became a plain `scheduledAt - 4h` offset, so it returns
+ * to the struct as `morningOf`.
  */
 export function tourSchedule(hoursFromNow = 48): TourTimes {
   const sched = new Date(Date.now() + hoursFromNow * 3_600_000);
@@ -247,17 +307,25 @@ export function tourSchedule(hoursFromNow = 48): TourTimes {
 
 /**
  * A tour whose reminder ladder ALWAYS arms in full: `daysOut` days ahead at
- * 14:00 local. Plain tourSchedule() books at "now + 48h", which inherits the
- * suite's time-of-day - run between 00:00 and 08:00 local, that tour STARTS
- * before 08:00, so its morning_of (08:00 tour-day, org-local) lands at/after
- * the start and is born SKIPPED (past_event); at exactly 09:00 (10:00 before
- * the 2026-08-18 move to a 1h en_route), en_route lands ON the morning_of slot
- * and supersedes it. That made the full-ladder assertion a 00:00-08:00
- * wall-clock flake (root-caused 2026-08-04). 14:00 keeps every rung distinct
- * and pre-start: day_before 14:00 D-1 < morning_of 08:00 D < en_route 13:00 D
- * < start. Use this whenever a spec asserts the
- * WHOLE ladder; keep plain tourSchedule() for quiet-hours flows that need
- * dueAts anchored to the wall clock's own time-of-day.
+ * 14:00 local. HISTORY, kept because it explains the fixed hour: plain
+ * tourSchedule() books at "now + 48h", which inherits the suite's time-of-day -
+ * run between 00:00 and 08:00 local, that tour STARTED before 08:00, so its
+ * morning_of (then 08:00 tour-day, org-local) landed at/after the start and was
+ * born SKIPPED (past_event); at exactly 09:00 (10:00 before the 2026-08-18 move
+ * to a 1h en_route), en_route landed ON the morning_of slot and superseded it.
+ * That made the full-ladder assertion a 00:00-08:00 wall-clock flake
+ * (root-caused 2026-08-04). The 2026-08-26 retiming RETIRED that particular
+ * flake - morning_of is now a pure `scheduledAt - 4h` offset, so it cannot
+ * outrun a start more than four hours away whatever the wall clock is - but
+ * the fixed hour is now load-bearing for a second reason: it makes every rung
+ * instant identical run to run, which is what quiet-hours test (2) anchors its
+ * stored window to. New chain at 14:00: day_before 19:30 D-1 < morning_of
+ * 10:00 D < en_route 13:00 D < start 14:00 D (spec 13.2 confirms this booking
+ * survives the new skip rules cleanly). Use this whenever a spec asserts the
+ * WHOLE ladder, and prefer it for a quiet-hours flow too: the old advice to
+ * keep plain tourSchedule() there described the pre-retime contract, where
+ * day_before was `sched - 24h` and therefore landed at the wall clock's own
+ * time of day.
  */
 export function tourScheduleFullLadder(daysOut = 2): TourTimes {
   const sched = new Date(Date.now() + daysOut * 24 * 3_600_000);
@@ -272,7 +340,10 @@ function timesFor(sched: Date): TourTimes {
   const t = parsed.getTime();
   return {
     scheduledAtLocal,
-    dayBefore: new Date(t - 24 * 3_600_000).toISOString(),
+    // FOUR hours before (founder retiming 2026-08-26, was 08:00 org-local on
+    // the tour's local day) - mirrors computeDueAt in
+    // app/src/jobs/tourReminders.ts. Move both together.
+    morningOf: new Date(t - 4 * 3_600_000).toISOString(),
     // ONE hour before (founder decision 2026-08-18, was two) - mirrors
     // computeDueAt in app/src/jobs/tourReminders.ts. Move both together.
     enRoute: new Date(t - 1 * 3_600_000).toISOString(),
@@ -328,6 +399,16 @@ const POOL_NUMBER_RE = /^\+1\d{3}019\d{4}$/;
  *  reaches the verbs that produce them. */
 interface ActiveTour {
   tourId: string;
+  /** The type the tour was CREATED with - the en_route rung's copy forks on it
+   *  (spec 9.0: self_guided one way, landlord_led and pm_team the other).
+   *  Required: a defaulted type would silently compose the wrong wording. */
+  tourType: TourType;
+  /** The tenant's first name, for the greeting every rung now carries.
+   *  Deliberately NO propertyContactFirstName twin: nothing in the harness
+   *  records the landlord's name against the active tour, so such a field
+   *  would be a contract with no way to satisfy it - see
+   *  requireTourReminderContext's docblock. */
+  tenantFirstName?: string;
   poolNumber?: string;
   groupThreadId?: string;
   /** The booked instant, ISO. Set by teamBooksTour, REPLACED by
@@ -1715,9 +1796,26 @@ export class Scenario {
       const m = /\/tours\/([^/?#]+)/.exec(this.page.url());
       if (!m) throw new Error('teamCreatesTourFromInterest: expected a /tours/:tourId URL after create');
       const tourId = decodeURIComponent(m[1]!);
-      // Carry the unit's street: the reminder-body helpers compose {where} from
-      // it, and this is the only verb that sees the Unit.
-      this.activeTour = { tourId, addressLine1: unit.addressLine1 };
+      // Carry the unit's street: the reminder-body helpers compose the address
+      // clause from it, and this is the only verb that sees the Unit. The tour
+      // TYPE and the tenant's first name ride along for the same reason - this
+      // is the only verb that knows either at create time.
+      this.activeTour = {
+        tourId,
+        tourType: TOUR_TYPE_BY_LABEL[tourType],
+        addressLine1: unit.addressLine1,
+        // HAZARD (harmless today, ordering luck tomorrow): teamCreatesLandlord
+        // ALSO writes this.activeTenant, with the LANDLORD's name. Every
+        // tour-creating spec happens to create the landlord FIRST and then
+        // switch to the tenant's file, so activeTenant is the tenant by the
+        // time this verb runs - but that is spec ordering, not a contract. A
+        // spec that creates a landlord AFTER the tenant and then books would
+        // greet the tenant by the landlord's name. If that ever happens, track
+        // the tenant explicitly rather than widening this line.
+        ...(this.activeTenant?.firstName !== undefined && {
+          tenantFirstName: this.activeTenant.firstName,
+        }),
+      };
       // Requested + not booked - the rebuilt page shows the tour StatusBadge in
       // the header band (no more <dd> aria-labels) plus a "Not booked" facts line.
       await expect(this.tourStatusBadge('Requested')).toBeVisible();
@@ -1911,6 +2009,25 @@ export class Scenario {
       await expect(this.tourStatusBadge('Scheduled')).toBeVisible({ timeout: 10_000 });
       tour.scheduledAt = instantOf(times);
     });
+  }
+
+  /** [App] The ARMED dueAt of one rung, read back from the reminders API.
+   *  Since the 2026-08-26 retiming, day_before fires at 19:30 ORG-LOCAL the
+   *  night before - a host-local mirror cannot compute it (the same reason
+   *  morningOf once left TourTimes), so specs drive ticks from the value the
+   *  server actually stored: correct by construction at any wall clock. */
+  async armedReminderDueAt(kind: ReminderKind): Promise<string> {
+    const tour = this.requireActiveTour();
+    const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const body = (await res.json()) as {
+      reminders: Array<{ kind: ReminderKind; dueAt: string; state: string }>;
+    };
+    const rung = body.reminders.find((r) => r.kind === kind && r.state === 'upcoming');
+    if (rung === undefined) {
+      throw new Error(`armedReminderDueAt: no upcoming '${kind}' rung on tour ${tour.tourId}`);
+    }
+    return rung.dueAt;
   }
 
   /**
@@ -3368,6 +3485,18 @@ export class Scenario {
    * Rows are scoped by the rung's staff label (REMINDER_KIND_LABELS); after a
    * reschedule a label can appear twice (an old canceled row + a fresh armed one),
    * so the state filter is what disambiguates.
+   *
+   * COLLISION PROFILE, changed 2026-08-26. `hasText` is a SUBSTRING match over
+   * the WHOLE listitem, which carries the label, the state chip, the
+   * suppression note AND the composed body. The old morning_of label
+   * 'Morning of' was shaped so that no body could contain it; its replacement
+   * '4 hours before' is prose-shaped and could. Verified at the relabel: no
+   * tour.* catalog default contains the substring "hour" at all (zero hits),
+   * and no chip or skip-reason label renders "4 hours" (the nearest is
+   * roster_unavailable's "gave up after an hour"). If a future copy edit
+   * introduces an hours phrase into a reminder body, this filter starts
+   * matching the WRONG row - narrow it to the label element rather than
+   * renaming the label back.
    */
   expectReminderRung(
     kind: ReminderKind,
@@ -3453,7 +3582,19 @@ export class Scenario {
    *  tour is BOOKED, which is also the only moment a ladder is armed - so a
    *  missing one means the caller asserted a rung before anything could have been
    *  scheduled, and that deserves a named error rather than a body composed off
-   *  an invented time. */
+   *  an invented time.
+   *
+   *  EXACT-EQUALITY ASSERTIONS ON THE en_route LANDLORD-LED BODY ARE NOT
+   *  SUPPORTED THROUGH THE STEP HELPERS. The harness records no
+   *  property-contact name against the active tour, so `names` carries only
+   *  the tenant and this context composes the SELF-GUIDED wording for that one
+   *  rung - exactly as the server does for a nameless property contact. A spec
+   *  that needs the landlord-led body must compose it spec-locally with an
+   *  explicit `names` object; the unit-level pin for that copy lives in
+   *  app/test/relayApi.test.ts. The gap is tracked in
+   *  docs/issues/tour-reminder-zero-primary-e2e-gap.md. No current spec asserts
+   *  that body - verified: tours.spec.ts asserts confirmation/day_before
+   *  in-group and en_route only on a self_guided 1:1. */
   private requireTourReminderContext(): TourReminderContext {
     const tour = this.requireActiveTour();
     if (tour.scheduledAt === undefined) {
@@ -3462,6 +3603,10 @@ export class Scenario {
     return {
       scheduledAt: tour.scheduledAt,
       timezone: ORG_TIMEZONE,
+      tourType: tour.tourType,
+      names: {
+        ...(tour.tenantFirstName !== undefined && { tenantFirstName: tour.tenantFirstName }),
+      },
       ...(tour.addressLine1 !== undefined && { address: tour.addressLine1 }),
     };
   }

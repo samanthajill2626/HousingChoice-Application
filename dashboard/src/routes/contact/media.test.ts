@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  isDeclarableMediaType,
   isInlineRenderable,
+  isPdfMediaType,
   mediaKindWord,
   messageMediaSrc,
   messageSid,
@@ -85,10 +85,16 @@ describe('mediaKindWord', () => {
     expect(mediaKindWord('text/csv')).toBe('Document');
   });
 
-  it('isDeclarableMediaType agrees with it - one map, two views', () => {
-    expect(isDeclarableMediaType('video/mp4')).toBe(true);
-    expect(isDeclarableMediaType('image/jpeg')).toBe(false);
-    expect(isDeclarableMediaType('application/octet-stream')).toBe(false);
+  it('isPdfMediaType essence-matches, so the render sites agree with the server', () => {
+    // All three dashboard render sites used to compare === 'application/pdf'
+    // exactly. For a stored `application/pdf; charset=x` - an ordinary wire
+    // form, and one the legacy population predates the normalizer for - the
+    // server serves it inline as a PDF while the dashboard drew the generic
+    // paperclip. Two readers, one object, different answers.
+    expect(isPdfMediaType('application/pdf')).toBe(true);
+    expect(isPdfMediaType('APPLICATION/PDF ; charset=x')).toBe(true);
+    expect(isPdfMediaType('application/octet-stream')).toBe(false);
+    expect(isPdfMediaType('image/jpeg')).toBe(false);
   });
 
   it('returns undefined for the opaque tier - there is no kind word for it', () => {

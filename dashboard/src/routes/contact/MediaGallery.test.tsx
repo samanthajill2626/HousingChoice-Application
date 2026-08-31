@@ -24,8 +24,24 @@ describe('MediaGallery type tiers', () => {
   it('renders a HEIC gallery item as a file tile, not an img', () => {
     renderGallery([item('image/heic')]);
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
-    // The file tile is the other branch: a link titled with the true type.
-    expect(screen.getByRole('link', { name: 'image/heic' })).toBeInTheDocument();
+    // The file tile is the other branch. It is titled with the KIND WORD, not
+    // the raw MIME type: an operator hovering a tile wants "Image", not
+    // "image/heic". The bare type was what this assertion used to pin.
+    expect(screen.getByRole('link', { name: 'Image' })).toBeInTheDocument();
+  });
+
+  it('titles an unrecognised tile generically rather than leaking the raw type', () => {
+    renderGallery([item('application/octet-stream')]);
+    expect(screen.getByRole('link', { name: 'Attachment' })).toBeInTheDocument();
+  });
+
+  it('draws the PDF glyph for a PARAMETERIZED pdf, agreeing with the server', () => {
+    // The server essence-matches, so it serves this inline as a PDF. An exact
+    // === comparison here drew the generic paperclip instead - two readers,
+    // one object, different answers.
+    renderGallery([item('application/pdf; charset=utf-8')]);
+    const tile = screen.getByRole('link');
+    expect(tile.textContent).toBe(String.fromCodePoint(0x1f4c4));
   });
 
   it('still renders a jpeg gallery item as an img', () => {

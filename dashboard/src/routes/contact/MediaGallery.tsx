@@ -6,8 +6,13 @@
 // - a document is never out of reach because newer texts buried it.
 import { Spinner } from '../../ui/index.js';
 import { EmptyRow } from './Card.js';
-import { isInlineRenderable, type CommsMediaItem } from './media.js';
+import { isInlineRenderable, isPdfMediaType, mediaKindWord, type CommsMediaItem } from './media.js';
 import styles from './MediaGallery.module.css';
+
+// Glyphs via String.fromCodePoint so these SOURCE LINES stay ASCII, matching
+// Timeline.tsx. U+1F4C4 = page (PDF); U+1F4CE = paperclip (everything else).
+const ICON_PAGE = String.fromCodePoint(0x1f4c4);
+const ICON_CLIP = String.fromCodePoint(0x1f4ce);
 
 /** What a paging caller supplies for the "Load older media" control (all three
  *  are one unit: `hasMore` renders it, `loadingMore` disables it, `onLoadMore` fetches). */
@@ -50,10 +55,10 @@ export function MediaGallery({
               href={m.src}
               target="_blank"
               rel="noopener noreferrer"
-              title={m.contentType}
+              title={mediaKindWord(m.contentType) ?? 'Attachment'}
             >
               <span className={styles.glyph} aria-hidden="true">
-                {m.contentType === 'application/pdf' ? '📄' : '📎'}
+                {isPdfMediaType(m.contentType) ? ICON_PAGE : ICON_CLIP}
               </span>
             </a>
           ),

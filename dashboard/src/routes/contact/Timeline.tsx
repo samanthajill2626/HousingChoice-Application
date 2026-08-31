@@ -49,7 +49,13 @@ import {
   senderLabel as resolveSenderLabel,
 } from '../../lib/memberAttribution.js';
 import { resolveRecipientLabel, type RecipientLabel } from '../../lib/recipientLabel.js';
-import { isInlineRenderable, mediaKindWord, messageMediaSrc, messageSid } from './media.js';
+import {
+  isInlineRenderable,
+  isPdfMediaType,
+  mediaKindWord,
+  messageMediaSrc,
+  messageSid,
+} from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
 import type { ReplyTarget } from './replyTargets.js';
@@ -663,7 +669,7 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
             </a>
           );
         }
-        const isPdf = att.contentType === 'application/pdf';
+        const isPdf = isPdfMediaType(att.contentType);
         return (
           <a
             key={i}
@@ -2194,7 +2200,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                       <img className={styles.chipThumb} src={a.previewUrl} alt="" />
                     ) : (
                       <span className={styles.chipIcon} aria-hidden="true">
-                        {a.contentType === 'application/pdf' ? 'PDF' : 'FILE'}
+                        {isPdfMediaType(a.contentType) ? 'PDF' : 'FILE'}
                       </span>
                     )}
                     <span className={styles.chipName}>{a.name}</span>

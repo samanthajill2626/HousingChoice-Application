@@ -34,9 +34,22 @@ correct-to-spec code, which no summary preserves.
 
 ## What was deliberately NOT kept
 
-`review/diff-package.md` and `review/rework-diff-package.md` (151KB + 217KB).
-They are raw diffs of the branch and are reconstructable from git history, so
-they were dropped rather than committed.
+The keeping rule is **decisions, findings, adjudications and reasoning** - not
+anything a reader could recompute from the repo.
+
+- `review/diff-package.md` and `review/rework-diff-package.md` (151KB + 217KB) -
+  raw diffs of the branch, reconstructable from git history.
+- `sdd/research-inbox-route.md`, `sdd/research-repos-unreadfeed.md`,
+  `sdd/research-tests-dashboard-e2e.md` (190KB) - **`sdd/worklist.md` names
+  itself as their distillation**: "The BYTE-EXACT reference lives in the three
+  research files; this file is the DELTA - what the plan says versus what the
+  tree holds, plus the orchestrator's adjudications." The delta and the
+  adjudications are the reasoning and they survive in `worklist.md`; what was
+  dropped is byte-exact quotation of code that git already holds at the commits
+  these reports name. **`worklist.md`'s pointers to `.superpowers/sdd/research-*`
+  are therefore dead links** - deliberately left unedited rather than rewriting
+  a historical record.
+- Every `*.log`, `*.exit` and `*.pid` from the gate and session runs.
 
 ## A note on character set
 

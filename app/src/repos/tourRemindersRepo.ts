@@ -117,6 +117,12 @@ export interface TourReminderItem {
    *  (docs/issues/tour-reminder-unclaimed-skip-no-conversation.md). */
   skippedAt?: string;
   skipReason?: ReminderSkipReason;
+  /** GENERATION POINTER (supersession, 2026-09-01): the id of the armTourReminders
+   *  CALL that wrote this row. A rung is CURRENT only while this matches its
+   *  tour's `currentLadderId`; a mismatch means a later arm superseded it and
+   *  every send path refuses it. ABSENT means pre-migration - the row predates
+   *  the feature and is judged by the pre-migration rules instead. */
+  ladderId?: string;
   createdAt: string;
 }
 
@@ -130,6 +136,10 @@ export interface TourRemindersRepo {
     kind: ReminderKind;
     dueAt: string;
     skipped?: { at: string; reason: ReminderSkipReason };
+    /** The arming call's generation id (see TourReminderItem.ladderId). Omitted
+     *  leaves the attribute ABSENT - the pre-migration shape, never written
+     *  empty. */
+    ladderId?: string;
   }): Promise<TourReminderItem>;
   listByTour(tourId: string): Promise<TourReminderItem[]>;
   /** Returns pending reminders due at or before `now` (no sentAt, no canceledAt). */
@@ -205,6 +215,7 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
           skippedAt: input.skipped.at,
           skipReason: input.skipped.reason,
         }),
+        ...(input.ladderId !== undefined && { ladderId: input.ladderId }),
         createdAt: now,
       };
       await doc.send(

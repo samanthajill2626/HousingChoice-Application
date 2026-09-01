@@ -16,6 +16,7 @@
 // Self-skipping: when nothing answers at DYNAMODB_ENDPOINT the suite skips.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DeleteCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import type {
   MessagingAdapter,
   SendMessageParams,
@@ -294,6 +295,94 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     doc.destroy();
     client.destroy();
   }, 120_000);
+
+  // Raw row read - there is no getById on TourRemindersRepo, and listByTour is a
+  // vacuous substitute for absence: a resurrected attribute-only stub carries no
+  // tourId and so cannot appear in a byTour query whether the bug is there or not.
+  const rawReminder = async (reminderId: string) => {
+    const { Item } = await doc.send(
+      new GetCommand({
+        TableName: tableName('tourReminders', testEnv),
+        Key: { reminderId },
+      }),
+    );
+    return Item as TourReminderItem | undefined;
+  };
+
+  const deleteReminderRaw = async (reminderId: string) => {
+    await doc.send(
+      new DeleteCommand({
+        TableName: tableName('tourReminders', testEnv),
+        Key: { reminderId },
+      }),
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // Supersession S1 - ladderId stamp on the row (T1.1)
+  // ---------------------------------------------------------------------------
+  describe('create carries the generation pointer (ladderId)', () => {
+    it('stores the supplied ladderId on the row and returns it', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-create-1',
+        unitId: 'unit-ladder-create-1',
+        scheduledAt: '2026-10-01T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-09-30T23:30:00.000Z',
+        ladderId: 'ladder-s1-create',
+      });
+
+      expect(row.ladderId).toBe('ladder-s1-create');
+      expect((await rawReminder(row.reminderId))?.ladderId).toBe('ladder-s1-create');
+    });
+
+    it('omits the attribute entirely when no ladderId is supplied (pre-migration shape)', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-create-2',
+        unitId: 'unit-ladder-create-2',
+        scheduledAt: '2026-10-02T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-10-01T23:30:00.000Z',
+      });
+
+      expect(row.ladderId).toBeUndefined();
+      const stored = await rawReminder(row.reminderId);
+      expect(stored).toBeDefined();
+      expect(stored).not.toHaveProperty('ladderId');
+    });
+
+    it('stamps a born-skipped row too (the arm-time visible trace)', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-create-3',
+        unitId: 'unit-ladder-create-3',
+        scheduledAt: '2026-10-03T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: '2026-10-03T11:00:00.000Z',
+        ladderId: 'ladder-s1-born-skipped',
+        skipped: { at: '2026-09-01T00:00:00.000Z', reason: 'past_event' },
+      });
+
+      expect(row.ladderId).toBe('ladder-s1-born-skipped');
+      const stored = await rawReminder(row.reminderId);
+      expect(stored?.ladderId).toBe('ladder-s1-born-skipped');
+      expect(stored?.skipReason).toBe('past_event');
+    });
+  });
 
   // ---------------------------------------------------------------------------
   // Test 1 — arm: correct ladder dueAts for a future tour

@@ -2947,6 +2947,12 @@ export function createFakeWorld(): FakeWorld {
           skippedAt: input.skipped.at,
           skipReason: input.skipped.reason,
         }),
+        // GENERATION POINTER (supersession S1): same scar, one field over -
+        // TourReminderItem has NO index signature, so an optional ladderId is
+        // not enforced on this hand-built literal and dropping it would
+        // typecheck green while making every route-level suite see rows that
+        // belong to no ladder. Mirrors the real repo's conditional spread.
+        ...(input.ladderId !== undefined && { ladderId: input.ladderId }),
         createdAt: now,
       };
       tourRemindersMap.set(item.reminderId, { ...item });

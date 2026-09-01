@@ -235,6 +235,126 @@ describe('retiredByTourStart - the ONE past-tour predicate (poll gate, force-sen
   });
 });
 
+// ---------------------------------------------------------------------------
+// Supersession S1 (T1.6) - the in-memory fakes must MIRROR the contracts the
+// DynamoDB describe below proves for the real repos. No database here.
+//
+// This file already carries the scar of a fake that dropped `input.skipped` on
+// the floor: TourReminderItem has NO index signature, so an optional field is
+// not enforced on the fake's hand-built literal and the omission typechecks
+// green. The route suites that lean on these three behaviours do not arrive
+// until S3/S8, which is far too late to find out.
+// ---------------------------------------------------------------------------
+describe('fake world repos mirror the S1 repo contracts', () => {
+  const newTour = async (world: ReturnType<typeof createFakeWorld>, seq: string) =>
+    world.toursRepo.create({
+      tenantId: `contact-fake-${seq}`,
+      unitId: `unit-fake-${seq}`,
+      scheduledAt: '2026-12-01T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+  it('create copies ladderId, and omits the field entirely when none is supplied', async () => {
+    const world = createFakeWorld();
+    const tour = await newTour(world, 'create');
+
+    const stamped = await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2026-11-30T23:30:00.000Z',
+      ladderId: 'ladder-fake',
+    });
+    const bare = await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2026-12-01T11:00:00.000Z',
+    });
+
+    expect(stamped.ladderId).toBe('ladder-fake');
+    expect(bare.ladderId).toBeUndefined();
+    expect(bare).not.toHaveProperty('ladderId');
+    // And the STORED row, not just the return value.
+    const stored = await world.tourRemindersRepo.listByTour(tour.tourId);
+    expect(stored.find((r) => r.kind === 'day_before')?.ladderId).toBe('ladder-fake');
+    expect(stored.find((r) => r.kind === 'morning_of')).not.toHaveProperty('ladderId');
+  });
+
+  it('setLadderIdIf has REAL compare semantics - a mismatch writes nothing', async () => {
+    const world = createFakeWorld();
+    const tour = await world.toursRepo.create({
+      tenantId: 'contact-fake-cas',
+      unitId: 'unit-fake-cas',
+      scheduledAt: '2026-12-02T15:00:00.000Z',
+      tourType: 'self_guided',
+      currentLadderId: 'ladder-rotation',
+    });
+
+    // Mismatch loses and leaves the winner's rotation intact.
+    expect(
+      await world.toursRepo.setLadderIdIf(tour.tourId, 'ladder-someone-else', 'ladder-armed'),
+    ).toBe(false);
+    expect((await world.toursRepo.get(tour.tourId))!.currentLadderId).toBe('ladder-rotation');
+
+    // The matching compare wins.
+    expect(
+      await world.toursRepo.setLadderIdIf(tour.tourId, 'ladder-rotation', 'ladder-armed'),
+    ).toBe(true);
+    expect((await world.toursRepo.get(tour.tourId))!.currentLadderId).toBe('ladder-armed');
+  });
+
+  it('setLadderIdIf returns false for an ABSENT pointer and for a missing tour', async () => {
+    const world = createFakeWorld();
+    const bare = await newTour(world, 'cas-absent');
+
+    expect(await world.toursRepo.setLadderIdIf(bare.tourId, 'ladder-x', 'ladder-y')).toBe(false);
+    expect((await world.toursRepo.get(bare.tourId))!.currentLadderId).toBeUndefined();
+    expect(await world.toursRepo.setLadderIdIf('tour-ghost', 'ladder-x', 'ladder-y')).toBe(false);
+  });
+
+  it('deleteSupersededForTour drops every unsent row (canceled and skipped included) and keeps sent', async () => {
+    const world = createFakeWorld();
+    const mine = await newTour(world, 'sweep-mine');
+    const theirs = await newTour(world, 'sweep-theirs');
+    const mk = (tourId: string, kind: ReminderKind) =>
+      world.tourRemindersRepo.create({ tourId, kind, dueAt: '2026-11-30T23:30:00.000Z' });
+
+    const pending = await mk(mine.tourId, 'day_before');
+    const canceled = await mk(mine.tourId, 'morning_of');
+    const skipped = await mk(mine.tourId, 'en_route');
+    const sent = await mk(mine.tourId, 'confirmation');
+    const other = await mk(theirs.tourId, 'day_before');
+    await world.tourRemindersRepo.cancel(canceled.reminderId, '2026-11-20T12:00:00.000Z');
+    await world.tourRemindersRepo.claimSkip(
+      skipped.reminderId,
+      '2026-11-20T12:00:00.000Z',
+      'tour_missing',
+    );
+    await world.tourRemindersRepo.claimSend(sent.reminderId, '2026-11-20T12:00:00.000Z');
+
+    await world.tourRemindersRepo.deleteSupersededForTour(mine.tourId);
+
+    const left = await world.tourRemindersRepo.listByTour(mine.tourId);
+    expect(left.map((r) => r.reminderId)).toEqual([sent.reminderId]);
+    expect(left.map((r) => r.reminderId)).not.toContain(pending.reminderId);
+    // Another tour's ladder is untouched.
+    expect((await world.tourRemindersRepo.listByTour(theirs.tourId)).map((r) => r.reminderId)).toEqual(
+      [other.reminderId],
+    );
+  });
+
+  it('the claim methods still refuse a row that is not there (the post-guard behaviour)', async () => {
+    const world = createFakeWorld();
+    const now = '2026-11-20T12:00:00.000Z';
+
+    expect(await world.tourRemindersRepo.claimSend('reminder-missing', now)).toBe(false);
+    expect(await world.tourRemindersRepo.claimSkip('reminder-missing', now, 'tour_missing')).toBe(
+      false,
+    );
+    expect(await world.tourRemindersRepo.cancel('reminder-missing', now)).toBe(false);
+    expect(await world.tourRemindersRepo.uncancel('reminder-missing')).toBe(false);
+  });
+});
+
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
   const client = createDynamoClient({ endpoint });

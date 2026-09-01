@@ -307,6 +307,15 @@ Per environment, in this order, and take **dev all the way through before starti
 
 **No agent runs this against dev or prod.** It is a data mutation on a real environment; the human runs it. An agent may run it only against a hermetic local lane. The founder's LOCAL imported dataset takes the same dry-run-first sequence; disposable e2e lanes bootstrap their own tables and need nothing.
 
+### Tour reminder supersession (2026-09-01): NOTHING is owed - no backfill, no Terraform, no sweep
+
+**Feature branch `feat/tour-reminder-supersession`. Deploy the app image and you are done.** Recorded here because the branch changes what a retired reminder rung LOOKS like, and the natural question on reading that is "what has to be migrated?" - the answer is nothing.
+
+- **No backfill.** Every reminder row gains an optional `ladderId` and every tour an optional `currentLadderId`, both server-minted from the next arm onward. A row with NO `ladderId` on a tour with NO `currentLadderId` is a PRE-MIGRATION PAIR and is EXEMPT: it reads as current and sends exactly as it did before (`app/src/lib/ladderPointer.ts` carries the four-cell table). So existing rows need no stamp, and stamping them would be wrong - a backfilled pointer would have to guess which generation each row belonged to.
+- **No Terraform and no `db-update-gsis`.** `ladderId` is a plain attribute and both `tourReminders` GSIs already project ALL.
+- **Retirement is now a DELETE.** A reschedule, a terminal transition or a placement conversion hard-deletes the tour's never-sent rungs instead of stamping them `canceledAt`. Sent rungs are never touched and surface under the panel's `Earlier reminders (N)` disclosure. An operator who expects a "Canceled" chip after a reschedule will not see one - that is the change, not a bug.
+- **This is INDEPENDENT of the one-time Phase B retire sweep above.** That sweep retires a bounded population of PAUSE-ERA rungs by stamping `skippedAt`; this branch's delete is a runtime behaviour on the tours an operator touches from now on. Neither waits for the other, and the order does not matter. If the sweep has not run yet, run it exactly as its own section says - its writes are conditional on `attribute_exists(reminderId)`, so a row this branch deleted first is counted under `skippedOnCondition` rather than resurrected.
+
 ### Unit photos: direct-upload CORS (apply BEFORE the upload path works)
 
 **Infra change - `feat/unit-photos` MERGED to main (@05aba86). DEV: CORS APPLIED 2026-07-16 (upload path live on dev). PROD: rides the M1.11 cutover (still to apply).**

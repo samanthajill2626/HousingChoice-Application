@@ -51,6 +51,13 @@ attempted at all - one unrecognised error on recipient 3 of 800 strands 798,
 with their slots left `queued` and the broadcast row left `sending`. Nothing
 repairs any of it, and nothing reports it.
 
+**Both fan-outs, not just broadcasts.** `relayFanOut.ts:531-535` has the
+identical shape and comment. Its symptom differs only in surface: the relay
+source message's `delivery_recipients` slots stay `queued` for every member from
+the failing one onward, so the thread shows a message that was silently
+delivered to a prefix of the group. There is no `finalize()` on that path to
+mis-report, which makes it quieter still.
+
 This is the same "stuck forever" class as
 [retry-counter-in-envelope-makes-caps-unreachable](./retry-counter-in-envelope-makes-caps-unreachable.md),
 reached by a different door: there the counter could not advance, here the retry
@@ -67,9 +74,9 @@ DO, then make the code do it:
 
 - if it is retryable, the retry must be a NEW enqueue (fresh `jobId`), not a
   throw - a throw cannot retry under the marker;
-- if it is not retryable, mark the recipient failed and let the job complete, so
-  the row reaches a terminal state and the DLQ is reserved for genuine
-  poison-envelope cases;
+- if it is not retryable, mark the recipient failed, **continue the loop so the
+  remaining recipients are still attempted**, and let the job complete so the
+  row reaches a terminal state;
 - either way, correct the two false comments.
 
 Note the interaction with the marker's purpose: it exists so a redelivery cannot

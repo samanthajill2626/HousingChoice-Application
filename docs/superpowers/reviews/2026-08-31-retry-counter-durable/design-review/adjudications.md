@@ -661,3 +661,82 @@ discriminating weight alone. Acceptable, and worth knowing.
 
 Six passes. The last one changed no decision - only precision, plus two
 corrections to a filed issue. That is the terminal round by the stop rule.
+
+---
+
+# Final pass (continued reviewer) - one BLOCKING, and a named failure pattern
+
+Cameron asked for one more pass after I had called the design final. It found a
+blocking defect six passes had missed. Report: `spec-r7-final-continued.md`.
+
+## F1 - the top-of-pass close was unreachable, and the fallback ships a lie
+
+**Verified.** The existing cap branch is nested inside
+`if (transientRemaining.length > 0)` (broadcastFanOut.ts:478-495,
+relayFanOut.ts:570-580) and closes over `transientRemaining`, a LOCAL list of
+the recipients THIS PASS deferred. A top-of-pass `capped` claim fires **before
+the send loop runs**, so that list is empty and the branch cannot be reached.
+
+Sec 3.6 told the builder to "reuse the EXISTING cap branch". Following it, the
+only reachable thing there is a bare `finalize()` - which marks the broadcast
+**SENT while its recipients are still `queued`.** A silent false success, worse
+than the hang this branch exists to remove.
+
+Why it survived six passes: Sec 3.6 was written in ROUND 3, when the claim still
+sat at the continuation point and the sentence was TRUE. The claim moved twice
+afterwards (to the top of the pass, then before the marker) and Sec 3.6 did not
+move with it. Nothing in Sec 7 caught it either - test 3 exercises the
+enqueue-failure path where the loop HAS run, and test 5 asserted only that the
+ladder "closes at the cap", never what state the recipients were left in.
+
+Resolved: there are **three** closes, not one shared branch (Sec 3.6), and test
+5a drives all three asserting the same terminal shape, with B called out as the
+discriminating case.
+
+## The pattern, named - and it will recur during the build
+
+The reviewer identified that F1 and F2 share a shape with the two errors before
+them:
+
+> **A mechanism credited BY NAME without tracing whether it is on the path in
+> question.**
+
+Four instances now, all mine, all confidently written:
+
+1. "SQS redelivers with a fresh jobId" - the jobId is stable, so redelivery does
+   nothing.
+2. "the terminal-status skip prevents the duplicate double-send" - the marker
+   does; the skip is never reached on that path.
+3. "`contact_opted_out` is the precedent for these codes" - it is precedent for
+   the MAP, but it is deliberately INTERCEPTED before `deliveryReason` on the
+   per-leg path (deliveryStatus.ts:505-516), so its aggregate-scoped copy never
+   has to work per-leg. The two new codes have no interception and must read
+   correctly in BOTH positions from one string.
+4. "the close is the EXISTING cap branch" - unreachable from the new call site.
+
+Each was true of the named mechanism in general and false of the path being
+specified. This is worth carrying into the build brief: **when the spec says
+"the existing X handles this", the builder's job is to trace that X from the new
+call site, not to trust the sentence.**
+
+## Remaining findings, all accepted
+
+- **F3** - Sec 2's in-scope list had drifted from the design in three places
+  (the rail flag's two callers, `Timeline.tsx`, the two map entries). Now
+  matches, with Cameron's `Timeline.tsx` authorization recorded inline.
+- **F4** - Sec 5's disposition rule ("in-region -> fix here") collides with Sec
+  3.4a for the one finding the sweep is GUARANTEED to produce: the unknown-error
+  throw, which is in-region and deliberately not fixed. The exception is now
+  named in advance so the builder does not have to adjudicate it mid-sweep.
+- **F5** - the issue's suggested-fix bullet kept a DLQ justification the issue
+  itself now disproves. Rewritten, and it now says to CONTINUE the loop so the
+  remaining recipients are still attempted.
+- **F6** - the issue described only the broadcast symptom though it covers both
+  fan-outs. The relay symptom added: slots stay `queued` from the failing member
+  onward, with no `finalize()` to mis-report, making it quieter still.
+- **F7** - the rail ladder's delay was unnamed. Now 500ms then 1500ms, stated as
+  a tunable starting point rather than a derived constant.
+
+The reviewer also independently re-derived the R6 corrections rather than
+assuming they inherited its own correctness, and confirmed the R4-11 citation
+fix. That is the right instinct and it is why this round found F1.

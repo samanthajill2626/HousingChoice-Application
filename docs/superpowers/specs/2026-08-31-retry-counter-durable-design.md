@@ -55,10 +55,15 @@ moves into a durable record and is claimed BEFORE the enqueue.
   pass counter, claimed at the top of each pass.
 - `app/src/repos/messagesRepo.ts`, `app/src/repos/broadcastsRepo.ts` - the claim
   primitive.
-- `app/src/services/groupRail.ts` - binding-propagation handling, job and import
-  paths only (Sec 4).
-- `dashboard/src/routes/contact/deliveryStatus.ts` - the 30003 copy on legs that
-  have no retry (Sec 6).
+- `app/src/services/groupRail.ts` - binding-propagation handling, plus an
+  opt-in flag on `GroupRailRequest` (Sec 4.2).
+- `app/src/jobs/groupRail.ts` and `app/src/lib/import/convertGroups.ts` - the
+  two callers that pass that flag. One line each.
+- `dashboard/src/routes/contact/deliveryStatus.ts` - the relay 30003 copy
+  (Sec 6), plus two `INTERNAL_CODE_REASONS` entries (Sec 3.4a).
+- `dashboard/src/routes/contact/Timeline.tsx` - three of the four
+  `deliveryReason` call sites (Sec 6). Cameron authorized this on 2026-09-01:
+  `T-DELIVERY-CHIPS` is Tier 2 backlog and no live worktree touches the file.
 - A bounded provider-status audit (Sec 5).
 
 **Out - hard fences:**
@@ -254,11 +259,41 @@ try {
 
 **The close on this path carries its own error code, not `transient_cap`.** The
 cap branch's `transient_cap` means "we retried and gave up"; here we scheduled
-nothing and retried zero times. The distinction reaches a human: an unmapped
-code renders verbatim through `deliveryReason`'s fallback as
-`Delivery failed (error transient_cap)`, so reusing it would tell an operator
-the recipient exhausted retries that never ran. Nothing branches on the value
-today, so a distinct `enqueue_failed` is free and honest.
+nothing and retried zero times, so reusing it would tell an operator the
+recipient exhausted retries that never ran.
+
+The full consumer trace for a recipient error code, since a new value entering a
+shared vocabulary is how invariants break quietly:
+
+- **Writers** - `transient_cap` has exactly two (broadcastFanOut.ts:482,
+  relayFanOut.ts:575). No other producer.
+- **Branching readers** - **none.** Nothing in `app/src`, `dashboard/src` or
+  `e2e` compares against `transient_cap`, so no logic changes.
+- **Rendering reader** - `deliveryReason` (deliveryStatus.ts:628-640), which
+  falls through unmapped codes to `Delivery failed (error <code>)`.
+
+So `enqueue_failed` is safe to introduce. It is registered in
+**`INTERNAL_CODE_REASONS`** (deliveryStatus.ts:609-611), the map for app-authored
+rather than carrier codes, with copy naming what actually happened: the send
+could not be scheduled, and no retry was attempted.
+
+**`contact_opted_out` is precedent for the MAP, not for the rendering path.**
+It is deliberately intercepted BEFORE `deliveryReason` on the per-leg path
+(deliveryStatus.ts:505-516), precisely because its copy is written for the
+message-level AGGREGATE and would misread on one member's row. The two codes
+here get **no such interception**, so each renders in BOTH positions - the
+rollup and the per-recipient row - from one string.
+
+That is a real constraint on the copy, not a detail: it must read correctly in
+both. Copy scoped to the aggregate ("nothing was sent") is wrong on a row; copy
+scoped to a row is wrong in a rollup covering several. Write it recipient-
+neutral, and **test 7e asserts both positions**, not just one.
+
+**And `transient_cap` is registered there too, in the same change.** It is
+app-authored and currently unmapped, so it already reaches operators today as
+the raw `Delivery failed (error transient_cap)`. Adding the code being
+introduced while leaving its sibling rendering as a bare token would be
+half a fix in a file this branch is already editing. Two map entries, no logic.
 
 Round 1's objection to this (that an immediate close discards retries the
 durable counter made reachable) was sound reasoning from a false premise: those
@@ -293,20 +328,40 @@ hazard that existed only because the map version counted enqueues instead.
 
 A test still asserts the total provider-send count per recipient equals `main`'s
 on both ladders, because this is invisible in any test that does not count.
-### 3.6 The close branches are the EXISTING ones
+### 3.6 There are TWO closes, and only one of them is the existing branch
 
-An earlier revision claimed `broadcastFanOut`'s cap branch fails to call
-`finalize()`. **That is false** - it already does. Building against the claim
-would have added a second finalize.
+An earlier revision said "the close is the EXISTING cap branch" at both call
+sites. **That is wrong at the top-of-pass site, and wrong in a way that ships a
+false success.**
 
-What is true: when `enqueue` throws, no path reaches any finalize, so the
-broadcast stays "Sending" forever. The fix routes that failure into the existing
-close, never adding a new one.
+The existing cap branch is nested inside `if (transientRemaining.length > 0)`
+(broadcastFanOut.ts:478-495, relayFanOut.ts:570-580). It closes over
+`transientRemaining` - a LOCAL list of the recipients this pass deferred. A
+top-of-pass `capped` claim happens **before the send loop runs**, so that list
+is empty and the branch is unreachable. A builder following the old text would
+reach for the only other thing there - a bare `finalize()` - which marks the
+broadcast **sent while its recipients are still `queued`**: a silent false
+success, strictly worse than the hang this branch removes.
 
-| site | close = |
-|---|---|
-| `broadcastFanOut` | the EXISTING cap branch: mark remaining `failed`/`transient_cap`, bump stats, emit progress, `finalize()` |
-| `relayFanOut` | the EXISTING cap branch: mark remaining `failed`/`transient_cap` |
+This is the same failure mode the spec itself warns about elsewhere: a mechanism
+credited BY NAME without tracing whether it is on the path in question. Sec 3.6
+was written in round 3, when the claim still sat at the continuation point and
+the sentence was true; the claim has moved twice since and this section did not
+move with it.
+
+| close | when | what it does |
+|---|---|---|
+| **A. Continuation cap** (EXISTING, unchanged) | the send loop ran and deferred recipients hit the cap | mark `transientRemaining` failed / `transient_cap`, bump stats, emit progress, `finalize()` |
+| **B. Top-of-pass cap** (NEW) | `claimFanoutPass` returns `capped`, before any sending | mark the envelope's still-non-terminal `recipientKeys` failed / `transient_cap`, bump stats, emit progress, `finalize()` |
+| **C. Enqueue failure** (NEW, Sec 3.4a) | `enqueue` threw after a successful pass | mark the deferred recipients failed / `enqueue_failed`, bump stats, emit progress, `finalize()` |
+
+B and C are new code, not reuse. Both operate on a recipient set the existing
+branch does not have in scope: B on `payload.recipientKeys` (the envelope's
+remaining set), C on `transientRemaining`.
+
+All three must leave the SAME shape of terminal state - no recipient left
+`queued`, the row finalized - which is what test 5a asserts. `relayFanOut` has
+no `finalize()`; its three closes end after marking recipients.
 
 ### 3.7 Preserve relayFanOut's existing backoff exactly
 
@@ -384,8 +439,13 @@ premise.**
 
 Everything follows from that one sentence:
 
-- **Ladder** - a short map on a fresh create triggers at most 2 bounded re-reads
-  with short delays, to fill in the addresses.
+- **Ladder** - a short map on a fresh create triggers at most **2** re-reads at
+  **500ms then 1500ms** (2s of added latency worst case, on job and import paths
+  only). The numbers are named rather than left as "short delays" so they are
+  reviewable and tunable: they are a starting point sized against a propagation
+  window measured in seconds, not a derived constant. A rail still short after
+  both re-reads proceeds (see the rule above); the ladder never blocks
+  indefinitely waiting for a binding.
 - **Repair** is entered only for members the create actually refused.
 - **`rail_failed`** requires a repair refusal. Not a short map, and not a member
   still unbound after the ladder.
@@ -431,6 +491,16 @@ edits the fences forbid:
 
 - inside a region this branch already edits -> fixed here;
 - anywhere else -> **filed as one new issue** with citations.
+
+**One in-region finding is exempt, and it is named in advance** so the rule and
+the exception do not collide when the builder hits it. The sweep is guaranteed
+to surface the unknown-error `throw` in both fan-outs
+(broadcastFanOut.ts:456-459, relayFanOut.ts:531-535) - squarely in a region this
+branch edits, and squarely a non-terminal default. It is **filed, not fixed**
+(Sec 3.4a, Sec 9 obligation 0): the remedy is a decision about what an
+unrecognised per-recipient error should DO, and it must preserve a guarantee
+about never texting twice that the current code gets from the execution marker.
+That is a behavior change with its own blast radius, not a sweep fix.
 
 The audit is committed as a mission record either way. A sweep that finds
 nothing is a valid result that still gets written down.
@@ -511,6 +581,13 @@ message-catalog rule does not apply (its own comment at :606 says so).
    not a log line.
 5. **The claim advances across legitimate continuations** - a successful
    continuation chain walks `fanout_attempt` 1, 2, 3 and closes at the cap.
+5a. **All THREE closes leave the same terminal shape** (Sec 3.6) - drive each of
+   A (continuation cap), B (top-of-pass cap) and C (enqueue failure) and assert
+   in every case: **no recipient left `queued`**, stats reconciled, and the
+   broadcast finalized. **B is the discriminating one**: against a design that
+   reuses the existing nested branch, B marks nothing and finalizes the
+   broadcast as SENT with recipients still queued - a false success no other
+   test in this list would catch.
 6. **Total send count is unchanged from `main`** on both ladders (Sec 3.5).
 7. **Claim against a pre-branch item** - an item with no `fanout_attempt`
    attribute claims successfully at 1 (`ADD` creates it), with no seeding step.
@@ -528,6 +605,11 @@ message-catalog rule does not apply (its own comment at :606 says so).
    re-send to a recipient already `sent`.
 7d. **The enqueue-failure close uses `enqueue_failed`**, not `transient_cap`
    (Sec 3.4a) - so an operator is not told retries were exhausted when none ran.
+7e. **Both internal codes render as prose in BOTH positions** - `enqueue_failed`
+   and `transient_cap` each resolve through `INTERNAL_CODE_REASONS` rather than
+   falling through to `Delivery failed (error <code>)`, asserted on the
+   aggregate rollup AND on a single per-recipient row, since one string serves
+   both with no interception (Sec 3.4a).
 8. **Rail** - a create whose participants have no binding yet resolves without
    repair and without a `rail_failed`; a create with a real per-member failure
    still repairs; 50386/50437 during repair is not a refusal; the adopt path is

@@ -362,6 +362,71 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     expect(screen.queryByText(/Attachment didn't get through/)).not.toBeInTheDocument();
   });
 
+  // POSITIONS 2 and 3 of the four surfaces the fan-out close codes reach: the
+  // accessible-name recital (Timeline.tsx:582) and the per-recipient row
+  // (Timeline.tsx:1045). The ladders write these codes onto the SLOT, so they
+  // land beside a named member; unregistered the row read
+  // "Failed - Delivery failed (error transient_cap)", which prints an
+  // app-invented token as though it were a carrier number the operator could look
+  // up. EXACT text, never a substring - same reason as the 30034 row above.
+  it('reads a CAPPED fan-out row as operator prose, with no carrier-code tail', () => {
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-capped',
+      tsMsgId: 'r-capped',
+      body: 'group note that ran out of retries',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: 'transient_cap' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    reveal('group note that ran out of retries');
+    const failedRow = rows()[1] as HTMLElement;
+    expect(failedRow).toHaveTextContent('Lars Landlord');
+    expect(
+      within(failedRow).getByText('Failed - Sending gave up after repeated carrier deferrals'),
+    ).toBeInTheDocument();
+    expect(failedRow.textContent ?? '').not.toContain('(error ');
+    expect(failedRow.textContent ?? '').not.toContain('transient_cap');
+    // The recital is the SECOND reader of the same slot code and is computed
+    // whether or not the list is revealed, so a screen-reader user gets the same
+    // sentence a sighted one does.
+    expect(screen.getByRole('img')).toHaveAccessibleName(
+      'delivered 1 of 2, 1 failed, Sending gave up after repeated carrier deferrals. ' +
+        'Keisha Kane: Delivered. Lars Landlord: Failed, Sending gave up after repeated carrier deferrals.',
+    );
+  });
+
+  // The other close: the continuation was never scheduled, so no retry ran at
+  // all. D10 - the row must not tell staff the ladder was exhausted.
+  it('reads a NEVER-SCHEDULED fan-out row distinctly, also without a tail', () => {
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-unscheduled',
+      tsMsgId: 'r-unscheduled',
+      body: 'group note that never got queued',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: 'enqueue_failed' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    reveal('group note that never got queued');
+    const failedRow = rows()[1] as HTMLElement;
+    expect(failedRow).toHaveTextContent('Lars Landlord');
+    expect(
+      within(failedRow).getByText('Failed - Sending could not be scheduled'),
+    ).toBeInTheDocument();
+    expect(failedRow.textContent ?? '').not.toContain('(error ');
+    expect(failedRow.textContent ?? '').not.toContain('enqueue_failed');
+    expect(screen.queryByText(/gave up after repeated carrier deferrals/)).not.toBeInTheDocument();
+    expect(screen.getByRole('img')).toHaveAccessibleName(
+      'delivered 1 of 2, 1 failed, Sending could not be scheduled. ' +
+        'Keisha Kane: Delivered. Lars Landlord: Failed, Sending could not be scheduled.',
+    );
+  });
+
   it('shows NO reason on a STILL-RETRYING row that carries a transient carrier code', () => {
     // The fan-out writes a transient code onto a leg it is still retrying.
     // `queued` is not a failure, so 30003's "will retry" copy must not appear

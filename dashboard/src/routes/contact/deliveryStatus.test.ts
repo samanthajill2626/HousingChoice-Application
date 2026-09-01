@@ -342,6 +342,43 @@ describe('presentRelayDelivery', () => {
     });
   });
 
+  // POSITION 1 of the four surfaces the fan-out close codes reach
+  // (deliveryStatus.ts:416 - the relay/broadcast rollup). A capped fan-out marks
+  // EVERY still-queued leg with the same code in one pass, so the rollup dedupes
+  // to a single sentence, and that sentence has to work as an AGGREGATE - these
+  // codes get no per-position interception the way contact_opted_out does.
+  it('summarises a capped fan-out in operator prose, with no carrier-code tail', () => {
+    expect(
+      presentRelayDelivery([
+        { status: 'delivered' },
+        { status: 'failed', errorCode: 'transient_cap' },
+        { status: 'failed', errorCode: 'transient_cap' },
+      ]),
+    ).toEqual({
+      label: 'delivered 1/3 - 2 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Sending gave up after repeated carrier deferrals',
+    });
+  });
+
+  // D10: never scheduled is NOT retries exhausted, and the rollup is where an
+  // operator reads which one happened.
+  it('summarises a never-scheduled fan-out distinctly from a capped one', () => {
+    const presented = presentRelayDelivery([
+      { status: 'failed', errorCode: 'enqueue_failed' },
+      { status: 'failed', errorCode: 'enqueue_failed' },
+    ]);
+    expect(presented).toEqual({
+      label: 'delivered 0/2 - 2 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Sending could not be scheduled',
+    });
+    expect(presented?.reason).not.toContain('(error ');
+    expect(presented?.reason).not.toContain('enqueue_failed');
+  });
+
   it('excludes opted-out members from the count — the opt-out note explains them, and N/M must stay reachable', () => {
     expect(
       presentRelayDelivery([
@@ -616,6 +653,42 @@ describe('deliveryReason', () => {
     expect(reason).toBe('Everyone here has opted out - nothing was sent');
     expect(reason).not.toMatch(/contact_opted_out/);
     expect(reason).not.toMatch(/error/i);
+  });
+
+  // D22/D23. The two codes the fan-out ladders write when they close a stuck
+  // send: `transient_cap` when the pass cap is spent with legs still deferred,
+  // `enqueue_failed` when the continuation could not be scheduled at all. Both
+  // are OURS - no carrier emits them and no operator can look them up - so
+  // unmapped they printed as `Delivery failed (error transient_cap)`, dressing an
+  // app token as a carrier error number. Registered here AHEAD of the code that
+  // emits them, so the raw token is never reachable in the product.
+  //
+  // ONE string per code has to serve every position. contact_opted_out is
+  // intercepted per-position by presentLegDelivery; these two are not, so the
+  // same sentence renders as a broadcast's results badge AND beside one member's
+  // name on a revealed recipient row.
+  it('renders the two fan-out close codes as operator prose, never as an error number', () => {
+    expect(deliveryReason('transient_cap')).toBe('Sending gave up after repeated carrier deferrals');
+    expect(deliveryReason('enqueue_failed')).toBe('Sending could not be scheduled');
+    for (const code of ['transient_cap', 'enqueue_failed']) {
+      const reason = deliveryReason(code) as string;
+      expect(reason).not.toContain('(error ');
+      expect(reason).not.toContain(code);
+    }
+    // D10. Reusing one code for both would tell an operator retries ran when
+    // none did, so the two sentences must not converge.
+    expect(deliveryReason('transient_cap')).not.toBe(deliveryReason('enqueue_failed'));
+  });
+
+  // INTERNAL_CODE_REASONS is consulted first and early-returns, so these two are
+  // immune to the media override by construction. A ladder closes an attachment
+  // leg exactly as it closes a text one - the reason is ours, not the carrier's -
+  // and the hedged MMS copy would be a false reading of what happened.
+  it('reads the close codes identically on an attachment leg', () => {
+    expect(deliveryReason('transient_cap', { media: true })).toBe(
+      'Sending gave up after repeated carrier deferrals',
+    );
+    expect(deliveryReason('enqueue_failed', { media: true })).toBe('Sending could not be scheduled');
   });
 
   // Adversarial 30. Both reason maps are bare object literals, so a code that

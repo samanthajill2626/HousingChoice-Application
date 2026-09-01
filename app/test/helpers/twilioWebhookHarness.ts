@@ -2892,14 +2892,20 @@ export function createFakeWorld(): FakeWorld {
         });
       }
       t.convertedPlacementId = value;
+      // The claim STAMP rides the same write (review round NEW-2) - the poll's
+      // grace window measures from it, never from updatedAt.
+      t.conversionClaimedAt = new Date().toISOString();
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },
     async releaseConversionClaim(tourId, value) {
-      // Best-effort conditional REMOVE: only while our sentinel still holds.
+      // Best-effort conditional REMOVE: only while our sentinel still holds, and
+      // BOTH halves go - a stamp that outlived its sentinel would hand the next
+      // claim on this tour a stranger's clock.
       const t = toursMap.get(tourId);
       if (!t || t.convertedPlacementId !== value) return;
       delete t.convertedPlacementId;
+      delete t.conversionClaimedAt;
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },

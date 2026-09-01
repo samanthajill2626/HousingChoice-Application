@@ -118,6 +118,22 @@ export interface TourItem {
    * typechecker.
    */
   currentLadderId?: string;
+  /**
+   * ISO 8601 - when `claimConversion` wrote the `pending:` sentinel that
+   * `convertedPlacementId` is currently carrying. `releaseConversionClaim`
+   * REMOVES it with the sentinel. A FINALIZE does not: it replaces the sentinel
+   * through the ordinary patch and leaves this behind, INERT - every reader
+   * gates on the `pending:` prefix first, so a stamp with no claim beside it is
+   * never consulted.
+   *
+   * It exists because the poll's conversion-claim grace has to be measured from
+   * something that means "the claim started", and `updatedAt` is
+   * last-touched-by-ANYTHING: every patch, setRoster, claimGroupThread and
+   * pointer rotation moves it, so on a tour edited more than once an hour a
+   * STALLED claim never expired and the deferral was unbounded again (review
+   * round NEW-2). This says what it means.
+   */
+  conversionClaimedAt?: string;
   createdAt: string;
   updatedAt: string;
   [key: string]: unknown;
@@ -458,12 +474,19 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         new UpdateCommand({
           TableName: table,
           Key: { tourId },
-          UpdateExpression: 'SET #cp = :v, #updatedAt = :now',
+          // The claim STAMP rides the same write as the sentinel (review round
+          // NEW-2): the poll's grace window has to measure from when the claim
+          // started, and updatedAt is last-touched-by-anything.
+          UpdateExpression: 'SET #cp = :v, #cca = :now, #updatedAt = :now',
           // Atomic one-placement-per-tour: only the FIRST claimant wins; a
           // concurrent /from-tour POST loses here BEFORE any placement row is
           // created (mirrors claimGroupThread).
           ConditionExpression: 'attribute_exists(tourId) AND attribute_not_exists(#cp)',
-          ExpressionAttributeNames: { '#cp': 'convertedPlacementId', '#updatedAt': 'updatedAt' },
+          ExpressionAttributeNames: {
+            '#cp': 'convertedPlacementId',
+            '#cca': 'conversionClaimedAt',
+            '#updatedAt': 'updatedAt',
+          },
           ExpressionAttributeValues: { ':v': value, ':now': new Date().toISOString() },
         }),
       );
@@ -476,11 +499,18 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
           new UpdateCommand({
             TableName: table,
             Key: { tourId },
-            UpdateExpression: 'REMOVE #cp SET #updatedAt = :now',
+            // BOTH halves of the claim go, or the stamp outlives the sentinel it
+            // describes and the next claim on this tour starts its grace window
+            // from a stranger's clock.
+            UpdateExpression: 'REMOVE #cp, #cca SET #updatedAt = :now',
             // Only release OUR sentinel — never clobber the finalized
             // placementId (or a newer claim) written since.
             ConditionExpression: '#cp = :v',
-            ExpressionAttributeNames: { '#cp': 'convertedPlacementId', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeNames: {
+              '#cp': 'convertedPlacementId',
+              '#cca': 'conversionClaimedAt',
+              '#updatedAt': 'updatedAt',
+            },
             ExpressionAttributeValues: { ':v': value, ':now': new Date().toISOString() },
           }),
         );

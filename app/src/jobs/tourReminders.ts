@@ -331,30 +331,43 @@ export const CONVERSION_CLAIM_GRACE_MS = 60 * 60 * 1000;
  * Has this rung waited longer than the grace window for a conversion claim to
  * resolve?
  *
- * Measured from `max(dueAt, tour.updatedAt)`, NOT from `dueAt` alone (review
- * round M2). The rows carry no claim-start stamp, but `claimConversion` bumps
- * the TOUR's `updatedAt` when it writes the sentinel, so the tour does - and
- * from dueAt alone the predicate is already true at t=0 for any rung more than
- * an hour past its own due time, which is a ROUTINE state rather than an
- * outage: a quiet-hours-deferred rung, a rung waiting out a roster/names grace,
- * or any worker downtime longer than an hour. A perfectly healthy conversion
- * would then retire such a rung `conversion_stalled` on its very first tick -
- * terminally, since skippedAt cannot be undone, and blamed on something that
- * did not happen if the conversion later failed and released its claim.
+ * Measured from `max(dueAt, tour.conversionClaimedAt)`, and NOT from either
+ * operand alone.
  *
- * A fresh claim therefore always gets the full window; a LATER tour edit only
- * extends the deferral (the safe direction); and a crashed claim on an
- * untouched tour still expires an hour after it was written. Unparseable or
- * absent stamps answer false - "keep waiting" is the safer half of this
- * decision, the same call rosterWaitExpired makes.
+ * Not `dueAt` alone (review round M2): the predicate is then already true at
+ * t=0 for any rung more than an hour past its own due time, which is a ROUTINE
+ * state rather than an outage - a quiet-hours-deferred rung, a rung waiting out
+ * a roster/names grace, or any worker downtime longer than an hour. A perfectly
+ * healthy conversion would retire such a rung `conversion_stalled` on its very
+ * first tick - terminally, since skippedAt cannot be undone, and blamed on
+ * something that did not happen if the conversion later failed and released its
+ * claim.
+ *
+ * And not `tour.updatedAt` (review round NEW-2), which was the first fix and is
+ * now only the defensive FALLBACK. It is a last-touched-by-anything stamp: every
+ * patch, setRoster, claimGroupThread and pointer rotation moves it forward, so
+ * on a tour edited more than once an hour a STALLED claim never expires and the
+ * unbounded deferral - the perpetual-"sending shortly" lie this bound exists to
+ * prevent - is back in a new costume. `claimConversion` therefore writes a
+ * dedicated `conversionClaimedAt` beside the sentinel and
+ * `releaseConversionClaim` REMOVES it with the sentinel.
+ *
+ * A fresh claim therefore always gets the full window; a later tour EDIT no
+ * longer extends it at all; and a crashed claim still expires an hour after it
+ * was written, whatever else happens to the tour. Unparseable or absent stamps
+ * answer false - "keep waiting" is the safer half of this decision, the same
+ * call rosterWaitExpired makes.
  */
 function conversionClaimExpired(
   dueAt: string,
-  tourUpdatedAt: string | undefined,
+  tour: Pick<TourItem, 'conversionClaimedAt' | 'updatedAt'>,
   nowIso: string,
 ): boolean {
   const due = Date.parse(dueAt);
-  const claimed = tourUpdatedAt === undefined ? Number.NaN : Date.parse(tourUpdatedAt);
+  // The fallback covers a claim written BEFORE the stamp existed - an in-flight
+  // conversion across the deploy - and nothing else.
+  const claimStamp = tour.conversionClaimedAt ?? tour.updatedAt;
+  const claimed = claimStamp === undefined ? Number.NaN : Date.parse(claimStamp);
   const now = Date.parse(nowIso);
   if (Number.isNaN(due) || Number.isNaN(claimed) || Number.isNaN(now)) return false;
   return now - Math.max(due, claimed) > CONVERSION_CLAIM_GRACE_MS;
@@ -1151,7 +1164,7 @@ async function processReminderRow(
     typeof tour.convertedPlacementId === 'string' &&
     tour.convertedPlacementId.startsWith('pending:')
   ) {
-    if (conversionClaimExpired(row.dueAt, tour.updatedAt, now)) {
+    if (conversionClaimExpired(row.dueAt, tour, now)) {
       log.error(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
         'tour reminder: placement conversion claim STILL unresolved past the grace window - retiring (claim-skipped)',

@@ -5558,21 +5558,26 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(newErrors[0]!['tourId']).toBe(tour.tourId);
     });
 
-    // The grace runs from max(dueAt, tour.updatedAt), not from dueAt alone
-    // (review round M2). claimConversion bumps updatedAt when it writes the
-    // sentinel, so a FRESH claim always gets the full window - even on a rung
-    // that has been pending for hours, which is routine (a quiet-hours
-    // deferral, a roster wait, an hour of worker downtime) rather than an
-    // outage. Both cases drive the poll with a stubbed tour read because the
-    // repo's own patch always bumps updatedAt to the wall clock.
+    // The grace runs from max(dueAt, tour.conversionClaimedAt), not from dueAt
+    // alone (review round M2) and not from updatedAt (review round NEW-2).
+    // claimConversion writes a DEDICATED claim stamp beside the sentinel, so a
+    // FRESH claim always gets the full window - even on a rung that has been
+    // pending for hours, which is routine (a quiet-hours deferral, a roster
+    // wait, an hour of worker downtime) rather than an outage - while an
+    // operator editing the tour cannot extend a STALLED claim forever, which is
+    // exactly what a last-touched-by-anything stamp did. The cases drive the
+    // poll with a stubbed tour read because the repo's own patch always bumps
+    // updatedAt to the wall clock.
     const claimedTourDeps = (
       rig: ReturnType<typeof createGroupTestRig>,
       tour: TourItem,
+      claimedAt: string | undefined,
       updatedAt: string,
     ) => {
       const claimed: TourItem = {
         ...tour,
         convertedPlacementId: `pending:${randomUUID()}`,
+        ...(claimedAt !== undefined && { conversionClaimedAt: claimedAt }),
         updatedAt,
       };
       return {
@@ -5586,7 +5591,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       };
     };
 
-    it('DEFERS a rung hours past due when the claim is FRESH (grace from updatedAt)', async () => {
+    it('DEFERS a rung hours past due when the claim is FRESH (grace from conversionClaimedAt)', async () => {
       const rig = createGroupTestRig();
       const tour = await seedSupersessionTour(rig, 'freshclaim', '+15550280011');
       const row = await tourReminders.create({
@@ -5595,9 +5600,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         dueAt: '2026-12-07T02:00:00.000Z',
       });
 
-      // Five hours overdue, claimed THIS instant.
+      // Five hours overdue, claimed THIS instant - on a tour whose LAST WRITE
+      // was two hours ago. The updatedAt basis would have retired this rung on
+      // the claim's very first tick.
       const pollAt = '2026-12-07T07:00:00.000Z';
-      await runDueTourReminders(pollAt, claimedTourDeps(rig, tour, pollAt));
+      await runDueTourReminders(
+        pollAt,
+        claimedTourDeps(rig, tour, pollAt, '2026-12-07T05:00:00.000Z'),
+      );
 
       expect(rig.world.sent).toHaveLength(0);
       const after = (await tourReminders.listByTour(tour.tourId)).find(
@@ -5623,16 +5633,45 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       });
 
       // Same five-hours-overdue rung; the claim is two hours old, so the window
-      // has genuinely elapsed and the sentinel is stuck.
+      // has genuinely elapsed and the sentinel is stuck. THE TOUR IS BEING
+      // EDITED - updatedAt is this very instant - which is review round NEW-2's
+      // case exactly: `updatedAt` is last-touched-by-ANYTHING, so on a tour
+      // edited more than once an hour the old basis never expired and the
+      // perpetual-"sending shortly" lie was back in a new costume.
       const pollAt = '2026-12-07T08:00:00.000Z';
       const claimedAt = '2026-12-07T06:00:00.000Z';
-      await runDueTourReminders(pollAt, claimedTourDeps(rig, tour, claimedAt));
+      await runDueTourReminders(pollAt, claimedTourDeps(rig, tour, claimedAt, pollAt));
 
       const after = (await tourReminders.listByTour(tour.tourId)).find(
         (r) => r.reminderId === row.reminderId,
       );
       expect(after?.skippedAt).toBe(pollAt);
       expect(after?.skipReason).toBe('conversion_stalled');
+    });
+
+    it('falls back to updatedAt for a claim written BEFORE the stamp existed', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'legacyclaim', '+15550280013');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-07T03:00:00.000Z',
+      });
+
+      // No conversionClaimedAt at all - an in-flight claim from before this
+      // deploy. DEFENSIVE ONLY: the fallback keeps the bound from vanishing, and
+      // it errs toward waiting, which is the safer half of this decision.
+      const pollAt = '2026-12-07T08:00:00.000Z';
+      await runDueTourReminders(
+        pollAt,
+        claimedTourDeps(rig, tour, undefined, '2026-12-07T07:45:00.000Z'),
+      );
+
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBeUndefined();
+      expect(after?.sentAt).toBeUndefined();
     });
 
     it('does NOT defer a FINALIZED tour - a real placementId is not a pending claim', async () => {

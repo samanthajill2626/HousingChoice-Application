@@ -7,10 +7,14 @@ Branch `feat/retry-counter-durable`, cut from `main@5ce9912f`.
 |---|---|---|
 | high | `retry-counter-in-envelope-makes-caps-unreachable` | **closes** |
 | low | `rail-binding-propagation-retry` | **closes** |
-| med | `relay-30003-retry-lineage` | **deferred - see Sec 2.1** |
+| med | `relay-30003-retry-lineage` | **deferred - Sec 2.1** |
 
-Design history: four adversarial review rounds plus a post-gate simplification,
-`design-review/adjudications.md`.
+**This document states decisions, not their history.** Eight review rounds
+produced it; the reasoning, the rejected alternatives and the four corrected
+misattributions live in `design-review/adjudications.md`. Where a decision is
+counter-intuitive the body says WHY, but it never argues with an earlier draft -
+a builder has only this file, and rebuttal-style prose left two sections
+disagreeing after one of them was edited.
 
 ## 1. The invariant
 
@@ -27,135 +31,111 @@ await enqueue(JOB, { ...payload, attempt: nextAttempt }, { runAt: backoff });
 
 The counter only moves when the queue accepts the message. A broken queue
 freezes it, `nextAttempt` is recomputed identically forever, and the close
-branch - the code written specifically to stop a stuck state - is unreachable.
-**The mechanism that advances the state is the mechanism that failed.**
+branch - written specifically to stop a stuck state - is unreachable. **The
+mechanism that advances the state is the mechanism that failed.**
 
 This is the shape that hung a one-second prod voicemail on "Transcribing..."
-indefinitely on 2026-08-16. The voice legs were patched in `a755c6f8`.
+indefinitely on 2026-08-16 (patched for voice in `a755c6f8`).
 
-**The claim is scoped, because the blanket form is false** and building against
-it produces fixes for behavior that already ships (this happened three times
-during design review):
+**Only two sites have this bug.** The blanket form of the claim is false, and
+building against it produces "fixes" for shipping behavior:
 
 | site | state |
 |---|---|
 | `broadcastFanOut`, `relayFanOut` | **envelope-counted. The bug.** |
-| `retrySend` (1:1) | **already durable** - the webhook reads `message.retry_attempt` off the persisted row |
-| `retrySend`'s enqueue failure | **already handled** - twilio.ts:2727-2731 catches, logs ERROR, leaves the message terminal |
-| `groupRail` | **already correct** - the in-repo precedent: wraps its enqueue, returns a degraded result the caller acts on |
-
-So the code change is at **two sites**, and the fix is structural: the count
-moves into a durable record and is claimed BEFORE the enqueue.
+| `retrySend` (1:1) | already durable - the webhook reads `message.retry_attempt` off the persisted row |
+| `retrySend`'s enqueue failure | already handled - twilio.ts:2727-2731 catches, logs ERROR, leaves the message terminal |
+| `groupRail` | already correct - wraps its enqueue, returns a degraded result the caller acts on |
 
 ## 2. Scope
 
 **In:**
 
-- `app/src/jobs/broadcastFanOut.ts`, `app/src/jobs/relayFanOut.ts` - a durable
-  pass counter, claimed at the top of each pass.
+- `app/src/jobs/broadcastFanOut.ts`, `app/src/jobs/relayFanOut.ts` - the durable
+  pass counter and three close paths (Sec 3).
 - `app/src/repos/messagesRepo.ts`, `app/src/repos/broadcastsRepo.ts` - the claim
-  primitive.
-- `app/src/services/groupRail.ts` - binding-propagation handling, plus an
-  opt-in flag on `GroupRailRequest` (Sec 4.2).
-- `app/src/jobs/groupRail.ts` and `app/src/lib/import/convertGroups.ts` - the
-  two callers that pass that flag. One line each.
-- `dashboard/src/routes/contact/deliveryStatus.ts` - the relay 30003 copy
-  (Sec 6), plus two `INTERNAL_CODE_REASONS` entries (Sec 3.4a).
-- `dashboard/src/routes/contact/Timeline.tsx` - three of the four
-  `deliveryReason` call sites (Sec 6). Cameron authorized this on 2026-09-01:
-  `T-DELIVERY-CHIPS` is Tier 2 backlog and no live worktree touches the file.
-- A bounded provider-status audit (Sec 5).
+  primitive (Sec 3.3).
+- `app/src/services/groupRail.ts` - the propagation re-read ladder (Sec 4).
+- `dashboard/src/routes/contact/deliveryStatus.ts` - the relay 30003 copy and
+  two internal-code entries (Sec 5).
+- `dashboard/src/routes/contact/Timeline.tsx` - the relay leg call sites
+  (Sec 5). Cameron authorized this file on 2026-09-01: `T-DELIVERY-CHIPS` is
+  Tier 2 backlog and no live worktree touches it.
+- A bounded provider-status audit (Sec 6).
 
 **Out - hard fences:**
 
-- `routes/webhooks/twilio.ts` **in its entirety.** With relay-30003 deferred,
-  this branch has no reason to touch it at all. (M4, M12, T-PUSH own it.)
-- `app/src/repos/conversationsRepo.ts` - bundle M1. This constrains the rail fix
-  and is why Sec 4 takes the shape it does.
+- `routes/webhooks/twilio.ts` **in its entirety** - M4, M12, T-PUSH.
+- `app/src/repos/conversationsRepo.ts` - M1. This constrains Sec 4.
 - `jobs/tourReminders.ts` - `feat/tour-reminder-ladder-phase-b`.
-- M1's other files: `routes/contacts.ts`, `routes/today.ts`,
-  `rosterResolution.ts`.
-- Delivery-chip rendering beyond the one copy fix - `T-DELIVERY-CHIPS`.
-- Native Twilio group-text receipt behavior and the 1:1 retry/collapse path.
+- `routes/contacts.ts`, `routes/today.ts`, `rosterResolution.ts` - M1.
+- Delivery-chip rendering beyond the copy fix - `T-DELIVERY-CHIPS`.
+- Native group-text receipt behavior and the 1:1 retry/collapse path.
 
 ### 2.1 Why relay-30003 is deferred
 
-`relay-30003-retry-lineage` stays **open**, re-bundled as its own mission.
+`relay-30003-retry-lineage` stays **open** as its own mission. Three review
+rounds failed to converge its lineage state machine - per-attempt idempotency,
+an atomic effective-status promotion, the pointer write-after-send race, cap
+semantics and gate-refusal accounting, all on one DynamoDB item - while the
+anchor converged after one. Its own file lists nine acceptance criteria spanning
+a new job, a new store, webhook changes and dashboard rendering. That is a
+mission, not a rider.
 
-Three adversarial rounds failed to converge its design. The pattern was
-consistent and is documented in the adjudications: each round's blocking
-findings were in the material written to close the previous round's blocking
-findings, and they clustered almost entirely in the lineage state machine -
-per-attempt idempotency, an atomic effective-status promotion, the pointer
-write-after-send race, cap semantics, and gate-refusal accounting, all on one
-DynamoDB item. The anchor issue converged after round one and stayed quiet.
+**What transfers is the pattern, not the data**: a durable counter outside the
+wholesale-written slot, claimed before the work, placed so every exit advances
+it, with a therefore-reachable cap. `fanout_attempt` is a scalar pass counter for
+the continuation ladder and is NOT reusable by the retry ladder - the two must
+not share a field, or a continuation silently consumes the retry budget. The
+lineage mission builds its own per-recipient, per-attempt structure alongside.
 
-That is a mission's worth of design, not a rider. Its own file lists nine
-acceptance criteria spanning a new job, a new lineage store, webhook changes and
-dashboard rendering.
-
-**What actually transfers - stated precisely, because the loose version is
-wrong.** M5 paired them because "the durable attempt record is what that lineage
-hangs off". What this branch lands is the **pattern**: a durable counter outside
-the wholesale-written slot, claimed atomically before the work, placed so every
-exit advances it, with a cap branch that is therefore always reachable.
-
-It does **not** land a counter or a store the lineage can reuse.
-`fanout_attempt` is a scalar pass counter for the CONTINUATION ladder; review
-established the two ladders must not share a field, since a continuation would
-silently consume the retry chain's budget. The lineage mission needs its own
-**per-recipient, per-attempt** structure - which is precisely the part that did
-not converge here - and builds it alongside, following this branch's pattern
-rather than extending its data.
-
-**What ships in the meantime.** No relay retry exists today and none is added
-here, so the dashboard's `will retry` promise on those legs is false in both
-worlds. Sec 6 stops it, which is the mission's "touch the dashboard only as far
-as the current chip stops lying" fence, satisfied more simply than before.
+**Interim user-visible state:** no relay retry exists today and none is added
+here, so the dashboard's `will retry` on relay legs is false in both worlds.
+Sec 5 stops it.
 
 ## 3. The durable pass counter
 
-### 3.1 One scalar per item, claimed at the top of the pass
+### 3.1 One scalar per item
 
 ```
 broadcasts.<broadcastId>.fanout_attempt = number
 messages.<conversationId>#<tsMsgId>.fanout_attempt = number
 ```
 
-A single top-level number, not a per-recipient map and **emphatically not a
-field inside the recipient slot**. The slot is written WHOLESALE on every pass
-(`setRecipientDelivery`, messagesRepo.ts:2777-2785; `setRecipient`,
-broadcastsRepo.ts:584-605), so a counter living there is erased each time a
-status is recorded - it would read 1 forever, **the exact bug this branch
-removes, reintroduced by its own fix.** A builder must not "tidy" it back in.
+**Not a field inside the recipient slot.** Both slots are written WHOLESALE on
+every pass - `setRecipientDelivery` (messagesRepo.ts, `SET
+delivery_recipients.#mk = :d`) and `setRecipient` (broadcastsRepo.ts, the same
+shape for `recipients.#ck`). A counter living there is erased each time a status
+is recorded: it would read 1 forever, which is the exact bug this branch
+removes. Do not "tidy" it into the slot.
 
-**Why a scalar and not per-recipient.** Per-recipient granularity was needed by
-the relay-30003 lineage, which Sec 2.1 defers. For THIS ladder it buys nothing:
-recipients inside a continuation are attempted together and success is terminal,
-so per-recipient counts stay in lockstep with the pass count. Review's rule was
-that the two LADDERS must not share a field - not that this ladder must count
-per recipient. With one ladder left, a scalar is the honest shape, and it counts
-exactly what the envelope's `attempt` counted: **passes**.
+**A scalar, not a per-recipient map.** Recipients inside a continuation are
+attempted together and success is terminal, so per-recipient counts would stay
+in lockstep with the pass count. It counts exactly what the envelope's `attempt`
+counted: passes.
 
-The simplification is not cosmetic. It removes, rather than answers, three
-findings the map version had to carry: the parent-map seeding problem, the
-creation-site edit that would have reached into fenced `twilio.ts`, and the
-400KB item-size question on a 1500-recipient broadcast.
+**Known incidental readers.** `fanout_attempt` is a new top-level attribute on
+`MessageItem`, and the thread route returns message items by spread
+(`api.ts` ~:2152-2165), so it ships to the browser. Harmless - nothing reads it -
+but it is a reader, and the dashboard's mirrored types may warn. Do not add it
+to `dashboard/src/api/types.ts`; leave it unmodelled.
 
-### 3.2 Seeding: none required
+**Writers that would erase it.** Any unconditional whole-ITEM `Put` of a
+broadcast or message row overwrites the attribute. The seed/import paths that do
+this are nominal (they create rows that have no counter yet), but a future
+whole-item Put on a live row would silently reset the ladder. The claim's
+`ADD` is the only writer.
+
+### 3.2 Seeding: none
 
 `ADD` on an ABSENT top-level numeric attribute treats it as zero and creates it.
-There is no parent document path to seed, so there is no seeding step, no
-creation-site edit, and no cold-path fallback.
+No parent document path exists, so there is no seeding step, no creation-site
+edit, and no read-compat work: an item written before this branch claims at 1.
 
-This also settles read-compat completely: an item written before this branch has
-no `fanout_attempt`, and its first claim creates it at 1. **No backfill, no
-migration, no exception handling.** In-flight envelopes carrying `attempt: N`
-still parse; N selects the backoff step only.
+In-flight envelopes carrying `attempt: N` still parse; N selects the backoff
+step only.
 
 ### 3.3 The claim
-
-One primitive per repo:
 
 ```
 claimFanoutPass(<key>, cap): Promise<
@@ -165,536 +145,380 @@ claimFanoutPass(<key>, cap): Promise<
 >
 ```
 
-An atomic `ADD fanout_attempt :one`, with a `ConditionExpression` asserting the
-item exists and `fanout_attempt < :cap` (`attribute_not_exists(fanout_attempt)`
-covering the zero case). `claim.attempt` is read from
-`ReturnValues: 'UPDATED_NEW'`, which now returns **a single number** - the claim
-never re-reads the item to learn its own result, and there is no payload concern
-to weigh.
+An atomic `ADD fanout_attempt :one` with a `ConditionExpression` asserting the
+item exists and `fanout_attempt < :cap` (`attribute_not_exists` covering zero).
+`claim.attempt` is read from `ReturnValues: 'UPDATED_NEW'`, which returns
+`{ fanout_attempt: N }` - the claim never re-reads the item to learn its own
+result.
 
 On `ConditionalCheckFailedException`, a **strongly consistent** read
 (`ConsistentRead: true`) disambiguates `capped` from `missing`; an eventually
 consistent read could report `missing` for an item that exists and skip the
 close.
 
-Atomicity matters even with one ladder: two concurrent deliveries of the same
-continuation cannot both claim the same pass number.
+**Accepted risk:** `ADD` is not idempotent, so an SDK-level transport retry that
+succeeded server-side but appeared to fail could double-increment, costing one
+rung. The AWS SDK's default retry policy makes this rare, and the consequence is
+a shortened ladder, never a duplicate send. Not worth a transaction.
 
-### 3.4 Placement: at the TOP of the pass, so every exit is covered
-
-This is the load-bearing detail, and an earlier revision got it wrong by putting
-the claim at the continuation point:
+### 3.4 Placement: after the duplicate-delivery guard, before the send loop
 
 ```
 defineJobHandler(JOB, async (raw) => {
   const payload = parse(raw);
   ...
-  if (!await putJobExecutionMarker(jobId, ...)) return;   // true duplicate: no claim
+  // existing duplicate-delivery guard, unchanged, INCLUDING its else-branch
+  // (both handlers WARN and continue when jobId is absent)
+  const jobId = getContext()?.jobId;
+  if (typeof jobId === 'string' && jobId.length > 0) {
+    if (!await messages.putJobExecutionMarker(jobId, ...)) return;   // duplicate
+  } else { log.warn(...); }
 
-  const claim = await repo.claimFanoutPass(key, CAP);     // <-- HERE
+  const claim = await repo.claimFanoutPass(key, CAP);   // <-- HERE
   if (claim.outcome === 'missing') { log; return; }
-  if (claim.outcome === 'capped')  { await close(); return; }
+  if (claim.outcome === 'capped')  { await closeAtCap(); return; }   // close B
 
   ... the send loop, which may throw ...
   ... the continuation enqueue, which may throw ...
 });
 ```
 
-**Claiming at the continuation point would cover only the enqueue failure.**
-Each loop also carries an earlier `throw` for an unrecognised send error
-(broadcastFanOut.ts:459, relayFanOut.ts:535) that never reaches the continuation
-block at all.
+**AFTER the marker.** The ladder advances on CONTINUATIONS, and every
+continuation is a fresh `enqueue()` - `buildEnvelope` mints a new
+`jobId: randomUUID()` per enqueue (jobs.ts:188) - so a continuation always
+passes the marker and always claims. Placing the claim before the marker buys
+nothing and does active harm: a duplicate delivery would then consume a rung and
+could itself reach `capped`, running a close that is not idempotent and can flip
+a finished broadcast to failed.
 
-Claiming at the top means **every** exit from the handler - unknown send error,
-enqueue failure, crash, timeout - happens after the count advanced. The counter
-records what was actually attempted rather than what was successfully scheduled,
-which is what makes it a truthful record of the work done.
+**BEFORE the send loop.** Every exit from the real work - the unrecognised-error
+`throw` (broadcastFanOut.ts:456-459, relayFanOut.ts:531-535), the enqueue
+failure, a crash, a timeout - then happens after the count advanced. The counter
+records what was ATTEMPTED, not what was successfully scheduled.
 
-**The claim sits BEFORE the marker, and this is forced.** The obvious ordering -
-marker first, so a duplicate cannot consume a pass - does not work here, because
-**`jobId` is STABLE across redeliveries**:
+**What a redelivery does: nothing, by design.** `jobId` is stable across SQS
+redeliveries (the envelope carries it in the message body; `dispatchJob` uses a
+complete envelope verbatim, jobs.ts:262, and its docblock says "the stable
+jobId"), and `putJobExecutionMarker` is a conditional PUT with no TTL. So a
+redelivered envelope returns at the marker. That is correct duplicate
+suppression - the ladder does not depend on it.
 
-- `buildEnvelope` mints `jobId: randomUUID()` ONCE, at enqueue (jobs.ts:188),
-  and the envelope travels in the SQS message body.
-- `dispatchJob` uses a complete envelope VERBATIM (jobs.ts:262); the fresh
-  `randomUUID()` nearby is only for the synthesized envelope-less path. Its own
-  docblock says "the new jobRunId + **the stable jobId**" (jobs.ts:286).
-- `putJobExecutionMarker` is a conditional PUT with **no TTL**
-  (messagesRepo.ts:2630-2649), so the suppression is permanent.
+**Consequence, and it is a filed bug, not this branch's:** because a redelivery
+is a no-op, the pre-existing `throw`-to-force-redelivery in both loops retries
+nothing. See Sec 8 obligation 0.
 
-A redelivery therefore hits the marker, gets `false`, and returns. With the
-claim after the marker, `fanout_attempt` would freeze at 1 forever - **the exact
-frozen-counter bug this branch exists to remove.**
+### 3.5 The existing `nextAttempt` guard is REMOVED
 
-**The cost, stated exactly.** A true duplicate delivery now consumes a retry
-rung without attempting any work - the ladder is shortened by one. That is the
-right trade against a counter frozen forever, but it is a real cost and not a
-free one.
+The claim's cap replaces it. Keeping both would gate the same ladder twice with
+different semantics and different counters.
 
-What a duplicate does NOT do is send twice, and the credit for that belongs to
-the **marker**, which returns above the send loop: the per-recipient
-terminal-status skip is never even evaluated on that path. The skip is the
-second layer, and it earns its keep on legitimate CONTINUATIONS, where a
-recipient already `sent` must not be re-sent by the next pass.
+Concretely, in each continuation block: delete the `const nextAttempt = ... + 1`
+computation and the `if (nextAttempt > MAX_*)` branch condition. The BODY of
+that branch survives as close A (Sec 3.6). The enqueued payload's `attempt`
+field is set from `claim.attempt` and is advisory - logged, and used to select
+the backoff step, never for a cap decision.
 
-### 3.4a Enqueue failure closes IMMEDIATELY
+**Cap value:** `cap = MAX_FANOUT_ATTEMPTS` / `MAX_BROADCAST_ATTEMPTS`, unchanged
+in value. The old code closed when `nextAttempt > MAX`; the claim refuses when
+`fanout_attempt` has reached `MAX`. Same number of passes. Test 6 pins the total
+provider-send count against `main`, because this is invisible in any test that
+does not count sends.
 
-The same fact overturns the other half. An earlier revision had the handler
-simply THROW on enqueue failure and rely on SQS redelivering into the cap. **A
-redelivery does no work** - it is suppressed at the marker. Nothing comes back.
-
-So on enqueue failure the handler runs the **close branch immediately** - which
-is what the anchor issue proposed ("wrap each re-enqueue and, on failure, run
-the cap/close branch immediately") and what `a755c6f8` did for the voice legs.
-
-```
-try {
-  await enqueue(JOB, { ...payload, attempt: claim.attempt }, { runAt: backoff });
-} catch (err) {
-  log.error(...);
-  await close('enqueue_failed');   // the ONLY path to terminal
-  return;
-}
-```
-
-**The close on this path carries its own error code, not `transient_cap`.** The
-cap branch's `transient_cap` means "we retried and gave up"; here we scheduled
-nothing and retried zero times, so reusing it would tell an operator the
-recipient exhausted retries that never ran.
-
-The full consumer trace for a recipient error code, since a new value entering a
-shared vocabulary is how invariants break quietly:
-
-- **Writers** - `transient_cap` has exactly two (broadcastFanOut.ts:482,
-  relayFanOut.ts:575). No other producer.
-- **Branching readers** - **none.** Nothing in `app/src`, `dashboard/src` or
-  `e2e` compares against `transient_cap`, so no logic changes.
-- **Rendering reader** - `deliveryReason` (deliveryStatus.ts:628-640), which
-  falls through unmapped codes to `Delivery failed (error <code>)`.
-
-So `enqueue_failed` is safe to introduce. It is registered in
-**`INTERNAL_CODE_REASONS`** (deliveryStatus.ts:609-611), the map for app-authored
-rather than carrier codes, with copy naming what actually happened: the send
-could not be scheduled, and no retry was attempted.
-
-**`contact_opted_out` is precedent for the MAP, not for the rendering path.**
-It is deliberately intercepted BEFORE `deliveryReason` on the per-leg path
-(deliveryStatus.ts:505-516), precisely because its copy is written for the
-message-level AGGREGATE and would misread on one member's row. The two codes
-here get **no such interception**, so each renders in BOTH positions - the
-rollup and the per-recipient row - from one string.
-
-That is a real constraint on the copy, not a detail: it must read correctly in
-both. Copy scoped to the aggregate ("nothing was sent") is wrong on a row; copy
-scoped to a row is wrong in a rollup covering several. Write it recipient-
-neutral, and **test 7e asserts both positions**, not just one.
-
-**And `transient_cap` is registered there too, in the same change.** It is
-app-authored and currently unmapped, so it already reaches operators today as
-the raw `Delivery failed (error transient_cap)`. Adding the code being
-introduced while leaving its sibling rendering as a bare token would be
-half a fix in a file this branch is already editing. Two map entries, no logic.
-
-Round 1's objection to this (that an immediate close discards retries the
-durable counter made reachable) was sound reasoning from a false premise: those
-retries are not reachable, because redelivery is a no-op. The durable counter
-still earns its place - it makes the cap reachable across the LEGITIMATE
-continuations, each of which is a new enqueue with a fresh `jobId` - but it
-cannot rescue a failed enqueue on its own.
-
-**Pre-existing bug, discovered here and FILED, not fixed.** Both fan-outs throw
-deliberately on an unrecognised send error, commented "let the job FAIL so SQS
-redelivers the whole envelope (the marker is per-jobId; the redelivery is a
-fresh jobId via the visibility timeout)" - broadcastFanOut.ts:456-459,
-relayFanOut.ts:531-535. **That comment is false**, and `retrySend.ts:122-128`
-states the truth. On `main` today that throw is a no-op that burns receive count
-to the DLQ while the row stays `sending`. It is the anchor issue's symptom
-through a third door, it predates this branch, and fixing it means deciding what
-an unknown per-recipient error should DO - a behavior change with its own blast
-radius. Sec 9 files it.
-
-### 3.5 Cap semantics
-
-Because the claim now counts **passes**, it counts exactly what the envelope
-field counted, and the translation is one-for-one:
-
-> `cap = MAX_FANOUT_ATTEMPTS` / `MAX_BROADCAST_ATTEMPTS`, unchanged in value and
-> in meaning. The total number of send passes per recipient is identical to
-> `main`.
-
-The old code closed when `nextAttempt > MAX`; the claim refuses when
-`fanout_attempt` has reached `MAX`. Same number of passes, no off-by-one - the
-hazard that existed only because the map version counted enqueues instead.
-
-A test still asserts the total provider-send count per recipient equals `main`'s
-on both ladders, because this is invisible in any test that does not count.
-### 3.6 There are TWO closes, and only one of them is the existing branch
-
-An earlier revision said "the close is the EXISTING cap branch" at both call
-sites. **That is wrong at the top-of-pass site, and wrong in a way that ships a
-false success.**
+### 3.6 THREE closes, and only one already exists
 
 The existing cap branch is nested inside `if (transientRemaining.length > 0)`
-(broadcastFanOut.ts:478-495, relayFanOut.ts:570-580). It closes over
-`transientRemaining` - a LOCAL list of the recipients this pass deferred. A
-top-of-pass `capped` claim happens **before the send loop runs**, so that list
-is empty and the branch is unreachable. A builder following the old text would
-reach for the only other thing there - a bare `finalize()` - which marks the
-broadcast **sent while its recipients are still `queued`**: a silent false
-success, strictly worse than the hang this branch removes.
+and closes over `transientRemaining`, a LOCAL list of the recipients THIS PASS
+deferred. It is unreachable from the top of the handler, where that list is
+empty. A top-of-pass close that called only `finalize()` would mark the
+broadcast **sent while its recipients are still `queued`** - a silent false
+success, worse than the hang.
 
-This is the same failure mode the spec itself warns about elsewhere: a mechanism
-credited BY NAME without tracing whether it is on the path in question. Sec 3.6
-was written in round 3, when the claim still sat at the continuation point and
-the sentence was true; the claim has moved twice since and this section did not
-move with it.
+| close | fires when | recipient set | code |
+|---|---|---|---|
+| **A. Continuation cap** (existing body, new trigger) | the send loop ran and deferred recipients hit the cap | `transientRemaining` | `transient_cap` |
+| **B. Top-of-pass cap** (NEW) | `claimFanoutPass` returns `capped` | the envelope's `recipientKeys` still non-terminal | `transient_cap` |
+| **C. Enqueue failure** (NEW) | `enqueue` threw after a successful pass | `transientRemaining` | `enqueue_failed` |
 
-| close | when | what it does |
-|---|---|---|
-| **A. Continuation cap** (EXISTING, unchanged) | the send loop ran and deferred recipients hit the cap | mark `transientRemaining` failed / `transient_cap`, bump stats, emit progress, `finalize()` |
-| **B. Top-of-pass cap** (NEW) | `claimFanoutPass` returns `capped`, before any sending | mark the envelope's still-non-terminal `recipientKeys` failed / `transient_cap`, bump stats, emit progress, `finalize()` |
-| **C. Enqueue failure** (NEW, Sec 3.4a) | `enqueue` threw after a successful pass | mark the deferred recipients failed / `enqueue_failed`, bump stats, emit progress, `finalize()` |
+All three mark their recipients failed, bump stats, emit progress, and (in
+`broadcastFanOut`) call `finalize()`. `relayFanOut` has no `finalize()`; its
+closes end after marking. Factor one helper taking a recipient set and a code.
 
-B and C are new code, not reuse. Both operate on a recipient set the existing
-branch does not have in scope: B on `payload.recipientKeys` (the envelope's
-remaining set), C on `transientRemaining`.
+**C closes immediately rather than throwing.** A redelivery is suppressed at the
+marker (Sec 3.4), so nothing comes back - an immediate close is the only path to
+a terminal state. This is what the anchor issue prescribes and what `a755c6f8`
+did for voice.
 
-All three must leave the SAME shape of terminal state - no recipient left
-`queued`, the row finalized - which is what test 5a asserts. `relayFanOut` has
-no `finalize()`; its three closes end after marking recipients.
+**`enqueue_failed` is a distinct code because `transient_cap` would be a lie**:
+on path C nothing was retried. Sec 5 registers both for rendering.
 
 ### 3.7 Preserve relayFanOut's existing backoff exactly
 
 `relayFanOut` selects its delay with `fanOutBackoffMs(payload.attempt ?? 1)`
-while the continuation runs AS `nextAttempt` - an apparent off-by-one against
-`broadcastFanOut`'s commented, deliberate choice of the next step. It sits
-inside the edited region. **This branch does not change it.** It is a timing
-change with its own blast radius and no issue asking for it. Do not silently
-"fix" it while editing around it; if it is wrong, it is a separate issue.
+while the continuation runs AS the next attempt - an apparent off-by-one against
+`broadcastFanOut`'s deliberate choice of the next step. It sits inside the
+edited region. **Do not change it.** It is a timing change with its own blast
+radius and no issue asking for it; if it is wrong, it is a separate issue.
 
 ## 4. Group rail binding propagation
 
-### 4.1 What is actually wrong
+### 4.1 The defect
 
-The read-back is **not** verifying that Twilio performed the add. It harvests
-`messagingBinding.address`, the receipt-attribution key. `buildParticipantMap`
-(groupRail.ts:224-231) **skips any participant whose `address` is empty** - and
-that field is what Twilio populates asynchronously. The participant exists the
-instant Twilio returns 200; the binding materializes seconds later. So
-`missingFromMap` reports members "missing" who are provably attached.
+`buildParticipantMap` (groupRail.ts:224-231) skips any participant whose
+`messagingBinding.address` is missing or empty - including, by design, the
+projected business-number participant on every rail. Twilio populates that
+binding ASYNCHRONOUSLY, so a seconds-old rail reads as short of its roster and
+`ensureGroupRail` enters the repair path.
 
 Measured on the 2026-08-13 migration of 132 threads: 81
 `group_rail_participants_incomplete` warnings, 178
 `group_rail_participant_add_failed` refusals (Twilio 50386/50437 "participant
-already exists"), and 2 false `rail_failed` records for rails a direct read
-minutes later showed fully bound.
+already exists" - the members were there all along), and 2 `rail_failed` records
+for rails a direct read minutes later showed fully bound.
 
-### 4.2 Where the fix applies - and where it must NOT
+### 4.2 The fix: re-read before concluding damage
 
-`ensureGroupRail` has three callers:
+**A bounded ladder, and nothing else.** On a rail created in THIS call whose map
+is short, re-read participants up to **2** more times, at **500ms then 1500ms**,
+before entering repair. Members whose binding appears are simply present; only
+members still unbound after the ladder proceed to repair, exactly as today.
 
-| caller | this branch |
+The delays are a starting point sized against a propagation window measured in
+seconds, named here so they are reviewable and tunable rather than buried.
+
+**The read-back stays authoritative, and completeness is NOT derived from the
+create's `failures` list.** The code's own rationale forbids that substitution:
+
+> "The re-read is authoritative: an add can 'succeed' and still leave a shape
+> Twilio will not bind, and a repair that trusted its own return value would
+> store a map that does not describe the rail." (groupRail.ts:536-538)
+
+A create can therefore report no failure for a member who is nonetheless not
+bound. `created.failures` is also collapsed to a single boolean
+(`authorRefusedOnCreate`, groupRail.ts:463) and is gone by the decision point,
+so using it would mean threading it forward to defeat a guarantee the file
+deliberately keeps. The ladder fixes the timing false-alarm without touching the
+authority model.
+
+**Repair refusals 50386/50437 are treated as success-pending-re-read.** These
+codes appear nowhere in the current source - this is NEW handling, not a tweak.
+An "already exists" refusal is positive evidence the member is attached, so it
+must not count as a repair failure; the authoritative re-read that follows
+repair decides the outcome either way.
+
+### 4.3 Every caller, and what each gets
+
+`ensureGroupRail` has FIVE callers. The ladder is opt-in via a flag on
+`GroupRailRequest` (default off), so caller identity is explicit rather than
+inferred - the service cannot see who called it, and the repair rules are shared
+code.
+
+| caller | ladder |
 |---|---|
-| job (`jobs/groupRail.ts:59`) | **fixed** |
-| import (`lib/import/convertGroups.ts:598`) | **fixed** - and this is where the measured harm occurred |
-| **inline send backstop (`groupSend.ts:381`, `healRail` :425)** | **UNCHANGED** |
+| `jobs/groupRail.ts:59` (job) | **on** |
+| `lib/import/convertGroups.ts:598` (import - where the measured harm occurred) | **on** |
+| `app/scripts/rail-verify.ts:198` (operator tool - how the harm was observed) | **on** |
+| `services/groupSend.ts:381` (inline send backstop) | **off** |
+| `services/groupSend.ts:425` (`healRail`) | **off** |
 
-**The inline path is left alone deliberately, and this is a hard constraint, not
-a preference.** Two independent reasons, both discovered in review:
+The two `groupSend` paths are reached from the send route (api.ts:1361), so a
+delay ladder there would sit inside a staff HTTP request. They keep today's
+behavior exactly: with the flag absent, the ladder, the 50386/50437 handling and
+the re-read scoping are all skipped.
 
-1. It is reached from the send route (api.ts:1361), so a re-read ladder with
-   delays would sit inside a staff HTTP request.
-2. Every workable variant leaked the `rail_creating` claim. That claim is
-   released ONLY by `setTwilioConversation` or `recordRailFailure`
-   (`conversationsRepo.ts`, the `recordRailFailure` / `setTwilioConversation`
-   declarations around :979 and :1008 and their implementations at :2436 and
-   :2484). A path that does neither wedges the thread until the ~5-minute
-   expiry, and introducing a third release means editing
-   `conversationsRepo.ts` - **a Sec 2 hard fence owned by M1.**
+**This means the defect remains live on the inline paths**, and the issue is
+closed only for the three that opt in. Sec 8 records that honestly rather than
+claiming a clean sweep.
 
-**How "unchanged" is expressed** - `ensureGroupRail` does not know its caller,
-and the repair / `rail_failed` / 50386 rules are shared code (spec R4). Caller
-identity is therefore made EXPLICIT rather than inferred: `GroupRailRequest`
-gains an optional flag (default off) that the job and import callers pass to opt
-IN to the propagation handling. `groupSend` passes nothing, so every shared rule
-in Sec 4.3 is bypassed on that path and its behavior is bit-for-bit today's.
+### 4.4 Unchanged
 
-The measured harm came from the import path. Fixing the two job-side callers
-closes the reported issue without touching the request path or the claim
-lifecycle.
+The adopt path's read-back, the compose gate (spec 6.1 - a map must cover the
+roster before compose is enabled), the dead-adoptee delete-and-recreate heal,
+the claim protocol, and the deterministic UniqueName protocol.
 
-### 4.3 The rule
+## 5. Dashboard
 
-**The premise, stated explicitly.** The bulk `ConversationWithParticipants`
-create returns `failures: []` **unconditionally** (groupConversations.ts:486):
-it is all-or-nothing, so a 200 means Twilio accepted every participant and a
-refusal throws instead. Per-member `failures` are real only on the
-individual-add fallback (`attach`, groupConversations.ts:539-569). The rule
-below is safe on both paths but for different reasons, and a future change
-making the bulk create partial would break it silently - **so a test pins the
-premise.**
+### 5.1 The relay 30003 copy
 
-> A member the create did NOT refuse is attached, on Twilio's own 200. A short
-> map for that member is binding propagation. It is never a `rail_failed`.
+`ERROR_CODE_REASONS['30003']` is `'Phone unreachable - will retry'`. For relay
+fan-out legs no retry is scheduled - the relay pointer branch of `/status`
+returns before the 1:1 retry branch - and this branch adds none.
 
-Everything follows from that one sentence:
+**Native group text is NOT included.** Its 30003 retry is real: the 30005/30006
+arm (twilio.ts:2633) and the 21610 arm (:2691) each carry a `group_text` guard,
+and **the 30003 arm carries none**, so a group-text 30003 reaches
+`enqueueSendRetry` like any 1:1.
 
-- **Ladder** - a short map on a fresh create triggers at most **2** re-reads at
-  **500ms then 1500ms** (2s of added latency worst case, on job and import paths
-  only). The numbers are named rather than left as "short delays" so they are
-  reviewable and tunable: they are a starting point sized against a propagation
-  window measured in seconds, not a derived constant. A rail still short after
-  both re-reads proceeds (see the rule above); the ladder never blocks
-  indefinitely waiting for a binding.
-- **Repair** is entered only for members the create actually refused.
-- **`rail_failed`** requires a repair refusal. Not a short map, and not a member
-  still unbound after the ladder.
-- **50386/50437 during repair** are success-pending-re-read, not refusals - they
-  are positive evidence the member is attached. Scoped to the repair of a
-  freshly created rail, so the adopt path's read-back authority is untouched.
-- **Still unbound after the ladder** - logged below alarm level with the
-  propagation reason named; the rail proceeds.
+So the override is keyed on `rosterKind === 'relay'`. `presentLegDelivery`
+already takes `rosterKind` (deliveryStatus.ts:500-505); `presentRelayDelivery`
+does not and gains it, passed by its caller, mirroring the existing parameter
+rather than inventing a discriminator.
 
-### 4.4 What does not change
+**All SIX `deliveryReason` call sites, and what each gets:**
 
-- The **adopt** path keeps its read-back as authoritative. We did not create
-  those participants and have no `failures` list, so Twilio is the only source
-  of roster truth there.
-- **The compose gate is not weakened.** Spec 6.1 requires a participant map
-  covering the roster before compose is enabled. What changes is only the
-  CONCLUSION drawn from a short map on a fresh create: propagation, not damage.
-  A member the create refused and repair could not attach is still a failure,
-  exactly as today.
-- The dead-adoptee delete-and-recreate heal, the claim protocol, and the
-  deterministic UniqueName protocol are untouched.
+| site | surface | change |
+|---|---|---|
+| `deliveryStatus.ts:416` | relay/group rollup | override when relay |
+| `Timeline.tsx:582` | per-leg reason | override when relay |
+| `Timeline.tsx:1045` | per-recipient row | override when relay |
+| `Timeline.tsx:849` | message-level 1:1 bubble | **unchanged** |
+| `Timeline.tsx:1390` | **EmailCard** - not a relay leg at all | **unchanged** |
+| `DeliveryBadge.tsx:31` | **broadcast results badge** | **unchanged** |
 
-## 5. The provider-status sweep
+The three relay sites must agree: `Timeline.tsx` states the invariant in its own
+comment (~:1035-1042) that one flag feeds the rollup, the row and the accessible
+name so the three cannot disagree. Fixing the rollup alone would break it.
 
-The high's file flags an un-done sweep: "any other place that branches on a raw
-provider status string with a `!== 'success'` fallthrough has the same
-exposure."
+The `(error 30003)` tail is appended by `deliveryReason` for
+`ERROR_CODE_REASONS` codes and is unchanged.
 
-A literal grep for `!== 'success'` across `app/src` returns **zero hits**. The
-real shape from the voice incident is broader: **a branch on a raw provider
-status whose unenumerated default is non-terminal** ("not finished yet, keep
-waiting") rather than terminal. `voiceTranscript.ts` now models the correct form.
+### 5.2 The two internal codes
 
-Bounded to a definite enumeration: every site in `app/src` that branches on a
-status string **received from a provider** - Twilio message/call/
-transcription/conversation status, SES event type, and the media and
-job-dispatch status reads. For each, record at `file:line` whether the
-unenumerated default is terminal.
+`transient_cap` and `enqueue_failed` are app-invented codes that no carrier
+emits and no operator can look up. Unmapped, they render through
+`deliveryReason`'s fallback as `Delivery failed (error transient_cap)` -
+**precisely the defect `INTERNAL_CODE_REASONS` exists to fix**, per its own
+docblock (deliveryStatus.ts:591-611): plain operator copy and, deliberately, NO
+`(error <code>)` tail.
 
-Disposition, **by region, not by filename** - `twilio.ts` is an anchor file of
-the bundle but Sec 2 fences all of it, so a filename-scoped rule would authorize
-edits the fences forbid:
+Both are registered there. `transient_cap` is included even though it predates
+this branch: introducing `enqueue_failed` correctly while leaving its sibling
+rendering as a raw token would be half a fix in a file already being edited.
+
+**Copy constraint.** `contact_opted_out` is precedent for the MAP but not for
+the rendering path - it is deliberately intercepted before `deliveryReason` on
+the per-leg path (deliveryStatus.ts:505-516) because its copy is written for the
+message-level aggregate. These two codes get no interception and render in BOTH
+positions from one string, so each must read correctly as a rollup summary and
+on a single recipient's row. Test 10 asserts both positions.
+
+## 6. The provider-status sweep
+
+The anchor issue flags an un-done sweep for `!== 'success'` fallthroughs. A
+literal grep returns **zero hits**; the real shape from the voice incident is a
+branch on a raw provider status whose unenumerated default is NON-TERMINAL
+("keep waiting") rather than terminal.
+
+Bounded to a definite enumeration: every site in `app/src` branching on a status
+string received from a provider - Twilio message/call/transcription/conversation
+status, SES event type, and the media and job-dispatch status reads. Record at
+`file:line` whether the unenumerated default is terminal.
+
+Disposition **by region, not by filename** (`twilio.ts` is an anchor file but
+Sec 2 fences all of it):
 
 - inside a region this branch already edits -> fixed here;
-- anywhere else -> **filed as one new issue** with citations.
+- anywhere else -> **filed as one new issue**.
 
-**One in-region finding is exempt, and it is named in advance** so the rule and
-the exception do not collide when the builder hits it. The sweep is guaranteed
-to surface the unknown-error `throw` in both fan-outs
-(broadcastFanOut.ts:456-459, relayFanOut.ts:531-535) - squarely in a region this
-branch edits, and squarely a non-terminal default. It is **filed, not fixed**
-(Sec 3.4a, Sec 9 obligation 0): the remedy is a decision about what an
-unrecognised per-recipient error should DO, and it must preserve a guarantee
-about never texting twice that the current code gets from the execution marker.
-That is a behavior change with its own blast radius, not a sweep fix.
+**One in-region exception, named in advance** so the rule does not collide with
+Sec 3.4 mid-sweep: the unknown-error `throw` in both fan-outs is in-region and
+is deliberately NOT fixed - see Sec 8 obligation 0.
 
-The audit is committed as a mission record either way. A sweep that finds
-nothing is a valid result that still gets written down.
-
-## 6. Dashboard - stop the chip lying
-
-**The problem.** `ERROR_CODE_REASONS['30003']` is
-`'Phone unreachable - will retry'` (em dash in the live string). For relay
-fan-out legs and native group-text legs **no retry is scheduled** - the relay
-pointer branch of `/status` returns before the 1:1 retry branch - and this
-branch does not add one. The promise is false.
-
-**The mechanism already exists.** `deliveryReason(errorCode, opts)`
-(deliveryStatus.ts:628-640) already selects `MMS_ERROR_CODE_REASONS` over
-`ERROR_CODE_REASONS` from an `opts.media` flag. The fix follows that precedent
-exactly: a sibling override map selected by a new opt, passed by
-`presentRelayDelivery` (deliveryStatus.ts:387-416), which already calls
-`deliveryReason(s.errorCode, opts)`.
-
-**Native group text DOES get a retry - verified, and it changes the scope.** An
-earlier revision widened the fix to every leg `presentRelayDelivery` renders, on
-the assumption that group-text legs get no retry either. **That assumption is
-false.** The 30005/30006 arm (twilio.ts:2633) and the 21610 arm (:2691) each
-carry an explicit `group_text` guard; **the 30003 arm carries none**, so a
-native group-text message's 30003 reaches `enqueueSendRetry` like any 1:1.
-
-So the copy change is scoped to **relay legs only**, and the presenter is told
-which it is rather than inferring it.
-
-| surface | 30003 copy |
-|---|---|
-| 1:1 bubble | `Phone unreachable - will retry` - **unchanged, correct**: a retry is scheduled |
-| native group-text legs | **unchanged, correct**: the 30003 arm has no group guard, so a retry is scheduled |
-| broadcast badge | unchanged |
-| **relay fan-out legs** | **`Phone unreachable`** - no retry exists, here or after this branch |
-
-**All FOUR `deliveryReason` call sites are updated, not just the rollup.**
-Fixing `presentRelayDelivery` alone would leave the per-recipient row beneath
-the chip still promising a retry the rollup above it had stopped promising -
-breaking the invariant `Timeline.tsx` states in its own comment at :1035-1042
-("One `isMms` feeds the rollup, this row and the accessible name, so the three
-cannot disagree"). The sites are `Timeline.tsx:582`, `:849`, `:1045`, `:1390`
-plus the `presentRelayDelivery` pass-through at `deliveryStatus.ts:416`; each
-receives the same relay discriminator its `media` flag already travels beside.
-
-**On touching `Timeline.tsx`.** `_CLUSTERS.md` lists it under
-`T-DELIVERY-CHIPS`, but that is **Tier 2** - unscheduled backlog, not the
-ordered mission queue - and no live worktree is touching `Timeline.tsx` or
-`deliveryStatus.ts` (checked across all ten). Cameron authorized the edit on
-that basis. A partial fix here would be worse than none.
-
-The `(error 30003)` tail is appended by `deliveryReason` itself and is
-unchanged; the override supplies only the phrase. The em dash in the untouched
-1:1 string stays byte-identical - it is pre-existing text, and the ASCII rule
-governs newly authored lines.
-
-`ERROR_CODE_REASONS` is dashboard presentation, not automated send copy, so the
-message-catalog rule does not apply (its own comment at :606 says so).
+A sweep that finds nothing is a valid result and is still written down.
 
 ## 7. Testing
 
 ### Unit / integration (vitest, DynamoDB Local)
 
-1. **The counter survives a status write** - the regression test for the defect
-   that nearly shipped (Sec 3.1). Claim, then perform a normal per-recipient
-   status write, then read the count back: it must still be there. **Fails
-   against any design that puts the counter in the slot.**
-2. **Claim is atomic** - concurrent claims on one key yield distinct numbers;
-   exactly one reaches the cap boundary.
-3. **A dead queue reaches a terminal state in ONE pass** - `enqueue` stubbed to
-   always throw. The close runs immediately (Sec 3.4a): the broadcast finalizes
-   with no recipient left `queued` and stops showing "Sending"; relay marks
-   every deferred recipient `failed`. **This is the regression test for the
-   anchor bug and must fail on `main`.** It must NOT be written as "throw, then
-   redeliver, then reach the cap" - redelivery is suppressed by the marker, so
-   such a test would pass vacuously while proving nothing.
-4. **The broadcast row leaves "Sending"** on that path - asserted on the row,
-   not a log line.
-5. **The claim advances across legitimate continuations** - a successful
-   continuation chain walks `fanout_attempt` 1, 2, 3 and closes at the cap.
-5a. **All THREE closes leave the same terminal shape** (Sec 3.6) - drive each of
-   A (continuation cap), B (top-of-pass cap) and C (enqueue failure) and assert
-   in every case: **no recipient left `queued`**, stats reconciled, and the
-   broadcast finalized. **B is the discriminating one**: against a design that
-   reuses the existing nested branch, B marks nothing and finalizes the
-   broadcast as SENT with recipients still queued - a false success no other
-   test in this list would catch.
-6. **Total send count is unchanged from `main`** on both ladders (Sec 3.5).
-7. **Claim against a pre-branch item** - an item with no `fanout_attempt`
-   attribute claims successfully at 1 (`ADD` creates it), with no seeding step.
-7a. **The claim precedes the execution marker** - pinned by construction, since
-   the ordering is forced by `jobId` stability (Sec 3.4) and would otherwise be
-   an inviting "tidy". Assert that a redelivered envelope carrying the SAME
-   `jobId` still advances `fanout_attempt`, even though the handler returns at
-   the marker.
-7b. **A duplicate delivery cannot double-send** - assert no provider send at
-   all on a same-`jobId` redelivery. The guarantee comes from the MARKER, which
-   returns above the send loop; do not word this test as if the terminal-status
-   skip were responsible, because that skip is never reached on this path.
-7c. **The terminal-status skip covers CONTINUATIONS** - the second layer, on the
-   path where it is actually evaluated: a legitimate continuation must not
-   re-send to a recipient already `sent`.
-7d. **The enqueue-failure close uses `enqueue_failed`**, not `transient_cap`
-   (Sec 3.4a) - so an operator is not told retries were exhausted when none ran.
-7e. **Both internal codes render as prose in BOTH positions** - `enqueue_failed`
-   and `transient_cap` each resolve through `INTERNAL_CODE_REASONS` rather than
-   falling through to `Delivery failed (error <code>)`, asserted on the
-   aggregate rollup AND on a single per-recipient row, since one string serves
-   both with no interception (Sec 3.4a).
-8. **Rail** - a create whose participants have no binding yet resolves without
-   repair and without a `rail_failed`; a create with a real per-member failure
-   still repairs; 50386/50437 during repair is not a refusal; the adopt path is
-   unchanged. **The inline path is pinned by CONSTRUCTION, not by adjective**:
-   assert `groupSend` calls `ensureGroupRail` without the opt-in flag, and that
-   with the flag absent the ladder, the repair-scoping and the 50386 handling
-   are all skipped. ("Byte-identical to `main`" is not an assertion a test can
-   make.)
-9. **The bulk-create premise is pinned** - `ConversationWithParticipants`
-   returning `failures: []` is all-or-nothing (Sec 4.3). If it ever returns 200
-   with a partial roster, this test fails rather than the rule breaking silently.
-10. **Chip copy, all four call sites** - a relay 30003 leg renders
-    `Phone unreachable` with the `(error 30003)` tail in the rollup, the
-    per-recipient row and the accessible name, so the three cannot disagree;
-    **1:1, native group text and the broadcast badge are unchanged**.
+1. **The counter survives a status write** - claim, perform a normal
+   per-recipient status write, read the count back. **Fails against any design
+   that puts the counter in the slot.**
+2. **Claim is atomic** - concurrent claims yield distinct numbers; exactly one
+   reaches the cap boundary.
+3. **Enqueue failure reaches a terminal state in ONE pass** - `enqueue` stubbed
+   to throw. Close C runs: no recipient left `queued`, broadcast finalized and
+   no longer "Sending". **Must fail on `main`.** Do NOT write this as
+   "throw, redeliver, reach the cap" - a redelivery is suppressed at the marker,
+   so such a test would pass vacuously.
+4. **The broadcast row leaves "Sending"** on that path - asserted on the row.
+5. **The ladder advances across continuations** - a chain walks
+   `fanout_attempt` 1, 2, 3 and closes at the cap.
+6. **Total provider-send count per recipient equals `main`'s** on both ladders.
+7. **All THREE closes leave the same terminal shape** - drive A, B and C; assert
+   no recipient left `queued`, stats reconciled, row finalized. **B is the
+   discriminating case**: against a design reusing the nested cap branch, B
+   marks nothing and finalizes as SENT with recipients queued.
+8. **A duplicate delivery claims nothing and sends nothing** - same `jobId`
+   returns at the marker; `fanout_attempt` unchanged. This is what makes
+   claim-after-marker safe.
+9. **A pre-branch item claims at 1** - no `fanout_attempt` attribute, no seeding
+   step.
+10. **Both internal codes render as prose in BOTH positions** - rollup and
+    per-recipient row, with no `(error <code>)` tail.
+11. **Rail** - a fresh create whose bindings have not propagated resolves via
+    the ladder without repair and without `rail_failed`; a member genuinely
+    unbound after the ladder still repairs; 50386/50437 during repair is not
+    counted a failure; the authoritative re-read still decides the outcome; the
+    adopt path is unchanged.
+12. **The two `groupSend` callers are unaffected** - pinned by construction:
+    assert they pass no ladder flag and that with the flag absent the ladder and
+    the 50386/50437 handling are skipped.
+13. **Chip copy** - a relay 30003 leg renders `Phone unreachable` at all three
+    relay sites; the 1:1 bubble, the EmailCard and the broadcast badge are
+    unchanged.
 
 ### E2E (Playwright, hermetic)
 
-11. **The relay 30003 copy**, end to end: a relay leg that failed 30003 shows
-    `Phone unreachable` and promises no retry. This is the user-facing change
-    this branch actually makes, and it is reachable through the existing seeded
-    world.
+14. A relay leg that failed 30003 shows `Phone unreachable` and promises no
+    retry.
 
-    **The broadcast dead-queue case is NOT an e2e test.** Nothing in the
-    hermetic stack can make `enqueue` throw, and adding a seam for it means
-    editing `routes/dev.ts`, which is out of scope. That behavior is covered at
-    integration level (tests 3 and 4), where `enqueue` is stubbable - which is
-    the right level for it regardless.
+    **Arm it with `setDeliveryOutcome` (fake-twilio), not seed data.** No seed
+    profile carries a `delivery_recipients` map - `e2e/support/selectors.md`
+    and `group-text-per-recipient-delivery.spec.ts` both say so - so a spec
+    assuming a seeded failed relay leg would assert against an empty list and
+    pass while proving nothing.
 
-## 8. Risks and watch items
+    The broadcast dead-queue case is deliberately NOT e2e: nothing in the
+    hermetic stack can make `enqueue` throw, and adding a seam means editing
+    `routes/dev.ts`, which is out of scope. Tests 3, 4 and 7 cover it where
+    `enqueue` is stubbable.
 
-- **`relayFanOut.ts` is a conflict surface** with M2, M3 and T-DELIVERY-CHIPS.
-  Keep the diff to the claim at the top of the handler plus the continuation/cap
-  region.
-- **The claim's PLACEMENT is the fix, not just its existence** (Sec 3.4). A
-  reviewer or a later refactor that moves it down next to the enqueue "where it
-  is used" silently reopens the unknown-error path. Test 7a is what catches
-  that; do not delete it as redundant with test 3.
-- **Do not touch `twilio.ts`.** With relay-30003 deferred there is no reason to,
-  and three other bundles own parts of it.
-- **Do not touch `conversationsRepo.ts`** - it is what forces Sec 4.2's shape.
-- **The slot type stays untouched** (Sec 3.1). A later change that moves a field
-  back into the slot re-opens `dashboard/src/api/types.ts` and native group text.
+## 8. Post-merge obligations
+
+**No infrastructure, dependency, environment or schema work.** The new attribute
+is optional and self-creating.
+
+Owed at handback, not after merge:
+
+0. **`throw-for-redelivery-defeated-by-job-marker` is filed** (done, high).
+   Both fan-outs throw on an unrecognised send error specifically to force a
+   redelivery, commented "a fresh jobId via the visibility timeout". False -
+   `retrySend.ts:122-128` states the truth. The suppressed redelivery returns
+   SUCCESSFULLY so the consumer deletes the message: no DLQ, no alarm, nothing
+   pages. And the `throw` exits the recipient loop, so one unrecognised error on
+   recipient 3 of 800 strands 798. NOT fixed here - the remedy requires deciding
+   what such an error should DO while preserving the never-text-twice guarantee
+   the marker currently provides.
+1. **The provider-status sweep's out-of-region findings are filed** (Sec 6).
+2. **`rail-binding-propagation-retry` is updated, not silently closed** - the
+   ladder covers the job, import and operator-tool callers; the inline
+   `groupSend` and `healRail` paths keep today's behavior by deliberate choice
+   (Sec 4.3), because releasing the `rail_creating` claim from a new path would
+   require editing fenced `conversationsRepo.ts`.
+3. **`relay-30003-retry-lineage` carries its design knowledge forward** so the
+   follow-on mission does not re-buy it: `ALLOWED_PRIOR.delivered` is
+   `['queued','sent']`, so "a delivered retry wins" needs an explicit scoped
+   transition; gating a retry claim on the slot transition caps the ladder at
+   ONE retry invisibly, so the gate belongs on the attempt record;
+   `relayAnnouncements.ts:289` writes relaysid pointers for tour-reminder rungs,
+   so a pointer-keyed retry reaches fenced `tourReminders.ts`; the two-level
+   `retry_lineage` map WILL hit the parent-path seeding problem this branch's
+   scalar avoids, and the in-repo answer is at conversationsRepo.ts:2189-2214;
+   and the relay chip copy this branch sets to `Phone unreachable` must be
+   revisited when a retry becomes real.
+
+## 9. Risks and watch items
+
+- **The claim's PLACEMENT is the fix.** Moving it next to the enqueue "where it
+  is used" reopens the unknown-error path; moving it above the marker reopens
+  the duplicate-close hazard. Tests 7 and 8 pin both ends.
+- **`relayFanOut.ts` conflicts** with M2, M3, T-DELIVERY-CHIPS. Keep the diff to
+  the claim site and the continuation/cap region.
+- **When this spec says "the existing X handles this", trace X from the NEW call
+  site.** Four errors in this document's review history had that exact shape - a
+  mechanism credited by name without checking it was on the path in question,
+  including a close branch that turned out unreachable.
 - **`npm test` contention**: three other missions share this machine and one
-  DynamoDB Local container. A red `npm test` is not a regression until proven
+  DynamoDB Local container. A red `npm test` is not a regression until re-run
   under a clean access key and compared against the merge base by failing FILE.
 - **`reuseExistingServer` adopts a stale stack on a commit match.** Confirm no
   orphaned listener on the lane's ports before each e2e run.
-
-## 9. Post-merge obligations
-
-**No infrastructure, dependency, or environment work.** No new dependencies, no
-infra change, no env var, no schema migration - the new attribute is optional
-and self-seeding (Sec 3.2).
-
-Three non-infra obligations, all owed at handback rather than after merge:
-
-0. **`throw-for-redelivery-defeated-by-job-marker` is filed** (done - severity
-   high). Discovered while verifying whether a post-throw redelivery could
-   advance the counter. It cannot, and both fan-outs rely on it doing so. This
-   branch does not fix it: the remedy requires deciding what an unrecognised
-   per-recipient send error should DO, which is a behavior change with its own
-   blast radius. Sec 3.4a records how this branch works around it.
-1. **The provider-status audit's out-of-region findings are filed as an issue**
-   (Sec 5).
-2. **`relay-30003-retry-lineage` is updated** - and it must carry the DESIGN
-   KNOWLEDGE, not just the fact of the split. Three review rounds bought these,
-   and a future mission that has to rediscover them pays for them twice. The
-   issue records:
-
-   - it is now its own mission; what transfers from this branch is the pattern
-     and primitives, not a reusable counter (Sec 2.1);
-   - **the effective-status trap**: `ALLOWED_PRIOR.delivered` is
-     `['queued','sent']`, so "a delivered retry wins" needs an explicit scoped
-     transition - the forward-only machine forbids it outright;
-   - **the idempotency trap**: gating a retry claim on the slot transition caps
-     the ladder at ONE retry, invisibly, because a second `undelivered` cannot
-     transition an already-`undelivered` slot. The gate belongs on the attempt
-     record. Any test exercising a single retry passes against the broken form;
-   - **the fence**: `relayAnnouncements.ts:289` writes relaysid pointers for
-     intro, member-added and tour-reminder rung sends, so a retry keyed on "the
-     pointer resolved" reaches `jobs/tourReminders.ts`. Announcement legs have
-     no source message to replay and must be excluded structurally;
-   - **the copy debt this branch creates**: relay legs now read
-     `Phone unreachable` with no retry promise. When the lineage ships, that
-     copy becomes wrong in the other direction and must be revisited at all four
-     `deliveryReason` call sites (Sec 6). Native group text and 1:1 are NOT
-     affected - their 30003 retry is real.

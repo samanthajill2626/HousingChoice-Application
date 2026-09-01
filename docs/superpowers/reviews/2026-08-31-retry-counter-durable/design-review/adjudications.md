@@ -740,3 +740,93 @@ call site, not to trust the sentence.**
 The reviewer also independently re-derived the R6 corrections rather than
 assuming they inherited its own correctness, and confirmed the R4-11 citation
 fix. That is the right instinct and it is why this round found F1.
+
+---
+
+# Cold reviewer, first look - 26 findings, 6 blocking
+
+Report: `spec-r7-cold-reviewer.md`. A FRESH reviewer, given the spec and the
+repo but deliberately NOT the review history, run in parallel with the continued
+reviewer's seventh pass.
+
+**It justified itself immediately.** Several blocking findings sat in sections
+the continued reviewer had read seven times and implicitly accepted. Cameron
+ruled: fix all 26 and run another pass.
+
+## The two that inverted a decision I had just made
+
+**C2/C3 - claim-before-marker was my over-correction, and it was harmful.**
+
+Last round I moved the claim ABOVE the execution marker, reasoning that a
+redelivery is suppressed there and the counter would freeze. **The ladder does
+not advance on redeliveries - it advances on CONTINUATIONS**, and every
+continuation is a fresh `enqueue()`, which mints a new `jobId` (jobs.ts:188). A
+continuation always passes the marker and always claims. Claiming above it buys
+nothing.
+
+Worse, it does harm: a duplicate delivery would then consume a rung and could
+itself return `capped`, running a close that is not idempotent - flipping a
+FINISHED broadcast to failed.
+
+Reverted to claim-after-marker, the natural ordering all along.
+
+This is the fourth instance of the pattern the continued reviewer named one
+round earlier: **a mechanism credited or discredited without tracing which path
+it governs.** I recorded that lesson and then committed it again on the very
+next decision. It is a habit, not a knowledge gap, and the spec now carries it
+as a standing watch item because the builder faces the same trap.
+
+## The other blockers
+
+- **C1** - Sec 3.4's code block and its prose specified OPPOSITE orderings after
+  I edited one and not the other. This is what C26 diagnoses structurally.
+- **C4** - the unreachable top-of-pass close, found INDEPENDENTLY by both
+  reviewers in the same round: the strongest signal available.
+- **C5** - the spec never said whether the existing `nextAttempt > MAX_*` guard
+  survives. Now explicit: REMOVED, its branch body surviving as close A.
+- **C6** - the relay discriminator was never named. `presentLegDelivery` already
+  takes `rosterKind` (deliveryStatus.ts:500-505); `presentRelayDelivery` gains it.
+
+## Factual corrections to claims I asserted confidently
+
+- **C10 - Sec 4.1's central claim was FALSE.** I wrote that the read-back
+  harvests the address rather than verifying the add. groupRail.ts:536-538 says
+  the opposite in its own words: "The re-read is authoritative: an add can
+  'succeed' and still leave a shape Twilio will not bind." Completeness CANNOT
+  come from the create's failures list.
+- **C13/C14** - and that premise was unusable anyway: `created.failures` is
+  collapsed to one boolean (groupRail.ts:463) and gone by the decision point.
+
+  **Consequence: the rail fix got SMALLER and better** - the bounded re-read
+  ladder and nothing else, which is what the issue actually asked for. The
+  failures-based authority was my invention and the part generating findings.
+- **C12** - a FIFTH caller I never enumerated: `app/scripts/rail-verify.ts:198`,
+  the operator tool the measured harm was observed through.
+- **C7** - the dashboard list was wrong both ways: `Timeline.tsx:1390` is an
+  EmailCard, and `DeliveryBadge.tsx:31` was missed. SIX sites, not four.
+- **C8** - `INTERNAL_CODE_REASONS` exists precisely to stop app-invented codes
+  printing as `(error <code>)`, and grants NO tail.
+- **C11** - the e2e premise was refuted in-repo: **no seed profile carries a
+  `delivery_recipients` map**. The spec would have asserted against an empty
+  list and passed while proving nothing. Now armed via `setDeliveryOutcome`.
+- **C18** - the spec claimed the rail issue "closes" while leaving the defect
+  live on three callers. Sec 8 now says which are covered and which are not.
+
+## Accepted, smaller
+
+C9, C15 (50386/50437 are NEW literals, absent from source), C16/C17, C19
+(`fanout_attempt` reaches the browser via the message spread), C20, C21, C22,
+C23 (`ADD` is not idempotent under SDK retry - accepted: costs a rung, never a
+duplicate send), C24, C25 (the marker is skipped entirely when `jobId` is
+absent).
+
+**C26 is the structural one.** The spec did not stand alone: sections argued
+with earlier drafts and pointed at adjudications the builder will not have.
+That produced C1. **The spec is rewritten to state decisions only**, with
+history confined to this file.
+
+## Status
+
+Rewritten at the scope Cameron chose. The rail section shrank to the ladder
+alone; the dashboard names all six call sites and the real discriminator; the
+ordering reverted. Next: another cold pass.

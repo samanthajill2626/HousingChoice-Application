@@ -8,8 +8,11 @@
   a test number, so "at the base commit" and "before any code edit" are the
   same measurement.
 - Records: `docs/superpowers/reviews/2026-08-31-npm-test-soundness/`
-- Revision: **v2**, after plan review round 1 (two independent reviewers,
-  38 findings, 38 accepted). Adjudications: `<records>/design-review/plan-adjudications.md`
+- Revision: **v3**, after plan review round 1 (two independent reviewers,
+  38 findings, 38 accepted) and round 2 (one continued reviewer, 15
+  findings, 15 accepted). Adjudications:
+  `<records>/design-review/plan-adjudications.md` and
+  `plan-adjudications-r2.md`.
 
 **Read the spec first, in full.** This plan does not restate its reasoning.
 Where the two disagree, the spec wins and the disagreement is a finding.
@@ -68,16 +71,21 @@ measures is tonight's.
 1. `npm install` in the worktree.
 2. One full `npm test` run, DISCARDED (warms the transform cache).
 3. **Contention snapshot immediately before and after every measured run:**
-   - other live vitest runs - **LIST the test-run registry, do not prune
-     it**; `app/test/helpers/testRunRegistry.ts` is machine-global and
-     other missions read it. If no read-only seam exists, count the marker
-     files directly and say so;
+   - other live vitest runs - **LIST the marker directory, do not prune
+     it.** `otherLiveRuns()` in `app/test/helpers/testRunRegistry.ts`
+     prunes as a side effect, and its directory (`RUN_REGISTRY_DIR`,
+     `testRunRegistry.ts:41`) is machine-global - other missions read it.
+     Count the marker files with a plain directory listing and say that is
+     what you did;
    - node/playwright process count, filtered to other worktrees;
    - the container's CPU and RSS (`docker stats --no-stream`).
    A run with no neighbours is labelled **QUIET**.
-   **Derive the residue-sweep MODE from this snapshot** (other live runs
-   > 0 implies spare-young mode). Do not try to read it from log output -
-   `globalSetup` prints nothing when the sweep finds nothing.
+   **Derive the residue-sweep MODES from this snapshot** (other live runs
+   > 0 implies spare-young mode). Plural: there are TWO sweeps per run -
+   one on the way in from `globalSetup` and one at teardown - and each
+   evaluates its mode independently, so a run can take different modes at
+   its two ends. Record both. Do not try to read them from log output;
+   `globalSetup` prints nothing when a sweep finds nothing.
 4. **3 full `npm test` runs at the base commit.** Record exit code, wall
    clock, failing FILE names (not cases), and the label.
 5. **Also record the SKIPPED count**, per workspace. S3 un-skips ~9 `it`s
@@ -145,11 +153,18 @@ is a finding for the handback, not a silent decision.
 
 **Stub contract - round 1 found two cases that could not have run:**
 
-- **scripted per-command, per-call sequencing.** Case 10 needs
+- **scripted per-command, per-call sequencing.** Case 16 needs
   `ensureGsis`'s FIRST `DescribeTable` (inside `liveIndexNames`,
   `db-update-gsis.ts:188-191`) to SUCCEED and only the VERIFICATION read to
   throw. A stub that throws on all `DescribeTable`s makes `liveIndexNames`
   throw before the retry is ever reached, and the case proves nothing;
+- **the stub must also satisfy what `ensureGsis` does AFTER the send.**
+  `db-update-gsis.ts:234` calls `waitUntilTableExists` and `:235`
+  `waitUntilIndexActive`, whose default ceiling is **900s** (`:158`) and
+  which `ensureGsis` calls with no override. A two-entry `[ok, throw]`
+  script leaves both spinning past the 60s test timeout. Every
+  `DescribeTable` the stub answers after the send must report the table
+  ACTIVE and the index ACTIVE;
 - throws REAL exception INSTANCES from `@aws-sdk/client-dynamodb`
   (`ResourceInUseException`, `ResourceNotFoundException`) - `dynamoAdmin`
   discriminates by `instanceof` (`:91`, `:148`), the retry by `err.name`;
@@ -165,9 +180,9 @@ is a finding for the handback, not a silent decision.
 | 5 | local, `UpdateTimeToLive` `InternalFailure` then ok | status RE-READ between attempts; hook called once for that attempt |
 | 6 | local, `UpdateTimeToLive` `InternalFailure`, re-read reports **ENABLED** | helper returns WITHOUT re-sending. *Without this, a hook that always returns `false` passes every other case* |
 | 7 | local, `UpdateTimeToLive` `InternalFailure`, re-read THROWS | ORIGINAL error rethrown; NO re-send |
-| 8 | local, **`InternalServerError`** (the `waiting for a lock` signature) | retried identically to `InternalFailure` |
+| 8 | local, **`CreateTable`** throws **`InternalServerError`** (the `waiting for a lock` signature) then ok | retried identically to `InternalFailure` |
 | 9 | local, `DescribeTimeToLive` (the PRE-SEND read) `InternalFailure` then ok | retried |
-| 10 | local, always `InternalFailure` | exactly **4** sends, then throws; **no hook call on the final attempt** (the bound is checked first, matching `db-update-gsis.ts:117`) |
+| 10 | local, **`UpdateTimeToLive`** always `InternalFailure` | exactly **4** sends, then throws; **hook called 3 times, NOT on the final attempt** (the bound is checked first, matching `db-update-gsis.ts:117`). Must be a hook-bearing send, or the assertion is vacuous |
 | 11 | **non-local** endpoint, `InternalFailure` once | throws immediately; `send` called ONCE |
 | 12 | no endpoint provider | same as 11 |
 | 13 | **REAL `DynamoDBClient`** with `{endpoint:'http://localhost:8000'}`, and a second region-only | the predicate says local / not-local. *Proves the `Provider<Endpoint>` assumption against the actual SDK, not against our own stub* |
@@ -181,18 +196,42 @@ half; 3 protects the hot path; 6 is what makes the hook contract real.**
 
 ### S1.2 - the shared helper
 
-- **4 attempts max, linear `attempt * 250ms`.**
+- **4 attempts max, linear `attempt * 250ms`. The backoff is INJECTABLE**
+  (like the poll's interval), or the acceptance suite spends ~4-5s of real
+  `setTimeout` in a file specified as "no container, no network".
+- **The endpoint predicate is EXPORTED**, so case 13 can reach it with a
+  real client. An unexported predicate is unreachable under "no container,
+  no network".
 - **Endpoint gate, resolved LAZILY** - only on the first retryable error.
   `client.config.endpoint` is an async `Provider<Endpoint>` returning an
   object with `hostname`. Local means `localhost`, `127.0.0.1`, `::1`,
   `[::1]`. **Fail closed** on no provider, a throwing provider, or any
   other hostname.
 - Retryable names: `InternalFailure`, `InternalServerError`.
-- **Return value: the command output.** Hence the CONSTRAINT: **a call
-  whose output is consumed may not supply a verification hook**, because
-  the hook-returned-true branch has no output to return. Checked against
-  all retried sends - only `DescribeTimeToLive` consumes output, and it
-  uses no hook.
+- **TWO functions, so the constraint is enforced by the TYPE rather than
+  by a comment.** A single function returning `TOut` cannot honour the
+  hook-returned-true branch, which has no output; typing it
+  `TOut | undefined` breaks `dynamoAdmin.ts:128-130`'s destructure under
+  `strict`, and the cast that silences that makes the constraint
+  unenforceable.
+
+  | function | returns | hook |
+  |---|---|---|
+  | `sendWithRetry<TOut>` | `TOut` | NOT accepted |
+  | `sendWithRetryVerified` | `void` | required |
+
+- **Which send uses which - tabulated, because getting it wrong is
+  silent.** A hook on `CreateTable` would make the helper return where
+  `ensureTable` expects to fall into its catch, yielding `'created'` where
+  today it returns `'exists'`, and it would still pass cases 2 and 3.
+
+  | send | function | hook |
+  |---|---|---|
+  | `CreateTable` | `sendWithRetry` | none |
+  | `DeleteTable` | `sendWithRetry` | none |
+  | `DescribeTimeToLive` (pre-send read) | `sendWithRetry` | none - output consumed |
+  | `UpdateTimeToLive` | `sendWithRetryVerified` | status re-read |
+  | `UpdateTable` (`ensureGsis`) | `sendWithRetryVerified` | `indexStatus` |
 - **Verification hook, ONE contract:**
 
   | hook outcome | helper does |
@@ -217,6 +256,30 @@ half; 3 protects the hot path; 6 is what makes the hook contract real.**
   is reached from ~75 call sites and `globalSetup` runs ~23 tables through
   it on every `npm test`; an unconditional poll would tax the commonest
   call and could throw where it used to return instantly.
+
+  **The seam, because there is no obvious one and the obvious wrong answer
+  passes every case.** The helper THROWS on this path, so no return value
+  can carry "we retried". **Do NOT use a module-level flag**: `ensureTable`
+  is called CONCURRENTLY (e.g. `todayUnmatchedNonRegression.test.ts:107`),
+  so a shared flag set by one call would make another call poll - and all
+  17 cases would still pass, because they are sequential.
+
+  Use a PER-CALL local, passed as an `onRetry` callback:
+
+  ```
+  let retried = false;
+  try {
+    await sendWithRetry(client, () => new CreateTableCommand(...),
+                        { onRetry: () => { retried = true; } });
+    await waitUntilTableExists(...);          // unchanged
+  } catch (err) {
+    if (!(err instanceof ResourceInUseException)) throw err;
+    result = 'exists';
+    if (retried) await pollUntilActive(client, physicalName);
+  }
+  ```
+
+  No shared state, correct under concurrency by construction.
   - The poll: `DescribeTable`, **100ms interval, 10s ceiling**, gated on
     the local endpoint like the retry, exported with injectable
     interval/ceiling so case 17 needs no 10s sleep. On exhaustion rethrow
@@ -292,9 +355,18 @@ permanent budget, so a figure taken under unrecorded load is worse than no
 figure. If the neighbours are still live, either wait or record the load
 and treat the result as an upper bound.
 
-Within `scanProgram`, also count and time `isCatchDeclared` versus
-`isErrorTyped` calls - the two-way `buildProgram`/`scanProgram` split does
-not partition the cost finely enough to choose a remedy.
+Within `scanProgram`, instrument **the three sites that actually do checker
+work**, because the two-way `buildProgram`/`scanProgram` split does not
+partition the cost finely enough to choose a remedy:
+
+- `:97` `checker.getShorthandAssignmentValueSymbol` (eager, even when
+  `legal`);
+- `:106` `checker.getSymbolAtLocation`;
+- `:79-80` inside `isErrorTyped` - `getTypeAtLocation` AND
+  `checker.typeToString`, which is a second, separately expensive call.
+
+**Do not instrument `isCatchDeclared` (`:74-77`) as a cost centre** - it
+reads `valueDeclaration` and node kinds and does no checker work at all.
 
 Record: `<records>/measurements/s2-guard-cost.md`. The instrumentation is
 REMOVED before handback.
@@ -366,16 +438,24 @@ silently dropped two.**
 
 ### S3.1 - (a) app-serving behaviour on a fixture. NEVER skips.
 
-`mkdtemp` fixture. **Create it BEFORE `buildApp`** - this file constructs
-the app in the DESCRIBE BODY at collection time (`:29`), so only
-`unitMediaServe.test.ts:171-173`'s shape (fixture in a `beforeAll`, app
-built inside it) is structurally compatible; restructure accordingly.
-**Clean up with `rmSync`**, as both precedents do.
+`mkdtemp` fixture, **file-scoped**. Both describes read `distDir` - the
+first at `:29`, the second at `:182` - so a fixture scoped to one of them
+leaves the other pointed at a path that may not exist. **Create it BEFORE
+`buildApp`**: this file constructs the app in the DESCRIBE BODY at
+collection time (`:29`), so only `unitMediaServe.test.ts:171-173`'s shape
+(fixture in a `beforeAll`, app built inside it) is structurally
+compatible; restructure both describes accordingly. **Clean up with
+`rmSync`**, as both precedents do.
 
 **Fixture `index.html`, positive AND negative:**
 
-- MUST contain `HousingChoice` (`:42`) and `<div id="root">` (`:108`,
-  `:165`, `:85`);
+- MUST contain `<div id="root">` (`:108`, `:165`, `:85`);
+- the `HousingChoice` assertion (`:42`) becomes a TAUTOLOGY once we write
+  the fixture ourselves - it asserts our own string back at us. Replace it
+  with a DISTINCTIVE fixture marker, the way
+  `unitMediaServe.test.ts:174` does, so the assertion proves the served
+  bytes came from THIS fixture. The real `HousingChoice` string is covered
+  by (b)/(c) against the tracked source;
 - MUST NOT contain `"version"`, `"private"` or `root:`. Load-bearing now
   that no decoy exists: the traversal assertions read whatever the SPA
   fallback returns, which IS this fixture's `index.html`.
@@ -418,8 +498,16 @@ Assert against `dashboard/index.html`. Exactly five conditions:
 "`dashboard/dist` disagrees with `dashboard/index.html`. Most likely the
 dist is stale - run `npm run build -w dashboard`. If a fresh build still
 reports this, the dashboard BUILD is dropping the identity tags, which is a
-real regression - see `docs/issues/<the slug filed in S7.2>`."
-**A literal `<slug>` must not reach the shipped string.**
+real regression - see `docs/issues/<slug>`."
+
+**The slug must exist BEFORE this string is written, so S7.2's SECOND issue
+(the built-dashboard coverage gap) is FILED HERE, in S3, not in S7.** It
+depends on no measurement - it is a consequence of this slice's own design.
+Deferring it to S7 would either ship a literal `<slug>` placeholder or
+force an ungated `.ts` edit onto the branch tip after the gates, which
+would falsify the docs-after-gates safety argument. S7.2's FIRST issue
+still waits for S5's probe result, because that one does depend on
+evidence.
 
 **No mtime predicate of any kind.**
 
@@ -462,10 +550,31 @@ Confounds go in the record, not the conclusion:
 - arm 2 changes the test SET - `dynamoAccessKeyGuard.test.ts:308` skips its
   per-file assertions under an explicit key. Expected, not a failure.
 
-**Also run the TTL probe here** (read-only, no restart): after a run,
-`DescribeTimeToLive` on an `hc-local-` table under the worktree key and
-record the status. **S7.2's first new issue is filed on THIS RESULT, not on
-an inference from a comment.**
+**Also run the TTL probe here.** It may NOT be done "after a run": vitest's
+teardown, returned from `globalSetup` (`globalSetup.ts:216`), calls
+`dropKeyedLocalTables` -> `dropAllTables` (`globalTeardown.ts:279`), so a
+completed run leaves NO `hc-local-` table to describe - the probe would find
+nothing and the claim would collapse back to the inference it exists to
+replace.
+
+Probe the mechanism directly instead, in a throwaway script (not a
+committed test), against the LOCAL container, with **no restart and no new
+access key** - use the worktree test key so no additional database is
+created:
+
+1. call the exported `ensureKeyedLocalTables()` (`globalSetup.ts`) in a
+   process where `DYNAMO_DISABLE_TTL` is UNSET - which is exactly the
+   condition `globalSetup` runs under, since `test.env` reaches workers
+   only;
+2. `DescribeTimeToLive` on one of the tables it created and record the
+   status;
+3. repeat with `DYNAMO_DISABLE_TTL=1` set in the process, for contrast;
+4. drop what you created (`dropKeyedLocalTables`), leaving the container as
+   found.
+
+**S7.2's first new issue is filed on THIS RESULT.** If the probe shows TTL
+is NOT enabled, the claim is wrong, the issue is not filed, and that is a
+finding for the handback.
 
 Record: `<records>/measurements/s5-clean-key.md`.
 
@@ -489,10 +598,18 @@ Record: `<records>/measurements/s5-clean-key.md`.
 3. **3 post-fix `npm test` runs with contention snapshots**, to pair with
    S0. If the machine has gone QUIET, label the arm QUIET - **do not
    fabricate load**, and remember a mixed pair may NOT close the anchor.
-4. **State the confound this mission created.** S3 un-skips ~9 `it`s and
-   S2 changes one file's cost, so S0 and S6 do not run the same work.
-   Report the skipped-count delta from S0 step 5 alongside the wall clock,
-   and do not present the difference as a pure performance result.
+4. **State BOTH confounds in the S0/S6 pair.**
+   - This mission's own changes: S3 un-skips ~9 `it`s and S2 changes one
+     file's cost, so the two arms do not run the same work. Report the
+     skipped-count delta from S0 step 5 alongside the wall clock.
+   - **The `main` sync in step 1.** S0 ran at `5ce9912f`; S6 runs at
+     whatever `main` has become. Any test `main` added or changed lands
+     between the arms. Name the synced SHA and the file-count delta.
+
+   The same reasoning is why S4's solo arm moved before S1 and why S5's
+   arms are pinned to one commit; applying it to S4 and S5 and not here
+   would be inconsistent. Do not present the difference as a pure
+   performance result.
 5. **Adjudicating a red gate 2:** re-run the failing FILES alone, run the
    full suite at the merge base, compare failing FILES rather than cases,
    report both runs.
@@ -512,6 +629,13 @@ it**.
 sighting to cure, and a mixed contended/quiet pair may not close it. If it
 stays open, add the new numbers, apply S4's NARROW strike, and say plainly
 what was and was not established.
+
+**When deciding that strike, say this out loud:** S4's solo arm was moved
+before S1 so it could not straddle a code change, but its LOADED arm
+straddles S1 by construction - S0's runs are pre-change and S6's are
+post-change. That is unavoidable given what the loaded arm is, and it is
+exactly the hazard that moved the solo arm, so it belongs in the closure
+text rather than being quietly relied on.
 
 **The logCallSiteGuard closure must not overclaim.** That issue also names
 `[vitest-worker]: Timeout calling "onTaskUpdate"`, which is birpc

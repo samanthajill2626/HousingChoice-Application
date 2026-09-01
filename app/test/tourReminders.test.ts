@@ -41,7 +41,7 @@ import {
   type TourReminderItem,
   type TourRemindersRepo,
 } from '../src/repos/tourRemindersRepo.js';
-import { createToursRepo } from '../src/repos/toursRepo.js';
+import { createToursRepo, type TourItem } from '../src/repos/toursRepo.js';
 import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import {
   createSendMessageService,
@@ -745,6 +745,114 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Supersession S2 - the armer mints ONE ladderId per CALL (T2.1)
+  //
+  // A UUID, not a timestamp: routes/tours.ts takes an injectable `deps.now` and
+  // the app suite injects a CONSTANT, so two arms of the same tour inside one
+  // test share an instant (spec 3.1). Every case below therefore pins the same
+  // `now` across both calls - a timestamp-derived id would pass case 1 and fail
+  // case 2 and only case 2.
+  // ---------------------------------------------------------------------------
+  describe('armTourReminders stamps one generation ladderId per call', () => {
+    // Jan 20 10:00 EST, tour the same afternoon at 15:00 EST. Quiet hours OFF,
+    // so the clamp is identity. This mix is deliberate: day_before and
+    // morning_of are both born SKIPPED (booked_too_late - the same-day booking
+    // rule, spec section 8) while en_route arms live, so one call covers both
+    // the create sites that write a skipped row and the one that writes a live
+    // rung.
+    const NOW_LADDER = '2026-01-20T15:00:00.000Z';
+    const SCHEDULED_LADDER = '2026-01-20T20:00:00.000Z';
+
+    const armFor = async (tour: TourItem, now = NOW_LADDER) =>
+      armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: quietOff,
+        logger,
+      });
+
+    it('stamps every row of one call - born-skipped rows included - with the SAME id', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-arm-1',
+        unitId: 'unit-ladder-arm-1',
+        scheduledAt: SCHEDULED_LADDER,
+        tourType: 'self_guided',
+      });
+
+      const { ladderId, rows } = await armFor(tour);
+
+      expect(ladderId).toEqual(expect.any(String));
+      expect(rows).toHaveLength(3);
+      // The mix this fixture exists to produce.
+      const skipped = rows.filter((r) => r.skippedAt !== undefined);
+      expect(skipped.map((r) => r.skipReason)).toEqual(['booked_too_late', 'booked_too_late']);
+      expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(1);
+
+      for (const row of rows) {
+        expect(row.ladderId).toBe(ladderId);
+      }
+
+      // ...and the STORED rows agree. The returned objects are the repo's own
+      // return values, so asserting only on them would pass on a create that
+      // dropped the attribute on the way to DynamoDB.
+      const stored = await tourReminders.listByTour(tour.tourId);
+      expect(stored).toHaveLength(3);
+      for (const row of stored) {
+        expect(row.ladderId).toBe(ladderId);
+      }
+    });
+
+    it('mints a DIFFERENT id for a second arm of the same tour at the same `now`', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-arm-2',
+        unitId: 'unit-ladder-arm-2',
+        scheduledAt: SCHEDULED_LADDER,
+        tourType: 'self_guided',
+      });
+
+      const first = await armFor(tour);
+      const second = await armFor(tour);
+
+      expect(first.ladderId).not.toBe(second.ladderId);
+      // Generation, not identity: the two calls' rows are disjoint sets, each
+      // internally consistent. (Nothing sweeps here - S2 writes no deletes.)
+      const firstIds = new Set(first.rows.map((r) => r.reminderId));
+      expect(second.rows.some((r) => firstIds.has(r.reminderId))).toBe(false);
+      for (const row of second.rows) {
+        expect(row.ladderId).toBe(second.ladderId);
+      }
+
+      const stored = await tourReminders.listByTour(tour.tourId);
+      expect(stored).toHaveLength(6);
+      expect(new Set(stored.map((r) => r.ladderId))).toEqual(
+        new Set([first.ladderId, second.ladderId]),
+      );
+    });
+
+    it('returns ladderId null when the arm writes NO rows (a time-less tour)', async () => {
+      // The no-scheduledAt early return is the ONLY zero-row exit. The silent
+      // `dueAt < now` skip cannot produce one on its own: it sits BELOW the
+      // booked-too-late branch, and for day_before those two are exhaustive -
+      // if booked-too-late is false then now <= raw - 4h, and the clamp only
+      // ever moves a dueAt FORWARD (quietHours.ts:153-163), so the clamped
+      // dueAt is still future and the rung falls through to a live or a
+      // past_event/superseded ROW. A day_before row is written on every tour
+      // that has a scheduledAt.
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-arm-3',
+        unitId: 'unit-ladder-arm-3',
+        tourType: 'self_guided',
+      });
+      expect(tour.scheduledAt).toBeUndefined();
+
+      const { ladderId, rows } = await armFor(tour);
+
+      expect(ladderId).toBeNull();
+      expect(rows).toEqual([]);
+      expect(await tourReminders.listByTour(tour.tourId)).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Test 1 — arm: correct ladder dueAts for a future tour
   // ---------------------------------------------------------------------------
   it('armTourReminders creates all 3 reminder rows with correct dueAts', async () => {
@@ -764,7 +872,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -828,7 +936,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
@@ -883,7 +991,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -929,7 +1037,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -995,7 +1103,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -1033,7 +1141,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -1089,7 +1197,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -1132,7 +1240,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
@@ -1169,7 +1277,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: failingSettingsRepo(),
       logger,
@@ -1883,7 +1991,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'pm_team',
     });
 
-    const rows = await armTourReminders(tour, now0, {
+    const { rows } = await armTourReminders(tour, now0, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
@@ -1964,7 +2072,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         scheduledAt: opts.scheduledAt ?? TOUR,
         tourType: 'self_guided',
       });
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: opts.settingsRepo ?? quietOff,
         logger,
@@ -5039,7 +5147,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         tourType: 'self_guided',
       });
 
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: stubSettingsRepo(),
         logger,
@@ -5137,7 +5245,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         tourType: 'self_guided',
       });
 
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: stubSettingsRepo(),
         logger,
@@ -5173,7 +5281,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         tourType: 'self_guided',
       });
 
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: quietOff,
         logger,

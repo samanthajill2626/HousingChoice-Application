@@ -35,6 +35,7 @@
 // canceledAt rows. Both conditions together = exactly-once delivery.
 //
 // PII (doc §9): NEVER log a phone number. Log only reminderId/tourId/tenantId/kind.
+import { randomUUID } from 'node:crypto';
 import type { MessagingAdapter } from '../adapters/messaging.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -372,15 +373,28 @@ export interface ArmTourRemindersDeps {
  * `now` is the ARM instant, not the booking instant: this runs on booking, on
  * reschedule and on a status revival, and every rule is evaluated against it.
  *
- * Returns the created TourReminderItem rows.
+ * GENERATION (supersession, 2026-09-01): one `ladderId` is minted per CALL and
+ * stamped on every row the call creates, rows born already-skipped included.
+ * A UUID and not a timestamp because `routes/tours.ts` takes an injectable
+ * `deps.now` and the app suite injects a constant, so two arms of one tour can
+ * share an instant (spec 3.1).
+ *
+ * Returns `{ ladderId, rows }`: the created TourReminderItem rows, plus the
+ * generation id to point the tour at - `null` exactly when no row was written,
+ * so a caller never writes a pointer that matches nothing. The CALLER owns the
+ * tour-row write (spec D3a); `ArmTourRemindersDeps` has no `toursRepo` and this
+ * function reads and writes reminder rows only.
  */
 export async function armTourReminders(
   tour: TourItem,
   now: string,
   deps: ArmTourRemindersDeps,
-): Promise<TourReminderItem[]> {
+): Promise<{ ladderId: string | null; rows: TourReminderItem[] }> {
   const log = deps.logger ?? defaultLogger;
   const created: TourReminderItem[] = [];
+  // Minted up front and used by every create below, so the whole ladder shares
+  // one generation. Unused (and never returned) when the call writes no row.
+  const ladderId = randomUUID();
 
   // Invariant: no reminder rows may ever exist for a time-less ('requested')
   // tour. Callers gate arming on scheduledAt presence, but guard anyway
@@ -388,7 +402,7 @@ export async function armTourReminders(
   const scheduledAt = tour.scheduledAt;
   if (typeof scheduledAt !== 'string') {
     log.warn({ tourId: tour.tourId }, 'tour reminders not armed (no scheduledAt)');
-    return created;
+    return { ladderId: null, rows: created };
   }
 
   const window = await readQuietHoursWindow(deps.settingsRepo, log);
@@ -493,6 +507,7 @@ export async function armTourReminders(
         kind,
         dueAt, // the CLAMPED value, like every arm-time skip row (spec 8.2)
         skipped: { at: now, reason: 'booked_too_late' },
+        ladderId,
       });
       created.push(row);
       log.info(
@@ -515,6 +530,7 @@ export async function armTourReminders(
         kind,
         dueAt,
         skipped: { at: now, reason: 'past_event' },
+        ladderId,
       });
       created.push(row);
       log.info(
@@ -547,6 +563,7 @@ export async function armTourReminders(
         kind,
         dueAt,
         skipped: { at: now, reason: 'quiet_hours_superseded' },
+        ladderId,
       });
       created.push(row);
       log.info(
@@ -555,12 +572,21 @@ export async function armTourReminders(
       );
       continue;
     }
-    const row = await deps.tourRemindersRepo.create({ tourId: tour.tourId, kind, dueAt });
+    const row = await deps.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind,
+      dueAt,
+      ladderId,
+    });
     created.push(row);
     log.info({ tourId: tour.tourId, kind, dueAt, reminderId: row.reminderId }, 'tour reminder armed');
   }
 
-  return created;
+  // null when the loop wrote nothing (every kind hit the SILENT past-dueAt skip
+  // at the top of the loop - the only path through pass 2 that creates no row).
+  // A pointer that matches no row means "no live ladder", which is a rotation
+  // the caller performs deliberately, never a side effect of an empty arm.
+  return { ladderId: created.length === 0 ? null : ladderId, rows: created };
 }
 
 // ---------------------------------------------------------------------------

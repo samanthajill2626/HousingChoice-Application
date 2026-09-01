@@ -516,7 +516,7 @@ export async function seedLive(
       settingsRepo,
     });
     console.log(
-      `  seeded   tourReminders (live tour-today): ${armedToday.length} reminder${armedToday.length === 1 ? '' : 's'}`,
+      `  seeded   tourReminders (live tour-today): ${armedToday.rows.length} reminder${armedToday.rows.length === 1 ? '' : 's'}`,
     );
 
     // Arm TOUR-B (tomorrow, landlord-led): the full auto-armed ladder.
@@ -530,7 +530,7 @@ export async function seedLive(
       settingsRepo,
     });
     console.log(
-      `  seeded   tourReminders (live tour-tomorrow): ${armedTomorrow.length} reminder${armedTomorrow.length === 1 ? '' : 's'}`,
+      `  seeded   tourReminders (live tour-tomorrow): ${armedTomorrow.rows.length} reminder${armedTomorrow.rows.length === 1 ? '' : 's'}`,
     );
 
     // Arm TOUR-C (+2 days, scheduled): similar to tomorrow - all THREE
@@ -540,7 +540,7 @@ export async function seedLive(
       settingsRepo,
     });
     console.log(
-      `  seeded   tourReminders (live tour-upcoming): ${armedUpcoming.length} reminder${armedUpcoming.length === 1 ? '' : 's'}`,
+      `  seeded   tourReminders (live tour-upcoming): ${armedUpcoming.rows.length} reminder${armedUpcoming.rows.length === 1 ? '' : 's'}`,
     );
 
     // Now-relative lifecycle history: reuse the SAME deterministic generator the

@@ -8,11 +8,14 @@
   a test number, so "at the base commit" and "before any code edit" are the
   same measurement.
 - Records: `docs/superpowers/reviews/2026-08-31-npm-test-soundness/`
-- Revision: **v4**, after plan review round 1 (two independent reviewers,
-  38 findings) and rounds 2-3 (one continued reviewer, 15 and 12
-  findings). 65 findings, 65 accepted, 0 rejected. Adjudications:
+- Revision: **v5, FINAL**. Plan review round 1 (two independent reviewers,
+  38 findings) and rounds 2-4 (one continued reviewer: 15, 12, 6).
+  **71 findings, 71 accepted, 0 rejected.** Round 4 was the HARD CAP;
+  its six findings were mechanical, the reviewer stated none needed a human
+  and that it would not spend a fifth round, so they were applied and the
+  review CLOSED without a round 5. Adjudications:
   `<records>/design-review/plan-adjudications.md`,
-  `plan-adjudications-r2.md`, `plan-adjudications-r3.md`.
+  `plan-adjudications-r2.md`, `-r3.md`, `-r4.md`.
 
 **Read the spec first, in full.** This plan does not restate its reasoning.
 Where the two disagree, the spec wins and the disagreement is a finding.
@@ -75,12 +78,20 @@ measures is tonight's.
      it.** `otherLiveRuns()` in `app/test/helpers/testRunRegistry.ts`
      prunes as a side effect, and its directory (`RUN_REGISTRY_DIR`,
      `testRunRegistry.ts:41`) is machine-global - other missions read it.
-     List the marker files, then **check each one's liveness yourself** -
-     the filename IS the pid (`testRunRegistry.ts:66`), and dead markers
-     are pruned only by `otherLiveRuns` (`:93-122`), which this plan
-     forbids calling. A raw file count therefore OVER-counts neighbours,
-     which would mislabel a QUIET run as contended - and that label is what
-     the anchor's one use restriction turns on;
+     List the marker files, then **reproduce ALL THREE of `otherLiveRuns`'
+     filters yourself, minus the pruning** (`testRunRegistry.ts:93-122`).
+     Transcribing only the first leaves the over-count the fix exists to
+     close:
+     1. **all-digit filenames only** (`:104`) - the filename IS the pid
+        (`:66`);
+     2. **the pid must be alive**;
+     3. **the marker must be younger than `MARKER_BACKSTOP_MS`**
+        (`:42-48`, `:110-115`) - a 6h backstop against a RECYCLED pid,
+        which otherwise reads as a live neighbour forever.
+
+     Do not call `otherLiveRuns` itself; it prunes, and the directory is
+     machine-global. An over-count mislabels a QUIET run as contended, and
+     that label is what the anchor's one use restriction turns on;
    - node/playwright process count, filtered to other worktrees;
    - the container's CPU and RSS (`docker stats --no-stream`).
    A run with no neighbours is labelled **QUIET**.
@@ -162,9 +173,10 @@ is a finding for the handback, not a silent decision.
   `db-update-gsis.ts:188-191`) to SUCCEED and only the VERIFICATION read to
   throw. A stub that throws on all `DescribeTable`s makes `liveIndexNames`
   throw before the retry is ever reached, and the case proves nothing;
-- **counters must distinguish SENDS from HOOK CALLS.** Case 10 asserts
-  "hook called 3 times across 4 attempts", which per-command send counters
-  cannot express - the hook and the send may issue the same command;
+- **counters must distinguish SENDS from HOOK CALLS**, and this SUPERSEDES
+  any plain per-command counter. Case 10 asserts "hook called 3 times
+  across 4 attempts", which per-command send counts cannot express - the
+  hook and the send may issue the same command;
 - **the stub must also satisfy what `ensureGsis` does AFTER the send.**
   `db-update-gsis.ts:234` calls `waitUntilTableExists` and `:235`
   `waitUntilIndexActive`, whose default ceiling is **900s** (`:158`) and
@@ -175,8 +187,7 @@ is a finding for the handback, not a silent decision.
 - throws REAL exception INSTANCES from `@aws-sdk/client-dynamodb`
   (`ResourceInUseException`, `ResourceNotFoundException`) - `dynamoAdmin`
   discriminates by `instanceof` (`:91`, `:148`), the retry by `err.name`;
-- a settable, resolvable `config.endpoint` provider;
-- per-command call counters.
+- a settable, resolvable `config.endpoint` provider.
 
 | # | setup | asserts |
 |---|---|---|
@@ -196,7 +207,7 @@ is a finding for the handback, not a silent decision.
 | 14 | `127.0.0.1`, `::1`, `[::1]`, `localhost` | all local |
 | 15 | local, `ensureGsis`, `UpdateTable` `InternalFailure` then ok | retries - the existing mitigation survives |
 | 16 | local, `ensureGsis`, first `DescribeTable` ok, verification read throws | still re-sends - `ensureGsis` keeps FAIL-OPEN |
-| 17 | the exported poll directly, injected interval/ceiling, never ACTIVE | throws at the ceiling carrying the observed status |
+| 17 | the exported poll called DIRECTLY with a LOCAL client, injected interval/ceiling, `DescribeTable` never ACTIVE | throws the POLL's own error type at the ceiling, naming the table and the observed status - not a `ResourceInUseException`, which the poll never sees |
 
 **11 and 12 stop the gate shipping inert; 13 and 14 are their positive
 half; 3 protects the hot path; 6 is what makes the hook contract real.**
@@ -288,10 +299,15 @@ half; 3 protects the hot path; 6 is what makes the hook contract real.**
 
   No shared state, correct under concurrency by construction.
   - The poll: `DescribeTable`, **100ms interval, 10s ceiling**, exported
-    with injectable interval/ceiling so case 17 needs no 10s sleep. On
-    exhaustion rethrow the original `ResourceInUseException` with the
-    observed status. Its own reads are NOT retried - a failed read counts
-    as "not ACTIVE yet".
+    with injectable interval/ceiling so case 17 needs no 10s sleep. Its own
+    reads are NOT retried - a failed read counts as "not ACTIVE yet".
+  - **Exhaustion, split correctly between the two layers.** The poll
+    CANNOT rethrow the original `ResourceInUseException` - it never sees
+    one; `ensureTable`'s catch holds it. So: the poll throws its own error
+    naming the table and the observed status, and `ensureTable` catches
+    that and rethrows the ORIGINAL `ResourceInUseException` with the status
+    appended. Case 17 calls the poll directly and asserts the POLL's error
+    type and message.
   - **The poll needs no endpoint gate of its own.** It is reached only when
     `retried` is true, and `retried` can only be true on a local endpoint,
     so a second gate would be dead code that reads as a live safeguard.
@@ -586,8 +602,16 @@ created:
    process where `DYNAMO_DISABLE_TTL` is UNSET - which is exactly the
    condition `globalSetup` runs under, since `test.env` reaches workers
    only;
-2. `DescribeTimeToLive` on one of the tables it created and record the
-   status;
+2. `DescribeTimeToLive` on a table **whose spec actually carries
+   `ttlAttribute`** - and NAME it in the record. Only 4 of the 22 specs do
+   (`tables.ts:231`, `:246`, `:615`, `:648`), and `ensureTable` guards on
+   exactly that (`dynamoAdmin.ts:117`), so describing any other table
+   reports DISABLED in BOTH arms. **Use the `messages` table.**
+
+   This matters because of step 6's escape hatch: a DISABLED reading on a
+   table with no `ttlAttribute` would look like the falsifying result,
+   delete a TRUE issue, and write a FALSE finding into the handback. A
+   DISABLED reading is only meaningful on a TTL-bearing table;
 3. **DROP the tables (`dropKeyedLocalTables`) before the second arm.**
    Without a drop the contrast is FAKE: `ensureTable` short-circuits on
    `ResourceInUseException` and, with the flag set, skips
@@ -688,10 +712,11 @@ written. Do not file it again here.
    `createAllTables` -> `ensureTable` -> `enableTtlIfNeeded` turns the
    reaper on before any test runs. The immunity `vitest.config.ts:92-118`
    describes does not hold for shared-table suites.
-2. **No gate asserts the BUILT dashboard's PWA identity tags.** Consequence
-   of S3.3 being unable to fail. Name the remedy (`npm run build -w
-   dashboard` in the app workspace's pretest or `globalSetup`) and its cost
-   (~15-40s on every `npm test`, on every branch).
+2. *(Already filed in S3.3 - the built-dashboard coverage gap. Nothing to
+   do here beyond confirming it exists.)* **Verify the slug shipped in
+   S3.3's SKIP string matches that file's actual filename**; nothing else
+   checks the two agree, and a wrong slug in a user-facing message is worse
+   than none.
 
 Also record the PRE-EXISTING observation that `db-create.ts:64` and `:76`
 call `waitUntilTableNotExists({maxWaitTime:60})` after every delete,
@@ -737,9 +762,17 @@ commit and final), main drift, and anything owed.
 - **Case 3 protects the hot path.** An unconditional ACTIVE poll would tax
   ~75 call sites and ~23 tables per run to fix a rare hole.
 - Case 15 stops the refactor disarming the retry that already works.
-- **A test can be tautological three revisions running.** The traversal
-  decoy was, and so was its replacement. When an assertion needs
-  scaffolding to be meaningful, check whether the mechanism under test
-  makes the scaffolding unreachable.
+- **A test can be tautological four revisions running.** The traversal
+  decoy was, its replacement was, and so was the `HousingChoice` assertion
+  once the fixture started writing that string itself. When an assertion
+  needs scaffolding to be meaningful, check whether the mechanism under
+  test makes the scaffolding unreachable - and when you write the fixture,
+  check you are not asserting your own string back at yourself.
+- **A fix can introduce a defect of the class it closed.** That happened in
+  three consecutive review rounds here: the hot-path poll fix introduced a
+  concurrency bug, the TTL probe went from unrunnable to producing a false
+  contrast, and the read-only neighbour count replaced an over-count with a
+  different over-count. After any fix, re-ask the ORIGINAL question of the
+  new text.
 - **These changes touch the harness every other mission is gated by.** A
   defect here fails other people's branches, not just this one.

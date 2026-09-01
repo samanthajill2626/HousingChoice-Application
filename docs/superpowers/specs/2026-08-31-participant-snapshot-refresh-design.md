@@ -1,34 +1,3 @@
-### 3.1 One population this branch does not fix - and one that turned out not to exist
-
-**WITHDRAWN: the "merged stub" population never existed.** Rounds 1 (A1) and 3
-(T6) both asserted that a roster `contactId` can point at a stub staff later
-merged away, leaving rung 1 permanently missing. Round 4 (U1) withdrew it and
-the planner verified the withdrawal:
-
-- **There is no contact merge mechanism in the tree at all** - no merge route,
-  service, or repo method.
-- Triage is an IN-PLACE `PATCH /api/contacts/:contactId`
-  (`routes/contacts.ts:1391`). The stub keeps its `contactId` and GAINS a name.
-- `routes/api.ts:2032-2044` says only that "the SNAPSHOT goes stale" when a stub
-  is triaged - the snapshot, never the id.
-
-So the roster's `contactId` keeps pointing at the same contact, which now has a
-name, and **rung 1 resolves it correctly**. There is no recurring gap, no
-dangling-id population, and the branch is more complete than v3 and v4 claimed.
-Recorded at length so nobody re-derives the phantom a third time: it survived
-two review rounds and one planner acceptance before anyone checked whether the
-mechanism it named exists.
-
-This also retires round 1's A1 on its merits. The phone-resolution rung it
-motivated was already dropped for independent reasons (unbatchable; up to two
-round trips each; returns an arbitrary contact for duplicate phones), and those
-reasons still stand.
-
-**The one real uncovered population: bare-phone RELAY members.** Skipped at
-`routes/relayGroups.ts:483` (`if (!member.contactId) return member;`), with no
-phone resolver in this branch and no writer anywhere that refreshes them. They
-keep today's behavior exactly - nothing regresses - and S5 sizes them.
-
 # Participant name snapshots: resolve on read, display surfaces
 
 Branch: `feat/participant-snapshot-refresh`
@@ -167,7 +136,27 @@ are accurate as of `b702a81c` and will drift again if `main` advances.
 **Cameron, 2026-08-31.** A build instruction, not a note. It stands on its own;
 what follows is the corrected account of what re-baselining actually involves.
 
-**WITHDRAWN: the preview-pin collision does not exist.** v4 claimed S3's
+**REINSTATED: the preview collision IS real.** Round 4 withdrew it and the
+planner verified the withdrawal against `services/rosterEdits.ts:153`
+(`owner: Omit<RosterOwner, 'roster' | 'groupThreadId'>`) - **the wrong
+interface.** That is the PLAN-EDIT owner. The preview builders take the FULL
+type: `buildOpenPreview` (`:545-547`) and `buildAddPreview` (`:719-721`) are
+both `owner: RosterOwner`, `groupThreadId` included. `buildAddPreview` operates
+on a group that already EXISTS, so it always carries one, `resolveRoster` takes
+its `participants` branch, and the stored names ARE what it reads. **S3's flip
+therefore does change `rosterEdits.ts` preview behavior.** Round 3's T5 was
+right; round 4's U4 and the planner's verification of it were both wrong.
+
+Because phase-b has now LANDED, this is no longer a coordination problem - it
+is a known test surface. Its preview pins are in the tree; S3 will move some of
+them, and the builder updates the RECIPIENT-name expectations only, leaving the
+owner-routed BODY expectations phase-b landed untouched. Named pins:
+`app/test/relayGroupPreview.test.ts`, `app/test/toursApi.test.ts`,
+`app/test/placementsApi.test.ts` - re-derive their line numbers by symbol.
+
+The superseded no-collision text follows, struck, so the reversal is legible:
+
+**[SUPERSEDED] v5 claimed the collision does not exist.** v4 claimed S3's
 `describeRoster` flip would fight phase-b's Task 14 re-baseline at
 `relayGroupPreview.test.ts:151,208`, `toursApi.test.ts:3989-3998,4096` and
 `placementsApi.test.ts:989,1007`, and built a field-by-field ritual and a
@@ -285,29 +274,36 @@ which resolves by phone and writes the corrected name back - after which this
 branch's rung 2 reads a fresh snapshot. Using that mechanism beats duplicating
 it.
 
-### 3.1 Two populations this branch does NOT fix, and the gap RECURS
+### 3.1 One population this branch does not fix - and one that turned out not to exist
 
-Stated plainly because v3 got this wrong in the direction that flatters the
-branch (round 3, T6/T7; the first was planner-verified in the code).
+**WITHDRAWN: the "merged stub" population never existed.** Rounds 1 (A1) and 3
+(T6) both asserted that a roster `contactId` can point at a stub staff later
+merged away, leaving rung 1 permanently missing. Round 4 (U1) withdrew it and
+the planner verified the withdrawal:
 
-**Population 1 - a roster `contactId` pointing at a merged-away stub.**
-Detection mints a REAL contact row for an unseen member
-(`services/groupMembers.ts:105-119`); when staff later triage that stub into a
-real contact, the roster keeps pointing at the stub. Rung 1 then resolves to a
-NAMELESS contact and falls to rung 2.
+- **There is no contact merge mechanism in the tree at all** - no merge route,
+  service, or repo method.
+- Triage is an IN-PLACE `PATCH /api/contacts/:contactId`
+  (`routes/contacts.ts:1391`). The stub keeps its `contactId` and GAINS a name.
+- `routes/api.ts:2032-2044` says only that "the SNAPSHOT goes stale" when a stub
+  is triaged - the snapshot, never the id.
 
-v3 claimed the existing converge-on-read write owns this case. **It does not.**
-`routes/api.ts:2102-2125` writes `{ ...p, name }` - `name` ONLY, never
-`contactId`. So the dead id survives every write-back, and **rung 1 misses
-again on the next rename, and every rename after that.** The gap RECURS per
-rename; it does not heal. Its owner is bundle M8
-(`participants[].contactId` ownership), which is fenced (2.3).
+So the roster's `contactId` keeps pointing at the same contact, which now has a
+name, and **rung 1 resolves it correctly**. There is no recurring gap, no
+dangling-id population, and the branch is more complete than v3 and v4 claimed.
+Recorded at length so nobody re-derives the phantom a third time: it survived
+two review rounds and one planner acceptance before anyone checked whether the
+mechanism it named exists.
 
-**Population 2 - bare-phone RELAY members.** Skipped at
+This also retires round 1's A1 on its merits. The phone-resolution rung it
+motivated was already dropped for independent reasons (unbatchable; up to two
+round trips each; returns an arbitrary contact for duplicate phones), and those
+reasons still stand.
+
+**The one real uncovered population: bare-phone RELAY members.** Skipped at
 `routes/relayGroups.ts:483` (`if (!member.contactId) return member;`), with no
-phone resolver in this branch and no writer anywhere that refreshes them.
-
-Both keep today's behavior exactly - nothing regresses - and S5 sizes both.
+phone resolver in this branch and no writer anywhere that refreshes them. They
+keep today's behavior exactly - nothing regresses - and S5 sizes them.
 
 ## 4. Surfaces
 
@@ -457,14 +453,22 @@ explicitly rather than staying silent.
 
 **Cameron, 2026-08-31: do not add reads unnecessarily, especially on
 already-busy pages.** v3's first draft hydrated
-`routes/api.ts:1993-2002` `GET /conversations/:id`. That is the worst place to
-add a read - it is a zero-read passthrough refetched on a DEBOUNCED SSE TICK
-for the life of an open thread (`useGroupThread.ts:16`,
-`useRelayThread.ts:437`), and `GroupTextView.tsx:200-206` records a production
-symptom from latency on a sibling per-tick read.
+`routes/api.ts:1993-2002` `GET /conversations/:id`.
 
-**It is also redundant.** Every view that fetches the header ALSO fetches a
-dedicated contact-resolved roster route on the same mount:
+**CORRECTION (fresh review C2/D2, planner-verified).** v3, v4 and v5 all
+justified NOT hydrating it by calling it "refetched on a DEBOUNCED SSE TICK for
+the life of an open thread". **That is false.** `getConversation` is a
+per-MOUNT read: `ConversationDetail.tsx:87` sits in a `useEffect` whose
+dependency array is `[conversationId]` (`:106`) with no `refetchSignal`, and
+neither `useGroupThread` nor `useRelayThread` fetches it at all - their
+debounced SSE refetches call `/messages` and `/scheduled`. The per-tick cost
+this branch claimed to be avoiding does not exist, and the planner reported it
+to Cameron as fact. It is corrected here rather than quietly dropped.
+
+**The DECISION still stands, on the redundancy argument alone.** Every view
+that fetches the header ALSO fetches a dedicated contact-resolved roster route
+on the same mount, so hydrating the header would pay for names the client is
+already handed:
 
 | view | header | resolved roster |
 |---|---|---|

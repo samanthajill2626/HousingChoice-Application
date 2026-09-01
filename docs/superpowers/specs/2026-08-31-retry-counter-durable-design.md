@@ -9,7 +9,8 @@ Branch `feat/retry-counter-durable`, cut from `main@5ce9912f`.
 | low | `rail-binding-propagation-retry` | **closes** |
 | med | `relay-30003-retry-lineage` | **deferred - see Sec 2.1** |
 
-Design history: three adversarial review rounds, `design-review/adjudications.md`.
+Design history: four adversarial review rounds plus a post-gate simplification,
+`design-review/adjudications.md`.
 
 ## 1. The invariant
 
@@ -50,10 +51,10 @@ moves into a durable record and is claimed BEFORE the enqueue.
 
 **In:**
 
-- `app/src/jobs/broadcastFanOut.ts`, `app/src/jobs/relayFanOut.ts` - durable
-  per-recipient attempt counts.
+- `app/src/jobs/broadcastFanOut.ts`, `app/src/jobs/relayFanOut.ts` - a durable
+  pass counter, claimed at the top of each pass.
 - `app/src/repos/messagesRepo.ts`, `app/src/repos/broadcastsRepo.ts` - the claim
-  primitive and its seeding.
+  primitive.
 - `app/src/services/groupRail.ts` - binding-propagation handling, job and import
   paths only (Sec 4).
 - `dashboard/src/routes/contact/deliveryStatus.ts` - the 30003 copy on legs that
@@ -90,185 +91,151 @@ dashboard rendering.
 
 **What actually transfers - stated precisely, because the loose version is
 wrong.** M5 paired them because "the durable attempt record is what that lineage
-hangs off". What this branch lands is the **pattern and its primitives**: the
-sibling-map placement, the seeding shape, the atomic claim-before-enqueue with a
-reachable cap, and the repo methods implementing them.
+hangs off". What this branch lands is the **pattern**: a durable counter outside
+the wholesale-written slot, claimed atomically before the work, placed so every
+exit advances it, with a cap branch that is therefore always reachable.
 
-It does **not** land a counter the lineage can reuse. `fanout_attempts` is the
-CONTINUATION ladder's counter; review established that the two ladders must not
-share a field, since a continuation would silently consume the retry chain's
-budget. The lineage mission adds its own `retry_attempts` alongside it, built
-the same way.
+It does **not** land a counter or a store the lineage can reuse.
+`fanout_attempt` is a scalar pass counter for the CONTINUATION ladder; review
+established the two ladders must not share a field, since a continuation would
+silently consume the retry chain's budget. The lineage mission needs its own
+**per-recipient, per-attempt** structure - which is precisely the part that did
+not converge here - and builds it alongside, following this branch's pattern
+rather than extending its data.
 
 **What ships in the meantime.** No relay retry exists today and none is added
 here, so the dashboard's `will retry` promise on those legs is false in both
 worlds. Sec 6 stops it, which is the mission's "touch the dashboard only as far
 as the current chip stops lying" fence, satisfied more simply than before.
 
-## 3. Durable attempt counters
+## 3. The durable pass counter
 
-### 3.1 A SIBLING map, not the slot
-
-**The obvious home is wrong and would have shipped a silent no-op.** Both
-per-recipient slots are written WHOLESALE on every pass:
-
-- `setRecipientDelivery` - `SET delivery_recipients.#mk = :d` (messagesRepo.ts:2777-2785)
-- `setRecipient` - the same whole-slot set (broadcastsRepo.ts:584-605)
-
-A counter inside the slot is overwritten every time the fan-out records a
-status. It would read 1 forever - **the exact bug this branch removes,
-reintroduced by its own fix.** A builder must not "simplify" this back into the
-slot.
-
-So the counters are sibling top-level maps on the same item:
+### 3.1 One scalar per item, claimed at the top of the pass
 
 ```
-broadcasts.<broadcastId>.fanout_attempts = { <contactKey>: number }
-messages.<...>.fanout_attempts           = { <memberKey>:  number }
+broadcasts.<broadcastId>.fanout_attempt = number
+messages.<conversationId>#<tsMsgId>.fanout_attempt = number
 ```
 
-Consequences, both load-bearing:
+A single top-level number, not a per-recipient map and **emphatically not a
+field inside the recipient slot**. The slot is written WHOLESALE on every pass
+(`setRecipientDelivery`, messagesRepo.ts:2777-2785; `setRecipient`,
+broadcastsRepo.ts:584-605), so a counter living there is erased each time a
+status is recorded - it would read 1 forever, **the exact bug this branch
+removes, reintroduced by its own fix.** A builder must not "tidy" it back in.
 
-- **`RelayRecipientDelivery` does not change.** It is shared with native group
-  text and hand-mirrored in `dashboard/src/api/types.ts`; leaving it alone keeps
-  both surfaces out of this branch.
-- **The two shared whole-slot writers are not edited.** Their child-write
-  discipline was itself a prior fix wave; re-opening them is risk this design
-  does not need.
+**Why a scalar and not per-recipient.** Per-recipient granularity was needed by
+the relay-30003 lineage, which Sec 2.1 defers. For THIS ladder it buys nothing:
+recipients inside a continuation are attempted together and success is terminal,
+so per-recipient counts stay in lockstep with the pass count. Review's rule was
+that the two LADDERS must not share a field - not that this ladder must count
+per recipient. With one ladder left, a scalar is the honest shape, and it counts
+exactly what the envelope's `attempt` counted: **passes**.
 
-### 3.2 Seeding and read-compat
+The simplification is not cosmetic. It removes, rather than answers, three
+findings the map version had to carry: the parent-map seeding problem, the
+creation-site edit that would have reached into fenced `twilio.ts`, and the
+400KB item-size question on a 1500-recipient broadcast.
 
-**A nested `ADD` on an absent parent map throws `ValidationException`**, which
-under Sec 3.4's throw rule would DLQ the envelope on the very first claim. The
-repo already documents this constraint for `delivery_recipients` and
-`recipients`, whose parents are pre-seeded at create time so child writes are
-legal.
+### 3.2 Seeding: none required
 
-**Two shapes are ruled OUT before the builder tries them**, because both are
-already documented as rejected in the files being edited:
+`ADD` on an ABSENT top-level numeric attribute treats it as zero and creates it.
+There is no parent document path to seed, so there is no seeding step, no
+creation-site edit, and no cold-path fallback.
 
-- **Not `SET <field> = if_not_exists(<field>, :empty)` alongside the `ADD` in
-  one update.** DynamoDB rejects an UpdateExpression that touches both a map and
-  a child of that map - overlapping document paths. The repo says so three
-  times, in both `setRecipientDelivery` (messagesRepo.ts:2770-2776) and
-  `setRecipient` (broadcastsRepo.ts:585-592).
-- **Not a seed at the relay creation site.** The relay message's sibling map is
-  seeded by `deliveryRecipients: {}` in `twilio.ts` - a Sec 2 hard fence. Seeding
-  `fanout_attempts` there would send the builder straight into a file this
-  branch must not touch.
-
-**The shape that works: seed lazily, on the cold path only.**
-
-```
-try   ADD fanout_attempts.#k :one   (condition: item exists, count < cap)
-catch ValidationException:                       // parent map absent
-      SET fanout_attempts = :empty  (condition: attribute_not_exists)
-      retry the ADD once
-```
-
-Two writes, but only the first time a given item is claimed against - every
-later claim is one write. This needs no creation-site edit at all, which means
-`broadcastsRepo`'s `markSending`, the message append, and `twilio.ts` are all
-left alone, and items written BEFORE this branch work identically to new ones.
-
-That is the entire read-compat story: no backfill, no migration, no seeding
-change. In-flight envelopes carrying `attempt: N` still parse; N selects the
-backoff step only.
+This also settles read-compat completely: an item written before this branch has
+no `fanout_attempt`, and its first claim creates it at 1. **No backfill, no
+migration, no exception handling.** In-flight envelopes carrying `attempt: N`
+still parse; N selects the backoff step only.
 
 ### 3.3 The claim
 
-One primitive, at both repos:
+One primitive per repo:
 
 ```
-claimFanoutAttempt(<keys>, key, cap): Promise<
+claimFanoutPass(<key>, cap): Promise<
   | { outcome: 'claimed'; attempt: number }
   | { outcome: 'capped';  attempt: number }
   | { outcome: 'missing' }
 >
 ```
 
-An atomic `ADD fanout_attempts.#k :one`, guarded by a `ConditionExpression`
-asserting the item exists and the count is below `cap` (with
-`attribute_not_exists` covering the zero case), combined with the
-`if_not_exists` parent seed from Sec 3.2.
-
-`claim.attempt` is read from **`ReturnValues: 'UPDATED_NEW'`** - the claim never
-re-reads the item to learn its own result, which would reintroduce the race the
-atomic `ADD` exists to remove. `UPDATED_NEW` on a nested path returns the
-enclosing `fanout_attempts` map, and the claimed value is read from it by key.
-
-**Size, both halves.** The map holds one small number per recipient, and a
-broadcast is capped at 1500 recipients.
-
-- *Response* - `UPDATED_NEW` returns the whole map, so a claim near the cap
-  returns ~1500 short-key/number pairs. Tens of kilobytes, once per continuation
-  enqueue (not per recipient). Acceptable.
-- *Item* - the same map is stored on an item that already carries a
-  1500-entry `recipients` map of richer objects, against DynamoDB's **400KB**
-  limit. The counter map is by far the cheaper of the two, but it is additive
-  in the exact scenario the claim exists for. The builder measures a
-  1500-recipient broadcast item's serialized size with and without it and
-  records the numbers; if the margin is thin, the counter map moves to its own
-  item keyed by broadcast, which the claim's interface already hides.
+An atomic `ADD fanout_attempt :one`, with a `ConditionExpression` asserting the
+item exists and `fanout_attempt < :cap` (`attribute_not_exists(fanout_attempt)`
+covering the zero case). `claim.attempt` is read from
+`ReturnValues: 'UPDATED_NEW'`, which now returns **a single number** - the claim
+never re-reads the item to learn its own result, and there is no payload concern
+to weigh.
 
 On `ConditionalCheckFailedException`, a **strongly consistent** read
 (`ConsistentRead: true`) disambiguates `capped` from `missing`; an eventually
 consistent read could report `missing` for an item that exists and skip the
 close.
 
-### 3.4 The handler shape
+Atomicity matters even with one ladder: two concurrent deliveries of the same
+continuation cannot both claim the same pass number.
+
+### 3.4 Placement: at the TOP of the pass, so every exit is covered
+
+This is the load-bearing detail, and an earlier revision got it wrong by putting
+the claim at the continuation point:
 
 ```
-const claim = await repo.claimFanoutAttempt(keys, key, CAP);
-if (claim.outcome === 'missing') { log; return; }        // nothing to advance
-if (claim.outcome === 'capped')  { await close(); return; }   // ALWAYS reachable
+defineJobHandler(JOB, async (raw) => {
+  const payload = parse(raw);
+  ...
+  if (!await putJobExecutionMarker(jobId, ...)) return;   // true duplicate: no claim
 
-await enqueue(JOB, { ...payload, attempt: claim.attempt }, { runAt: backoff });
-// no catch: see below
+  const claim = await repo.claimFanoutPass(key, CAP);     // <-- HERE
+  if (claim.outcome === 'missing') { log; return; }
+  if (claim.outcome === 'capped')  { await close(); return; }
+
+  ... the send loop, which may throw ...
+  ... the continuation enqueue, which may throw ...
+});
 ```
 
-**On enqueue failure the handler THROWS.** Both remaining sites are
-consumer-side, inside a job handler, so SQS redelivers the envelope; the count
-has already advanced durably, so the redelivery reaches the cap and runs the
-close. A transient blip costs a redelivery, not a recipient, and
-`maxReceiveCount`/DLQ bounds the loop.
+**Claiming at the continuation point covers only the enqueue failure.** Each
+loop also carries an earlier `throw` for an unrecognised send error
+(broadcastFanOut.ts:459, relayFanOut.ts:535) that never reaches the continuation
+block at all. On that path the count never advances: redeliveries re-run, hit
+the same error, throw again, and the counter sits still. The cap is never
+reached, the close never runs, and only `maxReceiveCount` stops the looping -
+after which the DLQ holds the envelope while the broadcast row is still
+`sending` and its recipients still `queued`. **The same "stuck forever" symptom
+this branch exists to remove, through a different door.**
 
-An earlier revision also closed immediately in a catch, calling it "belt and
-braces". It was a contradiction: the durable counter exists precisely so the cap
-stays reachable, and closing on the first blip **discards the retries the design
-just made reachable.** There is no producer-side site left in scope, so the rule
-is simply: throw.
+Claiming immediately after the duplicate-delivery marker fixes that: **every**
+exit from the handler - unknown send error, enqueue failure, crash, timeout -
+happens after the count advanced. A redelivery walks the counter toward the cap,
+and the cap branch runs the close. The invariant is answered for the whole
+handler rather than one branch of it.
 
-**Known limit, stated rather than hidden.** This makes the *enqueue* failure
-reach a terminal state. The pre-existing unknown-error `throw` earlier in each
-loop never reaches the claim at all, so for that path the invariant still
-answers NO - bounded only by SQS's DLQ. Closing that is a larger change to the
-per-recipient error taxonomy and is not in this branch.
+The claim sits AFTER the marker deliberately: a true duplicate delivery of the
+same `jobId` returns early and must not consume a pass. A redelivery after a
+throw carries a FRESH `jobId` (the visibility timeout), so it is not suppressed
+and does claim - which is what makes the ladder advance.
 
-The envelope's `attempt` field is retained but becomes **advisory**: logged, and
-used to select the backoff step, never for the cap decision.
+**On enqueue failure the handler simply THROWS** - no catch, no early close.
+Both remaining sites are consumer-side, so SQS redelivers, the count has already
+advanced, and the cap is reached in due course. A transient blip costs a
+redelivery, not a recipient.
 
-### 3.5 Cap semantics, stated numerically
+### 3.5 Cap semantics
 
-The durable claim counts **enqueues** where the envelope field counted
-**passes**, so the naive translation buys one extra pass - one extra real text
-to a real person. The literal is therefore named, not implied.
+Because the claim now counts **passes**, it counts exactly what the envelope
+field counted, and the translation is one-for-one:
 
-Today: `attempt` starts at 1 on the first run, the continuation computes
-`nextAttempt = attempt + 1`, and `nextAttempt > MAX_FANOUT_ATTEMPTS` closes.
-With `MAX_FANOUT_ATTEMPTS = 3` that is **3 passes total** per recipient.
+> `cap = MAX_FANOUT_ATTEMPTS` / `MAX_BROADCAST_ATTEMPTS`, unchanged in value and
+> in meaning. The total number of send passes per recipient is identical to
+> `main`.
 
-The claim replaces that comparison, and it is taken once per CONTINUATION
-enqueue - of which there are 2 across 3 passes. So:
+The old code closed when `nextAttempt > MAX`; the claim refuses when
+`fanout_attempt` has reached `MAX`. Same number of passes, no off-by-one - the
+hazard that existed only because the map version counted enqueues instead.
 
-> **`cap = MAX_FANOUT_ATTEMPTS - 1`** (and `MAX_BROADCAST_ATTEMPTS - 1`), with
-> the claim's condition being `count < cap`. The constants keep their current
-> values and their current meaning; the CAP PASSED TO THE CLAIM is one less.
-
-Getting this wrong is invisible in every test that does not count sends, so
-**test 6 asserts the total provider-send count per recipient equals `main`'s**
-on both ladders.
-
+A test still asserts the total provider-send count per recipient equals `main`'s
+on both ladders, because this is invisible in any test that does not count.
 ### 3.6 The close branches are the EXISTING ones
 
 An earlier revision claimed `broadcastFanOut`'s cap branch fails to call
@@ -486,8 +453,16 @@ message-catalog rule does not apply (its own comment at :606 says so).
 5. **A frozen envelope still terminates** - replaying an identical envelope
    repeatedly advances the durable count to the cap.
 6. **Total send count is unchanged from `main`** on both ladders (Sec 3.5).
-7. **Claim against a pre-branch item** - an item with no counter map claims
-   successfully via the `if_not_exists` seed rather than throwing into the DLQ.
+7. **Claim against a pre-branch item** - an item with no `fanout_attempt`
+   attribute claims successfully at 1 (`ADD` creates it), with no seeding step.
+7a. **An UNKNOWN send error also reaches the cap** - the regression test for the
+   gap the top-of-pass placement closes (Sec 3.4). Stub the send to throw an
+   unrecognised error; the handler throws, redeliveries advance the count, and
+   the cap branch closes the broadcast. **Fails against a design that claims at
+   the continuation point**, where that throw never reaches the claim.
+7b. **A true duplicate delivery does not consume a pass** - re-delivering the
+   SAME `jobId` returns at the execution marker and leaves `fanout_attempt`
+   untouched.
 8. **Rail** - a create whose participants have no binding yet resolves without
    repair and without a `rail_failed`; a create with a real per-member failure
    still repairs; 50386/50437 during repair is not a refusal; the adopt path is
@@ -520,7 +495,12 @@ message-catalog rule does not apply (its own comment at :606 says so).
 ## 8. Risks and watch items
 
 - **`relayFanOut.ts` is a conflict surface** with M2, M3 and T-DELIVERY-CHIPS.
-  Keep the diff inside the continuation/cap region.
+  Keep the diff to the claim at the top of the handler plus the continuation/cap
+  region.
+- **The claim's PLACEMENT is the fix, not just its existence** (Sec 3.4). A
+  reviewer or a later refactor that moves it down next to the enqueue "where it
+  is used" silently reopens the unknown-error path. Test 7a is what catches
+  that; do not delete it as redundant with test 3.
 - **Do not touch `twilio.ts`.** With relay-30003 deferred there is no reason to,
   and three other bundles own parts of it.
 - **Do not touch `conversationsRepo.ts`** - it is what forces Sec 4.2's shape.

@@ -489,3 +489,49 @@ Round 4 was the hard cap. Its findings were **corrections and one scope ruling**
 
 The design is done. What broke the self-inflicted cycle was not another round of
 fixes - it was removing the scope that was generating them.
+
+---
+
+# Post-gate simplification - the scalar pass counter
+
+Not a review round. Cameron asked at the spec gate whether "any enqueue failure
+is terminal, and it won't be requeued at all". Answering it precisely exposed
+that the answer was fine but the DESIGN AROUND IT was carrying weight it no
+longer needed.
+
+**The answer to the question:** no. An enqueue failure throws, SQS redelivers,
+the job re-runs and re-attempts the remaining recipients. The count advances per
+pass, so a persistently broken queue walks to the cap and only THEN closes.
+Terminal comes from exhausting the cap, never from a single failure.
+
+**What the question exposed.** The spec's "known limit" - that the pre-existing
+unknown-error `throw` (broadcastFanOut.ts:459, relayFanOut.ts:535) never reaches
+a claim placed at the continuation point, leaving that path's counter frozen and
+its row stuck after the DLQ - was described as needing an error-taxonomy rework.
+It does not. **Moving the claim to the top of the pass** covers every exit from
+the handler, including that throw.
+
+And once the claim counts PASSES rather than enqueues, per-recipient granularity
+buys nothing: recipients in a continuation are attempted together and success is
+terminal, so the counts were always in lockstep. Round 1's rule was that the two
+LADDERS must not share a field; with the lineage ladder deferred (Sec 2.1), one
+ladder remains and a **scalar** is the honest shape.
+
+**Cameron approved folding it in.** The change is strictly a simplification, and
+it REMOVES rather than answers four findings the map version had to carry:
+
+| finding | map version | scalar version |
+|---|---|---|
+| R4-1 `if_not_exists` is a rejected UpdateExpression shape | needed a cold-path seed | **no parent path exists**; `ADD` creates the attribute |
+| R4-4 the seed site is in fenced `twilio.ts` | avoided via lazy seeding | **no seeding step at all** |
+| R4-10 400KB item budget at 1500 recipients | measurement + fallback owed | **no map stored** |
+| R4-5 cap off-by-one (`MAX - 1`) | literal had to be named | **counts passes, one-for-one with the envelope** |
+
+Plus it closes the limit that prompted the question, which the map version left
+open regardless of placement.
+
+New material to review: Sec 3 in full, and test 7a - the regression test for the
+unknown-error path, which fails against a design that claims at the continuation
+point. Two watch items added so a later refactor cannot quietly undo the
+placement, since "move the claim next to where it is used" is exactly the tidy a
+reviewer would suggest.

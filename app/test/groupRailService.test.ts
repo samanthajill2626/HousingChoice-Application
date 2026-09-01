@@ -24,6 +24,7 @@ import type {
   CreateGroupConversationInput,
   GroupConversationRef,
   GroupConversationsPort,
+  GroupParticipantFailure,
   GroupParticipantRef,
 } from '../src/adapters/groupConversations.js';
 import { GroupConversationsUnavailableError } from '../src/adapters/groupConversations.js';
@@ -659,6 +660,77 @@ describe('ensureGroupRail', () => {
     expect(row.current?.twilio_conversation_sid).toBe('CH1');
     expect(row.current?.rail_failed).toBeUndefined();
     expect(row.current?.rail_creating).toBeUndefined();
+  });
+
+  // THE DEFECT THESE PIN (rail-binding-propagation-retry; migration 2026-08-13).
+  // Twilio populates a participant's messaging BINDING asynchronously, and
+  // `buildParticipantMap` drops any participant whose binding has no address
+  // yet. A rail read milliseconds after its own create therefore reads SHORT of
+  // its roster and the code concluded damage: 81 incomplete-roster warnings, 178
+  // "participant already exists" refusals, and 2 `rail_failed` records for rails
+  // a later read showed fully bound. The ladder waits that window out at BOTH
+  // reads that can conclude damage (D14), for the three opted-in callers only
+  // (D16), and never on an ADOPTED rail, whose read-back is the only source of
+  // roster truth (D17).
+  describe('BINDING PROPAGATION LADDER (awaitBindingPropagation)', () => {
+    const FULL_MAP = { MB0: 'phone#+15551110001', MB1: 'phone#+15551110002' };
+
+    /**
+     * A rail whose SECOND member's binding lands only on the Nth participant
+     * read the service itself makes. The create returns the SHORT list, which is
+     * the whole point: a fixture that returns the full list immediately passes
+     * against no ladder at all.
+     */
+    function bindingFixture(boundOnRead: number) {
+      const short = participantsFor([MEMBERS[0]!]);
+      const full = participantsFor(MEMBERS);
+      let reads = 0;
+      const waits: number[] = [];
+      const addParticipants = vi.fn(async (): Promise<GroupParticipantFailure[]> => []);
+      const { port, created } = makePort({
+        async createConversationWithParticipants(input) {
+          return {
+            conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
+            participants: short,
+            failures: [],
+          };
+        },
+        async fetchParticipants() {
+          reads += 1;
+          return reads >= boundOnRead ? full : short;
+        },
+        addParticipants,
+      });
+      const sleep = async (ms: number): Promise<void> => {
+        waits.push(ms);
+      };
+      return { port, created, addParticipants, waits, sleep, readCount: () => reads };
+    }
+
+    it('a fresh create whose bindings have not propagated resolves with NO repair and no rail_failed', async () => {
+      const { repo, row, calls } = makeRepo();
+      // The first laddered re-read sees the second binding.
+      const f = bindingFixture(1);
+
+      const result = await svc(repo, f.port, { sleep: f.sleep }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      expect(result.status).toBe('created');
+      expect(result.participantMap).toEqual(FULL_MAP);
+      // Asserted DIRECTLY, not by relying on makePort's throwing default: a
+      // ladder that emptied `missing` for the wrong reason would still pass a
+      // throw-based negative control.
+      expect(f.addParticipants).not.toHaveBeenCalled();
+      expect(calls.failures).toBe(0);
+      expect(row.current?.rail_failed).toBeUndefined();
+      expect(row.current?.twilio_participant_map).toEqual(FULL_MAP);
+      expect(row.current?.rail_creating).toBeUndefined();
+      // One rung was enough - the ladder stops as soon as `missing` empties.
+      expect(f.waits).toEqual([500]);
+    });
   });
 
   it('RECREATION RACE: losing the fenced finalize adopts the winner rail, never overwrites it', async () => {

@@ -50,6 +50,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
+import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
 import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
 import { SendRefusedError } from '../services/sendMessage.js';
 import { isMemberSuppressed, sendRelayAnnouncement } from '../services/relayAnnouncements.js';
@@ -74,7 +75,13 @@ export const MAX_FANOUT_ATTEMPTS = 3;
  */
 export const RELAY_PRESIGN_TTL_SECONDS = 3600;
 
-/** Exponential backoff for the transient-failure continuation: 5s, 10s, 20s. */
+/**
+ * Exponential backoff for the transient-failure continuation. The call site
+ * passes the CURRENT pass number, not the next one (M5 D7/D11: relay's
+ * argument differs from broadcastFanOut's deliberately and is preserved, not
+ * normalised), so the live ladder is 5s then 10s ONLY - pass 3 reaches the
+ * cap and closes instead of enqueueing, which leaves the 20s rung unreachable.
+ */
 export function fanOutBackoffMs(attempt: number): number {
   return 5_000 * 2 ** (attempt - 1);
 }
@@ -806,6 +813,88 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       recipients = recipients.filter((m) => allowed.has(relayMemberKey(m)));
     }
 
+    // Pin the lazily-initialised repo. Capturing the reassignable `let` inside a
+    // closure loses TS's non-undefined narrowing wherever that closure sits,
+    // because the compiler cannot prove the binding is still set when it runs.
+    // `snapshot` is the same pin for the point-in-time source row: a hoisted
+    // function declaration does not inherit the `if (!sourceMessage) return`
+    // narrowing either.
+    const repo = messages;
+    const snapshot = sourceMessage;
+
+    /**
+     * M5 D8: terminal-close every still-open member key in `memberKeys` with
+     * `code`. Three situations need this and they are not one code path - the
+     * cap reached mid-ladder (close A), a pass beginning with the ladder
+     * already spent (close B), and a continuation the queue refused (close C,
+     * D9) - but all three leave the SAME terminal shape: no recipient left
+     * `queued`, and one operator ERROR line naming the reason (D10).
+     *
+     * Deliberately NARROWER than broadcastFanOut's closeBroadcast: this path
+     * has no finalize, no persisted stats, no progress emit and no `sending`
+     * row status - none of that machinery exists here. The hub message's own
+     * delivery_status is likewise untouched (there is no relay rollup at all);
+     * that gap is filed rather than fixed in this slice.
+     *
+     * NOT closed here: the unknown-error `throw` below, which is D12 and stays
+     * broken deliberately (filed as throw-for-redelivery-defeated-by-job-marker).
+     */
+    async function closeRelay(memberKeys: string[], code: string, cause?: unknown): Promise<void> {
+      for (const key of memberKeys) {
+        // Both call sites pass an already-non-terminal set; re-checked against
+        // the pass snapshot so a future caller cannot overwrite a settled slot.
+        if (isTerminal(snapshot.delivery_recipients?.[key]?.status)) continue;
+        await markRecipient(repo, payload, key, { status: 'failed', errorCode: code });
+      }
+      log.error(
+        {
+          conversationId: payload.relayConversationId,
+          tsMsgId: payload.sourceTsMsgId,
+          deferred: memberKeys.length,
+          closeCode: code,
+          attempt: payload.attempt,
+          ...(cause !== undefined && { err: cause }),
+        },
+        'relayFanOut: fan-out closed - remaining recipients marked failed',
+      );
+    }
+
+    // M5 D1/D6: claim this pass on the DURABLE source message before any send.
+    // The count used to live in the enqueued envelope, so it only advanced when
+    // the queue accepted the continuation - a broken queue froze it and the cap
+    // below could never be reached. Claimed here, BELOW the duplicate-delivery
+    // guard and only when this pass will actually attempt a send: a job that
+    // sends nothing must not spend a rung, and a redelivery must not either.
+    // `recipients` holds participant OBJECTS, so the guard maps through
+    // relayMemberKey and reads the SAME snapshot the in-loop skip reads.
+    const pending = recipients.filter(
+      (m) => !isTerminal(snapshot.delivery_recipients?.[relayMemberKey(m)]?.status),
+    );
+    // Handler scope, not the branch: the continuation block reads it.
+    let claim: FanoutClaimResult | undefined;
+    if (pending.length > 0) {
+      claim = await repo.claimFanoutPass(
+        payload.relayConversationId,
+        payload.sourceTsMsgId,
+        MAX_FANOUT_ATTEMPTS,
+      );
+      if (claim.outcome === 'missing') {
+        log.warn(
+          { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId },
+          'relayFanOut: source message vanished before the pass claim - nothing relayed',
+        );
+        return;
+      }
+      if (claim.outcome === 'capped') {
+        // Close B: the ladder was already spent when this pass began, so there
+        // is nothing to attempt and nothing further will arrive.
+        await closeRelay(pending.map(relayMemberKey), 'transient_cap');
+        return;
+      }
+    }
+    // pending.length === 0 -> nothing to send; fall off the end of the handler
+    // without consuming a rung (there is no trailing finalize on this path).
+
     const transientRemaining: string[] = [];
     let sentCount = 0;
 
@@ -932,37 +1021,56 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     );
 
     // Transient continuation: re-enqueue the remaining recipients with backoff,
-    // capped. enqueue() with runAt routes through SQS DelaySeconds (5/10/20s is
-    // well within the 12min cap), so the backoff is EXACT — no EventBridge 60s
-    // floor inflating a 5s wait to 60s.
+    // capped. enqueue() with runAt routes through SQS DelaySeconds (5s then
+    // 10s - see fanOutBackoffMs; the cap closes on pass 3, so the third rung
+    // never fires and both are well within the 12min cap), so the backoff is
+    // EXACT: no EventBridge 60s floor inflating a 5s wait to 60s.
     if (transientRemaining.length > 0) {
-      const nextAttempt = (payload.attempt ?? 1) + 1;
-      if (nextAttempt > MAX_FANOUT_ATTEMPTS) {
-        // Cap reached: mark the still-deferred recipients failed so the thread
-        // shows the honest outcome (no silent black hole).
-        for (const key of transientRemaining) {
-          await markRecipient(messages, payload, key, { status: 'failed', errorCode: 'transient_cap' });
-        }
-        log.error(
-          { conversationId: payload.relayConversationId, deferred: transientRemaining.length, attempt: payload.attempt },
-          'relayFanOut: transient retry cap reached — remaining recipients marked failed',
-        );
+      if (claim?.outcome !== 'claimed') {
+        // Unreachable by construction: a key reaches transientRemaining only
+        // from inside the send loop, which only runs for a non-terminal slot -
+        // so `pending` was non-empty and the claim either succeeded or returned
+        // above. Narrowed rather than asserted, and closed rather than ignored,
+        // so D8 holds even if the impossible ever happens.
+        await closeRelay(transientRemaining, 'transient_cap');
         return;
       }
-      await enqueue(
-        RELAY_FANOUT_JOB,
-        {
-          relayConversationId: payload.relayConversationId,
-          sourceTsMsgId: payload.sourceTsMsgId,
-          senderKey: payload.senderKey,
-          ...(payload.senderNameOverride !== undefined && {
-            senderNameOverride: payload.senderNameOverride,
-          }),
-          attempt: nextAttempt,
-          recipientKeys: transientRemaining,
-        } satisfies RelayFanOutPayload,
-        { runAt: new Date(Date.now() + fanOutBackoffMs(payload.attempt ?? 1)) },
-      );
+      // The claimed pass number is the durable one; the envelope's `attempt` is
+      // advisory from M5 on (kept in the payload for logs and compatibility).
+      const nextAttempt = claim.attempt + 1;
+      if (claim.attempt >= MAX_FANOUT_ATTEMPTS) {
+        // Close A: this pass WAS the last rung, so no continuation follows and
+        // the still-deferred recipients close here (no silent black hole).
+        await closeRelay(transientRemaining, 'transient_cap');
+        return;
+      }
+      try {
+        await enqueue(
+          RELAY_FANOUT_JOB,
+          {
+            relayConversationId: payload.relayConversationId,
+            sourceTsMsgId: payload.sourceTsMsgId,
+            senderKey: payload.senderKey,
+            ...(payload.senderNameOverride !== undefined && {
+              senderNameOverride: payload.senderNameOverride,
+            }),
+            attempt: nextAttempt,
+            recipientKeys: transientRemaining,
+          } satisfies RelayFanOutPayload,
+          // D7/D11: relay waits the CURRENT pass's delay (1 -> 5s, 2 -> 10s),
+          // where broadcastFanOut waits the NEXT step's. The claimed attempt is
+          // the same number the envelope carried, so this is the identical
+          // value to main's - the difference is preserved, not normalised.
+          { runAt: new Date(Date.now() + fanOutBackoffMs(claim.attempt)) },
+        );
+      } catch (err) {
+        // Close C (D9): the queue refused the continuation, so nothing will come
+        // back - a redelivery of THIS envelope is suppressed by the job marker
+        // above. Close now instead of leaving the recipients queued forever.
+        // The reason is its OWN code (D10): retries never ran here.
+        await closeRelay(transientRemaining, 'enqueue_failed', err);
+        return;
+      }
     }
   });
 

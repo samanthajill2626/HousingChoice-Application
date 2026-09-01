@@ -5,7 +5,7 @@
 // intro naming every member. Driven through the real jobs envelope machinery
 // (enqueue → InMemoryScheduler/InProcessOutboundQueue → dispatchJob) so the
 // jobId-marker idempotency guard is exercised for real.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -40,7 +40,7 @@ import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
-import { createLogCapture } from './helpers/logCapture.js';
+import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
 
 const POOL = '+15550109000';
@@ -86,9 +86,76 @@ function seedSource(world: FakeWorld, body: string, senderKey: string): MessageI
     delivery_status: 'delivered',
     created_at: providerTs,
     relay_sender_key: senderKey,
+    // Production seeds the parent map EMPTY on an inbound relay source
+    // (routes/webhooks/twilio.ts) so the fan-out's child-only
+    // setRecipientDelivery has something to write into. The harness fake
+    // tolerates an absent map; the real repo would reject the child SET.
+    delivery_recipients: {},
   };
   world.messages.push(item);
   return item;
+}
+
+/**
+ * Seed a TEAM-authored source message: outbound, the team sentinel as sender
+ * key, and one 'queued' slot per roster member - the shape routes/api.ts
+ * persists before it enqueues the fan-out.
+ */
+function seedTeamSource(world: FakeWorld, body: string, memberKeys: string[]): MessageItem {
+  const providerTs = new Date().toISOString();
+  const tsMsgId = buildTsMsgId(providerTs, 'team-src-cap');
+  const slots: NonNullable<MessageItem['delivery_recipients']> = {};
+  for (const key of memberKeys) slots[key] = { status: 'queued' };
+  const item: MessageItem = {
+    conversationId: 'conv-relay-1',
+    tsMsgId,
+    type: 'sms',
+    direction: 'outbound',
+    author: 'teammate',
+    body,
+    provider_sid: 'team-src-cap',
+    provider_ts: providerTs,
+    delivery_status: 'queued',
+    created_at: providerTs,
+    relay_sender_key: TEAM_SENDER_KEY,
+    delivery_recipients: slots,
+  };
+  world.messages.push(item);
+  return item;
+}
+
+/** Recipient states the fan-out treats as terminal (relayFanOut isTerminal). */
+const TERMINAL_STATUSES = new Set(['sent', 'delivered', 'failed']);
+
+/**
+ * The single operator ERROR line every close writes (M5 D8): the cap reached
+ * mid-ladder, a pass beginning with the ladder already spent, and a failed
+ * continuation enqueue all land on one message, parameterised by closeCode.
+ * Matched by message so an unrelated error line cannot inflate the count.
+ */
+function closeLines(capture: LogCapture): Record<string, unknown>[] {
+  return capture
+    .atLevel(50)
+    .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('fan-out closed'));
+}
+
+/**
+ * Send stubs as vi.fn COUNTERS. These tests replace the messaging adapter
+ * wholesale, so `world.sent` (appended inside the harness adapter) never fills
+ * for a deferring recipient - the stub's own call count is the honest one.
+ */
+/** A send stub that must never run - calling it fails the test loudly. */
+function neverSends() {
+  return vi.fn(async (): Promise<never> => {
+    throw new Error('sendMessage must not be called on this pass');
+  });
+}
+
+/** A send stub that always rate-limits (429 = transient -> continuation). */
+function alwaysRateLimits() {
+  return vi.fn(async (): Promise<never> => {
+    throw Object.assign(new Error('rate limited'), { code: 429 });
+  });
 }
 
 describe('relay.fanOut (M1.7)', () => {
@@ -434,11 +501,15 @@ describe('relay.fanOut (M1.7)', () => {
     });
     await outbound.settle();
     expect(world.sent).toHaveLength(2);
+    expect(world.messages.find((m) => m.tsMsgId === source.tsMsgId)!.fanout_attempt).toBe(1);
 
     // Re-dispatch the SAME envelope (SQS at-least-once redelivery): the jobId
     // marker suppresses it — no further sends.
     await dispatchJob(JSON.parse(JSON.stringify(envelope)));
     expect(world.sent).toHaveLength(2);
+    // D6: the duplicate returned ABOVE the claim, so it consumed no rung. A
+    // claim placed any earlier would burn the ladder on redeliveries alone.
+    expect(world.messages.find((m) => m.tsMsgId === source.tsMsgId)!.fanout_attempt).toBe(1);
   });
 
   it('per-recipient idempotency: a continuation skips recipients already terminal', async () => {
@@ -503,6 +574,186 @@ describe('relay.fanOut (M1.7)', () => {
     expect(payload.attempt).toBe(2);
     // fanOutBackoffMs(attempt 1) = 5s → DelaySeconds 5 (exact, no 60s floor).
     expect(outbound.delayed[0]!.delaySeconds).toBe(5);
+    // M5: pass 1 claimed rung 1 on the DURABLE source message. The envelope's
+    // `attempt` is advisory from here on - this is the number the cap reads.
+    expect(world.messages.find((m) => m.tsMsgId === source.tsMsgId)!.fanout_attempt).toBe(1);
+  });
+
+  // --- M5: the three closes. The relay terminal shape is narrower than the
+  // broadcast one - there is no finalize, no stats and no hub-status rollup on
+  // this path - so it is exactly: every derived member slot terminal, one
+  // operator ERROR line, and no continuation left behind (D8).
+  it('close A: 429 capped at MAX_FANOUT_ATTEMPTS (ladder driven for real) -> deferred recipient marked failed', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob']);
+    // Alice succeeds on pass 1 and is terminal from then on; Bob rate-limits on
+    // every pass, so he is the one recipient the ladder carries to the cap.
+    const send = vi.fn(async (params: SendMessageParams) => {
+      if (params.to === BOB) throw Object.assign(new Error('rate limited'), { code: 429 });
+      return {
+        providerSid: `SMok-${params.to}`,
+        status: 'sent' as const,
+        providerTs: new Date().toISOString(),
+      };
+    });
+    world.adapter.sendMessage = send;
+
+    // Drive the ladder the way PRODUCTION reaches the cap - three passes, each
+    // deferring - instead of injecting attempt=3 in the envelope, which the
+    // durable counter has made advisory.
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: TEAM_SENDER_KEY,
+      senderNameOverride: TEAM_SENDER_LABEL,
+    });
+    await outbound.settle();
+
+    // deliverDelayed drains TRANSITIVELY and empties delayed[], so one call
+    // would run passes 2 AND 3 together and erase both delays. Shift one
+    // continuation at a time and dispatch it, recording the rung's delay first.
+    const delaysObserved: number[] = [];
+    for (let pass = 2; pass <= 3; pass += 1) {
+      const item = outbound.delayed.shift();
+      expect(item).toBeDefined();
+      delaysObserved.push(item!.delaySeconds);
+      await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)));
+    }
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
+    expect(stored.delivery_recipients?.['c-bob']?.errorCode).toBe('transient_cap');
+    // Alice's pass-1 send stands: a close never rewrites an already-terminal
+    // slot. Every slot on the row is terminal - nothing left queued (D8).
+    expect(stored.delivery_recipients?.['c-alice']?.status).toBe('sent');
+    expect(
+      Object.values(stored.delivery_recipients ?? {}).every((d) => TERMINAL_STATUSES.has(d.status)),
+    ).toBe(true);
+    expect(outbound.delayed).toHaveLength(0); // no FOURTH continuation
+    expect(closeLines(capture)).toHaveLength(1);
+    // D7: pass count and delays are exactly main's - three attempts at the
+    // deferred recipient, 5s then 10s (relay passes the CURRENT pass number).
+    expect(send.mock.calls.filter(([params]) => params.to === BOB)).toHaveLength(3);
+    expect(delaysObserved).toEqual([5, 10]);
+    // The cap was reached on the DURABLE counter, not on the envelope.
+    expect(stored.fanout_attempt).toBe(3);
+  });
+
+  it('close B: a pass beginning with the ladder already spent closes an INBOUND source, sending nothing', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'hi', 'c-alice');
+    // Spec 7.4's vacuous-pass trap: an inbound source carries an EMPTY
+    // delivery_recipients map, so every slot the close writes has to come from
+    // the ROSTER. A close driven off the row would mark nothing and still pass.
+    expect(Object.keys(source.delivery_recipients ?? {})).toHaveLength(0);
+    // Seed the STORED item at MAX_FANOUT_ATTEMPTS (world.messages holds the
+    // items themselves). A FIRST-pass envelope - no attempt, no recipientKeys -
+    // so only the durable counter can refuse the claim.
+    source.fanout_attempt = 3;
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(send).not.toHaveBeenCalled();
+    // Every roster-derived recipient (the sender excluded) is terminal.
+    expect(Object.keys(stored.delivery_recipients ?? {}).sort()).toEqual(['c-bob', 'c-carol']);
+    expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
+    expect(stored.delivery_recipients?.['c-bob']?.errorCode).toBe('transient_cap');
+    expect(stored.delivery_recipients?.['c-carol']?.status).toBe('failed');
+    expect(stored.delivery_recipients?.['c-carol']?.errorCode).toBe('transient_cap');
+    expect(closeLines(capture)).toHaveLength(1);
+    expect(outbound.delayed).toHaveLength(0);
+    // A capped claim consumes nothing: the counter is UNCHANGED.
+    expect(stored.fanout_attempt).toBe(3);
+  });
+
+  it('close C: a continuation the queue REFUSES closes the fan-out instead of leaving a recipient queued', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedSource(world, 'hi', 'c-alice');
+    const send = alwaysRateLimits();
+    world.adapter.sendMessage = send;
+
+    // DELAY-SELECTIVE: this file starts every job through the SAME adapter with
+    // delaySeconds 0, so an unconditional thrower would kill the test's own
+    // entry enqueue and the handler would never run.
+    configureOutboundQueue({
+      async enqueue(envelope, opts) {
+        if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+        return outbound.enqueue(envelope, opts);
+      },
+    });
+
+    // PASS 1 deliberately: runDeferred catches a handler throw (so settle()
+    // resolves and the assertions are reachable); deliverDelayed does not.
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    // The anchor bug: without the close the recipient stays 'queued' forever -
+    // the continuation never lands and a redelivery is suppressed at the marker.
+    expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
+    // Its OWN code (D10): retries never ran here, so it is not the cap's code.
+    expect(stored.delivery_recipients?.['c-bob']?.errorCode).toBe('enqueue_failed');
+    expect(closeLines(capture)).toHaveLength(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(outbound.delayed).toHaveLength(0);
+    // The pass WAS claimed and spent before the queue refused the next rung.
+    expect(stored.fanout_attempt).toBe(1);
+  });
+
+  it('a pass whose recipients are ALL already terminal claims no rung and enqueues nothing', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedSource(world, 'hi', 'c-alice');
+    // A continuation that raced: the only recipient is already terminal.
+    await world.messagesRepo.setRecipientDelivery('conv-relay-1', source.tsMsgId, 'c-bob', {
+      status: 'sent',
+      sid: 'SMprev',
+    });
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(send).not.toHaveBeenCalled();
+    // D6: a pass that attempts no send consumes no rung - the attribute is
+    // still ABSENT, so a later real pass still gets the full ladder.
+    expect(stored.fanout_attempt).toBeUndefined();
+    // There is no early return for an empty pending set: the handler simply
+    // falls off the end. Nothing enqueued, nothing closed.
+    expect(outbound.delayed).toHaveLength(0);
+    expect(closeLines(capture)).toHaveLength(0);
   });
 
   it('SendRefusedError (opt-out/breaker): marks that recipient failed and continues with others', async () => {

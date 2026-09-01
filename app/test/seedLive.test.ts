@@ -80,19 +80,20 @@ function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): str
         return new Date(scheduled + 30 * 60 * 1000).toISOString();
     }
   })();
-  return clampOutOfQuietHours(raw, QUIET_WINDOW);
+  // EN_ROUTE IS EXEMPT from the clamp (Phase B spec 6, founder decision
+  // 2026-08-31) - mirrored from armTourReminders, which applies the exemption
+  // at its own call site and leaves clampOutOfQuietHours itself kind-blind.
+  // This copy exists to catch drift, so it moves in lockstep or it lies.
+  return kind === 'en_route' ? raw : clampOutOfQuietHours(raw, QUIET_WINDOW);
 }
 
-// no_show_checkin is intentionally NOT auto-armed (manual send only), so it is
-// omitted here to mirror the canonical REMINDER_KINDS in jobs/tourReminders.ts.
-// The ReminderKind type + computeDueAt case above deliberately keep all 5 kinds
-// (the kind stays legal everywhere it is read/rendered; it is just never armed).
-const REMINDER_KINDS: ReminderKind[] = [
-  'confirmation',
-  'day_before',
-  'morning_of',
-  'en_route',
-];
+// Two kinds are intentionally NOT auto-armed, so both are omitted here to
+// mirror the canonical REMINDER_KINDS in jobs/tourReminders.ts: no_show_checkin
+// (manual send only) and confirmation (retired by the founder 2026-08-24;
+// arming stopped 2026-08-31, Phase B). The ReminderKind type + computeDueAt
+// cases above deliberately keep all 5 kinds - each stays legal everywhere it is
+// read or rendered, it is just never armed.
+const REMINDER_KINDS: ReminderKind[] = ['day_before', 'morning_of', 'en_route'];
 
 // ---------------------------------------------------------------------------
 // Fixed "now" for determinism. Set to 09:00 UTC so the "today" tour's 14:00
@@ -175,15 +176,15 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       }));
       // Quiet hours (default 21:00-08:00 America/New_York) and the two
       // booked-too-late rules together reshape this ladder. At 09:00 UTC
-      // (05:00 EDT) seeding a 14:00 UTC (10:00 EDT) SAME-DAY tour:
-      // confirmation clamps to 12:00 UTC (08:00 EDT), day_before is retired
-      // booked_too_late, morning_of clamps to 12:00 UTC and is retired
-      // booked_too_late too, and only en_route (13:00 UTC) is left live.
+      // (05:00 EDT) seeding a 14:00 UTC (10:00 EDT) SAME-DAY tour: day_before
+      // is retired booked_too_late, morning_of clamps to 12:00 UTC (08:00 EDT)
+      // and is retired booked_too_late too, and only en_route (13:00 UTC) is
+      // left live. (confirmation stopped arming 2026-08-31, Phase B.)
       expect(Items).toBeDefined();
       expect(Items!.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('the same-day seed leaves only en_route live: both near rungs are booked_too_late and confirmation is superseded', async () => {
+    it('the same-day seed leaves only en_route live: both near rungs are booked_too_late', async () => {
       const { Items } = await doc.send(new QueryCommand({
         TableName: `${prefix}tourReminders`,
         IndexName: 'byTour',
@@ -192,10 +193,9 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         ExpressionAttributeValues: { ':tid': LIVE_IDS.tourToday },
       }));
       const rows = Items ?? [];
-      // confirmation would have been sent at 05:00 EDT - it is clamped to 08:00
-      // EDT, where it collides with morning_of and loses the slot to it. The
-      // losers are written as VISIBLE skipped rows (the panel trace, 2026-08-04)
-      // rather than silently absent.
+      // A rung retired at arm time is written as a VISIBLE skipped row (the
+      // panel trace, 2026-08-04) rather than being silently absent, so this
+      // same-day seed leaves two traces and one live rung.
       //
       // Since 2026-08-26 the two booked-too-late rules (spec section 8) take
       // the two near rungs FIRST, so en_route is the only live rung left:
@@ -214,10 +214,11 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       expect(morningOf?.['dueAt']).toBe(
         instantAtLocalTime(FIXED_NOW_ISO.slice(0, 10), '08:00', QUIET_WINDOW.timezone),
       );
-      const confirmation = rows.find((r) => r['kind'] === 'confirmation');
-      expect(confirmation?.['skipReason']).toBe('quiet_hours_superseded');
       const dayBefore = rows.find((r) => r['kind'] === 'day_before');
       expect(dayBefore?.['skipReason']).toBe('booked_too_late');
+      // No confirmation row is born at all (arming stopped 2026-08-31), so the
+      // seeded world has nothing for the retirement sweep to find here.
+      expect(rows.find((r) => r['kind'] === 'confirmation')).toBeUndefined();
     });
   });
 
@@ -229,7 +230,7 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
     tomorrowDate.setUTCDate(tomorrowDate.getUTCDate() + 1);
     const scheduledAtTomorrow = `${tomorrowDate.toISOString().slice(0, 10)}T14:00:00.000Z`;
 
-    it('has 3 reminder rungs armed (morning_of is superseded by en_route)', async () => {
+    it('has 3 reminder rungs armed (day_before, morning_of, en_route - the whole auto ladder)', async () => {
       const { Items } = await doc.send(new QueryCommand({
         TableName: `${prefix}tourReminders`,
         IndexName: 'byTour',
@@ -239,19 +240,19 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       }));
       // At 09:00 UTC (05:00 EDT) today seeding a 14:00 UTC (10:00 EDT) tomorrow
       // tour, with the default quiet window:
-      // confirmation = 09:00 today, inside the window -> clamped to 12:00 today
       // day_before = 14:00 today (future, daytime - unclamped)
       // morning_of = 08:00 EDT tomorrow = 12:00 UTC tomorrow
       // en_route = 13:00 UTC tomorrow (scheduledAt - 1h since the founder
       //   decision of 2026-08-18; at the old 2h it was 12:00, the SAME instant
       //   as morning_of, which is why morning_of used to be superseded here).
-      //   An hour apart now, so ALL FOUR rungs are armed.
-      // no_show_checkin is manual-send only now, so it is NOT auto-armed.
+      //   An hour apart now, so ALL THREE rungs are armed.
+      // no_show_checkin is manual-send only, and confirmation stopped arming
+      // 2026-08-31 (Phase B), so neither is auto-armed. The title has said
+      // "3 rungs" since the en_route retiming; it is finally true.
       expect(Items).toBeDefined();
-      expect(Items!.length).toBe(4);
+      expect(Items!.length).toBe(3);
       const pending = (Items ?? []).filter((r) => r['skippedAt'] === undefined);
       expect(pending.map((r) => r['kind']).sort()).toEqual([
-        'confirmation',
         'day_before',
         'en_route',
         'morning_of',

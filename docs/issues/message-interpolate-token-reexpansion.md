@@ -3,11 +3,26 @@ id: message-interpolate-token-reexpansion
 title: interpolate() substitutes declared tokens SEQUENTIALLY, so a substituted value containing another declared token is re-expanded into the outbound message
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/messages
 created: 2026-08-31
+resolved: 2026-08-31
 refs: app/src/messages/resolve.ts:24, app/src/messages/catalog.ts:99, app/src/lib/tourContacts.ts, app/src/routes/public.ts
 ---
+
+**Resolution (2026-08-31).** Single-pass callback replacement in
+`interpolate()`; regression tests in `app/test/messages/resolve.test.ts`. The
+scan now runs once over the ORIGINAL template, so a substituted value is never
+re-scanned, and the replacement is a CALLBACK rather than a string (a string
+replacement would interpret `$&` / `$1` / `` $` `` / `$'` inside the VALUE -
+trading token re-expansion for `$`-expansion). Both preserved behaviours are
+pinned: an undeclared token stays literal, and a declared-but-missing var throws
+in a catalog default while degrading to empty in an operator override. A
+structural test iterates `MESSAGE_CATALOG` and asserts every declared var
+matches the regex's token charset, so a future entry cannot silently declare a
+var interpolation would never substitute. The `inertName` stopgap in
+`lib/tourContacts.ts` is left in place (harmless, and a brace in a human name is
+still not a name).
 
 **Problem.** `interpolate` in `app/src/messages/resolve.ts` walks `def.vars` in
 DECLARATION ORDER and does one `split(needle).join(value)` pass per token. The

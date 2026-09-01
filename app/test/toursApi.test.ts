@@ -23,8 +23,9 @@ import {
 } from '../src/jobs/jobs.js';
 import {
   composeIntroBody,
-  composeMemberAddedBody,
+  composeMemberAddedGroupBody,
   registerRelayFanOutJobHandler,
+  resolveRelayComposeInputs,
 } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
@@ -1338,11 +1339,9 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     // exclusive, so this does not clamp); sameDay, and 14:00Z > NEAR - 6h.
     expect(skipped['morning_of']?.skipReason).toBe('booked_too_late');
     expect(skipped['morning_of']?.dueAt).toBe('2026-07-13T12:00:00.000Z');
-    // en_route has no rule and still clears `now`; confirmation arms at `now`.
-    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual([
-      'confirmation',
-      'en_route',
-    ]);
+    // en_route has no rule and still clears `now`, and it is now the WHOLE
+    // pending ladder: confirmation stopped arming 2026-08-31 (Phase B).
+    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual(['en_route']);
   });
 
   it('case 7b: a status REVIVAL onto the stored (near) time stamps the same chips', async () => {
@@ -1356,7 +1355,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
       .send({ ...BASE_CREATE_BODY, scheduledAt: REVIVAL_TOUR });
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
-    // Two days out at ARM_NOW: four clean rungs, no chip anywhere.
+    // Two days out at ARM_NOW: three clean rungs, no chip anywhere.
     expect(skippedByKind(world, tourId)).toEqual({});
 
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
@@ -1374,10 +1373,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     expect(skipped['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
     expect(skipped['morning_of']?.skipReason).toBe('booked_too_late');
     expect(skipped['morning_of']?.dueAt).toBe('2026-07-15T14:00:00.000Z');
-    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual([
-      'confirmation',
-      'en_route',
-    ]);
+    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual(['en_route']);
   });
 
   it("status-only {status:'no_show'} cancels the pending rows (the check-in is a manual send now)", async () => {
@@ -1504,8 +1500,15 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // confirmation = FIXED_NOW
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // WHERE THE INJECTED CLOCK SHOWS. It used to be visible directly, in the
+    // confirmation rung's dueAt (which WAS the arm instant); that rung stopped
+    // arming 2026-08-31 (Phase B) and every remaining dueAt is derived from
+    // SCHEDULED_AT alone. `now` still reaches the armer through the arm-time
+    // SKIP rules, and that is what this asserts: on the real wall clock a July
+    // 2026 tour is long past, so all three rungs would be born skipped
+    // (booked_too_late / past_event). Clean rows are the seam working.
+    expect(byKind['confirmation']).toBeUndefined();
+    expect(rows.map((r) => r.skippedAt)).toEqual([undefined, undefined, undefined]);
     // day_before = 19:30 ORG-LOCAL (EDT) on 2026-07-14, the day before the
     // tour's local date = '2026-07-14T23:30:00.000Z'
     expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
@@ -1543,8 +1546,11 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     const newRows = allRows.filter((r) => r.canceledAt === undefined);
     const byKind = Object.fromEntries(newRows.map((r) => [r.kind, r]));
 
-    // confirmation = FIXED_NOW (injected)
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // The injected clock now shows through the arm-time skip rules rather than
+    // through a rung armed AT `now` (see the case above): under the real wall
+    // clock these July rows would all be born skipped.
+    expect(byKind['confirmation']).toBeUndefined();
+    expect(newRows.every((r) => r.skippedAt === undefined)).toBe(true);
     // day_before = 19:30 EDT Jul 19, the day before NEW_SCHEDULED's local date
     expect(byKind['day_before']?.dueAt).toBe('2026-07-19T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
@@ -1692,7 +1698,8 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
     const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
     expect(rows.every((r) => r.canceledAt === undefined)).toBe(true);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    expect(byKind['confirmation']).toBeUndefined(); // stopped arming 2026-08-31
+    expect(rows.every((r) => r.skippedAt === undefined)).toBe(true);
     // day_before = 19:30 EDT Jul 14, the day before BOOKED_AT's local date
     expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
@@ -1879,6 +1886,12 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      // The OWNER-ROUTED copy's reads (Phase B spec 9.3): this suite provisions
+      // TOUR-OWNED groups, so the intro job takes the owned path.
+      unitsRepo: world.unitsRepo,
+      toursRepo: world.toursRepo,
+      placementsRepo: world.placementsRepo,
+      settingsRepo: world.settingsRepo,
       logger,
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
@@ -2825,9 +2838,10 @@ describe('PATCH /api/tours — requested → scheduled transition', () => {
 
     // Assert the dueAts are computed from FIXED_NOW / NEW_SCHED.
     const byKind = Object.fromEntries(rowsAfter.map((r) => [r.kind, r]));
-    // FIXED_NOW is 08:00 EDT - exactly quiet-END, so the confirmation is stored
-    // unclamped (the window is end-EXCLUSIVE).
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // confirmation stopped arming 2026-08-31 (Phase B); the quiet-END boundary
+    // it used to pin here (FIXED_NOW is 08:00 EDT, and the window is
+    // end-EXCLUSIVE) is pinned on its own in tourReminders.test.ts.
+    expect(byKind['confirmation']).toBeUndefined();
     // day_before = 19:30 EDT Jul 24, the day before NEW_SCHED's local date
     // (Jul 25). 19:30 local is OUTSIDE the default 21:00-08:00 window, so it is
     // stored unclamped. (NEW_SCHED is a 06:00-EDT tour, so morning_of/en_route
@@ -3428,6 +3442,12 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      // The OWNER-ROUTED copy's reads (Phase B spec 9.3). Without them the job
+      // would build the real DynamoDB-backed repos on the owned path below.
+      unitsRepo: world.unitsRepo,
+      toursRepo: world.toursRepo,
+      placementsRepo: world.placementsRepo,
+      settingsRepo: world.settingsRepo,
       logger,
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
@@ -3468,6 +3488,10 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       unitId: 'unit-abc',
       landlordId: 'c-owner',
       status: 'available',
+      // The STREET is load-bearing from Phase B on (spec 9.5): with no address
+      // the owner-routed intro degrades to the naked one, and the preview pins
+      // below would pass whether or not the ROUTE wired the resolver's repos.
+      address: { line1: '318 Marietta St', city: 'Atlanta', state: 'GA', zip: '30313' },
       contacts: [
         { contactId: 'c-owner', role: 'owner', primaryContact: false },
         { contactId: 'c-pm', role: 'pm', primaryContact: true },
@@ -3482,8 +3506,22 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     _resetForTests();
   });
 
-  async function createTour(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
-    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+  /** A tour whose scheduledAt is FAR FUTURE, for the preview cases that want the
+   *  TOUR intro variant. The resolver treats an already-STARTED tour exactly as
+   *  a timeless one and composes the NAKED intro instead ("please let us know
+   *  when you're on the way" is not a sentence to send after the tour has run),
+   *  and BASE_CREATE_BODY's 2026-07-15 is judged against the real wall clock -
+   *  so a tour-variant assertion built on it is a fixture that silently rots
+   *  into asserting the wrong variant. */
+  const FUTURE_TOUR_AT = '2099-01-10T10:00:00.000Z';
+
+  async function createTour(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+    over: Record<string, unknown> = {},
+  ): Promise<string> {
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, ...over });
     expect(created.status).toBe(201);
     return created.body.tour.tourId as string;
   }
@@ -3505,6 +3543,10 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       ai_mode: 'manual',
       // The stored row shape uses '' for "no contact" (nonEmpty() reads it as absent).
       participants: participants.map((p) => ({ ...p, contactId: p.contactId ?? '' })),
+      // What POST /api/tours/:id/relay stamps when it really provisions - and
+      // from Phase B on it is what ROUTES the announcement copy (spec 9.1), so
+      // a thread faked without it would exercise the naked path only.
+      owner: { type: 'tour' as const, id: tourId },
       created_at: now,
       ...(opts.optedOutKeys !== undefined && {
         relay_opted_out_members: Object.fromEntries(opts.optedOutKeys.map((k) => [k, { at: now }])),
@@ -3798,6 +3840,14 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     ]);
     world.sent.length = 0;
 
+    // PARITY, MEMBER_ADDED half (spec 9.0 / 9.6), captured through the REAL
+    // preview route BEFORE the add: the preview shows the GROUP body, and the
+    // job's persisted row carries the NEW MEMBER's instead.
+    const preview = await authed(app)
+      .post(`/api/tours/${tourId}/roster/preview-add`)
+      .send({ contactId: 'c-caseworker' });
+    expect(preview.status).toBe(200);
+
     const res = await authed(app)
       .post(`/api/tours/${tourId}/roster/live-members`)
       .send({ contactId: 'c-caseworker' });
@@ -3809,8 +3859,48 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual(
       [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
     );
-    // FIRST name only since 2026-08-20 (founder decision) - not "Casey Worker".
-    expect(world.sent[0]!.body).toContain('Casey joined this group chat.');
+    // The SPLIT (spec 9.4). The caseworker is on no unit roster and is not the
+    // tour's tenant, so no role resolves and the group hears the no-role line -
+    // FIRST name only, as since 2026-08-20.
+    const groupBody = 'Hey, adding Casey to the group.';
+    expect(world.sent.find((s) => s.to === TENANT_PHONE)!.body).toBe(groupBody);
+    expect(world.sent.find((s) => s.to === PM_PHONE)!.body).toBe(groupBody);
+    const newMemberLeg = world.sent.find((s) => s.to === CASEWORKER_PHONE)!;
+    expect(newMemberLeg.body).toContain("You're now connected with Tina, Pat, and Casey");
+    // Preview === the job's GROUP leg; the persisted row === the NEW member's.
+    expect(preview.body.body).toBe(groupBody);
+    const rows = world.messages.filter((m) => m.conversationId === 'conv-live');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.body).toBe(newMemberLeg.body);
+  });
+
+  // The role half of the same split: the PM is on the unit's roster with
+  // role 'pm', so adding THEM names the role (spec 9.4's table).
+  it('LIVE add of a rostered PM announces the ROLE clause to the group', async () => {
+    const { app } = makeWebhookHarness({ world, poolNumbersService: makeFakePoolNumbers() });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-caseworker', phone: CASEWORKER_PHONE, name: 'Casey Worker' },
+    ]);
+    world.sent.length = 0;
+
+    const preview = await authed(app)
+      .post(`/api/tours/${tourId}/roster/preview-add`)
+      .send({ contactId: 'c-pm' });
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-pm' });
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    const groupBody = 'Hey, adding Pat to the group as the property manager.';
+    expect(preview.body.body).toBe(groupBody);
+    expect(world.sent.find((s) => s.to === TENANT_PHONE)!.body).toBe(groupBody);
+    // ...and the new member still gets the naked intro, never a role line.
+    expect(world.sent.find((s) => s.to === PM_PHONE)!.body).toContain(
+      "You're now connected with Tina, Casey, and Pat",
+    );
   });
 
   it('LIVE add on a CLOSED thread is silent and immediate - never announced, never deferred', async () => {
@@ -3989,13 +4079,32 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
   it('preview-open returns the SERVER-composed intro body the fan-out will send', async () => {
     const { app } = makeWebhookHarness({ world });
     await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, { scheduledAt: FUTURE_TOUR_AT });
 
     const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
 
     expect(res.status).toBe(200);
-    // Parity: the SAME composer relayFanOut's relay.intro handler uses.
-    expect(res.body.body).toBe(composeIntroBody(['Tina Tenant', 'Pat Manager']));
+    // PARITY, INTRO half (spec 9.0): the preview must show the variant the job
+    // would send - the same resolver, through the REAL route, which is what
+    // proves routes/tours.ts wired the resolver's optional repo picks. Asserted
+    // twice on purpose: the resolved-copy half below cannot pass vacuously (a
+    // naked body contains none of it), and the equality half cannot drift.
+    expect(res.body.body).toContain('Putting you in a group text with Pat to tour 318 Marietta St');
+    expect(res.body.body).toContain('Hey Tina!');
+    expect(res.body.body).toBe(
+      composeIntroBody(
+        await resolveRelayComposeInputs(
+          { type: 'tour', id: tourId },
+          {
+            toursRepo: world.toursRepo,
+            unitsRepo: world.unitsRepo,
+            contactsRepo: world.contactsRepo,
+            settingsRepo: world.settingsRepo,
+          },
+        ),
+        ['Tina Tenant', 'Pat Manager'],
+      ),
+    );
     expect(res.body.recipients).toEqual([
       { name: 'Tina Tenant', reachability: 'reachable' },
       { name: 'Pat Manager', reachability: 'reachable' },
@@ -4003,6 +4112,26 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(res.body.recipientCount).toBe(2);
     expect(res.body.deferred).toBe(false);
     expect(res.body.quietEndsAt).toBeUndefined();
+  });
+
+  it('preview-open on a tour that ALREADY HAPPENED shows the NAKED intro, not the tour copy', async () => {
+    // Review round 1, B-MF1, through the REAL route. tourOpenGuard refuses only
+    // canceled/closed tours, so a tour whose outcome has not been recorded yet
+    // is still `scheduled` and this endpoint has no time guard of its own - the
+    // resolver is the only thing standing between a past tour and "please let us
+    // know when you're on the way" landing on the tenant AND the landlord.
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app, { scheduledAt: '2020-01-10T10:00:00.000Z' });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.body).not.toContain('to tour ');
+    expect(res.body.body).not.toContain('on the way');
+    // Degraded to the naked intro, which names the roster - not a blank clause
+    // and not a 500 (spec 9.5).
+    expect(res.body.body).toContain("You're now connected with Tina and Pat");
   });
 
   it('preview-open carries duplicateOf when a live group already holds exactly this roster', async () => {
@@ -4075,7 +4204,7 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
   it('preview-open marks an opted-out member and excludes them from recipientCount', async () => {
     const { app } = makeWebhookHarness({ world });
     await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, { scheduledAt: FUTURE_TOUR_AT });
     await world.toursRepo.setRoster(
       tourId,
       [{ contactId: 'contact-tenant-1' }, { contactId: 'c-pm' }, { contactId: 'c-optout' }],
@@ -4091,9 +4220,13 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       { name: 'Otto Out', reachability: 'opted_out' },
     ]);
     expect(res.body.recipientCount).toBe(2);
-    // The opted-out member is still NAMED in the body - they are a participant
-    // whose leg is suppressed at send, exactly as the fan-out composes it.
-    expect(res.body.body).toBe(composeIntroBody(['Tina Tenant', 'Pat Manager', 'Otto Out']));
+    // The tour intro names the TENANT and the PROPERTY CONTACT only, so the
+    // roster no longer shows up in the body at all - the opted-out member is
+    // listed as a recipient and excluded from the count, which is where that
+    // rule now lives. (The naked intro's "everyone is named" pin survives on
+    // the standalone previews in relayGroupPreview.test.ts.)
+    expect(res.body.body).toContain('Putting you in a group text with Pat');
+    expect(res.body.body).not.toContain('Otto');
   });
 
   it('preview during PINNED quiet hours reports deferred:true with the clamped quiet-end instant', async () => {
@@ -4130,9 +4263,11 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       .send({ contactId: 'c-caseworker' });
 
     expect(res.status).toBe(200);
-    expect(res.body.body).toBe(
-      composeMemberAddedBody('Casey Worker', ['Tina Tenant', 'Pat Manager', 'Casey Worker']),
-    );
+    // The GROUP body (spec 9.0's ruling): what the operator is authoring and
+    // announcing. The new member receives the naked intro instead, which is not
+    // previewed - the live-add test above pins both halves against the job.
+    expect(res.body.body).toBe(composeMemberAddedGroupBody({ variant: 'naked' }, 'Casey Worker'));
+    expect(res.body.body).toBe('Hey, adding Casey to the group.');
     expect(res.body.recipients).toEqual([
       { name: 'Tina Tenant', reachability: 'reachable' },
       { name: 'Pat Manager', reachability: 'reachable' },

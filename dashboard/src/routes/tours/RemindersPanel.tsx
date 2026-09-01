@@ -45,7 +45,8 @@ import styles from './RemindersPanel.module.css';
 
 // dueAt-anchored refetch tuning. FIRE_BUFFER: the worker stamps the rung just
 // after dueAt, so aim slightly past it. OVERDUE_POLL: while a rung is past due
-// but still shows upcoming (the worker's poll runs every 60s), re-check on this
+// but still shows upcoming (the worker's poll runs every 30s by default -
+// WORKER_POLL_INTERVAL_MS), re-check on this
 // interval. MAX_ANCHOR: clamp far-future timers (setTimeout overflows past
 // ~24.8 days; a few no-op re-anchors per day cost nothing).
 const FIRE_BUFFER_MS = 2_000;
@@ -55,14 +56,33 @@ const MAX_ANCHOR_MS = 6 * 3_600_000;
 /**
  * How long until the panel should refetch on its own, or null when nothing is
  * pending (no upcoming rung → no timer). Pure — tested in isolation.
+ *
+ * A DISCONTINUED rung is not pending in the sense this timer means. The 20s
+ * overdue re-check exists because the worker will flip a past-due rung within a
+ * tick or two; a discontinued rung never flips by any path, so anchoring on one
+ * is an unbounded 20s poll of a route that reads the tour, the unit, two
+ * contacts, settings and the whole ladder. A `paused` rung is deliberately NOT
+ * skipped - a human can still send it, and the panel should notice when they do.
+ *
+ * Shared with the placement-nudge card (usePlacementNudges), hence the
+ * structural `suppression` shape rather than a view-specific type.
+ *
+ * That sharing is NOT in tension with the same wave reverting the placement
+ * card's `discontinued` chip branch (spec 3.1a): the revert concerned
+ * surface-specific RENDERING of copy a placement writer can never produce,
+ * while this is a pure helper keyed on the shared WIRE UNION - it reads a field
+ * the union defines and the tour panel needs. Different rule, same wave.
  */
 export function nextReminderRefetchDelay(
-  reminders: Pick<TourReminderView, 'state' | 'dueAt'>[],
+  reminders: (Pick<TourReminderView, 'state' | 'dueAt'> & {
+    suppression?: { reason: string };
+  })[],
   now: number,
 ): number | null {
   let earliest: number | null = null;
   for (const r of reminders) {
     if (r.state !== 'upcoming') continue;
+    if (r.suppression?.reason === 'discontinued') continue;
     const t = new Date(r.dueAt).getTime();
     if (Number.isNaN(t)) continue;
     if (earliest === null || t < earliest) earliest = t;
@@ -106,6 +126,28 @@ function StateChip({
         {reason !== undefined ? `Skipped - ${reason}` : 'Skipped'}
       </span>
     );
+  }
+  // TERMINAL: the rung's KIND is retired, so nothing will ever fire it and no
+  // person can either (Send now refuses with kind_retired). ABOVE `paused`
+  // deliberately - "Paused" would invite exactly that refused click.
+  //
+  // CHIP ORDER: the `overdue` chip sits BELOW this branch and ABOVE `paused`.
+  // A rung that will never send is never "overdue".
+  if (rung.suppression?.reason === 'discontinued') {
+    return <span className={`${styles.chip} ${styles.paused}`}>No longer sent</span>;
+  }
+  // OVERDUE (spec 8): the server says this rung's send time has passed and it
+  // still has not sent. It REPLACES the fire-time promise below rather than
+  // decorating it - "sending shortly" on a rung that has been sending shortly
+  // for a fortnight is the perpetual-promise lie in a politer register, and
+  // `state` alone cannot see it (it is derived from terminal markers, which a
+  // deferred rung has none of). Above `paused` deliberately: a rung a human
+  // still has to send by hand has earned the more urgent word, and the paused
+  // NOTE underneath still carries the "send manually" half. Never computed
+  // here - the panel does no clock arithmetic of its own, so a stale tab
+  // cannot invent an overdue rung.
+  if (rung.overdue === true) {
+    return <span className={`${styles.chip} ${styles.upcoming}`}>Overdue</span>;
   }
   // Held back from automatic sending (manual-only hold-back): the rung is armed
   // and sendable, but NOTHING is going to fire it. The fire-time wording below
@@ -344,8 +386,15 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                       morning_of to "4 hours before" turns the older bare form
                       into "Send 4 hours before reminder now". Both aria
                       sentences below carry it, uniformly for every kind, and
-                      e2e/support/selectors.md pins the send-now pattern. */}
-                  {rung.state === 'upcoming' ? (
+                      e2e/support/selectors.md pins the send-now pattern.
+                      NOT rendered for a DISCONTINUED rung: the server refuses it
+                      permanently (409 kind_retired), so the button could only
+                      ever produce an error toast. The chip above already changed
+                      to stop inviting the click - "Paused" would invite exactly
+                      that refused click - and this is the other half of it.
+                      Cancel/Restore below stay: a discontinued rung is still a
+                      pending row an operator may want off the ladder. */}
+                  {rung.state === 'upcoming' && rung.suppression?.reason !== 'discontinued' ? (
                     <button
                       type="button"
                       className={styles.action}
@@ -395,11 +444,15 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   // `paused` takes the muted tone for the same reason and one
                   // more: while the ladder is paused EVERY rung of EVERY tour
                   // carries this line, and an amber panel that is amber always
-                  // stops reading as a warning at all.
+                  // stops reading as a warning at all. `discontinued` joins them
+                  // on the same argument: it is a settled decision, not a
+                  // problem to act on, and it recurs on every tour that still
+                  // has a pause-era rung.
                   <p
                     className={
                       rung.suppression?.reason === 'quiet_hours' ||
-                      rung.suppression?.reason === 'paused'
+                      rung.suppression?.reason === 'paused' ||
+                      rung.suppression?.reason === 'discontinued'
                         ? styles.suppressionMuted
                         : styles.suppression
                     }

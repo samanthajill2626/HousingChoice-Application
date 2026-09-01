@@ -517,7 +517,20 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   /** The resolver + serializer deps (lib/rosterResolution), built once. The
    *  `actions` seam is what puts pending[]/skipped[] on every roster payload. */
-  const rosterDeps: RosterResolutionDeps = { conversations, units, contacts, actions: rosterActions, log };
+  // `tours` + `settings` are the OWNER-ROUTED intro's extra reads (Phase B spec
+  // 9.0): without them the previews below degrade to the naked intro while the
+  // job sends the tour variant, which is exactly the drift 9.0 forbids. There is
+  // no placements repo in this factory and none is owed - a tour-owned preview
+  // never takes the placement branch.
+  const rosterDeps: RosterResolutionDeps = {
+    conversations,
+    units,
+    contacts,
+    actions: rosterActions,
+    tours,
+    settings: settingsRepo,
+    log,
+  };
 
   /** Everything services/relayMembers touches for the LIVE call-through. */
   const memberDeps: RelayMemberDeps = {

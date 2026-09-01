@@ -3,10 +3,14 @@
 // Both confirms are the SAME shape because they answer the same question:
 // exactly what will be sent, and to exactly whom.
 //
-//   - THE BODY IS THE SERVER'S. It is composed from the `relay.intro` /
-//     `relay.member_added` catalog entries by the same code the send path uses
-//     and rendered verbatim here. The templates are founder-editable, so a
-//     browser-side copy would drift the first time one is edited.
+//   - THE BODY IS THE SERVER'S. It is composed from the relay intro /
+//     member_added catalog entries by the same code the send path uses and
+//     rendered verbatim here. The templates are founder copy, so a
+//     browser-side copy would drift the first time one is edited. Since Phase B
+//     the server also ROUTES between entries on the group's owner (a tour, a
+//     placement, or neither), and the ADD confirm shows the body the EXISTING
+//     group receives - the new member is sent the plain intro instead, which is
+//     not previewed (app spec 9.0/9.4).
 //   - EVERY recipient is listed, receiving or not, with the reason. An
 //     opted-out member's leg is suppressed at send time, so a bare "3
 //     recipients" over a suppressed leg is precisely the lie this dialog

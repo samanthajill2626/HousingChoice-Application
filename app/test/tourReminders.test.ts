@@ -26,9 +26,15 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createEventBus } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
+import { isQuietTime, quietHoursWindowOf } from '../src/lib/quietHours.js';
 import { ROSTER_UNAVAILABLE_GRACE_MS } from '../src/lib/rosterResolution.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
-import { createTourRemindersRepo, type ReminderKind } from '../src/repos/tourRemindersRepo.js';
+import {
+  createTourRemindersRepo,
+  type ReminderKind,
+  type TourReminderItem,
+  type TourRemindersRepo,
+} from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
 import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import {
@@ -41,10 +47,11 @@ import {
 import {
   armTourReminders,
   cancelTourReminders,
+  DISCONTINUED_REMINDER_KINDS,
   forceSendReminder,
   MANUAL_ONLY_REMINDER_KINDS,
-  runDueTourReminders as runDueTourRemindersRaw,
-  type RunDueTourRemindersDeps,
+  retiredByTourStart,
+  runDueTourReminders,
 } from '../src/jobs/tourReminders.js';
 import {
   composeTourReminderBody,
@@ -60,19 +67,13 @@ import {
   type SettingsReadRepo,
 } from './helpers/settingsStub.js';
 
-// Since 2026-08-20 the poll holds back EVERY auto-armed rung kind by default
-// (founder decision: tour reminders are manual-only). These suites exist to
-// cover the poll's own claim / send / skip / quiet-hours / group-routing
-// behaviour, and with the default hold-back there would be no rung left to
-// drive any of it - every assertion would pass for the wrong reason. So they
-// run the poll with the hold-back switched OFF, and the hold-back itself is
-// asserted on its own below ("manual-only hold-back"). Individual tests may
-// still pass an explicit manualOnlyKinds; the spread order lets theirs win.
-// Mirrors the placementNudges.test.ts wrapper of the same shape.
-const NO_MANUAL_HOLD_BACK: ReadonlySet<ReminderKind> = new Set();
-function runDueTourReminders(now: string, deps: RunDueTourRemindersDeps): Promise<void> {
-  return runDueTourRemindersRaw(now, { manualOnlyKinds: NO_MANUAL_HOLD_BACK, ...deps });
-}
+// The hold-back wrapper this file used to route every tick through is GONE
+// (Phase B, 2026-08-31): MANUAL_ONLY_REMINDER_KINDS is empty again, so the
+// production default sends the live rungs and injecting an empty set would say
+// nothing. Every tick below therefore calls the REAL runDueTourReminders with
+// no override; the few cases that still need pause-mode behaviour pass their
+// own explicit manualOnlyKinds, and the kind that must NEVER send is covered by
+// DISCONTINUED_REMINDER_KINDS instead (not injectable, see its own describe).
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -126,6 +127,107 @@ function rungBody(
     names,
   });
 }
+
+/** Immediate-send vehicle (Phase B spec 10): repo.create does NOT drop a
+ *  past-due row (only armTourReminders does), so this yields a due row of any
+ *  kind with zero production code. PRECONDITION (6.1a): dueAt must be BEFORE
+ *  the tour's scheduledAt or the past-tour gate retires it - callers pass the
+ *  tour's own times, never hardcoded dates. */
+async function createDueReminder(
+  repo: TourRemindersRepo,
+  tourId: string,
+  kind: ReminderKind,
+  dueAt: string,
+): Promise<TourReminderItem> {
+  return repo.create({ tourId, kind, dueAt });
+}
+
+// ---------------------------------------------------------------------------
+// The past-tour predicate (Phase B 6.1a). PURE, so it sits OUTSIDE the
+// DynamoDB-gated describe below: it needs no table and must run even on a
+// machine with no DynamoDB Local. The same function backs the poll gate, the
+// force-send refusal, and scripts/retire-paused-tour-reminders.ts - if those
+// three could ever disagree about a row, one of them would be wrong.
+// ---------------------------------------------------------------------------
+describe('retiredByTourStart - the ONE past-tour predicate (poll gate, force-send, sweep)', () => {
+  const T = '2026-08-01T15:00:00.000Z'; // tour start
+
+  it('true: a pre-tour rung after the tour started', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T15:00:01.000Z'),
+    ).toBe(true);
+  });
+
+  it('true: exactly AT the tour start - the copy is already stale', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T15:00:00.000Z'),
+    ).toBe(true);
+  });
+
+  it('false: the tour has not started yet', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T14:59:59.000Z'),
+    ).toBe(false);
+  });
+
+  it('false: no_show_checkin shape - dueAt AFTER the tour is exempt by construction', () => {
+    // The exemption is DERIVED from the ladder's own data (dueAt vs start), never
+    // from a name in a list - the rung an operator needs after a no-show survives.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T15:30:00.000Z' }, T, '2026-08-01T16:00:00.000Z'),
+    ).toBe(false);
+  });
+
+  it('false: absent or unparseable scheduledAt (invalid_schedule owns those)', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, undefined, '2026-08-02T00:00:00.000Z'),
+    ).toBe(false);
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, 'not-a-date', '2026-08-02T00:00:00.000Z'),
+    ).toBe(false);
+  });
+
+  it('normalizes a non-canonical ISO scheduledAt before comparing', () => {
+    // A stored scheduledAt without milliseconds must not decide the gate by
+    // lexicographic accident - '...15:00:00Z' sorts BEFORE '...14:00:00.000Z'.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, '2026-08-01T15:00:00Z', '2026-08-01T15:00:01.000Z'),
+    ).toBe(true);
+  });
+
+  // Review round 1, A-S5: the ROW's dueAt got no such treatment, and the sweep
+  // scans EVERY row in the table - including hand-seeded and imported ones that
+  // computeDueAt never wrote.
+  it('normalizes the ROW dueAt too: an offset-bearing dueAt is not judged by string order', () => {
+    // '2026-08-01T11:00:00-05:00' IS 16:00Z - an hour AFTER the tour, i.e. a
+    // no_show_checkin shape the predicate must exempt. Compared as raw text it
+    // sorts before '2026-08-01T15:00:00.000Z' ('11' < '15'), and the gate would
+    // retire the one rung an operator needs after a no-show.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T11:00:00-05:00' }, T, '2026-08-01T17:00:00.000Z'),
+    ).toBe(false);
+  });
+
+  it('false: an unparseable dueAt - no honest gate decision can be derived from it', () => {
+    expect(retiredByTourStart({ dueAt: 'not-a-date' }, T, '2026-08-01T16:00:00.000Z')).toBe(false);
+  });
+
+  // Round 2, B NOTE-4: `now` was the last operand still compared as TEXT, which
+  // left this exported predicate following two different rules across its three
+  // arguments - exactly the half-normalized shape A-S5 was raised about.
+  it('normalizes `now` too: an offset-bearing now is not judged by string order', () => {
+    // '2026-08-01T11:00:00-05:00' IS 16:00Z, an hour AFTER the tour - so the
+    // gate must fire. As raw text it sorts BELOW '2026-08-01T15:00:00.000Z'
+    // ('11' < '15') and the gate would silently decline to retire the rung.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T11:00:00-05:00'),
+    ).toBe(true);
+  });
+
+  it('false: an unparseable `now` - the same rule as the other two operands', () => {
+    expect(retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, 'not-a-date')).toBe(false);
+  });
+});
 
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -196,7 +298,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ---------------------------------------------------------------------------
   // Test 1 — arm: correct ladder dueAts for a future tour
   // ---------------------------------------------------------------------------
-  it('armTourReminders creates all 4 reminder rows with correct dueAts', async () => {
+  it('armTourReminders creates all 3 reminder rows with correct dueAts', async () => {
     // Quiet hours ON (the product default: 21:00-08:00 America/New_York, EST =
     // UTC-5 in January). Every rung below lands outside the window, so the
     // clamp is identity throughout - including day_before, which is now
@@ -219,13 +321,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       logger,
     });
 
-    // All 4 armed kinds: confirmation, day_before, morning_of, en_route
-    // (no_show_checkin is manual-send only). All dueAts are future relative to now.
-    expect(rows).toHaveLength(4);
+    // All 3 auto-armed kinds: day_before, morning_of, en_route. Two kinds are
+    // deliberately absent - no_show_checkin (manual-send only) and confirmation
+    // (retired by the founder 2026-08-24; arming stopped 2026-08-31, Phase B).
+    // All dueAts are future relative to now.
+    expect(rows).toHaveLength(3);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // confirmation: dueAt = now (10:00 EST - outside the window, unclamped)
-    expect(byKind['confirmation']!.dueAt).toBe(now);
+    // confirmation is no longer auto-armed: the kind stays valid everywhere
+    // else (union, computeDueAt, catalog) but no NEW row is born for it.
+    expect(byKind['confirmation']).toBeUndefined();
 
     // day_before: 19:30 ORG-LOCAL on the day before the tour's local date =
     // 19:30 EST Jan 19 = Jan 20 00:30Z (outside the window, unclamped).
@@ -253,7 +358,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // listByTour round-trip
     const listed = await tourReminders.listByTour(tour.tourId);
-    expect(listed).toHaveLength(4);
+    expect(listed).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
@@ -282,7 +387,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const kinds = rows.map((r) => r.kind);
 
     expect(kinds).not.toContain('no_show_checkin');
-    expect(kinds).toHaveLength(4);
+    // Three auto-armed rungs since 2026-08-31 (confirmation is retired too, but
+    // for its own reason - see the DISCONTINUED_REMINDER_KINDS describe).
+    expect(kinds).toHaveLength(3);
   });
 
   // ===========================================================================
@@ -299,16 +406,24 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ===========================================================================
 
   // ---------------------------------------------------------------------------
-  // Test 1c - (b) a LATE-EVENING tour retires en_route past the event
+  // Test 1c - a LATE-EVENING tour arms its whole ladder, en_route included
   //
   // This case USED to show a clamped day_before losing its slot to morning_of.
-  // The 19:30-local retiming ends that: 19:30 is outside the DEFAULT window, so
+  // The 19:30-local retiming ended that: 19:30 is outside the DEFAULT window, so
   // day_before never clamps at all here. The day_before-clamp scenario now
   // requires an org with quietHoursStart <= 19:30, which Task 7's warn test
-  // pins. What survives in this fixture is the past-event retirement of a 10pm
-  // tour's en_route rung, so that is what the test is now named for.
+  // pins.
+  //
+  // RE-DERIVED 2026-08-31 (Phase B spec 6). It then became the past-event pin
+  // for a 10pm tour's en_route: at a one-hour lead that rung fell at 21:00 local
+  // EXACTLY, clamped forward to the next 08:00 and landed after the tour. The
+  // quiet-hours exemption removes that clamp, so the rung now arms at its raw
+  // 21:00 and the tenant of a 10pm tour gets the message they should always have
+  // had. Nothing here is skipped any more - which is the point of the fixture
+  // now, and why the past-event branch is pinned on morning_of in Tests 1f/1g
+  // instead.
   // ---------------------------------------------------------------------------
-  it('a late-evening tour retires en_route past the event, and the retimed day_before arms clear of the window', async () => {
+  it('a late-evening tour arms its whole ladder - the exempt en_route keeps its raw 21:00 slot', async () => {
     const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
     const scheduledAt = '2026-01-21T03:00:00.000Z'; // Jan 20 22:00 EST - a 10pm tour
 
@@ -335,35 +450,26 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T23:00:00.000Z');
     expect(byKind['morning_of']!.skippedAt).toBeUndefined();
 
-    expect(byKind['confirmation']!.dueAt).toBe(now);
+    // THE EXEMPTION (spec 6). At a one-hour lead this rung falls at Jan 20
+    // 21:00 EST exactly - the first minute of the window - and it USED to clamp
+    // forward to the next 08:00, landing after the 10pm tour and being retired
+    // past_event. Sam's decision is that this rung never waits, so it is stored
+    // RAW and the 10pm tour gets its 9pm "on the way" text. No supersession
+    // either: morning_of is at 18:00 EST, hours EARLIER, so the widened
+    // predicate (a LATER rung firing at or before an earlier one) is false.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T02:00:00.000Z'); // Jan 20 21:00 EST
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
 
-    // (b) past-event, and the ONE behaviour change the 2h -> 1h move introduces
-    // (founder decision 2026-08-18). At two hours this rung fired at Jan 20
-    // 20:00 EST, comfortably before the 21:00 window. At ONE hour it lands at
-    // 21:00 EST exactly - inside the window - so it clamps forward to the next
-    // 08:00 local, which is AFTER this 10pm tour has already happened.
-    //
-    // The ladder's existing rule then does the right thing on its own: a rung
-    // whose clamped dueAt lands at/after the tour is born SKIPPED rather than
-    // sent late. That is the intended posture (Cameron 2026-08-18) - a 10pm tour
-    // may well be a mistyped 10am, so a reminder that is useless by the time the
-    // window lifts should not go out at all. Only tours at/after ~10pm local are
-    // affected; everything earlier is unchanged.
-    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T13:00:00.000Z'); // Jan 21 08:00 EST
-    expect(byKind['en_route']!.skippedAt).toBe(now);
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
-
-    // Still four VISIBLE rows - a skipped rung stays as an honest trace in the
-    // panel rather than vanishing - and three are live now that the retimed
-    // day_before clears the window (confirmation, day_before, morning_of).
-    expect(rows).toHaveLength(4);
+    // Three VISIBLE rows and all three live: with the exemption there is nothing
+    // left in this fixture for any skip rule to retire.
+    expect(rows).toHaveLength(3);
     expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
-  // Test 1d - (c) an en_route clamped onto the morning_of slot wins it
+  // Test 1d - (c) a morning_of clamped PAST the exempt en_route loses its slot
   // ---------------------------------------------------------------------------
-  it('an en_route clamped onto the morning_of slot supersedes morning_of', async () => {
+  it('a morning_of clamped past the exempt en_route is superseded by it', async () => {
     const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
     const scheduledAt = '2026-01-20T13:30:00.000Z'; // Jan 20 08:30 EST - an early tour
 
@@ -381,13 +487,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // en_route raw = Jan 20 06:30 EST (inside the window) -> clamps to 08:00 EST.
-    // morning_of raw = scheduledAt - 4h = Jan 20 04:30 EST, ALSO inside the
-    // window, so it clamps to the same 08:00 EST instant. en_route is the LATER
-    // rung, so it survives; morning_of stays behind as a VISIBLE skipped row.
-    // (Same outcome as before the retiming, by a different route: morning_of
-    // used to BE the 08:00-local slot rather than clamping onto it.)
-    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    // en_route raw = Jan 20 06:30 EST, inside the window and EXEMPT (spec 6), so
+    // it stays there. morning_of raw = scheduledAt - 4h = Jan 20 04:30 EST, also
+    // inside the window and NOT exempt, so it clamps forward to 08:00 EST -
+    // which is 90 minutes AFTER en_route. The ladder is inverted, and the
+    // WIDENED predicate (spec 6.2, `otherDue <= dueAt`) is what still retires
+    // morning_of: a later rung firing before it makes its copy stale. Under the
+    // old equality both would have armed and the tenant would get two texts.
+    // (Before the exemption both clamped onto the same 08:00 instant and plain
+    // equality did this job; that coincidence is gone.)
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T12:30:00.000Z');
     expect(byKind['en_route']!.skippedAt).toBeUndefined();
     expect(byKind['morning_of']!.skippedAt).toBe(now);
     expect(byKind['morning_of']!.skipReason).toBe('quiet_hours_superseded');
@@ -398,24 +507,37 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // past, and the silent past-dueAt rule dropped it.
     expect(byKind['day_before']!.dueAt).toBe('2026-01-20T00:30:00.000Z');
     expect(byKind['day_before']!.skippedAt).toBeUndefined();
-    expect(byKind['confirmation']!.dueAt).toBe(now);
 
-    // Pin the counts: four VISIBLE rows, three live (confirmation, day_before,
-    // en_route). This case's PREMISE moved most of all under the retiming -
-    // day_before flips from silently dropped to armed - so the shape is pinned
-    // here rather than left implicit.
-    expect(rows).toHaveLength(4);
+    // Pin the counts: three VISIBLE rows, two live (day_before, en_route).
+    // This case's PREMISE moved most of all under the retiming - day_before
+    // flips from silently dropped to armed - so the shape is pinned here rather
+    // than left implicit.
+    expect(rows).toHaveLength(3);
     expect(
       rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind).sort(),
-    ).toEqual(['confirmation', 'day_before', 'en_route']);
+    ).toEqual(['day_before', 'en_route']);
   });
 
   // ---------------------------------------------------------------------------
-  // Test 1e - the confirmation rung clamps out of evening quiet hours
+  // Test 1e - a rung whose RAW dueAt lands inside quiet hours clamps forward
+  //
+  // REDESIGNED 2026-08-31 (Phase B). This case used to ride `confirmation`,
+  // whose raw dueAt was the ARM INSTANT: arm at 22:00 local and the rung clamps
+  // to the next 08:00. Confirmation no longer arms, and with it went the only
+  // rung whose raw time could be chosen freely by moving `now`. Re-derived onto
+  // `morning_of`, whose raw time is scheduledAt - 4h: an EARLY-MORNING tour puts
+  // that inside the window, so the same clamp runs on a live rung.
+  //
+  // This is the CLEAN clamp - the one that lands clear of both the tour start
+  // and every other rung's slot, so the row simply arms at the clamped instant.
+  // Its two neighbours pin the other outcomes: Test 1d a clamp that collides
+  // with a later rung (superseded), Test 1f a clamp landing past the start
+  // (past_event). Without this case a clamp that silently did nothing would
+  // still pass all three.
   // ---------------------------------------------------------------------------
-  it('a confirmation armed inside quiet hours is clamped to quiet-end, not sent at `now`', async () => {
-    const now = '2026-01-19T03:00:00.000Z'; // Jan 18 22:00 EST - staff scheduling late
-    const scheduledAt = '2026-01-25T20:00:00.000Z'; // Jan 25 15:00 EST
+  it('a rung whose raw dueAt falls inside quiet hours is clamped to quiet-end, not left at its raw time', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-25T15:00:00.000Z'; // Jan 25 10:00 EST - an early tour
 
     const tour = await tours.create({
       tenantId: 'contact-arm-lateclamp-1',
@@ -431,11 +553,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // 22:00 EST is the evening side of the wrapping window: the window ends at
-    // 08:00 EST the NEXT local morning.
-    expect(byKind['confirmation']!.dueAt).toBe('2026-01-19T13:00:00.000Z');
-    expect(byKind['confirmation']!.dueAt).not.toBe(now);
-    expect(rows).toHaveLength(4);
+    // morning_of raw = scheduledAt - 4h = Jan 25 06:00 EST, the morning side of
+    // the wrapping 21:00-08:00 window -> clamps forward to Jan 25 08:00 EST.
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-25T13:00:00.000Z');
+    expect(byKind['morning_of']!.dueAt).not.toBe('2026-01-25T11:00:00.000Z');
+    // It landed clear of the 10:00 EST start and of en_route's 09:00 EST slot,
+    // so it is ARMED, not one of the two retirement traces.
+    expect(byKind['morning_of']!.skippedAt).toBeUndefined();
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-25T14:00:00.000Z');
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
+    expect(rows).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
@@ -466,12 +593,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // morning_of raw = scheduledAt - 4h = Jan 20 03:30 EST (quiet) -> clamps to
     // Jan 20 08:00 EST, at/after the 07:30 EST start -> retired as a VISIBLE
-    // skipped row (past_event). en_route raw = Jan 20 06:30 EST (quiet) ->
-    // clamps to the same 08:00 EST, also at/after the start -> same trace.
+    // skipped row (past_event). This is the rung the case is named for: it is
+    // the CLAMP that puts a rung past the start, so an exempt rung can never
+    // reach this branch by that route.
     expect(byKind['morning_of']!.skippedAt).toBe(now);
     expect(byKind['morning_of']!.skipReason).toBe('past_event');
-    expect(byKind['en_route']!.skippedAt).toBe(now);
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
+
+    // en_route raw = Jan 20 06:30 EST, inside the window and EXEMPT (spec 6):
+    // it stays at its raw instant, an hour before the tour, and arms. Before the
+    // exemption it clamped onto the same 08:00 EST as morning_of and was
+    // past_event too - the behaviour change this fixture records.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T11:30:00.000Z');
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
 
     // day_before = 19:30 EST Jan 19 = Jan 20 00:30Z: outside the window, no
     // clamp. Its LOCAL date (Jan 19) is not the tour's local date (Jan 20), so
@@ -480,7 +613,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(byKind['day_before']!.skippedAt).toBeUndefined();
     expect(
       rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind).sort(),
-    ).toEqual(['confirmation', 'day_before']);
+    ).toEqual(['day_before', 'en_route']);
   });
 
   // ---------------------------------------------------------------------------
@@ -496,7 +629,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // one-hour lead time, the rung no booked-too-late rule guards. Do NOT leave
   // the silent-drop branch trusting this comment; Task 7 owns that test.
   // ---------------------------------------------------------------------------
-  it('the retimed day_before arms where the old -24h anchor fell past due (the other rungs stay past_event)', async () => {
+  it('the retimed day_before arms where the old -24h anchor fell past due (morning_of stays past_event)', async () => {
     const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
     const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST
 
@@ -514,17 +647,20 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // day_before = 19:30 EST Jan 19 = Jan 20 00:30Z, outside the window and
-    // still ahead of `now` (10:00 EST) -> ARMED. Both same-day rungs clamp
-    // at/past the 07:30 start -> past-event, retired as VISIBLE skipped rows.
+    // still ahead of `now` (10:00 EST) -> ARMED. morning_of clamps at/past the
+    // 07:30 start -> past-event, retired as a VISIBLE skipped row. en_route is
+    // EXEMPT from the clamp (spec 6), so it arms at its raw 06:30 EST instead of
+    // joining morning_of on the past-event branch as it used to.
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
     expect(byKind['day_before']!.dueAt).toBe('2026-01-20T00:30:00.000Z');
     expect(byKind['day_before']!.skippedAt).toBeUndefined();
     expect(byKind['morning_of']!.skipReason).toBe('past_event');
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T11:30:00.000Z');
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
     // Creation order (REMINDER_KINDS), not sorted.
     expect(rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind)).toEqual([
-      'confirmation',
       'day_before',
+      'en_route',
     ]);
   });
 
@@ -554,8 +690,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // Test 1c's tour, all 4 rungs live here too.
-    expect(rows).toHaveLength(4);
+    // Test 1c's tour, all 3 auto-armed rungs live here too.
+    expect(rows).toHaveLength(3);
     // day_before is 19:30 ORG-LOCAL on the day before the tour's local date
     // (Jan 19), regardless of the window's enabled flag - the timezone comes
     // from the same settings row.
@@ -568,8 +704,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // Test 1i - a settings-read failure falls back to the DEFAULT window
   // ---------------------------------------------------------------------------
   it('a settings read failure still clamps, using the default window', async () => {
+    // RE-POINTED 2026-08-31 (Phase B spec 6) from Test 1c's 10pm tour to Test
+    // 1g's 07:30 tour. This case has to FAIL if the fallback ever became "no
+    // quiet hours", so it needs a rung the window actually MOVES. On the 10pm
+    // tour the only clamped rung was en_route - now exempt - which would have
+    // left every assertion here identical with the window on or off: a vacuous
+    // pass. morning_of on a 07:30 tour is the surviving clamp.
     const now = '2026-01-19T15:00:00.000Z';
-    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Test 1c's tour again
+    const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST - Test 1g's tour
 
     const tour = await tours.create({
       tenantId: 'contact-arm-settingsfail-1',
@@ -585,15 +727,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // Identical to Test 1c: the failure falls back to DEFAULT_ORG_SETTINGS
+    // Identical to Test 1g: the failure falls back to DEFAULT_ORG_SETTINGS
     // (enabled, 21:00-08:00, America/New_York) - never to "no quiet hours".
     expect(byKind['day_before']!.dueAt).toBe('2026-01-20T00:30:00.000Z');
-    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T23:00:00.000Z');
-    // ...including Test 1c's past-event en_route: the fallback window is what
-    // makes that rung clamp past the tour, so a read failure must reproduce the
-    // skip exactly. Three live rows, same as Test 1c.
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
-    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
+    // THE DISCRIMINATING ASSERTION: morning_of's raw Jan 20 03:30 EST is inside
+    // the fallback window, so it clamps to 08:00 EST - past the 07:30 start -
+    // and is retired. With no window it would have armed at its raw time.
+    expect(byKind['morning_of']!.skipReason).toBe('past_event');
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    // en_route is exempt from the clamp either way, so it arms raw. Two live
+    // rows, same as Test 1g.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T11:30:00.000Z');
+    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(2);
   });
 
   // ---------------------------------------------------------------------------
@@ -633,38 +778,41 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    // Arm reminders.
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    // Two due rungs on the IMMEDIATE-SEND VEHICLE (spec 10). What this case is
+    // about is the poll's claim/send/idempotence behaviour, not the arm-time
+    // ladder (Test 1 owns that), so the rows are written straight to the repo:
+    // repo.create honours any dueAt, and both of these sit BEFORE scheduledAt,
+    // so the past-tour gate (6.1a) is a no-op for them.
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
+    await createDueReminder(
+      tourReminders,
+      tour.tourId,
+      'morning_of',
+      '2026-07-14T23:30:00.000Z',
+    );
 
-    // Tick 1 - just after the confirmation dueAt: that rung alone is due.
+    // Tick 1 - just after the day_before dueAt: that rung alone is due.
     await runDueTourReminders('2026-07-13T10:01:00.000Z', runDeps);
 
-    // Tick 2 - just after day_before dueAt. The tour is 06:00 EDT Jul 15, so
-    // day_before is 19:30 EDT Jul 14 = '2026-07-14T23:30:00.000Z'. Both later
-    // rungs are still future: morning_of ('2026-07-15T06:00:00.000Z', sched-4h)
-    // and en_route ('2026-07-15T09:00:00.000Z', sched-1h).
+    // Tick 2 - just after the morning_of dueAt.
     // (The two rungs are released by SEPARATE ticks on purpose: one catch-up
     // tick releasing both would hit release supersession - a later rung of the
     // same tour retires the earlier one. That rule has its own case below.)
     const pollAt = '2026-07-14T23:31:00.000Z';
     await runDueTourReminders(pollAt, runDeps);
 
-    // confirmation + day_before fired, one per tick.
+    // day_before + morning_of fired, one per tick.
     expect(world.sent).toHaveLength(2);
     const sentBodies = world.sent.map((s) => s.body);
-    expect(sentBodies).toContain(rungBody('confirmation', scheduledAt));
     expect(sentBodies).toContain(rungBody('day_before', scheduledAt));
+    expect(sentBodies).toContain(rungBody('morning_of', scheduledAt));
 
     // All sent rows should have sentAt stamped.
     const rows = await tourReminders.listByTour(tour.tourId);
-    const confirmation = rows.find((r) => r.kind === 'confirmation');
     const dayBefore = rows.find((r) => r.kind === 'day_before');
-    expect(confirmation?.sentAt).toBeDefined();
+    const morningOf = rows.find((r) => r.kind === 'morning_of');
     expect(dayBefore?.sentAt).toBeDefined();
+    expect(morningOf?.sentAt).toBeDefined();
 
     // Second run — idempotent: no new sends.
     await runDueTourReminders(pollAt, runDeps);
@@ -705,19 +853,22 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'self_guided',
     });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    // Same immediate-send vehicle as Test 2: two due rungs, both before the
+    // tour, each released by its own tick.
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
+    await createDueReminder(
+      tourReminders,
+      tour.tourId,
+      'morning_of',
+      '2026-07-14T23:30:00.000Z',
+    );
 
     const events = createEventBus({ logger });
     const emitted: Array<{ contactId?: string }> = [];
     events.on('scheduled.updated', (p) => emitted.push(p));
 
     // Same two ticks as Test 2 (separate releases - see the supersession note
-    // there): confirmation fires on the first, day_before on the second. The
-    // second tick sits just after 19:30 EDT Jul 14, the retimed day_before.
+    // there): day_before fires on the first, morning_of on the second.
     await runDueTourReminders('2026-07-13T10:01:00.000Z', { ...runDeps, events });
     await runDueTourReminders('2026-07-14T23:31:00.000Z', { ...runDeps, events });
     expect(emitted).toHaveLength(2);
@@ -755,37 +906,34 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'self_guided',
     });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    // Immediate-send vehicle (spec 10): one due rung, dueAt before the tour.
+    const rung = await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     const events = createEventBus({ logger });
     const emitted: Array<{ contactId?: string }> = [];
     events.on('scheduled.updated', (p) => emitted.push(p));
 
-    // Only the confirmation rung (dueAt = now0) is due in this window.
+    // Only that one rung (dueAt = now0) is due for this tour in this window.
     const pollAt = '2026-07-13T10:01:00.000Z';
     await runDueTourReminders(pollAt, { ...runDeps, events });
 
     // Nothing sent; the rung is retired with the stamp + reason.
     expect(world.sent).toHaveLength(0);
     const rows = await tourReminders.listByTour(tour.tourId);
-    const confirmation = rows.find((r) => r.kind === 'confirmation');
-    expect(confirmation?.sentAt).toBeUndefined();
-    expect(confirmation?.skippedAt).toBe(pollAt);
-    expect(confirmation?.skipReason).toBe('no_conversation');
+    const retired = rows.find((r) => r.reminderId === rung.reminderId);
+    expect(retired?.sentAt).toBeUndefined();
+    expect(retired?.skippedAt).toBe(pollAt);
+    expect(retired?.skipReason).toBe('no_conversation');
 
     // The skip told live surfaces to refetch (advisory tenant contactId).
     expect(emitted.filter((p) => p.contactId === contactId)).toHaveLength(1);
 
     // Retired = gone from listDue: the next poll has nothing to re-skip …
     const due = await tourReminders.listDue(pollAt);
-    expect(due.find((r) => r.reminderId === confirmation!.reminderId)).toBeUndefined();
+    expect(due.find((r) => r.reminderId === retired!.reminderId)).toBeUndefined();
 
     // … and the row can never be claimed for a send later (terminal).
-    await expect(tourReminders.claimSend(confirmation!.reminderId, pollAt)).resolves.toBe(false);
+    await expect(tourReminders.claimSend(retired!.reminderId, pollAt)).resolves.toBe(false);
   });
 
   // ---------------------------------------------------------------------------
@@ -861,9 +1009,13 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt: '2026-01-06T18:00:00.000Z',
       tourType: 'self_guided',
     });
+    // A LIVE ladder kind: the failure under test is the compose, and the rung's
+    // kind is incidental to it. The tour's scheduledAt is corrupted below, which
+    // makes the past-tour gate a no-op (an unparseable start is invalid_schedule's
+    // business, not the gate's), so this row reaches the composer either way.
     const row = await tourReminders.create({
       tourId: tour.tourId,
-      kind: 'confirmation',
+      kind: 'day_before',
       dueAt: '2026-01-05T15:00:00.000Z',
     });
     // Corrupt the tour's time AFTER arming - the only way to reach this state.
@@ -986,7 +1138,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
     const legacy = await tourReminders.create({
       tourId: tour.tourId,
-      kind: 'confirmation',
+      kind: 'day_before',
       dueAt: '2026-01-15T08:00:00.000Z',
     });
 
@@ -1181,7 +1333,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       logger,
     });
     const origRows = await tourReminders.listByTour(tour.tourId);
-    expect(origRows).toHaveLength(4);
+    expect(origRows).toHaveLength(3);
 
     // Cancel and re-arm with the new scheduledAt.
     await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
@@ -1201,7 +1353,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // New rows should exist in addition to the canceled ones.
     const allRows = await tourReminders.listByTour(tour.tourId);
     const newRows = allRows.filter((r) => r.canceledAt === undefined);
-    expect(newRows).toHaveLength(4);
+    expect(newRows).toHaveLength(3);
 
     // New day_before should reflect the new scheduledAt: 19:30 org-local the
     // evening before its local date (Jul 20 EDT) = 19:30 EDT Jul 19.
@@ -1233,10 +1385,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       logger,
     });
 
-    // Manually mark the confirmation row as sent (simulates one already fired).
+    // Manually mark the day_before row as sent (simulates one already fired).
+    // It rode `confirmation` until 2026-08-31; any armed kind does, and
+    // day_before is the earliest live rung.
     const rows = await tourReminders.listByTour(tour.tourId);
-    const confirmRow = rows.find((r) => r.kind === 'confirmation');
-    await tourReminders.claimSend(confirmRow!.reminderId, now0);
+    const sentRow = rows.find((r) => r.kind === 'day_before');
+    await tourReminders.claimSend(sentRow!.reminderId, now0);
 
     // Now cancel.
     await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
@@ -1251,8 +1405,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(stillPending).toHaveLength(0);
 
     // The already-sent row should still be sent (not double-canceled).
-    const confirmAfter = afterCancel.find((r) => r.kind === 'confirmation');
-    expect(confirmAfter?.sentAt).toBeDefined();
+    const sentAfter = afterCancel.find((r) => r.kind === 'day_before');
+    expect(sentAfter?.sentAt).toBeDefined();
     // canceledAt should NOT be set on the sent row (the condition guard).
     // Note: the cancelForTour implementation only cancels rows with no sentAt AND no canceledAt.
     // The sent row has sentAt set, so it should be excluded from cancelation.
@@ -1298,8 +1452,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(dayBefore?.skipReason).toBe('booked_too_late');
     expect(dayBefore?.dueAt).toBe('2026-07-12T23:30:00.000Z');
 
-    // confirmation = now0 - always armed (quiet hours are OFF for this case)
-    expect(armedKinds).toContain('confirmation');
+    // confirmation no longer arms at all (Phase B, 2026-08-31), so the ladder
+    // this case leaves behind is en_route alone - see the en_route pin below.
+    expect(rows.map((r) => r.kind)).not.toContain('confirmation');
 
     // morning_of RAW = scheduledAt - 4h = '2026-07-13T10:00:00.000Z' and is
     // still ahead of now0 - but rule 2 does not care about the RAW time being
@@ -1424,7 +1579,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(morningOf!.dueAt).toBe('2026-07-23T15:00:00.000Z');
 
       expect(byKind['en_route']!.skippedAt).toBeUndefined();
-      expect(byKind['confirmation']!.skippedAt).toBeUndefined();
+      // en_route is the only survivor: confirmation no longer arms (Phase B).
+      expect(byKind['confirmation']).toBeUndefined();
     });
 
     // -- case 4 ---------------------------------------------------------------
@@ -1541,12 +1697,13 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
       expect(byKind['day_before']!.skipReason).toBe('booked_too_late');
       expect(byKind['morning_of']!.skipReason).toBe('booked_too_late');
-      // confirmation is armed at `now`: 18:30Z is still before the 19:00Z tour,
-      // so the past-event rule does not claim it either.
-      expect(byKind['confirmation']!.dueAt).toBe(now);
-      expect(byKind['confirmation']!.skippedAt).toBeUndefined();
+      // confirmation used to arm at `now` and make a third row here. It no
+      // longer arms at all (Phase B, 2026-08-31), so the two booked_too_late
+      // traces are the WHOLE ladder this booking leaves - which is the point of
+      // the case: en_route's silent drop is the only rung with no visible row.
+      expect(byKind['confirmation']).toBeUndefined();
 
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(2);
     });
   });
 
@@ -1554,6 +1711,13 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // Test 6 — listDue returns only pending rows with dueAt <= now
   // ---------------------------------------------------------------------------
   it('listDue excludes sentAt and canceledAt rows', async () => {
+    // REDESIGNED 2026-08-31 (Phase B). This case used to arm the ladder and
+    // lean on "the confirmation row is the ONLY row due at now0" - a fact that
+    // died with arming, and one that made the case depend on the ARMER's
+    // dueAt arithmetic to say anything about the REPO's due-row query. It now
+    // builds its rows directly (the spec-10 immediate-send vehicle), which
+    // states the three inputs the query actually discriminates on - dueAt <=
+    // now, sentAt absent, canceledAt absent - with nothing else in the way.
     const now0 = '2026-07-13T15:00:00.000Z';
     const scheduledAt = '2026-07-15T15:00:00.000Z';
 
@@ -1564,22 +1728,32 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    // Two rows due AT now0 and one a day out. Every dueAt is before the tour
+    // start (6.1a), so none of them is a row the past-tour gate would retire.
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
+    await createDueReminder(tourReminders, tour.tourId, 'morning_of', now0);
+    await createDueReminder(
+      tourReminders,
+      tour.tourId,
+      'en_route',
+      '2026-07-14T15:00:00.000Z',
+    );
 
-    // Only the confirmation row has dueAt=now0 <= now0.
+    // The future row is excluded by dueAt alone; the two at now0 come back
+    // (the boundary is <=, not <).
     const dueRows1 = await tourReminders.listDue(now0);
     const forThisTour1 = dueRows1.filter((r) => r.tourId === tour.tourId);
-    expect(forThisTour1).toHaveLength(1);
-    expect(forThisTour1[0]!.kind).toBe('confirmation');
+    expect(forThisTour1.map((r) => r.kind).sort()).toEqual(['day_before', 'morning_of']);
 
-    // Mark the confirmation row as sent via claimSend (the production API).
-    await tourReminders.claimSend(forThisTour1[0]!.reminderId, now0);
+    // Now retire both, one per terminal stamp: claimSend for sentAt (the
+    // production send path) and cancelTourReminders for canceledAt. Both
+    // exclusions are in this test's NAME, so both are exercised.
+    const dayBefore = forThisTour1.find((r) => r.kind === 'day_before')!;
+    await tourReminders.claimSend(dayBefore.reminderId, now0);
+    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
 
-    // Second listDue at the same time — no more due rows for this tour.
+    // Second listDue at the SAME instant - so nothing but the two terminal
+    // stamps can explain the rows disappearing.
     const dueRows2 = await tourReminders.listDue(now0);
     const forThisTour2 = dueRows2.filter((r) => r.tourId === tour.tourId);
     expect(forThisTour2).toHaveLength(0);
@@ -1631,12 +1805,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    // Arm the confirmation row only (now0 as arm time).
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    // ONE due row (immediate-send vehicle, spec 10) - the race is about a single
+    // row claimed twice, so the rest of a ladder would only add noise.
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     const racingDeps = {
       tourRemindersRepo: tourReminders,
@@ -1706,17 +1877,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    // ONE due row (immediate-send vehicle, spec 10).
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     // List due rows (simulating what runDueTourReminders does internally) —
     // then cancel the tour BEFORE the claim fires.
     const dueRows = await tourReminders.listDue(now0);
-    const confirmRow = dueRows.find((r) => r.tourId === tour.tourId && r.kind === 'confirmation');
-    expect(confirmRow).toBeDefined();
+    const pendingRow = dueRows.find((r) => r.tourId === tour.tourId && r.kind === 'day_before');
+    expect(pendingRow).toBeDefined();
 
     // Cancel the tour's reminders (simulates PATCH /tours/:id { status: 'canceled' }).
     await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
@@ -1930,13 +2098,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    // IMMEDIATE-SEND VEHICLE (spec 10), used by every case in this group-routing
+    // section: what is under test is where a due rung GOES, so each tour gets one
+    // directly-created due row instead of a whole armed ladder. repo.create
+    // honours any dueAt, and now0 is well before scheduledAt, so the past-tour
+    // gate (6.1a) is a no-op.
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
-    // Only the confirmation rung is due at now0.
+    // That one rung is the only row due at now0.
     await runDueTourReminders(now0, rig.deps);
 
     // Group route: one direct adapter send PER member, FROM the pool number,
@@ -1945,7 +2114,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends.map((s) => s.to).sort()).toEqual([tenantPhone, landlordPhone].sort());
     for (const s of rig.groupSends) {
       expect(s.from).toBe(poolNumber);
-      expect(s.body).toBe(rungBody('confirmation', scheduledAt));
+      expect(s.body).toBe(rungBody('day_before', scheduledAt));
     }
 
     // Founder decision 2026-07-14: the rung is VISIBLE in the group thread —
@@ -1958,22 +2127,22 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(announcement.direction).toBe('outbound');
     expect(announcement.author).toBe('system');
     expect(announcement.relay_sender_key).toBe('system');
-    expect(announcement.body).toBe(rungBody('confirmation', scheduledAt));
+    expect(announcement.body).toBe(rungBody('day_before', scheduledAt));
     expect(Object.keys(announcement.delivery_recipients ?? {})).toHaveLength(2);
     // Nothing through the 1:1 send service.
     expect(rig.world.sent).toHaveLength(0);
 
     // Claim stamped — a second tick sends nothing more (exactly once per member).
     const rows = await tourReminders.listByTour(tour.tourId);
-    expect(rows.find((r) => r.kind === 'confirmation')?.sentAt).toBeDefined();
+    expect(rows.find((r) => r.kind === 'day_before')?.sentAt).toBeDefined();
     // The GROUP path's sentBody snapshot, pinned to the composed body (not just
     // defined). All three claimSend call sites pass the body; only the 1:1 poll
     // path had a regression pin, so a refactor of THIS path could drop the
     // argument with every test green and the dashboard would silently lose
     // "what was actually sent" for group-routed rungs.
     // See docs/issues/reminder-sentbody-group-and-forcesend-untested.md.
-    expect(rows.find((r) => r.kind === 'confirmation')?.sentBody).toBe(
-      rungBody('confirmation', scheduledAt),
+    expect(rows.find((r) => r.kind === 'day_before')?.sentBody).toBe(
+      rungBody('day_before', scheduledAt),
     );
     await runDueTourReminders(now0, rig.deps);
     expect(rig.groupSends).toHaveLength(2);
@@ -2000,11 +2169,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: 'conv-group-bucket-1' });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     // Counting bucket: every adapter send must be preceded by one acquire(1) —
     // the same combined A2P rate metering the relay fan-out/intro loops use.
@@ -2050,11 +2215,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'pm_team',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2092,11 +2253,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2104,7 +2261,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends).toHaveLength(0);
     expect(rig.world.sent).toHaveLength(1);
     expect(rig.world.sent[0]!.to).toBe(tenantPhone);
-    expect(rig.world.sent[0]!.body).toContain(rungBody('confirmation', scheduledAt));
+    expect(rig.world.sent[0]!.body).toContain(rungBody('day_before', scheduledAt));
   });
 
   // ---------------------------------------------------------------------------
@@ -2124,11 +2281,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'landlord_led',
     });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2156,11 +2309,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: 'conv-does-not-exist' });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2172,7 +2321,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends).toHaveLength(0);
     expect(rig.world.sent).toHaveLength(0);
     const held = (await tourReminders.listByTour(tour.tourId)).find(
-      (r) => r.kind === 'confirmation',
+      (r) => r.kind === 'day_before',
     );
     expect(held?.sentAt).toBeUndefined();
     expect(held?.skippedAt).toBeUndefined();
@@ -2204,11 +2353,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     // Points at the tenant's own 1:1 thread — exists but is NOT a relay_group.
     await tours.patch(tour.tourId, { groupThreadId: 'conv-1to1-wt-1' });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2220,7 +2365,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends).toHaveLength(0);
     expect(rig.world.sent).toHaveLength(0);
     const skipped = (await tourReminders.listByTour(tour.tourId)).find(
-      (r) => r.kind === 'confirmation',
+      (r) => r.kind === 'day_before',
     );
     expect(skipped?.sentAt).toBeUndefined();
     expect(skipped?.skipReason).toBe('tenant_not_on_roster');
@@ -2256,11 +2401,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2307,11 +2448,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2352,11 +2489,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await Promise.all([
       runDueTourReminders(now0, rig.deps),
@@ -2400,11 +2533,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
+    await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -2414,7 +2543,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // The claim is stamped (accepted tradeoff — same post-claim semantics as
     // the 1:1 path): a second tick does NOT retry the failed member.
     const rows = await tourReminders.listByTour(tour.tourId);
-    expect(rows.find((r) => r.kind === 'confirmation')?.sentAt).toBeDefined();
+    expect(rows.find((r) => r.kind === 'day_before')?.sentAt).toBeDefined();
     await runDueTourReminders(now0, rig.deps);
     expect(rig.groupSends).toHaveLength(1);
     // Never through the 1:1 service either.
@@ -2541,7 +2670,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const { tour, row } = await seedForceTour({
       tenantId: 'contact-force-1',
       unitId: 'unit-force-1',
-      kind: 'confirmation',
+      kind: 'day_before',
     });
 
     // Sanity: at this same instant the POLLER defers (backstop) - so a send
@@ -2554,7 +2683,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(result).toEqual({ outcome: 'sent' });
     expect(spy.sent).toHaveLength(1);
     expect(spy.sent[0]!.conversationId).toBe('conv-force-1');
-    expect(spy.sent[0]!.body).toBe(rungBody('confirmation', '2026-02-11T20:00:00.000Z'));
+    expect(spy.sent[0]!.body).toBe(rungBody('day_before', '2026-02-11T20:00:00.000Z'));
     expect(spy.sent[0]!.author).toBe('teammate');
     // automated: false - a human send bypasses manual mode + the breaker.
     expect(spy.sent[0]!.automated).toBe(false);
@@ -2567,7 +2696,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // the third claimSend call site, previously covered only by a one-time
     // human read during the 2026-08-06 roster merge.
     // See docs/issues/reminder-sentbody-group-and-forcesend-untested.md.
-    expect(after?.sentBody).toBe(rungBody('confirmation', '2026-02-11T20:00:00.000Z'));
+    expect(after?.sentBody).toBe(rungBody('day_before', '2026-02-11T20:00:00.000Z'));
     // The claim told the live surfaces to refetch (advisory tenant contactId).
     expect(emitted.filter((p) => p.contactId === 'contact-force-1')).toHaveLength(1);
   });
@@ -2876,7 +3005,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const { tour, row } = await seedForceTour({
       tenantId: 'contact-force-9',
       unitId: 'unit-force-9',
-      kind: 'confirmation',
+      kind: 'day_before',
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
@@ -2945,12 +3074,21 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   //
   // Clocks are PINNED (injected `now`), never wall-clock.
 
-  /** now/scheduled pair used by this section: confirmation is due at NOW_D11. */
+  /** now/scheduled pair used by this section: the ladder is ARMED at NOW_D11 and
+   *  ridden at TICK_D11 below, one second past the EARLIEST live rung's dueAt. */
   const NOW_D11 = '2026-08-05T10:00:00.000Z';
   const SCHEDULED_D11 = '2026-08-07T18:00:00.000Z';
   /** day_before = 19:30 org-local (EDT) on Aug 6, the day before the tour's
    *  local date, with quiet hours off (no clamping). */
   const DAY_BEFORE_D11 = '2026-08-06T23:30:00.000Z';
+  /** THE TICK EVERY CASE BELOW DRIVES: one second past day_before's dueAt.
+   *  day_before is the EARLIEST rung of the live ladder, so a tick here releases
+   *  it and nothing later, and it is still well before SCHEDULED_D11, so the
+   *  past-tour gate (6.1a) is a no-op. Derived, not re-typed: the "+1s" is the
+   *  whole point and a hand-written twin could drift off the rung it names. */
+  const TICK_D11 = new Date(Date.parse(DAY_BEFORE_D11) + 1_000).toISOString();
+  /** The NEXT rung after day_before: scheduledAt - 4h, unclamped (quiet OFF). */
+  const MORNING_OF_D11 = '2026-08-07T14:00:00.000Z';
 
   async function armD11Tour(opts: {
     tourId?: string;
@@ -2990,13 +3128,13 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       undefined,
     );
 
-    await runDueTourReminders(NOW_D11, rig.deps);
+    await runDueTourReminders(TICK_D11, rig.deps);
 
     expect(rig.world.sent).toHaveLength(0);
-    const confirmation = await rungOf(tour.tourId, 'confirmation');
-    expect(confirmation?.sentAt).toBeUndefined();
-    expect(confirmation?.skippedAt).toBe(NOW_D11);
-    expect(confirmation?.skipReason).toBe('tenant_not_on_roster');
+    const dayBefore = await rungOf(tour.tourId, 'day_before');
+    expect(dayBefore?.sentAt).toBeUndefined();
+    expect(dayBefore?.skippedAt).toBe(TICK_D11);
+    expect(dayBefore?.skipReason).toBe('tenant_not_on_roster');
   });
 
   it('THE FALLBACK DOOR: a landlord_led rung with NO usable group is suppressed too', async () => {
@@ -3011,12 +3149,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     await tours.setRoster(tour.tourId, [{ contactId: 'c-pm-d11' }], undefined);
 
-    await runDueTourReminders(NOW_D11, rig.deps);
+    await runDueTourReminders(TICK_D11, rig.deps);
 
     expect(rig.world.sent).toHaveLength(0);
     expect(rig.groupSends).toHaveLength(0);
-    const confirmation = await rungOf(tour.tourId, 'confirmation');
-    expect(confirmation?.skipReason).toBe('tenant_not_on_roster');
+    const dayBefore = await rungOf(tour.tourId, 'day_before');
+    expect(dayBefore?.skipReason).toBe('tenant_not_on_roster');
   });
 
   it('a landlord_led rung that REACHES its group still sends, tenant on the roster or not', async () => {
@@ -3041,13 +3179,13 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       groupThreadId: 'conv-d11-group-c',
     });
 
-    await runDueTourReminders(NOW_D11, rig.deps);
+    await runDueTourReminders(TICK_D11, rig.deps);
 
     expect(rig.groupSends).toHaveLength(2);
     expect(rig.world.sent).toHaveLength(0); // nothing 1:1
-    const confirmation = await rungOf(tour.tourId, 'confirmation');
-    expect(confirmation?.sentAt).toBe(NOW_D11);
-    expect(confirmation?.skippedAt).toBeUndefined();
+    const dayBefore = await rungOf(tour.tourId, 'day_before');
+    expect(dayBefore?.sentAt).toBe(TICK_D11);
+    expect(dayBefore?.skippedAt).toBeUndefined();
   });
 
   it('re-adding the tenant lifts the suppression for the NEXT rung - no re-arm step', async () => {
@@ -3056,8 +3194,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const tour = await armD11Tour({ tenantId: 'contact-d11-d', unitId: 'unit-d11-d' });
     const first = await tours.setRoster(tour.tourId, [{ contactId: 'c-pm-d11' }], undefined);
 
-    await runDueTourReminders(NOW_D11, rig.deps);
-    expect((await rungOf(tour.tourId, 'confirmation'))?.skipReason).toBe('tenant_not_on_roster');
+    await runDueTourReminders(TICK_D11, rig.deps);
+    expect((await rungOf(tour.tourId, 'day_before'))?.skipReason).toBe('tenant_not_on_roster');
 
     // The operator puts the tenant back (optimistic-concurrency write).
     await tours.setRoster(
@@ -3068,11 +3206,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // The very next due rung goes out - the check runs at CLAIM time, so
     // nothing had to be re-armed.
-    await runDueTourReminders(DAY_BEFORE_D11, rig.deps);
+    await runDueTourReminders(MORNING_OF_D11, rig.deps);
     expect(rig.world.sent).toHaveLength(1);
     expect(rig.world.sent[0]!.to).toBe('+15550800004');
-    const dayBefore = await rungOf(tour.tourId, 'day_before');
-    expect(dayBefore?.sentAt).toBe(DAY_BEFORE_D11);
+    const morningOf = await rungOf(tour.tourId, 'morning_of');
+    expect(morningOf?.sentAt).toBe(MORNING_OF_D11);
   });
 
   it("an UNREADABLE roster leaves the rung UNCLAIMED - neither sent nor skipped", async () => {
@@ -3087,10 +3225,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       groupThreadId: 'conv-d11-vanished',
     });
 
-    await runDueTourReminders(NOW_D11, rig.deps);
+    await runDueTourReminders(TICK_D11, rig.deps);
 
     expect(rig.world.sent).toHaveLength(0);
-    const before = await rungOf(tour.tourId, 'confirmation');
+    const before = await rungOf(tour.tourId, 'day_before');
     expect(before?.sentAt).toBeUndefined();
     expect(before?.skippedAt).toBeUndefined();
 
@@ -3104,9 +3242,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       ],
       now: NOW_D11,
     });
-    await runDueTourReminders(NOW_D11, rig.deps);
+    await runDueTourReminders(TICK_D11, rig.deps);
     expect(rig.world.sent).toHaveLength(1);
-    expect((await rungOf(tour.tourId, 'confirmation'))?.sentAt).toBe(NOW_D11);
+    expect((await rungOf(tour.tourId, 'day_before'))?.sentAt).toBe(TICK_D11);
   });
 
   it('an UNREADABLE roster is BOUNDED by time-past-due: unclaimed inside the grace, claim-skipped past it', async () => {
@@ -3120,14 +3258,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       unitId: 'unit-d11-f',
       groupThreadId: 'conv-d11-never-loads',
     });
-    const dueAt = (await rungOf(tour.tourId, 'confirmation'))!.dueAt;
+    const dueAt = (await rungOf(tour.tourId, 'day_before'))!.dueAt;
 
     // One minute SHORT of the grace window - still a blip, still unclaimed.
+    // Both clocks below stay inside the tour's own day (dueAt + 1h at most),
+    // so the past-tour gate never pre-empts the wait this case is about.
     const withinGrace = new Date(
       Date.parse(dueAt) + ROSTER_UNAVAILABLE_GRACE_MS - 60_000,
     ).toISOString();
     await runDueTourReminders(withinGrace, rig.deps);
-    const waiting = await rungOf(tour.tourId, 'confirmation');
+    const waiting = await rungOf(tour.tourId, 'day_before');
     expect(waiting?.sentAt).toBeUndefined();
     expect(waiting?.skippedAt, 'inside the grace it re-lists next tick').toBeUndefined();
     expect(
@@ -3140,7 +3280,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       Date.parse(dueAt) + ROSTER_UNAVAILABLE_GRACE_MS + 60_000,
     ).toISOString();
     await runDueTourReminders(pastGrace, rig.deps);
-    const retired = await rungOf(tour.tourId, 'confirmation');
+    const retired = await rungOf(tour.tourId, 'day_before');
     expect(retired?.sentAt, 'a skip is never a send').toBeUndefined();
     expect(retired?.skippedAt).toBe(pastGrace);
     expect(retired?.skipReason).toBe('roster_unavailable');
@@ -3190,19 +3330,26 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
 
-    await runDueTourReminders(NOW_D11, {
+    await runDueTourReminders(TICK_D11, {
       ...rig.deps,
       pendingRosterActionsRepo: pendingOpenFor(tour.tourId),
     });
 
     expect(rig.world.sent).toHaveLength(0);
     expect(rig.groupSends).toHaveLength(0);
-    const confirmation = await rungOf(tour.tourId, 'confirmation');
-    expect(confirmation?.sentAt, 'unclaimed - it re-lists next tick').toBeUndefined();
-    expect(confirmation?.skippedAt).toBeUndefined();
+    const dayBefore = await rungOf(tour.tourId, 'day_before');
+    expect(dayBefore?.sentAt, 'unclaimed - it re-lists next tick').toBeUndefined();
+    expect(dayBefore?.skippedAt).toBeUndefined();
   });
 
-  it('AT/AFTER tour start the wait ENDS: the rung proceeds through the usual fallback', async () => {
+  it('AT/AFTER tour start the wait is MOOT: the past-tour gate retires the rung first', async () => {
+    // WAS "the wait ENDS: the rung proceeds through the usual fallback" - it
+    // asserted the 1:1 fallback FIRES at the tour's own start instant. Phase B
+    // 6.1a inverts that deliberately (this is the gate working, not a
+    // regression): every rung that can reach the D7 wait has a dueAt BEFORE the
+    // tour, so at/after the start its copy is stale and it must not go out.
+    // The `beforeStart` disjunct is kept as defence-in-depth; what changed is
+    // that nothing pre-tour can reach it any more.
     const rig = createGroupTestRig();
     seedTenant(rig.world, 'contact-d7-b', '+15550800012', 'conv-d7-b', NOW_D11);
     const tour = await armD11Tour({
@@ -3211,13 +3358,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
 
-    // now == the tour's own start instant: the staleness bound has expired.
+    // now == the tour's own start instant.
     await runDueTourReminders(SCHEDULED_D11, {
       ...rig.deps,
       pendingRosterActionsRepo: pendingOpenFor(tour.tourId),
     });
 
-    expect(rig.world.sent.length, 'the tenant 1:1 fallback fires').toBeGreaterThan(0);
+    expect(rig.world.sent, 'a rung whose copy assumes the tour has not happened').toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    const enRoute = await rungOf(tour.tourId, 'en_route');
+    expect(enRoute?.sentAt).toBeUndefined();
+    expect(enRoute?.skippedAt).toBe(SCHEDULED_D11);
+    expect(enRoute?.skipReason).toBe('tour_already_passed');
   });
 
   it('a RESOLVED open imposes no wait at all', async () => {
@@ -3229,7 +3381,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
 
-    await runDueTourReminders(NOW_D11, {
+    await runDueTourReminders(TICK_D11, {
       ...rig.deps,
       pendingRosterActionsRepo: pendingOpenFor(tour.tourId, 'applied'),
     });
@@ -3250,7 +3402,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const { tour, row } = await seedForceTour({
       tenantId: 'contact-d11-f',
       unitId: 'unit-d11-f',
-      kind: 'confirmation',
+      kind: 'day_before',
     });
     await tours.setRoster(tour.tourId, [{ contactId: 'c-pm-d11' }], undefined);
 
@@ -3266,17 +3418,221 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(after?.skippedAt).toBeUndefined();
   });
 
-  // ---------------------------------------------------------------------------
-  // Manual-only hold-back (founder decision 2026-08-20)
+  // ===========================================================================
+  // Phase B 6.1a - THE FIRE-TIME PAST-TOUR GATE
+  // ===========================================================================
   //
-  // These are the ONLY cases in this file that call the RAW poll - everything
-  // above runs through the local wrapper with the hold-back switched off. The
-  // load-bearing assertion is that a held-back rung is left PENDING rather than
-  // claim-skipped: "Send now" (forceSendReminder) refuses any row that is
-  // already sent/skipped/canceled, so retiring them here would silently disable
-  // the button this change exists to keep.
+  // Arm time has `past_event`; until Phase B fire time had no equivalent, and
+  // quiet hours was only accidentally capping the damage (an overnight backlog
+  // deferred to 08:00). These cases pin the gate's PLACEMENT as much as its
+  // behaviour: position is the behaviour here. Above supersededInBatch, or a
+  // post-tour catch-up batch puts "superseded by a later reminder" on the panel
+  // beside the very rung it names reading "the tour had already happened".
+  // Above the quiet-hours backstop, or a past-tour rung due inside the window
+  // re-lists unclaimed every tick until quiet-end instead of retiring once.
+  //
+  // Clocks are PINNED (injected `now`), never wall-clock.
+  describe('past-tour gate (spec 6.1a)', () => {
+    /** The tour happened; every clock below is relative to it. */
+    const PAST_TOUR_START = '2026-09-10T18:00:00.000Z';
+    /** When the ladder was armed - two days AHEAD of the tour, as normal. */
+    const PAST_ARMED_AT = '2026-09-08T10:00:00.000Z';
+    /** One hour after the tour started: the worker is back from an outage. */
+    const PAST_TOUR_NOW = '2026-09-10T19:00:00.000Z';
+    /** The two pre-tour dueAts armTourReminders would have written. */
+    const MORNING_OF_DUE = '2026-09-10T14:00:00.000Z';
+    const EN_ROUTE_DUE = '2026-09-10T17:00:00.000Z';
+
+    async function pastTour(tenantId: string, unitId: string) {
+      return tours.create({
+        tenantId,
+        unitId,
+        scheduledAt: PAST_TOUR_START,
+        tourType: 'self_guided',
+      });
+    }
+
+    it('a pre-tour rung due after the tour started is claim-skipped tour_already_passed on the FIRST tick', async () => {
+      const rig = createGroupTestRig();
+      seedTenant(rig.world, 'contact-past-a', '+15550900001', 'conv-past-a', PAST_ARMED_AT);
+      const tour = await pastTour('contact-past-a', 'unit-past-a');
+      // A NORMAL ladder, armed ahead of the tour the ordinary way - the rows
+      // this gate exists for are not exotic, they are last week's backlog.
+      await armTourReminders(tour, PAST_ARMED_AT, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: quietOff,
+        logger,
+      });
+
+      await runDueTourReminders(PAST_TOUR_NOW, rig.deps);
+
+      const enRoute = await rungOf(tour.tourId, 'en_route');
+      expect(enRoute?.sentAt).toBeUndefined();
+      expect(enRoute?.skippedAt).toBe(PAST_TOUR_NOW);
+      expect(enRoute?.skipReason).toBe('tour_already_passed');
+      expect(rig.world.sent).toHaveLength(0);
+
+      // Retired ONCE: the claim-skip took the row out of listDue, so a second
+      // tick neither sends nor re-stamps (the perpetual-re-skip bug the
+      // claim-skip idiom exists to prevent).
+      await runDueTourReminders('2026-09-10T20:00:00.000Z', rig.deps);
+      expect((await rungOf(tour.tourId, 'en_route'))?.skippedAt).toBe(PAST_TOUR_NOW);
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('outranks supersededInBatch: a post-tour catch-up batch gives BOTH rungs tour_already_passed', async () => {
+      const rig = createGroupTestRig();
+      seedTenant(rig.world, 'contact-past-b', '+15550900002', 'conv-past-b', PAST_ARMED_AT);
+      const tour = await pastTour('contact-past-b', 'unit-past-b');
+      // Both rungs pending and due in ONE listDue snapshot - the worker-downtime
+      // shape. Created directly so the case does not depend on arm-time timing.
+      await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+      await tourReminders.create({ tourId: tour.tourId, kind: 'en_route', dueAt: EN_ROUTE_DUE });
+
+      await runDueTourReminders(PAST_TOUR_NOW, rig.deps);
+
+      const rows = await tourReminders.listByTour(tour.tourId);
+      expect(rows).toHaveLength(2);
+      for (const r of rows) {
+        expect(r.skipReason, `${r.kind} takes the per-tour reason`).toBe('tour_already_passed');
+      }
+      // The ledger-item-8 chip shape must not appear: "superseded by a later
+      // reminder" beside a rung that reads "the tour had already happened".
+      expect(rows.map((r) => r.skipReason)).not.toContain('quiet_hours_superseded');
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('outranks the quiet-hours backstop: a past-tour rung due inside the window retires instead of re-listing', async () => {
+      const rig = createGroupTestRig();
+      // Quiet hours ON (21:00-08:00 America/New_York). Without the gate above
+      // it, this tick returns UNCLAIMED and the row re-lists every tick until
+      // quiet-end - then fires stale.
+      const deps = { ...rig.deps, settingsRepo: stubSettingsRepo() };
+      seedTenant(rig.world, 'contact-past-c', '+15550900003', 'conv-past-c', PAST_ARMED_AT);
+      const tour = await pastTour('contact-past-c', 'unit-past-c');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+      /** 01:00 EDT the night after the tour - deep inside the default window. */
+      const QUIET_NOW = '2026-09-11T05:00:00.000Z';
+
+      await runDueTourReminders(QUIET_NOW, deps);
+
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBe(QUIET_NOW);
+      expect(after?.skipReason).toBe('tour_already_passed');
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('the hoisted tour read is deliberate: superseded-in-batch AND tour-missing now reads tour_missing', async () => {
+      const rig = createGroupTestRig();
+      // No tours row at all for this id.
+      const tourId = `tour-gone-${randomUUID().slice(0, 8)}`;
+      const earlier = await tourReminders.create({
+        tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+      await tourReminders.create({ tourId, kind: 'en_route', dueAt: EN_ROUTE_DUE });
+
+      await runDueTourReminders(PAST_TOUR_NOW, rig.deps);
+
+      // ACCEPTED CONSEQUENCE of hoisting the tour read above supersededInBatch:
+      // before Phase B the earlier rung read 'quiet_hours_superseded' (it never
+      // reached the tour read at all). 'tour_missing' is the truer answer for
+      // both rows - a rung whose tour no longer exists was not superseded.
+      const rows = await tourReminders.listByTour(tourId);
+      expect(rows).toHaveLength(2);
+      for (const r of rows) {
+        expect(r.skipReason, `${r.kind} reports the tour read, not supersession`).toBe(
+          'tour_missing',
+        );
+      }
+      expect(rows.find((r) => r.reminderId === earlier.reminderId)?.skippedAt).toBe(PAST_TOUR_NOW);
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('no_show_checkin survives the gate: force-send AFTER the tour still sends', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-past-d',
+        phone: '+15550900004',
+        convId: 'conv-past-d',
+        now: PAST_ARMED_AT,
+      });
+      const tour = await pastTour('contact-past-d', 'unit-past-d');
+      // dueAt = scheduledAt + 30m. This is the ONE rung whose copy assumes the
+      // tour HAS happened, and the predicate exempts it BY CONSTRUCTION rather
+      // than by a name in a list - the exception a later reader would delete.
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'no_show_checkin',
+        dueAt: '2026-09-10T18:30:00.000Z',
+      });
+
+      const result = await forceSendReminder(row.reminderId, tour.tourId, PAST_TOUR_NOW, true, deps);
+
+      expect(result).toEqual({ outcome: 'sent' });
+      expect(spy.sent).toHaveLength(1);
+      expect(spy.sent[0]!.body).toBe(rungBody('no_show_checkin', PAST_TOUR_START));
+    });
+
+    it('force-send on a past-tour pre-tour rung refuses tour_already_passed and leaves the row pending', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-past-e',
+        phone: '+15550900005',
+        convId: 'conv-past-e',
+        now: PAST_ARMED_AT,
+      });
+      const tour = await pastTour('contact-past-e', 'unit-past-e');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+
+      const result = await forceSendReminder(row.reminderId, tour.tourId, PAST_TOUR_NOW, true, deps);
+
+      // A REFUSAL, never a claim-skip: a human action must not retire a rung.
+      expect(result).toEqual({ outcome: 'refused', reason: 'tour_already_passed' });
+      expect(spy.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
+  });
+
   // ---------------------------------------------------------------------------
-  describe('manual-only hold-back (founder decision 2026-08-20)', () => {
+  // Manual-only hold-back - the MECHANISM, exercised through the injection seam
+  //
+  // MANUAL_ONLY_REMINDER_KINDS is EMPTY again since 2026-08-31 (Phase B), so
+  // production exhibits none of this by default. The mechanism itself is not
+  // gone: it is the way a kind gets paused again ("TO PAUSE AGAIN: add kinds
+  // here"), so these cases inject an explicit non-empty set and keep it pinned.
+  // The load-bearing assertion is that a held-back rung is left PENDING rather
+  // than claim-skipped: "Send now" (forceSendReminder) refuses any row that is
+  // already sent/skipped/canceled, so retiring them here would silently disable
+  // the button the pause exists to keep.
+  //
+  // Every rung below is a LIVE kind. Riding `confirmation` would prove nothing
+  // now - the discontinued guard would stop it first, for a different reason.
+  // ---------------------------------------------------------------------------
+  describe('manual-only hold-back (the pause mechanism, injected)', () => {
     // seedForceTour arms its row at 2026-02-11T13:00Z, which is AFTER FORCE_NOW
     // (the force-send suite polls at an instant the row is deliberately NOT due,
     // so only the human path can move it). These cases need the opposite: the
@@ -3284,15 +3640,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // Paired with quietOff so the quiet-hours backstop cannot be the reason
     // either - the hold-back has to be the only thing standing in the way.
     const POLL_AFTER_DUE = '2026-02-11T13:01:00.000Z';
+    /** What a re-pause would look like: one live kind, held back by hand. */
+    const PAUSE_DAY_BEFORE: ReadonlySet<ReminderKind> = new Set<ReminderKind>(['day_before']);
 
-    it('holds back every AUTO-ARMED rung kind, and leaves the manual rung alone', () => {
-      // The four armTourReminders writes (REMINDER_KINDS) - all paused.
-      for (const kind of ['confirmation', 'day_before', 'morning_of', 'en_route'] as const) {
-        expect(MANUAL_ONLY_REMINDER_KINDS.has(kind), `${kind} not held back`).toBe(true);
-      }
-      // no_show_checkin was NEVER auto-armed, so it has no business in the set -
-      // its absence is what keeps this a pause of the POLL, not a second manual list.
-      expect(MANUAL_ONLY_REMINDER_KINDS.has('no_show_checkin')).toBe(false);
+    it('the production default holds nothing back, and the retired kind is elsewhere', () => {
+      // The unpause, asserted on the set itself: nothing is paused today.
+      expect(MANUAL_ONLY_REMINDER_KINDS.size, 'the ladder is fully automatic again').toBe(0);
+      // `confirmation` did not stay here under a new name - it moved to the
+      // permanent set, which is what makes "Send now" refuse it too.
+      expect([...DISCONTINUED_REMINDER_KINDS]).toEqual(['confirmation']);
     });
 
     it('a due manual-only rung is NOT sent and is LEFT PENDING (still force-sendable)', async () => {
@@ -3308,11 +3664,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const { tour, row } = await seedForceTour({
         tenantId: 'contact-hold-1',
         unitId: 'unit-hold-1',
-        kind: 'confirmation',
+        kind: 'day_before',
       });
 
-      // The real production default - NO manualOnlyKinds override.
-      await runDueTourRemindersRaw(POLL_AFTER_DUE, deps);
+      await runDueTourReminders(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: PAUSE_DAY_BEFORE });
 
       expect(spy.sent).toHaveLength(0);
       const after = (await tourReminders.listByTour(tour.tourId)).find(
@@ -3336,12 +3691,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const { tour, row } = await seedForceTour({
         tenantId: 'contact-hold-2',
         unitId: 'unit-hold-2',
-        kind: 'confirmation',
+        kind: 'day_before',
       });
 
-      await runDueTourRemindersRaw(POLL_AFTER_DUE, deps);
+      await runDueTourReminders(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: PAUSE_DAY_BEFORE });
       expect(spy.sent).toHaveLength(0);
 
+      // forceSendReminder never consults manualOnlyKinds at all - the pause is a
+      // POLL-side hold only, which is exactly why it could never have been the
+      // guard for a kind that must never send (spec 3.1).
       const result = await forceSendReminder(
         row.reminderId,
         tour.tourId,
@@ -3357,7 +3715,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(spy.sent[0]!.automated).toBe(false);
     });
 
-    it('an explicit empty override restores the automatic send (the e2e tick seam)', async () => {
+    it('with nothing paused, the same rung sends automatically (the unpause)', async () => {
       const rig = createGroupTestRig();
       const spy = makeForceSendSpy();
       const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
@@ -3370,10 +3728,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const { tour, row } = await seedForceTour({
         tenantId: 'contact-hold-3',
         unitId: 'unit-hold-3',
-        kind: 'confirmation',
+        kind: 'day_before',
       });
 
-      await runDueTourRemindersRaw(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: new Set() });
+      // The real production default - NO manualOnlyKinds override anywhere.
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
 
       expect(spy.sent).toHaveLength(1);
       expect(spy.sent[0]!.automated, 'the poll path is still an AUTOMATED send').toBe(true);
@@ -3381,6 +3740,222 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         (r) => r.reminderId === row.reminderId,
       );
       expect(after?.sentAt).toBe(POLL_AFTER_DUE);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // DISCONTINUED_REMINDER_KINDS (Phase B spec 3.1) - the PERMANENT guard.
+  //
+  // Distinct from the pause above in both directions: no path may send a
+  // discontinued kind (the poll skips it AND the human force-send refuses it),
+  // and no deps object can switch it off - the set is deliberately not
+  // injectable, so e2e can never grow a send path production lacks.
+  // ---------------------------------------------------------------------------
+  describe('DISCONTINUED_REMINDER_KINDS', () => {
+    const POLL_AFTER_DUE = '2026-02-11T13:01:00.000Z';
+
+    it('the poll EXCLUDES a due discontinued row - not sent, not claim-skipped, left pending', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-1',
+        phone: '+15550240001',
+        convId: 'conv-disc-1',
+        now: SEEDED_AT,
+      });
+      // A FUTURE tour (seedForceTour's start is 20:00, the rung is due 13:00), so
+      // the past-tour gate cannot be what stops this - only the kind can.
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-1',
+        unitId: 'unit-disc-1',
+        kind: 'confirmation',
+      });
+
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
+      // TWICE: an excluded row must not be a row that merely lost a race.
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
+
+      expect(spy.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      // LEFT PENDING, not claim-skipped: the poll has no in-app writer for
+      // `kind_retired` at all (spec 3.1) - only the sweep script stamps it.
+      expect(after?.skippedAt).toBeUndefined();
+      expect(after?.skipReason).toBeUndefined();
+      expect(after?.canceledAt).toBeUndefined();
+    });
+
+    it('the held-back LOG counts a kind in BOTH sets once, not twice', async () => {
+      // Review round 1, B-N4. MANUAL_ONLY_REMINDER_KINDS is empty today so the
+      // two counters cannot overlap in production - but the whole point of
+      // keeping the mechanism alive is that a kind CAN be re-paused, and
+      // `confirmation` is the kind its docblock names. The counters exist to
+      // tell two opposite actions apart (a queue a human must work through vs
+      // rows the sweep has not reached), so a row in both sets must be reported
+      // under the one that is true of it.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-n4',
+        phone: '+15550240009',
+        convId: 'conv-disc-n4',
+        now: SEEDED_AT,
+      });
+      await seedForceTour({
+        tenantId: 'contact-disc-n4',
+        unitId: 'unit-disc-n4',
+        kind: 'confirmation',
+      });
+
+      const before = logCapture.lines.length;
+      await runDueTourReminders(POLL_AFTER_DUE, {
+        ...deps,
+        manualOnlyKinds: new Set<ReminderKind>(['confirmation']),
+      });
+
+      const held = logCapture.lines
+        .slice(before)
+        .find((l) => l['msg'] === 'tour reminder poll: rungs left pending (no automatic send)');
+      expect(held).toBeDefined();
+      // At least this suite's own row (earlier cases in this file leave their
+      // discontinued rows pending too, deliberately - so this is >=, and the
+      // RECONCILIATION below is the real assertion).
+      expect(held?.['heldBackDiscontinued'] as number).toBeGreaterThanOrEqual(1);
+      expect(held?.['heldBackManualOnly']).toBe(0);
+      expect(
+        (held?.['heldBackManualOnly'] as number) + (held?.['heldBackDiscontinued'] as number),
+      ).toBe(held?.['heldBack']);
+    });
+
+    it('forceSendReminder REFUSES kind_retired for a discontinued kind, and the row is untouched', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-2',
+        phone: '+15550240002',
+        convId: 'conv-disc-2',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-2',
+        unitId: 'unit-disc-2',
+        kind: 'confirmation',
+      });
+
+      const result = await forceSendReminder(
+        row.reminderId,
+        tour.tourId,
+        POLL_AFTER_DUE,
+        true,
+        deps,
+      );
+
+      expect(result).toEqual({ outcome: 'refused', reason: 'kind_retired' });
+      expect(spy.sent).toHaveLength(0);
+      // PRE-CLAIM: a refusal never retires a rung (the sweep does that).
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
+
+    it('refusal precedence: a discontinued rung on a PAST tour refuses kind_retired, not tour_already_passed', async () => {
+      // Both gates are true here. The kind check sits at the row lookup, above
+      // target resolution and above the past-tour gate, so the permanent reason
+      // is the one the operator sees - "we no longer send this", not "you are
+      // too late", which would invite a retry on the next tour.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-3',
+        phone: '+15550240003',
+        convId: 'conv-disc-3',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-3',
+        unitId: 'unit-disc-3',
+        kind: 'confirmation',
+      });
+      // An hour AFTER the seeded tour started (20:00), with the rung due 13:00:
+      // retiredByTourStart is true, so tour_already_passed is genuinely live.
+      const AFTER_TOUR = '2026-02-11T21:00:00.000Z';
+      expect(retiredByTourStart(row, tour.scheduledAt, AFTER_TOUR)).toBe(true);
+
+      const result = await forceSendReminder(row.reminderId, tour.tourId, AFTER_TOUR, true, deps);
+
+      expect(result).toEqual({ outcome: 'refused', reason: 'kind_retired' });
+      expect(spy.sent).toHaveLength(0);
+    });
+
+    it('the dev tick shape does NOT bypass it: an empty manualOnlyKinds still sends nothing', async () => {
+      // The old dev/e2e override (`manualOnlyKinds: new Set()`) switched the
+      // PAUSE off. It never reached this set, and must not: a seam that could
+      // would give e2e a send path production does not have.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-4',
+        phone: '+15550240004',
+        convId: 'conv-disc-4',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-4',
+        unitId: 'unit-disc-4',
+        kind: 'confirmation',
+      });
+
+      await runDueTourReminders(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: new Set() });
+
+      expect(spy.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
+
+    it('a LIVE rung due in the same batch still sends - the exclusion is per KIND', async () => {
+      // Anti-vacuity for the whole describe: without this, "nothing was sent"
+      // would also pass if the poll had stopped working altogether.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-5',
+        phone: '+15550240005',
+        convId: 'conv-disc-5',
+        now: SEEDED_AT,
+      });
+      const { tour } = await seedForceTour({
+        tenantId: 'contact-disc-5',
+        unitId: 'unit-disc-5',
+        kind: 'confirmation',
+      });
+      // The SAME tour, one live rung, due a minute earlier so supersession has
+      // nothing later to prefer (the discontinued row is not in the batch).
+      const live = await createDueReminder(
+        tourReminders,
+        tour.tourId,
+        'day_before',
+        '2026-02-11T12:59:00.000Z',
+      );
+
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
+
+      expect(spy.sent).toHaveLength(1);
+      const rows = await tourReminders.listByTour(tour.tourId);
+      expect(rows.find((r) => r.reminderId === live.reminderId)?.sentAt).toBe(POLL_AFTER_DUE);
+      expect(rows.find((r) => r.kind === 'confirmation')?.sentAt).toBeUndefined();
     });
   });
 
@@ -3414,7 +3989,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
      * the wrong reason":
      *  (a) the D7 pending-open wait cannot fire, because `createGroupTestRig`
      *      omits `pendingRosterActionsRepo` and the wait is gated on its
-     *      presence (jobs/tourReminders.ts:797).
+     *      presence (jobs/tourReminders.ts:1037).
      *  (b) the throwing property read cannot make the ROSTER unreadable:
      *      memberFromContact catches its own contact-read throw
      *      (lib/rosterResolution.ts:162-171), so tenantRosterGate still answers
@@ -3663,7 +4238,24 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(msgsSince(from)).not.toContain(DEFER_WARN);
     });
 
-    it('guard g3: a confirmation force-send SENDS with the unit read throwing', async () => {
+    // g3 / g3b are the FORCE-SEND twins of g1 / g2: the carve-out has to hold on
+    // the human path too, or an operator would be told to try again over a read
+    // the copy never needed.
+    //
+    // THEY USED TO RIDE `confirmation` (Phase A), for its own reason: that copy
+    // renders NO name, so no failed name read can corrupt it. Both halves of
+    // that survive, in the right places. The "renders no name" half is a CATALOG
+    // fact and is pinned directly on the assessor in tourCopy.test.ts
+    // ("confirmation is never blocked - its untouched copy renders no name",
+    // with all three reads thrown at once) - a stronger pin than an integration
+    // test could give it. What could NOT survive on confirmation is the half
+    // below: since Phase B the kind is discontinued, so a force-send refuses
+    // `kind_retired` above the compose gate and would never reach the carve-out.
+    // Derived, not assumed: reminderNamesUsed says `confirmation` is the ONLY
+    // kind rendering no name, so there was no live kind to retarget the FIRST
+    // half to. `day_before` names the tenant and nothing else, which is exactly
+    // what these two failing reads are NOT.
+    it('guard g3: a day_before force-send SENDS with the unit read throwing', async () => {
       // FIXTURE FACT, not a gap: with the unit read throwing, `unit` is
       // undefined and resolveTourContactNames never ATTEMPTS the property read,
       // so propertyReadFailed is structurally false here. Do NOT "fix" the
@@ -3672,7 +4264,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const f = await nameFailRig({
         suffix: 'g3',
         phone: '+15550240007',
-        kind: 'confirmation',
+        kind: 'day_before',
         throwing: 'unit',
       });
 
@@ -3686,17 +4278,19 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
       expect(result).toEqual({ outcome: 'sent' });
       expect(f.spy.sent).toHaveLength(1);
+      // The address degraded away; the tenant greeting did not (the tenant read
+      // is deliberately NOT thrown in either g3 variant: that one fails inside
+      // target resolution, which is case 13's behaviour, not the compose gate's).
+      expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
     });
 
-    it('guard g3b: a confirmation force-send SENDS with only the property-contact read throwing', async () => {
-      // Phase A's confirmation copy renders NO name, so no failed name read can
-      // corrupt it. (The tenant read is deliberately NOT thrown in either g3
-      // variant: that one fails inside target resolution, which is case 13's
-      // behaviour, not the compose gate's.)
+    it('guard g3b: a day_before force-send SENDS with only the property-contact read throwing', async () => {
+      // day_before's copy never names the property contact, so a failed property
+      // read degrades exactly like absence - on the human path as on the poll's.
       const f = await nameFailRig({
         suffix: 'g3b',
         phone: '+15550240008',
-        kind: 'confirmation',
+        kind: 'day_before',
         throwing: 'property',
       });
 
@@ -3710,6 +4304,439 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
       expect(result).toEqual({ outcome: 'sent' });
       expect(f.spy.sent).toHaveLength(1);
+      expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
+    });
+
+    // =========================================================================
+    // THE ONE-HOUR BOUND on the names re-list (Phase B spec 7, ledger item 7).
+    //
+    // Phase A accepted an UNBOUNDED defer here because the poll sat behind the
+    // manual-only hold-back; that acceptance expired with the pause. A read
+    // that throws forever re-lists the rung every tick with nothing on the
+    // panel to say why, and when the table recovers the whole backlog fires
+    // carrying copy whose moment has passed. The bound mirrors the roster twin
+    // exactly (ROSTER_UNAVAILABLE_GRACE_MS, one hour past the rung's dueAt):
+    // inside the hour a blip still costs nothing, past it the rung is retired
+    // VISIBLY. One hour and not longer because an "on the way" text landing
+    // ninety minutes late is worse than a chip saying it did not send.
+    //
+    // BOTH send routes need it. The GROUP route matters most: a landlord_led
+    // en_route rung is the only rung in the whole ladder whose copy FORKS on
+    // the property-contact name, so it is the single rung-differential names
+    // failure there is - bounding the 1:1 alone would close the smaller half.
+    //
+    // FORCE-SEND is deliberately unbounded on both routes: a human action never
+    // retires a rung, so it keeps refusing `names_unavailable` for as long as
+    // the rung stays pending.
+    // =========================================================================
+    describe('the one-hour names bound (spec 7)', () => {
+      /** dueAt + 1 minute: past due, well inside the grace window. */
+      const NF_EARLY_POLL = '2026-03-11T15:01:00.000Z';
+      /** dueAt + 61 minutes: past the one-hour grace (rosterWaitExpired is `>`). */
+      const NF_LATE_POLL = '2026-03-11T16:01:00.000Z';
+      const RETIRE_ERROR =
+        'tour reminder: name resolution STILL failing past the grace window - retiring (claim-skipped)';
+
+      /**
+       * The GROUP twin of nameFailRig: a landlord_led tour WITH a usable open
+       * relay group, so delivery routes to sendGroupReminder rather than
+       * falling back to the tenant 1:1. The unit's property contact is the read
+       * that throws - the fork en_route's group copy depends on.
+       *
+       * The throwing read cannot make the group unusable: memberFromContact
+       * catches its own contact-read throw, so the roster still resolves and a
+       * red here can only be the compose gate.
+       *
+       * THE TENANT'S 1:1 CONVERSATION IS DELETED after seeding, deliberately.
+       * Without that these cases would pass identically if the group were
+       * unusable and routing quietly fell back to the 1:1 - i.e. they would
+       * prove the 1:1 bound twice and the group bound never. With no 1:1 thread
+       * to fall back TO, a routing failure claim-skips `no_conversation`
+       * instead, which every assertion below would catch.
+       */
+      async function groupNameFailRig(opts: {
+        suffix: string;
+        phone: string;
+        landlordPhone: string;
+        kind: ReminderKind;
+      }) {
+        const rig = createGroupTestRig();
+        const spy = makeForceSendSpy();
+        const tenantId = `contact-gnf-${opts.suffix}`;
+        const unitId = `unit-gnf-${opts.suffix}`;
+        const landlordId = `c-gboom-${opts.suffix}`;
+        const groupConvId = `conv-gnf-group-${opts.suffix}`;
+        seedForceTenant(rig.world, {
+          contactId: tenantId,
+          phone: opts.phone,
+          convId: `conv-gnf-${opts.suffix}`,
+          now: NF_SEEDED,
+        });
+        // See the docblock: no 1:1 thread, so nothing can silently fall back.
+        rig.world.conversations.delete(`conv-gnf-${opts.suffix}`);
+        rig.world.units.set(unitId, {
+          unitId,
+          landlordId,
+          status: 'available',
+          created_at: NF_SEEDED,
+          updated_at: NF_SEEDED,
+        });
+        const realGetById = rig.world.contactsRepo.getById.bind(rig.world.contactsRepo);
+        rig.world.contactsRepo.getById = async (contactId: string) => {
+          if (contactId === landlordId) throw new Error('contacts unavailable');
+          return realGetById(contactId);
+        };
+        seedRelayGroup(rig.world, {
+          convId: groupConvId,
+          poolNumber: '+15550190901',
+          participants: [
+            { contactId: tenantId, phone: opts.phone, name: 'Tina Tenant' },
+            { contactId: landlordId, phone: opts.landlordPhone, name: 'Larry Landlord' },
+          ],
+          now: NF_SEEDED,
+        });
+        const tour = await tours.create({
+          tenantId,
+          unitId,
+          scheduledAt: NF_SCHEDULED,
+          tourType: 'landlord_led',
+        });
+        await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+        const row = await tourReminders.create({
+          tourId: tour.tourId,
+          kind: opts.kind,
+          dueAt: NF_DUE,
+        });
+        const deps = { ...rig.deps, sendMessageService: spy.service };
+        return { rig, spy, deps, tour, row };
+      }
+
+      it('1:1 route (a): INSIDE the hour the rung is still left unclaimed and re-lists', async () => {
+        const f = await nameFailRig({
+          suffix: 'bound1a',
+          phone: '+15550240011',
+          kind: 'en_route',
+          throwing: 'property',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_EARLY_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+        expect(f.spy.sent).toHaveLength(0);
+        // The warn string is unchanged and asserted verbatim: the inside-the-hour
+        // branch is exactly the Phase A behaviour, and only its bound is new.
+        expect(msgsSince(from)).toContain(DEFER_WARN);
+        expect(msgsSince(from)).not.toContain(RETIRE_ERROR);
+        // Still live: the next tick retries it.
+        expect((await tourReminders.listDue(NF_EARLY_POLL)).map((r) => r.reminderId)).toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('1:1 route (b): PAST the hour it is claim-skipped names_unavailable, exactly once', async () => {
+        const f = await nameFailRig({
+          suffix: 'bound1b',
+          phone: '+15550240012',
+          kind: 'en_route',
+          throwing: 'property',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_LATE_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.skippedAt).toBe(NF_LATE_POLL);
+        expect(after?.skipReason).toBe('names_unavailable');
+        expect(after?.sentAt).toBeUndefined();
+        expect(f.spy.sent).toHaveLength(0);
+        expect(msgsSince(from)).toContain(RETIRE_ERROR);
+        // EXACTLY ONCE is the whole point of a claim-skip over a bare return:
+        // the row leaves listDue, so a second tick has nothing to re-retire.
+        expect((await tourReminders.listDue(NF_LATE_POLL)).map((r) => r.reminderId)).not.toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('1:1 route (c): FORCE-SEND past the hour still refuses names_unavailable and never retires', async () => {
+        const f = await nameFailRig({
+          suffix: 'bound1c',
+          phone: '+15550240013',
+          kind: 'en_route',
+          throwing: 'property',
+        });
+
+        const result = await forceSendReminder(
+          f.row.reminderId,
+          f.tour.tourId,
+          NF_LATE_POLL,
+          true,
+          f.deps,
+        );
+
+        // The bound is a POLL rule. A human pressing Send now gets an answer and
+        // keeps the rung, so they can push it through the moment the table
+        // recovers - however long past due that is.
+        expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+      });
+
+      it('GROUP route (a): INSIDE the hour the rung is still left unclaimed and re-lists', async () => {
+        const f = await groupNameFailRig({
+          suffix: 'bound2a',
+          phone: '+15550240021',
+          landlordPhone: '+15550240121',
+          kind: 'en_route',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_EARLY_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+        // Nothing announced into the group thread either.
+        expect(f.rig.groupSends).toHaveLength(0);
+        expect(msgsSince(from)).toContain(DEFER_WARN);
+        expect(msgsSince(from)).not.toContain(RETIRE_ERROR);
+        expect((await tourReminders.listDue(NF_EARLY_POLL)).map((r) => r.reminderId)).toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('GROUP route (b): PAST the hour it is claim-skipped names_unavailable, exactly once', async () => {
+        const f = await groupNameFailRig({
+          suffix: 'bound2b',
+          phone: '+15550240022',
+          landlordPhone: '+15550240122',
+          kind: 'en_route',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_LATE_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.skippedAt).toBe(NF_LATE_POLL);
+        expect(after?.skipReason).toBe('names_unavailable');
+        expect(f.rig.groupSends).toHaveLength(0);
+        expect(msgsSince(from)).toContain(RETIRE_ERROR);
+        expect((await tourReminders.listDue(NF_LATE_POLL)).map((r) => r.reminderId)).not.toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('GROUP route (c): FORCE-SEND past the hour still refuses names_unavailable and never retires', async () => {
+        const f = await groupNameFailRig({
+          suffix: 'bound2c',
+          phone: '+15550240023',
+          landlordPhone: '+15550240123',
+          kind: 'en_route',
+        });
+
+        const result = await forceSendReminder(
+          f.row.reminderId,
+          f.tour.tourId,
+          NF_LATE_POLL,
+          true,
+          f.deps,
+        );
+
+        expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+        expect(f.rig.groupSends).toHaveLength(0);
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+      });
+    });
+  });
+
+  // ===========================================================================
+  // en_route QUIET-HOURS EXEMPTION (Phase B spec 6) + the WIDENED supersession
+  // predicate (spec 6.2).
+  //
+  // These cases live on their OWN November 2026 timeline, so no row from any
+  // other test in this file is ever due at their polls and none of their armed
+  // rows is ever swept by another test's tick. America/New_York is EST (UTC-5)
+  // from Nov 1 2026, and the default window is 21:00-08:00 local.
+  //
+  // The exemption is the founder's decision (Sam, 2026-08-31): the "on the way"
+  // rung is the one message whose whole value is that it lands an hour before
+  // the tour, so it is stored and fired at its RAW time even inside the window.
+  // Every other rung clamps exactly as before - clampOutOfQuietHours itself is
+  // untouched, because the placement ladder and the timeline share it.
+  // ===========================================================================
+  describe('en_route quiet-hours exemption (spec 6) + widened supersession (6.2)', () => {
+    const QUIET_WINDOW = quietHoursWindowOf({
+      quietHoursEnabled: true,
+      quietHoursStart: '21:00',
+      quietHoursEnd: '08:00',
+      timezone: DEFAULT_ORG_SETTINGS.timezone,
+    });
+
+    it('arm-time: en_route stores its RAW dueAt inside the quiet window; other rungs clamp', async () => {
+      // A 04:00-local tour - the unbounded consequence spec 6.1 names. en_route
+      // is due at 03:00 local, deep inside the window, and is stored THERE.
+      const now = '2026-11-17T15:00:00.000Z'; // Nov 17 10:00 EST
+      const scheduledAt = '2026-11-19T09:00:00.000Z'; // Nov 19 04:00 EST
+
+      const tour = await tours.create({
+        tenantId: 'contact-arm-enroute-1',
+        unitId: 'unit-arm-enroute-1',
+        scheduledAt,
+        tourType: 'self_guided',
+      });
+
+      const rows = await armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: stubSettingsRepo(),
+        logger,
+      });
+      const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+      // THE EXEMPTION: raw = scheduledAt - 1h = Nov 19 03:00 EST. Unclamped, and
+      // still armed (it is before the tour and no later rung shares its slot).
+      expect(byKind['en_route']!.dueAt).toBe('2026-11-19T08:00:00.000Z');
+      expect(byKind['en_route']!.skippedAt).toBeUndefined();
+      // ...and it really is inside the window - the assertion that would still
+      // pass if the exemption were reverted for a tour that happened to clamp
+      // to the same instant.
+      expect(isQuietTime(byKind['en_route']!.dueAt, QUIET_WINDOW)).toBe(true);
+
+      // EVERY OTHER RUNG CLAMPS. morning_of raw = Nov 19 00:00 EST (inside the
+      // window) -> 08:00 EST = 13:00Z, which is AFTER this 04:00 tour, so the
+      // pre-existing past-event rule retires it with a visible row.
+      expect(byKind['morning_of']!.dueAt).toBe('2026-11-19T13:00:00.000Z');
+      expect(byKind['morning_of']!.skipReason).toBe('past_event');
+
+      // day_before = 19:30 EST Nov 18, outside the window either way - the
+      // control that shows the exemption did not disable clamping wholesale.
+      expect(byKind['day_before']!.dueAt).toBe('2026-11-19T00:30:00.000Z');
+      expect(byKind['day_before']!.skippedAt).toBeUndefined();
+    });
+
+    it('fire-time: a due en_route sends during the quiet window; day_before defers', async () => {
+      // TWO TOURS on purpose: two rungs of the SAME tour due in one batch hit
+      // supersededInBatch (which retires the earlier one), and that would hide
+      // the deferral this case exists to pin.
+      const rig = createGroupTestRig();
+      const deps = quietOnDeps(rig.deps);
+      const seededAt = '2026-11-16T15:00:00.000Z';
+      const inWindow = '2026-11-18T03:00:00.000Z'; // Nov 17 22:00 EST
+      seedTenant(rig.world, 'contact-enroute-fire', '+15550260001', 'conv-enroute-fire', seededAt);
+      seedTenant(rig.world, 'contact-daybefore-fire', '+15550260002', 'conv-daybefore-fire', seededAt);
+
+      const enRouteTour = await tours.create({
+        tenantId: 'contact-enroute-fire',
+        unitId: 'unit-enroute-fire',
+        scheduledAt: '2026-11-18T04:00:00.000Z', // Nov 17 23:00 EST - the tour is still ahead
+        tourType: 'self_guided',
+      });
+      const dayBeforeTour = await tours.create({
+        tenantId: 'contact-daybefore-fire',
+        unitId: 'unit-daybefore-fire',
+        scheduledAt: '2026-11-20T20:00:00.000Z',
+        tourType: 'self_guided',
+      });
+      const enRoute = await createDueReminder(tourReminders, enRouteTour.tourId, 'en_route', inWindow);
+      const dayBefore = await createDueReminder(
+        tourReminders,
+        dayBeforeTour.tourId,
+        'day_before',
+        inWindow,
+      );
+
+      await runDueTourReminders(inWindow, deps);
+
+      // The exempt rung went out mid-window.
+      const enRouteAfter = (await tourReminders.listByTour(enRouteTour.tourId)).find(
+        (r) => r.reminderId === enRoute.reminderId,
+      );
+      expect(enRouteAfter?.sentAt).toBe(inWindow);
+      expect(rig.world.sent.map((s) => s.to)).toContain('+15550260001');
+
+      // The unexempt sibling is DEFERRED, not skipped: no claim, no stamp, and
+      // still in listDue so the tick after quiet-end picks it up.
+      const dayBeforeAfter = (await tourReminders.listByTour(dayBeforeTour.tourId)).find(
+        (r) => r.reminderId === dayBefore.reminderId,
+      );
+      expect(dayBeforeAfter?.sentAt).toBeUndefined();
+      expect(dayBeforeAfter?.skippedAt).toBeUndefined();
+      expect((await tourReminders.listDue(inWindow)).map((r) => r.reminderId)).toContain(
+        dayBefore.reminderId,
+      );
+      expect(rig.world.sent.map((s) => s.to)).not.toContain('+15550260002');
+    });
+
+    it('REGRESSION (the 08:30 double-send): morning_of clamped ONTO or PAST en_route is superseded at arm', async () => {
+      // Spec 6.2's counter-example, and the reason the predicate had to widen
+      // from equality to `<=`. Before the exemption both rungs clamped to 08:00
+      // and equality retired morning_of. With en_route unclamped at 07:30 the
+      // two slots SEPARATE and the ladder INVERTS - equality would arm both, and
+      // the tenant would get "she is headed that way shortly" at 07:30 followed
+      // by "looking forward to having you tour at 8:30 today" at 08:00.
+      const now = '2026-11-19T01:00:00.000Z'; // Nov 18 20:00 EST - the evening before
+      const scheduledAt = '2026-11-19T13:30:00.000Z'; // Nov 19 08:30 EST
+
+      const tour = await tours.create({
+        tenantId: 'contact-arm-0830',
+        unitId: 'unit-arm-0830',
+        scheduledAt,
+        tourType: 'self_guided',
+      });
+
+      const rows = await armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: stubSettingsRepo(),
+        logger,
+      });
+      const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+      // en_route raw = Nov 19 07:30 EST, inside the window, EXEMPT -> stored raw.
+      expect(byKind['en_route']!.dueAt).toBe('2026-11-19T12:30:00.000Z');
+      expect(byKind['en_route']!.skippedAt).toBeUndefined();
+      // morning_of raw = Nov 19 04:30 EST -> clamps to 08:00 EST = 13:00Z, which
+      // is now AFTER en_route. The widened predicate sees a later rung firing
+      // BEFORE this one and retires this one, visibly.
+      expect(byKind['morning_of']!.dueAt).toBe('2026-11-19T13:00:00.000Z');
+      expect(byKind['morning_of']!.skipReason).toBe('quiet_hours_superseded');
+      // day_before is booked-too-late at this arm instant (its 19:30 anchor was
+      // 30 minutes ago), so it is a visible skipped row too - which leaves
+      // en_route as the ONLY pending rung. ONE text goes out.
+      expect(byKind['day_before']!.skipReason).toBe('booked_too_late');
+      expect(rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind)).toEqual(['en_route']);
+    });
+
+    it('widened predicate is a NO-OP on an unclamped ladder', async () => {
+      // Spec 6.2's own regression test: with nothing clamping, the rungs are
+      // strictly increasing in time, so `otherDue <= dueAt` is false for every
+      // pair and the arm result is byte-for-byte the pre-change one.
+      const now = '2026-11-17T15:00:00.000Z'; // Nov 17 10:00 EST
+      const scheduledAt = '2026-11-19T20:00:00.000Z'; // Nov 19 15:00 EST - an ordinary afternoon
+
+      const tour = await tours.create({
+        tenantId: 'contact-arm-noop',
+        unitId: 'unit-arm-noop',
+        scheduledAt,
+        tourType: 'self_guided',
+      });
+
+      const rows = await armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: quietOff,
+        logger,
+      });
+      const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+      expect(byKind['day_before']!.dueAt).toBe('2026-11-19T00:30:00.000Z');
+      expect(byKind['morning_of']!.dueAt).toBe('2026-11-19T16:00:00.000Z');
+      expect(byKind['en_route']!.dueAt).toBe('2026-11-19T19:00:00.000Z');
+      // Zero supersession rows, zero skips of any kind.
+      expect(rows).toHaveLength(3);
+      expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
     });
   });
 });

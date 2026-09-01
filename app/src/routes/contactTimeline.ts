@@ -81,6 +81,7 @@ import type { PlacementStage } from '../lib/statusModel.js';
 import { LISTING_STATUS_LABELS } from '../lib/statusModel.js';
 import {
   resolveUsableGroup,
+  DISCONTINUED_REMINDER_KINDS,
   MANUAL_ONLY_REMINDER_KINDS,
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
@@ -112,8 +113,11 @@ export interface ContactTimelineRouterDeps {
   /**
    * Reminder kinds the POLL holds back, mirrored onto this surface's tour rungs
    * so a rung the poll will never claim chips `paused` here too. Defaults to
-   * MANUAL_ONLY_REMINDER_KINDS. Test seam only - see the twin on
-   * routes/tourReminders.ts for why the quiet-hours suites pass an empty set.
+   * MANUAL_ONLY_REMINDER_KINDS, which is EMPTY today (2026-08-31, Phase B), so
+   * this is now the seam a suite uses to INJECT pause-mode behaviour that
+   * production no longer exhibits by default - see the twin on
+   * routes/tourReminders.ts. Never a route for DISCONTINUED_REMINDER_KINDS,
+   * which is permanent and not injectable anywhere.
    */
   manualOnlyReminderKinds?: ReadonlySet<ReminderKind>;
   /** As above, for the placement-nudge ladder. Defaults to
@@ -841,12 +845,22 @@ async function gatherUpcoming(params: {
   const landlordConv = convs.find((c) => c.type === 'landlord_1to1' || c.type === 'unknown_1to1');
   const contactOptOut = contact.sms_opt_out === true;
 
-  /** Preview suppression against a 1:1 thread (+ optional nudge stale-stage). */
+  /**
+   * Preview suppression against a 1:1 thread (+ optional nudge stale-stage).
+   *
+   * `quietExempt` is a PRE-COMPUTED boolean the caller supplies; this helper
+   * stays kind-blind on purpose. It is SHARED with the placement-nudge walk
+   * below, and `quietFor` is shared more widely still, so the en_route
+   * exemption (Phase B spec 6) must be decided at the reminder call site: a
+   * kind test in here would strip quiet suppression from placement nudges too.
+   * Only the QUIET operand is forced - every other reason still evaluates.
+   */
   const suppressionFor = (
     conv: ConversationItem | undefined,
     staleStage: boolean,
     dueAt: string,
     paused = false,
+    quietExempt = false,
   ): ScheduledSuppression | undefined =>
     evaluateScheduledSendSuppression({
       smsSendingEnabled: config.smsSendingEnabled,
@@ -858,7 +872,7 @@ async function gatherUpcoming(params: {
       // Quiet hours (spec 2026-08-03): the timeline is the THIRD evaluator
       // caller, so a deferred rung reads the same here as on the tour /
       // placement panels - including the per-RUNG scoping.
-      quietNow: quietFor(dueAt),
+      quietNow: !quietExempt && quietFor(dueAt),
     });
 
   /** Map upcoming nudge rows of ONE recipient on ONE placement → items. */
@@ -998,12 +1012,29 @@ async function gatherUpcoming(params: {
           // 1:1-routed tours reach this walk (group-routed ones return [] just
           // above), so the evaluator always runs - no bare-`paused` fallback is
           // needed on this surface.
-          const suppression = suppressionFor(
-            tenantConv,
-            false,
-            row.dueAt,
-            manualOnlyReminderKinds.has(row.kind),
-          );
+          //
+          // A DISCONTINUED kind short-circuits AHEAD of the evaluator (spec
+          // 3.1a): it is terminal and outranks every reason the ladder ranks -
+          // including the opt-out - because a rung nothing will ever send is not
+          // something a harder reason should override. This surface has its OWN
+          // read of the set rather than inheriting the tour panel's answer, and
+          // that is the point: without it the contact page would keep promising
+          // "sends in 3h" on a rung the panel one click away calls retired.
+          //
+          // en_route is EXEMPT FROM QUIET HOURS (spec 6): the poll neither
+          // clamps it at arm time nor defers it at fire time, so this surface
+          // must not chip "Will wait" on it either. The exemption is passed IN
+          // rather than decided inside suppressionFor / quietFor, which the
+          // placement-nudge walk above shares.
+          const suppression = DISCONTINUED_REMINDER_KINDS.has(row.kind)
+            ? ({ reason: 'discontinued' } as const)
+            : suppressionFor(
+                tenantConv,
+                false,
+                row.dueAt,
+                manualOnlyReminderKinds.has(row.kind),
+                row.kind === 'en_route',
+              );
           return {
             kind: 'scheduled',
             id: `sched#tour_reminder#${row.reminderId}`,

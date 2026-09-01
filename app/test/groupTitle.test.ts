@@ -85,7 +85,7 @@ describe('relayThreadLabel', () => {
     // nameless member must show their number instead of vanishing from a list the
     // navigator is trying to act on. Dropping them used to render "With Ana Diaz &
     // Jose" for a THREE-person thread. Names still travel alone in the outbound
-    // intro body - see jobs/relayFanOut composeConnectionSentence, unchanged.
+    // intro body - see jobs/relayFanOut composeNameList, unchanged.
     const conv = relayConv({
       participants: [
         member({ contactId: 'c1', phone: '+15550100001', name: 'Ana Diaz' }),

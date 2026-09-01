@@ -8,7 +8,7 @@
 // PII (doc section 9, as corrected by the founder ruling 2026-08-19): the line is
 // OUTBOUND CONTENT vs STAFF CHROME, not preview vs not-preview. Anything a tenant
 // or landlord RECEIVES carries names and never a phone - that is the intro body
-// (jobs/relayFanOut composeConnectionSentence), and it is untouched. This warning
+// (jobs/relayFanOut composeNameList), and it is untouched. This warning
 // is STAFF CHROME: it renders only in the navigator's confirm dialog
 // (dashboard/src/routes/shared/RosterConfirmDialog.tsx) and is transmitted to
 // nobody, so a nameless member shows their formatted phone rather than a useless

@@ -876,9 +876,12 @@ function buildLandlordsMatrix(): LandlordGroup[] {
 //
 // Per status:
 //   - requested  — TIMELESS: no scheduledAt, ZERO reminder rows (invariant).
-//   - scheduled  - UPCOMING (scheduledAt = now + Ndays): a SENT
-//     confirmation (armed at creation) + a PENDING day_before whose dueAt =
-//     scheduledAt - 24h >= now, so listDue(now) never returns it (no live-fire).
+//   - scheduled  - UPCOMING (scheduledAt = now + Ndays): a SENT, HISTORICAL
+//     confirmation + a PENDING day_before whose dueAt = scheduledAt - 24h >=
+//     now, so listDue(now) never returns it (no live-fire). The confirmation
+//     row is kept deliberately: the kind stopped ARMING on 2026-08-31 (Phase
+//     B), which does not un-send the ones that already went out, and the seeded
+//     world has to keep rendering rows real history contains.
 //   - toured/no_show/canceled/closed — recent PAST (scheduledAt = now − Ndays):
 //     ALL reminders terminal. day_before sent at its dueAt (= scheduledAt − 24h);
 //     no_show adds a sent no_show_checkin at scheduledAt + 30m; canceled's
@@ -980,7 +983,10 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
         _schedPartition: 'tours', // sparse byScheduledAt GSI membership
       };
 
-      // Confirmation is armed at creation and sent immediately — always terminal.
+      // A HISTORICAL confirmation: sent at creation, always terminal. The kind
+      // stopped arming on 2026-08-31 (Phase B), so no NEW row like this is ever
+      // born - but rows that already sent stay in the record, and the seeded
+      // world keeps one so every read surface goes on rendering them.
       reminders.push({
         reminderId: `rem-mx-${tourId}-conf`,
         tourId,

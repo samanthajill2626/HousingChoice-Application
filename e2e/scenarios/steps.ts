@@ -722,6 +722,14 @@ export class Scenario {
     });
   }
 
+  /** [Team] Rename the active tenant via the contact page's edit form. */
+  teamRenamesActiveTenant(t: Tenant, fields: { firstName: string; lastName: string }): Promise<void> {
+    return step('Team renames the tenant', async () => {
+      await this.openActiveContact(t);
+      await this.editTenantIdentity(fields);
+    });
+  }
+
   /** @deprecated Alias of {@link teamCreatesTenant} — kept for the tenant/sending-unit
    *  specs that predate the rename. */
   teamCreatesContact(...args: Parameters<Scenario['teamCreatesTenant']>): Promise<void> {
@@ -3530,6 +3538,11 @@ export class Scenario {
    *  spec can pin its Upcoming assertions to a SPECIFIC contact page. */
   contactId(): string {
     return this.requireActiveContactId();
+  }
+
+  /** The active tour's relay-group conversation id (set by teamOpensTourGroup). */
+  activeTourGroupId(): string {
+    return this.requireActiveTourGroup().groupThreadId;
   }
 
   /** The active placement's id (captured by teamRecordsExitGate('yes') — the

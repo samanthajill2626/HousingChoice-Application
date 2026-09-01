@@ -146,8 +146,17 @@ claimAttempt(<keys>, key, field, cap): Promise<
 
 Implemented as an atomic `ADD <field>.#k :one` guarded by a `ConditionExpression`
 asserting the parent item exists and the count is below `cap`
-(`attribute_not_exists` covering the zero case). On
-`ConditionalCheckFailedException`, a **strongly consistent** read
+(`attribute_not_exists` covering the zero case).
+
+**`claim.attempt` comes from `ReturnValues: 'UPDATED_NEW'`**, read back from the
+returned attribute (spec R2, A18 partially sustained - the round-1 revision
+deleted this clause while mooting the original finding and left the value's
+source unspecified). The counter maps are top-level, so the return is the
+enclosing counter map and the claimed value is read from it by key; the claim
+never re-reads the item to learn its own result, which would reintroduce the
+race the atomic `ADD` exists to remove.
+
+On `ConditionalCheckFailedException`, a **strongly consistent** read
 (`ConsistentRead: true`) disambiguates `capped` from `missing` - an eventually
 consistent read here could report `missing` for a slot that exists and skip the
 close.
@@ -190,26 +199,49 @@ The envelope's `attempt` field is retained but becomes **advisory**: logged, and
 used to select the backoff step, never for the cap decision. Payload parsers keep
 accepting it so in-flight envelopes still parse.
 
-### 3.5 Read-compat
+### 3.5 Seeding, and read-compat for items written before this branch
 
-A missing entry in a counter map is zero and claims to 1. In-flight envelopes
-carrying `attempt: N` still parse; N selects the backoff step only. No backfill
-migration. The durable value is authoritative from the first claim onward.
+**A nested `ADD` on an absent parent map throws** `ValidationException`, and
+under Sec 3.4's consumer-side THROW rule that would loop the envelope straight
+to the DLQ on the very first claim (spec R2, F2). The counter maps must exist
+before the first claim. This is the same constraint the repo already documents
+for `delivery_recipients` and `recipients`, whose parents are pre-seeded at
+create time precisely so child writes are legal.
 
-### 3.6 The 1:1 site - a different, smaller gap
+- **Seed at creation.** `fanout_attempts` / `retry_attempts` / `retry_lineage`
+  are seeded as empty maps where their sibling map is seeded today: broadcast
+  `markSending`, message append, and the relay inbound path.
+- **Defensive seed-if-absent in the claim.** Items written BEFORE this branch
+  have no such attribute and will never be re-seeded (spec R2, F6/F17). The
+  claim therefore tolerates an absent parent: on `ValidationException` it
+  seeds the map with `attribute_not_exists` and retries the `ADD` once. This
+  is the whole read-compat story - there is no backfill and none is needed.
+- **Lineage for legs sent before this branch.** A relay leg whose pointer
+  carries no `n` is attempt 1 (Sec 4.2), and a claim against absent lineage
+  starts the ladder at 1. An old leg retries correctly.
 
-`retrySend`'s count is **already durable** (`message.retry_attempt`), so nothing
-moves. Its actual defect: if `enqueueSendRetry` throws in the webhook, no retry
-is ever scheduled, and the dashboard goes on promising one. That is a
-producer-side failure by the table above, so it closes immediately - and the
-chip stops promising (Sec 8). No counter change, no new schema.
+In-flight envelopes carrying `attempt: N` still parse; N selects the backoff
+step only. The durable value is authoritative from the first claim onward.
 
-### 3.4 Read-compat
+### 3.6 The 1:1 site needs NO code change
 
-A slot with no `attempt` attribute is treated as zero and claimed to 1. In-flight
-envelopes carrying `attempt: N` still parse; their N is used only for the
-backoff step. No backfill migration. The durable value is authoritative from
-first claim onward.
+`retrySend`'s count is **already durable** (`message.retry_attempt`), and its
+enqueue failure is **already handled**: the status webhook wraps the whole
+error-code switch in a `try/catch` that logs ERROR (feeding the alarm) and
+leaves the message terminal (twilio.ts:2727-2731).
+
+An earlier revision proposed a "producer-side close" here. **That already
+ships** (spec R2, F7) - the third time this spec proposed a fix for existing
+behavior, after the `finalize()` and `retry_attempt` corrections. The 1:1 path
+is therefore OUT of the code scope entirely; its only defect is the chip that
+promises a retry when the enqueue failed, which Sec 8 fixes in the dashboard.
+
+**Correcting Sec 3.4's justification.** That table justified producer-side
+closure with "nothing redelivers a webhook". **Twilio does redeliver**, as the
+file's own comment says. The accurate reason is narrower: a Twilio redelivery
+**no-ops at the status transition** (the slot has already moved), so it cannot
+re-drive the retry - which is why the close must happen on the first pass. The
+conclusion stands; the stated reason was wrong (spec R2, F11).
 
 ### 3.7 Per-site close branches
 
@@ -304,8 +336,10 @@ Each `relaysid` pointer gains the attempt number `n`, so a callback resolves to
 The handler re-reads the durable source message and reconstructs the outbound
 exactly as `relayFanOut` does - `composeRelayBody(senderLabel, body)` and
 `mediaAttachmentsOf()` **re-presigned fresh per attempt**, never replaying a
-stored presigned URL, at the same 3600-second TTL the manual route and the relay
-legs use.
+stored presigned URL, at **`RELAY_PRESIGN_TTL_SECONDS`** (relayFanOut.ts:65) -
+the exported constant the relay legs already presign with at relayFanOut.ts:498.
+A round-1 adjudication rejected naming it on the false claim that no such
+constant exists; it does (spec R2, contesting my rejection of A17).
 
 The sender label comes from **`retry_lineage.<memberKey>.<n>.senderLabel`**, not
 from the payload and not from a fresh roster read. `senderNameOverride` is
@@ -320,6 +354,33 @@ storm must trip the breaker exactly as a send storm does.
 
 Duplicate-delivery guard: the existing `putJobExecutionMarker(jobId, ...)`
 pattern, identical to `retrySend`.
+
+### 4.3a WHICH legs may retry - the fence, enforced in code
+
+**Not every relaysid pointer belongs to a fan-out leg.**
+`relayAnnouncements.ts:289` writes pointers too, for relay intro, member-added
+and **tour-reminder rung** sends (spec R2, F5). A retry path keyed on "the
+pointer resolved" would therefore reach into `jobs/tourReminders.ts` - a Sec 2
+HARD FENCE, owned by `feat/tour-reminder-ladder-phase-b` - and would re-compose
+an announcement through `composeRelayBody`, prefixing an app-authored
+announcement with a sender name that was never on it.
+
+The 30003 issue is explicit that it "is scoped to relay fan-out legs". That
+scope is enforced structurally, not by comment:
+
+- Fan-out legs are retryable. They have a **source message** whose body and
+  attachments the retry replays.
+- **Announcement legs are NOT retryable.** They have no source message to
+  replay; their content is composed by the announcement service.
+
+The retry claim runs only when the pointer resolves to a source message that
+carries the member's `delivery_recipients` slot AND the leg was written by the
+fan-out. A pointer that does not satisfy that is logged and left terminal -
+never enqueued. A test pins this: **a 30003 on a tour-reminder rung leg
+schedules no retry and touches no tours code.**
+
+Whether announcement legs should retry at all is a separate question for
+whichever bundle owns them; it is not decided here.
 
 ### 4.4 Pre-send gates, re-run per attempt
 
@@ -372,10 +433,29 @@ mechanism could not deliver.
 
 **Resolution - one scoped transition, not a loosened machine.** A new repo
 method `resolveRetryDelivered(conversationId, tsMsgId, memberKey, n)` performs
-the `undelivered -> delivered` effective transition, conditional on:
+the `undelivered -> delivered` effective transition.
 
-1. the slot's current status being `undelivered` (or `failed`), AND
-2. `retry_lineage.<memberKey>.<n>.status` being `delivered`.
+**It must be ONE UpdateCommand, not a read-then-write** (spec R2, F9). Lineage
+and slot live on the SAME item, so a single conditional update can set the slot
+from the lineage's own state:
+
+```
+UpdateExpression:  SET delivery_recipients.#mk.#st = :delivered,
+                       delivery_recipients.#mk.#da = :now
+ConditionExpression: delivery_recipients.#mk.#st IN (:undelivered, :failed)
+                     AND retry_lineage.#mk.#n.#st = :delivered
+```
+
+Split into two writes, a crash between them strands the recipient permanently on
+`undelivered` while the lineage says delivered, with no reconciler to heal it -
+a new instance of the very "stuck forever" class this bundle exists to remove.
+One atomic write, or the guarantee is a slogan again.
+
+**The SSE emit rides the same result** (spec R2, F14). The existing refresh
+event is gated on `transitioned`; this promotion does not go through
+`updateRecipientDeliveryStatus`, so it must emit on its own successful write.
+Otherwise a successful retry updates the durable record and nothing on screen
+moves until a manual reload.
 
 `ALLOWED_PRIOR` is **not** modified. Loosening it would let any caller regress a
 terminal status app-wide - a far larger change than this branch is entitled to,
@@ -396,19 +476,62 @@ The remaining rules:
 - The existing message-refresh event is emitted after each **effective**
   transition, not per attempt.
 
-### 4.8 The claim is gated on the transition
+### 4.8 The idempotency gate is the ATTEMPT, not the slot transition
 
-The 1:1 path gates its retry on `if (transitioned && ErrorCode)` - the
-forward-only transition returning true is what makes a duplicate callback a
-no-op. The relay branch needs the same gate (spec R1, A6/B14): atomic `ADD`
-prevents two callbacks claiming the same attempt NUMBER, but it does not by
-itself stop a redelivered callback from claiming a SECOND attempt and sending a
-second text.
+The requirement is real: atomic `ADD` stops two callbacks claiming the same
+attempt NUMBER, but not a redelivered callback claiming a SECOND attempt and
+sending a second text (spec R1, A6/B14).
 
-So: **the relay retry is claimed only when
-`updateRecipientDeliveryStatus` actually transitioned the slot.** A redelivered
-30003 callback finds the slot already `undelivered`, transitions nothing, and
-claims nothing.
+**The obvious gate is wrong and caps the ladder at one retry.** An earlier
+revision gated the claim on `updateRecipientDeliveryStatus` having transitioned
+the slot, copying the 1:1 path's `if (transitioned && ErrorCode)`. Trace it
+(spec R2, F1):
+
+- attempt 1 fails 30003: slot `sent -> undelivered`, transitioned **true**,
+  retry claimed. Correct.
+- attempt 2 fails 30003: the slot is ALREADY `undelivered`, and
+  `ALLOWED_PRIOR.undelivered = ['queued','sent']` - so the transition is
+  refused, transitioned is **false**, and **nothing is ever claimed again**.
+
+The chain dies after one retry, silently, and every test that exercises a single
+retry would pass. The 1:1 gate does not have this problem because each 1:1 retry
+creates a NEW message row with its own fresh `delivery_status`; the relay slot is
+reused across attempts, so slot-transition state cannot carry per-attempt
+idempotency.
+
+**The gate is the attempt record.** The callback resolves through the pointer to
+`(conversationId, tsMsgId, memberKey, n)`, and the claim for attempt `n+1` is
+conditional on **attempt `n`'s lineage entry not already having been resolved**:
+
+```
+resolveAttemptAndClaimNext(conversationId, tsMsgId, memberKey, n, outcome, cap)
+  ConditionExpression:
+    attribute_exists(retry_lineage.#mk.#n)
+    AND attribute_not_exists(retry_lineage.#mk.#n.resolvedAt)
+```
+
+One conditional write resolves attempt `n` and advances the counter. A
+redelivered callback for attempt `n` finds `resolvedAt` already set, the
+condition fails, and it claims nothing - **while attempt `n+1`'s later callback
+carries a different `n` and is unaffected**. Idempotent per attempt, and the
+ladder runs to its cap.
+
+### 4.9 Cap semantics, stated exactly
+
+`MAX_RELAY_RETRY_ATTEMPTS = 3` means **at most 3 RETRIES after the original
+send: 4 provider sends maximum per recipient.**
+
+This is stated numerically because the durable claim counts *enqueues* where the
+old envelope field counted *passes*, and an off-by-one here is one extra real
+text to a real person (spec R1 B4, restated R2 F4 - which my round-1
+adjudication folded into A4 and left unresolved). The claim is taken **per
+retry send**, so `retry_attempts.<memberKey>` reaching 3 means three retries have
+been claimed and the next callback closes the chain terminally.
+
+The equivalent statement for the fan-out ladder: `MAX_FANOUT_ATTEMPTS = 3`
+continues to mean what it means today - the pass count, unchanged - and a test
+pins the total provider-send count on both ladders so a future refactor cannot
+drift it.
 
 ### 4.9 Idempotency matrix
 
@@ -453,6 +576,19 @@ from the create's own per-member `failures`
 (`createConversationWithParticipants`, groupConversations.ts:539-569), **not**
 from map coverage.
 
+**The premise this rests on, stated explicitly.** The bulk
+`ConversationWithParticipants` create returns `failures: []`
+**unconditionally** (groupConversations.ts:486) - it is all-or-nothing, so a 200
+means Twilio accepted every participant and a refusal throws instead. On that
+path "not in `failures`" is therefore vacuously true of every member, and the
+rule below is safe ONLY because the API is all-or-nothing (spec R2, contesting
+my round-1 rejection of B17, which was wrong).
+
+Per-member `failures` are real only on the **individual-add fallback**
+(`attach`, groupConversations.ts:539-569). The rule holds on both paths, but for
+different reasons, and a future change that makes the bulk create partial would
+break it silently. A test pins the premise.
+
 **The single rule, stated once** (an earlier revision gave two contradictory
 answers for the same member - spec R1, A11/B8):
 
@@ -484,6 +620,22 @@ B16).
 The inline path is a backstop whose job is to get the message out. It does not
 block a staff send to watch a binding propagate; the job path converges the rail
 afterwards.
+
+**But it must not PERSIST a short map as complete** (spec R2, F10). Proceeding
+with a short map and finalizing it as the rail's participant map would make
+exactly the receipt-attribution drop that Sec 5.4's compose gate exists to
+prevent - reachable by design rather than by accident. So on the inline path:
+
+- the send proceeds using the map as it stands;
+- the map is **not** finalized as the rail's authoritative coverage, and no
+  `rail_failed` is written;
+- the rail stays marked as needing convergence, and the job path completes the
+  map when the bindings have propagated.
+
+The distinction is between "send this message now with what Twilio has already
+accepted" and "declare this rail's roster coverage settled". The inline backstop
+may do the first. Only a path that has actually read a covering map may do the
+second.
 
 ### 5.4 What does not change
 
@@ -522,7 +674,10 @@ unenumerated default is terminal or non-terminal, at `file:line`.
 
 Disposition follows Sec 2's fences, which it does not override:
 
-- inside M5's anchor files -> **fixed here**;
+- inside **the regions of M5's anchor files this branch already edits** ->
+  fixed here. By REGION, not by filename (spec R2, B18 sustained): `twilio.ts`
+  is an anchor file but Sec 2 fences all of it except the status-callback
+  branch, so a filename-scoped rule would authorize edits the fences forbid;
 - outside them -> **filed as one new issue** with citations, not dragged into
   this diff.
 
@@ -566,8 +721,30 @@ written down.
 11. **Rail** - a create whose participants have no binding yet resolves without
     repair and without a `rail_failed`; a create with a real per-member failure
     still repairs; 50386/50437 during repair is not a refusal; the inline
-    `groupSend` backstop neither ladders nor repairs; the adopt path is
-    unchanged.
+    `groupSend` backstop neither ladders nor repairs **and does not finalize a
+    short map as authoritative coverage**; the adopt path is unchanged.
+11a. **The bulk-create premise** - `ConversationWithParticipants` returning
+    `failures: []` is pinned as all-or-nothing (Sec 5.2). If it ever returns 200
+    with a partial roster, this test fails rather than the rule silently
+    breaking.
+11b. **The ladder runs to its cap** - the regression test for spec R2 F1. Drive
+    THREE consecutive 30003 callbacks across three attempts and assert three
+    retries were claimed. A test that exercises only one retry passes against
+    the broken gate, which is how that defect survived a full review round.
+11c. **Announcement legs do not retry** - a 30003 on a tour-reminder rung leg
+    (which carries a relaysid pointer) schedules no retry and touches no tours
+    code (Sec 4.3a).
+11d. **Total provider sends are pinned** on both ladders - 4 maximum per
+    recipient on the retry ladder (Sec 4.9), and the fan-out ladder's count
+    unchanged from `main`. An off-by-one here is a real extra text to a real
+    person.
+11e. **Claim against a pre-branch item** - an item written with no counter map
+    claims successfully via the defensive seed (Sec 3.5), rather than throwing
+    into the DLQ.
+11f. **Delivered promotion is atomic and emits** - the promotion is one write,
+    and a successful retry emits the refresh event (Sec 4.7).
+11g. **1:1 and broadcast 30003 copy is unchanged** - only the relay row's copy
+    changes (Sec 8).
 
 ### E2E (Playwright, hermetic)
 
@@ -591,18 +768,31 @@ The only dashboard change is that **the chip stops promising a retry.**
 verbatim in whatever replaces it). It becomes simply `Phone unreachable`, with
 the error code still exposed by the existing tail.
 
-**Why unconditional rather than context-aware.** An earlier revision made the
-copy conditional on whether a retry was actually claimed. That is not buildable
-inside the fence (spec R1, A8/B7): the retry-pending signal exists on neither
-the wire nor the per-leg render site, and the reason string is produced from a
-message-level rollup that Sec 2 fences out. Adding a wire field and a per-leg
-render site IS `T-DELIVERY-CHIPS`.
+**Why not context-aware.** An earlier revision made the copy conditional on
+whether a retry was actually claimed. Not buildable inside the fence (spec R1,
+A8/B7): the retry-pending signal is on neither the wire nor the per-leg render
+site, and the reason is produced from a message-level rollup Sec 2 fences out.
+Adding both IS `T-DELIVERY-CHIPS`.
 
-Unconditional is also the more honest minimum. Today the chip promises a retry
-that never happens for relay legs; after this branch a relay retry may well
-happen, but the chip is not the surface that reports it. Saying less is
-truthful in both cases. `T-DELIVERY-CHIPS` adds the retry-aware variant when it
-renders the lineage this branch produces.
+**Why not a blanket string edit either** (spec R2, F12). `ERROR_CODE_REASONS` is
+shared: the same table renders the **1:1 bubble** and the **broadcast badge**. On
+the 1:1 path a 30003 retry genuinely IS scheduled, so deleting "will retry"
+everywhere would make the copy *less* accurate there - and Sec 2's own
+shared-presenter fence forbids changing 1:1 behavior merely because the
+presenter is shared.
+
+So the change is **scoped to relay legs**, which is a one-parameter change
+inside the one dashboard file Sec 2 allows:
+
+| surface | 30003 copy | why |
+|---|---|---|
+| 1:1 bubble | `Phone unreachable - will retry` (unchanged) | a retry really is scheduled |
+| broadcast badge | unchanged | out of this branch's scope entirely |
+| **relay recipient row** | **`Phone unreachable`** | the retry is real now, but this chip is not the surface that reports it - `T-DELIVERY-CHIPS` renders the lineage |
+
+The relay caller already knows it is rendering a relay leg, so the scoping needs
+no new wire field - only that the shared table stop being consulted blindly for
+the relay case.
 
 `ERROR_CODE_REASONS` is dashboard presentation, not automated send copy, so the
 message-catalog rule does not apply to it (spec R1, B15).

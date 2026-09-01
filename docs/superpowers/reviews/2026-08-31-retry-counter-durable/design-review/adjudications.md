@@ -210,3 +210,133 @@ Four decisions moved, not merely precision edits:
    both smaller and more honest (A8/B7).
 
 Round 2 is warranted.
+
+---
+
+# Spec round 2 - adjudications
+
+Continued reviewer A (same agent, holding round 1's context), given the revised
+spec, this file, and reviewer B's report. Report: `spec-r2-reviewer-a.md`,
+18 findings plus a contest of six adjudications.
+
+Counts: **16 ACCEPT, 2 partial, 0 outright reject.** Five blocking, and
+**three of them were defects the ROUND-1 REVISION introduced.** That is the
+re-review charge earning its keep: a round that only re-checked round 1's
+findings would have shipped all three.
+
+## My two rejections that were WRONG
+
+Both verified against the code. I was wrong on the facts, not on judgment.
+
+- **A17 - `RELAY_PRESIGN_TTL_SECONDS`.** I rejected it as "no such constant
+  exists to point at". It exists, exported, at relayFanOut.ts:65 and in use at
+  :498. **Reversed to ACCEPT**; the spec now names it.
+- **B17 - the rail authority is vacuous on the bulk create path.** I rejected
+  this saying B "did not show a create path that returns no failures list". B
+  did: groupConversations.ts:486 returns `failures: []` **unconditionally**.
+  **Reversed to ACCEPT.** The rule survives - the bulk API is all-or-nothing, so
+  a 200 does mean every participant was accepted - but that premise was exactly
+  what B said the spec never stated, and it was right. Now stated, with a test
+  pinning it.
+
+Also partially conceded: **A18** (the revision deleted the `ReturnValues`
+clause, leaving `claim.attempt`'s source unspecified - a real gap I created
+while mooting the original finding) and **B18** (the "anchor files" disposition
+rule is by filename while Sec 2's fences are by REGION; the collision survived
+my rewrite). Both fixed. **A13 and A19/B20 were conceded by the reviewer**, and
+B20 verified fully moot.
+
+## Blocking - and three are mine
+
+### F1 - my own idempotency gate capped the ladder at ONE retry. ACCEPT.
+
+The round-1 fix for A6/B14 gated the retry claim on the slot having
+transitioned, copying the 1:1 path. But `ALLOWED_PRIOR.undelivered` is
+`['queued','sent']`, so attempt 2's 30003 cannot transition an already-
+`undelivered` slot: transitioned is false and **nothing is ever claimed again**.
+The relay ladder would silently stop after one retry.
+
+The 1:1 gate works only because each 1:1 retry creates a NEW row with a fresh
+`delivery_status`. The relay slot is reused, so it cannot carry per-attempt
+idempotency. **The gate moves to the attempt record**, conditional on attempt
+`n` not already being resolved.
+
+Worth noting how this would have escaped: every natural test of "a 30003
+schedules a retry" passes against the broken gate. Only a test driving three
+consecutive callbacks catches it - now test 11b.
+
+### F2 - the new sibling maps are never seeded. ACCEPT.
+
+A nested `ADD` on an absent parent throws `ValidationException`, and under my
+own consumer-side THROW rule that loops the envelope to the DLQ on the FIRST
+claim. The round-1 revision moved the counters out of the slot to dodge the
+whole-slot writers and forgot they now need seeding. Seeded at create, plus a
+defensive seed-if-absent in the claim, which doubles as the read-compat story
+for pre-branch items (F6/F17).
+
+### F3 - a stale duplicate section survived the revision. ACCEPT.
+
+Two `### 3.4 Read-compat` sections, the second still asserting the slot-resident
+counter the revision exists to remove. A builder reading top-to-bottom would
+have hit the contradiction. Deleted. Pure editing failure on my part.
+
+### F4 - B's cap off-by-one was never adjudicated. ACCEPT.
+
+I folded B4 into A4 in round 1; they are different findings. A4 is "two ladders
+sharing one field"; B4 is "the durable claim counts enqueues where the envelope
+counted passes, so the budget grows by one". The second went unanswered. Cap
+semantics are now stated numerically - **4 provider sends maximum per
+recipient** - with a test pinning the total, because an off-by-one here is one
+extra real text to a real person.
+
+### F5 - the retry path reaches into a fenced file. ACCEPT.
+
+`relayAnnouncements.ts:289` writes relaysid pointers for intro, member-added and
+**tour-reminder rung** sends. A retry keyed on "the pointer resolved" therefore
+reaches `jobs/tourReminders.ts` - a Sec 2 hard fence owned by another live
+branch - and would re-prefix an app-authored announcement with a sender name.
+Now fenced structurally: only legs with a replayable source message retry, with
+a test on the tour-reminder rung case.
+
+## Accepted, non-blocking
+
+- **F7** - the 1:1 producer-side close ALREADY SHIPS (twilio.ts:2727-2731).
+  **The third time this spec proposed a fix for existing behavior**, after
+  `finalize()` and `retry_attempt`. The 1:1 path leaves the code scope entirely.
+- **F11** - and the justification I gave for closing there ("nothing redelivers
+  a webhook") is contradicted by the file's own comments. Twilio DOES redeliver;
+  the redelivery no-ops at the status transition. Same conclusion, wrong reason,
+  now corrected.
+- **F9** - `resolveRetryDelivered` as two writes strands the guarantee on a
+  crash. Now a single conditional update, legal because lineage and slot are on
+  one item.
+- **F14** - the promotion bypassed the `transitioned` flag that gates the SSE
+  emit, so a successful retry would update nothing on screen. Emits on its own
+  write now.
+- **F10** - the inline no-ladder rule would finalize a SHORT map as coverage,
+  making receipt drops reachable by design. Split: the inline backstop may send,
+  but may not declare roster coverage settled.
+- **F12** - `ERROR_CODE_REASONS` is shared with the 1:1 bubble and broadcast
+  badge, where a 30003 retry IS scheduled. A blanket edit would make 1:1 copy
+  less accurate and violate Sec 2's own shared-presenter fence. Scoped to relay
+  legs.
+- **F6 / F17** - no lineage and no read-compat for legs sent before the branch;
+  no test claimed against a pre-branch item. Both closed (Sec 3.5, test 11e).
+- **F8** - the consumer-side rule covers only enqueue failure; the pre-existing
+  unknown-error throw never reaches the claim. Accepted as a stated limit rather
+  than a silent gap.
+- **F13, F15, F16, F18** - precision: the em-dash/tail instruction, the
+  `isTerminal` decision B asked for, the unscoped 50386/50437 rule colliding
+  with adopt-path authority, and the 400KB item budget under a 1500-recipient
+  cap.
+
+## Loop status
+
+Round 2 changed decisions materially (the gate, the seeding, the fence, the cap
+semantics, the dashboard scoping), so the stop rule is not met. **Round 3 is
+warranted.** Hard cap is 4.
+
+The pattern worth naming for round 3: **every blocking finding in this round was
+in material written to close the previous round's blocking findings.** Round 3's
+sharpest question is therefore the same one again - not "are round 2's findings
+closed" but "what did the round-2 rewrite break".

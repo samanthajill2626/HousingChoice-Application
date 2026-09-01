@@ -222,3 +222,235 @@ padding; and the five non-goals in spec section 5, none of which is violated
 (the one edit that touches a CURRENT-ladder action - hiding Send now for a
 superseded rung, `RemindersPanel.tsx:439-441` - is unreachable after S7's
 partition and is an explicit T5.2 task, not drift).
+
+---
+
+# Round 2 - re-review of fix wave 1 (@9af87a2c)
+
+Re-read the amended spec sections (3.2 ownership-guarded sweep + terminal
+TRANSITION, 3.3 grace basis + `conversion_in_progress`, acceptance 8) and
+conformance-checked the nine-commit fix diff cold against them, then re-walked
+acceptances 1, 6, 7, 7a, 8, 9 and 15 against the live tree.
+
+Verification: `npx vitest run test/toursApi.test.ts test/tourRemindersApi.test.ts
+test/placementConvert.test.ts test/tourReminders.test.ts
+test/seedMatrixCoherence.test.ts` -> 5 files, 467 tests, all green. One
+throwaway probe (`app/test/zzConformanceR2Probe.test.ts`) was written to
+reproduce finding R2-1 and has been DELETED; the only untracked file left is
+`app/test/zzAdvR2Tmp.test.ts`, which is not mine (the concurrent adversarial
+reviewer's) and I have not touched it.
+
+**Counts: 1 NEW BLOCKING (reproduced), 2 NEW MINOR, 1 NEW NOTE; 11 fix-wave
+items verified CLOSED (F1, F5, F3, F7/m2, B1 re-arm, B1 conversion, M1, M2, M3,
+m1, m3, m4); 0 STILL-OPEN from round 1.**
+
+## 1. What my first pass MISSED
+
+Worth stating plainly, because the pattern matters more than the list. I
+verified that every clause the spec WROTE DOWN was implemented, and I did not
+ask which behaviours had an unwritten twin. That is how all four majors got past
+me:
+
+- **B1** (generation-blind sweep deletes a concurrent winner's fresh ladder). I
+  read the compare-and-set, satisfied myself it matched spec 3.2 step 4, and
+  stopped - I checked the pointer WRITE was ordered, never that the DELETE
+  between steps 2 and 3 was ordered. The sweep has no generation filter at all
+  (`deleteSupersededForTour` filters on `sentAt` alone,
+  `app/src/repos/tourRemindersRepo.ts:474`), which I had read and quoted
+  approvingly in the S1 row of my own table. I had both halves and did not put
+  them together.
+- **M1** (Send now ignores the `pending:` sentinel). I traced the deferral in
+  `processReminderRow` and the `superseded` refusal in `forceSendReminder`
+  carefully, and never asked the symmetric question the spec itself asks about
+  `superseded` ("it is a SEPARATE entry point and inherits nothing"): the
+  deferral is a poll behaviour with no Send-now counterpart. My round-1 note
+  that S5/O4 "conforms" was true clause-by-clause and blind to the gap between
+  the clauses.
+- **M2** (grace from `dueAt`). I FOUND this and under-rated it as a NOTE
+  (round-1 F2), deferring to O3's wording. My reachability argument was wrong in
+  a specific way: I reasoned about how long the sentinel lives and concluded the
+  poll would rarely tick inside it, and never noticed that from `dueAt` alone
+  the predicate is already TRUE at t=0 for any rung more than an hour past due -
+  a quiet-hours deferral, a roster/names grace, an hour of worker downtime.
+  Those are routine, not outages. The adversarial reviewer re-rated it MAJOR and
+  was right; an O-decision's wording is not a reason to stop measuring
+  reachability.
+- **M3** (unrelated PATCH on an already-terminal tour). I explicitly considered
+  the non-terminal, non-scheduled case (a PATCH to `requested`), concluded it
+  was pre-existing behaviour, and moved on without doing the same walk for a
+  PATCH that carries NO status on an ALREADY-terminal tour - the ordinary
+  navigator exit gate, and the one that hits every completed tour.
+- **m1** (echo bodies recompose). I read both echo paths for T7.8's 404 work and
+  did not carry the LIST projection's "never recompose an earlier body" rule
+  (which I had just praised) across to the single-row responses.
+
+Re-walk of the acceptances the fix diff touches:
+
+| # | round-2 verdict | evidence |
+| --- | --- | --- |
+| 1 | still DELIVERED | `app/test/toursApi.test.ts:1793` unchanged and green; the ownership read now sits in its path and passes (sequential reschedules always own their own rotation). |
+| 6 | DELIVERED, and now correctly SCOPED | `app/src/routes/tours.ts:1212-1217` reads `patch['status']`; the new test "UNRELATED PATCH on an already-terminal tour rotates nothing and sweeps nothing" asserts the legacy `canceledAt` row, the sent row, the ABSENT pointer and the absent emit. See R2-2 for the residual door. |
+| 7 | DELIVERED, materially strengthened | `conversionClaimExpired` now takes `tour.updatedAt` (`app/src/jobs/tourReminders.ts:351`, called `:1154`); paired tests "DEFERS a rung hours past due when the claim is FRESH" and "RETIRES the same rung once the CLAIM itself outlives the window" - the second is the anti-vacuity half and it is present. |
+| 7a | DELIVERED | rotation still rides the finalize (`app/src/routes/placements.ts:769-775`); the sweep after it is now ownership-guarded `:817-830` with a test ("CONCURRENT REVIVAL: the post-finalize sweep is SKIPPED when another writer owns the ladder"). |
+| 8 (amended) | **NOT DELIVERED as amended** - see R2-1. The re-arm half is delivered and well tested; the amended clause "no interleaving deletes the winner's freshly armed rows" is FALSE on the terminal path, which I reproduced. |
+| 9 | DELIVERED | the 404 + emit path is untouched; the echo now refuses to recompose a superseded body (`app/src/routes/tourReminders.ts:453-461`, `:537-542`) with a test. |
+| 15 | DELIVERED, hole closed | `prevHasBlockRef` (`dashboard/src/routes/contact/Timeline.tsx:1848-1852`) + re-derive at the effect top `:1949-1962` + `hasUpcomingBlock` in the deps `:2016`; test "re-derives the anchor when the block VANISHES under the operator". |
+
+## 2. Cold conformance check of the new code
+
+**Re-arm ownership guard - CONFORMS to amended 3.2 step 2, exactly.**
+`app/src/routes/tours.ts:1254` re-reads, `:1255-1263` skips the sweep AND the
+arm, logs at error with `tourId` / `rotation` / `storedLadderId`, and assigns the
+winner's stored tour to the response. I checked the clause the spec does not
+state and the report does: `ladderChanged` stays false on that branch (it is set
+at `:1330`, inside the else), so the loser advertises no `scheduled.updated` -
+correct, it changed nothing.
+
+**Conversion ownership guard - CONFORMS.** `app/src/routes/placements.ts:817-830`
+skips only the sweep and never the 201, matching the adjudication's narrowing and
+the amended bullet in 3.2's conversion paragraph.
+
+**`conversion_in_progress` copy surfaces - COMPLETE.** Union membership is
+`ForceSendRefusal` only (`app/src/jobs/tourReminders.ts:1714`), which forces
+nothing in the dashboard - there is no mirrored `ForceSendRefusal` union (I
+grepped `dashboard/src`). The route mapping is code-agnostic
+(`app/src/routes/tourReminders.ts:557` returns `result.reason` verbatim), so the
+token reaches the wire. The one surface its membership IMPLIES is
+`SEND_NOW_ERROR_COPY`, which has its own retry-flavoured sentence
+(`dashboard/src/api/types.ts:1443-1449`) and a test asserting it is neither the
+generic fallback nor the `conversion_stalled` sentence
+(`dashboard/src/api/types.test.ts:172`). Correctly ABSENT from
+`PERMANENT_REFUSALS`, from `ReminderSkipReason` and from
+`ScheduledSuppressionReason` - the poll never stamps it and no preview surface
+renders it. Nothing missing.
+
+### R2-1 - NEW, BLOCKING - the TERMINAL sweep is not ownership-guarded; B1 is still live on that path
+
+`app/src/routes/tours.ts:1344`
+
+The fix wave guarded two of the THREE `deleteSupersededForTour` call sites. The
+terminal branch still sweeps unconditionally, with no ownership read, no
+try/catch and no log. That is not a residual window: the sweep can be delayed
+arbitrarily after the terminal PATCH's rotation committed, and it then deletes
+every unsent row on the tour regardless of generation.
+
+I reproduced it rather than argued it. Throwaway probe, using the same parking
+idiom the accepted B1 test uses (park request A between its patch write and its
+sweep): A = `PATCH {status:'canceled'}`, B = `PATCH {scheduledAt}` running
+underneath - which auto-advances a canceled tour back to `scheduled` at
+`app/src/routes/tours.ts:1165-1171`, a first-class product flow - then A resumes
+and sweeps. Measured end state:
+
+```
+status=scheduled  pointer=a2fe7a44-...  winner=a2fe7a44-...  rowsLeft=0
+ownership errors=0
+```
+
+Two 200s, a live `scheduled` tour pointing at a ladder with ZERO rows, silently
+disarmed, and not one error log from either request. That is byte-for-byte the
+end state the adjudication called BLOCKING for B1 ("pointer names a ladder with
+zero rows; two 200s; only the loser's log") - and worse by one, because here
+there is no log at all. I rate it the way the same end state was already rated.
+
+It is also a conformance failure against the amendment as written, twice over.
+Spec 3.2 says "**Terminal transitions** ... run steps 1-2 and stop", and the same
+amendment redefined step 2 as ownership-guarded - so the terminal path inherits
+the guard by the spec's own sentence. And amended acceptance 8's new clause is
+unqualified: "no interleaving deletes the winner's freshly armed rows". The fix
+is the same shape as the two that landed: re-read, compare against `rotation`,
+skip and log otherwise. The regression test is the probe above.
+
+While in that branch: the comment at `:1343` still says "Same no-try/catch
+posture as the re-arm branch", which the fix wave made FALSE - the re-arm sweep
+acquired a try/catch and the F1 log at `:1280-1288`. Fix both in one edit.
+
+### R2-2 - NEW, MINOR - "transition" is defined by the payload, not by a change, so an idempotent re-cancel still destroys pre-migration history
+
+`app/src/routes/tours.ts:1212-1217`
+
+**Conformance verdict first: the code CONFORMS.** The amendment says "A
+TRANSITION means the PATCH explicitly carries a terminal `status`", and a repeat
+`PATCH {status:'canceled'}` does carry one. So this is a challenge to the
+amendment's wording and to the fix-wave report's justification for it, not a
+claim that the implementation missed the spec.
+
+The amendment's own rationale is "every pre-migration tour loses its surviving
+reminder history on its first edit". A no-op re-PATCH to the same terminal status
+is an edit that still does exactly that: `terminal` is true, `:1211` rotates the
+pointer, and `:1344` hard-deletes the legacy `canceledAt` and pending rungs the
+old tour-wide cancel left behind. The population is the same one M3 was filed to
+protect - tours retired before this deploy, which have never been swept - and the
+rotation additionally moves the tour out of the pre-migration cell permanently.
+This codebase treats a no-op re-PATCH to the same status as a real, anticipated
+event: the milestone emits immediately below carry idempotency guards for exactly
+it (`:1375`, `effectiveStatus === 'scheduled' && currentStatus !== 'scheduled'`)
+and the comment at `:1361-1362` says so in words. The narrower trigger is why
+this is MINOR and not a re-open of M3.
+
+The tightening is one clause - `patchedStatus !== undefined && patchedStatus !==
+currentStatus` - and it reuses the idiom already in the file. If the orchestrator
+prefers the simpler rule, the amendment should say WHY an idempotent re-cancel is
+allowed to delete history, rather than resting on the claim in R2-3.
+
+### R2-3 - CHALLENGE to fix-wave correction #3 (the claim is false)
+
+`.superpowers/sdd/reports/fixwave-1.md:152-157`
+
+The report defends the payload-based rule with: "The difference is a repeat
+`PATCH {status:'canceled'}` on an already-canceled tour, which still rotates and
+sweeps - **harmless (it deletes rows that are already gone)** and the simpler rule
+to state."
+
+The parenthetical is false for the only population that matters. Rows are
+"already gone" only if a post-deploy terminal transition already swept them. On a
+PRE-MIGRATION terminal tour nothing has ever swept - and after the M3 fix, an
+unrelated PATCH deliberately never will - so its legacy rows are still there, and
+the repeat status PATCH is precisely what deletes them. The fix wave's own M3
+regression test builds that exact fixture (`app/test/toursApi.test.ts`,
+"UNRELATED PATCH on an already-terminal tour ...": a pre-migration `toured` tour
+holding a `canceledAt` row and a sent row) and proves the rows survive an
+`{outcome, moveForward}` PATCH; send `{status:'toured'}` to that same fixture and
+the canceled row is deleted. The conclusion (keep the simpler rule) may still be
+the right call - but it needs a different argument, because this one would let a
+reader believe the case is empty.
+
+The report's other two corrections I checked and AGREE with: #1 (parking inside
+`deleteSupersededForTour` lands in the accepted residual window, not the defect -
+the test parks between the patch write and the sweep, which is the reviewer's
+interleaving faithfully, and the pre-existing parked-arm test was kept), and #2
+(`seedMatrix.test.ts` already pairs pointers per status GROUP; the genuinely
+missing walk was row-side, and that is what `seedMatrixCoherence.test.ts`
+gained).
+
+### R2-4 - NEW, NOTE - the superseded echo sends `body: ''`, which the panel words as an outage
+
+`app/src/routes/tourReminders.ts:459`, `:541`
+
+The m1 fix is right and I verified it (no recompose). The fallback is
+`after.sentBody ?? ''`, and `''` on the current-ladder renderer means "Preview
+unavailable - this message cannot be composed right now"
+(`dashboard/src/routes/tours/RemindersPanel.tsx:476-479`), while the LIST
+projection deliberately OMITS the key for the same row so the disclosure renders
+no paragraph at all (`app/src/routes/tourReminders.ts:813`, argued at
+`dashboard/src/api/types.ts:1285-1293`). Unreachable today: neither client
+handler renders the echoed `reminder` - both refetch
+(`RemindersPanel.tsx:328-335`, `:353-364`). `viewOf` requires a `string` body, so
+omitting is not free. Recorded so a future client that DOES render the echo does
+not inherit a sentence blaming an outage that is not happening.
+
+## 3. Closure of round-1 findings
+
+| round-1 | verdict | evidence |
+| --- | --- | --- |
+| F1 (MINOR) - sweep failure leaves a disarmed tour unlogged | **CLOSED** on the re-arm path | `app/src/routes/tours.ts:1280-1288` logs "sweep failed after pointer rotation - tour is DISARMED ..." with the tourId, then rethrows - the posture I recommended. Test: "SWEEP FAILURE after the rotation is LOUD too". Not closed on the terminal path, but there the disarm IS the intended end state, so it folds into R2-1's guard rather than standing alone. |
+| F2 (NOTE) = M2 | **CLOSED** | `app/src/jobs/tourReminders.ts:340-365`; the docblock no longer apologises for the basis. My round-1 severity was too low - see section 1. |
+| F3 (NOTE) - slice reports gitignored | **CLOSED** | committed @4272c88d to `docs/superpowers/reviews/2026-09-01-tour-reminder-supersession/slice-reports/` (ten slice reports + `fixwave-1.md`). |
+| F4 (NOTE) - acceptance 5 true by construction | accepted, no fix - agreed. |
+| F5 (NOTE) - stale repo header prose | **CLOSED** | `app/src/repos/tourRemindersRepo.ts:3-12` now names `ladderId` in the row shape and says byTour backs the bulk DELETE, with the removed bulk CANCEL named as history. |
+| F6 (NOTE) - acceptance 16's contact half is unit-only | accepted, routed to phase-5 live QA - agreed. |
+| F7 (NOTE) = m2 | **CLOSED** | verified above (acceptance 15 row). The `upcoming` ARRAY is not in the deps - only the boolean - so the `GroupTextView` fresh-`[]` trap is respected. |
+
+Also verified closed, from the adversarial list: m3 (the canceled matrix
+`day_before` row is gone, `app/src/lib/seed/matrix.ts:1041-1050`, with the
+row-side coherence invariant added) and m4 (retire-script comments,
+`e2e/support/selectors.md`, both issue docs).

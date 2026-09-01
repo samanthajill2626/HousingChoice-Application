@@ -410,3 +410,230 @@ Recorded so a later reader does not re-walk them.
   bottom padding and below the flex `gap`. Not worth reporting on its own.
   GroupTextView's `[]` literal is handled by keying the ResizeObserver effect on
   the boolean (`Timeline.tsx:1868`).
+
+---
+
+# Round 2 - re-review of fix wave 1 (@9af87a2c, base @65c19506)
+
+Inputs: the 9-commit fix diff, `code-review-adjudications.md`, and the
+implementer's `.superpowers/sdd/reports/fixwave-1.md`. Method as round 1: read
+the new code cold, walked interleavings, grepped consumers, reproduced where
+cheap. One throwaway vitest was written, run and deleted. Nothing committed.
+
+Counts: **6 NEW** (1 MAJOR, 3 MINOR, 2 NOTE), **3 STILL-OPEN**, **7 CLOSED**.
+
+---
+
+## 1. NEW findings
+
+### NEW-1 (MAJOR). The ownership guard is a read-your-own-write on an EVENTUALLY CONSISTENT GetItem - so one uncontended reschedule can disarm the tour and return the old time
+
+Evidence: **REPRODUCED** (throwaway vitest, deleted).
+
+- `app/src/repos/toursRepo.ts:299-300` -
+  `new GetCommand({ TableName: table, Key: { tourId } })`. No `ConsistentRead`.
+  DynamoDB's default GetItem is eventually consistent and is documented as
+  possibly not reflecting a recently completed write.
+- `app/src/routes/tours.ts:1252` writes `currentLadderId = rotation` via
+  `tours.patch`, then `:1254` reads it straight back with that same
+  non-consistent get, and `:1255` compares the two.
+- `app/src/routes/placements.ts:812` does the same after the finalize.
+
+The guard's entire correctness rests on that read observing the write issued one
+line earlier. It is not guaranteed to. And this repo plainly knows the
+difference: `ConsistentRead: true` appears in `messagesRepo.ts` (:1801, :2135,
+:3288, :3365, :3510), `extractionRepo.ts` (:602-:827),
+`suggestionResolutionRepo.ts` (:502-:569), `aiRunsRepo.ts:233` and
+`contactsRepo.ts:781`. `toursRepo.get` is not one of them, and the fix wave added
+a correctness-critical caller without noticing.
+
+Measured, with the post-patch read serving the pre-patch row exactly once and
+**no concurrency at all**:
+
+```
+status: 200
+responseScheduledAt: '2026-07-20T18:00:00.000Z'   <- the OLD time
+storedScheduledAt:   '2026-07-21T18:00:00.000Z'   <- the NEW time
+storedPointer:       '55f66c3d-...'               <- the rotation
+ladderIdsNow:        [ '07f2083f-...' ]           <- the OLD ladder, unswept
+rowsMatchingPointer: 0
+totalRows: 3
+```
+
+The chain: the guard sees a mismatch, takes the loser branch
+(`app/src/routes/tours.ts:1256-1262`), logs
+`a concurrent reschedule owns this ladder` naming a competitor that does not
+exist, skips **both** the sweep and the arm, and sets `tour = owner` - the stale
+row - so the 200 tells the operator their reschedule did not happen. Meanwhile
+the store holds the new `scheduledAt` and a pointer no row carries: the tour is
+**disarmed**, and its surviving rungs still carry dueAts computed for the OLD
+time.
+
+Worse than round-1's B1 in two ways:
+
+1. It needs no race. B1 required two overlapping requests; this is one request.
+2. `ladderChanged` stays false on the loser branch (`app/src/routes/tours.ts:1330`
+   is inside the `else`), so **no `scheduled.updated` is emitted**. The Reminders
+   panel and both Upcoming buckets never refetch and keep rendering the old
+   ladder as live - which agrees with the stale 200. Every surface tells the same
+   false story, so nothing contradicts it and nothing prompts a retry.
+
+No existing test can see this: every fake (`twilioWebhookHarness.ts:2801`,
+DynamoDB Local) is strongly consistent by construction.
+
+Fix, in preference order:
+- Best: delete the check-then-act. Make the sweep itself generation-aware -
+  `deleteSupersededForTour(tourId, { exceptLadderId })` with a per-row
+  `attribute_not_exists(ladderId) OR ladderId <> :except` - which needs no read,
+  has no window, and was the round-1 suggestion.
+- Otherwise: `ConsistentRead: true` on this read. Either add it to
+  `toursRepo.get` outright, or follow `contactsRepo.ts:781`'s opt-in flag idiom
+  so only the two ownership call sites pay for it.
+- Either way, the loser branch must not overwrite `tour` with an unvalidated
+  read (see NEW-5).
+
+### NEW-2 (MINOR). M2's grace now keys on `tour.updatedAt`, which EVERY tour write bumps - so a stalled claim on an active tour never expires
+
+`app/src/jobs/tourReminders.ts:351-361`, consumed at `:1154`.
+
+The premise checks out - `claimConversion` does bump `updatedAt`
+(`app/src/repos/toursRepo.ts`, `SET #cp = :v, #updatedAt = :now`), so round-1's
+M2 is genuinely fixed. But `updatedAt` is not a claim stamp; it is a
+last-touched-by-anything stamp. Every `patch`, `setRoster`, `claimGroupThread`
+and pointer rotation moves it forward, which means
+`now - max(dueAt, updatedAt) > 1h` is false forever on any tour edited more than
+once an hour.
+
+The docstring calls that "the safe direction". It is safe for SENDING - nothing
+fires - but the bound does not exist to prevent a send; the module header
+(`app/src/jobs/tourReminders.ts:318-322`) says it exists because "an unbounded
+deferral is the perpetual-'sending shortly' lie in a new costume". On an edited
+tour the deferral is unbounded again and the lie is back, which matters because
+of the interaction in challenge C3 below.
+
+Suggested: have `claimConversion` write a dedicated `conversionClaimedAt` and
+measure from `max(dueAt, conversionClaimedAt)`. It is one attribute in a write
+that already exists, and it says what it means.
+
+### NEW-3 (MINOR). `conversion_in_progress` reaches one of four sites, and now the panel visibly contradicts itself
+
+`app/src/jobs/tourReminders.ts:1820-1841` refuses; nothing else consults the
+sentinel. `forceSendReminder` has exactly one caller
+(`app/src/routes/tourReminders.ts:508`), so the new token has no orphan consumer
+and `SEND_NOW_ERROR_COPY` covers it (`dashboard/src/api/types.ts:1443-1449`) -
+that part is clean.
+
+What the fix produced is a self-contradicting row: during a claim the panel
+renders the rung as `upcoming` with a live fire-time estimate and an ENABLED
+"Send now" button whose only possible answer is 409 "try again once that
+finishes". `lib/ladderPointer.ts:4-9` states the branch's own rule - a surface
+must not promise what a send path refuses, because "a surface that decided this
+for itself could show 'sends in 6 days' for a rung the poll refuses, which is
+the exact lie the feature exists to end." `superseded` was given all four sites
+for that reason. `conversion_in_progress` was given one.
+
+The cheap version is not a fourth predicate: the panel GET already holds the
+tour, so one `startsWith('pending:')` at `app/src/routes/tourReminders.ts:747`
+(beside the `superseded` computation) would suppress the estimate and the button
+on the surface an operator actually clicks from.
+
+### NEW-4 (MINOR). The shipped M3 rule leaves a second door to the same data loss
+
+`app/src/routes/tours.ts:1211-1216`: `terminal` now reads `patchedStatus`. That
+closes the reported trigger, but an EXPLICIT terminal status on an
+ALREADY-terminal tour still rotates and sweeps. `app/src/lib/toursModel.ts:12`
+lists `* -> canceled` as legal and there is no same-status rejection, so
+`PATCH {status:'canceled'}` on an already-canceled tour is a 200 that takes the
+terminal branch.
+
+The implementer calls this "harmless (it deletes rows that are already gone)".
+That holds for a post-deploy tour. It does not hold for the exact population M3
+was fixed to protect: a PRE-MIGRATION terminal tour still carrying the old
+tour-wide cancel's `canceledAt` rungs. One redundant terminal PATCH hard-deletes
+them - the same history loss, one door over.
+
+My round-1 rule, `terminal && currentStatus !== effectiveStatus`, closes both
+doors, is one clause longer, and states the actual intent ("a TRANSITION").
+
+### NEW-5 (NOTE). The loser branch replaces the response tour with an unvalidated read
+
+`app/src/routes/tours.ts:1262` - `if (owner !== undefined) tour = owner;`.
+`owner` is whatever that read returned, with no check that it is newer than this
+request's own patch return. Under NEW-1 it is demonstrably OLDER. Even with a
+consistent read, building the response by wholesale replacement rather than by
+merging the winner's pointer into `tour` makes the response's freshness depend
+on a read this handler does not control.
+
+### NEW-6 (NOTE). The guard adds unconditional store traffic to two hot paths
+
+One extra GetItem per re-arm PATCH (`app/src/routes/tours.ts:1254`) and per
+conversion (`app/src/routes/placements.ts:812`). The cost is small; it is worth
+naming only because it buys a guarantee it does not currently deliver (NEW-1),
+and because the generation-aware-sweep alternative costs zero reads.
+
+---
+
+## 2. Adjudication challenges
+
+**C1 - B1's accepted residue is described by its harm, not its mitigation.**
+The adjudication accepts the ownership-read-to-sweep window because "its end
+state fires nothing, one side logs at error, and the next reschedule repairs
+it". Firing nothing IS the defect. B1's whole finding was a live `scheduled`
+tour with zero reachable rungs and no operator-visible signal; the residual end
+state is byte-for-byte that, just rarer. "The next reschedule repairs it"
+assumes someone reschedules, which nothing prompts them to do. And the window is
+not ms-scale in the way the acceptance implies once NEW-1 is on the table. A
+generation-aware sweep removes the window instead of shrinking it and was
+available; I would not accept this residue.
+
+**C2 - the adjudication was wrong about B1's test parking point; the implementer
+was right.** The adjudication directed the regression test to park request A "at
+its SWEEP". That is inside the window the same paragraph accepts, so the test
+could only ever encode the residue as expected behaviour or fail permanently.
+Parking A between its rotation and its ownership read is the faithful
+translation of my reported interleaving. Deviation 1 in `fixwave-1.md` is
+correct and should be recorded as an adjudication error, not an implementer
+deviation.
+
+**C3 - M1's preview-surface ACCEPT-RECORD leans on a cap that M2's fix removed.**
+The acceptance reads: "the promise-during-claim window is milliseconds on the
+happy path and capped by the grace window on a crashed one." After @a6890024 the
+grace window restarts on every tour write (NEW-2), so on a crashed claim against
+an edited tour there is no cap - the three preview surfaces promise "sends in
+Nh" indefinitely. The two residues were adjudicated independently and interact:
+fixing M2 as specified invalidated M1's acceptance rationale. Re-decide them
+together (NEW-2's `conversionClaimedAt` restores the cap and makes the original
+acceptance sound again).
+
+**C4 - M3's "simpler rule to state" costs a second data-loss door.** See NEW-4.
+Deviation 3 in `fixwave-1.md` is accurate about what changed; I disagree that
+the difference is harmless.
+
+**C5 - agreements, recorded so they are not re-litigated.** Deviation 2 (m3's
+invariant belongs in `seedMatrixCoherence.test.ts` as a row-side walk, the group
+pairing already existing in `seedMatrix.test.ts`) is right. N1, N2, N3 and N4
+remain correctly accepted - N3's risk class genuinely improved with the bounded
+row count, and N4's reachability is as narrow as adjudicated. S5's
+`names_unavailable` residue is an honest outcome under an imperfect token.
+
+---
+
+## 3. Round-1 verdicts against the fixed code
+
+| # | round-1 severity | verdict | note |
+| --- | --- | --- | --- |
+| B1 | BLOCKING | **STILL-OPEN (MINOR as a race; MAJOR via NEW-1)** | Window narrowed from patch->sweep to read->sweep; end state unchanged. Check-then-act, not a conditional write. See C1. |
+| M1 | MAJOR | **CLOSED (send path) / STILL-OPEN (preview surfaces)** | `app/src/jobs/tourReminders.ts:1830-1841` refuses correctly and is ordered below `superseded` as specified. Surfaces: NEW-3, C3. |
+| M2 | MAJOR | **CLOSED** | Premise verified: `claimConversion` does bump `updatedAt`. `max(dueAt, updatedAt)` with NaN-answers-false is correct. Residual: NEW-2. |
+| M3 | MAJOR | **CLOSED for the reported trigger** | `app/src/routes/tours.ts:1215-1216` reads `patchedStatus`; the exit-gate PATCH no longer rotates or sweeps. Second door: NEW-4. |
+| m1 | MINOR | **CLOSED** | Both echoes (`app/src/routes/tourReminders.ts:459`, `:540`) take `after.sentBody ?? ''` under `isSupersededRung`, covering the PATCH 200/409 and the send-now 200/409 alike. |
+| m2 | MINOR | **CLOSED** | `prevHasBlockRef` + `hasUpcomingBlock` in the deps re-derive on both mount and unmount, ahead of the branch logic and ahead of the conversation-switch early return. The `upcoming` array identity stayed out of the deps. |
+| m3 | MINOR | **CLOSED** | The canceled matrix tour no longer pushes a canceled rung; the sent confirmation and rotated pointer remain, which is the producible shape. |
+| m4 | MINOR | **CLOSED** | All named prose sites updated. |
+| N1-N4 | NOTE | accepted as adjudicated | See C5. |
+| N5 | NOTE | **CLOSED** | RUNBOOK section added @9af87a2c. |
+
+Neither reproduced round-1 defect survives in its reported form: the round-1 B1
+probe (park A at its sweep) now hits the ownership guard, and the round-1 M3
+probe (exit-gate PATCH on a terminal tour) no longer touches the rows. What
+replaced B1's race is NEW-1's single-request version of the same end state.

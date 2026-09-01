@@ -72,29 +72,37 @@ because this path has no sweep.
    being written at `routes/tours.ts:1164` - not a separate write. A separate
    rotation would leave a window in which the NEW `scheduledAt` is stored
    against the OLD pointer, and costs a round trip for nothing.
-2. Sweep (delete every row with no `sentAt`) - OWNERSHIP-GUARDED (review round
-   B1): re-read the tour first, and if `currentLadderId` no longer holds the
-   step-1 rotation, a concurrent reschedule owns this ladder - skip the sweep
-   AND the arm, log at error, and return the winner's stored state. Without the
-   guard the sweep is generation-blind, and the loser's late sweep deletes the
-   WINNER's freshly armed rows: pointer at a ladder with zero rows, two 200s.
-   The residual window (a full competing request landing between the ownership
-   read and the sweep) is accepted: it fires nothing, one side logs at error,
-   and the next reschedule repairs it.
-3. Arm.
-4. Write the returned `ladderId`, CONDITIONAL on `currentLadderId` still holding
+2. Arm.
+3. Write the returned `ladderId`, CONDITIONAL on `currentLadderId` still holding
    the rotation value from step 1. Two concurrent reschedules can otherwise
    interleave so that the pointer names a ladder the other request already
    swept: two 200s, a silently disarmed tour, no error. The loser logs at error
    and leaves the winner's pointer; its rows are unpointed, refused by 3.3, and
-   visible in `earlier[]` until the next sweep.
+   visible in `earlier[]` until the next sweep. The loser's response is built
+   from a CONSISTENT re-read - an eventually consistent one can serve the
+   pre-patch row and report the reschedule as not having happened (review
+   rounds NEW-1/NEW-5).
+4. IF the write WON: sweep. The sweep is TRANSACTIONAL PER ROW (review rounds
+   B1/R2-1/NEW-1 - a check-then-act guard was tried and failed twice, once on
+   an eventually consistent read and once by omission on the terminal branch):
+   every delete rides a `TransactWriteItems` pairing a `ConditionCheck` that
+   the TOUR's `currentLadderId` still equals the ladder this request just
+   pointed at with the `attribute_not_exists(sentAt)` delete; rows of that
+   current ladder are excluded from the candidate set. A pointer-check
+   cancellation aborts the remaining sweep - a newer writer owns the ladder
+   and its own sweep is responsible; a delete-condition cancellation (the row
+   was claimed mid-sweep) skips that row and continues. No interleaving can
+   delete a row while the pointer names another generation. IF the write LOST:
+   no sweep.
 
-**Terminal transitions** (`canceled` / `closed` / `toured` / `no_show`) run
-steps 1-2 and stop: the rotated pointer matches nothing, so the tour has no live
-ladder. A TRANSITION means the PATCH explicitly carries a terminal `status` -
-an unrelated PATCH (outcome, notes) on an ALREADY-terminal tour must not rotate
-or sweep, or every pre-migration tour loses its surviving reminder history on
-its first edit (review round M3).
+**Terminal transitions** (`canceled` / `closed` / `toured` / `no_show`) rotate
+(step 1) then sweep transactionally against the rotation (step 4's machinery,
+expected pointer = the rotation) and STOP - no arm, so the pointer is FINAL and
+matches nothing. A TRANSITION means the PATCH explicitly carries a terminal
+`status` the tour does NOT already hold - an unrelated PATCH (outcome, notes)
+on an already-terminal tour, or a repeat of the same terminal status, must not
+rotate or sweep, or every pre-migration tour loses its surviving reminder
+history on an ordinary edit (review rounds M3/NEW-4).
 
 **Conversion** (`routes/placements.ts:716`) does not touch the pointer BEFORE
 the finalize, and rotates it AS PART OF the finalize. The two halves have
@@ -112,8 +120,9 @@ opposite requirements and the split is the whole design:
 - AT finalize the conversion is real and there is nothing left to reverse, so
   the pointer rotation rides the finalize patch itself (`placements.ts:758`,
   the same one-write idiom the re-arm path uses) and the sweep follows - also
-  ownership-guarded (3.2 step 2): swept only while the pointer still holds the
-  finalize's rotation, so a concurrent revival's fresh ladder survives.
+  transactional (3.2 step 4's machinery, expected pointer = the finalize's
+  rotation), so a concurrent revival's fresh ladder survives every
+  interleaving.
 
 The rotation is REQUIRED here, not optional. Without it the converted tour has
 no refusal backstop at all: the sentinel is gone so the deferral ends, the
@@ -146,15 +155,19 @@ own skip reason, distinct from `superseded` because the cause is different and
 the operator's remedy is different: the conversion is stuck, not superseded.
 Inside the window it is DEFERRED: left
 unclaimed, no stamp, retried on the next tick (3.2). The grace window runs from
-`max(dueAt, tour.updatedAt)` - the claim write bumps `updatedAt`, so a fresh
-claim always gets the full window even on a rung already hours past due (a
-quiet-hours deferral is routine, not an outage - review round M2); later tour
-edits only EXTEND the deferral. Send now ALSO refuses a claim-in-flight tour,
-409 `conversion_in_progress` with its own copy (review round M1) - the poll
-defers, the human path refuses, and neither stamps. The three preview surfaces
-do NOT consult the sentinel: a promise rendered during the claim window is
-milliseconds-stale on the happy path and capped by the grace window on a
-crashed one - accepted residue.
+`max(dueAt, conversionClaimedAt)` - `claimConversion` stamps
+`conversionClaimedAt` beside the sentinel and `releaseConversionClaim` REMOVEs
+both - so a fresh claim always gets the full window even on a rung already
+hours past due (a quiet-hours deferral is routine, not an outage - review round
+M2), and an operator editing the tour cannot extend a stalled claim forever
+(review round NEW-2; `updatedAt` is last-touched-by-anything and is only the
+defensive fallback). Send now ALSO refuses a claim-in-flight tour, 409
+`conversion_in_progress` with its own copy (review round M1). And the three
+preview surfaces DO consult the sentinel (review round NEW-3): a claim-in-flight
+rung renders suppressed `conversion_in_progress` - a temporary state, unlike
+`superseded` - never as a live promise with a Send-now button whose only
+possible answer is 409. The poll defers, the human path refuses, the surfaces
+say so, and nothing stamps.
 
 **Copy and type surfaces for `superseded` - the count matters because only some
 break the build.** Exhaustive maps that WILL fail typecheck if the token is

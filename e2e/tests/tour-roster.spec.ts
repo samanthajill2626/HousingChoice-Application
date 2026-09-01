@@ -250,20 +250,20 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     const introBody = ((await previewRes.json()) as { body: string }).body;
     // A pure server-echo can pass VACUOUSLY (an empty body would equal an empty
     // bubble), so the echo is pinned against the catalog default's own shell
-    // around {members} plus who the sentence names - all still copy-sourced.
+    // around {names} plus who the list names - all still copy-sourced.
     const [introHead = '', introTail = ''] =
-      MESSAGE_CATALOG['relay.intro'].default.split('{members}');
+      MESSAGE_CATALOG['relay.intro'].default.split('{names}');
     // BOTH halves of the shell must be non-empty or the matcher they feed is
     // itself vacuous: startsWith('') / endsWith('') are true of any string. An
-    // empty tail is also what "the default lost its {members} token entirely"
+    // empty tail is also what "the default lost its {names} token entirely"
     // looks like (split returns the whole string as the head).
     expect(
       introHead.length,
-      'the relay.intro default has no copy BEFORE {members} - startsWith below proves nothing',
+      'the relay.intro default has no copy BEFORE {names} - startsWith below proves nothing',
     ).toBeGreaterThan(0);
     expect(
       introTail.length,
-      'the relay.intro default has no copy AFTER {members} - endsWith below proves nothing',
+      'the relay.intro default has no copy AFTER {names} - endsWith below proves nothing',
     ).toBeGreaterThan(0);
     expect(introBody.startsWith(introHead), introBody).toBeTruthy();
     expect(introBody.endsWith(introTail), introBody).toBeTruthy();

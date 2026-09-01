@@ -24,7 +24,7 @@ import type { OrgSettings } from '../repos/settingsRepo.js';
  * SINGLE PASS. The scan runs ONCE over the ORIGINAL template, so a substituted
  * VALUE is never part of the string being scanned and can never re-open a token
  * (message-interpolate-token-reexpansion): a name, or a relayed body, that
- * happens to contain "{members}" stays literal text instead of expanding into
+ * happens to contain "{names}" stays literal text instead of expanding into
  * another variable's value. The replacement is a CALLBACK, never a string -
  * String.replace with a string argument interprets $&/$1/$`/$' inside the VALUE,
  * which would trade token re-expansion for $-expansion. The token charset in the

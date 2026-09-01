@@ -182,27 +182,57 @@ function firstNameOnly(name: string): string {
 }
 
 /**
- * The "You're now connected with …" connection sentence shared by the intro
- * and the member-added announcement. Uses member FIRST names where known, a
- * neutral count phrasing otherwise — NEVER a phone number (PII).
+ * The value of the `{names}` token: the bare member list, FIRST names where
+ * known, a neutral count phrasing otherwise - NEVER a phone number (PII).
+ *
+ * Phase B (spec 9.2) renamed this composer and narrowed what it owns - the old
+ * name said "sentence". It used to return the whole "You're now connected with ... on
+ * this number. Reply here and everyone in the group sees it." SENTENCE, fixed
+ * copy and all; that copy now lives in the `relay.intro` catalog default where
+ * it is visible, and this function returns only the list that varies.
+ *
+ * It is TOTAL - it never returns the empty string, on ANY roster including an
+ * empty one. That is not defensiveness: `{names}` feeds a NON-EDITABLE catalog
+ * default, and an unvalued token there does not degrade, it THROWS
+ * (messages/resolve.ts) - which would kill the intro job AFTER its
+ * putJobExecutionMarker claim (announcement lost, not retried) and 500 the
+ * add-preview route. The preview builder can reach the no-names branch.
+ *
+ * The old zero-others branch RESTRUCTURED the sentence, which a token cannot do,
+ * so spec 9.2's table routes it to the "1 other person" phrasing: copy that is
+ * mildly wrong on an edge case, in exchange for a template that always works.
+ * Every other roster composes BYTE-IDENTICALLY to the pre-change body.
  */
-export function composeConnectionSentence(memberNames: (string | undefined)[]): string {
+export function composeNameList(memberNames: (string | undefined)[]): string {
   const named = memberNames
     .map((n) => (n && n.trim().length > 0 ? firstNameOnly(n) : undefined))
     .filter((n): n is string => n !== undefined);
   if (named.length === 0) {
     const others = Math.max(memberNames.length - 1, 0);
-    return others > 0
-      ? `You're now connected with ${others} other ${others === 1 ? 'person' : 'people'} on this number. Reply here and everyone in the group sees it.`
-      : `You're now connected on this number. Reply here and the group sees it.`;
+    return others > 1 ? `${others} other people` : '1 other person';
   }
-  const list =
-    named.length === 1
-      ? named[0]
-      : named.length === 2
-        ? `${named[0]} and ${named[1]}`
-        : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
-  return `You're now connected with ${list} on this number. Reply here and everyone in the group sees it.`;
+  return named.length === 1
+    ? named[0]!
+    : named.length === 2
+      ? `${named[0]} and ${named[1]}`
+      : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
+}
+
+/**
+ * The value of the `{name}` token on the member-added announcements (spec 9.4):
+ * the joiner's FIRST name, or a neutral phrase - NEVER a phone number.
+ *
+ * TOTAL for the same reason `composeNameList` is: a relay member can be a bare
+ * phone with no contact row, and an unvalued `{name}` in a non-editable default
+ * throws rather than degrading.
+ *
+ * Lower-cased, unlike the sentence-initial ANONYMOUS_JOINED_LABEL it replaces,
+ * because Sam's Phase B wording puts it MID-sentence: "Hey, adding a new member
+ * to the group." Written and pinned here; WIRED in Task 14, which deletes
+ * ANONYMOUS_JOINED_LABEL rather than leaving it beside this.
+ */
+export function joinedName(name: string | undefined): string {
+  return name && name.trim().length > 0 ? firstNameOnly(name) : 'a new member';
 }
 
 /**
@@ -215,13 +245,38 @@ export function composeConnectionSentence(memberNames: (string | undefined)[]): 
  * 2026-07-14: content first, STOP last). Both fold into the catalog default.
  */
 export function composeIntroBody(memberNames: (string | undefined)[]): string {
-  // The count-plurality / Oxford-list `connection` string feeds the {members}
-  // token of the `relay.intro` catalog default (brand … opt-out shell).
-  return resolveMessage('relay.intro', { members: composeConnectionSentence(memberNames) });
+  // The count-plurality / Oxford-list name list feeds the {names} token of the
+  // `relay.intro` catalog default, which now carries the connection sentence
+  // itself (Phase B spec 9.2). Signature unchanged on purpose: Task 13 rewires
+  // the token WITHOUT moving any call site, and the byte-identity pin in
+  // relayFanOut.test.ts proves the seam. Task 14 changes the signature when the
+  // owner-routed variants land.
+  return resolveMessage('relay.intro', { names: composeNameList(memberNames) });
 }
 
 /** Neutral joined label when the added member has no resolved name (never a phone). */
 const ANONYMOUS_JOINED_LABEL = 'A new member';
+
+/**
+ * The pre-Phase-B connection SENTENCE, kept module-private for the ONE caller
+ * still on the old `relay.member_added` shape.
+ *
+ * Phase B moves that copy into the catalog for the intro (spec 9.2), but
+ * `relay.member_added` is deliberately NOT touched in Task 13 - it is rewritten
+ * ONCE in Task 14, with the per-recipient split, so the seven assertion sites
+ * across three app suites and three e2e files re-baseline exactly once. Keeping
+ * the old text here rather than rebuilding it from composeNameList preserves the
+ * one branch the two disagree on: a single nameless member RESTRUCTURED this
+ * sentence, and 9.2's token form cannot. DELETED in Task 14 together with
+ * ANONYMOUS_JOINED_LABEL.
+ */
+function legacyConnectionSentence(memberNames: (string | undefined)[]): string {
+  const anyNamed = memberNames.some((n) => n !== undefined && n.trim().length > 0);
+  if (!anyNamed && memberNames.length <= 1) {
+    return `You're now connected on this number. Reply here and the group sees it.`;
+  }
+  return `You're now connected with ${composeNameList(memberNames)} on this number. Reply here and everyone in the group sees it.`;
+}
 
 /**
  * Member-added announcement (founder decision 2026-07-14): one body sent to
@@ -245,7 +300,7 @@ export function composeMemberAddedBody(
       : ANONYMOUS_JOINED_LABEL;
   return resolveMessage('relay.member_added', {
     joined: `${who} joined this group chat.`,
-    members: composeConnectionSentence(memberNames),
+    members: legacyConnectionSentence(memberNames),
   });
 }
 

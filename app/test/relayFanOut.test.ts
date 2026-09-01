@@ -27,7 +27,9 @@ import {
   TEAM_SENDER_LABEL,
   composeIntroBody,
   composeMemberAddedBody,
+  composeNameList,
   composeRelayBody,
+  joinedName,
   registerRelayFanOutJobHandler,
 } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
@@ -714,6 +716,141 @@ describe('relay body/intro composition (M1.7)', () => {
     );
     expect(composeMemberAddedBody('  ', ['Alice'])).toContain(
       'A new member joined this group chat.',
+    );
+  });
+});
+
+// Phase B spec 9.2 / 9.4. {members} was a whole computed SENTENCE; {names} is
+// the bare list, so the fixed copy around it moves into the catalog where it is
+// visible. Both token values are TOTAL - they never return the empty string -
+// because an unvalued token in a NON-EDITABLE catalog default does not degrade,
+// it THROWS (messages/resolve.ts), which would kill the intro job AFTER its
+// idempotency claim (announcement lost, not retried) and 500 the preview route.
+describe('composeNameList - the TOTAL {names} value (spec 9.2)', () => {
+  it('Oxford list of FIRST names', () => {
+    expect(composeNameList(['Alicia Reyes', 'Marcus Webb', 'Dana Cole'])).toBe(
+      'Alicia, Marcus, and Dana',
+    );
+    expect(composeNameList(['Alicia Reyes', 'Marcus Webb'])).toBe('Alicia and Marcus');
+    expect(composeNameList(['Alicia Reyes'])).toBe('Alicia');
+  });
+
+  it('no names known: count phrase, never empty, never a phone', () => {
+    expect(composeNameList([undefined, undefined, undefined])).toBe('2 other people');
+    expect(composeNameList([undefined, undefined])).toBe('1 other person');
+    // Zero-others row (spec 9.2's last row): a mildly wrong sentence beats a
+    // strict-mode throw. The PREVIEW builder can reach this branch.
+    expect(composeNameList([undefined])).toBe('1 other person');
+    // Whitespace-only is the same as absent, and an EMPTY roster still answers.
+    expect(composeNameList(['  '])).toBe('1 other person');
+    expect(composeNameList([])).toBe('1 other person');
+  });
+
+  it('a partially-named roster lists only the names it has, never a placeholder', () => {
+    expect(composeNameList(['Alicia Reyes', undefined])).toBe('Alicia');
+  });
+});
+
+describe('joinedName - the TOTAL {name} value (spec 9.4)', () => {
+  it('first name, else the lower-cased neutral phrase', () => {
+    expect(joinedName('Dana Cole')).toBe('Dana');
+    expect(joinedName(undefined)).toBe('a new member');
+    expect(joinedName('  ')).toBe('a new member');
+  });
+
+  it('is lower-cased so it reads correctly MID-sentence in the founder wording', () => {
+    // "Hey, adding a new member to the group." - the pre-Phase-B constant was
+    // sentence-initial ("A new member joined this group chat.") and cannot be
+    // reused as-is. Wired in Task 14; pinned here so the value is settled.
+    expect(joinedName(undefined)).not.toBe('A new member');
+  });
+});
+
+describe('relay catalog entries (spec 9.2a)', () => {
+  it('naked intro composed output is BYTE-IDENTICAL to the pre-change body', () => {
+    // Derived by RUNNING the pre-change composeIntroBody(['Alicia Reyes',
+    // 'Marcus Webb']) before the rewrite, not hand-assembled. The old pipeline
+    // was "Hey, it's Sam. " + the whole connection SENTENCE + the trailing copy;
+    // the new one is the same text with the sentence living in the default and
+    // only the name list interpolated. This pin is what proves the seam.
+    const names = ['Alicia Reyes', 'Marcus Webb'];
+    const expected =
+      "Hey, it's Sam. You're now connected with Alicia and Marcus on this number. " +
+      'Reply here and everyone in the group sees it. Use this group text for anything ' +
+      'that comes up. It can be a long process, so ask me anything in here!';
+    expect(resolveMessage('relay.intro', { names: composeNameList(names) })).toBe(expected);
+    // ...and the composer that every call site still goes through agrees.
+    expect(composeIntroBody(names)).toBe(expected);
+  });
+
+  it('the nameless multi-member intro is BYTE-IDENTICAL too', () => {
+    expect(composeIntroBody([undefined, undefined, undefined])).toBe(
+      "Hey, it's Sam. You're now connected with 2 other people on this number. Reply here " +
+        'and everyone in the group sees it. Use this group text for anything that comes up. ' +
+        'It can be a long process, so ask me anything in here!',
+    );
+    expect(composeIntroBody([undefined, undefined])).toBe(
+      "Hey, it's Sam. You're now connected with 1 other person on this number. Reply here " +
+        'and everyone in the group sees it. Use this group text for anything that comes up. ' +
+        'It can be a long process, so ask me anything in here!',
+    );
+  });
+
+  it('the ONE composed output spec 9.2 deliberately changes: the zero-others intro', () => {
+    // Pre-change this single-member roster RESTRUCTURED the sentence:
+    // "You're now connected on this number. Reply here and the group sees it."
+    // As a token {names} cannot restructure the one sentence in the template, so
+    // 9.2's table routes it to the "1 other person" phrasing instead - mildly
+    // wrong copy on an edge case, in exchange for a template that always works.
+    const body = composeIntroBody([undefined]);
+    expect(body).toBe(
+      "Hey, it's Sam. You're now connected with 1 other person on this number. Reply here " +
+        'and everyone in the group sees it. Use this group text for anything that comes up. ' +
+        'It can be a long process, so ask me anything in here!',
+    );
+    expect(body).not.toContain("You're now connected on this number");
+  });
+
+  it('the four new founder entries carry the exact 9.1 / 9.4 copy and 9.2a metadata', () => {
+    expect(
+      resolveMessage('relay.intro_tour_today', {
+        tenantFirstName: 'Alicia',
+        propertyContactFirstName: 'Marcus',
+        time: '3:00 PM',
+        where: '412 Oak St',
+      }),
+    ).toBe(
+      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. ' +
+        'Looking forward to you seeing the property and meeting Marcus! Please let us know ' +
+        "when you're on the way.",
+    );
+    expect(
+      resolveMessage('relay.intro_tour', {
+        tenantFirstName: 'Alicia',
+        propertyContactFirstName: 'Marcus',
+        when: 'Tue, Sep 8 at 3:00 PM',
+        where: '412 Oak St',
+      }),
+    ).toBe(
+      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 ' +
+        'at 3:00 PM. Looking forward to you seeing the property and meeting Marcus! Please ' +
+        "let us know when you're on the way.",
+    );
+    expect(
+      resolveMessage('relay.intro_placement', {
+        tenantFirstName: 'Alicia',
+        propertyContactFirstName: 'Marcus',
+        where: '412 Oak St',
+      }),
+    ).toBe(
+      'Hey Alicia! Excited to have you move into 412 Oak St. Please use this group text for ' +
+        'all future communication and Marcus will share updates as they receive them from ' +
+        'the housing authority. This can be a long process so if you have any questions feel ' +
+        'free to ask in here! We are committed to the process and are excited to have you ' +
+        'move in.',
+    );
+    expect(resolveMessage('relay.member_added_role', { name: 'Dana', role: 'property manager' })).toBe(
+      'Hey, adding Dana to the group as the property manager.',
     );
   });
 });

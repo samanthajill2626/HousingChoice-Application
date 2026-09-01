@@ -194,23 +194,23 @@ test('Contact file: create a relay group, land CONNECTING, then open it and deli
   await expect(previewRegion).toBeVisible();
   // WHAT it is previewing, not just that it previews something. The body is the
   // server's; it is pinned against the relay.intro catalog default's own shell
-  // around {members} plus who the sentence names, so an edit to the copy moves
+  // around {names} plus who the list names, so an edit to the copy moves
   // the expectation and the UI together.
   // The preview is an EDITABLE field on the relay-open surfaces (2026-08-20), so
   // the message lives in the textarea's VALUE - textContent() here would return
   // the field label and the character counter, not the message.
   const introBody = (await previewRegion.getByRole('textbox').inputValue()).trim();
   const [introHead = '', introTail = ''] =
-    MESSAGE_CATALOG['relay.intro'].default.split('{members}');
+    MESSAGE_CATALOG['relay.intro'].default.split('{names}');
   // BOTH halves must be non-empty or the matchers they feed are vacuous:
   // startsWith('') / endsWith('') are true of any string.
   expect(
     introHead.length,
-    'the relay.intro default has no copy BEFORE {members} - startsWith below proves nothing',
+    'the relay.intro default has no copy BEFORE {names} - startsWith below proves nothing',
   ).toBeGreaterThan(0);
   expect(
     introTail.length,
-    'the relay.intro default has no copy AFTER {members} - endsWith below proves nothing',
+    'the relay.intro default has no copy AFTER {names} - endsWith below proves nothing',
   ).toBeGreaterThan(0);
   expect(introBody.startsWith(introHead), introBody).toBeTruthy();
   expect(introBody.endsWith(introTail), introBody).toBeTruthy();

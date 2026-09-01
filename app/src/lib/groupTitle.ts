@@ -57,7 +57,7 @@ export function groupThreadLabel(
  * THE LINE (founder ruling 2026-08-19), and it is not "preview vs not-preview":
  *
  *   OUTBOUND MESSAGE CONTENT - anything a tenant or landlord actually receives -
- *   carries names and NEVER a phone. jobs/relayFanOut composeConnectionSentence
+ *   carries names and NEVER a phone. jobs/relayFanOut composeNameList
  *   drops a nameless member and falls back to a neutral count rather than print
  *   their number, and that stays exactly as it is.
  *

@@ -35,7 +35,7 @@ must inspect both live worktree state and current `main` at Task 0, implement on
 feature branch, and perform the workflow's one allowed `main` sync only at the
 final pre-handback step.
 
-**Status:** Draft for adversarial plan review.
+**Status:** Revised after adversarial plan review round 1; round 2 pending.
 
 ## Global constraints
 
@@ -91,8 +91,10 @@ final pre-handback step.
 - A successful result clears a stale transient `errorCode`. SID and `sentAt` are
   absent-only. Status may remain `queued` while result metadata and actual
   transport land. Terminal delivery state must never regress.
-- For version-1 relay work, complete all-current-member preflight before the first
-  provider call. For schema-absent relay work, bypass every transport step and run
+- For version-1 relay work, complete all-eligible-recipient preflight before the
+  first provider call. The candidate set is the exact existing send set after
+  sender and continuation-recipient filters; an inbound sender never gets a slot.
+  For schema-absent relay work, bypass every transport step and run
   the exact legacy path, including in-flight jobs, continuations, and held-message
   release.
 - An `excluded` slot without a suppression code is intentionally absent from the
@@ -485,7 +487,7 @@ export type TransportMutationOutcome =
   | 'missing';
 
 export interface RecipientSendResultPatch {
-  status: RelayRecipientStatus;
+  status: DeliveryStatus;
   sid?: string;
   sentAt?: string;
   errorCode?: string;
@@ -620,6 +622,11 @@ inbound, native-group inbound, and unknown-conversation inbound branches. Assert
 - native-group inbound stores actual MMS from the group rail even when text-only;
 - status callbacks can add actual when delivery status is unchanged/refused;
 - status can advance with no actual evidence;
+- direct and relay callbacks resolve the stored message/source slot before
+  normalization, then pass its requested transport into the normalizer;
+- identical `SM`/`MM` plus E.164 `From` callbacks observe fallback only for a
+  resolved RCS request; an SMS/MMS request follows its own rule and a missing
+  request remains missing/conflicting rather than being treated as RCS fallback;
 - one SSE event is emitted when either state machine writes and none when both are
   no-ops;
 - legacy rows still advance delivery state while transport returns `legacy_noop`;
@@ -641,11 +648,19 @@ existing fresh provider params, execute, and append `transportSchemaVersion: 1`,
 `requestedTransport`, and any `actualTransport`. Keep legacy `type` selection exactly
 where content behavior currently depends on it.
 
-At the top of each authenticated Twilio webhook handler, construct the Task 1
-normalizer input from `From`, `To`, `MessageSid`, `ChannelPrefix`, and
-`ChannelMetadata`. Pass only normalized output downstream. Native group branches
-use the group adapter's authoritative MMS evidence and may compare a receipt channel
-SID only for corroboration/conflict.
+For inbound handlers, normalize at the authenticated provider boundary from
+`From`, `To`, `MessageSid`, `ChannelPrefix`, and `ChannelMetadata` before the
+business branch consumes the result. For `/status`, do not normalize at handler
+entry: first complete the existing MessageSid lookup/retry. A direct message uses
+its stored `requested_transport`. A relay pointer is resolved with
+`messages.getByTsMsgId(ptr.conversationId, ptr.tsMsgId)` and reads the addressed
+slot's `requestedTransport`. Only then invoke the provider-boundary normalizer with
+the raw callback fields and resolved request. Keep the raw Twilio fields confined
+to that call and pass only normalized output into repository state transitions.
+System/unknown callbacks have no stored carrier row and retain their current ack/log
+behavior without inventing transport. Native group branches use the group adapter's
+authoritative MMS evidence and may compare a receipt channel SID only for
+corroboration/conflict.
 
 Status callbacks call status and actual operations independently and combine their
 outcomes before emitting SSE. A non-provider dev fixture never enters this warning
@@ -694,7 +709,7 @@ deliveryRecipients: Object.fromEntries(
       status: 'queued',
       requestedTransport: sourceIntent.requestedTransport,
       // Source-time slots intentionally have no aggregation state. The worker's
-      // all-current-member preflight owns planned/excluded reconciliation.
+      // all-eligible-recipient preflight owns planned/excluded reconciliation.
     },
   ]),
 ),
@@ -720,8 +735,10 @@ Use a deterministic fake roster and provider. Cover:
    results continue for an in-flight job, continuation, and `queued_pending` flush.
 2. A version-1 source is read before any transport write, making the branch
    decidable without mutating legacy work.
-3. Before the first send, every current member has an initialized queued slot with
-   immutable requested intent and `planned` aggregation.
+3. Before the first send, every eligible recipient has an initialized queued slot
+   with immutable requested intent and `planned` aggregation. Compute this set only
+   after applying the existing sender exclusion and continuation recipient-key
+   filter. An inbound sender receives no slot and cannot appear in the disclosure.
 4. A never-attempted planned member absent from the current roster becomes
    `excluded`; an attempted member is untouched; a later rejoin may move excluded
    back to planned only under the state machine.
@@ -772,16 +789,18 @@ return runVersionedRelayFanOut(source, input, deps);
 ```
 
 `runLegacyRelayFanOut` is the existing behavior extracted or retained without any
-transport calls. `runVersionedRelayFanOut` performs one all-current-member preflight,
-then processes legs. Do not duplicate provider/pacing/media logic: factor shared
+transport calls. `runVersionedRelayFanOut` performs one all-eligible-recipient
+preflight, then processes legs. Do not duplicate provider/pacing/media logic: factor shared
 execution helpers whose transport hooks are explicit, while keeping the absence of
 hooks on the legacy branch mechanically testable.
 
-Use `initializeRecipientDelivery` only for current members absent from the source
-map. Reconcile stale never-attempted planned slots after current-member
-initialization. Mark attempted in the same leg immediately before the provider
-call. Apply results with `applyRecipientSendResult`; never call unconstrained
-`setRecipientDelivery` for v1.
+Use `initializeRecipientDelivery` only for eligible recipients absent from the
+source map. The eligible set must be byte-for-byte aligned with the existing
+sender/continuation-filtered send loop. Reconcile stale never-attempted planned
+slots after eligible-recipient initialization; a source-time sender slot, if any
+old fixture contains one, is reconciled out rather than recreated. Mark attempted
+in the same leg immediately before the provider call. Apply results with
+`applyRecipientSendResult`; never call unconstrained `setRecipientDelivery` for v1.
 
 - [ ] **Step 5.6: Run focused tests and app typecheck**
 
@@ -946,6 +965,7 @@ Co-Authored-By: Codex GPT-5 <noreply@openai.com>
 - Modify `app/src/lib/import/apply.ts`
 - Modify import tests named by Task 0
 - Create `app/src/lib/seed/messageTransport.ts`
+- Modify `app/src/lib/seed/cast.ts`
 - Modify `app/src/lib/seed/lean.ts`
 - Modify `app/src/lib/seed/live.ts`
 - Modify `app/src/lib/seed/matrix.ts`
@@ -957,7 +977,13 @@ Co-Authored-By: Codex GPT-5 <noreply@openai.com>
 - Modify `app/src/routes/dev.ts`
 - Create `app/test/devMessageTransportFixture.test.ts`
 - Modify `fake-twilio/src/engine/signer.ts`
+- Modify `fake-twilio/src/engine/types.ts`
+- Modify `fake-twilio/src/engine/engine.ts`
+- Modify `fake-twilio/src/routes/control.ts` only if validation is added to the
+  existing passthrough route
 - Modify `fake-twilio/test/signer.test.ts`
+- Modify `fake-twilio/test/engine.test.ts`
+- Modify `fake-twilio/test/control.test.ts`
 - Modify `e2e/fixtures/fakeTwilio.ts`
 
 **Explicit seed helper:**
@@ -1005,7 +1031,10 @@ declaration. Test these named worlds:
 - new unresolved inbound: version 1 with actual absent;
 - explicit legacy row: no version or transport fields;
 - performance-generated ordinary carrier and native group rows with explicit SMS
-  or MMS facts, never inference from `type`.
+  or MMS facts, never inference from `type`;
+- every carrier row returned by `castItems()` in the full profile uses the same
+  explicit declaration helper; only a fixture named and asserted as legacy may
+  remain schema-absent.
 
 Update byte-stable seed expectations once and only once after deliberate new fields
 are accepted. A profile with no message rows should prove zero generated rows rather
@@ -1044,18 +1073,32 @@ interface BuildStatusInput {
   channelPrefix?: string;
   channelMetadata?: Record<string, unknown> | string;
 }
+
+interface DeliveryProfile {
+  // existing kind/stall/fail fields
+  transportEvidence?: {
+    from?: string;
+    to?: string;
+    channelPrefix?: string;
+    channelMetadata?: Record<string, unknown> | string;
+  };
+}
 ```
 
 Assert the fake emits no SMS/MMS `ChannelPrefix`; only explicit rich-channel cases
-may emit `rcs`. Standard SMS/MMS callbacks include realistic E.164 endpoints and
-valid SM/MM SIDs. JSON metadata is serialized exactly once. Extend
-`postInboundSms` with the same optional controls.
+may emit `rcs`. Standard SMS/MMS callbacks include realistic E.164 endpoints from
+the stored outbound thread message and valid SM/MM SIDs. Profile evidence may
+override `From` for an RCS/fallback/conflict scenario and carries optional channel
+fields through `SetDeliveryOutcomeInput`, `/control/delivery-outcome`, the engine's
+scheduled callback, and `buildStatusParams`. JSON metadata is serialized exactly
+once. Extend `postInboundSms` and the e2e `setDeliveryOutcome` DTO with the same
+optional controls.
 
 - [ ] **Step 8.4: Run focused tests and prove red**
 
 ```powershell
 npm run test -w @housingchoice/app -- test/seedData.test.ts test/seedLive.test.ts test/seedMatrix.test.ts test/performanceSeed.test.ts test/performanceSeed.integration.test.ts test/importApply.integration.test.ts test/devMessageTransportFixture.test.ts
-npm run test -w @housingchoice/fake-twilio -- test/signer.test.ts
+npm run test -w @housingchoice/fake-twilio -- test/signer.test.ts test/engine.test.ts test/control.test.ts
 ```
 
 Expected: exit 1 on absent explicit declarations and callback controls.
@@ -1070,13 +1113,16 @@ declaring a known provider rail, not because the helper derives it.
 Keep importer output schema-absent. Update the dev fixture through the same domain
 validation used by `messagesRepo` even though it writes directly. The fake emits
 shape-faithful provider payloads; it does not call app code or import the app's
-normalizer.
+normalizer. `MessagingEngine` passes `message.from` and `message.to` by default,
+then applies only explicit `profile.transportEvidence` overrides before calling the
+signer. The engine/control test must exercise the complete signed callback path;
+direct signer tests alone are insufficient.
 
 - [ ] **Step 8.6: Run focused tests and workspace typechecks**
 
 ```powershell
 npm run test -w @housingchoice/app -- test/seedData.test.ts test/seedLive.test.ts test/seedMatrix.test.ts test/performanceSeed.test.ts test/performanceSeed.integration.test.ts test/importApply.integration.test.ts test/devMessageTransportFixture.test.ts
-npm run test -w @housingchoice/fake-twilio -- test/signer.test.ts
+npm run test -w @housingchoice/fake-twilio -- test/signer.test.ts test/engine.test.ts test/control.test.ts
 npm run typecheck -w @housingchoice/app
 npm run typecheck -w @housingchoice/fake-twilio
 npm run typecheck -w @housingchoice/e2e

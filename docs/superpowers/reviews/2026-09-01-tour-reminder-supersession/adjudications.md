@@ -448,3 +448,77 @@ is a third raw writer), PB-11 (390px contradicted the harness's `NARROW_360`,
 and "more messages than main" has no in-run pass/fail), PB-13 (the
 ResizeObserver must wire into the existing effect, not a standalone one),
 PB-16 (seeded terminal tours), PA-12, PA-11, PB-15 - ALL ACCEPT** and folded in.
+
+---
+
+# PLAN round 2
+
+10 findings, 1 BLOCKING. ACCEPT 10, REJECT 0. Every fix is one to three
+sentences; the reviewer's own summary was "the mechanism is right".
+
+**PB2-1 - the plan and the spec now CONTRADICT each other. ACCEPT, BLOCKING, my
+process error.** I accepted PB-2 and fixed the PLAN (T8.3, rotate at
+conversion), and never amended the SPEC, whose reasoned paragraph at 3.2 still
+said "Conversion does NOT touch the pointer" - with three more stale passages
+behind it (the section-4 writer list, acceptance 7, 3.6's five-writer count).
+Neither document said which won, so a literal builder is stopped cold. This is
+the failure mode of fixing downstream and leaving upstream: the spec is the
+authority the plan is checked against, so a plan-only fix is not a fix. Spec
+amended: the conversion path does not touch the pointer BEFORE finalize (where
+reversibility is the requirement) and rotates it AS PART OF the finalize (where
+there is nothing left to reverse). Both halves now state their reason.
+
+**PB2-2 - fold the rotation INTO the finalize patch. ACCEPT.** A separate write
+after the finalize keeps a slice of the very gap PB-2 identified, and adds a
+rotation-failure branch nothing covers. `placements.ts:758` is the same
+one-write idiom the re-arm path already uses, and folding it in also settles the
+rotate-vs-sweep order I had left unstated.
+
+**PB2-3 - T5.4's deferral had no POSITION. ACCEPT.** Below the batch-supersession
+block (`tourReminders.ts:1086-1099`) a claim-window rung picks up a terminal
+`quiet_hours_superseded` stamp on the way past - reintroducing round 5's
+irreversibility through a different token. The deferral check goes ABOVE it.
+
+**PB2-4 - the grace-window retire had no TOKEN. ACCEPT.** I adopted this job's
+bounded-wait pattern and took the pattern minus the thing that makes it visible.
+Every existing token is false for a stuck conversion claim, and `superseded` is
+wrong because the cause and the remedy differ. A new token re-runs the entire
+T5.2 census - now budgeted in the task rather than discovered in S6 - and the
+spec's acceptance 7 is amended to permit the retire.
+
+**PB2-5 - `ToursRepo` is faked too. ACCEPT.** T1.3 widens `ToursRepo` and the
+harness fakes it at `twilioWebhookHarness.ts:2801` - the same trap as T1.6, one
+interface over, and worse: without REAL compare semantics in the fake, T3.3's
+compare-and-set test passes against a fake that never says no.
+
+**PB2-6 - T7.6 delegated a decision I was asked to make. ACCEPT.** "Decide and
+state which view carries what" is not a plan task. Acceptance 4 already forces
+it: `earlier[]` carries `suppression` and the disclosure renders the chip.
+
+**PB2-7 - the fate of the existing `cancelTourReminders` call across S3-S8 was
+unstated. ACCEPT.** Both misreadings break the slice guarantee - deleting it
+early stops retiring ladders at all, swapping it early starts deletion before
+refusal exists. One sentence: it stays until S9.
+
+**PB2-8 - the census method probes ONE union. ACCEPT.** `discontinued` reaches
+only the suppression surfaces; the skip-reason and 409 side needs a second probe
+(`tour_already_passed` spans all of them). The census has now been wrong in four
+consecutive reviews, which is the argument for a method over a list - but the
+method has to be complete too.
+
+**PB2-9 - `seedAll` persists tours BEFORE `seedLive` arms**, so T4.1's "set the
+pointer inline" is not available as written. ACCEPT - patch after the arm or
+reorder, and say which.
+
+**PB2-10 - conversion emits no `scheduled.updated`. ACCEPT** as a stated
+acceptance rather than a fix: it is parity with today, but post-S8 the stale
+rows are DELETED rather than canceled, so it belongs in a comment where the next
+reader looks.
+
+## Where the review process stands
+
+Seven rounds total (five spec, two plan), 111 findings, 107 accepted, 0 rejected
+outright. Round 2's blocker was not a design defect - it was me fixing the plan
+and leaving the spec contradicting it. Worth carrying forward as a rule: when a
+review finding changes a decision, amend the SPEC first and let the plan follow,
+because the spec is what the plan is checked against.

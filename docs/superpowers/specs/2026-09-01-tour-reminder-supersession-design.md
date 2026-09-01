@@ -85,19 +85,27 @@ because this path has no sweep.
 steps 1-2 and stop: the rotated pointer matches nothing, so the tour has no live
 ladder.
 
-**Conversion** (`routes/placements.ts:716`) does NOT touch the pointer. The tour
-already carries a reversible in-flight marker - the conversion claim sentinel
-written by `claimConversion` and undone by `releaseConversionClaim` - and 3.3
-makes the poll DEFER every rung of a claim-in-flight tour: left unclaimed, no
-skip stamp, no delete. The sweep runs only after the FINALIZE succeeds
-(`placements.ts:757-773` shows a finalize failure releasing the claim and
-rethrowing with the tour left `scheduled` and retryable by design; sweeping
-before it is exactly the silently-disarmed tour this ordering prevents).
-Deferral, not a claim-skip, is what makes this reversible: `skippedAt` is
-terminal (`tourRemindersRepo.ts:361`), so a rung retired during the window could
-never come back when the claim is released. The deferral is bounded - the claim
-either finalizes (the sweep removes the rungs) or is released (the rungs
-resume) - so nothing re-lists forever.
+**Conversion** (`routes/placements.ts:716`) does not touch the pointer BEFORE
+the finalize, and rotates it AS PART OF the finalize. The two halves have
+opposite requirements and the split is the whole design:
+
+- BEFORE finalize, the disarm must be REVERSIBLE, because a failed `create` or
+  a failed finalize releases the claim and leaves the tour `scheduled` and
+  retryable by design (`placements.ts:757-773`). Rotating there would be
+  irreversible in practice: 3.3's poll would claim-skip due rungs `superseded`,
+  and `skippedAt` is terminal (`tourRemindersRepo.ts:361`), so releasing the
+  claim would not bring them back. The reversible disarm is the conversion claim
+  the tour ALREADY carries - `claimConversion` writes a `pending:<uuid>`
+  sentinel, `releaseConversionClaim` undoes it - and 3.3 makes the poll DEFER
+  every rung of a claim-in-flight tour: left unclaimed, nothing stamped.
+- AT finalize the conversion is real and there is nothing left to reverse, so
+  the pointer rotation rides the finalize patch itself (`placements.ts:758`,
+  the same one-write idiom the re-arm path uses) and the sweep follows.
+
+The rotation is REQUIRED here, not optional. Without it the converted tour has
+no refusal backstop at all: the sentinel is gone so the deferral ends, the
+pointer still matches, and the poll has no tour-status check - so a rung the
+sweep MISSED would send on a converted tour, permanently.
 
 **Interruption posture.** A failure at step 3 or 4 leaves a live `scheduled`
 tour whose pointer matches nothing - disarmed, not merely unsent. That is not
@@ -117,7 +125,13 @@ A rung whose `ladderId` does not match its tour's `currentLadderId` is REFUSED:
   separate entry point from the poll; without this it is a live button that
   force-sends a superseded reminder.
 
-A rung of a tour with a CONVERSION CLAIM in flight is DEFERRED instead: left
+A rung of a tour with a CONVERSION CLAIM in flight is DEFERRED instead - but a
+deferral with no ceiling is the perpetual-"sending shortly" lie this codebase has
+already fixed once, and a crashed conversion leaves its sentinel with no TTL and
+no recovery route. So past a grace window the rung is retired VISIBLY with its
+own skip reason, distinct from `superseded` because the cause is different and
+the operator's remedy is different: the conversion is stuck, not superseded.
+Inside the window it is DEFERRED: left
 unclaimed, no stamp, retried on the next tick (3.2).
 
 **Copy and type surfaces for `superseded` - the count matters because only some
@@ -256,7 +270,10 @@ not compensate on its own. The "New messages" pill is positioned against
 
 ## 4. Surfaces
 
-**Writers of reminder rows**: `armTourReminders` (create); the sweep (3.2);
+**Writers of reminder rows**: `armTourReminders` (create); the sweep (3.2 -
+three sites, and note the conversion site is one CALL SITE but two operations at
+two points in an ordered compensation: a deferral before finalize, a rotation
+plus sweep at it);
 `claimSend` / `claimSkip`; `cancel` / `uncancel`; the seed builders under
 `app/src/lib/seed/`; the dev tick routes;
 `app/scripts/retire-paused-tour-reminders.ts` (already guarded - the precedent,
@@ -330,7 +347,12 @@ and name.
    rung.
 7. A conversion whose `placements.create` OR whose FINALIZE fails leaves the
    tour still armed, with every rung intact and NONE of them stamped
-   `superseded` - a rung due during the claim window is deferred, not retired.
+   `superseded` - a rung due inside the claim window is deferred, not retired.
+   The ONE exception is a conversion claim that never resolves: past the grace
+   window such a rung is retired visibly with its own reason (3.3), because a
+   rung that defers forever is never sent and never says so.
+7a. A conversion that SUCCEEDS rotates the pointer as part of its finalize, so a
+   rung the sweep missed is refused rather than sent.
 8. Two concurrent reschedules leave the tour pointing at a ladder that exists;
    the loser logs at error and strands no pointer at a swept generation.
 9. A hand-canceled rung disappears on the next reschedule; PATCH against a
@@ -374,6 +396,6 @@ and name.
   it. The pointer check lowers a missed row's consequence from "sends" to
   "appears in earlier".
 - **R6 - scroll semantics.** Passes unit tests, fails in the hand. Live QA on a
-  phone viewport is required, and the three-anchor model across all five scroll
+  phone viewport is required, and the three-anchor model across all six scroll
   writers is the part to drive by hand first.
 - **R7 - a terminal tour's panel can go empty.** Intended consequence of D1.

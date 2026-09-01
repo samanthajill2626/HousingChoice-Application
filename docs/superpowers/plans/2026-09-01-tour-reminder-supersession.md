@@ -57,6 +57,12 @@ a narrow `setLadderIdIf(tourId, expected, next)`. It must be a real DynamoDB
 `ConditionExpression`, and it must be tested against DynamoDB Local, not only
 against the in-memory fake.
 
+This widens `ToursRepo`, and the harness fakes THAT repo too
+(`twilioWebhookHarness.ts:2801`, explicitly annotated) - the same typecheck trap
+as T1.6, one interface over. The fake's version needs REAL compare semantics
+(reject when the stored value differs), or T3.3's test passes against a fake
+that never says no.
+
 **T1.4 - claim guards. RED FIRST; this test is why the slice exists.** Against
 DynamoDB Local, at the repo layer:
 
@@ -140,7 +146,12 @@ tour captured before the arm.
 
 **T3.2 - re-arm path** (`tours.ts`, `armable && rearmTrigger`). Rotate the
 pointer to a fresh UUID inside the patch ALREADY written at `tours.ts:1164` -
-one write. Then sweep (S9), arm, then T3.3.
+one write. Then arm, then T3.3.
+
+**The existing `cancelTourReminders` call stays exactly where it is until S9.**
+Do not delete it here (the ladder would stop being retired at all) and do not
+swap it for the sweep here (deletion would start before refusal exists). Either
+misreading breaks the slice-order guarantee.
 
 **T3.3 - the final pointer write is a COMPARE-AND-SET** on the rotation value
 from T3.2, using T1.3's guarded method. RED: two interleaved reschedules leave
@@ -170,8 +181,10 @@ pre-migration exemption - it is refused, so it is safe, but it must be loud.
 Must land BEFORE refusal (S5) or every seeded world goes dark.
 
 **T4.1 - `lib/seed/live.ts`** arms through the REAL armer (`:514`, `:528`,
-`:538`) and writes tour rows directly: set `currentLadderId` inline from each
-arm's returned `ladderId`. RED: after a live seed, every armed rung matches its
+`:538`) and writes tour rows directly. Note `seedAll` PERSISTS the tours before
+`seedLive` arms, so "inline" is not available as written: either patch the
+pointer after the arm, or reorder to arm before the tour write. Pick one and say
+which. RED: after a live seed, every armed rung matches its
 tour's pointer.
 
 **T4.2 - `lib/seed/matrix.ts`** builds RAW rows including a same-tour SENT
@@ -214,10 +227,11 @@ renders the raw snake_case token to staff), plus `SEND_NOW_ERROR_COPY`, a
 `Record<string, string>` read through `??` (`dashboard/src/api/types.ts:1327`,
 `:1379`) whose missing entry silently renders the generic retry sentence.
 
-Method, since the census keeps being wrong: grep for every map and union keyed
-by an existing reason token (`discontinued` is the best probe - it is the most
-recently added), add `superseded` everywhere one appears, and write an explicit
-assertion for each surface the typechecker does not force. Include the
+Method, since the census keeps being wrong: probe with an EXISTING token and add
+`superseded` everywhere it appears. Two probes are needed, not one -
+`discontinued` reaches only the SUPPRESSION surfaces, while the skip-reason and
+409 surfaces need a second (`tour_already_passed` appears across all of them).
+Write an explicit assertion for each surface the typechecker does not force. Include the
 `types.test.ts` hand-lists. Green is not evidence here.
 
 **T5.3 - the poll refuses.** In `runDueTourReminders`, a rung whose `ladderId`
@@ -239,10 +253,22 @@ Deferred means: left unclaimed, NOTHING stamped, retried next tick. It must not
 be a claim-skip - `skippedAt` is terminal (`tourRemindersRepo.ts:361`), so a
 skip inside the window could never be undone when the claim is released.
 
-**Bound it.** A crashed conversion leaves the sentinel with no TTL and no
-recovery route, so an unbounded deferral is a silent forever-loop. Follow this
-job's own bounded-wait pattern (`tourReminders.ts:1193-1206`): past the grace
-window, retire the rung visibly rather than deferring again, and log.
+**Position: ABOVE the batch-supersession block** (`tourReminders.ts:1086-1099`).
+Below it, a claim-window rung picks up a terminal `quiet_hours_superseded` stamp
+on its way past, which reintroduces the same irreversibility through a different
+token - the deferral would be undone by nothing.
+
+**Bound it, and NAME the token.** A crashed conversion leaves the sentinel with
+no TTL and no recovery route, so an unbounded deferral is a silent forever-loop.
+Follow this job's own bounded-wait pattern (`tourReminders.ts:1193-1206`): past
+the grace window, retire the rung visibly rather than deferring again, and log.
+
+That retire needs its OWN skip reason - every existing token is false for a
+stuck conversion claim, and `superseded` is wrong because the cause and the
+operator's remedy are both different (the conversion is stuck, not the ladder
+replaced). Adding it re-runs the whole T5.2 census: two unions, every exhaustive
+map, both hand-mirrored dashboard unions, and a `SEND_NOW_ERROR_COPY` entry.
+Budget for that here rather than discovering it in S6.
 
 **T5.5 - Send now refuses.** `forceSendReminder` is a SEPARATE entry point and
 inherits nothing from T5.3. A pointer-mismatched rung gets 409 with its own
@@ -292,10 +318,10 @@ current-ladder action list: it keys off `state` and would put Send now on an
 unsent earlier rung (`RemindersPanel.tsx:397`) and Restore on a canceled one
 (`:408`).
 
-**T7.6 - `earlier[]` views must carry `suppression`** if they are to show the
-`superseded` annotation at all. After T7.1's partition no row in `reminders[]`
-can carry it, so the annotation has nowhere to render unless the earlier view
-shape includes it. Decide and state which view carries what.
+**T7.6 - `earlier[]` views carry `suppression`.** After T7.1's partition no row
+in `reminders[]` can carry the `superseded` annotation, so without this the
+annotation has nowhere to render. Acceptance 4 forces the answer: the earlier
+view shape includes `suppression`, and the disclosure renders its chip.
 
 **T7.7 - no body without `sentBody`.** An earlier rung lacking the snapshot
 renders NO body rather than composing live against the tour's current time.
@@ -317,17 +343,30 @@ tour `scheduled`, retryable by design): in both, the tour keeps every rung, its
 pointer, and has NO rung stamped `superseded`. Sweeping before the finalize
 passes the first and fails the second - that is the point of the task.
 
-**T8.3 - ROTATE the pointer with the sweep, after finalize.** Without this the
+**T8.3 - ROTATE the pointer INSIDE the finalize patch.** Without a rotation the
 converted tour has no refusal backstop at all: T5.4's deferral ends when the
-sentinel is replaced, the pointer still matches, and the poll has no
-tour-status check - so a rung the sweep MISSED (or a sweep that failed
-outright) sends on a converted tour, permanently. This is the task that makes
-the slice-order guarantee true at S8; the previous draft's guarantee was false
-here.
+sentinel is replaced, the pointer still matches, and the poll has no tour-status
+check - so a rung the sweep MISSED (or a sweep that failed outright) sends on a
+converted tour, permanently. This is the task that makes the slice-order
+guarantee true at S8; an earlier draft's guarantee was false here.
+
+Write it as part of the finalize patch at `placements.ts:758` - the same
+one-write idiom the re-arm path uses - NOT as a separate write afterwards. A
+separate write reopens a slice of the same gap between finalize and rotation,
+and adds a rotation-failure branch nothing covers. Folding it in also settles
+the order question: the pointer is rotated by the finalize, and the sweep
+follows it.
 
 **T8.4 - sweep-failure posture.** The sweep is best-effort at this point - the
 conversion is already real and must not be rolled back for it. Log at error;
 the rotated pointer from T8.3 is what keeps a missed row harmless.
+
+**T8.5 - accepted, state it in a comment:** conversion emits no
+`scheduled.updated` (this route emits only placement and tour events), so after
+the sweep the two Upcoming buckets stay stale until their next refetch. That is
+parity with today's cancel-based behavior, not a regression this slice
+introduces - but post-S8 the stale rows are DELETED rather than merely canceled,
+so say so where the next reader will look.
 
 ---
 

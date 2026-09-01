@@ -915,6 +915,18 @@ describe('GET /api/calls/:callId (M1.9a, authed)', () => {
     expect(res.body.call.call_party_label).toBe('Bob');
   });
 
+  it('RED: GET /api/calls/:callId hands back a roster with resolved names', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-bob', type: 'landlord', phone: BOB, firstName: 'Robert', lastName: 'Renamed' });
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+    const res = await request(app).get('/api/calls/CAinbound0001').set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const bob = (res.body.conversation.participants as { contactId: string; name?: string }[]).find((p) => p.contactId === 'c-bob');
+    expect(bob?.name).toBe('Robert Renamed');
+  });
+
   it('404 for an unknown callId', async () => {
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({ world });

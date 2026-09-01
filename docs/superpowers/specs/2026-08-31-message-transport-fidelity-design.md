@@ -1,6 +1,6 @@
 # Message transport fidelity - design specification
 
-Status: v2 - round 1 adjudicated; awaiting adversarial re-review and human gate
+Status: v3 - round 2 adjudicated; awaiting adversarial re-review and human gate
 Date: 2026-08-31
 Branch: `feat/message-transport-fidelity`
 Worktree: `W:\tmp\message-transport-fidelity`
@@ -111,7 +111,7 @@ message:
 
 Therefore:
 
-- requested transport comes from the provider adapter's prepared send plan;
+- requested transport comes from the provider adapter's transport intent;
 - actual transport comes from an explicit provider observation such as
   `ChannelPrefix`;
 - a callback without transport evidence may still advance delivery status but
@@ -178,7 +178,7 @@ Rules:
 
 - Every carrier message newly written by runtime, import, or seed code after
   this feature has `transport_schema_version: 1`.
-- An adapter plan establishes outbound `requested_transport` before the provider
+- An adapter intent establishes outbound `requested_transport` before the provider
   send begins. A message row stores that value atomically when the row can be
   created: after a direct/group provider result supplies the required SID and
   timestamp, or before enqueue for a relay source whose synthetic identity
@@ -205,12 +205,14 @@ requestedTransport?: MessageTransport;
 actualTransport?: MessageTransport;
 ```
 
-`requestedTransport` is required for every new provider-attempted outbound leg.
-`actualTransport` is optional until evidence exists. A suppressed slot for which
-no provider send occurred carries neither field and keeps its existing
-suppression status/error contract. The source message may be an inbound relay
-message while its fan-out legs are outbound, so message-level direction cannot
-substitute for leg-level requested transport.
+`requestedTransport` records the adapter-selected transport intent for every new
+outbound leg slot. It may be present when a later consent, suppression, or guard
+check prevents a provider call; requested intent is not evidence that an attempt
+occurred. `actualTransport` is optional until provider evidence exists and is
+always absent when no provider send occurred. A suppressed slot keeps its
+requested intent plus its existing suppression status/error contract. The source
+message may be an inbound relay message while its fan-out legs are outbound, so
+message-level direction cannot substitute for leg-level requested transport.
 
 The existing status, SID, error, sent timestamp, and delivered timestamp fields
 are unchanged.
@@ -230,18 +232,23 @@ Late callbacks do not upgrade schema-absent rows. Repository transport writes
 are conditioned on `transport_schema_version = 1`, preserving the no-migration
 and keep-legacy decisions.
 
-## 6. Prepared-send contract
+## 6. Two-stage adapter contract
 
 Requested transport must be available before actual transport and must also be
-available for queued fan-out work. To keep routing policy out of services, each
-carrier adapter exposes a prepare-then-send contract.
+available for queued fan-out work. Long-lived jobs must still materialize fresh
+media URLs immediately before each provider call. To satisfy both constraints
+without moving provider policy into services, each carrier adapter exposes a
+two-stage classify-then-prepare contract.
 
 Conceptually:
 
 ```ts
-interface PreparedMessageSend {
-  params: SendMessageParams;
+interface MessageTransportIntent {
   requestedTransport: MessageTransport;
+}
+
+interface PreparedMessageSend extends MessageTransportIntent {
+  params: SendMessageParams;
 }
 
 interface SendMessageResult {
@@ -252,89 +259,101 @@ interface SendMessageResult {
 }
 ```
 
-The same adapter must create and execute the plan. Services may persist the
-normalized `requestedTransport`, but may not construct it themselves or modify
-the plan.
+The transport-intent stage accepts durable message facts and provider
+configuration only. It cannot contain presigned URLs or any other expiring send
+material. The late preparation stage accepts that intent plus freshly
+materialized provider parameters and returns the executable plan. The same
+adapter owns both stages and executes the plan. Services may persist the
+normalized `requestedTransport`, but may not construct or reinterpret it.
 
-The plan makes requested transport known before execution; it does not require a
-durable direct/group message row before Twilio returns the provider SID and
+The intent makes requested transport known before execution; it does not require
+a durable direct/group message row before Twilio returns the provider SID and
 timestamp that form the existing row key. Direct and native-group messages keep
-their current send/post-then-append ordering and persist the plan's requested
+their current send/post-then-append ordering and persist the intent's requested
 transport in that append. This mission adds no provisional identity, alias, or
 failed-pre-send row lifecycle.
 
-The Twilio Programmable Messaging adapter's current policy prepares SMS for
+The Twilio Programmable Messaging adapter's current policy classifies SMS for
 text-only sends and MMS for media sends. That policy is localized in the
 adapter, covered by contract tests, and is the future seam where an enabled RCS
 sender changes the requested transport. The console/fake adapter implements the
 same domain contract without importing Twilio vocabulary.
 
-The group Conversations port has an equivalent prepared-post contract. Its
-current Twilio implementation prepares and observes MMS because it calls the
-Group MMS rail. A future rail can change that adapter result without changing
-group services, persistence, or UI logic.
+The group Conversations port has an equivalent intent and late-preparation
+contract. Its current Twilio implementation classifies and observes MMS because
+it calls the Group MMS rail. A future rail can change that adapter result without
+changing group services, persistence, or UI logic.
 
-Prepared plans are plain serializable data, not closures. An asynchronous source
-persists the requested transport before enqueue; on execution the job recreates
-and validates the current adapter plan from its existing stable inputs. A
-mismatch between the persisted requested transport and the recreated plan is a
-loud structured error and a refused send, not silent drift.
+Transport intents are plain serializable data, not closures. An asynchronous
+source persists the requested transport before enqueue; on execution the job
+reclassifies from the current adapter and durable inputs, then prepares fresh
+provider parameters immediately before each send. If the current classification
+differs from the persisted requested transport, the job emits a structured
+warning and continues the current send path. It does not rewrite the original
+requested value or add a new refusal mode. Later actual provider evidence remains
+the only authority for what transport was used.
 
 ## 7. Flow by message path
 
 ### 7.1 Direct 1:1 and broadcast recipients
 
-`sendMessage` obtains a prepared plan, executes it, and appends:
+`sendMessage` obtains a transport intent, prepares and executes the send, and
+appends:
 
 - schema version 1,
-- the plan's requested transport,
+- the intent's requested transport,
 - any actual transport returned by the adapter, and
 - the unchanged legacy `type` selected for media/content behavior.
 
 The append occurs after a successful provider call because the current key
 requires the returned provider SID and timestamp. Requested transport was fixed
-by the immutable plan before that call; it is not reverse-engineered afterward.
+by the immutable intent before that call; it is not reverse-engineered afterward.
 
 Broadcasts already create ordinary 1:1 message rows, so they inherit this path.
-Manual 30003 retries create a new attempt and obtain a new plan; they do not copy
-actual transport from the prior attempt. Existing `retry_of` lineage remains.
+Manual 30003 retries create a new attempt and obtain a new intent; they do not
+copy actual transport from the prior attempt. Existing `retry_of` lineage
+remains.
 
 ### 7.2 Relay groups
 
 For a team-authored relay message, the source message records schema version 1
 and the common requested transport before the fan-out job is enqueued. Each
-recipient slot is seeded with the same requested transport.
+recipient slot is seeded with the same requested transport. A slot that is later
+suppressed retains that intent and receives no actual transport; this records
+what the application selected without claiming a provider attempt.
 
 For an inbound relay source, the source message records inbound actual evidence
-only. At the first fan-out execution, the job resolves the current roster exactly
-where it does today, evaluates suppression, prepares each eligible send, and
-conditionally seeds the complete `delivery_recipients` map in one repository
-write before the first provider send. Non-suppressed slots start queued with
-their requested transport; suppressed slots carry only their existing suppressed
-status/error. This atomically captured map is the expected leg set for transport
-completeness and for redelivery of that fan-out. A concurrent or repeated job
-must adopt the captured set and must not replace it from a later roster read.
+only. Every fan-out execution resolves the current roster where it does today,
+so membership-at-execution and retry behavior remain unchanged. For each current
+outbound leg, the adapter classifies transport from durable source facts. The job
+creates or updates that recipient slot with immutable requested intent and its
+current queued or suppressed state. An eligible leg then materializes fresh media
+URLs immediately before late preparation and provider send. No recipient-set
+snapshot, initialization marker, or prebuilt all-recipient send plan is added.
 
-Each fan-out send executes a provider plan. Its result can populate immediate
+Each fan-out result is applied through child-field repository updates that
+preserve requested intent and concurrent status fields. It can populate immediate
 actual evidence. A later Programmable Messaging status callback can populate or
 refine that slot's actual transport via the existing SID pointer.
 
 The inbound source's main chip always follows the inbound actual-only rule. Its
 recipient disclosure is allowed even though the source direction is inbound and
-shows the separately outbound slots. The outbound slot aggregate never replaces
-or rewrites the inbound main chip.
+shows the outbound slots created by current and prior executions. Those slots are
+progressive disclosure, not a frozen completeness set. Their aggregate never
+replaces or rewrites the inbound main chip.
 
-Relay announcements that persist a source message use the same prepared-send and
-slot contract. Non-persisted system sends remain outside message-chip scope.
+Relay announcements that persist a source message use the same intent,
+late-preparation, and child-field result contract. Non-persisted system sends
+remain outside message-chip scope.
 
 ### 7.3 Native groups
 
-`groupSend` obtains the group adapter's prepared post before persistence. New
-source messages and every recipient slot carry requested MMS. Because the
+`groupSend` obtains the group adapter's transport intent before the provider
+post. New source messages and every recipient slot carry requested MMS. Because the
 current rail is exclusively Group MMS, the successful provider result supplies
 actual MMS for the source and every non-suppressed, provider-attempted slot.
-Suppressed slots carry no requested or actual transport because Twilio creates no
-leg for them.
+Suppressed slots retain requested MMS and carry no actual transport because
+Twilio creates no leg for them.
 
 Inbound native-group messages are normalized as actual MMS from the native
 group envelope and have no requested value.
@@ -375,7 +394,8 @@ is a new provider attempt and therefore a new row or slot send observation.
 
 Initial message appends and recipient-slot seeds write requested transport in
 the same operation as the rest of the new item/slot. No later generic update may
-replace it.
+replace it. Requested transport may survive a later suppression result because it
+records adapter intent, not proof of provider invocation.
 
 ### 8.2 Actual transport state machine
 
@@ -414,7 +434,12 @@ writes. Conditional expressions enforce the state machine against the value in
 DynamoDB, not a stale read. A conditional race is re-read and classified as
 idempotent, allowed fallback, or conflict.
 
-The existing whole-slot `setRecipientDelivery` remains the initial slot seed.
+The existing whole-slot `setRecipientDelivery` may be used only for true initial
+slot creation. Add a send-result repository operation (conceptually
+`applyRecipientSendResult`) for relay fan-out and persisted announcement success
+and failure paths. It updates only status, SID, sent timestamp, error, and actual
+transport child fields under the existing forward-status and new actual-
+transport state machines; it never replaces the slot or requested transport.
 Callback paths continue using child-field updates only.
 
 ## 9. Presentation contract
@@ -467,17 +492,17 @@ transitions. No normalized known pair falls through to `Unknown` or a blank chip
 
 On an outbound message, recipient slots take precedence over message-level
 actual transport when at least one slot exists. On an inbound relay source, the
-main chip remains inbound actual-only and slots affect only the recipient
-disclosure.
+main chip remains inbound actual-only and slots affect only the progressively
+populated recipient disclosure.
 
-- The atomically seeded slot map is the expected set. Until every non-suppressed
-  slot in that set has actual evidence, an outbound main chip shows only the
-  message's requested transport.
+- For outbound sources, the recipient slots initialized with the source message
+  are the expected set. Until every non-suppressed slot in that set has actual
+  evidence, the main chip shows only the message's requested transport.
 - Once complete, one distinct actual transport uses the single-recipient table.
 - Once complete, two or more distinct actual transports use `Mixed` as actual.
 - A suppressed slot (`contact_opted_out`) is excluded from completeness and
-  actual aggregation because no provider send occurred. It stores neither
-  requested nor actual transport.
+  actual aggregation because no provider send occurred. It retains requested
+  intent but has no actual transport.
 - A genuinely failed provider attempt remains included. If it has no actual
   evidence, the aggregate remains pending rather than inventing a channel.
 - If no requested transport is present, complete mixed evidence shows `Mixed`;
@@ -485,8 +510,9 @@ disclosure.
 
 Expanded recipient rows are allowed for both outbound multi-recipient sources and
 inbound relay sources. They use their own requested/actual fields. A suppressed
-row keeps its existing suppression copy and renders no transport label because
-no transport was attempted.
+row keeps its existing suppression copy and renders requested transport only;
+the suppression state makes clear that no provider attempt occurred. Inbound
+relay slots appear progressively and are never used to decide the main chip.
 
 ### 9.5 Copy and layout
 
@@ -549,11 +575,12 @@ be silently omitted.
 ### App
 
 - `app/src/repos/messagesRepo.ts`: domain type, message/recipient fields,
-  conditional child-field writers, append mapping, fake repository parity.
-- `app/src/adapters/messaging.ts`: prepared-send contract, Twilio and console
-  policy, callback-prefix normalizer.
-- `app/src/adapters/groupConversations.ts`: prepared group post and Group MMS
-  actual evidence.
+  conditional child-field writers including the non-replacing producer-result
+  operation, append mapping, fake repository parity.
+- `app/src/adapters/messaging.ts`: durable transport-intent classification,
+  late send preparation, Twilio and console policy, callback-prefix normalizer.
+- `app/src/adapters/groupConversations.ts`: group intent, late post preparation,
+  and Group MMS actual evidence.
 - `app/src/services/sendMessage.ts`: direct/broadcast/retry persistence.
 - `app/src/services/groupSend.ts`: native group source and slots.
 - `app/src/jobs/relayFanOut.ts`: per-leg requested/actual transport.
@@ -601,18 +628,23 @@ Before full completion gates, add and run targeted tests for:
    all nine known requested/actual pairs, partial multi-recipient evidence,
    complete uniform evidence, mixed evidence, optimistic suppression, inbound
    relay leg disclosure, and suppression.
-2. Adapter planning: current text, media, and Group MMS policies; RCS-ready
-   normalization; no service or dashboard attachment-only inference.
+2. Adapter intent and late preparation: current text, media, and Group MMS
+   policies; RCS-ready normalization; fresh per-leg media parameters; no service
+   or dashboard attachment-only inference.
 3. Webhook normalization: recognized case variants, missing prefix, unknown
    prefix warning, and Group MMS envelope evidence.
 4. Direct, broadcast, retry, relay, announcement, native-group, inbound,
    import, seed, and dev-fixture writers.
 5. Repository actual state machine: absent, duplicate, RCS fallback, refused
    conflicts, schema-absent legacy row, and unknown row/slot.
-6. DynamoDB Local concurrency: simultaneous status, SID, error, and actual
-   transport writes to one recipient slot preserve every field.
+6. DynamoDB Local concurrency: simultaneous status, SID, error, requested, and
+   actual transport writes to one recipient slot preserve every field; producer
+   results never whole-slot replace seeded intent.
 7. API/projection and dashboard hook propagation.
 8. Transport-only callback updates emit the existing live refetch event.
+9. Relay behavior parity: inbound retries use membership-at-each-execution,
+   media is materialized per leg immediately before send, suppressed slots retain
+   requested-only intent, and queued classification drift warns but still sends.
 
 ### 13.2 Browser proof
 
@@ -660,6 +692,8 @@ at base `5ce9912f` and exited 0:
 - Conflicting actual transitions produce a structured warning and preserve the
   stored value.
 - Missing channel evidence is expected and produces no warning by itself.
+- Queued classification drift produces a structured warning, preserves the
+  original requested value, and continues the existing send path.
 - Provider payload names remain at adapter/webhook boundaries.
 - Logs contain safe IDs, enum values, and error codes only; no bodies or phone
   numbers.
@@ -686,15 +720,16 @@ The mission is complete only when all of the following are true:
 1. No new carrier-message chip derives transport from `MessageType`, media, SID
    prefix, or conversation kind.
 2. Every new carrier runtime writer stamps schema version 1.
-3. Every newly persisted outbound provider-attempt row or slot stores
-   adapter-owned requested transport.
+3. Every newly persisted outbound message or leg slot stores adapter-owned
+   requested transport, including a slot later suppressed before provider send;
+   only provider evidence may populate actual transport.
 4. Every explicit provider transport observation can update actual transport
    without depending on a delivery-status transition.
 5. Requested transport is immutable and conflicting actual observations cannot
    corrupt stored evidence.
 6. Multi-recipient message and recipient-row presentation follows the locked
-   rules, including inbound relay disclosure, expected-slot completeness,
-   suppression, pending, and mixed states.
+   rules, including progressive inbound relay disclosure, outbound-source
+   expected-slot completeness, suppression, pending, and mixed states.
 7. Existing schema-absent rows display exactly as they do today.
 8. Calls and email retain their current labels and behavior.
 9. Targeted tests, browser proof, full feature-mission gates, and independent

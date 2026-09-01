@@ -100,6 +100,24 @@ export interface TourItem {
   moveForward?: boolean;
   /** Navigator note: convertible to a placement? Absent until exit gate. */
   convertible?: boolean;
+  /**
+   * GENERATION POINTER (supersession, 2026-09-01): the id of the reminder
+   * ladder that is CURRENT for this tour. Reminder rows carry a matching
+   * `ladderId`; a row that does not match has been superseded and every send
+   * path refuses it.
+   *
+   * NEVER REMOVED. "This tour has no live ladder" is expressed by ROTATING this
+   * to a fresh value that no row carries - not by clearing it, because `patch`
+   * maps an explicit null to REMOVE and a cleared pointer would be
+   * byte-identical to a never-migrated one. ABSENT means pre-migration,
+   * permanently and only.
+   *
+   * DECLARATION ONLY. `[key: string]: unknown` below means PatchTourInput
+   * collapses to an index-signature type, so `patch({ currentLadderId })` and a
+   * misspelling of it both compile. Assert on the STORED row, never on the
+   * typechecker.
+   */
+  currentLadderId?: string;
   createdAt: string;
   updatedAt: string;
   [key: string]: unknown;
@@ -181,6 +199,21 @@ export interface ToursRepo {
    * written since). Best-effort — a lost condition is a no-op.
    */
   releaseConversionClaim(tourId: string, value: string): Promise<void>;
+  /**
+   * COMPARE-AND-SET the generation pointer: writes `currentLadderId = next`
+   * ONLY while the stored value still equals `expected` (and the tour exists).
+   *
+   * This is the last step of a reschedule - rotate the pointer, sweep, arm,
+   * then point at what was armed. Without the compare, two concurrent
+   * reschedules interleave so that the pointer names a ladder the other request
+   * already swept: two 200s, a silently disarmed tour, no error.
+   *
+   * Returns `false` on a lost compare (the other reschedule's rotation stands
+   * and must NOT be clobbered) - never throws for it; the caller logs at error
+   * and leaves its own rows unpointed, where the refusal rules will decline
+   * them. Anything else propagates.
+   */
+  setLadderIdIf(tourId: string, expected: string, next: string): Promise<boolean>;
   /**
    * Write the roster PLAN under a conditional guard (contact-rosters section 7).
    * `expectedVersion === undefined` MATERIALIZES it - the write only lands when
@@ -440,6 +473,41 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         throw err;
       }
       log.info({ tourId }, 'tour conversion claim released (conversion failed)');
+    },
+
+    async setLadderIdIf(tourId, expected, next) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId },
+            UpdateExpression: 'SET #cl = :next, #updatedAt = :now',
+            // Value-guarded, like releaseConversionClaim: only advance the
+            // pointer we ourselves rotated. attribute_exists(tourId) keeps
+            // UpdateItem from conjuring an attribute-only stub for a missing
+            // tour (an equality on an absent attribute is false anyway, but the
+            // guard is the one this repo states everywhere else).
+            ConditionExpression: 'attribute_exists(tourId) AND #cl = :expected',
+            ExpressionAttributeNames: { '#cl': 'currentLadderId', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeValues: {
+              ':expected': expected,
+              ':next': next,
+              ':now': new Date().toISOString(),
+            },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // A lost compare is a REAL outcome, not an error: a concurrent
+          // reschedule rotated the pointer and owns the tour's ladder now. The
+          // caller decides how loud that is.
+          log.debug({ tourId }, 'tour ladder pointer write lost the compare - no-op');
+          return false;
+        }
+        throw err;
+      }
+      log.info({ tourId }, 'tour ladder pointer advanced');
+      return true;
     },
 
     async setRoster(tourId, roster, expectedVersion) {

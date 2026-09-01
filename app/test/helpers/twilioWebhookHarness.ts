@@ -2898,6 +2898,20 @@ export function createFakeWorld(): FakeWorld {
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },
+    async setLadderIdIf(tourId, expected, next) {
+      // REAL compare semantics, or the route-level interleaving test asserts
+      // nothing. Like claimConversion above, the check-and-set is synchronous
+      // within this async tick (no internal await between them), so two
+      // concurrent callers can never both win. A stored value that differs -
+      // including ABSENT, which never equals a string - LOSES and writes
+      // nothing; the winner's rotation must survive intact.
+      const t = toursMap.get(tourId);
+      if (!t || t.currentLadderId !== expected) return false;
+      t.currentLadderId = next;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+      return true;
+    },
     async setRoster(tourId, roster, expectedVersion) {
       // Mirror the conditional write: MATERIALIZE only when no plan exists AND
       // no thread pointer does (D1 - a plan on a thread-bearing tour is inert),

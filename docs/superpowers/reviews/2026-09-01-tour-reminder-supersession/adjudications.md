@@ -206,3 +206,73 @@ returned); acceptance 11's group case is unsatisfiable through
 
 **R3-13 - A15 conceded again.** Kept as a risk, now lower-consequence: the
 pointer check downgrades a missed row from "sends" to "appears in earlier".
+
+---
+
+# Round 4 (terminal - the cap)
+
+13 findings, 1 BLOCKING, verdict "BUILDABLE: no" scoped to ONE mechanism.
+ACCEPT 13, REJECT 0. Doc review stops here regardless: four rounds is the cap.
+
+**R4-1 - one boolean cannot drive both the pin and the pill. ACCEPT, BLOCKING.**
+Verified: `atBottomRef.current` gates the pin at `Timeline.tsx:1911` and the
+pill at `:1914`. Once content exists below the last message the two gates want
+opposite answers - strict reading lights the pill permanently for an operator
+standing on the block, loose reading fires the pin and yanks them off it. My
+sentinel gave one predicate to both and asserted two properties one boolean
+cannot deliver. Replaced with a three-valued anchor (`sentinel` / `below` /
+`null`): the pill lights only on `null`, the pin never fires on `null`, and
+`below` is anchored to the scroller's true bottom rather than re-pinned to the
+sentinel.
+
+**R4-2 - the conversion split stopped one step short. ACCEPT.** Verified at
+`placements.ts:757-773`: a FINALIZE failure releases the claim, leaves the tour
+`scheduled`, and is retryable by design. Sweeping after `create` but before
+finalize reproduces exactly the silently-disarmed tour R3-3 was raised for. The
+sweep now runs after the finalize succeeds.
+
+**R4-3 - `superseded` needs four surfaces and two are not typecheck-forced.
+ACCEPT.** Verified: `SEND_NOW_ERROR_COPY` is `Record<string, string>` read
+through `??` (`dashboard/src/api/types.ts:1327`, `:1379`), so a missing entry
+renders the generic retry sentence - silently, and green. Named explicitly in
+3.3 along with `ScheduledSuppressionReason` / `suppressionLead`.
+
+**R4-4 - "safe by construction: nothing sends" inverts the hazard. ACCEPT.** A
+step-3/4 failure leaves a live `scheduled` tour disarmed with no trace. Safe
+from SENDING is not safe. Now carries a stated interruption posture and a loud
+log.
+
+**R4-5 - fold `currentLadderId: null` into the patch already being written at
+`routes/tours.ts:1164`. ACCEPT** - closes the new-scheduledAt-with-old-pointer
+window and saves a write.
+
+**R4-6 - D3a's cost rationale was wrong by ~17 call sites, and the return SHAPE
+was unspecified. ACCEPT.** The decision stands on shape rather than count, and
+the return is now specified as `{ ladderId, rows }` with `ladderId: null` on a
+zero-row arm, which is the case the two candidate shapes differed on.
+
+**R4-7 - the pointer restore needs the old id captured and a failure posture.
+ACCEPT** - `placements.ts:759-767` is the precedent and is now cited.
+
+**R4-8 - "allowlisted to Cancel" named no states. ACCEPT.** `RemindersPanel.tsx:408`
+would render Restore on a canceled earlier rung. Now a per-state table, with the
+note that Cancel cannot win against an already `superseded`-skipped row
+(`tourRemindersRepo.ts:361`) and that this is correct.
+
+**R4-9 / R4-10 - section 4's "three sweep call sites" wording after the
+conversion split; the ResizeObserver covers the block only and does not fix
+`clusters`' pre-existing key. BOTH ACCEPT** (R4-10 added to non-goals).
+
+## Round summary and stop
+
+Four rounds, 69 findings, 65 accepted, 0 rejected outright. Every round found at
+least one blocking defect, and three of the four found a defect introduced by
+the PREVIOUS round's fix - which is the honest signature of a design whose
+enforcement surface is wide, and the reason the founder was given the
+superseded-stamp off-ramp at round 3.
+
+Reviewer B's terminal verdict was "BUILDABLE: no", scoped to R4-1 alone; every
+other part was called executable. R4-1 is now resolved with a mechanism the
+reviewer did not see, which is the one thing this process cannot self-certify.
+That residual goes to the human's spec gate as an open item, not silently into
+the build.

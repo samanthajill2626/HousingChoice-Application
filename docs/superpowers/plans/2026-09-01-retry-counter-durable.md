@@ -20,24 +20,36 @@ Adding a method to a repo interface breaks typecheck until EVERY implementation
 has it, and the hand-written test fake's semantics silently decide whether later
 tests mean anything.
 
-1. Declare the attribute on both item types, beside the 1:1 ladder's existing
-   `retry_attempt` so the two ladders are visibly siblings:
+1. Declare the attribute on both item types:
    - `BroadcastItem.fanout_attempt?: number` (`repos/broadcastsRepo.ts`)
-   - `MessageItem.fanout_attempt?: number` (`repos/messagesRepo.ts`)
+   - `MessageItem.fanout_attempt?: number` (`repos/messagesRepo.ts`), beside the
+     1:1 ladder's existing `retry_attempt` (~:873) so the two ladders are
+     visibly siblings. **`retry_attempt` exists only on `MessageItem`** - there
+     is no such neighbour on `BroadcastItem`.
 2. Add `claimFanoutPass` to both interfaces (signature in slice 1).
-3. **Implement it in every implementation.** Enumerate them by grepping for the
-   interface name before writing code; as of `main` they are:
-   - `createBroadcastsRepo` / `createMessagesRepo` (the real ones);
-   - the hand-written fake at `app/test/helpers/twilioWebhookHarness.ts:2663`
-     (`const broadcastsRepo: BroadcastsRepo = {...}`) and any messages-repo fake
-     in the same harness.
+3. **Implement it in EVERY implementation, in this slice.** Re-grep
+   `: MessagesRepo = {` / `: BroadcastsRepo = {` and `create*Repo` before
+   writing code; as of `main`:
+   - `createMessagesRepo`, `createBroadcastsRepo` - the real ones;
+   - `app/test/helpers/twilioWebhookHarness.ts:1054` (messages) and `:2663`
+     (broadcasts);
+   - `app/test/scheduledSendSuppression.test.ts:261` (messages);
+   - `app/test/sendMessage.test.ts:210` (messages).
 
-   **The fake must model the real semantics**: increment-and-return, refuse at
+   Miss any and **slice 0's own typecheck gate fails.**
+
+   **Every fake must model the real semantics**: increment-and-return, refuse at
    `cap`, distinguish missing. A fake that always returns `claimed` makes every
-   cap test in slices 2 and 3 pass vacuously.
-4. Add a test-only way to SET the counter (or have the fake expose its map) -
-   close B and the rewritten cap test both need to start from a capped item
+   cap test in slices 2 and 3 pass vacuously. (Fakes in files that never
+   exercise the ladder may throw `not implemented` instead - but they must have
+   the property.)
+4. Add a test-only way to SET the counter (or have the harness fake expose its
+   map) - close B and the rewritten cap test both start from a capped item
    (slice 2d).
+
+**Slice 0 and slice 1 are one build step, not two.** Slice 0 is the type and
+implementation surface; slice 1 is the real bodies and their tests. Do not ship
+a production stub between them.
 
 **Gate:** `npm run typecheck` is green before moving on.
 
@@ -70,9 +82,15 @@ Implementation:
 - `ReturnValues: 'UPDATED_NEW'` -> `{ fanout_attempt: N }`. **Do not re-read to
   learn the result** (D5).
 - On `ConditionalCheckFailedException`, disambiguate `capped` from `missing`
-  with a **`ConsistentRead: true`** get. `messagesRepo` has no single-item
-  getter - add one or use a consistent `GetCommand` directly; do not reuse a
-  query helper that reads eventually-consistently.
+  with a **`ConsistentRead: true`** get.
+
+  **Both single-item getters already exist and BOTH are eventually
+  consistent** - `messagesRepo.getByTsMsgId` (:1236 / :2740) and
+  `broadcastsRepo.getById` (:385-388) issue a plain `GetCommand` with no
+  `ConsistentRead`. Reusing either is the trap: it can report `missing` for an
+  item that exists and skip a close. Issue a direct `GetCommand` with
+  `ConsistentRead: true`, or add a consistent variant. Do not "reuse the
+  existing getter" - it is exactly wrong here.
 
 ADD creates the attribute from absent, so there is no seeding step (D4).
 
@@ -104,17 +122,30 @@ construction.
 
 ```ts
 const pending = keys.filter((k) => !isTerminal(broadcast.recipients?.[k]?.status));
-if (pending.length === 0) { /* nothing to do - fall through to finalize */ }
-else {
-  const claim = await broadcasts.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
+let claim: ClaimResult | undefined;              // NOT block-scoped - 2b uses it
+if (pending.length > 0) {
+  claim = await broadcasts.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
   if (claim.outcome === 'missing') { log.warn(...); return; }
   if (claim.outcome === 'capped')  { await closeBroadcast(pending, 'transient_cap'); return; }
 }
+// pending.length === 0 -> nothing to send; fall through to the trailing finalize
 ```
+
+`claim` must be declared in the HANDLER scope, not inside the branch - slice 2b
+reads `claim.attempt` in the continuation block. (A `const` inside an `else`
+does not compile there.) In 2b, `pending.length > 0` is implied by
+`transientRemaining.length > 0`, so `claim` is defined on every path that uses
+it; narrow it explicitly rather than asserting.
 
 The `pending` guard is what delivers D6. Without it a pass whose recipients are
 ALL already terminal - reachable via a continuation that raced - consumes a rung
 while sending nothing.
+
+**Known bounded deviation from D6:** a pass whose recipients are all
+non-terminal but all turn out to be SKIPPED inside the loop (opted out, no
+consent) still consumes a rung. Predicting that before the loop would duplicate
+the loop's own skip logic, and the consequence is a shortened ladder for a
+broadcast that was sending to nobody. Accepted and stated rather than hidden.
 
 ### 2b. The continuation block (~:478-513)
 
@@ -149,10 +180,22 @@ as Sent on pass 1 with a continuation in flight.
 
 ### 2c. `closeBroadcast`
 
-**Define it INSIDE the handler closure**, after the lazily-initialised repos are
-narrowed. A module-level helper needs 7-8 arguments, and a closure declared
-above the `??=` initialisation loses TS's narrowing on the `let` bindings and
-fails gate 1.
+**Define it INSIDE the handler closure**, and **pin the lazily-initialised repos
+to `const` first**:
+
+```ts
+broadcasts ??= createBroadcastsRepo(...);   // existing lazy init (~:189/:198)
+const repo = broadcasts;                    // pin - capture THIS, not the `let`
+async function closeBroadcast(recipientKeys: string[], code: string) { ... }
+```
+
+A module-level helper would need 7-8 arguments. But the narrowing problem is
+**not about placement**: capturing the reassignable `let broadcasts`
+(broadcastFanOut.ts ~:189/:198) - or `let messages` in relayFanOut (~:321/:332) -
+inside ANY nested function loses TS's narrowing wherever that function sits,
+because the compiler cannot prove the binding is still non-undefined when the
+closure runs. The fix is the pinned `const`, and gate 1 is what catches getting
+it wrong.
 
 Body, lifted from the existing cap branch (~:481-495): per key
 `recordRecipient({ status: 'failed', errorCode: code })`, `bumpStats({ failed:
@@ -166,13 +209,21 @@ by the reason - closes A, B and C must each leave a log line.
 `attempt: 3` in the ENVELOPE. Once the counter is durable that envelope field is
 advisory, the claim returns 1, and the test's cap expectation fails.
 
-**It is the only test pinning the cap-close shape.** Rewrite it to reach the cap
-the real way - drive three passes, or seed `fanout_attempt` at the cap via slice
-0's test hook - and keep every existing assertion (`failed`, `transient_cap`,
-stats, terminal status). Do not delete it, do not relax it.
+**It is the only test pinning the cap-close shape.** Keep every existing
+assertion (`failed`, `transient_cap`, stats, terminal status). Do not delete it,
+do not relax it.
 
-The seeded-at-cap variant IS the close-B test (spec 7.4): close B has no
-production trigger once close A exists, so it must be constructed directly.
+**Two tests are required, not one - "either" would leave close A untested.**
+
+- **Close A** (the only close with a production trigger): drive the ladder for
+  real - three passes, each deferring the recipient - so the cap is reached the
+  way production reaches it. This is the rewrite of the existing test.
+- **Close B**: seed `fanout_attempt` at the cap via slice 0's hook and dispatch
+  one envelope. Close B has no production trigger once close A exists, so it can
+  only be constructed.
+
+Writing only the seeded variant would leave the one close that actually fires in
+production with no coverage at all.
 
 **Tests (spec 7.3-7.8):**
 - **RED-ON-MAIN:** with enqueueing broken, the broadcast finalizes, no recipient
@@ -183,10 +234,13 @@ production trigger once close A exists, so it must be constructed directly.
 - closes A, B and C each leave the same terminal shape - enumerated as: every
   recipient terminal, stats reconciled (`queued` 0), row finalized, one log line.
 - **backoff delays asserted as LITERAL milliseconds** (pass 1->2 = 10s,
-  2->3 = 20s), read off the `runAt` passed to the throwing/capturing adapter.
+  2->3 = 20s), read off the `runAt` passed to the capturing adapter.
   **Do not assert `broadcastBackoffMs(n)`** - that re-derives from the function
   under test and passes against a shifted ladder, which is exactly what D7/D11
   exist to prevent.
+- **the send COUNT per deferred recipient equals `main`'s** - three passes, not
+  two and not four (spec 7.5 has two halves; delays alone do not pin the count,
+  and the count alone does not pin the delays).
 - a pass that enqueues successfully leaves the broadcast `sending`.
 - a same-`jobId` redelivery claims nothing; an all-terminal pass claims nothing.
 
@@ -268,7 +322,15 @@ on `!wasAdopted`:
 `fetchParticipants` outside one escapes `ensureGroupRail` and leaks the
 `rail_creating` claim for its ~5-minute expiry - the precise failure D16 used to
 reject changing the `groupSend` paths. Verify the placement lands inside the
-existing handler, or wrap it.
+existing handler; if ladder point 1 needs its own wrapper, **the catch must
+behave like the existing participant-read failure path**: record the rail
+failure and return, exactly as the current `fetchParticipants` catch does.
+
+**Do NOT swallow and continue with the previously-read list.** That leaks
+nothing but silently substitutes a STALE `participants` value for an
+authoritative read - which is precisely what D15 forbids, and it would store a
+map that does not describe the rail. A ladder re-read that throws is a failed
+read, not a reason to trust older data.
 
 **4e. State the coupling.** The ladder REASSIGNS `participants`, which also
 feeds the author-verification block (~:578-584) and the stored participant map
@@ -339,14 +401,22 @@ in all three positions with no tail.
 
 ---
 
-## Slice 6 - the provider-status sweep (AFTER 2 and 3)
+## Slice 6 - the provider-status sweep (AFTER 2, 3 AND 4)
 
-Read-only audit (spec Sec 9). Its in-region fixes land in the two files slices 2
-and 3 rewrite, so it is not independent of them.
+Read-only audit (spec Sec 9). Its in-region fixes land in files slices 2, 3 and
+4 edit, so it is last, not free. `groupRail.ts:259-262` (`isDeadRailState`) is a
+live sweep hit whose fix-here-vs-file disposition flips depending on whether
+slice 4 has landed.
 
 Enumerate every `app/src` site branching on a provider status string; record
 `file:line` and whether the unenumerated default is terminal. Fix in-region;
-file the rest as one issue. The unknown-error `throw` is the named in-region
+file the rest as one issue.
+
+**`routes/webhooks/twilio.ts` is fenced in its ENTIRETY** (spec Sec 2) and is
+the repo's densest provider-status file. Audit it - it is in `app/src` - but
+every finding there is FILED, never fixed, regardless of how small.
+
+The unknown-error `throw` in the two fan-outs is the other named in-region
 exception - filed, not fixed (D12).
 
 **While in those two regions, correct the two false comments**
@@ -374,6 +444,12 @@ A nil result is still committed.
 - File follow-ups: adopt-path exposure (D17), refusal log noise (D18), and
   whether `closeRelay` should also drive the hub message's own
   `delivery_status` to terminal (verify first - the rollup may already mask it).
+- **Update `relay-30003-retry-lineage` with the five design facts spec Sec 8
+  obligation 5 names** - the forward-only transition problem, the
+  slot-transition gate capping the ladder at one retry, the
+  `relayAnnouncements` pointer fence, the two-level map's seeding problem, and
+  the chip copy needing revisiting. This is a task, not a note: three review
+  rounds bought those facts and the follow-on mission should not re-buy them.
 - Amend `_CLUSTERS.md` M5.
 - `npm run issues`.
 
@@ -396,8 +472,8 @@ Confirm no orphaned listener on the lane's ports before each e2e run.
 
 ## Ordering
 
-**0 -> 1 -> 5b -> 2 -> 3 -> 6 -> 7.** Slice 4 is genuinely independent and may
-run any time after 0.
+**0+1 -> 5b -> 2 -> 3 -> 4 -> 6 -> 7.** Slices 0 and 1 are one build step.
+Slice 4 is independent of 1-3 and may run any time after 0, but must precede 6.
 
 Stopping points: after any slice the branch typechecks and every stated
 guarantee holds. The one ordering trap is 5b before 2 - shipping

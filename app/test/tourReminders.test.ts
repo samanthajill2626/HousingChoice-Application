@@ -46,11 +46,11 @@ import {
 import {
   armTourReminders,
   cancelTourReminders,
+  DISCONTINUED_REMINDER_KINDS,
   forceSendReminder,
   MANUAL_ONLY_REMINDER_KINDS,
   retiredByTourStart,
-  runDueTourReminders as runDueTourRemindersRaw,
-  type RunDueTourRemindersDeps,
+  runDueTourReminders,
 } from '../src/jobs/tourReminders.js';
 import {
   composeTourReminderBody,
@@ -66,19 +66,13 @@ import {
   type SettingsReadRepo,
 } from './helpers/settingsStub.js';
 
-// Since 2026-08-20 the poll holds back EVERY auto-armed rung kind by default
-// (founder decision: tour reminders are manual-only). These suites exist to
-// cover the poll's own claim / send / skip / quiet-hours / group-routing
-// behaviour, and with the default hold-back there would be no rung left to
-// drive any of it - every assertion would pass for the wrong reason. So they
-// run the poll with the hold-back switched OFF, and the hold-back itself is
-// asserted on its own below ("manual-only hold-back"). Individual tests may
-// still pass an explicit manualOnlyKinds; the spread order lets theirs win.
-// Mirrors the placementNudges.test.ts wrapper of the same shape.
-const NO_MANUAL_HOLD_BACK: ReadonlySet<ReminderKind> = new Set();
-function runDueTourReminders(now: string, deps: RunDueTourRemindersDeps): Promise<void> {
-  return runDueTourRemindersRaw(now, { manualOnlyKinds: NO_MANUAL_HOLD_BACK, ...deps });
-}
+// The hold-back wrapper this file used to route every tick through is GONE
+// (Phase B, 2026-08-31): MANUAL_ONLY_REMINDER_KINDS is empty again, so the
+// production default sends the live rungs and injecting an empty set would say
+// nothing. Every tick below therefore calls the REAL runDueTourReminders with
+// no override; the few cases that still need pause-mode behaviour pass their
+// own explicit manualOnlyKinds, and the kind that must NEVER send is covered by
+// DISCONTINUED_REMINDER_KINDS instead (not injectable, see its own describe).
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -3525,16 +3519,21 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Manual-only hold-back (founder decision 2026-08-20)
+  // Manual-only hold-back - the MECHANISM, exercised through the injection seam
   //
-  // These are the ONLY cases in this file that call the RAW poll - everything
-  // above runs through the local wrapper with the hold-back switched off. The
-  // load-bearing assertion is that a held-back rung is left PENDING rather than
-  // claim-skipped: "Send now" (forceSendReminder) refuses any row that is
+  // MANUAL_ONLY_REMINDER_KINDS is EMPTY again since 2026-08-31 (Phase B), so
+  // production exhibits none of this by default. The mechanism itself is not
+  // gone: it is the way a kind gets paused again ("TO PAUSE AGAIN: add kinds
+  // here"), so these cases inject an explicit non-empty set and keep it pinned.
+  // The load-bearing assertion is that a held-back rung is left PENDING rather
+  // than claim-skipped: "Send now" (forceSendReminder) refuses any row that is
   // already sent/skipped/canceled, so retiring them here would silently disable
-  // the button this change exists to keep.
+  // the button the pause exists to keep.
+  //
+  // Every rung below is a LIVE kind. Riding `confirmation` would prove nothing
+  // now - the discontinued guard would stop it first, for a different reason.
   // ---------------------------------------------------------------------------
-  describe('manual-only hold-back (founder decision 2026-08-20)', () => {
+  describe('manual-only hold-back (the pause mechanism, injected)', () => {
     // seedForceTour arms its row at 2026-02-11T13:00Z, which is AFTER FORCE_NOW
     // (the force-send suite polls at an instant the row is deliberately NOT due,
     // so only the human path can move it). These cases need the opposite: the
@@ -3542,15 +3541,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // Paired with quietOff so the quiet-hours backstop cannot be the reason
     // either - the hold-back has to be the only thing standing in the way.
     const POLL_AFTER_DUE = '2026-02-11T13:01:00.000Z';
+    /** What a re-pause would look like: one live kind, held back by hand. */
+    const PAUSE_DAY_BEFORE: ReadonlySet<ReminderKind> = new Set<ReminderKind>(['day_before']);
 
-    it('holds back every AUTO-ARMED rung kind, and leaves the manual rung alone', () => {
-      // The four armTourReminders writes (REMINDER_KINDS) - all paused.
-      for (const kind of ['confirmation', 'day_before', 'morning_of', 'en_route'] as const) {
-        expect(MANUAL_ONLY_REMINDER_KINDS.has(kind), `${kind} not held back`).toBe(true);
-      }
-      // no_show_checkin was NEVER auto-armed, so it has no business in the set -
-      // its absence is what keeps this a pause of the POLL, not a second manual list.
-      expect(MANUAL_ONLY_REMINDER_KINDS.has('no_show_checkin')).toBe(false);
+    it('the production default holds nothing back, and the retired kind is elsewhere', () => {
+      // The unpause, asserted on the set itself: nothing is paused today.
+      expect(MANUAL_ONLY_REMINDER_KINDS.size, 'the ladder is fully automatic again').toBe(0);
+      // `confirmation` did not stay here under a new name - it moved to the
+      // permanent set, which is what makes "Send now" refuse it too.
+      expect([...DISCONTINUED_REMINDER_KINDS]).toEqual(['confirmation']);
     });
 
     it('a due manual-only rung is NOT sent and is LEFT PENDING (still force-sendable)', async () => {
@@ -3566,11 +3565,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const { tour, row } = await seedForceTour({
         tenantId: 'contact-hold-1',
         unitId: 'unit-hold-1',
-        kind: 'confirmation',
+        kind: 'day_before',
       });
 
-      // The real production default - NO manualOnlyKinds override.
-      await runDueTourRemindersRaw(POLL_AFTER_DUE, deps);
+      await runDueTourReminders(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: PAUSE_DAY_BEFORE });
 
       expect(spy.sent).toHaveLength(0);
       const after = (await tourReminders.listByTour(tour.tourId)).find(
@@ -3594,12 +3592,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const { tour, row } = await seedForceTour({
         tenantId: 'contact-hold-2',
         unitId: 'unit-hold-2',
-        kind: 'confirmation',
+        kind: 'day_before',
       });
 
-      await runDueTourRemindersRaw(POLL_AFTER_DUE, deps);
+      await runDueTourReminders(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: PAUSE_DAY_BEFORE });
       expect(spy.sent).toHaveLength(0);
 
+      // forceSendReminder never consults manualOnlyKinds at all - the pause is a
+      // POLL-side hold only, which is exactly why it could never have been the
+      // guard for a kind that must never send (spec 3.1).
       const result = await forceSendReminder(
         row.reminderId,
         tour.tourId,
@@ -3615,7 +3616,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(spy.sent[0]!.automated).toBe(false);
     });
 
-    it('an explicit empty override restores the automatic send (the e2e tick seam)', async () => {
+    it('with nothing paused, the same rung sends automatically (the unpause)', async () => {
       const rig = createGroupTestRig();
       const spy = makeForceSendSpy();
       const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
@@ -3628,10 +3629,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const { tour, row } = await seedForceTour({
         tenantId: 'contact-hold-3',
         unitId: 'unit-hold-3',
-        kind: 'confirmation',
+        kind: 'day_before',
       });
 
-      await runDueTourRemindersRaw(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: new Set() });
+      // The real production default - NO manualOnlyKinds override anywhere.
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
 
       expect(spy.sent).toHaveLength(1);
       expect(spy.sent[0]!.automated, 'the poll path is still an AUTOMATED send').toBe(true);
@@ -3639,6 +3641,179 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         (r) => r.reminderId === row.reminderId,
       );
       expect(after?.sentAt).toBe(POLL_AFTER_DUE);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // DISCONTINUED_REMINDER_KINDS (Phase B spec 3.1) - the PERMANENT guard.
+  //
+  // Distinct from the pause above in both directions: no path may send a
+  // discontinued kind (the poll skips it AND the human force-send refuses it),
+  // and no deps object can switch it off - the set is deliberately not
+  // injectable, so e2e can never grow a send path production lacks.
+  // ---------------------------------------------------------------------------
+  describe('DISCONTINUED_REMINDER_KINDS', () => {
+    const POLL_AFTER_DUE = '2026-02-11T13:01:00.000Z';
+
+    it('the poll EXCLUDES a due discontinued row - not sent, not claim-skipped, left pending', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-1',
+        phone: '+15550240001',
+        convId: 'conv-disc-1',
+        now: SEEDED_AT,
+      });
+      // A FUTURE tour (seedForceTour's start is 20:00, the rung is due 13:00), so
+      // the past-tour gate cannot be what stops this - only the kind can.
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-1',
+        unitId: 'unit-disc-1',
+        kind: 'confirmation',
+      });
+
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
+      // TWICE: an excluded row must not be a row that merely lost a race.
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
+
+      expect(spy.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      // LEFT PENDING, not claim-skipped: the poll has no in-app writer for
+      // `kind_retired` at all (spec 3.1) - only the sweep script stamps it.
+      expect(after?.skippedAt).toBeUndefined();
+      expect(after?.skipReason).toBeUndefined();
+      expect(after?.canceledAt).toBeUndefined();
+    });
+
+    it('forceSendReminder REFUSES kind_retired for a discontinued kind, and the row is untouched', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-2',
+        phone: '+15550240002',
+        convId: 'conv-disc-2',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-2',
+        unitId: 'unit-disc-2',
+        kind: 'confirmation',
+      });
+
+      const result = await forceSendReminder(
+        row.reminderId,
+        tour.tourId,
+        POLL_AFTER_DUE,
+        true,
+        deps,
+      );
+
+      expect(result).toEqual({ outcome: 'refused', reason: 'kind_retired' });
+      expect(spy.sent).toHaveLength(0);
+      // PRE-CLAIM: a refusal never retires a rung (the sweep does that).
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
+
+    it('refusal precedence: a discontinued rung on a PAST tour refuses kind_retired, not tour_already_passed', async () => {
+      // Both gates are true here. The kind check sits at the row lookup, above
+      // target resolution and above the past-tour gate, so the permanent reason
+      // is the one the operator sees - "we no longer send this", not "you are
+      // too late", which would invite a retry on the next tour.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-3',
+        phone: '+15550240003',
+        convId: 'conv-disc-3',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-3',
+        unitId: 'unit-disc-3',
+        kind: 'confirmation',
+      });
+      // An hour AFTER the seeded tour started (20:00), with the rung due 13:00:
+      // retiredByTourStart is true, so tour_already_passed is genuinely live.
+      const AFTER_TOUR = '2026-02-11T21:00:00.000Z';
+      expect(retiredByTourStart(row, tour.scheduledAt, AFTER_TOUR)).toBe(true);
+
+      const result = await forceSendReminder(row.reminderId, tour.tourId, AFTER_TOUR, true, deps);
+
+      expect(result).toEqual({ outcome: 'refused', reason: 'kind_retired' });
+      expect(spy.sent).toHaveLength(0);
+    });
+
+    it('the dev tick shape does NOT bypass it: an empty manualOnlyKinds still sends nothing', async () => {
+      // The old dev/e2e override (`manualOnlyKinds: new Set()`) switched the
+      // PAUSE off. It never reached this set, and must not: a seam that could
+      // would give e2e a send path production does not have.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-4',
+        phone: '+15550240004',
+        convId: 'conv-disc-4',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-disc-4',
+        unitId: 'unit-disc-4',
+        kind: 'confirmation',
+      });
+
+      await runDueTourReminders(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: new Set() });
+
+      expect(spy.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
+
+    it('a LIVE rung due in the same batch still sends - the exclusion is per KIND', async () => {
+      // Anti-vacuity for the whole describe: without this, "nothing was sent"
+      // would also pass if the poll had stopped working altogether.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-5',
+        phone: '+15550240005',
+        convId: 'conv-disc-5',
+        now: SEEDED_AT,
+      });
+      const { tour } = await seedForceTour({
+        tenantId: 'contact-disc-5',
+        unitId: 'unit-disc-5',
+        kind: 'confirmation',
+      });
+      // The SAME tour, one live rung, due a minute earlier so supersession has
+      // nothing later to prefer (the discontinued row is not in the batch).
+      const live = await createDueReminder(
+        tourReminders,
+        tour.tourId,
+        'day_before',
+        '2026-02-11T12:59:00.000Z',
+      );
+
+      await runDueTourReminders(POLL_AFTER_DUE, deps);
+
+      expect(spy.sent).toHaveLength(1);
+      const rows = await tourReminders.listByTour(tour.tourId);
+      expect(rows.find((r) => r.reminderId === live.reminderId)?.sentAt).toBe(POLL_AFTER_DUE);
+      expect(rows.find((r) => r.kind === 'confirmation')?.sentAt).toBeUndefined();
     });
   });
 
@@ -3921,7 +4096,24 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(msgsSince(from)).not.toContain(DEFER_WARN);
     });
 
-    it('guard g3: a confirmation force-send SENDS with the unit read throwing', async () => {
+    // g3 / g3b are the FORCE-SEND twins of g1 / g2: the carve-out has to hold on
+    // the human path too, or an operator would be told to try again over a read
+    // the copy never needed.
+    //
+    // THEY USED TO RIDE `confirmation` (Phase A), for its own reason: that copy
+    // renders NO name, so no failed name read can corrupt it. Both halves of
+    // that survive, in the right places. The "renders no name" half is a CATALOG
+    // fact and is pinned directly on the assessor in tourCopy.test.ts
+    // ("confirmation is never blocked - its untouched copy renders no name",
+    // with all three reads thrown at once) - a stronger pin than an integration
+    // test could give it. What could NOT survive on confirmation is the half
+    // below: since Phase B the kind is discontinued, so a force-send refuses
+    // `kind_retired` above the compose gate and would never reach the carve-out.
+    // Derived, not assumed: reminderNamesUsed says `confirmation` is the ONLY
+    // kind rendering no name, so there was no live kind to retarget the FIRST
+    // half to. `day_before` names the tenant and nothing else, which is exactly
+    // what these two failing reads are NOT.
+    it('guard g3: a day_before force-send SENDS with the unit read throwing', async () => {
       // FIXTURE FACT, not a gap: with the unit read throwing, `unit` is
       // undefined and resolveTourContactNames never ATTEMPTS the property read,
       // so propertyReadFailed is structurally false here. Do NOT "fix" the
@@ -3930,7 +4122,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const f = await nameFailRig({
         suffix: 'g3',
         phone: '+15550240007',
-        kind: 'confirmation',
+        kind: 'day_before',
         throwing: 'unit',
       });
 
@@ -3944,17 +4136,19 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
       expect(result).toEqual({ outcome: 'sent' });
       expect(f.spy.sent).toHaveLength(1);
+      // The address degraded away; the tenant greeting did not (the tenant read
+      // is deliberately NOT thrown in either g3 variant: that one fails inside
+      // target resolution, which is case 13's behaviour, not the compose gate's).
+      expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
     });
 
-    it('guard g3b: a confirmation force-send SENDS with only the property-contact read throwing', async () => {
-      // Phase A's confirmation copy renders NO name, so no failed name read can
-      // corrupt it. (The tenant read is deliberately NOT thrown in either g3
-      // variant: that one fails inside target resolution, which is case 13's
-      // behaviour, not the compose gate's.)
+    it('guard g3b: a day_before force-send SENDS with only the property-contact read throwing', async () => {
+      // day_before's copy never names the property contact, so a failed property
+      // read degrades exactly like absence - on the human path as on the poll's.
       const f = await nameFailRig({
         suffix: 'g3b',
         phone: '+15550240008',
-        kind: 'confirmation',
+        kind: 'day_before',
         throwing: 'property',
       });
 
@@ -3968,6 +4162,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
       expect(result).toEqual({ outcome: 'sent' });
       expect(f.spy.sent).toHaveLength(1);
+      expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
     });
   });
 });

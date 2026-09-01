@@ -107,12 +107,17 @@ export interface TourRemindersRouterDeps {
   /**
    * Rung kinds the POLL holds back, mirrored here so an upcoming rung the poll
    * will never claim chips `paused` instead of "sending shortly". Defaults to
-   * MANUAL_ONLY_REMINDER_KINDS.
+   * MANUAL_ONLY_REMINDER_KINDS, which is EMPTY today (2026-08-31, Phase B).
    *
-   * Test seam: `paused` outranks quiet hours, so with the production default
-   * every upcoming rung chips `paused` and the quiet-hours preview below becomes
-   * unobservable. The quiet-hours suite passes an EMPTY set to keep exercising
-   * that formula - the same posture the dev tick route takes for the poll.
+   * So this is now a TEST SEAM in the opposite direction from the one it was
+   * built as: with nothing paused in production, a suite that wants to see the
+   * `paused` chip INJECTS a non-empty set here. (It used to exist because the
+   * production default paused everything and `paused` outranks quiet hours,
+   * which made the quiet-hours preview below unobservable; the quiet suites now
+   * need no injection at all.)
+   *
+   * It has NOTHING to do with DISCONTINUED_REMINDER_KINDS, which is permanent
+   * and which no deps object anywhere can override.
    */
   manualOnlyKinds?: ReadonlySet<ReminderKind>;
   // ---- Send-now deps (quiet-hours spec section 7) --------------------------

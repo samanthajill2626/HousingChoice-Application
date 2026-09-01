@@ -200,38 +200,68 @@ export const LADDER_ORDER: ReminderKind[] = [
 ];
 
 /**
- * do-not-remove-without-reading — FOUNDER DECISION, 2026-08-20, TEMPORARY.
+ * do-not-remove-without-reading - the TEMPORARY human hold. EMPTY today.
  *
- * Tour reminders are MANUAL ONLY. The ladder still ARMS every rung on booking
- * (so the panel keeps showing the schedule, the draft copy, and a working "Send
- * now"), but the poll never sends one on its own. A human decides when each
- * reminder goes out.
+ * What this set is FOR: pausing a rung kind's AUTOMATIC send while leaving the
+ * rung fully alive. A kind listed here still arms on booking, still shows its
+ * schedule and draft copy on the tour panel, and still has a working "Send now"
+ * - the poll simply never claims it, so a human decides when it goes out. The
+ * panel chips "Paused - send manually" so nobody reads a fire-time promise that
+ * is not coming.
  *
- * This mirrors the application-nudge pause of 2026-08-18
- * (jobs/placementNudges.ts MANUAL_ONLY_NUDGE_KINDS) and was taken for the same
- * root reason: automated sends are going out under a founder who does not yet
- * have a settled model of when the system speaks for her, and an unexpected text
- * to a tenant or landlord is more expensive than a missed one.
+ * It is EMPTY, which means the ladder is fully automatic again as of 2026-08-31
+ * (Phase B). The empty state is the point: it is what "TO RESTORE: empty this
+ * set. Nothing else has to change" always meant, and it now holds.
  *
- * `confirmation` is INCLUDED (Cameron's explicit call). It is the rung with the
- * strongest case for staying automatic - the recipient agreed to the tour
- * seconds earlier - so its inclusion is a deliberate decision, not a side effect
- * of pausing the ladder.
+ * HISTORY, because the shape of the decision matters more than the dates:
+ * 2026-08-20 (founder decision, Cameron) every auto-armed kind went in here -
+ * mirroring the application-nudge pause of 2026-08-18
+ * (jobs/placementNudges.ts MANUAL_ONLY_NUDGE_KINDS), and for the same root
+ * reason: automated sends were going out under a founder who did not yet have a
+ * settled model of when the system speaks for her, and an unexpected text to a
+ * tenant or landlord is more expensive than a missed one. `confirmation` was
+ * INCLUDED then by Cameron's explicit call, and on 2026-08-24 Sam retired that
+ * rung outright ("No confirmation text at all - I'm scheduling manually, so it's
+ * redundant"). That is a different decision with a different meaning, so it left
+ * this set entirely.
  *
- * `no_show_checkin` is absent because it was never auto-armed in the first place
- * (see REMINDER_KINDS) - it has always been manual.
+ * `no_show_checkin` was never here because it was never auto-armed at all (see
+ * REMINDER_KINDS) - it has always been manual.
  *
- * NOT the same thing as emptying REMINDER_KINDS: that would stop the ARMING, and
- * take the schedule and its copy off the tour page entirely - the opposite of
- * what was asked for.
+ * TO PAUSE AGAIN: add kinds here. Nothing else has to change.
  *
- * TO RESTORE: empty this set. Nothing else has to change.
+ * A kind that must NEVER send belongs in DISCONTINUED_REMINDER_KINDS below, not
+ * here. The two are deliberately separate: "paused" means a human decides WHEN,
+ * so Send now must keep working; "discontinued" means it never goes out at all,
+ * so Send now must refuse. Listing a retired kind here would have left a live
+ * Send now button beside a "Paused" chip on a message we had decided to stop
+ * sending.
+ *
+ * NOT the same thing as emptying REMINDER_KINDS: that stops the ARMING, and
+ * takes the schedule and its copy off the tour page entirely.
  */
-export const MANUAL_ONLY_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([
+export const MANUAL_ONLY_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([]);
+
+/**
+ * do-not-remove-without-reading - PERMANENT, Phase B (2026-08-31).
+ *
+ * Kinds that are DISCONTINUED: no path may ever send one. Distinct from
+ * MANUAL_ONLY_REMINDER_KINDS on purpose - "paused" means a human decides WHEN
+ * this goes out (Send now works, chip says Paused); "discontinued" means it
+ * NEVER goes out (force-send refuses kind_retired, chip says "no longer
+ * sent"). Conflating them put a working Send now button beside a Paused chip
+ * on a kind we had retired. Four read surfaces, all mandatory: the poll
+ * filter below, forceSendReminder, routes/tourReminders.ts's chip branch, and
+ * routes/contactTimeline.ts's own read. NOT injectable via deps - e2e must
+ * never grow a send path production lacks.
+ *
+ * confirmation: founder decision, Sam 2026-08-24 - "No confirmation text at
+ * all - I'm scheduling manually, so it's redundant." Armed rows from the
+ * pause era are retired by scripts/retire-paused-tour-reminders.ts; this set
+ * is what makes that sweep hygiene rather than a race against the deploy.
+ */
+export const DISCONTINUED_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([
   'confirmation',
-  'day_before',
-  'morning_of',
-  'en_route',
 ]);
 
 /**
@@ -498,10 +528,15 @@ export async function cancelTourReminders(
 export interface RunDueTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;
   /**
-   * Rung kinds the poll must NEVER send automatically. Defaults to
-   * MANUAL_ONLY_REMINDER_KINDS; an explicit set overrides it (the e2e tick
-   * route passes an EMPTY set so the harness can still drive the automatic
-   * path). Mirrors RunDuePlacementNudgesDeps.manualOnlyKinds.
+   * Rung kinds this poll holds back from an AUTOMATIC send, leaving them
+   * pending. Defaults to MANUAL_ONLY_REMINDER_KINDS, which is EMPTY today - so
+   * this is now a TEST SEAM: it is how a suite exercises pause-mode behaviour
+   * that production no longer exhibits by default. Mirrors
+   * RunDuePlacementNudgesDeps.manualOnlyKinds (whose own set is NOT empty).
+   *
+   * It does NOT reach DISCONTINUED_REMINDER_KINDS, and must never be made to:
+   * a discontinued kind is unsendable by every path, and a seam that could
+   * switch that off would give e2e a send path production does not have.
    */
   manualOnlyKinds?: ReadonlySet<ReminderKind>;
   /**
@@ -615,26 +650,40 @@ export async function runDueTourReminders(
 
   const allDueRows = await deps.tourRemindersRepo.listDue(now);
 
-  // MANUAL-ONLY FILTER (founder decision 2026-08-20) - see MANUAL_ONLY_REMINDER_KINDS.
-  // These rows are LEFT PENDING on purpose, NOT claim-skipped: "Send now"
-  // (forceSendReminder) only works on a row that is still pending, so retiring
-  // them here would silently disable the very button this change exists to
-  // preserve. They simply stop being candidates for an automatic send. The
-  // panel chip stays honest via the route's `paused` suppression estimate
-  // (routes/tourReminders.ts), NOT via a skip stamp.
+  // HELD-BACK FILTER - two INDEPENDENT causes, both leaving the row PENDING:
+  //   - manual-only (MANUAL_ONLY_REMINDER_KINDS, empty today): a human decides
+  //     when this goes out, so "Send now" must keep working;
+  //   - discontinued (DISCONTINUED_REMINDER_KINDS): this kind never goes out at
+  //     all, and forceSendReminder refuses it too.
+  // Neither is a claim-skip, on purpose: "Send now" (forceSendReminder) only
+  // works on a row that is still pending, so retiring a PAUSED row here would
+  // silently disable the very button the pause exists to preserve - and a
+  // discontinued row is retired by scripts/retire-paused-tour-reminders.ts,
+  // which is the ONE writer of the kind_retired skip token (spec 3.1). Both
+  // panels stay honest through their own reads of the same two sets, NOT
+  // through a skip stamp.
   //
   // The filtered array is ALSO what feeds the supersession backstop below (the
   // `batch` argument), and that is deliberate: supersession retires an EARLIER
-  // rung when a LATER one is releasable in the same batch, so a paused later
-  // rung must not suppress an earlier rung that WILL still send. With every
-  // auto-armed kind paused this is moot today - it matters on a PARTIAL restore.
+  // rung when a LATER one is releasable in the same batch, so a rung that will
+  // NOT send must not suppress an earlier rung that will.
+  //
+  // The counts are separated because the two causes call for opposite actions:
+  // a manual-only count is a queue somebody has to work through, a discontinued
+  // count is rows the sweep has not reached yet.
   const manualOnly = deps.manualOnlyKinds ?? MANUAL_ONLY_REMINDER_KINDS;
-  const dueRows = allDueRows.filter((r) => !manualOnly.has(r.kind));
+  const blocked = (r: TourReminderItem): boolean =>
+    manualOnly.has(r.kind) || DISCONTINUED_REMINDER_KINDS.has(r.kind);
+  const dueRows = allDueRows.filter((r) => !blocked(r));
   const heldBack = allDueRows.length - dueRows.length;
   if (heldBack > 0) {
+    const heldBackManualOnly = allDueRows.filter((r) => manualOnly.has(r.kind)).length;
+    const heldBackDiscontinued = allDueRows.filter((r) =>
+      DISCONTINUED_REMINDER_KINDS.has(r.kind),
+    ).length;
     log.info(
-      { heldBack, now },
-      'tour reminder poll: manual-only rungs left pending (no automatic send)',
+      { heldBack, heldBackManualOnly, heldBackDiscontinued, now },
+      'tour reminder poll: rungs left pending (no automatic send)',
     );
   }
   if (dueRows.length === 0) return;
@@ -1466,6 +1515,21 @@ export async function forceSendReminder(
   if (row === undefined) return { outcome: 'refused', reason: 'tour_missing' };
   if (row.sentAt !== undefined || row.canceledAt !== undefined || row.skippedAt !== undefined) {
     return { outcome: 'not_pending' };
+  }
+  // DISCONTINUED KIND (Phase B spec 3.1): the human path least of all. Placed
+  // HERE, above target resolution, so it is FIRST in the refusal precedence -
+  // ahead of names_unavailable and tour_already_passed. That ordering is the
+  // honest one: those two invite a retry ("try again", "next time"), and this
+  // one never will. It also costs no reads to say so. INLINE, like the two
+  // returns above it: `refuse` is declared further down, past the gates that
+  // need a resolved target. Never a claim-skip - a human action does not retire
+  // a rung; scripts/retire-paused-tour-reminders.ts is what stamps kind_retired.
+  if (DISCONTINUED_REMINDER_KINDS.has(row.kind)) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'kind_retired' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'kind_retired' };
   }
 
   // CONTAINED (spec 6.3b): target resolution does FOUR bare reads - the tour

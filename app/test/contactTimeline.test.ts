@@ -1126,16 +1126,27 @@ const DAY_BEFORE_BODY = composeTourReminderBody({
 });
 const APPROVAL_BODY = resolveMessage('nudge.approval_check');
 
+/** What a re-pause of ONE live tour kind looks like. Production pauses nothing
+ *  since 2026-08-31 (Phase B), so every `paused` case here injects this. */
+const PAUSE_DAY_BEFORE: ReadonlySet<ReminderKind> = new Set<ReminderKind>(['day_before']);
+
 describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B server)', () => {
+  it('the production tour hold-back is empty - nothing is paused by default', () => {
+    // The unpause, on the surface that mirrors it. Without this pin every
+    // `paused` case below could be green while production held everything back.
+    expect(MANUAL_ONLY_REMINDER_KINDS.size).toBe(0);
+  });
+
   function makeGatherHarness(
     // Quiet hours OFF by default so these cases keep asserting the pre-quiet
     // reasons regardless of the time of day the suite runs; the quiet cases
     // pass a window-around-now stub explicitly.
     settingsRepo: SettingsReadRepo = quietOffSettingsRepo(),
-    // The manual-only hold-back is OFF by default here for the same reason:
-    // since 2026-08-20 every auto-armed rung kind is paused in production, and
-    // `paused` outranks quiet hours - so the default would mask every estimate
-    // these cases exist to prove. The hold-back has its own cases below.
+    // The manual-only hold-back defaults to EMPTY here, which since 2026-08-31
+    // is also the PRODUCTION default (Phase B emptied
+    // MANUAL_ONLY_REMINDER_KINDS). The parameter is kept because it is now the
+    // only way to reach pause-mode behaviour at all: the cases below that assert
+    // `paused` pass a non-empty set explicitly.
     manualOnlyReminderKinds: ReadonlySet<ReminderKind> = new Set(),
     // The nudge ladder's hold-back, off by default for the same reason.
     manualOnlyNudgeKinds: ReadonlySet<NudgeKind> = new Set(),
@@ -1236,11 +1247,13 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(res.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
   });
 
-  // Manual-only hold-back (founder decision 2026-08-20): the contact page's
-  // Upcoming cards must agree with the tour panel. A rung the poll will never
-  // claim cannot advertise "sends in 3h" here while the panel calls it paused.
-  it('marks a paused tour rung `paused` under the PRODUCTION hold-back', async () => {
-    const { world, app } = makeGatherHarness(undefined, MANUAL_ONLY_REMINDER_KINDS);
+  // Manual-only hold-back: the contact page's Upcoming cards must agree with the
+  // tour panel. A rung the poll will never claim cannot advertise "sends in 3h"
+  // here while the panel calls it paused. Production pauses nothing today
+  // (2026-08-31), so the set is INJECTED - this is the mechanism a future
+  // re-pause would use, and it has to keep working on BOTH surfaces.
+  it('marks a paused tour rung `paused` when a kind is held back', async () => {
+    const { world, app } = makeGatherHarness(undefined, PAUSE_DAY_BEFORE);
     const phone = '+15550600031';
     world.contacts.push({ contactId: 'ct-paused', type: 'tenant', status: 'active', phone });
     seedConv(world, 'conv-ct-paused', phone, 'tenant_1to1');
@@ -1293,8 +1306,10 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
 
   it('the two ladders hold back independently: a paused TOUR rung leaves nudges alone', async () => {
     // The tour pause must not leak onto the other ladder (and vice versa) - two
-    // independent sets, two independent decisions.
-    const { world, app } = makeGatherHarness(undefined, MANUAL_ONLY_REMINDER_KINDS);
+    // independent sets, two independent decisions. Live proof of the asymmetry
+    // today: MANUAL_ONLY_NUDGE_KINDS is still full while
+    // MANUAL_ONLY_REMINDER_KINDS is empty, so the tour side is injected.
+    const { world, app } = makeGatherHarness(undefined, PAUSE_DAY_BEFORE);
     const phone = '+15550600032';
     world.contacts.push({ contactId: 'ct-nudge', type: 'tenant', status: 'active', phone });
     seedConv(world, 'conv-ct-nudge', phone, 'tenant_1to1');

@@ -112,8 +112,11 @@ export interface ContactTimelineRouterDeps {
   /**
    * Reminder kinds the POLL holds back, mirrored onto this surface's tour rungs
    * so a rung the poll will never claim chips `paused` here too. Defaults to
-   * MANUAL_ONLY_REMINDER_KINDS. Test seam only - see the twin on
-   * routes/tourReminders.ts for why the quiet-hours suites pass an empty set.
+   * MANUAL_ONLY_REMINDER_KINDS, which is EMPTY today (2026-08-31, Phase B), so
+   * this is now the seam a suite uses to INJECT pause-mode behaviour that
+   * production no longer exhibits by default - see the twin on
+   * routes/tourReminders.ts. Never a route for DISCONTINUED_REMINDER_KINDS,
+   * which is permanent and not injectable anywhere.
    */
   manualOnlyReminderKinds?: ReadonlySet<ReminderKind>;
   /** As above, for the placement-nudge ladder. Defaults to

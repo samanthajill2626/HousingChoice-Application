@@ -17,7 +17,8 @@ import { describe, expect, it } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
 import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import {
-  runDueTourReminders as runDueTourRemindersRaw,
+  MANUAL_ONLY_REMINDER_KINDS,
+  runDueTourReminders,
   type RunDueTourRemindersDeps,
 } from '../src/jobs/tourReminders.js';
 import type {
@@ -149,30 +150,15 @@ async function seedQuietTour(world: FakeWorld, suffix: string, phone: string): P
 }
 
 /**
- * A harness whose tour-reminders route applies NO manual-only hold-back.
- *
- * Since 2026-08-20 every auto-armed rung kind is held back (founder decision),
- * and `paused` outranks quiet hours in the shared precedence ladder - so under
- * the production default EVERY upcoming rung chips `paused` and the estimates
- * these cases exist to prove become unobservable. They are testing the route's
- * per-row quiet-hours formula and its opt-out/kill-switch preview, not the
- * hold-back, so they switch the hold-back off; the hold-back has its own cases
- * ("manual-only hold-back" below). Same posture the dev tick route takes for
- * the poll, and the wrapper tourReminders.test.ts uses for runDueTourReminders.
+ * The two hold-back wrappers this file used to route everything through are
+ * GONE (Phase B, 2026-08-31). MANUAL_ONLY_REMINDER_KINDS is EMPTY again, so
+ * `previewHarness()` (a harness with an injected empty set) and the poll
+ * wrapper both became no-ops that only obscured which default was in play.
+ * Every case below now runs the REAL production default through plain
+ * `makeWebhookHarness()` and the real `runDueTourReminders`; the few that want
+ * pause-mode behaviour INJECT a non-empty `tourReminderManualOnlyKinds`, which
+ * is what that seam is for now.
  */
-const NO_MANUAL_HOLD_BACK: ReadonlySet<ReminderKind> = new Set();
-function previewHarness(): ReturnType<typeof makeWebhookHarness> {
-  return makeWebhookHarness({ tourReminderManualOnlyKinds: NO_MANUAL_HOLD_BACK });
-}
-
-/**
- * The poll with the hold-back switched off - the cases below drive a real send
- * to compare it against the GET preview, and the production default would send
- * nothing. See the twin wrapper in tourReminders.test.ts.
- */
-function runDueTourReminders(now: string, deps: RunDueTourRemindersDeps): Promise<void> {
-  return runDueTourRemindersRaw(now, { manualOnlyKinds: NO_MANUAL_HOLD_BACK, ...deps });
-}
 
 describe('GET /api/tours/:tourId/reminders', () => {
   it('returns each rung sorted by dueAt asc with state + body, and next = earliest upcoming', async () => {
@@ -251,15 +237,13 @@ describe('GET /api/tours/:tourId/reminders', () => {
           names: {},
         }),
       );
-      // A non-self_guided tour still gets no RECIPIENT-state estimate (Task 2
-      // scope: that preview needs 1:1 routing). Since the 2026-08-20 hold-back
-      // its UPCOMING rungs do carry `paused`, which is derived from the kind and
-      // needs no recipient IO - a terminal rung carries nothing either way.
-      if (r.state === 'upcoming') {
-        expect(r.suppression).toEqual({ reason: 'paused' });
-      } else {
-        expect(r.suppression).toBeUndefined();
-      }
+      // A non-self_guided tour gets no RECIPIENT-state estimate at all (Task 2
+      // scope: that preview needs 1:1 routing), and since the 2026-08-31 unpause
+      // there is no kind-derived estimate either - nothing is paused. So on the
+      // PRODUCTION default every rung of this ladder, terminal or upcoming,
+      // carries no suppression. (The `paused` chip still exists; it is now
+      // reached only by injecting the set - see the hold-back describe below.)
+      expect(r.suppression).toBeUndefined();
     }
 
     // sentAt / canceledAt surfaced on the respective rungs.
@@ -316,7 +300,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   });
 
   it('carries a contact_opted_out suppression estimate on an upcoming 1:1 (self_guided) rung', async () => {
-    const { app, world } = previewHarness();
+    const { app, world } = makeWebhookHarness();
 
     const tenantPhone = '+15550600001';
     const tenantId = 'contact-optout-1';
@@ -370,7 +354,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // still built from the current time (never a fixed 21:00-08:00, which would
   // make these cases pass or fail depending on when the suite runs).
   it('carries a quiet_hours suppression estimate for a rung due inside a window occurrence', async () => {
-    const { app, world } = previewHarness();
+    const { app, world } = makeWebhookHarness();
     Object.assign(world.settings, quietWindowAroundNow());
     const tourId = await seedQuietTour(world, 'view-1', '+15550600011');
     // Same wall time tomorrow: inside TOMORROW's occurrence of the window.
@@ -393,7 +377,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // Friday afternoon will not wait for anything, so it must NOT be chipped -
   // while a rung already due IS being held by the fire-time backstop right now.
   it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
-    const { app, world } = previewHarness();
+    const { app, world } = makeWebhookHarness();
     Object.assign(world.settings, quietWindowAroundNow());
     const tourId = await seedQuietTour(world, 'view-5', '+15550600015');
     // Three days out at a time of day outside EVERY occurrence of the window.
@@ -428,7 +412,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // tonight WILL be deferred, so it must chip even though the clock is outside
   // the window - exactly when staff are looking at the panel.
   it('outside the window, still chips a rung due inside tonight occurrence', async () => {
-    const { app, world } = previewHarness();
+    const { app, world } = makeWebhookHarness();
     Object.assign(world.settings, quietWindowAwayFromNow());
     const tourId = await seedQuietTour(world, 'view-6', '+15550600016');
     seedReminder(world, {
@@ -461,7 +445,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // in-window dueAt must not chip it via the rung-time disjunct; only a rung
   // still in the FUTURE reads its own dueAt against the window.
   it('outside the window, an OVERDUE rung with an in-window dueAt is not chipped', async () => {
-    const { app, world } = previewHarness();
+    const { app, world } = makeWebhookHarness();
     Object.assign(world.settings, quietWindowAwayFromNow());
     const tourId = await seedQuietTour(world, 'view-7', '+15550600017');
     // Overdue, and its wall time sits inside a PAST occurrence of the window
@@ -483,7 +467,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   });
 
   it('carries NO suppression when quiet hours are disabled (nothing else suppresses)', async () => {
-    const { app, world } = previewHarness();
+    const { app, world } = makeWebhookHarness();
     world.settings.quietHoursEnabled = false;
 
     const tenantPhone = '+15550600012';
@@ -526,7 +510,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   });
 
   it('a harder reason still outranks quiet hours (opted-out tenant inside the window)', async () => {
-    const { app, world } = previewHarness();
+    const { app, world } = makeWebhookHarness();
     Object.assign(world.settings, quietWindowAroundNow());
 
     const tenantPhone = '+15550600013';
@@ -571,12 +555,26 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
   });
 
-  // Manual-only hold-back (founder decision 2026-08-20). These run on the
-  // PRODUCTION default - no previewHarness - because the hold-back is the thing
-  // under test.
-  describe('manual-only hold-back', () => {
+  // Manual-only hold-back. The production default is EMPTY since 2026-08-31
+  // (Phase B), so these INJECT the set: what is under test is the mechanism a
+  // future re-pause would use, not today's default. Every rung here is a LIVE
+  // kind - a discontinued one would chip its own, harder reason.
+  describe('manual-only hold-back (the pause mechanism, injected)', () => {
+    /** What a re-pause would look like: the live auto-armed kinds, by hand. */
+    const PAUSED_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([
+      'day_before',
+      'morning_of',
+      'en_route',
+    ]);
+
+    it('the production default pauses nothing', () => {
+      // The unpause itself: without this, every case below could be green while
+      // production quietly held the whole ladder back.
+      expect(MANUAL_ONLY_REMINDER_KINDS.size).toBe(0);
+    });
+
     it('chips an upcoming rung `paused` instead of leaving it to read "sending shortly"', async () => {
-      const { app, world } = makeWebhookHarness();
+      const { app, world } = makeWebhookHarness({ tourReminderManualOnlyKinds: PAUSED_KINDS });
       const tourId = await seedQuietTour(world, 'paused-1', '+15550600021');
       seedReminder(world, {
         reminderId: 'rem-paused-1',
@@ -596,7 +594,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
     });
 
     it('chips a GROUP-routed tour too, where no recipient-state estimate is computed', async () => {
-      const { app, world } = makeWebhookHarness();
+      const { app, world } = makeWebhookHarness({ tourReminderManualOnlyKinds: PAUSED_KINDS });
       // landlord_led: resolveTenantSuppression never runs for this shape, so
       // `paused` is the ONLY estimate the route can produce - and the one that
       // keeps these panels honest.
@@ -625,7 +623,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
       // The pause invites "Send now". A send-now to an opted-out contact is
       // refused, so the operator has to be told the real reason up front rather
       // than being sent into that refusal.
-      const { app, world } = makeWebhookHarness();
+      const { app, world } = makeWebhookHarness({ tourReminderManualOnlyKinds: PAUSED_KINDS });
       const phone = '+15550600022';
       const tourId = await seedQuietTour(world, 'paused-2', phone);
       const tenant = world.contacts.find((c) => c.contactId === 'contact-quiet-paused-2');
@@ -646,12 +644,14 @@ describe('GET /api/tours/:tourId/reminders', () => {
     });
 
     it('a terminal rung carries no estimate at all', async () => {
-      const { app, world } = makeWebhookHarness();
+      const { app, world } = makeWebhookHarness({ tourReminderManualOnlyKinds: PAUSED_KINDS });
       const tourId = await seedQuietTour(world, 'paused-3', '+15550600023');
       seedReminder(world, {
         reminderId: 'rem-paused-3',
         tourId,
-        kind: 'confirmation',
+        // A PAUSED kind, deliberately: the point is that `state !== 'upcoming'`
+        // wins over a live suppression cause, so the cause has to be live.
+        kind: 'day_before',
         dueAt: isoHoursFromNow(-48),
         sentAt: isoHoursFromNow(-47),
       });
@@ -1127,11 +1127,17 @@ describe('composed reminder bodies', () => {
 // wire view, the dashboard mirror and TimelineScheduled).
 // ===========================================================================
 describe('uncomposable rungs on the tour-reminder read paths', () => {
-  /** A self_guided tour whose scheduledAt was corrupted AFTER the ladder existed. */
+  /** A self_guided tour whose scheduledAt was corrupted AFTER the ladder existed.
+   *
+   *  `pendingKind` defaults to a LIVE kind: the send-now case below has to reach
+   *  the COMPOSE gate, and a discontinued kind is refused above it (kind_retired
+   *  outranks invalid_schedule). Pass 'confirmation' to test that precedence
+   *  itself. */
   async function seedUncomposableTour(
     world: FakeWorld,
     suffix: string,
     phone: string,
+    pendingKind: ReminderKind = 'morning_of',
   ): Promise<{ tourId: string; pendingId: string; sentId: string }> {
     const tourId = await seedQuietTour(world, suffix, phone);
     // Recorded consent, so the send-now case below reaches the COMPOSE instead
@@ -1145,7 +1151,7 @@ describe('uncomposable rungs on the tour-reminder read paths', () => {
     seedReminder(world, {
       reminderId: pendingId,
       tourId,
-      kind: 'confirmation',
+      kind: pendingKind,
       dueAt: '2026-01-10T10:00:00.000Z',
     });
     seedReminder(world, {
@@ -1180,7 +1186,7 @@ describe('uncomposable rungs on the tour-reminder read paths', () => {
     const pending = rungs.find((r) => r.reminderId === pendingId)!;
     expect(pending.body).toBe('');
     expect(pending.state).toBe('upcoming');
-    expect(pending.kind).toBe('confirmation');
+    expect(pending.kind).toBe('morning_of');
     expect(pending.dueAt).toBe('2026-01-10T10:00:00.000Z');
     // A SENT rung never recomposes, so an unusable tour time cannot erase what
     // was really sent.
@@ -1217,6 +1223,33 @@ describe('uncomposable rungs on the tour-reminder read paths', () => {
     expect(res.body.reminder.body).toBe('');
     expect(spy.sent).toHaveLength(0);
     // Untouched: no sentAt, no skip stamp - still the poll's to deliver.
+    expect(world.tourRemindersMap.get(pendingId)?.sentAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(pendingId)?.skippedAt).toBeUndefined();
+  });
+
+  it('send-now on a DISCONTINUED kind refuses kind_retired FIRST - before invalid_schedule', async () => {
+    // Both refusals are live on this row: the tour time is unusable AND the kind
+    // is retired. `kind_retired` has to win, because the two say opposite things
+    // to the operator - invalid_schedule is a fixable data problem ("repair the
+    // tour and try again"), kind_retired is permanent. The ordering is
+    // structural: the kind check sits at the row lookup, above the compose gate
+    // and above target resolution, so it costs no reads to say the true thing.
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, pendingId } = await seedUncomposableTour(
+      world,
+      'read4',
+      '+15550710014',
+      'confirmation',
+    );
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${pendingId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('kind_retired');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+    // Still PENDING: a refusal never retires a rung (only the sweep does).
     expect(world.tourRemindersMap.get(pendingId)?.sentAt).toBeUndefined();
     expect(world.tourRemindersMap.get(pendingId)?.skippedAt).toBeUndefined();
   });
@@ -1501,10 +1534,18 @@ describe('name-read FAILURE on the tour-reminder route surfaces (spec 6.3b)', ()
     // to the amber "sends in Nh" promise mid-outage - the perpetual-"sending
     // shortly" lie the 2026-08-20 pause chip exists to end.
     //
-    // Plain makeWebhookHarness(), NOT previewHarness(): the latter injects the
-    // EMPTY manual-only set, which would make `paused` false and the assertion
-    // below unmeetable.
-    const { app, world } = makeWebhookHarness();
+    // The manual-only set is INJECTED (it is empty in production since
+    // 2026-08-31), because `paused` is the state this case needs to observe:
+    // the finding is about what happens to the chip when the evaluator is
+    // handed back defined-but-empty, and only a paused rung can show it.
+    const { app, world } = makeWebhookHarness({
+      tourReminderManualOnlyKinds: new Set<ReminderKind>([
+        'confirmation',
+        'day_before',
+        'morning_of',
+        'en_route',
+      ]),
+    });
     world.contacts.push({
       contactId: 'contact-panel-boom',
       type: 'tenant',

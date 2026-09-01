@@ -35,10 +35,12 @@ interface GroupSeed {
 interface Calls {
   groupLimits: (number | undefined)[];
   groupCursors: (string | undefined)[];
+  /** One entry per getDisplaysByIds batch: proof the page reads names ONCE. */
+  displayBatches: string[][];
 }
 
 function makeDeps(seed: GroupSeed): { deps: InboxRouterDeps; calls: Calls } {
-  const calls: Calls = { groupLimits: [], groupCursors: [] };
+  const calls: Calls = { groupLimits: [], groupCursors: [], displayBatches: [] };
   const groups = [...(seed.groups ?? [])].sort((a, b) =>
     a.last_activity_at < b.last_activity_at ? 1 : -1,
   );
@@ -113,6 +115,20 @@ function makeDeps(seed: GroupSeed): { deps: InboxRouterDeps; calls: Calls } {
       // partition is provably empty in this suite.
       async listByType(type: string, opts = {}) {
         return listByTypeFromContacts((seed.contacts ?? []) as never, type, opts);
+      },
+      // The display projection the read boundary batches over (M1). Records the
+      // id set of every call so a test can prove ONE batch per page, not one
+      // read per member.
+      async getDisplaysByIds(contactIds: string[]) {
+        calls.displayBatches.push([...contactIds]);
+        return new Map(
+          (seed.contacts ?? [])
+            .filter((c) => contactIds.includes(c.contactId))
+            .map(
+              (c) =>
+                [c.contactId, { contactId: c.contactId, firstName: c.name, phone: c.phone }] as const,
+            ),
+        );
       },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
@@ -449,5 +465,56 @@ describe('aggregateInbox - filter=groups', () => {
     await expect(
       aggregateInbox({ filter: 'all', limit: 25, cursor: groupCursor }, deps),
     ).rejects.toBeInstanceOf(InboxBadRequestError);
+  });
+});
+
+// M1: `participants[].name` is a write-time snapshot nothing refreshes, so a
+// renamed contact kept its old title forever. The row builders now take a names
+// map resolved at the boundary - ONE batch for the page, never a read per
+// member - and hand the unchanged label functions a fresher roster.
+describe('roster names resolve on read (M1)', () => {
+  it('titles group rows from the CONTACT names, one batch per page', async () => {
+    const { deps, calls } = makeDeps({
+      groups: [
+        groupConv({
+          conversationId: 'gt-1',
+          last_activity_at: '2026-06-17T10:00:00.000Z',
+          participants: [
+            { contactId: 'c-ann', phone: '+14045550111', name: 'Ann Tenant' },
+            { contactId: 'c-marcus', phone: '+14045550112' },
+          ],
+        }),
+        groupConv({ conversationId: 'gt-2', last_activity_at: '2026-06-17T09:00:00.000Z' }),
+      ],
+      contacts: [
+        { contactId: 'c-ann', phone: '+14045550111', name: 'Annika' },
+        { contactId: 'c-marcus', phone: '+14045550112', name: 'Marc' },
+      ],
+    });
+    const page = await aggregateInbox({ filter: 'groups', limit: 25 }, deps);
+    expect(page.rows.map((r) => r.name)).toEqual(['With Annika & Marc', 'With Annika & Marc']);
+    expect(calls.displayBatches).toHaveLength(1);
+    expect(new Set(calls.displayBatches[0])).toEqual(new Set(['c-ann', 'c-marcus']));
+  });
+
+  it('titles a relay row from the contact name', async () => {
+    const { deps } = makeDeps({
+      relay: [
+        {
+          conversationId: 'relay-1',
+          status: 'open',
+          type: 'relay_group',
+          pool_number: '+15550160001',
+          participants: [{ contactId: 'c-ann', phone: '+14045550111', name: 'Ann Tenant' }],
+          last_activity_at: '2026-06-17T22:00:00.000Z',
+          created_at: '2026-06-17T22:00:00.000Z',
+          ai_mode: 'manual',
+        } as ConversationItem,
+      ],
+      contacts: [{ contactId: 'c-ann', phone: '+14045550111', name: 'Annika' }],
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    const row = page.rows.find((r) => r.conversationId === 'relay-1');
+    expect(row?.name).toBe('With Annika');
   });
 });

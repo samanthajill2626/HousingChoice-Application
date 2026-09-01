@@ -221,6 +221,13 @@ function makeDeps(
         if (calls !== undefined) calls.listByType += 1;
         return listByTypeFromContacts(seed.contacts, type, opts);
       },
+      // Explicit and empty (M1). The roster-name boundary batches through this
+      // method; the cast above would let it be MISSING, and the resulting
+      // TypeError is swallowed - so this suite would go green by resolving zero
+      // names silently rather than by resolving none.
+      async getDisplaysByIds() {
+        return new Map();
+      },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
       async listByConversation(conversationId: string) {

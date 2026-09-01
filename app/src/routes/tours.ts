@@ -1196,11 +1196,25 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
     // The four terminal statuses, named ONCE and used twice (rotation decision
     // here, sweep branch below) so the two can never drift apart.
+    //
+    // Read from `patch['status']` and NOT from `effectiveStatus` (review round
+    // M3): a terminal transition is a PATCH that explicitly carries one of these
+    // four, never one that INHERITS the tour's already-terminal status. The
+    // ordinary navigator exit gate is `{ outcome, moveForward }` with no status
+    // at all, on a tour that is already `toured` - and off the effective status
+    // that PATCH rotated the pointer and swept, hard-deleting every
+    // pre-migration `canceledAt` rung the tour still carried (the old tour-wide
+    // cancel's rows) on the first edit after this deploy. Nothing is superseded
+    // in that state: the ladder is already dead, so the sweep has no
+    // justification and its only effect is to destroy reminder history. It also
+    // churned a pointer write, an updatedAt bump and an SSE emit on every note
+    // or outcome edit of every completed tour, in perpetuity.
+    const patchedStatus = patch['status'] as TourStatus | undefined;
     const terminal =
-      effectiveStatus === 'canceled' ||
-      effectiveStatus === 'closed' ||
-      effectiveStatus === 'toured' ||
-      effectiveStatus === 'no_show';
+      patchedStatus === 'canceled' ||
+      patchedStatus === 'closed' ||
+      patchedStatus === 'toured' ||
+      patchedStatus === 'no_show';
     // Minted unconditionally so the compare-and-set below can name it without a
     // non-null assertion; it only reaches the store when this patch ends the
     // current ladder. On a re-arm it is a placeholder the arm's real ladderId

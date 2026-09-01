@@ -1845,6 +1845,60 @@ describe('currentLadderId - the tour generation pointer', () => {
     expect(world.toursMap.get(tourId)?.currentLadderId).toBe(gen3Ladder);
   });
 
+  // ---- M3: only a TRANSITION is terminal -----------------------------------
+
+  it('UNRELATED PATCH on an already-terminal tour rotates nothing and sweeps nothing', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    // A PRE-MIGRATION tour, already terminal: no pointer at all, and its rungs
+    // are the old shape - one canceled by the deleted tour-wide cancel, one
+    // sent. This is every tour retired before this feature deployed.
+    const tourId = 'tour-legacy-terminal';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId: 'contact-tenant-1',
+      unitId: 'unit-abc',
+      tourType: 'self_guided',
+      status: 'toured',
+      scheduledAt: FAR,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+    const canceled = await world.tourRemindersRepo.create({
+      tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-19T22:00:00.000Z',
+    });
+    expect(await world.tourRemindersRepo.cancel(canceled.reminderId, PTR_NOW)).toBe(true);
+    const sent = await world.tourRemindersRepo.create({
+      tourId,
+      kind: 'morning_of',
+      dueAt: '2026-07-20T13:00:00.000Z',
+    });
+    expect(await world.tourRemindersRepo.claimSend(sent.reminderId, PTR_NOW, 'sent copy')).toBe(
+      true,
+    );
+
+    // The normal navigator exit gate on a toured tour: an outcome, no status.
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true });
+    expect(res.status).toBe(200);
+
+    // Nothing was superseded here - the tour was already terminal and its ladder
+    // already dead - so the sweep has no justification and its cost is the
+    // silent destruction of pre-migration reminder history.
+    expect(world.tourRemindersMap.get(canceled.reminderId)?.canceledAt).toBe(PTR_NOW);
+    expect(world.tourRemindersMap.get(sent.reminderId)?.sentAt).toBe(PTR_NOW);
+    // ABSENT stays absent: a rotation here would also flip this tour out of the
+    // pre-migration cell and orphan both rows.
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBeUndefined();
+    expect(res.body.tour.currentLadderId).toBeUndefined();
+    // No ladder changed, so no Upcoming refetch is advertised.
+    expect(world.emitted.filter((e) => e.event === 'scheduled.updated')).toHaveLength(0);
+  });
+
   // ---- T3.3 the compare-and-set --------------------------------------------
 
   it('CONCURRENT RESCHEDULES: the surviving pointer names a ladder whose rows exist; the loser logs', async () => {

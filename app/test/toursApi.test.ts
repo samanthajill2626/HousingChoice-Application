@@ -1338,11 +1338,9 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     // exclusive, so this does not clamp); sameDay, and 14:00Z > NEAR - 6h.
     expect(skipped['morning_of']?.skipReason).toBe('booked_too_late');
     expect(skipped['morning_of']?.dueAt).toBe('2026-07-13T12:00:00.000Z');
-    // en_route has no rule and still clears `now`; confirmation arms at `now`.
-    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual([
-      'confirmation',
-      'en_route',
-    ]);
+    // en_route has no rule and still clears `now`, and it is now the WHOLE
+    // pending ladder: confirmation stopped arming 2026-08-31 (Phase B).
+    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual(['en_route']);
   });
 
   it('case 7b: a status REVIVAL onto the stored (near) time stamps the same chips', async () => {
@@ -1356,7 +1354,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
       .send({ ...BASE_CREATE_BODY, scheduledAt: REVIVAL_TOUR });
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
-    // Two days out at ARM_NOW: four clean rungs, no chip anywhere.
+    // Two days out at ARM_NOW: three clean rungs, no chip anywhere.
     expect(skippedByKind(world, tourId)).toEqual({});
 
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
@@ -1374,10 +1372,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     expect(skipped['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
     expect(skipped['morning_of']?.skipReason).toBe('booked_too_late');
     expect(skipped['morning_of']?.dueAt).toBe('2026-07-15T14:00:00.000Z');
-    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual([
-      'confirmation',
-      'en_route',
-    ]);
+    expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual(['en_route']);
   });
 
   it("status-only {status:'no_show'} cancels the pending rows (the check-in is a manual send now)", async () => {
@@ -1504,8 +1499,15 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // confirmation = FIXED_NOW
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // WHERE THE INJECTED CLOCK SHOWS. It used to be visible directly, in the
+    // confirmation rung's dueAt (which WAS the arm instant); that rung stopped
+    // arming 2026-08-31 (Phase B) and every remaining dueAt is derived from
+    // SCHEDULED_AT alone. `now` still reaches the armer through the arm-time
+    // SKIP rules, and that is what this asserts: on the real wall clock a July
+    // 2026 tour is long past, so all three rungs would be born skipped
+    // (booked_too_late / past_event). Clean rows are the seam working.
+    expect(byKind['confirmation']).toBeUndefined();
+    expect(rows.map((r) => r.skippedAt)).toEqual([undefined, undefined, undefined]);
     // day_before = 19:30 ORG-LOCAL (EDT) on 2026-07-14, the day before the
     // tour's local date = '2026-07-14T23:30:00.000Z'
     expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
@@ -1543,8 +1545,11 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     const newRows = allRows.filter((r) => r.canceledAt === undefined);
     const byKind = Object.fromEntries(newRows.map((r) => [r.kind, r]));
 
-    // confirmation = FIXED_NOW (injected)
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // The injected clock now shows through the arm-time skip rules rather than
+    // through a rung armed AT `now` (see the case above): under the real wall
+    // clock these July rows would all be born skipped.
+    expect(byKind['confirmation']).toBeUndefined();
+    expect(newRows.every((r) => r.skippedAt === undefined)).toBe(true);
     // day_before = 19:30 EDT Jul 19, the day before NEW_SCHEDULED's local date
     expect(byKind['day_before']?.dueAt).toBe('2026-07-19T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
@@ -1692,7 +1697,8 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
     const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
     expect(rows.every((r) => r.canceledAt === undefined)).toBe(true);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    expect(byKind['confirmation']).toBeUndefined(); // stopped arming 2026-08-31
+    expect(rows.every((r) => r.skippedAt === undefined)).toBe(true);
     // day_before = 19:30 EDT Jul 14, the day before BOOKED_AT's local date
     expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
@@ -2825,9 +2831,10 @@ describe('PATCH /api/tours — requested → scheduled transition', () => {
 
     // Assert the dueAts are computed from FIXED_NOW / NEW_SCHED.
     const byKind = Object.fromEntries(rowsAfter.map((r) => [r.kind, r]));
-    // FIXED_NOW is 08:00 EDT - exactly quiet-END, so the confirmation is stored
-    // unclamped (the window is end-EXCLUSIVE).
-    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // confirmation stopped arming 2026-08-31 (Phase B); the quiet-END boundary
+    // it used to pin here (FIXED_NOW is 08:00 EDT, and the window is
+    // end-EXCLUSIVE) is pinned on its own in tourReminders.test.ts.
+    expect(byKind['confirmation']).toBeUndefined();
     // day_before = 19:30 EDT Jul 24, the day before NEW_SCHED's local date
     // (Jul 25). 19:30 local is OUTSIDE the default 21:00-08:00 window, so it is
     // stored unclamped. (NEW_SCHED is a 06:00-EDT tour, so morning_of/en_route

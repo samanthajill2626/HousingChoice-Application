@@ -468,8 +468,12 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     // --- 2. Lifecycle milestones STILL pin to the tenant --------------------
     // Book the tour AFTER the removal: the milestone is the tenant's history,
     // not the roster's, so it lands on their timeline either way.
+    // +48h is the horizon the tour specs already tick against (steps.ts
+    // tourSchedule's default): far enough out that the whole ladder arms and no
+    // booked-too-late rule can fire at any wall clock, and no further, because
+    // 2b below drives a FUTURE global tick off this booking.
     const booked = await req.patch(`${NEXT}/api/tours/${tourId}`, {
-      data: { scheduledAt: new Date(Date.now() + 5 * 24 * 3_600_000).toISOString() },
+      data: { scheduledAt: new Date(Date.now() + 48 * 3_600_000).toISOString() },
     });
     expect(booked.ok(), await booked.text()).toBeTruthy();
     await page.goto(`${NEXT}/contacts/${tenant.contactId}`);
@@ -484,21 +488,31 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     // reason), so the only ladder-visible signal is the chip a claim-skip
     // leaves behind - which means the poll has to actually run.
     //
-    // TIMING-ROBUST BY CONSTRUCTION: the booking above armed the ladder and the
-    // `confirmation` rung's dueAt is the server's ARM-TIME instant, so it is
-    // already due - no scheduledAt change is needed (moving the tour near-term
-    // would un-arm the other rungs). Rather than tick bare on the wall clock,
-    // read the rung's STORED dueAt (which IS the real send time - it is the
-    // quiet-hours-clamped instant) and tick 1s past it, the `justAfter` idiom.
-    // The tick is global, but at ~now it fires only what the worker's own 60s
-    // poll would have fired anyway; a far-future `now` never belongs here.
+    // TIMING-ROBUST BY CONSTRUCTION: read the rung's STORED dueAt (which IS the
+    // real send time - it is the quiet-hours-clamped instant) and tick 1s past
+    // it, the `justAfter` idiom. Any rung that is armed, claim-skippable and
+    // drivable will do; `day_before` is the ladder's EARLIEST live rung, so
+    // ticking it pulls no later rung along with it.
+    //
+    // RE-DERIVED 2026-08-31. This block rode `confirmation`, whose dueAt was the
+    // server's ARM-TIME instant and therefore already due - which is what the
+    // old warning here ("a far-future `now` never belongs here") was defending:
+    // the whole point of that trick was that the tick stayed at ~now, so a
+    // global tick fired only what the worker would have fired anyway. That rung
+    // no longer arms, and every live rung's dueAt is in the future by
+    // construction, so a future global tick is now unavoidable - and is already
+    // the suite's standard vehicle (tours.spec.ts and
+    // scheduled-visibility.spec.ts both tick `justAfter` a read-back day_before).
+    // The booking above is +48h precisely to keep that reach as short as the
+    // rest of the suite's. Arrival assertions stay scoped to this test's tour,
+    // which is what makes a global tick safe.
     const ladder = await req.get(`${NEXT}/api/tours/${tourId}/reminders`);
     expect(ladder.ok(), await ladder.text()).toBeTruthy();
     const { reminders } = (await ladder.json()) as { reminders: { kind: string; dueAt: string }[] };
-    const confirmation = reminders.find((r) => r.kind === 'confirmation');
-    if (confirmation === undefined) throw new Error('the booking armed no confirmation rung');
+    const dayBefore = reminders.find((r) => r.kind === 'day_before');
+    if (dayBefore === undefined) throw new Error('the booking armed no day_before rung');
     const tick = await req.post(`${NEXT}/__dev/tour-reminders/tick`, {
-      data: { now: new Date(Date.parse(confirmation.dueAt) + 1_000).toISOString() },
+      data: { now: new Date(Date.parse(dayBefore.dueAt) + 1_000).toISOString() },
     });
     expect(tick.ok(), await tick.text()).toBeTruthy();
 
@@ -509,14 +523,15 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     const remindersCard = page
       .locator('section')
       .filter({ has: page.getByRole('heading', { name: 'Reminders' }) });
-    // `.first()` on the rung is the Scenario.remindersCard idiom too
-    // (steps.ts:3277): it resolves to one node today, but it collapses the whole
-    // chain, so neither a second matching <section> nor a second matching rung
-    // could turn this into a strict-mode violation.
+    // `.first()` on the rung is the Scenario.expectReminderRung idiom too
+    // (steps.ts, `remindersCard` + a label filter): it resolves to one node
+    // today, but it collapses the whole chain, so neither a second matching
+    // <section> nor a second matching rung could turn this into a strict-mode
+    // violation.
     await expect(
       remindersCard
         .getByRole('listitem')
-        .filter({ hasText: REMINDER_KIND_LABELS.confirmation })
+        .filter({ hasText: REMINDER_KIND_LABELS.day_before })
         .first(),
     ).toContainText(`Skipped - ${REMINDER_SKIP_REASON_LABELS.tenant_not_on_roster}`, {
       timeout: 20_000,

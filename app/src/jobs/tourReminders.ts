@@ -299,12 +299,16 @@ export async function readQuietHoursWindow(
 // a human judgment the system cannot verify, so it is sent manually from the tour
 // page ("Send no-show check-in"). The kind stays valid everywhere else (catalog,
 // ReminderKind union, computeDueAt case) for that manual send.
-const REMINDER_KINDS: ReminderKind[] = [
-  'confirmation',
-  'day_before',
-  'morning_of',
-  'en_route',
-];
+//
+// confirmation is intentionally NOT auto-armed either, for a different reason:
+// the founder retired the rung outright (Sam, 2026-08-24 - "No confirmation text
+// at all - I'm scheduling manually, so it's redundant"), so arming stopped
+// 2026-08-31 (Phase B). The kind likewise stays valid everywhere else - the
+// ReminderKind union, computeDueAt, LADDER_ORDER and the message catalog all
+// keep it, so in-flight rows armed during the pause and rows in seeded history
+// still compose, sort and display. SENDING is guarded separately by
+// DISCONTINUED_REMINDER_KINDS above; this list only stops NEW rows being born.
+const REMINDER_KINDS: ReminderKind[] = ['day_before', 'morning_of', 'en_route'];
 
 export interface ArmTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;

@@ -55,10 +55,11 @@
 //     tourScheduleFullLadder(2) (14:00, two days out), so the next rung up,
 //     morning_of, is due 10:00 on TOUR DAY - after the defer tick (19:30:01 the
 //     evening before) AND after the release tick (00:30 tour day). No later rung
-//     is ever in either batch, so nothing supersedes day_before. (confirmation,
-//     whose dueAt is the arm instant, IS in the defer batch - but it is EARLIER
-//     in the ladder, so supersession retires IT and leaves day_before pending,
-//     which is exactly what the "still upcoming" assertion reads.)
+//     is ever in either batch, so nothing supersedes day_before. (The defer
+//     batch now holds day_before ALONE: `confirmation`, whose dueAt was the arm
+//     instant, used to share it and be retired by supersession as the earlier
+//     rung - it stopped arming on 2026-08-31, so there is no longer anything
+//     beside day_before to reason about.)
 //
 // LANE HYGIENE: the lean seed ships quiet hours OFF (worklist A1) so every other
 // spec stays time-of-day independent. This file turns it on explicitly and puts

@@ -9,7 +9,9 @@
 //
 // Structural rules this suite encodes (documentation/tours-sequence-writeup.md):
 //   - The tour record is created at INTEREST, with NO time — booking (setting
-//     the time) is the moment the confirmation + reminder ladder fire.
+//     the time) is the moment the reminder ladder is ARMED. Nothing goes out at
+//     booking any more: the one rung that did, `confirmation`, was retired by
+//     the founder and stopped arming 2026-08-31.
 //   - Masked relay groups are Team-created BY HAND (a TourDetail button), never
 //     auto-created; the tenant↔landlord/PM time negotiation happens INSIDE the
 //     group, each message relayed masked ("Name: body" from the pool number).
@@ -311,11 +313,20 @@ test('no-show: booked (no group -> 1:1 fallback) -> no auto check-in -> logged n
   // textually DISTINCT from anything the first ladder sent: its arrival at all
   // proves the re-arm (a stronger claim than the old "2 identical copies" count -
   // a re-label could not produce a body composed off newTimes).
+  //
+  // REBUILT 2026-08-31, same treatment as its twin in
+  // scheduled-visibility.spec.ts (c). The proof used to ride `confirmation`,
+  // which armed AT the re-arm instant and so fired on a bare wall-clock tick.
+  // That rung no longer arms. day_before is now the fresh ladder's earliest,
+  // and its dueAt is 19:30 ORG-local the evening before the +72h tour - which
+  // no host-local mirror can compute, so the tick is driven from the value the
+  // server stored. armedReminderDueAt selects state === 'upcoming', so it reads
+  // the FRESH row: the first ladder's day_before is already SENT (above).
   await flow.teamMarksNoShow();
   const newTimes = tourSchedule(72);
   await flow.teamReschedulesTour(newTimes);
-  await flow.tickTourReminders();
-  await flow.expectReminderTo1to1('confirmation', tenant);
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
+  await flow.expectReminderTo1to1('day_before', tenant);
 });
 
 // Activity coverage: each surfaced tour transition dual-writes a tenant activity

@@ -74,9 +74,6 @@ test('no_show_checkin is not auto-sent; staff send it manually with prefilled co
   //
   // WHAT THAT ACTUALLY ARMS, re-derived 2026-08-26 against the retimed ladder and
   // the new skip rules (the lean seed has quiet hours OFF, so nothing clamps):
-  //   - confirmation: dueAt IS the arm instant, which is 26h AFTER the tour
-  //     start, so the at-or-past-start rule fires and it is born a VISIBLE
-  //     `past_event` skipped row. It is NOT pending and it does NOT fire.
   //   - day_before: its RAW time is 19:30 org-local the evening before the tour's
   //     local date - about two days ago - so the arm instant is far past
   //     (RAW - 4h) and it is born a VISIBLE `booked_too_late` skipped row.
@@ -85,7 +82,11 @@ test('no_show_checkin is not auto-sent; staff send it manually with prefilled co
   //     crosses a local date boundary, so that rule never fires here; the dueAt
   //     is simply already past, which is the one SILENT drop - no row.
   //   - en_route: start - 1h, 27h ago - the same silent drop, no row.
-  //   - no_show_checkin: absent from REMINDER_KINDS, never considered at all.
+  //   - no_show_checkin and confirmation: both absent from REMINDER_KINDS, so
+  //     neither is ever considered - no row of either kind exists at all.
+  //     (confirmation left the list on 2026-08-31; before that its dueAt was the
+  //     arm instant, 26h AFTER this tour's start, so it was born a VISIBLE
+  //     `past_event` skipped row. Either way it never fired.)
   // So NOTHING is pending, and the wall-clock tick in half 1 fires NOTHING.
   const pastIso = new Date(Date.now() - 26 * 3_600_000).toISOString();
   const patched = await page.request.patch(`${dashboard}/api/tours/${tourId}`, {

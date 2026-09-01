@@ -1465,20 +1465,22 @@ describe('relay-group API (M1.7)', () => {
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(200);
       const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
-      // The full 4-rung ladder is upcoming (armed 2 days before the tour;
-      // no_show_checkin is manual-send only, so it is not in the ladder).
-      expect(scheduled).toHaveLength(4);
+      // The full 3-rung auto ladder is upcoming (armed 2 days before the tour).
+      // Two kinds are absent by design: no_show_checkin is manual-send only,
+      // and confirmation stopped arming 2026-08-31 (Phase B).
+      expect(scheduled).toHaveLength(3);
       // dueAt ascending; each item is wire-parity TimelineScheduled.
       const ats = scheduled.map((s) => s['at'] as string);
       expect([...ats].sort()).toEqual(ats);
       const first = scheduled[0]!;
       expect(first['kind']).toBe('scheduled');
       expect(first['source']).toBe('tour_reminder');
-      expect(first['reminderKind']).toBe('confirmation');
+      // day_before is the earliest live rung now that confirmation is gone.
+      expect(first['reminderKind']).toBe('day_before');
       // The flipped copy: composed by the SAME composer the send path uses, so
-      // the body opens with the confirmation lead-in and carries the local time
+      // the body opens with the day_before lead-in and carries the local time
       // (zone-agnostic shape - this bucket does not pin the org zone).
-      expect(first['body']).toContain('your tour is set for');
+      expect(first['body']).toContain('confirming your tour tomorrow at');
       expect(first['body']).toMatch(/at \d{1,2}:\d{2} (AM|PM)/);
       expect(first['conversationId']).toBe(conversationId);
       expect(first['refType']).toBe('tour');
@@ -1490,17 +1492,17 @@ describe('relay-group API (M1.7)', () => {
 
       // Fire one rung (claim = sent) — it must drop out of the bucket.
       const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
-      const confirmation = rows.find((r) => r.kind === 'confirmation')!;
-      await world.tourRemindersRepo.claimSend(confirmation.reminderId, '2026-08-01T10:01:00.000Z');
+      const dayBefore = rows.find((r) => r.kind === 'day_before')!;
+      await world.tourRemindersRepo.claimSend(dayBefore.reminderId, '2026-08-01T10:01:00.000Z');
       const after = await request(app)
         .get(`/api/conversations/${conversationId}/scheduled`)
         .set('x-origin-verify', SECRET)
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(200);
-      expect(after.body.scheduled).toHaveLength(3);
+      expect(after.body.scheduled).toHaveLength(2);
       expect(
         (after.body.scheduled as Array<{ reminderKind: string }>).some(
-          (s) => s.reminderKind === 'confirmation',
+          (s) => s.reminderKind === 'day_before',
         ),
       ).toBe(false);
     });
@@ -1518,7 +1520,17 @@ describe('relay-group API (M1.7)', () => {
       // time, never the group send itself, and the placement-nudge twin owns
       // the rest of that gap.
       const { app } = authedHarness(world, makeFakePoolNumbers());
-      const { conversationId } = await seedTourGroup(app, 'landlord_led');
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // A PAUSE-ERA row, written directly: arming stopped 2026-08-31 (Phase B),
+      // so `armTourReminders` above no longer produces one - and this surface
+      // exists precisely for the rows that were armed BEFORE it stopped and are
+      // still sitting pending until the sweep reaches them. dueAt is the old
+      // arm instant, which is what those rows actually carry.
+      await world.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind: 'confirmation',
+        dueAt: '2026-08-01T10:00:00.000Z',
+      });
 
       const res = await request(app)
         .get(`/api/conversations/${conversationId}/scheduled`)
@@ -1613,11 +1625,10 @@ describe('relay-group API (M1.7)', () => {
         .expect(200);
 
       const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
-      expect(scheduled).toHaveLength(4);
+      expect(scheduled).toHaveLength(3);
       expect(scheduled.every((s) => s['body'] === '')).toBe(true);
       // Everything else about each rung survives.
       expect(scheduled.map((s) => s['reminderKind'])).toEqual([
-        'confirmation',
         'day_before',
         'morning_of',
         'en_route',
@@ -1708,9 +1719,9 @@ describe('relay-group API (M1.7)', () => {
       const byKind = Object.fromEntries(scheduled.map((s) => [s['reminderKind'] as string, s]));
       expect(byKind['en_route']!['body']).toBe('');
       expect(byKind['day_before']!['body']).not.toBe('');
-      expect(byKind['confirmation']!['body']).not.toBe('');
+      expect(byKind['morning_of']!['body']).not.toBe('');
       // The card itself survives - only the text is withheld.
-      expect(scheduled).toHaveLength(4);
+      expect(scheduled).toHaveLength(3);
     });
   });
 });

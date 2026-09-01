@@ -6,12 +6,13 @@ severity: high
 status: open
 area: jobs
 created: 2026-09-01
-refs: app/src/jobs/broadcastFanOut.ts:456, app/src/jobs/relayFanOut.ts:531, app/src/jobs/jobs.ts:188, app/src/jobs/jobs.ts:262, app/src/repos/messagesRepo.ts:2630, app/src/jobs/retrySend.ts:122
+updated: 2026-09-01
+refs: app/src/jobs/broadcastFanOut.ts:545, app/src/jobs/relayFanOut.ts:1002, app/src/jobs/jobs.ts:188, app/src/jobs/jobs.ts:262, app/src/repos/messagesRepo.ts:2653, app/src/jobs/retrySend.ts:122
 ---
 
 **Problem.** `broadcastFanOut` and `relayFanOut` both handle an unrecognised
 per-recipient send error by deliberately throwing, so that SQS redelivers the
-envelope and the work is retried. Both say so in a comment:
+envelope and the work is retried. Both said so in a comment:
 
 ```
 // Unknown error: leave the recipient queued and let the job FAIL so SQS
@@ -20,7 +21,7 @@ envelope and the work is retried. Both say so in a comment:
 throw err;
 ```
 
-**The parenthetical is false.** A redelivery carries the SAME `jobId`:
+**The parenthetical was false.** A redelivery carries the SAME `jobId`:
 
 - `buildEnvelope` mints `jobId: randomUUID()` ONCE, at enqueue time
   (`jobs.ts:188`), and the envelope travels inside the SQS message body.
@@ -29,7 +30,7 @@ throw err;
   envelope-less path. The function's own docblock says it re-hydrates "the new
   jobRunId + **the stable jobId**" (`jobs.ts:286`).
 - `putJobExecutionMarker` is a conditional PUT with **no TTL**
-  (`messagesRepo.ts:2630-2649`), so its suppression never expires.
+  (`messagesRepo.ts:2653-2672`), so its suppression never expires.
 
 So the redelivered envelope reaches the handler, `putJobExecutionMarker` returns
 `false`, and the handler **returns immediately having done nothing**. The
@@ -51,7 +52,7 @@ attempted at all - one unrecognised error on recipient 3 of 800 strands 798,
 with their slots left `queued` and the broadcast row left `sending`. Nothing
 repairs any of it, and nothing reports it.
 
-**Both fan-outs, not just broadcasts.** `relayFanOut.ts:531-535` has the
+**Both fan-outs, not just broadcasts.** `relayFanOut.ts:1002` has the
 identical shape and comment. Its symptom differs only in surface: the relay
 source message's `delivery_recipients` slots stay `queued` for every member from
 the failing one onward, so the thread shows a message that was silently
@@ -69,6 +70,15 @@ verifying whether a post-throw redelivery could advance a durable pass counter.
 It cannot. M5's fix therefore closes the ENQUEUE-failure path by running the
 cap-and-close branch immediately, and does not touch this path.
 
+**Comment corrected, BEHAVIOR UNCHANGED (2026-09-01, commit `8cebbebf`).** The
+two false comments quoted above no longer exist in the tree: both were replaced
+with an accurate one carrying a `TODO(throw-for-redelivery-defeated-by-job-marker)`
+marker. The quoted block is kept here as the historical text this issue was
+filed against. Both files also moved under M5's edits, so the CURRENT anchors
+are `broadcastFanOut.ts:545` and `relayFanOut.ts:1002` - re-derive by reading
+rather than trusting either number. Nothing about the argument below changes:
+the throws are still there and still retry nothing.
+
 **Suggested fix.** Decide what an unrecognised per-recipient send error should
 DO, then make the code do it:
 
@@ -77,7 +87,8 @@ DO, then make the code do it:
 - if it is not retryable, mark the recipient failed, **continue the loop so the
   remaining recipients are still attempted**, and let the job complete so the
   row reaches a terminal state;
-- either way, correct the two false comments.
+- the two false comments are already corrected (see above); the remaining work
+  is the behavior.
 
 Note the interaction with the marker's purpose: it exists so a redelivery cannot
 TEXT SOMEONE TWICE. Any fix must keep that guarantee.

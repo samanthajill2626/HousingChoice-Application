@@ -9,7 +9,7 @@ the planner verified the withdrawal:
   service, or repo method.
 - Triage is an IN-PLACE `PATCH /api/contacts/:contactId`
   (`routes/contacts.ts:1391`). The stub keeps its `contactId` and GAINS a name.
-- `routes/api.ts:2029-2041` says only that "the SNAPSHOT goes stale" when a stub
+- `routes/api.ts:2032-2044` says only that "the SNAPSHOT goes stale" when a stub
   is triaged - the snapshot, never the id.
 
 So the roster's `contactId` keeps pointing at the same contact, which now has a
@@ -25,7 +25,7 @@ round trips each; returns an arbitrary contact for duplicate phones), and those
 reasons still stand.
 
 **The one real uncovered population: bare-phone RELAY members.** Skipped at
-`routes/relayGroups.ts:470` (`if (!member.contactId) return member;`), with no
+`routes/relayGroups.ts:483` (`if (!member.contactId) return member;`), with no
 phone resolver in this branch and no writer anywhere that refreshes them. They
 keep today's behavior exactly - nothing regresses - and S5 sizes them.
 
@@ -35,7 +35,8 @@ Branch: `feat/participant-snapshot-refresh`
 Worktree: `W:\tmp\participant-snapshot-refresh`
 Bundle: M1 (docs/issues/_CLUSTERS.md, re-derived 2026-08-31 @5ce9912f)
 Date: 2026-08-31
-Revision: **v5**, after design review rounds 1-4 and four rulings from Cameron
+Base: `main` @f27aabbf, merged in 2026-09-01 (`b702a81c`) - **`feat/tour-reminder-ladder-phase-b` HAS LANDED**, which 2.4 required before this branch proceeds.
+Revision: **v6**, after design review rounds 1-4, the phase-b sync, and four rulings from Cameron
 (resolve-on-read; the three-rung chain; outbound content out; phase-b merges
 first - 2.4).
 Adjudications: `docs/superpowers/reviews/2026-08-31-participant-snapshot-refresh/design-review/`
@@ -85,15 +86,15 @@ BLOCKING, found independently by both reviewers and verified by the planner):
 
 | site | today |
 |---|---|
-| `routes/api.ts:2017-2117` `GET /conversations/:id/group-members` | resolves by PHONE, prefers the contact name, WRITES the roster back via `backfillGroupTextRoster` (`:2099-2114`). `group_text` only. |
-| `routes/relayGroups.ts:456-492` `GET /conversations/:id/members` | resolves by contactId and DELETES the stored name. `relay_group` only. |
-| `lib/rosterResolution.ts:544-545` `describeRoster` | resolves the contact but lets the STORED name win. |
+| `routes/api.ts:2020-2128` `GET /conversations/:id/group-members` | resolves by PHONE, prefers the contact name, WRITES the roster back via `backfillGroupTextRoster` (`:2099-2114`). `group_text` only. |
+| `routes/relayGroups.ts:469-505` `GET /conversations/:id/members` | resolves by contactId and DELETES the stored name. `relay_group` only. |
+| `lib/rosterResolution.ts:564` `describeRoster` | resolves the contact but lets the STORED name win. |
 | everything else | reads the raw snapshot. |
 
 The work is to **put the surfaces this branch hydrates onto one rule, and
 extend that rule to the display surfaces that have none.**
 
-NOT a full reconciliation, deliberately: `routes/api.ts:2017-2117` keeps its own
+NOT a full reconciliation, deliberately: `routes/api.ts:2020-2128` keeps its own
 three rules (resolve by phone, prefer contact, write back) untouched. Changing a
 shipped converge mechanism is its own change with its own blast radius; this
 branch reads AROUND it and says so rather than claiming a unification it does
@@ -111,7 +112,7 @@ here would be rewritten by that split.
 
 Its plan Tasks 13 and 14 rewrite exactly these functions:
 
-- `jobs/relayFanOut.ts` - `composeConnectionSentence` (becomes
+- `jobs/relayFanOut.ts` - `composeNameList` (becomes
   `composeNameList`), `composeIntroBody`, `composeMemberAddedBody`, both job
   handlers, plus a new shared owner-keyed resolver;
 - `services/rosterEdits.ts` - `buildOpenPreview`, `buildAddPreview`,
@@ -136,9 +137,32 @@ verified):
   exceeding its own stated exclusion.
 
 So: one landed edit, no further planned work, in a different function from this
-branch's `:456-492`. A one-time textual merge, not ongoing contention.
+branch's `:469-505`. A one-time textual merge, not ongoing contention.
 
-### 2.4 MERGE ORDER: phase-b lands FIRST; this branch re-baselines against it
+### 2.4 MERGE ORDER: phase-b has LANDED; this section is now a record
+
+**STATUS 2026-09-01: DONE.** `feat/tour-reminder-ladder-phase-b` merged to
+`main` (verified: ancestor of main AND 0 ahead / 0 behind - never a merge commit
+naming the branch), and `main` was merged into this branch at `b702a81c`.
+Cameron directed the sync now rather than at the usual pre-handback step; a
+SECOND sync may therefore still be owed before handback if `main` advances
+again.
+
+What the sync actually brought, re-derived BY SYMBOL per step 2 below - and
+note that **phase-b touched FOUR of this branch's anchor files**, which this
+spec previously said it did not:
+
+| file | what phase-b did | effect here |
+|---|---|---|
+| `lib/rosterResolution.ts` | +19: three OPTIONAL deps (`tours`, `placements`, `settings`) on `RosterResolutionDeps` for the owner-routed preview composer | additive only; `describeRoster`'s name backfill is untouched and S3 is still a one-line flip, now at `:564` |
+| `routes/relayGroups.ts` | +15: a `discontinued` suppression field in the scheduled-reminder block | different function; this branch's members route shifted `:456`->`:469` |
+| `routes/api.ts` | +13: a docblock rewrite on a test seam | none |
+| `lib/groupTitle.ts` | +2: renamed `composeConnectionSentence` -> `composeNameList` in a docblock | this spec's references renamed to match |
+
+Every line number in this spec was re-derived by symbol after the merge. They
+are accurate as of `b702a81c` and will drift again if `main` advances.
+
+#### The original ruling, kept as the record
 
 **Cameron, 2026-08-31.** A build instruction, not a note. It stands on its own;
 what follows is the corrected account of what re-baselining actually involves.
@@ -150,11 +174,11 @@ what follows is the corrected account of what re-baselining actually involves.
 handback stop-block around it. Round 4 (U4/U5) withdrew it and the planner
 verified the withdrawal - it is enforced by the TYPE:
 
-- `services/rosterEdits.ts:138` types the preview-open owner as
+- `services/rosterEdits.ts:153` types the preview-open owner as
   `Omit<RosterOwner, 'roster' | 'groupThreadId'>`. With no `groupThreadId`,
   `resolveRoster` can NEVER take its `participants` branch on those paths.
 - It therefore always takes plan/default, where `memberFromContact`
-  (`lib/rosterResolution.ts:172-180`) already builds the name from the CONTACT.
+  (`lib/rosterResolution.ts:181-200`) already builds the name from the CONTACT.
 - S3 only reorders stored-vs-contact precedence, so on a path whose names are
   already contact-derived it is a structural no-op.
 
@@ -170,7 +194,7 @@ rewrite to guard against. Both the ritual and the stop-block are deleted.
    `main` sync.
 2. **Every `routes/relayGroups.ts` line number in this spec will be stale**
    (round 4, U7). phase-b's landed `6328970e` inserts ~13 lines above this
-   branch's edit site, so `:456-492` and `:470` shift by roughly that much.
+   branch's edit site, so `:469-505` and `:470` shift by roughly that much.
    **Re-derive them after the sync by symbol name** (`GET /conversations/:id/members`,
    `memberWithoutStoredName`) rather than trusting any number written here.
 3. **`app/test/relayApi.test.ts` is a genuine test co-edit** (round 4, U12):
@@ -231,7 +255,7 @@ member ... is shown by number as a RECIPIENT, because a blank row is useless.
 That split is intended and must not be 'fixed' in either direction."
 
 **Correction of record:** v2 justified overriding
-`routes/relayGroups.ts:471-474` by claiming its comment "only argues about
+`routes/relayGroups.ts:484-487` by claiming its comment "only argues about
 precedence". Round 2 (R4) showed that is a misreading - its second clause,
 "otherwise the dashboard uses this current roster phone as its fallback", IS
 the read-failure branch, implemented at `:482-489` and in two client files. The
@@ -256,7 +280,7 @@ authorised ~50 sequential reads on `GET /api/inbox`; and it returns the FIRST
 GSI item for duplicate phones in arbitrary order (`:1011-1016`), so it can
 attach the WRONG person's name. The triage-stub case it was meant to cover
 (a roster `contactId` still pointing at a stub that staff merged away) stays
-owned by the EXISTING converge-on-read write at `routes/api.ts:2099-2114`,
+owned by the EXISTING converge-on-read write at `routes/api.ts:2102-2125`,
 which resolves by phone and writes the corrected name back - after which this
 branch's rung 2 reads a fresh snapshot. Using that mechanism beats duplicating
 it.
@@ -273,14 +297,14 @@ real contact, the roster keeps pointing at the stub. Rung 1 then resolves to a
 NAMELESS contact and falls to rung 2.
 
 v3 claimed the existing converge-on-read write owns this case. **It does not.**
-`routes/api.ts:2099-2114` writes `{ ...p, name }` - `name` ONLY, never
+`routes/api.ts:2102-2125` writes `{ ...p, name }` - `name` ONLY, never
 `contactId`. So the dead id survives every write-back, and **rung 1 misses
 again on the next rename, and every rename after that.** The gap RECURS per
 rename; it does not heal. Its owner is bundle M8
 (`participants[].contactId` ownership), which is fenced (2.3).
 
 **Population 2 - bare-phone RELAY members.** Skipped at
-`routes/relayGroups.ts:470` (`if (!member.contactId) return member;`), with no
+`routes/relayGroups.ts:483` (`if (!member.contactId) return member;`), with no
 phone resolver in this branch and no writer anywhere that refreshes them.
 
 Both keep today's behavior exactly - nothing regresses - and S5 sizes both.
@@ -315,13 +339,13 @@ IN SCOPE:
 |---|---|---|
 | `routes/api.ts:1993-2002` | `GET /conversations/:id` - raw passthrough | **NOT HYDRATED - see 5.5** |
 | `routes/api.ts:2190-2198` | `GET /calls/:callId` - sibling passthrough feeding QuickReply | S2 |
-| `routes/api.ts:2017-2117` | group-members panel - already resolves; reconcile, keep its write-back | S2 |
-| `routes/relayGroups.ts:456-492` | relay members panel - add rung 2; batch it | S2 |
+| `routes/api.ts:2020-2128` | group-members panel - already resolves; reconcile, keep its write-back | S2 |
+| `routes/relayGroups.ts:469-505` | relay members panel - add rung 2; batch it | S2 |
 | `routes/inbox.ts:1237, 2358` | `groupRowFor` - SYNCHRONOUS, zero reads today | S2 |
 | `routes/inbox.ts:1154, 2293, 1418` | `relayRowFor` | S2 |
 | `routes/contacts.ts:1213, 1295` | relay-groups + group-texts cards | S2 |
 | `routes/today.ts:1001` | relay close-nag `memberNames` | S1 |
-| `lib/rosterResolution.ts:544-545` | `describeRoster` - precedence inverted | S3 |
+| `lib/rosterResolution.ts:564` | `describeRoster` - precedence inverted | S3 |
 | `webhooks/twilio.ts:307-315` | `pushSenderLabel` - snapshot FIRST | S4 |
 | `webhooks/voice.ts:112-121` | `maskedPartyLabel` - snapshot FIRST | S4 |
 
@@ -406,12 +430,12 @@ is out of scope (2.2).
 ### 5.3 Soft-delete
 
 **Rung 1** never serves a soft-deleted contact's name; such a member falls to
-rung 2. Matches `lib/rosterResolution.ts:522`, `routes/api.ts:2095` and
+rung 2. Matches `lib/rosterResolution.ts:541`, `routes/api.ts:2095` and
 `routes/api.ts:2157`. `isDeleted` accepts the display shape
 (`contactsRepo.ts:309-311`).
 
 **Rung 2 MAY still serve one, and that is a stated limitation** (round 3, T2):
-`routes/api.ts:2086` derives its name with no deleted check and `:2099-2114`
+`routes/api.ts:2089` derives its name with no deleted check and `:2099-2114`
 writes it into the stored snapshot, which IS rung 2. Adding a deleted check
 there means changing a shipped converge mechanism this branch deliberately does
 not touch (2.1). So the posture is: rung 1 is clean, rung 2 inherits whatever
@@ -505,10 +529,10 @@ resolved map as a second argument rather than becoming async.
 
 Two reconciliations:
 
-- **`routes/api.ts:2017-2117`** keeps its converge-on-read write untouched. The
+- **`routes/api.ts:2020-2128`** keeps its converge-on-read write untouched. The
   new in-memory hydration is applied to the OTHER boundaries so they agree with
   it without adding a second writer. State the precedence in its comment.
-- **`routes/relayGroups.ts:456-492`** stops deleting the stored name (rung 2)
+- **`routes/relayGroups.ts:469-505`** stops deleting the stored name (rung 2)
   and is BATCHED with `getDisplaysByIds` (round 2, R5 - it is a `Promise.all`
   of per-member `getById` today, which violates section 3's own batching rule).
   Amend `:471-474`, and the two client notes at `recipientLabel.ts:95-99` and
@@ -533,7 +557,7 @@ both. Round 4, U11.)
 
 ### S3 - `describeRoster` precedence flip (zero new reads)
 
-`lib/rosterResolution.ts:544-545`, invert so the contact wins:
+`lib/rosterResolution.ts:564`, invert so the contact wins:
 
 ```
 - nonEmpty(member.name) ?? (!removed && contact ? displayName(contact) : undefined)
@@ -569,7 +593,7 @@ Both already hold the contact, so both cost ZERO reads (round 2, R3):
 `lib/voiceMasking.ts:46-53`), NOT `contactDisplayName`** (round 2, R16).
 
 Its rung 2 is **MASKED, not dropped** - v4 said "no rung 2" and that was a
-REGRESSION (round 4, U3). `maskedPartyLabel` (`webhooks/voice.ts:116-121`) is
+REGRESSION (round 4, U3). `maskedPartyLabel` (`webhooks/voice.ts:116-121` (unchanged)) is
 total by construction: `member.name` -> role -> `'the other party'`. Dropping
 rung 2 would send a bare-phone member - 3.1's real uncovered population, who
 has no contact and therefore no role - from their stored name straight to

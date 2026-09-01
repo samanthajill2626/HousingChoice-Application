@@ -313,7 +313,11 @@ test('no-show: booked (no group -> 1:1 fallback) -> no auto check-in -> logged n
   await flow.expectRungsRetiredPastTour(stillPending);
 
   // Team logs the no-show, then reschedules — no-show tours stay reschedulable,
-  // and rescheduling cancels + RE-ARMS the ladder off the new time. Since the
+  // and rescheduling SWEEPS + RE-ARMS the ladder off the new time (the old
+  // generation's never-sent rungs are DELETED, not canceled in place; the rungs
+  // `stillPending` named above and the no_show transition's own sweep have both
+  // already gone by here, which is why the retirement read had to be taken
+  // before the tick rather than after the reschedule). Since the
   // flip a rung's body carries its tour's TIME, so a rung of the FRESH ladder is
   // textually DISTINCT from anything the first ladder sent: its arrival at all
   // proves the re-arm (a stronger claim than the old "2 identical copies" count -

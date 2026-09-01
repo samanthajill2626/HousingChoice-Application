@@ -1048,7 +1048,7 @@ function MessageBubble({
           </span>
         ) : null}
       </div>
-      {inboundRecipientName !== undefined ? (
+      {inboundRecipientName !== undefined && !revealed ? (
         <div className={styles.srOnly} role="group" aria-label={inboundRecipientName} />
       ) : null}
       {/* Who the send actually reached. CONDITIONALLY RENDERED on the reveal -

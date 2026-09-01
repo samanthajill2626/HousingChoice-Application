@@ -1584,6 +1584,11 @@ describe('Timeline relay-group annotations', () => {
     const accessibleName = disclosure.getAttribute('aria-label');
     expect(accessibleName?.split('9:25a')).toHaveLength(2);
     expect(accessibleName).not.toContain('9:14a');
+
+    fireEvent.click(screen.getByText('inbound relay accessibility'));
+
+    expect(screen.queryByRole('group', { name: expectedName })).not.toBeInTheDocument();
+    expect(screen.getByRole('list', { name: 'Delivery by recipient' })).toBeInTheDocument();
   });
 
   it('does not add the inbound Relay accessibility owner to a native group message', () => {

@@ -72,7 +72,15 @@ because this path has no sweep.
    being written at `routes/tours.ts:1164` - not a separate write. A separate
    rotation would leave a window in which the NEW `scheduledAt` is stored
    against the OLD pointer, and costs a round trip for nothing.
-2. Sweep (delete every row with no `sentAt`).
+2. Sweep (delete every row with no `sentAt`) - OWNERSHIP-GUARDED (review round
+   B1): re-read the tour first, and if `currentLadderId` no longer holds the
+   step-1 rotation, a concurrent reschedule owns this ladder - skip the sweep
+   AND the arm, log at error, and return the winner's stored state. Without the
+   guard the sweep is generation-blind, and the loser's late sweep deletes the
+   WINNER's freshly armed rows: pointer at a ladder with zero rows, two 200s.
+   The residual window (a full competing request landing between the ownership
+   read and the sweep) is accepted: it fires nothing, one side logs at error,
+   and the next reschedule repairs it.
 3. Arm.
 4. Write the returned `ladderId`, CONDITIONAL on `currentLadderId` still holding
    the rotation value from step 1. Two concurrent reschedules can otherwise
@@ -83,7 +91,10 @@ because this path has no sweep.
 
 **Terminal transitions** (`canceled` / `closed` / `toured` / `no_show`) run
 steps 1-2 and stop: the rotated pointer matches nothing, so the tour has no live
-ladder.
+ladder. A TRANSITION means the PATCH explicitly carries a terminal `status` -
+an unrelated PATCH (outcome, notes) on an ALREADY-terminal tour must not rotate
+or sweep, or every pre-migration tour loses its surviving reminder history on
+its first edit (review round M3).
 
 **Conversion** (`routes/placements.ts:716`) does not touch the pointer BEFORE
 the finalize, and rotates it AS PART OF the finalize. The two halves have
@@ -100,7 +111,9 @@ opposite requirements and the split is the whole design:
   every rung of a claim-in-flight tour: left unclaimed, nothing stamped.
 - AT finalize the conversion is real and there is nothing left to reverse, so
   the pointer rotation rides the finalize patch itself (`placements.ts:758`,
-  the same one-write idiom the re-arm path uses) and the sweep follows.
+  the same one-write idiom the re-arm path uses) and the sweep follows - also
+  ownership-guarded (3.2 step 2): swept only while the pointer still holds the
+  finalize's rotation, so a concurrent revival's fresh ladder survives.
 
 The rotation is REQUIRED here, not optional. Without it the converted tour has
 no refusal backstop at all: the sentinel is gone so the deferral ends, the
@@ -132,7 +145,16 @@ no recovery route. So past a grace window the rung is retired VISIBLY with its
 own skip reason, distinct from `superseded` because the cause is different and
 the operator's remedy is different: the conversion is stuck, not superseded.
 Inside the window it is DEFERRED: left
-unclaimed, no stamp, retried on the next tick (3.2).
+unclaimed, no stamp, retried on the next tick (3.2). The grace window runs from
+`max(dueAt, tour.updatedAt)` - the claim write bumps `updatedAt`, so a fresh
+claim always gets the full window even on a rung already hours past due (a
+quiet-hours deferral is routine, not an outage - review round M2); later tour
+edits only EXTEND the deferral. Send now ALSO refuses a claim-in-flight tour,
+409 `conversion_in_progress` with its own copy (review round M1) - the poll
+defers, the human path refuses, and neither stamps. The three preview surfaces
+do NOT consult the sentinel: a promise rendered during the claim window is
+milliseconds-stale on the happy path and capped by the grace window on a
+crashed one - accepted residue.
 
 **Copy and type surfaces for `superseded` - the count matters because only some
 break the build.** Exhaustive maps that WILL fail typecheck if the token is
@@ -359,7 +381,8 @@ and name.
 7a. A conversion that SUCCEEDS rotates the pointer as part of its finalize, so a
    rung the sweep missed is refused rather than sent.
 8. Two concurrent reschedules leave the tour pointing at a ladder that exists;
-   the loser logs at error and strands no pointer at a swept generation.
+   the loser logs at error and strands no pointer at a swept generation - and
+   no interleaving deletes the winner's freshly armed rows.
 9. A hand-canceled rung disappears on the next reschedule; PATCH against a
    deleted rung returns 404, not 500, and still emits `scheduled.updated` when
    the write won.

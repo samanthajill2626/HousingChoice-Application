@@ -64,9 +64,11 @@ const FIXTURE_INDEX_HTML =
   `<!doctype html><html lang="en"><head><title>${FIXTURE_MARKER}</title></head>` +
   '<body><div id="root"></div></body></html>';
 
-// Decoy exfiltration targets, written INSIDE the temp root at the depths the
-// traversal probes resolve to. Carries both leak markers the probes assert on
-// ('"version"' and '"private"'), and nothing else - it is never a real package.
+// The decoy exfiltration target, written INSIDE the temp root at the one depth
+// the traversal probes resolve to. Carries both leak markers the probes assert
+// on ('"version"' and '"private"'), and nothing else - it is never a real
+// package. There is exactly one, and a probe reaches it: a decoy at a depth no
+// probe reaches is dead scaffolding that reads as coverage.
 const DECOY_PACKAGE_JSON = '{"name":"static-smoke-decoy","version":"0.0.0","private":true}';
 
 // The fixture is a THREE-level tree, not a bare dist:
@@ -74,7 +76,7 @@ const DECOY_PACKAGE_JSON = '{"name":"static-smoke-decoy","version":"0.0.0","priv
 //   <root>/package.json          <- two levels up from dist: the depth
 //                                   '/../../package.json' and
 //                                   '/assets/../../../package.json' resolve to
-//   <root>/site/package.json     <- one level up from dist
+//   <root>/site/                 <- one level up from dist
 //   <root>/site/dist/            <- DASHBOARD_DIST_DIR
 //       index.html, assets/app-fixture.js
 //
@@ -85,11 +87,15 @@ let distDir: string;
 beforeAll(() => {
   root = mkdtempSync(path.join(os.tmpdir(), 'hc-static-smoke-'));
   distDir = path.join(root, 'site', 'dist');
+  // ONE recursive mkdir, before any write. <root>/site/dist/assets is the
+  // deepest and only directory the fixture needs, so creating it here makes the
+  // writes below ORDER-INDEPENDENT: reordering them cannot ENOENT, which it
+  // could when an intermediate directory existed only as a side effect of
+  // whichever write happened to run first.
   mkdirSync(path.join(distDir, 'assets'), { recursive: true });
   writeFileSync(path.join(distDir, 'index.html'), FIXTURE_INDEX_HTML);
   writeFileSync(path.join(distDir, 'assets', 'app-fixture.js'), FIXTURE_ASSET_BODY);
   writeFileSync(path.join(root, 'package.json'), DECOY_PACKAGE_JSON);
-  writeFileSync(path.join(root, 'site', 'package.json'), DECOY_PACKAGE_JSON);
 });
 
 afterAll(() => {
@@ -238,9 +244,9 @@ describe('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
     // this app's particular stack of static serving, SPA fallback and reserved
     // namespaces, no encoded '..' yields anything but the SPA shell or a 4xx.
     //
-    // THE DECOYS ARE WHAT MAKE THAT FALSIFIABLE. The fixture writes a
-    // package.json carrying both leak markers below at exactly the depths these
-    // probes resolve to, all INSIDE the mkdtemp root (nothing is ever written
+    // THE DECOY IS WHAT MAKES THAT FALSIFIABLE. The fixture writes a
+    // package.json carrying both leak markers below at exactly the depth these
+    // probes resolve to, INSIDE the mkdtemp root (nothing is ever written
     // outside it). Under a resolver that decoded the path itself, four of the
     // six land on <root>/package.json:
     //
@@ -248,6 +254,14 @@ describe('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
     //   /..%2f..%2fpackage.json                  -> dist/../../package.json
     //   /..%5c..%5cpackage.json                  -> dist/..\..\package.json
     //   /assets/%2e%2e%2f%2e%2e%2f%2e%2e%2f...   -> dist/assets/../../../package.json
+    //
+    // THE THIRD OF THOSE FOUR IS WINDOWS-ONLY. On POSIX - the Linux ARM64
+    // deploy target and any Linux CI - '\' is a legal filename character, so
+    // path.resolve treats '..\..\package.json' as ONE filename inside dist,
+    // where no decoy exists, and the probe degrades to a shape probe like the
+    // /etc/passwd one below. So the falsifiability these probes carry is 4 of 6
+    // on Windows and 3 of 6 on Linux. All six still ASSERT the same thing
+    // everywhere; what varies is how many of them a leak could show up in.
     //
     // The other two cannot be given a target here, for different reasons, and
     // both are kept:
@@ -261,24 +275,23 @@ describe('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
     //     planting its target would mean writing outside the temp tree. It stays
     //     a pure SHAPE probe on 'root:'.
     //
-    // <root>/site/package.json covers the remaining in-root depth (one level
-    // above dist), for a future probe or a differently-rooted dist.
-    //
-    // Today none of the decoys is ever read: send (installed 1.2.1 when this
+    // Today the decoy is never read: send (installed 1.2.1 when this
     // was written, 2026-09-01 - an observation about the pinned version, not an
     // invariant; see the S3 record) decodes the request path and rejects any
     // normalized '..' segment with UP_PATH_REGEXP before touching the
-    // filesystem. Their job is to make a FUTURE leaky static layer OBSERVABLE.
-    // That was proven, not assumed: a review reproduction on 2026-09-01 drove a
-    // hand-rolled resolver with these exact probes and this exact assertion
-    // block, and it leaked 4 of the 6 only when a target file existed at the
-    // probed depth - 0 of 6 against the old target-less fixture.
+    // filesystem. Its job is to make a FUTURE leaky static layer OBSERVABLE.
+    // That was proven, not assumed: a review reproduction on 2026-09-01 (Windows)
+    // drove a hand-rolled resolver with these exact probes and this exact
+    // assertion block, and it leaked 4 of the 6 only when a target file existed
+    // at the probed depth - 0 of 6 against the old target-less fixture.
     const app = fixtureApp();
     for (const probe of [
       '/%2e%2e%2f%2e%2e%2fpackage.json',
       '/%2e%2e/%2e%2e/package.json',
       '/..%2f..%2fpackage.json',
-      '/..%5c..%5cpackage.json', // backslash separators - meaningful on Windows hosts
+      // Backslash separators: its decoy target exists on Windows only - on
+      // POSIX this resolves to one filename inside dist (see above).
+      '/..%5c..%5cpackage.json',
       '/assets/%2e%2e%2f%2e%2e%2f%2e%2e%2fpackage.json',
       '/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd',
     ]) {

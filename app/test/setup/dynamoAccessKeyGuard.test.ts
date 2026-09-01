@@ -91,10 +91,27 @@ function declaresNoContainerTables(absPath: string): boolean {
 }
 
 /**
- * What a `none` suite must not contain: an import of the app's own client
- * factory (src/lib/dynamo.js), a call to one of the three constructors it
- * exports, or a real table name. Kept beside the marker so the two rot together
- * or not at all.
+ * What a `none` suite must not contain. Kept beside the marker so the two rot
+ * together or not at all.
+ *
+ * THIS IS A ONE-FILE SOURCE SCAN AND IT DOES NOT FOLLOW IMPORTS. It is a
+ * statement about the declaring file's own text, not about its module graph, so
+ * a helper module that builds a client on the suite's behalf is invisible to it.
+ * What it does name is the set of entry points a test file uses to reach the
+ * container directly: the app's own client factory (src/lib/dynamo.js) and its
+ * three constructors, and the table-creating script/setup modules
+ * (db-create.js, db-seed.js, globalSetup.js, globalTeardown.js) and the helpers
+ * they export - because createAllTables builds its own client and creates all 22
+ * specs under FIXED names, which is the cross-worktree collision this guard
+ * exists to prevent. A quoted hc-local- prefix or a TABLE_PREFIX key is the
+ * second half: a stub suite has no business naming real tables.
+ *
+ * THE KNOWN ONE-HOP GAP, live in the tree today: dynamoAdminRetry.test.ts
+ * imports scripts/db-update-gsis.js, which imports the client factory. Harmless
+ * - that module's client construction sits behind its CLI argv guard and never
+ * runs under vitest - and db-update-gsis.js is deliberately NOT listed below,
+ * since listing it would flag the one legitimate `none` suite in the tree. It is
+ * the concrete measure of what a text scan cannot see.
  *
  * Every alternative is CODE-SHAPED on purpose - an import clause, a call, a
  * quoted prefix, an object key. The very comment that declares the marker has
@@ -105,7 +122,12 @@ function declaresNoContainerTables(absPath: string): boolean {
 const CONTAINER_REACHING = new RegExp(
   [
     String.raw`from\s+['"][^'"]*\/dynamo\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/db-create\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/db-seed\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/globalSetup\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/globalTeardown\.js['"]`,
     String.raw`\b(?:createDynamoClient|createDocumentClient|getDocumentClient)\s*\(`,
+    String.raw`\b(?:createAllTables|dropAllTables|ensureKeyedLocalTables|dropKeyedLocalTables)\s*\(`,
     String.raw`['"\`]hc-local-`,
     String.raw`\bTABLE_PREFIX\b\s*:`,
   ].join('|'),
@@ -374,11 +396,12 @@ describe('per-file DynamoDB Local access keys', () => {
     // marker keeps exempting it, and the fixed table names it now creates
     // collide across worktrees exactly as the guard above exists to prevent.
     //
-    // The app's own client factory is the ONLY thing that reaches the
-    // container, so importing that module - or calling one of its three
-    // constructors - is the reachable definition of "opens a database". A
-    // quoted hc-local- prefix or a TABLE_PREFIX key is the second half: a stub
-    // suite has no business naming real tables.
+    // What counts as reaching a database is listed at CONTAINER_REACHING: the
+    // app's client factory and its constructors, the table-creating script and
+    // setup entry points and their helpers, or a real table name. Read the
+    // limitation stated there before trusting this case - it is a one-file
+    // source scan that does not follow imports, so a suite that opens a
+    // database through a helper module of its own passes it.
     //
     // Constructing a bare DynamoDBClient from the SDK is NOT caught here, and
     // should not be: dynamoAdminRetry.test.ts case 13 makes two of them purely
@@ -392,7 +415,8 @@ describe('per-file DynamoDB Local access keys', () => {
       offenders,
       `These suites declare "${NO_CONTAINER_TABLES_MARKER}" - that they open no ` +
         `DynamoDB Local database - but their CODE imports the app client factory ` +
-        `module, calls one of its constructors, or names a real table. Either ` +
+        `module or a table-creating script/setup module, calls one of their ` +
+        `constructors or table helpers, or names a real table. Either ` +
         `drop the marker and satisfy the creates-tables guard the normal way ` +
         `(a per-run random prefix, or worktree-derived keys), or keep the suite ` +
         `on stubs.`,

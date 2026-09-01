@@ -112,12 +112,17 @@ const LOCAL_ENDPOINT: StubEndpoint = {
 };
 
 class StubClient {
-  /** Every command this client was asked to send, in order. */
+  /** Every command this client was asked to send, in ISSUE order. */
   readonly sent: CommandName[] = [];
 
   config: { endpoint?: () => Promise<StubEndpoint> } = {
     endpoint: async () => LOCAL_ENDPOINT,
   };
+
+  /** Shared ACROSS clients when set - see recordInto. */
+  private timeline: string[] | undefined;
+
+  private label = 'stub';
 
   private readonly scripts = new Map<CommandName, Step[]>();
 
@@ -139,6 +144,23 @@ class StubClient {
   /** What this command answers once its script (if any) runs out. */
   fallback(command: CommandName, step: Step): this {
     this.defaults.set(command, step);
+    return this;
+  }
+
+  /**
+   * Record this client's sends into a log SHARED with other clients, as
+   * `<label>:<CommandName>`. Two per-client counters can say how often each was
+   * called but never in what ORDER relative to each other, and an ordering is
+   * the whole content of case 20.
+   *
+   * The shared log records when a send ANSWERS, not when it is issued: what
+   * decides whether a concurrent caller could inherit another call's state is
+   * where its catch block runs, and a delayed send is issued long before that.
+   * `sent` (and therefore count()) keeps issue order and is unaffected.
+   */
+  recordInto(timeline: string[], label: string): this {
+    this.timeline = timeline;
+    this.label = label;
     return this;
   }
 
@@ -181,6 +203,7 @@ class StubClient {
     const step = (queue && queue.length > 0 ? queue.shift() : undefined) ?? this.defaults.get(name);
     if (!step) throw new Error(`stub client: no response configured for ${name}`);
     if (step.delayMs !== undefined) await delay(step.delayMs);
+    this.timeline?.push(`${this.label}:${name}`);
     if ('fail' in step) throw step.fail;
     return step.ok;
   }
@@ -542,13 +565,18 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     // B's single send is DELAYED past A's retry, so a module-level flag set by A
     // would already be true when B's conflict is handled - and B would poll.
     // Every sequential test in this file would still pass under that defect.
-    const retriedStub = new StubClient().script('CreateTable', [
-      { fail: internalFailure() },
-      { fail: resourceInUse() },
-    ]);
-    const plainStub = new StubClient().script('CreateTable', [
-      { fail: resourceInUse(), delayMs: 25 },
-    ]);
+    //
+    // The outcome assertions below are only worth what the INTERLEAVING is
+    // worth: if B's delayed send ever answered before A's retry fired, the case
+    // would pass without exercising the per-call flag at all and nobody would
+    // be told. One shared answer-ordered timeline pins it.
+    const timeline: string[] = [];
+    const retriedStub = new StubClient()
+      .recordInto(timeline, 'retried')
+      .script('CreateTable', [{ fail: internalFailure() }, { fail: resourceInUse() }]);
+    const plainStub = new StubClient()
+      .recordInto(timeline, 'plain')
+      .script('CreateTable', [{ fail: resourceInUse(), delayMs: 25 }]);
 
     const [a, b] = await Promise.all([
       ensureTable(retriedStub.asClient(), NO_TTL, 'stub-a', LIVE_ENV, {
@@ -564,6 +592,14 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     expect(retriedStub.count('DescribeTable')).toBeGreaterThanOrEqual(1);
     expect(plainStub.count('CreateTable')).toBe(1);
     expect(plainStub.count('DescribeTable')).toBe(0);
+
+    // B's conflict was handled AFTER A had already retried - the only ordering
+    // under which a module-level flag would have been set when B's catch ran.
+    const retriedFirst = timeline.indexOf('retried:CreateTable');
+    const retriedSecond = timeline.indexOf('retried:CreateTable', retriedFirst + 1);
+    const plainFirst = timeline.indexOf('plain:CreateTable');
+    expect(retriedSecond, `timeline: ${timeline.join(', ')}`).toBeGreaterThan(-1);
+    expect(plainFirst, `timeline: ${timeline.join(', ')}`).toBeGreaterThan(retriedSecond);
   });
 
   it('case 21: the retry stops at its ELAPSED-TIME deadline, not just the attempt bound', async () => {
@@ -571,22 +607,60 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     // ~10s per attempt by the retry's own account, so four attempts can spend
     // ~41.5s inside a 60s hook that loops the whole 22-table manifest - and the
     // failure the caller then sees is "Hook timed out in 60000ms", which names
-    // nothing. Each attempt here takes ~30ms against a 50ms deadline, so the
-    // loop must stop early and rethrow the ORIGINAL container fault.
-    const stub = new StubClient().fallback('CreateTable', {
-      fail: internalFailure(),
-      delayMs: 30,
-    });
+    // nothing.
+    //
+    // THE DEADLINE, NOT THE TIMER, IS THE BINDING CONSTRAINT HERE, by a wide
+    // margin - an earlier version of this case slept 30ms against a 50ms
+    // deadline, and 20ms of timer accuracy on a saturated worker is exactly the
+    // load-sensitive false red this mission exists to remove. The attempt bound
+    // is lifted to 12, well above what a 200ms deadline permits at 20ms a send:
+    //   lower bound (>= 2): attempt 1 finishes at ~20ms against a 200ms budget,
+    //     so ~180ms of slack has to be lost before it can fail;
+    //   upper bound (< 12): this is what proves the deadline fired AT ALL -
+    //     with no deadline the loop runs the full 12 sends.
+    const fault = internalFailure();
+    const stub = new StubClient().fallback('CreateTable', { fail: fault, delayMs: 20 });
 
+    // The ORIGINAL container fault, by identity - not a deadline error of the
+    // retry's own invention.
     await expect(
       ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, {
-        retry: { backoffMs: (): number => 0, deadlineMs: 50 },
+        retry: { attempts: 12, backoffMs: (): number => 0, deadlineMs: 200 },
       }),
-    ).rejects.toMatchObject({ name: 'InternalFailure' });
+    ).rejects.toBe(fault);
 
-    // Fewer than the bound of 4, and more than one - the deadline must cut the
-    // loop short without turning the retry off.
-    expect(stub.count('CreateTable')).toBeLessThanOrEqual(3);
     expect(stub.count('CreateTable')).toBeGreaterThanOrEqual(2);
+    expect(stub.count('CreateTable')).toBeLessThan(12);
+  });
+
+  it('case 22: an EXPIRED deadline still asks the hook whether the mutation landed', async () => {
+    // The deadline stops RE-SENDS; it must never stop the "did it land?" read.
+    // The hazard is the one the whole module exists to remove: the server
+    // ACCEPTS the mutation and only its RESPONSE fails, so a bare throw reports
+    // a run whose mutation SUCCEEDED as failed. The deadline reaches that blind
+    // spot EARLIER than the attempt bound (it can fire on attempt 2 of 4) and
+    // preferentially on the ~10s lock-timeout signature - the fault where the
+    // server spent the most work and is therefore the most likely to have
+    // accepted. The hook is one cheap read and cannot loop, so nothing is saved
+    // by skipping it.
+    //
+    // Here the deadline (1ms) is already blown by the 30ms attempt when the
+    // catch runs, and the re-read reports ENABLED. Exactly one UpdateTimeToLive
+    // (no re-send) and exactly two DescribeTimeToLive (the pre-send guard, then
+    // the hook) is what says the hook RAN despite the expiry.
+    const stub = new StubClient()
+      .script('UpdateTimeToLive', [{ fail: internalFailure(), delayMs: 30 }])
+      .script('DescribeTimeToLive', [
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'ENABLED' } } },
+      ]);
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, {
+        retry: { backoffMs: (): number => 0, deadlineMs: 1 },
+      }),
+    ).resolves.toBe('created');
+    expect(stub.count('UpdateTimeToLive')).toBe(1);
+    expect(stub.count('DescribeTimeToLive')).toBe(2);
   });
 });

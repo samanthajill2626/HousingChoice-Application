@@ -147,8 +147,20 @@ const DEFAULT_ATTEMPTS = 4;
 // spend ~41.5s - and the hooks that reach here loop the whole 22-table manifest
 // inside a 60s hookTimeout, where the resulting failure reads "Hook timed out in
 // 60000ms" and names nothing. 20s is chosen so that ONE full lock-timeout retry
-// (~10s + backoff) still fits, several fast InternalFailure retries still fit,
-// and a 22-table loop cannot lose more than ~20s to any one contended table.
+// (~10s + backoff) still fits, and several fast InternalFailure retries still
+// fit.
+//
+// WHAT IT BOUNDS IS ONE RETRIED SEND. It is read only before a RE-SEND, never
+// during one, so an attempt already in flight is not interrupted: the effective
+// bound is deadlineMs PLUS one attempt. It is not a budget for a whole
+// ensureTable call either - on a TTL-bearing spec that makes up to THREE
+// retried sends (CreateTable, the pre-send DescribeTimeToLive, and
+// UpdateTimeToLive), each with its own fresh clock, plus up to 10s in
+// pollUntilTableActive on the retried-conflict path; and the success path's SDK
+// waiter (waitUntilTableExists, 60s) sits outside all of them. Under `npm test`
+// the two TTL legs do not run at all (DYNAMO_DISABLE_TTL=1); db:create and the
+// e2e lanes do reach them. Size a hook timeout by adding these up, not by
+// reading this one number.
 const DEFAULT_DEADLINE_MS = 20_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
 // Argued against DynamoDB Local's own 10s per-table lock timeout: a table that
@@ -157,10 +169,24 @@ const DEFAULT_POLL_INTERVAL_MS = 100;
 //
 // NOT a contradiction of db-update-gsis.ts's 900s timeout, which the same diff
 // introduced: that one waits on a GSI BACKFILL over a populated local table,
-// which legitimately takes minutes. This one waits only on a table THIS call
-// just created - empty, and (by the per-worktree or per-run-random key scheme
-// the access-key guard enforces) not being created concurrently by anyone else.
-// An empty table that is still not ACTIVE after 10s is stuck, not busy.
+// which legitimately takes minutes. This one waits on a table THIS call just
+// created - empty, and, FOR THE VITEST CALLERS, not being created concurrently
+// by anyone else, because the access-key guard puts every such suite on a
+// per-run-random table prefix or a worktree-derived key. An empty table that is
+// still not ACTIVE after 10s is stuck, not busy.
+//
+// THAT EXCLUSIVITY IS A CLAIM ABOUT THE VITEST KEY SCHEME ACROSS WORKTREES, not
+// about every caller. app/scripts/db-create.ts runs against the human's ambient
+// database under fixed names, and scripts/e2e-session.mjs runs db-create and
+// then db-update-gsis over the same lane tables - so a table there really can be
+// UPDATING for the minutes that backfill budget allows. What those callers lose
+// is bounded: only a RETRIED conflict reaches this poll at all, and it then
+// fails after 10s naming the observed status, where the base code failed
+// IMMEDIATELY on the InternalFailure. A slower failure, not a lost success.
+//
+// A DescribeTable that FAILS inside the poll counts as not-ACTIVE by design and
+// is not retried (see pollUntilTableActive), so 10s of unreadable container ends
+// a retried conflict in a hard failure rather than a longer wait.
 const DEFAULT_POLL_CEILING_MS = 10_000;
 
 // URL.hostname yields the BRACKETED form for an IPv6 literal, so both spellings
@@ -231,11 +257,6 @@ async function retryLocalControlPlane(
     } catch (err) {
       if (!isRetryableContainerFault(err)) throw err;
       if (n >= attempts) throw err;
-      // The elapsed-time half of the bound. Read only here, in the catch, so a
-      // clean send never touches the clock. Checked BEFORE the re-send rather
-      // than after it, because the point is to stop spending, not to notice
-      // afterwards that we did.
-      if (Date.now() - startedAt >= deadlineMs) throw err;
       local ??= await isLocalDynamoEndpoint(client);
       if (!local) throw err;
       if (opts.verify) {
@@ -250,6 +271,16 @@ async function retryLocalControlPlane(
         }
         if (landed) return;
       }
+      // The elapsed-time half of the bound. Read only here, in the catch, so a
+      // clean send never touches the clock, and deliberately AFTER the verify
+      // block: the deadline stops RE-SENDS only. Every non-final failed attempt
+      // still asks "did it land?" - skipping that read would report a mutation
+      // the server ACCEPTED as failed, which is the one failure this whole
+      // module exists to remove, and the deadline reaches it earlier than the
+      // attempt bound does (see case 22). The hook is one read and cannot loop.
+      // Checked before the re-send rather than after it, because the point is
+      // to stop spending, not to notice afterwards that we did.
+      if (Date.now() - startedAt >= deadlineMs) throw err;
       opts.onRetry?.();
       await sleep(backoffMs(n));
     }
@@ -324,6 +355,12 @@ export class TableNotActiveError extends Error {
  * poll a flat 20s and it throws at 60s, which is the whole budget of the
  * beforeAll hooks that reach ensureTable. Arming a new false red while fixing
  * an old one is not a trade worth making.
+ *
+ * The SUCCESS path of ensureTable nevertheless keeps waitUntilTableExists
+ * deliberately unchanged - its first poll is immediate, so a fresh empty table
+ * normally returns on the first check and the flat-20s second tick bites only
+ * when the create itself is slow - and this mission changed only the
+ * retried-conflict path.
  *
  * Its own DescribeTable reads are NOT retried - a read that fails here simply
  * counts as "not ACTIVE yet" and is polled again until the ceiling. It carries

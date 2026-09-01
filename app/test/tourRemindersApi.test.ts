@@ -1434,6 +1434,28 @@ describe('PATCH /api/tours/:tourId/reminders/:reminderId', () => {
     ).toEqual(['rem-cancelable']);
   });
 
+  // The disclosure's Cancel button hits this path on an EARLIER rung, so the
+  // echoed view has to obey the same rule earlier[] does (review round m1):
+  // `bodyFor` recomposes live for any row without a sentAt+sentBody pair, and
+  // for a superseded generation that means printing a sentence about a schedule
+  // that never existed. The list GET is careful; the single-row echoes were not.
+  it('the PATCH echo of a SUPERSEDED rung never recomposes its body', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+    world.tourRemindersMap.get('rem-cancelable')!.ladderId = 'ladder-echo-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-echo-new' });
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reminder.state).toBe('canceled');
+    // This rung never sent, so it has no snapshot and there is no honest text at
+    // all - empty, never a freshly composed sentence.
+    expect(res.body.reminder.body).toBe('');
+  });
+
   it('409s a cancel that lost to the send (honest state in the body)', async () => {
     const { app, world } = makeWebhookHarness();
     const tourId = await seedTourWithRung(world);
@@ -1797,6 +1819,9 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('superseded');
     expect(res.body.reminder.state).toBe('upcoming');
+    // The 409 echoes the same view, so it obeys the same no-recompose rule
+    // (review round m1): a superseded rung renders its snapshot or nothing.
+    expect(res.body.reminder.body).toBe('');
     expect(spy.sent).toHaveLength(0);
     // A refusal never retires a rung - the poll's claim-skip is what does that.
     expect(world.tourRemindersMap.get(reminderId)?.sentAt).toBeUndefined();

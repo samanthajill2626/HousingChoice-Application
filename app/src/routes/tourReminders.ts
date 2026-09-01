@@ -450,6 +450,15 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // reuses the zone from its list state.
     const window = await readQuietHoursWindow(settings, log);
     const { address, names, ...readFlags } = await composeInputsOf(tour);
+    // NO LIVE RECOMPOSE for a rung of a replaced generation (spec 3.4, review
+    // round m1). `bodyFor` composes against the tour's CURRENT scheduledAt for
+    // any row without a sentAt+sentBody pair, which on a superseded rung is a
+    // sentence about a schedule that never existed - exactly the lie
+    // TourReminderEarlierView exists to prevent, and the disclosure's Cancel
+    // button reaches this echo on an earlier rung. Snapshot or nothing.
+    const afterBody = isSupersededRung(after, tour)
+      ? (after.sentBody ?? '')
+      : bodyFor(after, tour, window.timezone, address, names, readFlags);
     if (!won) {
       log.info(
         { tourId, reminderId, wanted: canceled ? 'cancel' : 'restore', state: stateOf(after) },
@@ -457,7 +466,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       );
       res.status(409).json({
         error: canceled ? 'reminder_not_cancelable' : 'reminder_not_restorable',
-        reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names, readFlags)),
+        reminder: viewOf(after, afterBody),
       });
       return;
     }
@@ -466,9 +475,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       { tourId, reminderId, kind: after.kind, canceled },
       canceled ? 'tour reminder canceled via api' : 'tour reminder restored via api',
     );
-    res.json({
-      reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names, readFlags)),
-    });
+    res.json({ reminder: viewOf(after, afterBody) });
   });
 
   // POST /:tourId/reminders/:reminderId/send-now - "Send now" (quiet-hours spec
@@ -527,7 +534,12 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // rung the force-send just claimed renders its SNAPSHOT, not a recompose.
     const window = await readQuietHoursWindow(settings, log);
     const { address, names, ...readFlags } = await composeInputsOf(tour);
-    const afterBody = bodyFor(after, tour, window.timezone, address, names, readFlags);
+    // Snapshot or nothing for a superseded rung, exactly as on the PATCH echo
+    // above (review round m1): the 409 `superseded` refusal returns this same
+    // view, and recomposing it would print a schedule this generation never had.
+    const afterBody = isSupersededRung(after, tour)
+      ? (after.sentBody ?? '')
+      : bodyFor(after, tour, window.timezone, address, names, readFlags);
 
     if (result.outcome === 'sent') {
       await audit.append(`tours#${tourId}`, 'reminder_force_sent', {

@@ -310,6 +310,35 @@ describe('GET /api/contacts/:id/relay-groups', () => {
     expect(res.body.groups[0].otherMemberNames).toEqual(['Lena Landlord']);
   });
 
+  // The card's tag carve-out sees the HYDRATED roster (same call as the inbox
+  // row, pinned in inboxGroups.test.ts): a snapshot-nameless member whose
+  // contact HAS a name makes `anyNamed` true, so the member labels are sent and
+  // the operator tag rides beside them instead of replacing them. Before M1
+  // this exact fixture sent `otherMemberNames: []` (tag-only chrome).
+  it('PIN: a tagged, snapshot-nameless roster sends the CONTACT names beside the tag', async () => {
+    seedContact();
+    world.contacts.push({
+      contactId: 'c-other',
+      type: 'landlord',
+      status: 'active',
+      phone: LANDLORD_PHONE,
+      firstName: 'Lena',
+      lastName: 'Landlord',
+    });
+    seedRelay(
+      'rg-tagged',
+      [
+        { contactId: TENANT, phone: PHONE_A },
+        { contactId: 'c-other', phone: LANDLORD_PHONE },
+      ],
+      { status: 'open', tag: 'Maple St - Dana' },
+    );
+    const res = await authedGet(`/api/contacts/${TENANT}/relay-groups`);
+    expect(res.status).toBe(200);
+    expect(res.body.groups[0].tag).toBe('Maple St - Dana');
+    expect(res.body.groups[0].otherMemberNames).toEqual(['Lena Landlord']);
+  });
+
   // THE READ BUDGET IS THE PROMISE. The route walks three status partitions, so
   // the batch must sit OUTSIDE that loop and take the ids collected AFTER the
   // membership filter - one read for the card, never one per partition and never

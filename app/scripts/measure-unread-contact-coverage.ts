@@ -601,7 +601,13 @@ async function auditDenorm(): Promise<void> {
 async function auditGroupRosters(): Promise<void> {
   const { rosters, groupTextTruncated, relayTruncated } = await collectGroupRosters(conversations);
   const ids = new Set<string>();
-  for (const roster of rosters) for (const p of roster) if (p.contactId !== '') ids.add(p.contactId);
+  // Same predicate as the tally and collectRosterContactIds: an ABSENT
+  // contactId must not enter the batch - `undefined` marshals to an empty key,
+  // DynamoDB rejects the chunk, the repo swallows it, and up to 100 healthy
+  // members would read as "dangling" with a phantom throttle warning.
+  for (const roster of rosters)
+    for (const p of roster)
+      if (typeof p.contactId === 'string' && p.contactId.length > 0) ids.add(p.contactId);
   const idList = [...ids];
   const found = new Map<string, ContactDisplayItem>();
   for (let i = 0; i < idList.length; i += 100) {

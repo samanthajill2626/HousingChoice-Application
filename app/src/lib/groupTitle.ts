@@ -164,10 +164,12 @@ export function relayThreadLabel(conv: ConversationItem): string {
   // under the key `placement_tag` (NOT `tag`) and is untyped.
   const tag = typeof conv['placement_tag'] === 'string' ? conv['placement_tag'].trim() : '';
   // The tag carve-out: raw digits lose to a deliberate operator label, but only
-  // when there is no real name anywhere on the roster. Hydrated callers (inbox
-  // rows, contact cards) have fed this LIVE contact names since 2026-09-01, so
-  // the tag now yields to a name resolved at read time exactly as it always
-  // yielded to a stored one - the rung is unchanged, its input got fresher.
+  // when there is no real name anywhere on the roster. The hydrated caller (the
+  // inbox relay row) has fed this LIVE contact names since 2026-09-01 - and the
+  // contact card applies this same carve-out by hand over its own hydrated
+  // roster (routes/contacts.ts) - so the tag now yields to a name resolved at
+  // read time exactly as it always yielded to a stored one: the rung is
+  // unchanged, its input got fresher.
   if (labels.length > 0 && (anyNamed || tag.length === 0)) return `With ${labels.join(' & ')}`;
   if (tag.length > 0) return tag;
   const pool =

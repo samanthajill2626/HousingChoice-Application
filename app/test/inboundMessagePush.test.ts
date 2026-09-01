@@ -362,7 +362,9 @@ describe('inbound message push - relay group', () => {
       kind: 'message',
       conversationId: 'conv-relay-1',
     });
-    // Same label the inbox row renders (parity by construction).
+    // Same RULE as the inbox row - but the push passes the STORED roster while
+    // the inbox hydrates first (lib/participantNames), so after a rename the
+    // two can differ by design. This restatement pins rule-parity only.
     expect(soleMessagePayload(world).title).toBe(relayThreadLabel(relay));
   });
 

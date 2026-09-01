@@ -1,6 +1,6 @@
 # Message transport fidelity - design specification
 
-Status: draft for adversarial review and human gate
+Status: v2 - round 1 adjudicated; awaiting adversarial re-review and human gate
 Date: 2026-08-31
 Branch: `feat/message-transport-fidelity`
 Worktree: `W:\tmp\message-transport-fidelity`
@@ -27,6 +27,11 @@ The compact chip is:
 
 When a multi-recipient send is expanded, each recipient row applies the same
 requested/actual presentation to that recipient's leg.
+
+An inbound relay source has two distinct observations on one bubble: the main
+transport chip describes the inbound source only, while the expandable recipient
+rows describe the outbound fan-out legs. Recipient slots never replace the main
+chip on an inbound message.
 
 This is an observability mission. It does not enable RCS, change routing, or alter
 delivery behavior.
@@ -74,14 +79,15 @@ The following decisions were made during the approved brainstorm:
    leg has actual evidence and at least two distinct actual transports exist.
    Pending evidence is not a transport and must not be called mixed.
 6. Expanded multi-recipient delivery rows show each leg's requested and actual
-   transport.
+   transport. An inbound relay source keeps its inbound-only main chip but may
+   expose its outbound fan-out legs in this disclosure.
 7. No migration or provider-history fetch is required.
 8. Rows created before this contract keep the current legacy `type` display.
 9. New inbound rows without transport evidence show `Unknown`; media presence is
    not transport evidence.
-10. Optimistic bubbles show no transport label until the server returns the
-    persisted requested transport. The dashboard must not duplicate provider
-    routing policy.
+10. Optimistic bubbles carry an explicit local-only `optimistic: true` marker and
+    show no transport label until a server refetch replaces them. The dashboard
+    must not duplicate provider routing policy.
 11. Keep `MessageType` and its current semantics. Add an independent transport
     model beside it.
 12. The model is open to RCS even though RCS sending is not part of this mission.
@@ -172,8 +178,11 @@ Rules:
 
 - Every carrier message newly written by runtime, import, or seed code after
   this feature has `transport_schema_version: 1`.
-- Outbound messages have `requested_transport` before the provider send begins
-  or before an asynchronous fan-out is enqueued.
+- An adapter plan establishes outbound `requested_transport` before the provider
+  send begins. A message row stores that value atomically when the row can be
+  created: after a direct/group provider result supplies the required SID and
+  timestamp, or before enqueue for a relay source whose synthetic identity
+  already exists.
 - Inbound messages never have `requested_transport`.
 - `actual_transport` is absent until the provider adapter or webhook normalizer
   supplies evidence.
@@ -196,9 +205,12 @@ requestedTransport?: MessageTransport;
 actualTransport?: MessageTransport;
 ```
 
-Both are required for new outbound recipient legs. The source message may be an
-inbound relay message while its fan-out legs are outbound, so message-level
-direction cannot substitute for leg-level requested transport.
+`requestedTransport` is required for every new provider-attempted outbound leg.
+`actualTransport` is optional until evidence exists. A suppressed slot for which
+no provider send occurred carries neither field and keeps its existing
+suppression status/error contract. The source message may be an inbound relay
+message while its fan-out legs are outbound, so message-level direction cannot
+substitute for leg-level requested transport.
 
 The existing status, SID, error, sent timestamp, and delivered timestamp fields
 are unchanged.
@@ -244,6 +256,13 @@ The same adapter must create and execute the plan. Services may persist the
 normalized `requestedTransport`, but may not construct it themselves or modify
 the plan.
 
+The plan makes requested transport known before execution; it does not require a
+durable direct/group message row before Twilio returns the provider SID and
+timestamp that form the existing row key. Direct and native-group messages keep
+their current send/post-then-append ordering and persist the plan's requested
+transport in that append. This mission adds no provisional identity, alias, or
+failed-pre-send row lifecycle.
+
 The Twilio Programmable Messaging adapter's current policy prepares SMS for
 text-only sends and MMS for media sends. That policy is localized in the
 adapter, covered by contract tests, and is the future seam where an enabled RCS
@@ -255,11 +274,11 @@ current Twilio implementation prepares and observes MMS because it calls the
 Group MMS rail. A future rail can change that adapter result without changing
 group services, persistence, or UI logic.
 
-Prepared plans are plain serializable data, not closures. Asynchronous jobs can
-persist the requested transport and carry only the existing stable job inputs;
-on execution they recreate and validate the current adapter plan. A mismatch
-between the persisted requested transport and the recreated plan is a loud
-structured error and a refused send, not silent drift.
+Prepared plans are plain serializable data, not closures. An asynchronous source
+persists the requested transport before enqueue; on execution the job recreates
+and validates the current adapter plan from its existing stable inputs. A
+mismatch between the persisted requested transport and the recreated plan is a
+loud structured error and a refused send, not silent drift.
 
 ## 7. Flow by message path
 
@@ -272,6 +291,10 @@ structured error and a refused send, not silent drift.
 - any actual transport returned by the adapter, and
 - the unchanged legacy `type` selected for media/content behavior.
 
+The append occurs after a successful provider call because the current key
+requires the returned provider SID and timestamp. Requested transport was fixed
+by the immutable plan before that call; it is not reverse-engineered afterward.
+
 Broadcasts already create ordinary 1:1 message rows, so they inherit this path.
 Manual 30003 retries create a new attempt and obtain a new plan; they do not copy
 actual transport from the prior attempt. Existing `retry_of` lineage remains.
@@ -283,12 +306,23 @@ and the common requested transport before the fan-out job is enqueued. Each
 recipient slot is seeded with the same requested transport.
 
 For an inbound relay source, the source message records inbound actual evidence
-only, while every outbound fan-out slot records its own requested and actual
-transport independently.
+only. At the first fan-out execution, the job resolves the current roster exactly
+where it does today, evaluates suppression, prepares each eligible send, and
+conditionally seeds the complete `delivery_recipients` map in one repository
+write before the first provider send. Non-suppressed slots start queued with
+their requested transport; suppressed slots carry only their existing suppressed
+status/error. This atomically captured map is the expected leg set for transport
+completeness and for redelivery of that fan-out. A concurrent or repeated job
+must adopt the captured set and must not replace it from a later roster read.
 
 Each fan-out send executes a provider plan. Its result can populate immediate
 actual evidence. A later Programmable Messaging status callback can populate or
 refine that slot's actual transport via the existing SID pointer.
+
+The inbound source's main chip always follows the inbound actual-only rule. Its
+recipient disclosure is allowed even though the source direction is inbound and
+shows the separately outbound slots. The outbound slot aggregate never replaces
+or rewrites the inbound main chip.
 
 Relay announcements that persist a source message use the same prepared-send and
 slot contract. Non-persisted system sends remain outside message-chip scope.
@@ -298,7 +332,9 @@ slot contract. Non-persisted system sends remain outside message-chip scope.
 `groupSend` obtains the group adapter's prepared post before persistence. New
 source messages and every recipient slot carry requested MMS. Because the
 current rail is exclusively Group MMS, the successful provider result supplies
-actual MMS for the source and slots.
+actual MMS for the source and every non-suppressed, provider-attempted slot.
+Suppressed slots carry no requested or actual transport because Twilio creates no
+leg for them.
 
 Inbound native-group messages are normalized as actual MMS from the native
 group envelope and have no requested value.
@@ -321,9 +357,14 @@ legacy content fields and is unaffected by the transport result.
 
 ### 7.5 Optimistic UI
 
-Optimistic messages are not provider facts. They render body/media/delivery
-pending state but no transport chip. The persisted server row replaces or
-deduplicates the optimistic row and introduces the requested transport.
+Optimistic carrier messages are not provider facts. Every optimistic message hook
+stamps the local-only `optimistic: true` field. For `sms`/`mms` rows, the presenter
+checks it before the schema-version/legacy rules and renders body/media/delivery
+pending state but no transport chip. Optimistic email keeps its `EMAIL` modality
+label. Resolving a POST may replace the temporary ID and status but keeps the
+marker; only a server refetch replaces or deduplicates that local row with a
+transport-bearing persisted row. The marker is never part of the API contract
+and is never sent to the server.
 
 ## 8. Repository update semantics
 
@@ -379,13 +420,14 @@ Callback paths continue using child-field updates only.
 ## 9. Presentation contract
 
 Add one pure dashboard presenter used by Timeline and every message host that
-reuses its bubbles. It receives the message and, for multi-recipient sends, the
-recipient slots.
+reuses its bubbles. It receives the message, its local optimistic marker, and,
+for multi-recipient sends, the recipient slots.
 
 ### 9.1 Legacy and non-carrier rows
 
 | Row | Chip |
 | --- | --- |
+| Local carrier row with `optimistic: true` | no transport chip |
 | Schema version absent | Existing `type.toUpperCase()` |
 | Email | `EMAIL` |
 | Call | `CALL` |
@@ -403,44 +445,48 @@ than the carrier transports governed by this feature.
 | Absent | `Unknown` |
 
 Requested transport is ignored on inbound even if malformed data contains it.
+For an inbound relay source, this table governs the main chip; outbound leg
+transport appears only inside the recipient disclosure.
 
 ### 9.3 Version 1 outbound single-recipient rows
 
-| Requested | Actual | Chip |
-| --- | --- | --- |
-| SMS | absent or SMS | `SMS` |
-| MMS | absent or MMS | `MMS` |
-| RCS | absent or RCS | `RCS` |
-| RCS | SMS | `RCS -> SMS` |
-| RCS | MMS | `RCS -> MMS` |
-| SMS | MMS | `SMS -> MMS` |
-| MMS | SMS | `MMS -> SMS` |
-| absent | known | actual only |
-| absent | absent | `Unknown` |
+The presenter uses one complete algorithm rather than a partial matrix:
 
-The presenter is generic even though the repository refuses unsupported actual
-state transitions. This keeps corrupt or future API data visible rather than
-blank.
+1. Requested known, actual absent -> requested only.
+2. Requested and actual equal -> the value once.
+3. Requested and actual differ -> `REQUESTED -> ACTUAL` for every combination in
+   the three-by-three SMS/MMS/RCS matrix.
+4. Requested absent, actual known -> actual only.
+5. Both absent -> `Unknown`.
+
+This includes `SMS -> RCS` and `MMS -> RCS` for future or corrupt API data even
+though the current repository state machine would refuse those actual
+transitions. No normalized known pair falls through to `Unknown` or a blank chip.
 
 ### 9.4 Version 1 outbound multi-recipient rows
 
-Recipient slots take precedence over message-level actual transport when at
-least one outbound slot exists.
+On an outbound message, recipient slots take precedence over message-level
+actual transport when at least one slot exists. On an inbound relay source, the
+main chip remains inbound actual-only and slots affect only the recipient
+disclosure.
 
-- Until every non-suppressed recipient slot has actual evidence, show only the
+- The atomically seeded slot map is the expected set. Until every non-suppressed
+  slot in that set has actual evidence, an outbound main chip shows only the
   message's requested transport.
 - Once complete, one distinct actual transport uses the single-recipient table.
 - Once complete, two or more distinct actual transports use `Mixed` as actual.
 - A suppressed slot (`contact_opted_out`) is excluded from completeness and
-  actual aggregation because no provider send occurred.
+  actual aggregation because no provider send occurred. It stores neither
+  requested nor actual transport.
 - A genuinely failed provider attempt remains included. If it has no actual
   evidence, the aggregate remains pending rather than inventing a channel.
 - If no requested transport is present, complete mixed evidence shows `Mixed`;
   otherwise malformed/incomplete data follows the `Unknown` rule.
 
-Expanded recipient rows use their own requested/actual fields. A suppressed row
-keeps its existing suppression copy and does not claim a transport that was
-never attempted.
+Expanded recipient rows are allowed for both outbound multi-recipient sources and
+inbound relay sources. They use their own requested/actual fields. A suppressed
+row keeps its existing suppression copy and renders no transport label because
+no transport was attempted.
 
 ### 9.5 Copy and layout
 
@@ -527,7 +573,10 @@ be silently omitted.
 - `dashboard/src/routes/contact/Timeline.tsx`: metadata transport fragment.
 - contact Timeline fallback and group/relay mapping hooks: propagation.
 - `dashboard/src/routes/conversation/useGroupThread.ts`: remove optimistic SMS
-  transport claim.
+  transport claim and stamp the explicit optimistic marker.
+- `dashboard/src/routes/conversation/useRelayThread.ts` and
+  `dashboard/src/routes/contact/useContactTimeline.ts`: stamp and preserve the
+  same optimistic marker until server refetch.
 - per-recipient delivery presentation: transport beside each expanded leg.
 
 ### Fake and browser harness
@@ -535,6 +584,9 @@ be silently omitted.
 - fake Twilio status callback input/output for `ChannelPrefix`.
 - hermetic seed support for group MMS and RCS fallback presentation.
 - focused browser coverage on the real dashboard/API stack.
+- `app/src/routes/dev.ts` extraction-message fixture: version 1 fields and
+  explicit requested/actual fixture inputs, including an intentional legacy
+  option only when a test asks for legacy behavior.
 
 The plan must begin with a fresh codebase inventory because this list is a
 design-time map, not permission to assume no other writer or projection exists.
@@ -546,14 +598,15 @@ design-time map, not permission to assume no other writer or projection exists.
 Before full completion gates, add and run targeted tests for:
 
 1. Pure presenter matrix: pending, agreement, fallback, inbound unknown, legacy,
-   partial multi-recipient evidence, complete uniform evidence, mixed evidence,
-   and suppression.
+   all nine known requested/actual pairs, partial multi-recipient evidence,
+   complete uniform evidence, mixed evidence, optimistic suppression, inbound
+   relay leg disclosure, and suppression.
 2. Adapter planning: current text, media, and Group MMS policies; RCS-ready
    normalization; no service or dashboard attachment-only inference.
 3. Webhook normalization: recognized case variants, missing prefix, unknown
    prefix warning, and Group MMS envelope evidence.
 4. Direct, broadcast, retry, relay, announcement, native-group, inbound,
-   import, and seed writers.
+   import, seed, and dev-fixture writers.
 5. Repository actual state machine: absent, duplicate, RCS fallback, refused
    conflicts, schema-absent legacy row, and unknown row/slot.
 6. DynamoDB Local concurrency: simultaneous status, SID, error, and actual
@@ -570,6 +623,8 @@ Hermetic Playwright coverage must prove at least:
 - an RCS fallback displays `RCS -> SMS`;
 - a complete mixed multi-recipient send displays `RCS -> Mixed` and expanded
   rows identify each recipient's transport;
+- an inbound relay source keeps its inbound main chip while its expanded rows
+  show outbound leg transports;
 - a schema-absent message keeps its legacy label;
 - a version 1 inbound message without evidence displays `Unknown`;
 - the optimistic group bubble does not briefly claim SMS before refetch.
@@ -631,16 +686,17 @@ The mission is complete only when all of the following are true:
 1. No new carrier-message chip derives transport from `MessageType`, media, SID
    prefix, or conversation kind.
 2. Every new carrier runtime writer stamps schema version 1.
-3. Every outbound provider attempt stores adapter-owned requested transport.
+3. Every newly persisted outbound provider-attempt row or slot stores
+   adapter-owned requested transport.
 4. Every explicit provider transport observation can update actual transport
    without depending on a delivery-status transition.
 5. Requested transport is immutable and conflicting actual observations cannot
    corrupt stored evidence.
 6. Multi-recipient message and recipient-row presentation follows the locked
-   matrix, including pending and mixed states.
+   rules, including inbound relay disclosure, expected-slot completeness,
+   suppression, pending, and mixed states.
 7. Existing schema-absent rows display exactly as they do today.
 8. Calls and email retain their current labels and behavior.
 9. Targeted tests, browser proof, full feature-mission gates, and independent
    review all pass with recorded evidence.
 10. Merge, deployment, and production rollout remain human-owned.
-

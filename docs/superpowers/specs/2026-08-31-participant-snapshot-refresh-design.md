@@ -44,17 +44,18 @@ Founder-observed symptoms, both closed by this branch:
 | S1 | Today `who` | `routes/today.ts:1075` | 0 - contact already memoized by the deleted-check at `:743` |
 | S1 | Today relay close-nag member names | `routes/today.ts:1000` | 1 batch over `listRelayGroups('open')` |
 | S2 | Inbox group rows | `routes/inbox.ts:1190` (`groupRowFor`), called `:1237`, `:2358` | 1 batch per page |
-| S2 | Inbox relay rows | `routes/inbox.ts:1154` (`relayRowFor`), called `:1418`, `:2293` | 1 batch per page; the two single-row callers batch over one |
+| S2 | Inbox relay rows | `routes/inbox.ts:1154` (`relayRowFor`), called `:1418`, `:2293` | 1 batch per page. `filter=all` pays TWO (relay partition at `:2293`, group partition at `:2358` - separate reads ~50 lines apart). `filter=unread` pays one batch per multi-party row at `:1418`, beside the point read that loop already does per row |
 | S2 | Contact page group cards | `routes/contacts.ts:1204`, `:1294` | 1 batch per card, ids collected AFTER the membership filter |
 | S2 | Relay members panel | `routes/relayGroups.ts:469-505` | FEWER - replaces per-member `getById` with one batch; stops deleting the stored name at `:489` |
 | S2 | `GET /calls/:callId` passthrough | `routes/api.ts:2185`, feeds QuickReply | 1 batch over one roster |
 | S3 | People card (`describeRoster`) | `lib/rosterResolution.ts:564` | 0 - flip the precedence; contact already read |
 | S4 | Push sender label | `routes/webhooks/twilio.ts:307` | 0 - contact already in hand; flip precedence |
-| S4 | Voice masked party label | `routes/webhooks/voice.ts:116` | 0 - contact already in hand; flip precedence, stays masked |
-| S5 | Drift audit, group rosters | `scripts/measure-unread-contact-coverage.ts:510`, `:785` | offline script |
+| S4 | Voice masked party label | `routes/webhooks/voice.ts:116` | 0 - contact already in hand; flip precedence, stays masked. The same label is the SPOKEN whisper's caller name (`:1044` -> `/whisper`), so it moves too |
+| S5 | Drift audit, group rosters | `scripts/measure-unread-contact-coverage.ts:510` (`auditDenorm`) | offline script |
 
-Net request-path cost: one batch read on the inbox page and the contact page,
-and one existing route gets cheaper.
+Net request-path cost: one batch read on the contact page; one on the inbox
+page for `groups`, two for `all`, one per multi-party row for `unread`; and one
+existing route gets cheaper.
 
 ### Out, and why
 
@@ -140,7 +141,9 @@ roster name second; rewrite the docblock at `:301-306`. `maskedPartyLabel`
 (`voice.ts:116`): `contactShortName(contact)` first, then the stored name put
 through the same "First L." transform, then the existing role / "the other
 party" rungs; rewrite the docblock at `:109-115`. The output is persisted as
-`call_party_label`, so it must never be an unmasked full name.
+`call_party_label` AND spoken to the callee as the whisper's caller name
+(`:1044`), so it must never be an unmasked full name; the whisper therefore
+says "Bob B." where it used to say "Bob Builder". Pin both.
 
 **S5 Audit.** `measure-unread-contact-coverage.ts`: the `--audit-denorm` walk
 skips groups at `:510` and reads `status:'open'` only, which never returns a
@@ -148,8 +151,11 @@ skips groups at `:510` and reads `status:'open'` only, which never returns a
 from `listGroupTexts` + `listRelayGroups('open'|'connecting'|'closed')`
 reporting counts only: rosters, members with a contactId, stored name missing
 while the contact has one, stored name differs, dangling contactId, no
-contactId. Run at the merge base and at handback; both numbers go in the
-handback.
+contactId, soft-deleted contact (skipped), and the requested-vs-returned id
+delta (a short map on throttle must not read as dangling ids). Run ONCE at
+handback against a seeded lane and record the numbers: this branch changes no
+stored data, so the audit sizes the stale population the read path now masks -
+there is no before/after.
 
 ## 6. Tests
 

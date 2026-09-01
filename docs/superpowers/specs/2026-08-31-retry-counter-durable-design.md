@@ -221,10 +221,16 @@ A redelivery therefore hits the marker, gets `false`, and returns. With the
 claim after the marker, `fanout_attempt` would freeze at 1 forever - **the exact
 frozen-counter bug this branch exists to remove.**
 
-Claiming before the marker costs a rung to a true duplicate. That is the right
-trade: a duplicate cannot double-send anyway (the per-recipient terminal-status
-skip is what prevents that, not the counter), whereas a frozen counter defeats
-the entire design.
+**The cost, stated exactly.** A true duplicate delivery now consumes a retry
+rung without attempting any work - the ladder is shortened by one. That is the
+right trade against a counter frozen forever, but it is a real cost and not a
+free one.
+
+What a duplicate does NOT do is send twice, and the credit for that belongs to
+the **marker**, which returns above the send loop: the per-recipient
+terminal-status skip is never even evaluated on that path. The skip is the
+second layer, and it earns its keep on legitimate CONTINUATIONS, where a
+recipient already `sent` must not be re-sent by the next pass.
 
 ### 3.4a Enqueue failure closes IMMEDIATELY
 
@@ -241,10 +247,18 @@ try {
   await enqueue(JOB, { ...payload, attempt: claim.attempt }, { runAt: backoff });
 } catch (err) {
   log.error(...);
-  await close();      // the ONLY path to terminal - nothing will redeliver
+  await close('enqueue_failed');   // the ONLY path to terminal
   return;
 }
 ```
+
+**The close on this path carries its own error code, not `transient_cap`.** The
+cap branch's `transient_cap` means "we retried and gave up"; here we scheduled
+nothing and retried zero times. The distinction reaches a human: an unmapped
+code renders verbatim through `deliveryReason`'s fallback as
+`Delivery failed (error transient_cap)`, so reusing it would tell an operator
+the recipient exhausted retries that never ran. Nothing branches on the value
+today, so a distinct `enqueue_failed` is free and honest.
 
 Round 1's objection to this (that an immediate close discards retries the
 durable counter made reachable) was sound reasoning from a false premise: those
@@ -505,9 +519,15 @@ message-catalog rule does not apply (its own comment at :606 says so).
    an inviting "tidy". Assert that a redelivered envelope carrying the SAME
    `jobId` still advances `fanout_attempt`, even though the handler returns at
    the marker.
-7b. **A duplicate delivery still cannot double-send** - the per-recipient
-   terminal-status skip, not the counter, is what guarantees this. Assert no
-   second provider send for an already-`sent` recipient.
+7b. **A duplicate delivery cannot double-send** - assert no provider send at
+   all on a same-`jobId` redelivery. The guarantee comes from the MARKER, which
+   returns above the send loop; do not word this test as if the terminal-status
+   skip were responsible, because that skip is never reached on this path.
+7c. **The terminal-status skip covers CONTINUATIONS** - the second layer, on the
+   path where it is actually evaluated: a legitimate continuation must not
+   re-send to a recipient already `sent`.
+7d. **The enqueue-failure close uses `enqueue_failed`**, not `transient_cap`
+   (Sec 3.4a) - so an operator is not told retries were exhausted when none ran.
 8. **Rail** - a create whose participants have no binding yet resolves without
    repair and without a `rail_failed`; a create with a real per-member failure
    still repairs; 50386/50437 during repair is not a refusal; the adopt path is

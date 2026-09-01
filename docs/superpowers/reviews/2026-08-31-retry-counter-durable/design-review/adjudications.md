@@ -614,3 +614,50 @@ On the deferred mission: Sec 2.1's framing confirmed right. One real trade
 noted - the parent-map seeding problem the scalar removes here lands on the
 lineage mission's two-level `retry_lineage`, and the in-repo answer exists at
 conversationsRepo.ts:2189-2214. Added to Sec 9's issue update.
+
+---
+
+# Ordering check - CLEAN, with five corrections
+
+Report: `spec-r6-ordering-check.md`. **Nothing blocking.** The reordering, the
+jobId reasoning at every cited line, and the immediate-close reversal all
+verified sound. All five findings accepted; two of them make the FILED ISSUE
+more severe than I wrote it.
+
+- **R6-2 - the issue's DLQ mechanism was wrong, and the truth is worse.** I
+  wrote that the suppressed redelivery burns receive count to the DLQ. It does
+  not: the marker makes the redelivery return SUCCESSFULLY, so the consumer
+  DELETES the message. One redelivery, a no-op, gone. `maxReceiveCount` is never
+  approached, **no DLQ alarm fires, nothing pages anyone.** The failure is
+  entirely silent - which is strictly worse than the DLQ story I filed.
+- **Q4 - "hangs on Sending permanently" was UNDERSTATED.** The `throw` exits the
+  `for` loop over recipients, so every recipient after the failing one is never
+  attempted. **One unrecognised error on recipient 3 of 800 strands 798.** Both
+  corrections are now in the issue; `high` stands and is if anything generous.
+- **R6-1 / R6-4 - I credited the wrong mechanism.** A same-`jobId` duplicate
+  returns ABOVE the send loop, so the terminal-status skip is never evaluated on
+  that path: the MARKER prevents the double-send. The skip is the second layer
+  and earns its keep on continuations. My Q1 premise survives - a duplicate
+  still cannot double-send - but for a different reason than I gave, and the
+  reordering's real cost (a duplicate silently consumes a retry rung) was
+  unstated. Both fixed, and test 7b/7c split to assert each mechanism where it
+  actually operates.
+- **R6-3 - `transient_cap` would lie to an operator.** On the enqueue-failure
+  path nothing was retried, but the code renders verbatim through
+  `deliveryReason`'s fallback as "Delivery failed (error transient_cap)".
+  Nothing branches on the value, so a distinct `enqueue_failed` is free. Test 7d
+  pins it.
+- **R6-5 - the send-to-slot-write window.** The skip reads a slot written AFTER
+  the provider send returns, so a crash in between leaves a texted recipient
+  marked `queued`. The marker closes that window because it is claimed before
+  any send. Added to the issue as a constraint on any future fix - it is exactly
+  the trap someone would fall into while removing the throw.
+
+On test discrimination: tests 3 and 7a fail against BOTH `main` and the
+throw-and-redeliver design; test 5 passes against both, so 7a carries the
+discriminating weight alone. Acceptable, and worth knowing.
+
+## Design status: FINAL
+
+Six passes. The last one changed no decision - only precision, plus two
+corrections to a filed issue. That is the terminal round by the stop rule.

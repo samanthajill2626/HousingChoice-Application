@@ -33,20 +33,29 @@ throw err;
 
 So the redelivered envelope reaches the handler, `putJobExecutionMarker` returns
 `false`, and the handler **returns immediately having done nothing**. The
-deliberate throw does not retry the work. It burns one `maxReceiveCount` rung
-per delivery until the envelope lands in the DLQ, and the broadcast row is left
-`sending` with its recipients `queued` - permanently, because nothing repairs
-it.
+deliberate throw does not retry the work.
 
 `retrySend.ts:122-128` documents the correct semantics for the same marker and
 does not rely on redelivery. The two fan-outs are the outliers.
 
-**Why it matters.** This is the same "stuck forever" class as
+**It does not even reach the DLQ.** The suppressed redelivery RETURNS
+SUCCESSFULLY - that is the marker's whole design, so the consumer deletes the
+message instead of DLQ-cycling it. There is exactly one redelivery (receive 2),
+it no-ops, and the message is gone. `maxReceiveCount` is never approached, so
+**no DLQ alarm fires and nothing pages anybody.** The failure is completely
+silent.
+
+**Why it matters, and it is worse than one recipient.** The `throw` exits the
+`for` loop over recipients. Every recipient AFTER the failing one is never
+attempted at all - one unrecognised error on recipient 3 of 800 strands 798,
+with their slots left `queued` and the broadcast row left `sending`. Nothing
+repairs any of it, and nothing reports it.
+
+This is the same "stuck forever" class as
 [retry-counter-in-envelope-makes-caps-unreachable](./retry-counter-in-envelope-makes-caps-unreachable.md),
-reached by a different door: there the counter could not advance, here the
-retry cannot happen at all. A broadcast that hits one unrecognised send error
-hangs on "Sending" in the dashboard exactly as the 2026-08-16 prod voicemail
-hung on "Transcribing...".
+reached by a different door: there the counter could not advance, here the retry
+cannot happen at all. The dashboard symptom is identical to the 2026-08-16 prod
+voicemail stuck on "Transcribing..." - except silent, and at broadcast scale.
 
 Discovered during M5's design review (`feat/retry-counter-durable`), while
 verifying whether a post-throw redelivery could advance a durable pass counter.
@@ -64,9 +73,18 @@ DO, then make the code do it:
 - either way, correct the two false comments.
 
 Note the interaction with the marker's purpose: it exists so a redelivery cannot
-TEXT SOMEONE TWICE. Any fix must keep that guarantee. The per-recipient
-terminal-status skip already provides it independently, which is worth
-confirming before relying on it.
+TEXT SOMEONE TWICE. Any fix must keep that guarantee.
+
+The per-recipient terminal-status skip is the obvious candidate to carry it
+instead - but **confirm the window before relying on it**. The skip reads the
+slot's status, and the slot is written AFTER the provider send returns. A
+process that dies between the send and the slot write leaves a recipient marked
+`queued` who has already been texted; a re-run that trusts only the skip would
+text them again. The marker closes that window today precisely because it is
+claimed before any send.
+
+Whatever replaces the throw has to preserve that ordering guarantee, not just
+the skip.
 
 **Also worth checking.** Any other handler that throws expecting a redelivery to
 re-run its work has the same defect. This sweep has not been done.

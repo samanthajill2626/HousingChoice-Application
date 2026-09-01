@@ -2030,6 +2030,52 @@ export class Scenario {
     return rung.dueAt;
   }
 
+  /** [App] Which rungs are still PENDING right now, read back from the reminders
+   *  API. Pairs with expectRungsRetiredPastTour: capture before a tick, assert
+   *  after it. Derived rather than hand-listed because which rungs a booking
+   *  arms depends on the wall clock (arm-time clamping can retire one). */
+  async upcomingReminderKinds(): Promise<ReminderKind[]> {
+    const tour = this.requireActiveTour();
+    const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const body = (await res.json()) as {
+      reminders: Array<{ kind: ReminderKind; state: string }>;
+    };
+    return body.reminders.filter((r) => r.state === 'upcoming').map((r) => r.kind);
+  }
+
+  /** [App] Phase B 6.1a: these rungs were RETIRED by the fire-time past-tour
+   *  gate - a rung whose own dueAt precedes the tour must not send once the tour
+   *  has started, because its copy assumes the tour has not happened yet.
+   *
+   *  Reads STATE from the API, never the panel: expectReminderRung(k,'upcoming')
+   *  resolves 'upcoming' as "not Sent and not Canceled", so it cannot tell a
+   *  pending rung from a Skipped one and would pass either way here.
+   *
+   *  An EMPTY list throws: an assertion with nothing to assert must fail loudly
+   *  rather than quietly prove nothing. */
+  expectRungsRetiredPastTour(kinds: ReminderKind[]): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step(`App: rungs retired - the tour had already happened (${kinds.join(', ')})`, async () => {
+      if (kinds.length === 0) {
+        throw new Error('expectRungsRetiredPastTour: no rungs to assert - the tick proved nothing');
+      }
+      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const body = (await res.json()) as {
+        reminders: Array<{ kind: ReminderKind; state: string; skipReason?: string }>;
+      };
+      for (const kind of kinds) {
+        const rung = body.reminders.find((r) => r.kind === kind);
+        if (rung === undefined) {
+          throw new Error(`expectRungsRetiredPastTour: no '${kind}' rung on tour ${tour.tourId}`);
+        }
+        expect(rung.state, `'${kind}' state`).toBe('skipped');
+        expect(rung.skipReason, `'${kind}' skipReason`).toBe('tour_already_passed');
+      }
+    });
+  }
+
   /**
    * [App, AUTO — dev seam] One deterministic tour-reminder poll pass. Omitting
    * `now` uses the server wall clock (fires the just-armed 'confirmation' rung);

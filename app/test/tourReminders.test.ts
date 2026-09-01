@@ -3257,7 +3257,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(confirmation?.skippedAt).toBeUndefined();
   });
 
-  it('AT/AFTER tour start the wait ENDS: the rung proceeds through the usual fallback', async () => {
+  it('AT/AFTER tour start the wait is MOOT: the past-tour gate retires the rung first', async () => {
+    // WAS "the wait ENDS: the rung proceeds through the usual fallback" - it
+    // asserted the 1:1 fallback FIRES at the tour's own start instant. Phase B
+    // 6.1a inverts that deliberately (this is the gate working, not a
+    // regression): every rung that can reach the D7 wait has a dueAt BEFORE the
+    // tour, so at/after the start its copy is stale and it must not go out.
+    // The `beforeStart` disjunct is kept as defence-in-depth; what changed is
+    // that nothing pre-tour can reach it any more.
     const rig = createGroupTestRig();
     seedTenant(rig.world, 'contact-d7-b', '+15550800012', 'conv-d7-b', NOW_D11);
     const tour = await armD11Tour({
@@ -3266,13 +3273,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
 
-    // now == the tour's own start instant: the staleness bound has expired.
+    // now == the tour's own start instant.
     await runDueTourReminders(SCHEDULED_D11, {
       ...rig.deps,
       pendingRosterActionsRepo: pendingOpenFor(tour.tourId),
     });
 
-    expect(rig.world.sent.length, 'the tenant 1:1 fallback fires').toBeGreaterThan(0);
+    expect(rig.world.sent, 'a rung whose copy assumes the tour has not happened').toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    const enRoute = await rungOf(tour.tourId, 'en_route');
+    expect(enRoute?.sentAt).toBeUndefined();
+    expect(enRoute?.skippedAt).toBe(SCHEDULED_D11);
+    expect(enRoute?.skipReason).toBe('tour_already_passed');
   });
 
   it('a RESOLVED open imposes no wait at all', async () => {
@@ -3319,6 +3331,205 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     );
     expect(after?.sentAt).toBeUndefined();
     expect(after?.skippedAt).toBeUndefined();
+  });
+
+  // ===========================================================================
+  // Phase B 6.1a - THE FIRE-TIME PAST-TOUR GATE
+  // ===========================================================================
+  //
+  // Arm time has `past_event`; until Phase B fire time had no equivalent, and
+  // quiet hours was only accidentally capping the damage (an overnight backlog
+  // deferred to 08:00). These cases pin the gate's PLACEMENT as much as its
+  // behaviour: position is the behaviour here. Above supersededInBatch, or a
+  // post-tour catch-up batch puts "superseded by a later reminder" on the panel
+  // beside the very rung it names reading "the tour had already happened".
+  // Above the quiet-hours backstop, or a past-tour rung due inside the window
+  // re-lists unclaimed every tick until quiet-end instead of retiring once.
+  //
+  // Clocks are PINNED (injected `now`), never wall-clock.
+  describe('past-tour gate (spec 6.1a)', () => {
+    /** The tour happened; every clock below is relative to it. */
+    const PAST_TOUR_START = '2026-09-10T18:00:00.000Z';
+    /** When the ladder was armed - two days AHEAD of the tour, as normal. */
+    const PAST_ARMED_AT = '2026-09-08T10:00:00.000Z';
+    /** One hour after the tour started: the worker is back from an outage. */
+    const PAST_TOUR_NOW = '2026-09-10T19:00:00.000Z';
+    /** The two pre-tour dueAts armTourReminders would have written. */
+    const MORNING_OF_DUE = '2026-09-10T14:00:00.000Z';
+    const EN_ROUTE_DUE = '2026-09-10T17:00:00.000Z';
+
+    async function pastTour(tenantId: string, unitId: string) {
+      return tours.create({
+        tenantId,
+        unitId,
+        scheduledAt: PAST_TOUR_START,
+        tourType: 'self_guided',
+      });
+    }
+
+    it('a pre-tour rung due after the tour started is claim-skipped tour_already_passed on the FIRST tick', async () => {
+      const rig = createGroupTestRig();
+      seedTenant(rig.world, 'contact-past-a', '+15550900001', 'conv-past-a', PAST_ARMED_AT);
+      const tour = await pastTour('contact-past-a', 'unit-past-a');
+      // A NORMAL ladder, armed ahead of the tour the ordinary way - the rows
+      // this gate exists for are not exotic, they are last week's backlog.
+      await armTourReminders(tour, PAST_ARMED_AT, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: quietOff,
+        logger,
+      });
+
+      await runDueTourReminders(PAST_TOUR_NOW, rig.deps);
+
+      const enRoute = await rungOf(tour.tourId, 'en_route');
+      expect(enRoute?.sentAt).toBeUndefined();
+      expect(enRoute?.skippedAt).toBe(PAST_TOUR_NOW);
+      expect(enRoute?.skipReason).toBe('tour_already_passed');
+      expect(rig.world.sent).toHaveLength(0);
+
+      // Retired ONCE: the claim-skip took the row out of listDue, so a second
+      // tick neither sends nor re-stamps (the perpetual-re-skip bug the
+      // claim-skip idiom exists to prevent).
+      await runDueTourReminders('2026-09-10T20:00:00.000Z', rig.deps);
+      expect((await rungOf(tour.tourId, 'en_route'))?.skippedAt).toBe(PAST_TOUR_NOW);
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('outranks supersededInBatch: a post-tour catch-up batch gives BOTH rungs tour_already_passed', async () => {
+      const rig = createGroupTestRig();
+      seedTenant(rig.world, 'contact-past-b', '+15550900002', 'conv-past-b', PAST_ARMED_AT);
+      const tour = await pastTour('contact-past-b', 'unit-past-b');
+      // Both rungs pending and due in ONE listDue snapshot - the worker-downtime
+      // shape. Created directly so the case does not depend on arm-time timing.
+      await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+      await tourReminders.create({ tourId: tour.tourId, kind: 'en_route', dueAt: EN_ROUTE_DUE });
+
+      await runDueTourReminders(PAST_TOUR_NOW, rig.deps);
+
+      const rows = await tourReminders.listByTour(tour.tourId);
+      expect(rows).toHaveLength(2);
+      for (const r of rows) {
+        expect(r.skipReason, `${r.kind} takes the per-tour reason`).toBe('tour_already_passed');
+      }
+      // The ledger-item-8 chip shape must not appear: "superseded by a later
+      // reminder" beside a rung that reads "the tour had already happened".
+      expect(rows.map((r) => r.skipReason)).not.toContain('quiet_hours_superseded');
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('outranks the quiet-hours backstop: a past-tour rung due inside the window retires instead of re-listing', async () => {
+      const rig = createGroupTestRig();
+      // Quiet hours ON (21:00-08:00 America/New_York). Without the gate above
+      // it, this tick returns UNCLAIMED and the row re-lists every tick until
+      // quiet-end - then fires stale.
+      const deps = { ...rig.deps, settingsRepo: stubSettingsRepo() };
+      seedTenant(rig.world, 'contact-past-c', '+15550900003', 'conv-past-c', PAST_ARMED_AT);
+      const tour = await pastTour('contact-past-c', 'unit-past-c');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+      /** 01:00 EDT the night after the tour - deep inside the default window. */
+      const QUIET_NOW = '2026-09-11T05:00:00.000Z';
+
+      await runDueTourReminders(QUIET_NOW, deps);
+
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBe(QUIET_NOW);
+      expect(after?.skipReason).toBe('tour_already_passed');
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('the hoisted tour read is deliberate: superseded-in-batch AND tour-missing now reads tour_missing', async () => {
+      const rig = createGroupTestRig();
+      // No tours row at all for this id.
+      const tourId = `tour-gone-${randomUUID().slice(0, 8)}`;
+      const earlier = await tourReminders.create({
+        tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+      await tourReminders.create({ tourId, kind: 'en_route', dueAt: EN_ROUTE_DUE });
+
+      await runDueTourReminders(PAST_TOUR_NOW, rig.deps);
+
+      // ACCEPTED CONSEQUENCE of hoisting the tour read above supersededInBatch:
+      // before Phase B the earlier rung read 'quiet_hours_superseded' (it never
+      // reached the tour read at all). 'tour_missing' is the truer answer for
+      // both rows - a rung whose tour no longer exists was not superseded.
+      const rows = await tourReminders.listByTour(tourId);
+      expect(rows).toHaveLength(2);
+      for (const r of rows) {
+        expect(r.skipReason, `${r.kind} reports the tour read, not supersession`).toBe(
+          'tour_missing',
+        );
+      }
+      expect(rows.find((r) => r.reminderId === earlier.reminderId)?.skippedAt).toBe(PAST_TOUR_NOW);
+      expect(rig.world.sent).toHaveLength(0);
+    });
+
+    it('no_show_checkin survives the gate: force-send AFTER the tour still sends', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-past-d',
+        phone: '+15550900004',
+        convId: 'conv-past-d',
+        now: PAST_ARMED_AT,
+      });
+      const tour = await pastTour('contact-past-d', 'unit-past-d');
+      // dueAt = scheduledAt + 30m. This is the ONE rung whose copy assumes the
+      // tour HAS happened, and the predicate exempts it BY CONSTRUCTION rather
+      // than by a name in a list - the exception a later reader would delete.
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'no_show_checkin',
+        dueAt: '2026-09-10T18:30:00.000Z',
+      });
+
+      const result = await forceSendReminder(row.reminderId, tour.tourId, PAST_TOUR_NOW, true, deps);
+
+      expect(result).toEqual({ outcome: 'sent' });
+      expect(spy.sent).toHaveLength(1);
+      expect(spy.sent[0]!.body).toBe(rungBody('no_show_checkin', PAST_TOUR_START));
+    });
+
+    it('force-send on a past-tour pre-tour rung refuses tour_already_passed and leaves the row pending', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-past-e',
+        phone: '+15550900005',
+        convId: 'conv-past-e',
+        now: PAST_ARMED_AT,
+      });
+      const tour = await pastTour('contact-past-e', 'unit-past-e');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: MORNING_OF_DUE,
+      });
+
+      const result = await forceSendReminder(row.reminderId, tour.tourId, PAST_TOUR_NOW, true, deps);
+
+      // A REFUSAL, never a claim-skip: a human action must not retire a rung.
+      expect(result).toEqual({ outcome: 'refused', reason: 'tour_already_passed' });
+      expect(spy.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -3469,7 +3680,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
      * the wrong reason":
      *  (a) the D7 pending-open wait cannot fire, because `createGroupTestRig`
      *      omits `pendingRosterActionsRepo` and the wait is gated on its
-     *      presence (jobs/tourReminders.ts:797).
+     *      presence (jobs/tourReminders.ts:1037).
      *  (b) the throwing property read cannot make the ROSTER unreadable:
      *      memberFromContact catches its own contact-read throw
      *      (lib/rosterResolution.ts:162-171), so tenantRosterGate still answers

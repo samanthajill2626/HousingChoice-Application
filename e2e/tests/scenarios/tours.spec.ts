@@ -281,11 +281,20 @@ test('no-show: booked (no group -> 1:1 fallback) -> no auto check-in -> logged n
 
   // The tenant never shows. The no-show check-in is no longer auto-armed - it is
   // a MANUAL send now (tour-no-show-checkin.spec.ts), so ticking past its OLD due
-  // time fires the earlier rungs (unasserted) but never the check-in body. ABSENCE,
-  // so this rides the kind-distinctive MARKER: an exact composed string that were
-  // ever mis-composed would make "nothing arrived" pass for the wrong reason.
+  // time never produces the check-in body. ABSENCE, so this rides the
+  // kind-distinctive MARKER: an exact composed string that were ever mis-composed
+  // would make "nothing arrived" pass for the wrong reason.
+  //
+  // The tick's `now` is 30 MINUTES AFTER THE TOUR STARTED, so the still-pending
+  // earlier rungs no longer ride along and fire: each one's copy assumes the tour
+  // has not happened yet, so the fire-time past-tour gate RETIRES them instead
+  // (Phase B 6.1a). The absence assertion below is green either way, which is
+  // exactly why the retirement gets its own positive read - captured before the
+  // tick because after it there is nothing pending left to name.
+  const stillPending = await flow.upcomingReminderKinds();
   await flow.tickTourReminders(justAfter(times.noShowCheckin));
   await flow.expectNoOutboxMessageContaining(tenant, REMINDER_BODY_MARKERS.no_show_checkin);
+  await flow.expectRungsRetiredPastTour(stillPending);
 
   // Team logs the no-show, then reschedules — no-show tours stay reschedulable,
   // and rescheduling cancels + RE-ARMS the ladder off the new time. Since the

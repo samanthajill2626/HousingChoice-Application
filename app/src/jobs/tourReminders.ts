@@ -669,6 +669,14 @@ export async function runDueTourReminders(
  * `reason` is the FULL ReminderSkipReason union, so the compiler cannot stop
  * you: `'booked_too_late'` is an ARM-ONLY reason (armTourReminders decides it
  * from the RAW offsets before any row exists) and must NEVER be passed here.
+ *
+ * There is a THIRD category since Phase B: SWEEP-ONLY reasons, which no poll
+ * path passes either. `'kind_retired'` is written exclusively by
+ * scripts/retire-paused-tour-reminders.ts (a discontinued kind never reaches
+ * the poll at all, so there is nothing here to retire), while
+ * `'tour_already_passed'` is written by BOTH the sweep and the fire-time gate
+ * above - which is the point: the sweep is cleanup of a condition the runtime
+ * also enforces, not the only thing enforcing it.
  */
 async function claimSkipRow(
   row: TourReminderItem,
@@ -827,13 +835,20 @@ type ReminderTarget =
  * conversation. Read-only - it claims nothing and sends nothing, so each caller
  * decides what "unresolvable" MEANS: the poll retires the rung (claim-skip with
  * the returned reason), a human force-send refuses and leaves it pending.
+ *
+ * `prefetchedTour` exists so the poll's past-tour gate (Phase B 6.1a), which
+ * runs ABOVE every other pre-claim gate and therefore needs the tour first, is
+ * a HOIST of this read rather than a second one. When it is absent (the
+ * force-send path) the read happens here as it always did, and the
+ * `tour_missing` answer is byte-identical either way.
  */
 async function resolveReminderTarget(
   row: TourReminderItem,
   deps: RunDueTourRemindersDeps,
   log: Logger,
+  prefetchedTour?: TourItem,
 ): Promise<ReminderTarget> {
-  const tour = await deps.toursRepo.get(row.tourId);
+  const tour = prefetchedTour ?? (await deps.toursRepo.get(row.tourId));
   if (!tour) {
     log.warn(
       { reminderId: row.reminderId, tourId: row.tourId },
@@ -895,9 +910,41 @@ async function processReminderRow(
   deps: RunDueTourRemindersDeps,
   log: Logger,
 ): Promise<void> {
-  // Both quiet-hours checks below run FIRST - above the tour fetch and above
-  // the group-route branch (which returns early), so landlord_led / pm_team
-  // rungs are covered too.
+  // PAST-TOUR GATE (Phase B 6.1a) - FIRST, above supersededInBatch and above
+  // the quiet-hours backstop. POSITION IS BEHAVIOUR here:
+  //   - Below supersededInBatch, a post-tour catch-up batch retires morning_of
+  //     as "superseded by" an en_route this gate then retires, putting
+  //     "superseded by a later reminder" on the panel beside the rung it names
+  //     reading "the tour had already happened" - on the ROUTINE
+  //     worker-downtime path, not a three-way coincidence.
+  //   - Below isQuietTime, a past-tour rung due inside the window re-lists
+  //     unclaimed every tick until quiet-end instead of retiring once.
+  // The tour read MOVES UP here with the gate rather than being duplicated:
+  // resolveReminderTarget takes the pre-fetched tour below, so this is a hoist,
+  // not a second read. ACCEPTED CONSEQUENCE of the hoist, pinned by a test: a
+  // row that is both superseded-in-batch AND tour-missing now reads
+  // `tour_missing` (it used to read `quiet_hours_superseded`) - the truer
+  // answer, since a rung whose tour is gone was not superseded by anything.
+  const tour = await deps.toursRepo.get(row.tourId);
+  if (!tour) {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId },
+      'tour reminder: tour not found',
+    );
+    await claimSkipRow(row, 'tour_missing', now, deps);
+    return;
+  }
+  if (retiredByTourStart(row, tour.scheduledAt, now)) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: tour already started - retiring (claim-skipped)',
+    );
+    await claimSkipRow(row, 'tour_already_passed', now, deps, tour.tenantId);
+    return;
+  }
+
+  // Both quiet-hours checks below run above the group-route branch (which
+  // returns early), so landlord_led / pm_team rungs are covered too.
 
   // RELEASE SUPERSESSION (the backstop twin of arm-time supersession): if a
   // LATER rung of the SAME tour is also due in this batch, this rung's copy is
@@ -948,7 +995,7 @@ async function processReminderRow(
   // with forceSendReminder so a human send can never route differently from the
   // poll; the POLL retires an unresolvable rung with the same claim-skip
   // reasons it always used.
-  const target = await resolveReminderTarget(row, deps, log);
+  const target = await resolveReminderTarget(row, deps, log, tour);
   if ('unresolvable' in target) {
     log.info(
       {
@@ -968,7 +1015,9 @@ async function processReminderRow(
     return;
   }
 
-  const { tour, conversation: conv } = target;
+  // `tour` is already in scope from the past-tour gate above (the same row the
+  // target resolved against, since it was handed the pre-fetched one).
+  const { conversation: conv } = target;
 
   // D7 REMINDER COUPLING (contact-rosters): this rung is GROUP-ELIGIBLE but fell
   // back to the tenant 1:1, and the tour has a PENDING open_group - the relay
@@ -976,8 +1025,15 @@ async function processReminderRow(
   // the reminder to the tenant alone, minutes before the group it belongs in
   // exists. Leave the rung UNCLAIMED (the ladder's existing "wait" idiom: it
   // re-lists next tick, and the open applies within one tick of quiet-end).
-  // BOUNDED BY TOUR START: at/after the scheduled time the rung proceeds through
-  // today's fallback, so a morning_of reminder can never be held past the tour.
+  // BOUNDED BY TOUR START, and since Phase B (6.1a) the bound is enforced
+  // ABOVE this branch, not by it. Every rung that can reach this wait has a
+  // dueAt BEFORE the tour, so the past-tour gate at the top of this function
+  // has already retired it by the time the tour starts - which is what makes
+  // "a morning_of reminder can never be held past the tour" true, and makes
+  // the at-or-after-start escape below unreachable for a pre-tour rung. The
+  // `beforeStart` disjunct STAYS as defence-in-depth: it costs nothing, and a
+  // post-tour-dueAt rung (no_show_checkin) is exempt from the gate and would
+  // still need it.
   if (tour.tourType !== 'self_guided' && deps.pendingRosterActionsRepo !== undefined) {
     const pendingOpen = await deps.pendingRosterActionsRepo.getById(
       rosterActionIdFor({ ownerType: 'tour', ownerId: tour.tourId, action: 'open_group' }),
@@ -1413,7 +1469,7 @@ export async function forceSendReminder(
   }
 
   // CONTAINED (spec 6.3b): target resolution does FOUR bare reads - the tour
-  // (:652), the group conversation, the tenant contact (:673) and the 1:1
+  // (:851), the group conversation, the tenant contact (:872) and the 1:1
   // conversation lookup. Uncontained, any of them escapes the route unwrapped
   // as a 500, where 6.3b demands "a REFUSAL the route can render, not silence"
   // - a panel that degrades gracefully beside a Send-now button that 500s on
@@ -1459,6 +1515,14 @@ export async function forceSendReminder(
     );
     return { outcome: 'refused', reason };
   };
+  // PAST-TOUR REFUSAL (Phase B 6.1a), the SAME predicate as the poll gate - a
+  // rung whose own dueAt precedes the tour, on a tour that has started. Never a
+  // name-in-a-list exception: no_show_checkin's dueAt FOLLOWS the tour, so the
+  // one rung an operator needs after a no-show passes this untouched. A
+  // REFUSAL, never a claim-skip: a human action does not retire a rung.
+  if (retiredByTourStart(row, target.tour.scheduledAt, nowIso)) {
+    return refuse('tour_already_passed');
+  }
   if (isKillSwitchOff(smsSendingEnabled)) return refuse('sms_sending_disabled');
   if (target.route === 'one_to_one') {
     // D11 (contact-rosters): this send targets the tenant 1:1, so the roster

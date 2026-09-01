@@ -813,17 +813,24 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
       last_activity_at: '2026-07-13T00:00:00.000Z',
       created_at: '2026-07-13T00:00:00.000Z',
     });
+    // FAR FUTURE, deliberately: this route runs on the WALL CLOCK, and since
+    // Phase B 6.1a a force-send on a rung whose own dueAt precedes a tour that
+    // has already started is refused `tour_already_passed` before any of the
+    // gates these cases are about. The fixture's old 2026-07 pair was future
+    // when it was written and has since become past, which would have turned
+    // every case below into a past-tour refusal. 2099 is the file's own idiom
+    // for "never expires" (see seedQuietTour).
     const created = await world.toursRepo.create({
       tenantId,
       unitId: `unit-sendnow-${suffix}`,
-      scheduledAt: '2026-07-20T14:00:00.000Z',
+      scheduledAt: '2099-07-20T14:00:00.000Z',
       tourType: 'self_guided',
     });
     seedReminder(world, {
       reminderId: `rem-sendnow-${suffix}`,
       tourId: created.tourId,
       kind: 'day_before',
-      dueAt: '2026-07-19T14:00:00.000Z',
+      dueAt: '2099-07-19T14:00:00.000Z',
     });
     return { tourId: created.tourId, reminderId: `rem-sendnow-${suffix}`, tenantId };
   }
@@ -848,7 +855,7 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(res.body.reminder.body).toBe(
       composeTourReminderBody({
         kind: 'day_before',
-        scheduledAt: '2026-07-20T14:00:00.000Z',
+        scheduledAt: '2099-07-20T14:00:00.000Z',
         timezone: world.settings.timezone,
         tourType: 'self_guided',
         names: {},
@@ -875,7 +882,7 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     const spy = makeSendSpy();
     const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
     const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '2' });
-    await world.tourRemindersRepo.claimSend(reminderId, '2026-07-19T14:00:05.000Z');
+    await world.tourRemindersRepo.claimSend(reminderId, '2099-07-19T14:00:05.000Z');
 
     const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
 
@@ -902,7 +909,7 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(spy.sent).toHaveLength(0);
     // Still pending for the poll at its own dueAt.
     expect(
-      (await world.tourRemindersRepo.listDue('2026-07-19T14:01:00.000Z')).map((r) => r.reminderId),
+      (await world.tourRemindersRepo.listDue('2099-07-19T14:01:00.000Z')).map((r) => r.reminderId),
     ).toContain(reminderId);
   });
 

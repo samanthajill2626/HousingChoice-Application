@@ -59,7 +59,9 @@ export function parseContactName(raw: string): ParsedContactName | undefined {
 //
 // Consumers include the inbound-message and voice pushes and the participant
 // name resolver in lib/participantNames.ts. Private copies of this derivation
-// still exist in routes/inbox.ts and routes/today.ts and DIFFER from this one
+// still exist across the tree (the full census lives in
+// docs/issues/consolidate-contact-display-name-helpers.md); the two that
+// matter here are routes/inbox.ts and routes/today.ts, which DIFFER from this one
 // on purpose (an extra `contact.name` rung; outer-vs-part trimming); see
 // docs/issues/consolidate-contact-display-name-helpers.md before re-pointing
 // any of them.

@@ -147,3 +147,12 @@ NOT covered, deliberately, and all of it stated rather than assumed:
   that would add a per-message read - so a stale name observed on a relayed
   message is the signal to reopen this or file a follow-up. The `high` severity
   above was set for that outbound reach; it survives the close.
+
+One more residue seam, added by the planner's independent review
+(2026-09-01): the group_text members panel (`routes/api.ts`
+`GET /group-members`) converges stored roster names by PHONE with no
+soft-delete check, so it can seed a deleted contact's name - or, on a
+moved number, another contact's name - into the stored fallback rung the
+read-time chain trusts second. Pre-existing behavior in an
+out-of-scope-by-design route; recorded so the fallback rung's provenance
+is not mistaken for clean.

@@ -1,8 +1,12 @@
 // participantNames - resolve a conversation roster's display names from the
 // contacts it points at, IN MEMORY, at a read boundary.
 //
-// `participants[].name` is a write-time snapshot nothing refreshes (M1,
-// 2026-08-31). Rather than trust it, each read boundary does ONE batched
+// `participants[].name` is a write-time snapshot with no general refresher
+// (M1, 2026-08-31). One partial exception exists and is left alone: the
+// group_text members panel (routes/api.ts GET /group-members) converges the
+// stored roster by PHONE when it is opened - so a never-opened group stays
+// stale forever, which is why reads cannot trust the field. Rather than trust
+// it, each read boundary does ONE batched
 // display-projection read for the page and hands the existing label functions
 // (lib/groupTitle.ts, describeRoster, ...) a fresher array. Those functions do
 // not change.

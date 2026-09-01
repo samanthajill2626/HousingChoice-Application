@@ -531,9 +531,17 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           log.warn({ broadcastId: payload.broadcastId, contactKey, errorCode: code, attempt: payload.attempt }, 'broadcastFanOut: transient send error — deferring recipient to continuation');
           continue;
         }
-        // Unknown error: leave the recipient queued and let the job FAIL so SQS
-        // redelivers the whole envelope (a fresh jobId via the visibility
-        // timeout; the marker is per-jobId).
+        // TODO(throw-for-redelivery-defeated-by-job-marker): this throw asks
+        // SQS to redeliver the envelope, and the redelivery RETRIES NOTHING.
+        // buildEnvelope mints jobId ONCE at enqueue (jobs.ts:188) and
+        // dispatchJob reuses a complete envelope verbatim, so the redelivery
+        // carries the SAME jobId; the per-jobId execution marker suppresses
+        // the re-run, which returns successfully, so the message is DELETED
+        // rather than DLQ-cycled and nothing pages. Meanwhile this recipient
+        // stays queued, every later key in the loop is never attempted, and
+        // the broadcast is never finalized. retrySend.ts:122-128 states the
+        // marker's real semantics. D12 declines to change the behavior on
+        // this branch - only the comment is corrected here.
         throw err;
       }
     }

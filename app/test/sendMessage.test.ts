@@ -236,6 +236,11 @@ function makeFakes(
     listParkedEmailEvents: async () => [],
     deleteParkedEmailEvent: async () => {},
     // Relay groups (M1.7) — unused by the send service:
+    setMessageActualTransport: async () => 'missing',
+    initializeRecipientDelivery: async () => 'missing',
+    setRecipientTransportAggregationState: async () => 'missing',
+    setRecipientActualTransport: async () => 'missing',
+    applyRecipientSendResult: async () => 'missing',
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,
     putRelaySidPointer: async () => {},

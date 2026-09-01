@@ -55,7 +55,10 @@ because it silently drops a tenant-facing communication.
 guards (tour missing / contact missing / no phone / no 1:1 conversation) now
 CLAIM-SKIP the row: `tourRemindersRepo.claimSkip(reminderId, now, reason)`
 stamps `skippedAt` + `skipReason` under the same atomic condition claimSend
-uses, listDue/claimSend/cancelForTour all treat skipped as terminal, and the
+uses, listDue/claimSend/cancelForTour all treat skipped as terminal (the
+tour-wide `cancelForTour` named here was removed by the 2026-09-01 supersession
+feature - a superseded rung is now DELETED, not stamped canceled; skipped is
+still terminal), and the
 skip emits `scheduled.updated`. The reminders view surfaces `state: 'skipped'`
 + `skipReason`; the Reminders panel chip reads `Skipped - <reason>` (plain
 hyphen, danger tone) and the contact timeline's upcoming bucket excludes

@@ -1,11 +1,17 @@
 // Tour reminders repo — durable reminder rows for the tour-reminder poll job.
 //
-// Each row: { reminderId, tourId, kind, dueAt (ISO), sentAt?, canceledAt? }
+// Each row: { reminderId, tourId, kind, dueAt (ISO), ladderId?, sentAt?,
+// canceledAt? }. `ladderId` names the GENERATION that armed the rung; the
+// tour's `currentLadderId` names the live one, and the pair is what every send
+// and read path compares (lib/ladderPointer.ts).
 //
 // GSI byDueAt: hash='reminders' (fixed partition key _reminderPartition),
 // range=dueAt (ISO) — allows the poll to query "due now" with dueAt <= now.
 //
-// GSI byTour: hash=tourId — allows bulk cancel on reschedule/cancel.
+// GSI byTour: hash=tourId - backs the per-tour read AND the bulk DELETE of a
+// superseded generation (deleteSupersededForTour). The tour-wide bulk CANCEL it
+// used to back was removed with the supersession feature: a retired rung is now
+// deleted, never stamped canceled.
 //
 // PII: never log a phone number. Log only reminderId/tourId/tenantId/kind.
 import { randomUUID } from 'node:crypto';

@@ -1,6 +1,6 @@
 # Message transport fidelity - design specification
 
-Status: v3 - round 2 adjudicated; awaiting adversarial re-review and human gate
+Status: v4 - round 3 adjudicated; awaiting final adversarial re-review and human gate
 Date: 2026-08-31
 Branch: `feat/message-transport-fidelity`
 Worktree: `W:\tmp\message-transport-fidelity`
@@ -318,16 +318,30 @@ remains.
 
 For a team-authored relay message, the source message records schema version 1
 and the common requested transport before the fan-out job is enqueued. Each
-recipient slot is seeded with the same requested transport. A slot that is later
-suppressed retains that intent and receives no actual transport; this records
-what the application selected without claiming a provider attempt.
+recipient slot known at source creation is seeded with the same requested
+transport. A slot that is later suppressed retains that intent and receives no
+actual transport; this records what the application selected without claiming a
+provider attempt.
 
 For an inbound relay source, the source message records inbound actual evidence
-only. Every fan-out execution resolves the current roster where it does today,
-so membership-at-execution and retry behavior remain unchanged. For each current
-outbound leg, the adapter classifies transport from durable source facts. The job
-creates or updates that recipient slot with immutable requested intent and its
-current queued or suppressed state. An eligible leg then materializes fresh media
+only.
+
+Every relay fan-out execution resolves the current roster where it does today,
+so membership-at-execution and retry behavior remain unchanged. Before
+suppression handling or a provider call for a current member with no slot, a
+conditional initial-slot operation creates that member's queued slot with
+requested intent. For a team-authored or persisted-announcement source, it copies
+the immutable source requested transport. For an inbound source, the adapter
+first classifies transport from durable source facts and the new slot stores that
+intent. The initializer succeeds only when the member slot is absent; on a race,
+the job reads and preserves the existing slot and requested value.
+
+Existing relay slots are never recreated for a continuation. A transient failure
+remains queued and a continuation resends through the same member-key slot,
+preserving the current one-slot-per-recipient delivery status, SID pointer, and
+callback routing model. This mission introduces no per-attempt relay history.
+
+After the slot and suppression checks, an eligible leg materializes fresh media
 URLs immediately before late preparation and provider send. No recipient-set
 snapshot, initialization marker, or prebuilt all-recipient send plan is added.
 
@@ -389,8 +403,11 @@ and is never sent to the server.
 
 ### 8.1 Requested transport
 
-Requested transport is immutable once the row or recipient slot exists. A retry
-is a new provider attempt and therefore a new row or slot send observation.
+Requested transport is immutable once the row or recipient slot exists. Retry
+storage follows the existing path contract: a manual direct 30003 retry creates a
+new message row and new requested intent, while a relay continuation reuses its
+existing member slot and original requested intent. No new retry identity or
+per-attempt relay observation is introduced.
 
 Initial message appends and recipient-slot seeds write requested transport in
 the same operation as the rest of the new item/slot. No later generic update may
@@ -434,8 +451,14 @@ writes. Conditional expressions enforce the state machine against the value in
 DynamoDB, not a stale read. A conditional race is re-read and classified as
 idempotent, allowed fallback, or conflict.
 
-The existing whole-slot `setRecipientDelivery` may be used only for true initial
-slot creation. Add a send-result repository operation (conceptually
+Source-time recipient slots remain part of the atomic initial message append.
+Replace later unconstrained whole-slot writes with a conditional operation
+(conceptually `initializeRecipientDelivery`) that creates a member slot only
+when it is absent and otherwise returns or re-reads the existing slot. It is used
+for current-roster members first discovered by any relay execution and never
+replaces requested intent, status, or callback pointers.
+
+Add a send-result repository operation (conceptually
 `applyRecipientSendResult`) for relay fan-out and persisted announcement success
 and failure paths. It updates only status, SID, sent timestamp, error, and actual
 transport child fields under the existing forward-status and new actual-
@@ -642,9 +665,12 @@ Before full completion gates, add and run targeted tests for:
    results never whole-slot replace seeded intent.
 7. API/projection and dashboard hook propagation.
 8. Transport-only callback updates emit the existing live refetch event.
-9. Relay behavior parity: inbound retries use membership-at-each-execution,
-   media is materialized per leg immediately before send, suppressed slots retain
-   requested-only intent, and queued classification drift warns but still sends.
+9. Relay behavior parity: all executions use membership-at-each-execution; a
+   member added after source append gets a conditional requested-transport slot
+   before suppression/provider handling; continuations reuse the same slot and
+   callback pointer; media is materialized per leg immediately before send;
+   suppressed slots retain requested-only intent; and queued classification
+   drift warns but still sends.
 
 ### 13.2 Browser proof
 
@@ -735,3 +761,6 @@ The mission is complete only when all of the following are true:
 9. Targeted tests, browser proof, full feature-mission gates, and independent
    review all pass with recorded evidence.
 10. Merge, deployment, and production rollout remain human-owned.
+11. Relay membership races and continuation retries preserve the current routing,
+    one-slot-per-member, and callback-pointer behavior while every newly
+    discovered leg records requested intent before provider handling.

@@ -2,8 +2,11 @@
 
 Date: 2026-09-01
 Branch: `feat/tour-reminder-supersession` (cut from `main` @f27aabbf)
-Status: REVISED after spec review round 1 (30 findings, 24 accepted) -
+Status: REVISED after spec review rounds 1-3 (56 findings, 52 accepted) -
 adjudications at `docs/superpowers/reviews/2026-09-01-tour-reminder-supersession/adjudications.md`
+
+D1 (hard delete) was re-affirmed by the founder at the end of round 3, with the
+enforcement surface below priced in.
 
 ## 1. Problem
 
@@ -14,239 +17,267 @@ retire its reminder ladder; it STAMPS every pending rung `canceledAt`
 (`routes/tours.ts` -> `cancelTourReminders` -> `tourRemindersRepo.cancelForTour`)
 and then arms a fresh ladder alongside it. Every row ever written for the tour
 stays in the `byTour` partition and `listByTour` returns all of them, so the
-tour's Reminders panel grows by a full dead ladder per reschedule. A tour
-rebooked three times shows four ladders, three of them struck through.
+tour's Reminders panel grows by a full dead ladder per reschedule.
 
 **P2 - the Upcoming block eats the phone.** In `Timeline.tsx` the pinned
-`<section class=upcoming>` is a flex sibling of `.streamWrap`, sitting between
-the scrolling stream and the composer. Under 767.98px `Timeline.module.css`
-gives it `min-height: 2.5rem; max-height: 7rem` out of a roughly 400px column,
-so on a phone two or three messages remain visible and the block is on screen
-whether or not the operator is looking at it.
+`<section class=upcoming>` is a flex sibling of `.streamWrap`, between the
+scrolling stream and the composer. Under 767.98px `Timeline.module.css` gives it
+`min-height: 2.5rem; max-height: 7rem` out of a roughly 400px column, so on a
+phone two or three messages remain visible and the block is on screen whether or
+not the operator is looking at it.
 
-## 2. Decisions (D1, D2, D4 locked with the founder 2026-08-31)
+## 2. Decisions
 
 - **D1 - supersession DELETES.** On reschedule, on the terminal status
   transitions, and on tour-to-placement conversion, the superseded ladder's
-  never-sent rungs are hard-deleted rather than stamped canceled. The sweep
-  reaches pending, operator-canceled AND skipped rows alike. Only rows carrying
-  `sentAt` survive.
-- **D2 - sent rungs survive in storage, not in the default view.** A rung that
-  texted somebody keeps its row (it is the send-idempotency record and holds the
-  `sentBody` snapshot). It leaves the panel's default list and collapses behind
-  one disclosure line.
-- **D3 - generation is a monotonic arm stamp.** A new `armedAt` attribute
-  records the instant an arm CALL ran, identical on every row that call creates.
-  Current ladder = the rows carrying the greatest `armedAt` for the tour.
-  REVISED at round 1: the first draft keyed generation off `tour.scheduledAt`,
-  which a status-only revival and a no-op re-PATCH both leave unchanged, so two
-  generations would have shared an identifier.
-- **D4 - the Upcoming block moves inside the scroll, at every width.** It
-  becomes the last thing inside the scrolling stream, below the newest message,
-  and it keeps a height cap there. No phone-only branch; desktop changes too.
+  never-sent rungs are hard-deleted. The sweep reaches pending,
+  operator-canceled AND skipped rows alike. Only rows carrying `sentAt` survive.
+- **D2 - sent rungs survive in storage, not in the default view.**
+- **D3 - the generation pointer lives on the TOUR.** Each arm call mints a
+  `ladderId` (UUID) stamped on every row it writes; the tour carries
+  `currentLadderId`. Current ladder = rows matching the pointer. A cleared
+  pointer means the tour has no current ladder.
+- **D3a - the CALLER owns the pointer write.** `armTourReminders` mints the
+  `ladderId`, stamps its rows and RETURNS it; the caller writes it to the tour.
+  `ArmTourRemindersDeps` gains no `toursRepo`. This is the cheap side of a real
+  fork: threading a repo into the armer would touch its ~25 call sites, and
+  `lib/seed/live.ts:514,528,538` has no repo to thread.
+- **D4 - the Upcoming block moves inside the scroll, at every width**, with
+  "at the bottom" continuing to mean the newest MESSAGE is at the bottom.
 
 ## 3. Behavior
 
 ### 3.1 Arm time
 
-`armTourReminders` computes ONE `armedAt` (the `now` it was called with,
-canonicalized ISO) and stamps it on every row of the ladder it writes -
-including rows born already-skipped, which belong to a generation like any
-other row. Two arm calls can never share an `armedAt` for the same tour: the
-sweep in 3.2 runs between them, and the route awaits each in turn.
+`armTourReminders` mints one `ladderId` per CALL, stamps it on every row that
+call creates (rows born already-skipped included), and returns it. A UUID rather
+than a timestamp because `routes/tours.ts:251` takes an injectable `deps.now`
+and the app suite injects a constant (`ARM_NOW`, `toursApi.test.ts:1228`), so
+two arms inside one test share an instant.
 
-### 3.2 Supersession sweep
+### 3.2 Ordering - one sequence, all three paths
 
-A new repo method, `deleteSupersededForTour`, replaces `cancelForTour` at ALL
-THREE of its call sites:
+The pointer is what makes a rung claimable, so it moves FIRST and comes back
+LAST. Every path runs:
 
-1. `routes/tours.ts` re-arm path (`armable && rearmTrigger`), immediately BEFORE
-   `armTourReminders`.
-2. `routes/tours.ts` terminal path (`canceled` / `closed` / `toured` /
-   `no_show`).
-3. `routes/placements.ts:716`, tour-to-placement conversion, between
-   `claimConversion` and `create`. Its compensation semantics are unchanged: a
-   throw still releases the conversion claim and rethrows. Deleting rather than
-   canceling is correct here for the same reason cancel was - the tour is over
-   as a tour - and the rows it removes are exactly the ones no longer reachable.
+1. **Clear** the tour's `currentLadderId`.
+2. **Sweep** (delete every row with no `sentAt`).
+3. Re-arm paths only: **arm** the new ladder, then **set** the pointer to the
+   returned `ladderId`.
 
-`cancelForTour` is removed once all three move.
+Between steps 1 and 3 the tour has no current ladder, so the poll and every
+other send path refuse every rung of it (3.3). That window is the whole reason
+the pointer moves first: it closes the interval the sweep is working in, rather
+than leaving it open the way a sweep-then-pointer order would.
 
-The sweep lists the tour's rows and deletes every row with no `sentAt`. Each
-delete is CONDITIONAL on `attribute_not_exists(sentAt)`, so a rung the poll
-claimed between the list and the delete survives: the condition fails, the
-delete is a benign no-op, and the row stays as sent history. A lost condition
-logs at debug, never as an error - the posture `cancelForTour` already takes
-with `Promise.allSettled`.
+Terminal transitions (`canceled` / `closed` / `toured` / `no_show`) stop after
+step 2 - a terminal tour has no current ladder.
 
-**The claim guards are part of this change, not an optimisation.**
-`claimSend`, `claimSkip` and `cancel` are `UpdateCommand`s conditioned only on
-`attribute_not_exists(...)`. DynamoDB's UpdateItem CREATES a missing item, so
-against a row this sweep deleted every one of those conditions HOLDS: the claim
-succeeds, an attribute-only stub row springs into existence with no `tourId`,
-`kind` or `dueAt`, and the poll sends a reminder for a schedule that no longer
-exists. Each of the three gains `attribute_exists(reminderId)`. Without this,
-D1 does not retire anything - it converts a reliably-blocked rung into a sent
-one. `uncancel` already requires `attribute_exists(canceledAt)` and is safe.
+**Conversion (`routes/placements.ts:716`) stops after step 1 until the placement
+exists.** Today's comment is right that a reminder must not fire on a converted
+tour, but hard delete broke the compensation: `placements.create` failing
+releases the conversion claim and rethrows, and with the ladder already gone the
+tour is left live, `scheduled`, and silently disarmed. Clearing the pointer
+alone disarms the ladder REVERSIBLY - the poll refuses every rung immediately,
+and the release path restores the pointer. The sweep runs only once `create` has
+succeeded and the conversion is real.
 
-Ordering is load-bearing and is the ONLY thing protecting the incoming ladder:
-sweep first, then arm. The sweep does not read `armedAt` and cannot tell
-generations apart - it is a "delete everything unsent" operation whose safety
-comes entirely from running before the new rows exist.
+### 3.3 What refuses a superseded rung
 
-### 3.3 Read grouping
+**Every send path checks the pointer, not just the poll.** A rung whose
+`ladderId` does not match its tour's `currentLadderId` - including every rung of
+a tour whose pointer is cleared - is refused by:
 
-`GET /api/tours/:tourId/reminders` gains a partition. Let `maxArmedAt` be the
-greatest `armedAt` among the tour's rows. A row is CURRENT when its `armedAt`
-equals `maxArmedAt`, or when NO row carries an `armedAt` at all (a wholly
-pre-migration tour - see 3.4). Every other row is EARLIER.
+- `runDueTourReminders`, which retires it with a claim-skip carrying a new
+  `ReminderSkipReason` token `superseded`, labelled "superseded by a reschedule"
+  in the exhaustive `REMINDER_SKIP_REASON_LABELS` map (both unions and the map
+  are exhaustive; a new token that misses either fails typecheck).
+- `forceSendReminder`, the human "Send now" path, which refuses with 409. It is
+  NOT covered by the poll's check - it is a separate entry point - and without
+  this it is a live button that sends a superseded reminder on demand.
 
-- `reminders[]` keeps its meaning and its shape: the current ladder, and it
-  alone feeds `next`.
-- `earlier[]` is new: the surviving sent rungs of previous generations, newest
-  first. By construction it can hold only `sentAt` rows.
+**The claim guards.** `claimSend`, `claimSkip` and `cancel` are `UpdateCommand`s
+conditioned only on `attribute_not_exists(...)`. DynamoDB's UpdateItem CREATES a
+missing item, so against a swept row every one of those conditions HOLDS: the
+claim succeeds, an attribute-only stub springs into existence with no `tourId`,
+`kind` or `dueAt`, and the poll sends. Each gains
+`attribute_exists(reminderId)`. `uncancel` already requires
+`attribute_exists(canceledAt)`. The precedent is in-repo at
+`app/scripts/retire-paused-tour-reminders.ts:205-207`.
 
-`RemindersPanel` renders `reminders[]` as today. When `earlier` is non-empty it
-renders one muted disclosure - "Earlier schedules (N sent)" - that expands to
-the same row treatment, read-only: no Cancel, no Restore, no Send now, all of
-which the server already refuses on a sent row.
+**The three PREVIEW surfaces must agree.** `routes/tourReminders.ts` (the
+panel), `routes/contactTimeline.ts:981` (contact Upcoming) and
+`routes/relayGroups.ts:226` (group Upcoming) all render a pending rung as a
+promise that it will send. A pointer-mismatched rung is a promise the send paths
+will refuse, and because `listDue` only picks rows up at `dueAt <= now` the lie
+would stand until the rung came due - not until the next tick. All three
+surfaces therefore render such a rung as suppressed with the `superseded`
+reason, never as upcoming.
 
-**The disclosure's slot sits OUTSIDE the empty-ladder short-circuit.** Today
+### 3.4 Read grouping
+
+A row is CURRENT when its `ladderId` matches the tour's `currentLadderId`, or
+when the tour has NO pointer and the row has NO `ladderId` (a wholly
+pre-migration tour). Every other row is EARLIER.
+
+- `reminders[]` keeps its meaning and shape: the current ladder, and it alone
+  feeds `next`.
+- `earlier[]` is new: surviving rungs of previous generations, newest first.
+
+`earlier[]` is NOT guaranteed to hold only sent rows - a lost sweep delete (a
+swallowed `allSettled` rejection, a GSI read that missed a row) leaves an unsent
+superseded rung behind. Such a rung renders with its real state and keeps
+**Cancel** so an operator can retire it. It does NOT get **Send now**:
+`RemindersPanel.tsx:397` renders that button for any rung in state `upcoming`,
+which an unsent earlier rung is, so the action list for `earlier[]` is
+allowlisted rather than inherited.
+
+**The disclosure's slot sits OUTSIDE the empty-ladder short-circuit.**
 `RemindersPanel.tsx:346` returns "No reminders armed." on an empty
-`reminders[]`; a canceled tour is precisely an empty current ladder with a
-non-empty `earlier[]`, so a disclosure nested inside the list branch would be
-unreachable in the case that needs it most.
+`reminders[]`; a canceled tour is exactly that state with a non-empty
+`earlier[]`.
 
-**An earlier rung with no `sentBody` renders no body.** Those rows predate the
-snapshot field and today's read paths compose them LIVE - which, for a
-superseded generation, composes against the tour's CURRENT time and would show
-a text sent last month advertising next month's date. The row still shows its
-kind and its sent-at.
+**An earlier rung with no `sentBody` renders no body** - those rows predate the
+snapshot field and compose LIVE, which for a superseded generation means
+composing against the tour's CURRENT time.
 
-### 3.4 Pre-migration rows
+### 3.5 Pre-migration rows
 
-Rows written before `armedAt` exists have no generation. A tour whose rows ALL
-lack it renders exactly as today (everything current, pile-up intact). The
-first sweep-and-arm on that tour stamps the new ladder, at which point the
-legacy rows sort as EARLIER - the unsent ones are already gone, and the sent
-ones move behind the disclosure. No backfill: it would have to guess which
-historical rows belonged together, and the state resolves on first use.
+A tour with no `currentLadderId` and rows with no `ladderId` renders, and polls,
+exactly as today. The first sweep-and-arm writes a pointer and a stamped ladder,
+after which legacy rows sort as EARLIER. No backfill.
 
-### 3.5 Upcoming placement
+### 3.6 Upcoming placement
 
 The `<section class=upcoming>` moves from a sibling of `.streamWrap` to the last
-child INSIDE `.stream`, keeping its heading, its list and its `aria-label`.
+child INSIDE `.stream`, keeping its heading, list and `aria-label`. Its
+`max-height`, `overflow-y` and `flex` rules go away - a capped block with its
+own scrollbar inside the stream's scrollbar is a nested scroller, and the cap is
+unnecessary once the pin target is right.
 
-It KEEPS a height cap there (its current 12rem / 7rem-on-phone ceiling and its
-own `overflow-y`). Uncapping it would mean that pinning to the bottom fills a
-phone with scheduled cards and no messages - strictly worse than today. Capped
-and inside the scroller delivers the actual intent: visible when you scroll to
-the bottom, entirely gone when you scroll up, never occupying the pane while you
-read.
+**`atBottom` becomes a predicate over the MESSAGE content.** Today it is
+`scrollHeight - scrollTop - clientHeight <= 48` (`Timeline.tsx:1838`) and the
+pin is `scrollTop = scrollHeight` (`:1890`). Both are rewritten against a
+sentinel element placed after the last cluster and before the Upcoming section:
+at-bottom means that sentinel's bottom is within 48px of the viewport bottom;
+pinning scrolls it there. Two failure modes this must avoid, and the acceptance
+criteria pin both: an operator reading the Upcoming block must NOT be yanked
+back to the last message by an arriving item, and a "New messages" pill must NOT
+be permanently lit merely because content exists below the sentinel.
 
-Three anchoring facts constrain the move, all verified on `main`:
+**The pin dep must track HEIGHT, not identity or count.** The effect's deps are
+`[clusters, resetScrollKey, paging?.olderPagesLoaded]` (`:1920`). An ids/length
+key is insensitive to the block's rendered height, which is the quantity the pin
+depends on - a body wrapping to a second line moves the anchor with no key
+change. A `ResizeObserver` on the Upcoming block, re-pinning when it is at
+bottom, is the mechanism. The array itself must never be a dep:
+`GroupTextView.tsx:451` passes a fresh `[]` literal every render.
 
-- The layout effect that pins to bottom lists deps
-  `[clusters, resetScrollKey, paging?.olderPagesLoaded]` (`Timeline.tsx:1920`).
-  `upcoming` must join them, or a block that arrives or grows after the stream
-  settles changes `scrollHeight` with nothing re-pinning.
-- `atBottom` allows 48px of slack (`Timeline.tsx:1838`), which is smaller than
-  the block. The measurement must keep meaning "the operator is at the newest
-  content" once the block is inside the scroller.
-- `.stream` sets `overflow-anchor: none` (module CSS :142), so the browser will
-  not compensate for the height change on its own.
-
-The "New messages" pill is absolutely positioned against `.streamWrap`, which is
-unchanged by this move.
+`.stream` sets `overflow-anchor: none` (module CSS :142), so the browser will
+not compensate on its own. The "New messages" pill is positioned against
+`.streamWrap`, untouched by this move.
 
 ## 4. Surfaces
 
-**Writers** of reminder rows: `armTourReminders` (create); `cancelForTour` at
-the three call sites in 3.2; `claimSend` / `claimSkip` (poll and send-now);
-`cancel` / `uncancel` (PATCH); the seed builders under `app/src/lib/seed/`; the
-dev tick routes; and `app/scripts/retire-paused-tour-reminders.ts`, which runs
-the same claim path and is subject to the same resurrection race. Seeds that arm
-ladders must stamp `armedAt` or the seeded world reads as pre-migration.
-`app/src/lib/performanceSeed.ts:167` constructs the repo and hands it on -
-whether it writes rows is a plan-time check.
+**Writers of reminder rows**: `armTourReminders` (create); the three sweep call
+sites (3.2); `claimSend` / `claimSkip` (poll and send-now); `cancel` /
+`uncancel` (PATCH); the seed builders under `app/src/lib/seed/`; the dev tick
+routes; `app/scripts/retire-paused-tour-reminders.ts` (already guarded - the
+precedent, not a victim). Seeds must stamp ONE `ladderId` per seeded ladder and
+set the tour pointer to it: `matrix.ts` builds raw rows for a same-tour sent
+`confirmation` plus pending `day_before`, and a partial stamp splits every
+seeded ladder across the disclosure.
 
-**Readers**: `listByTour` at `routes/contactTimeline.ts:981` (the contact
-Upcoming bucket), `routes/relayGroups.ts:226` (the group thread's Upcoming
-bucket, `GET /api/conversations/:id/scheduled`), `jobs/tourReminders.ts:1618`
-(the force-send path), and FIVE sites in `routes/tourReminders.ts`; plus
-`listDue` in the poll. Two of those five (`:395`, `:462`) end in `.find(...)!`
-on a post-write re-read; once rows can vanish that assertion is `undefined`
-reaching a view composer, so both must return an honest 404 instead.
+**Writers of the tour row**: `currentLadderId`, written by the CALLER (D3a) at
+the three sweep sites and on arm. `routes/tours.ts:1164` captures the tour
+BEFORE the reminder side effects and `:1285` returns it, so the PATCH response
+would omit a `currentLadderId` the same request wrote - the returned object must
+carry it.
 
-The two Upcoming buckets already filter to rows with no `sentAt` / `canceledAt`,
-so D1 needs no read-side change there - it removes the rows they were showing.
+**Readers**: `listByTour` at `routes/contactTimeline.ts:981`,
+`routes/relayGroups.ts:226`, `jobs/tourReminders.ts:1618`, and FIVE sites in
+`routes/tourReminders.ts`; plus `listDue` in the poll. Two of the five (`:395`,
+`:462`) end in `.find(...)!` on a post-write re-read - `undefined` reaching a
+view composer once rows can vanish - so both return an honest 404, and the 404
+path must still emit `scheduled.updated` (`:416`) when the write itself won.
 
-**Client render sites**: `RemindersPanel` (tour detail) for the ladder;
-`Timeline.tsx` for both Upcoming buckets - the single render site behind the
-contact comms tab, `ConversationDetail`, `GroupTextView`, and the tour and
-placement conversation views.
+**Client render sites**: `RemindersPanel` (tour detail); `Timeline.tsx` for both
+Upcoming buckets - the single render site behind the contact comms tab,
+`ConversationDetail`, `GroupTextView`, and the tour and placement conversation
+views.
 
-**Tests encoding the OLD contract** (must be re-pointed, not deleted):
-`e2e/tests/scenarios/scheduled-visibility.spec.ts:268` is the only end-to-end
-proof that a reschedule retires the previous ladder, and
-`e2e/scenarios/steps.ts:3615-3661` disambiguates rungs in a way that rests on
-superseded rows remaining visible.
+**Tests encoding contracts this change breaks** (re-point, do not delete):
+`e2e/tests/scenarios/scheduled-visibility.spec.ts:268` (the only end-to-end
+proof that a reschedule retires the previous ladder);
+`e2e/scenarios/steps.ts:3615-3661` (rung disambiguation resting on superseded
+rows staying visible); `dashboard/src/routes/contact/Timeline.test.tsx:1375-1481`
+(five tests encoding the OLD pin contract). jsdom performs no layout, so the new
+anchor cannot be proven at the unit layer: unit tests cover the at-bottom
+PREDICATE as a pure function, and the anchoring itself is an e2e assertion in a
+real browser. Four e2e sites resolve the Upcoming region by role and name.
 
 ## 5. Non-goals
 
-- No change to when rungs fire, what they say, or the quiet-hours clamp - Phase
-  A and Phase B own that and both just landed.
-- No backfill of `armedAt` onto historical rows (3.4).
-- No change to per-rung Cancel / Restore / Send now for the current ladder.
-- No new mobile-only layout branch (D4 is deliberately uniform).
-- No pagination work on `listByTour` (see R5).
+- No change to when rungs fire, what they say, or the quiet-hours clamp.
+- No backfill of `ladderId` / `currentLadderId` (3.5).
+- No change to per-rung Cancel / Restore / Send now on the CURRENT ladder.
+- No mobile-only layout branch.
+- No pagination work on `listByTour` (R5).
 
 ## 6. Acceptance
 
-1. After two reschedules the panel's current ladder holds exactly one
-   generation, and the superseded rows are GONE from the table - not merely
-   filtered out of a response.
+1. After two reschedules the current ladder holds exactly one generation and the
+   superseded unsent rows are GONE from the table, not merely filtered.
 2. A rung the poll claims between the sweep's list and its delete survives and
-   reads as sent. Proven at the REPO layer against DynamoDB Local, because the
-   in-memory fake returns `false` on a missing row and cannot express this.
-3. A rung deleted by the sweep and then reached by the poll's `claimSend` does
-   NOT resurrect and does NOT send.
-4. A hand-canceled rung disappears on the next reschedule and cannot be
-   restored into the new ladder; PATCH against it returns 404, not 500.
-5. A tour whose earlier ladder sent a confirmation shows that rung only behind
-   the disclosure - including when the current ladder is EMPTY (a canceled
-   tour), where the disclosure must still render.
-6. An earlier rung with no `sentBody` shows no body rather than a body composed
-   from the tour's current time.
-7. A tour whose rows all predate `armedAt` renders exactly as it does on `main`.
-8. On a 390px viewport the conversation stream shows more messages than it does
-   on `main`; scrolling to the bottom reveals the Upcoming block; scrolling up
-   removes it from view entirely.
-9. The "New messages" pill still appears on an inbound message while scrolled
-   up and dismisses on scroll to bottom, with an Upcoming block present.
-10. Both Upcoming buckets (contact and group thread) stop returning rungs from a
-    superseded ladder, because those rows no longer exist.
+   reads as sent. Proven at the REPO layer against DynamoDB Local: the in-memory
+   fake returns `false` on a missing row, which is correct POST-guard behavior
+   and therefore cannot express the pre-guard defect.
+3. A rung deleted by the sweep and then reached by `claimSend` does NOT
+   resurrect and does NOT send.
+4. A rung the sweep failed to delete is refused by the poll (claim-skipped
+   `superseded`) AND by Send now (409), and shows in `earlier[]` with its real
+   state, a working Cancel, and NO Send now button.
+5. All three preview surfaces render a pointer-mismatched pending rung as
+   suppressed `superseded`, not as upcoming, before its `dueAt` arrives.
+6. A terminal transition clears the pointer; the current ladder is empty and
+   every survivor reads as earlier. Reviving to `scheduled` arms a NEW ladder
+   that adopts no earlier rung.
+7. A conversion whose `placements.create` FAILS leaves the tour with its ladder
+   intact and its pointer restored - still armed, still sending.
+8. A hand-canceled rung disappears on the next reschedule; PATCH against a
+   deleted rung returns 404, not 500, and still emits `scheduled.updated` when
+   the write won.
+9. The disclosure renders when the current ladder is EMPTY.
+10. An earlier rung with no `sentBody` shows no body.
+11. A tour with no pointer and no stamped rows renders, and polls, exactly as on
+    `main`.
+12. On a 390px viewport, in a thread whose messages OVERFLOW the stream, at rest
+    the view shows more messages than `main` and no Upcoming block; scrolling
+    down reveals it; scrolling up removes it. (A thread shorter than the
+    viewport has nothing to scroll and shows the block - that is correct.)
+13. An operator scrolled onto the Upcoming block is NOT yanked back to the last
+    message when a new item arrives, and the "New messages" pill is not lit
+    merely because the block sits below the sentinel.
+14. The pill still appears on an inbound message while scrolled up and dismisses
+    on scroll to bottom, in a contact thread and in a relay-group thread through
+    `ConversationDetail` (`GroupTextView` passes `upcoming={[]}` and cannot
+    exercise it).
+15. Both Upcoming buckets stop returning rungs from a superseded ladder.
 
 ## 7. Risks
 
 - **R1 - deletion is irreversible.** The `attribute_not_exists(sentAt)`
-  condition must be on the DELETE itself, never a read-then-delete check.
-- **R2 - the claim guards are the load-bearing half.** Shipping the sweep
-  without `attribute_exists(reminderId)` on the three claim paths is worse than
-  shipping nothing: it turns a blocked rung into a sent one.
-- **R3 - the sweep widens what `cancelForTour` did.** It now also removes
-  operator-canceled and skipped rows. Any test asserting a canceled row remains
-  visible after a reschedule now encodes the OLD contract.
-- **R4 - `listByTour` is an eventually-consistent GSI query.** D1 makes
-  staleness user-visible for the first time: an immediate re-read can still
-  return a deleted row. The panel's existing `scheduled.updated` refetch and
-  dueAt anchor converge it; no design change, but a live-QA watch item.
-- **R5 - `listByTour` is unpaginated.** Both the sweep and the read partition
-  inherit that. Five rungs per generation puts the 1MB page hundreds of
-  reschedules away, but this repo has shipped this exact class of bug before.
-- **R6 - scroll semantics.** Moving a block inside the scroller passes unit
-  tests and fails in the hand. Live QA on a phone viewport is required.
-- **R7 - a terminal tour's panel can go empty.** A canceled tour that never sent
-  a rung now reads "No reminders armed." where it used to list the struck-through
-  ladder. That is the intended consequence of D1, stated here so it is not
-  discovered as a regression.
+  condition belongs on the DELETE, never a read-then-delete check.
+- **R2 - the guards and checks are the load-bearing half.** Sweep without them
+  and a blocked rung becomes a sent one.
+- **R3 - the sweep widens what `cancelForTour` did**, so any test asserting a
+  canceled row survives a reschedule encodes the OLD contract.
+- **R4 - two writes, one invariant.** Pointer and rows are separate writes with
+  no transaction. The 3.2 ordering bounds every interruption to "no current
+  ladder", which is safe by construction: nothing sends.
+- **R5 - `listByTour` is unpaginated**; the sweep and the read partition inherit
+  it. The pointer check lowers the consequence of a missed row from "sends" to
+  "shows up in earlier".
+- **R6 - scroll semantics.** Passes unit tests, fails in the hand. Live QA on a
+  phone viewport is required.
+- **R7 - a terminal tour's panel can go empty.** Intended consequence of D1.

@@ -37,7 +37,7 @@ function parseChannelMetadata(raw: string | undefined): ChannelMetadataEvidence 
     }
     const type = (parsed as { type?: unknown }).type;
     if (type === 'rcs') return 'rcs';
-    return type === undefined ? 'absent' : 'unknown';
+    return 'unknown';
   } catch {
     return 'malformed';
   }

@@ -101,6 +101,33 @@ describe('Twilio transport evidence normalization', () => {
     }
   });
 
+  it.each([
+    [
+      'authenticated provider traffic',
+      true,
+      {
+        kind: 'conflict',
+        source: 'unknown-rich-channel-evidence',
+        safeFacts: { sidPrefix: 'SM' },
+      },
+    ],
+    [
+      'unauthenticated fixture traffic',
+      false,
+      { kind: 'missing', source: 'unauthenticated-provider-evidence' },
+    ],
+  ] as const)('handles incomplete ChannelMetadata for %s', (_name, authenticatedProviderTraffic, expected) => {
+    expect(
+      normalize({
+        direction: 'inbound',
+        authenticatedProviderTraffic,
+        messageSid: SMS_SID,
+        to: '+16175550100',
+        channelMetadata: '{}',
+      }),
+    ).toEqual(expected);
+  });
+
   it('limits safe facts to provider prefixes and channel schemes', () => {
     expect(
       normalize({

@@ -35,7 +35,7 @@ must inspect both live worktree state and current `main` at Task 0, implement on
 feature branch, and perform the workflow's one allowed `main` sync only at the
 final pre-handback step.
 
-**Status:** Revised after adversarial plan review round 1; round 2 pending.
+**Status:** APPROVED for implementation launch after adversarial plan review round 2; awaiting human launch gate.
 
 ## Global constraints
 

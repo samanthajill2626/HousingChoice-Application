@@ -1038,16 +1038,16 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
           scheduledMs - 6 * HOUR_MS,
           Date.parse(dayBeforeDueAt) + HOUR_MS,
         ));
-        reminders.push({
-          reminderId: `rem-mx-${tourId}-dbf`,
-          tourId,
-          kind: 'day_before',
-          dueAt: dayBeforeDueAt,
-          canceledAt,
-          ladderId,
-          _reminderPartition: 'reminders',
-          createdAt,
-        });
+        // NO day_before ROW (supersession review round m3). The terminal
+        // transition DELETES every never-sent rung of the ladder it retires
+        // (routes/tours.ts, spec 3.2), so a canceled tour cannot end up holding
+        // a canceledAt rung on a superseded generation - a row that is
+        // superseded and canceled at once is a shape the product can no longer
+        // produce, and seeding it teaches operators and e2e authors to expect a
+        // "Canceled" chip inside `Earlier reminders` that the real world erases.
+        // The sent confirmation above survives (the sweep's only filter is
+        // "never sent") and the rotated pointer makes it read as earlier, which
+        // is exactly what a canceled tour looks like post-feature.
         tour['canceledAt'] = canceledAt;
         tour['updatedAt'] = canceledAt;
       } else {

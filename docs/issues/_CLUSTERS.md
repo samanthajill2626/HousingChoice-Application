@@ -228,13 +228,16 @@ soundness items; the e2e-under-load items are T-E2E-LOAD.
 
 | sev | issue | why it ships here |
 |---|---|---|
-| high | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | anchor - suite A latency-robust assertions, suite B retry `UpdateTable` on `InternalFailure` |
-| med | [logcallsiteguard-hook-budget-equals-its-own-cost](./logcallsiteguard-hook-budget-equals-its-own-cost.md) | a `beforeAll` budget smaller than the hook's own cost - fails on load, not on defect |
-| med | [static-smoke-fails-on-stale-dashboard-dist](./static-smoke-fails-on-stale-dashboard-dist.md) | skips on ABSENT dist, fails on STALE dist, blames the wrong thing |
+| high | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | anchor - STILL OPEN after the 2026-09-01 mission (no sighting to prove cured); the control-plane retry landed, suite A's latency remedy was struck on 13 green runs, the clean-key recipe superseded |
+| med | [logcallsiteguard-hook-budget-equals-its-own-cost](./logcallsiteguard-hook-budget-equals-its-own-cost.md) | RESOLVED 2026-09-01 - the 196s premise did not reproduce (6.5s hook, 27x headroom); budget unchanged, measured comments shipped |
+| med | [static-smoke-fails-on-stale-dashboard-dist](./static-smoke-fails-on-stale-dashboard-dist.md) | RESOLVED 2026-09-01 - split: fixture-served behaviour + tracked-source identity never skip; the dist check can only PASS or SKIP |
 
-**conflicts:** none. **gated-on:** nothing. Run its gates under a clean
-access key (`AWS_ACCESS_KEY_ID=hccleanrun001`) or the anchor's own symptom
-contaminates the verdict.
+**conflicts:** none. **gated-on:** nothing. The clean-key advice that stood
+here is SUPERSEDED (2026-09-01): under per-file keys an exported
+`AWS_ACCESS_KEY_ID` collapses every suite onto one database - the old
+regime, not a clean one. Adjudicate a red gate 2 by re-running the failing
+FILES alone plus a merge-base run, comparing failing FILES (see the anchor
+issue's rewritten first-diagnostic block).
 
 ### M8 - Who owns the conversation-to-contact link
 

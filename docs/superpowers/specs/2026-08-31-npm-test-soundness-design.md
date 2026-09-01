@@ -4,10 +4,10 @@
 - Branch: `feat/npm-test-soundness`
 - Worktree: `W:\tmp\npm-test-soundness`
 - Bundle: M7 of `docs/issues/_CLUSTERS.md` (re-derived 2026-08-31 @ `5ce9912f`)
-- Revision: **v3**, after adversarial rounds 1 (two independent reviewers)
-  and 2 (one continued reviewer). Adjudications:
-  `docs/superpowers/reviews/2026-08-31-npm-test-soundness/design-review/adjudications.md`
-  and `adjudications-r2.md`.
+- Revision: **v4**, after adversarial rounds 1 (two independent reviewers),
+  2 and 3 (one continued reviewer). Adjudications:
+  `docs/superpowers/reviews/2026-08-31-npm-test-soundness/design-review/adjudications.md`,
+  `adjudications-r2.md`, `adjudications-r3.md`.
 
 ## The class
 
@@ -70,12 +70,15 @@ Enumerated by this command, which is reproducible and which the builder
 must re-run rather than trust this table:
 
 ```
-grep -rn "new \(CreateTable\|DeleteTable\|UpdateTable\|UpdateTimeToLive\|DescribeTimeToLive\|DescribeTable\|ListTables\)Command\|waitUntilTableExists(" --include=*.ts --include=*.mjs app e2e scripts | grep -v node_modules
+grep -rn "new \(CreateTable\|DeleteTable\|UpdateTable\|UpdateTimeToLive\|DescribeTimeToLive\|DescribeTable\|ListTables\)Command\|waitUntilTable\(Exists\|NotExists\)(" --include=*.ts --include=*.mjs app e2e scripts | grep -v node_modules
 ```
 
-It finds ~25 sends and 3 waiter sites across 11 files. The v2 spec claimed
-"nine sends exist in the repo", which was command-type-limited and
-presented as exhaustive - worse than an admitted sample.
+The builder re-runs it and works from ITS output, not from a count quoted
+here - v2 claimed "nine sends exist in the repo" (command-type-limited,
+presented as exhaustive) and v3 quoted a file count that was also wrong.
+The pattern above additionally matches `waitUntilTableNotExists`, which the
+v3 pattern could not see - and which made `app/scripts/db-create.ts`
+invisible to the enumeration entirely.
 
 **Disposition rule, applied to all of them:**
 
@@ -139,21 +142,56 @@ stops being true on attempt 2** - the identical defect
 schedule makes its second poll a flat 20s and it throws at 60s - inside
 `ensureTable` calls that sit in `beforeAll` hooks budgeted at 60s. Arming a
 new false red while fixing an old one is this mission's own failure mode.
-Use a bounded `DescribeTable` poll with a short interval (~100ms) and an
-explicit ceiling well inside the caller's budget.
 
-### The verification hook must fail CLOSED
+Use a bounded `DescribeTable` poll, fully specified so no reader has to
+guess: **100ms interval, 10s ceiling**, and on exhaustion **rethrow the
+original `ResourceInUseException` with the observed table status appended**.
+10s is chosen against the caller's 60s hook budget and against DynamoDB
+Local's own 10s per-table lock timeout - a table that is still not ACTIVE
+after 10s locally is not going to become so inside the same hook.
 
-`db-update-gsis.ts:88-101`'s `indexStatus` catches everything and returns
-`undefined`, falling through to a re-send. That is fail-OPEN and it is
-tolerable there only because a re-sent GSI create is caught downstream.
+The poll's own `DescribeTable` calls are NOT retried. They are reads under
+the reads-are-not-covered rule, and a read that fails here simply counts as
+"not ACTIVE yet" and is polled again until the ceiling.
 
-**For `UpdateTimeToLive` it is not tolerable**: re-sending an enable for a
-TTL that is already enabled can draw a `ValidationException`, converting a
-transient container hiccup into a hard failure. So the shared helper's
-contract is: **if the verification hook itself throws, rethrow the ORIGINAL
-error rather than re-sending.** `db-update-gsis.ts` keeps its current
-fail-open behaviour explicitly, as its own documented choice.
+**Pre-existing, and deliberately not fixed here:**
+`db-create.ts:64` and `:76` call `waitUntilTableNotExists({ maxWaitTime: 60 })`
+after every `deleteTableIfExists`, carrying the identical flat-20s second
+tick on the `npm test` teardown path (`globalTeardown` uses `dropAllTables`).
+That cost exists today, independent of this mission. Tolerating
+`ResourceInUseException` in `deleteTableIfExists` makes the waiter's slow
+path slightly more reachable - previously that case threw outright, which
+is strictly worse. It is recorded as a watch item and measured if it shows
+up in teardown timing; changing `db-create.ts` is not in this mission.
+
+### The verification hook: ONE contract, at the right layer
+
+v3 stated an asymmetric contract - fail-closed for `dynamoAdmin`,
+fail-open retained for `db-update-gsis` - **at the helper layer, where it
+cannot hold**. `indexStatus` (`db-update-gsis.ts:88-101`) catches
+everything and returns `undefined`, so it never throws and the helper's
+fail-closed branch would be inert for it; worse, a future TTL hook copied
+from that shape would silently restore the risk the branch exists to
+prevent. Two contracts in one helper is an invitation to the next defect.
+
+So: **the helper has exactly one contract - if the verification hook
+throws, rethrow the ORIGINAL error and do not re-send.** Fail closed,
+always, for every caller.
+
+`db-update-gsis.ts`'s existing fail-open behaviour is unchanged because it
+lives INSIDE `indexStatus`'s own `catch`, which is where a caller's
+tolerance belongs. Its comment gains one line saying so, so the next reader
+does not mistake the swallow for an accident.
+
+Why this matters for TTL specifically: re-sending an enable for a TTL that
+is already enabled can draw a `ValidationException`, converting a transient
+container hiccup into a hard failure. The TTL hook therefore does NOT
+swallow - it lets the helper fail closed.
+
+**The verification hook is called at most ONCE per failed attempt and is
+never itself retried.** v3 left this undefined, which nested a retried read
+inside a retried mutation - the very objection this spec used to exclude
+the SDK waiter, with exhaustion semantics nobody could state.
 
 ### The local-endpoint gate, specified concretely
 
@@ -203,7 +241,7 @@ Cases:
    `ResourceInUseException` -> resolves, does not throw;
 4. local, `UpdateTimeToLive` retried -> status RE-READ between attempts;
    and a re-read that THROWS -> the original error is rethrown, no
-   re-send;
+   re-send, and the hook was called exactly once for that attempt;
 5. **non-local endpoint, `InternalFailure` once -> throws immediately,
    `send` called exactly once.** This is the case that stops the gate
    shipping inert;
@@ -212,7 +250,10 @@ Cases:
 8. **`ensureGsis` still retries after the refactor** - a stub whose
    `UpdateTable` throws `InternalFailure` then succeeds. Without this the
    mission could silently disarm the only retry that exists today while
-   adding one that never fires.
+   adding one that never fires. A second case pins that `ensureGsis` keeps
+   its FAIL-OPEN behaviour: a stub whose `DescribeTable` also throws must
+   still reach a re-send, proving the swallow inside `indexStatus` survived
+   the move to a fail-closed helper.
 
 ## Item 1B - groupCrossCheck: measure, do not pre-rewrite
 
@@ -300,9 +341,21 @@ labelled QUIET.
 
 **Fallback, because the neighbours will finish.** If the post-fix arm can
 only be run QUIET, say so plainly and report the comparison as
-baseline-contended vs post-fix-quiet - clearly labelled as the weaker
-comparison it is. **Do not fabricate load** to match the baseline, and do
-not silently drop the label.
+baseline-contended vs post-fix-quiet. **Do not fabricate load** to match
+the baseline.
+
+**A label is not enough, so this is a USE RESTRICTION, not a caveat.** The
+anchor's own numbers put contended against quiet at roughly 5x on wall
+clock - the signal this protocol calls durable - so a contended-vs-quiet
+pair is biased toward the fix by more than any effect it could measure.
+**A mixed pair may NOT be used to close the anchor issue** (Deliverable 2).
+It may be reported, and it may support a "no regression" claim, but the
+anchor then stays open with the mixed pair recorded and the reason stated.
+
+The same asymmetry applies to the BASELINE, which ordering alone does not
+protect: install plus warm-up plus three runs can outlast the neighbours.
+Snapshot every run, and if the baseline itself degrades to QUIET partway,
+report the per-run labels rather than an average over a changing machine.
 
 1. **Install first.** `npm install` in this worktree BEFORE the baseline,
    plus one discarded warm-up run - otherwise the baseline pays a cold
@@ -427,17 +480,30 @@ nobody built the dashboard - including this worktree.
 `HousingChoice` and `<div id="root">`, because assertions at `:41`, `:108`,
 `:165` and `:85` depend on them.
 
-**Traversal decoys are placed against the actual probe strings.** The
-probes at `:148-154` escape TWO levels
-(`/%2e%2e%2f%2e%2e%2fpackage.json`); the `/assets/...` probe at `:153`
-prefixes a path segment that `express.static` resolves within the same
-root, so it reaches the same depth rather than a third level. v2's single
-decoy one level up would have left every "no leak" assertion vacuous - the
-exact tautology it claimed to prevent. The builder places a decoy
-`package.json` containing `"version"` and `"private"` at **each depth the
-probe strings actually reach**, verified by asserting the decoy IS readable
-from disk at that path before asserting the server does not serve it. A
-decoy nobody can reach proves nothing.
+**No traversal decoys. The whole decoy idea is dropped, and this is the
+third revision it has broken in.** v1 planted one decoy one level up, v2
+planted two at depths the probes do not reach, and v3 mandated verifying
+reachability - all three were solving a problem that does not exist.
+
+`send`'s `UP_PATH_REGEXP` (`node_modules/send/index.js:61`, tested at
+`:431`) matches any normalized path containing a `..` segment with either
+separator, and answers **403 before joining the root**. Express decodes
+`%2e%2e%2f` to `../` first, so every probe at `:148-154` - including the
+`/assets/`-prefixed one and the backslash variant - is rejected without
+ever touching the filesystem. **There is no depth at which a decoy could
+be read**, so no decoy can make those assertions less vacuous.
+
+The probes are therefore carried over UNCHANGED onto the fixture. What
+they assert is that the rejection holds; the mechanism that delivers it is
+`send`'s, not ours, and it is worth pinning precisely because a future
+static-serving change could lose it.
+
+**What the fixture DOES need is a positive control**, which the file lacks
+today: a real asset written into the fixture dist and fetched
+successfully. Without it, a `distDir` pointed somewhere wrong is
+indistinguishable from a correct one - `GET /` would still pass off the
+SPA fallback, and every "no leak" assertion would pass because nothing is
+being served at all.
 
 ### (b) The PWA identity contract -> tracked source. NEVER skips.
 
@@ -475,7 +541,9 @@ forever. So the message says both causes and what distinguishes them:
 "`dashboard/dist` disagrees with `dashboard/index.html`. Most likely the
 dist is stale - run `npm run build -w dashboard`. **If a fresh build still
 reports this, the dashboard BUILD is dropping the identity tags, which is a
-real regression** - see `docs/issues/<slug>.md`."
+real regression.**" The message ends by naming the ACTUAL issue slug filed
+under Deliverable 3 - a literal `<slug>` placeholder must not reach the
+shipped string.
 
 **The honest cost, and it is filed rather than hidden.** With (c) unable to
 fail, **nothing anywhere asserts the BUILT dashboard's identity tags** - a
@@ -547,15 +615,19 @@ comparison at the merge base - never by line number. The config lints
 ## Risks and watch items
 
 - **Retrying can mask.** The local-endpoint gate is the only thing keeping
-  the retry off any path that could reach real AWS, and acceptance cases 5
-  and 6 are the only things proving the gate is not inert.
+  the retry off any path that could reach real AWS. Cases 5 and 6 prove it
+  refuses; **case 7 is the other half of the same proof** - a gate that
+  refuses everything is exactly as inert as one that refuses nothing, and
+  only 7 shows it still says yes to a local endpoint.
 - **The refactor can disarm the working retry.** Case 8 exists solely for
   that, and it is the difference between improving the harness and
   quietly regressing it.
-- **A fixture can make an assertion tautological.** This has already
-  happened twice in this document - v1's traversal decoy and v2's
-  replacement. Verify the decoy is reachable before asserting it is not
-  served.
+- **A test can be tautological three revisions running.** The traversal
+  decoy was wrong in v1, wrong differently in v2, and in v3 was given a
+  reachability check that could not have detected the real problem - that
+  `send` 403s before the filesystem is touched at all. When an assertion
+  needs elaborate scaffolding to be meaningful, check first whether the
+  mechanism under test makes the scaffolding unreachable.
 - **Measurement under shared load is noisy, and this mission is part of the
   load.** Report run counts and contention snapshots; label a QUIET arm as
   QUIET.

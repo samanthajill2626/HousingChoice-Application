@@ -52,6 +52,11 @@ import {
 } from '../../lib/memberAttribution.js';
 import { resolveRecipientLabel, type RecipientLabel } from '../../lib/recipientLabel.js';
 import {
+  includedRecipientEntries,
+  presentMessageTransport,
+  presentRecipientTransport,
+} from '../../lib/messageTransport.js';
+import {
   isInlineRenderable,
   isPdfMediaType,
   mediaKindWord,
@@ -576,11 +581,18 @@ function recipientSummaryName(
   const recital = rows.map((row) => {
     const who = row.name.note !== undefined ? `${row.name.label}, ${row.name.note}` : row.name.label;
     const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, nowMs);
-    // A null presentation (an unrecognised wire status) names the person and
-    // claims no state - never a blank row, never an invented one.
-    if (leg === null) return `${who}.`;
-    const legReason = leg.isFailure ? deliveryReason(row.slot.errorCode, { media }) : undefined;
-    return `${who}: ${speakDeliveryText(chipText(leg, legReason))}.`;
+    const legReason = leg?.isFailure === true
+      ? deliveryReason(row.slot.errorCode, { media })
+      : undefined;
+    const transport = presentRecipientTransport(row.slot);
+    const details = [leg === null ? null : chipText(leg, legReason), transport].filter(
+      (detail): detail is string => detail !== null,
+    );
+    // A row with neither presentation still names the person and claims no
+    // state. Delivery and transport otherwise share the visible ASCII separator.
+    return details.length === 0
+      ? `${who}.`
+      : `${who}: ${speakDeliveryText(details.join(' - '))}.`;
   });
   return `${spoken}. ${recital.join(' ')}`;
 }
@@ -761,8 +773,8 @@ function bubbleClocks(
  * cannot change any pixel, so it must not buy an interval. FIVE clauses carry
  * that mirror, and each one names a real rendering decision made elsewhere:
  *
- *  - OUTBOUND only, and a non-empty `delivery_recipients` map, which is
- *    `showRecipients` / the rollup guard in `MessageBubble`.
+ *  - OUTBOUND or an inbound multi-party source, and a non-empty filtered
+ *    `delivery_recipients` set, which mirrors `showRecipients` below.
  *  - NOT a `queued_pending` hold, which suppresses both the rollup and the rows.
  *  - NOT an `email` row. `StreamItem` routes `type === 'email'` to `EmailCard`,
  *    which renders no rollup, no rows and no legs at all - while the server
@@ -776,13 +788,15 @@ function bubbleClocks(
  *    for such a leg however long it sits there.
  */
 function hasTickableLeg(msg: TimelineMessage, tickNow: number): boolean {
-  if (msg.direction !== 'outbound') return false;
   if (msg.type === 'email') return false;
   if (msg.delivery_status === 'queued_pending') return false;
+  if (msg.direction !== 'outbound' && msg.relay_sender_key === undefined) return false;
+  const recipientEntries = includedRecipientEntries(msg.delivery_recipients);
+  if (recipientEntries.length === 0) return false;
   const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
   if (bubbleNowMs === undefined) return false;
-  return Object.values(msg.delivery_recipients ?? {}).some(
-    (slot) =>
+  return recipientEntries.some(
+    ([, slot]) =>
       slot.errorCode !== 'contact_opted_out' &&
       canEverGoStale(slot, messageAtMs, bubbleNowMs) &&
       !isStaleLeg(slot, messageAtMs, bubbleNowMs),
@@ -814,7 +828,15 @@ function MessageBubble({
   const [revealed, setRevealed] = useState(false);
   const outbound = msg.direction === 'outbound';
   const number = outbound ? msg.toPhone : msg.fromPhone;
-  const transport = msg.type.toUpperCase();
+  const transport = presentMessageTransport({
+    type: msg.type,
+    direction: msg.direction,
+    optimistic: msg.optimistic,
+    transportSchemaVersion: msg.transport_schema_version,
+    requestedTransport: msg.requested_transport,
+    actualTransport: msg.actual_transport,
+    recipients: msg.delivery_recipients,
+  });
   const meta = [
     transport,
     number ? `${outbound ? 'to ' : ''}${formatPhone(number)}` : null,
@@ -855,8 +877,9 @@ function MessageBubble({
   // suppressed leg, the group-text receipts path writes Twilio's own
   // `undelivered` for a 21610. Requiring `failed` too left a group text's
   // opted-out member unexplained AND counted as a hard failure.
-  const optedOutCount = Object.values(msg.delivery_recipients ?? {}).filter(
-    (r) => r.errorCode === 'contact_opted_out',
+  const recipientEntries = includedRecipientEntries(msg.delivery_recipients);
+  const optedOutCount = recipientEntries.filter(
+    ([, recipient]) => recipient.errorCode === 'contact_opted_out',
   ).length;
   // ONE CLOCK PER BUBBLE, and it is a DIFFERENT value from the timeline's tick.
   // `tickNow` is always a number and exists to force re-renders; `bubbleNowMs` is
@@ -875,11 +898,8 @@ function MessageBubble({
   // condition walks - so a bubble and the interval that exists to re-render it
   // can never disagree about this message's clocks.
   const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
-  // Object.entries, not Object.values: the KEYS are who each leg went to, and
-  // throwing them away is precisely what left the 2026-08-23 bubble saying
-  // "delivered 1/2" about a coin flip the founder lost. The rollup still reads
-  // them in MAP order, exactly as it did.
-  const recipientEntries = Object.entries(msg.delivery_recipients ?? {});
+  // The filtered entries retain the KEYS because they identify who each leg went
+  // to. Roster ordering and all downstream counts consume this same set.
   // Relay group (M1.7): a message carrying a delivery_recipients map is a relayed
   // SOURCE message. For an OUTBOUND relay bubble, summarize per-member delivery
   // as ONE rollup chip (counting up while in flight, green "Delivered N/N" once
@@ -904,7 +924,9 @@ function MessageBubble({
   // members are the ONLY information the bubble has. There the chip states the
   // aggregate, the note counts, and the rows NAME - three elements, three jobs.
   const showRecipients =
-    outbound && recipientEntries.length > 0 && msg.delivery_status !== 'queued_pending';
+    (outbound || msg.relay_sender_key !== undefined) &&
+    recipientEntries.length > 0 &&
+    msg.delivery_status !== 'queued_pending';
   // Spec S6. The name goes on whichever chip ACTUALLY RENDERS: the rollup chip
   // when there is one, else - and only on a branch-0 bubble, i.e. a non-empty map
   // whose legs all opted out - the message-level chip, which is the only chip
@@ -1044,14 +1066,26 @@ function MessageBubble({
               leg?.isFailure === true
                 ? deliveryReason(row.slot.errorCode, { media: isMms })
                 : undefined;
+            const recipientTransport = presentRecipientTransport(row.slot);
+            const state = [leg === null ? null : chipText(leg, legReason), recipientTransport]
+              .filter((part): part is string => part !== null)
+              .join(' - ');
+            const recipientIdentity = row.name.note !== undefined
+              ? `${row.name.label} - ${row.name.note}`
+              : row.name.label;
+            const accessibleName = [recipientIdentity, state, row.when]
+              .filter((part) => part.length > 0)
+              .join(' - ');
             return (
-              <li key={row.key} className={styles.recipientRow}>
+              <li key={row.key} className={styles.recipientRow} aria-label={accessibleName}>
                 <span className={styles.recipientName}>
                   {row.name.note !== undefined ? `${row.name.label} - ${row.name.note}` : row.name.label}
                 </span>
-                {leg !== null ? (
-                  <span className={`${styles.recipientState ?? ''} ${TONE_CLASS[leg.tone] ?? ''}`}>
-                    {chipText(leg, legReason)}
+                {state.length > 0 ? (
+                  <span
+                    className={`${styles.recipientState ?? ''} ${leg === null ? '' : (TONE_CLASS[leg.tone] ?? '')}`}
+                  >
+                    {state}
                   </span>
                 ) : null}
                 {row.when.length > 0 ? (

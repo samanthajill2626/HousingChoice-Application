@@ -832,12 +832,37 @@ describe('GroupTextView - the composer (S5)', () => {
   }
 
   it('POSTs the reply to the thread and shows the bubble optimistically', async () => {
+    let resolveSend!: (value: {
+      conversationId: string;
+      providerSid: string;
+      tsMsgId: string;
+      status: string;
+    }) => void;
+    sendMessageMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
     renderAt('gt-1');
     await typeAndSend('on my way');
 
     await waitFor(() => expect(sendMessageMock).toHaveBeenCalledWith('gt-1', { body: 'on my way' }));
     // The optimistic bubble is on screen before any refetch resolves.
-    await waitFor(() => expect(screen.getByText('on my way')).toBeInTheDocument());
+    const optimisticBody = await screen.findByText('on my way');
+    const bubble = optimisticBody.closest('[class*="bubble"]');
+    expect(bubble).not.toBeNull();
+    expect(within(bubble as HTMLElement).queryByText(/^SMS(?: -|$)/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSend({
+        conversationId: 'gt-1',
+        providerSid: 'IMsent1',
+        tsMsgId: '2026-06-17T11:00:00.000Z#IMsent1',
+        status: 'queued',
+      });
+      await Promise.resolve();
+    });
+    expect(within(bubble as HTMLElement).queryByText(/^SMS(?: -|$)/)).not.toBeInTheDocument();
   });
 
   it('names the GROUP TEXT in the reply note, never "relay group"', async () => {
@@ -1060,9 +1085,22 @@ describe('GroupTextView - the composer (S5)', () => {
         body: 'heading over',
         delivery_status: 'queued',
         provider_ts: '2026-06-17T10:00:00.000Z',
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
         delivery_recipients: {
-          'phone#+14045550111': { status: 'delivered' },
-          'phone#+14045550112': { status: 'sent' },
+          'phone#+14045550111': {
+            status: 'delivered',
+            requestedTransport: 'mms',
+            actualTransport: 'mms',
+            transportAggregationState: 'attempted',
+          },
+          'phone#+14045550112': {
+            status: 'sent',
+            requestedTransport: 'mms',
+            actualTransport: 'mms',
+            transportAggregationState: 'attempted',
+          },
         },
       } as unknown as Message,
     ]);
@@ -1079,6 +1117,8 @@ describe('GroupTextView - the composer (S5)', () => {
     // a quiet leg IS the feature, and this is the one assertion on this surface
     // that proves it.
     expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(screen.getByText(/^MMS -/)).toBeInTheDocument();
+    expect(screen.queryByText(/^SMS -/)).not.toBeInTheDocument();
   });
 
   // The GROUP-TEXT key convention, end to end through the real view. Timeline's

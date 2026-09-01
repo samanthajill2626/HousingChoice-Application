@@ -121,6 +121,96 @@ describe('Timeline', () => {
     expect(screen.getByText(/SMS - \(404\) 010-0007 - 9:14a/)).toBeInTheDocument();
   });
 
+  it.each([
+    {
+      label: 'pending RCS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-pending',
+        tsMsgId: 'transport-pending',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
+      } as TimelineItem,
+      expected: 'RCS',
+    },
+    {
+      label: 'SMS agreement',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-agreement',
+        tsMsgId: 'transport-agreement',
+        transport_schema_version: 1,
+        requested_transport: 'sms',
+        actual_transport: 'sms',
+      } as TimelineItem,
+      expected: 'SMS',
+    },
+    {
+      label: 'RCS fallback',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-fallback',
+        tsMsgId: 'transport-fallback',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
+        actual_transport: 'sms',
+      } as TimelineItem,
+      expected: 'RCS -> SMS',
+    },
+    {
+      label: 'unresolved inbound',
+      item: {
+        ...MESSAGE_IN,
+        id: 'transport-unknown',
+        tsMsgId: 'transport-unknown',
+        transport_schema_version: 1,
+      } as TimelineItem,
+      expected: 'Unknown',
+    },
+    {
+      label: 'legacy SMS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-legacy',
+        tsMsgId: 'transport-legacy',
+      } as TimelineItem,
+      expected: 'SMS',
+    },
+    {
+      label: 'text-only native Group MMS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-group-mms',
+        tsMsgId: 'transport-group-mms',
+        type: 'sms',
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
+      } as TimelineItem,
+      expected: 'MMS',
+    },
+  ])('renders $label from the normalized transport contract', ({ item, expected }) => {
+    renderTimeline({ items: [item] });
+    expect(screen.getByText(new RegExp(`^${expected} -`))).toBeInTheDocument();
+  });
+
+  it('shows no transport for an optimistic direct message even when local fields claim one', () => {
+    const optimistic: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'transport-optimistic',
+      tsMsgId: 'transport-optimistic',
+      body: 'optimistic transport stays hidden',
+      optimistic: true,
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+    };
+    renderTimeline({ items: [optimistic] });
+    const bubble = screen.getByText('optimistic transport stays hidden').closest('[class*="bubble"]');
+    expect(bubble).not.toBeNull();
+    expect(within(bubble as HTMLElement).queryByText(/RCS|SMS/)).not.toBeInTheDocument();
+  });
+
   it('renders a cluster label (day - time) for the first message', () => {
     renderTimeline({ items: [MESSAGE_IN] });
     expect(screen.getByText(/Mon Jun 8 - 9:14a/)).toBeInTheDocument();
@@ -1265,6 +1355,119 @@ describe('Timeline relay-group annotations', () => {
     renderTimeline({ items: [queued], relayRoster: ROSTER });
     expect(screen.getByText('Queued - will send when connected')).toBeInTheDocument();
     expect(screen.queryByText('delivered 0/2')).not.toBeInTheDocument();
+  });
+
+  it('renders complete and incomplete relay transport aggregates without changing delivery state', () => {
+    const complete: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'relay-transport-complete',
+      tsMsgId: 'relay-transport-complete',
+      body: 'complete transport aggregate',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'rcs',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+    const incomplete: TimelineItem = {
+      ...complete,
+      id: 'relay-transport-incomplete',
+      tsMsgId: 'relay-transport-incomplete',
+      body: 'incomplete transport aggregate',
+      delivery_recipients: {
+        c1: complete.delivery_recipients!.c1!,
+        c2: {
+          status: 'sent',
+          requestedTransport: 'rcs',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({ items: [complete, incomplete], relayRoster: ROSTER });
+    expect(screen.getByText(/^RCS -> Mixed -/)).toBeInTheDocument();
+    expect(screen.getByText(/^RCS - 9:20a$/)).toBeInTheDocument();
+    expect(screen.getByText('Delivered 2/2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('complete transport aggregate'));
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - RCS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Lars Landlord - Delivered - RCS -> SMS' }),
+    ).toBeInTheDocument();
+  });
+
+  it('discloses inbound relay legs while filtering removed members and preserving suppressed and state-absent rows', () => {
+    const roster = [
+      ...ROSTER,
+      { contactId: 'c3', phone: '+14045550113', name: 'Opted Out' },
+      { contactId: 'c4', phone: '+14045550114', name: 'State Absent' },
+    ];
+    const inbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'relay-inbound-transport',
+      tsMsgId: 'relay-inbound-transport',
+      body: 'inbound relay transport',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'queued',
+          requestedTransport: 'rcs',
+          transportAggregationState: 'excluded',
+        },
+        c3: {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          requestedTransport: 'sms',
+          transportAggregationState: 'excluded',
+        },
+        c4: {
+          status: 'delivered',
+          requestedTransport: 'sms',
+          actualTransport: 'sms',
+        },
+      },
+    };
+
+    renderTimeline({ items: [inbound], relayRoster: roster });
+    expect(screen.getByText(/^SMS -/)).toBeInTheDocument();
+    expect(screen.getByText(/1 member opted out/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('inbound relay transport'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3);
+    expect(within(list).queryByText('Lars Landlord')).not.toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - RCS -> SMS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Opted Out - Not sent - opted out - SMS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'State Absent - Delivered - SMS' }),
+    ).toBeInTheDocument();
   });
 
   it('attributes an inbound relay bubble to the sending member', () => {

@@ -299,8 +299,16 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
             UpdateExpression: setBody
               ? 'SET #sentAt = :sentAt, #sentBody = :sentBody'
               : 'SET #sentAt = :sentAt',
+            // attribute_exists(reminderId) FIRST: UpdateItem CREATES a missing
+            // item, and every attribute_not_exists below HOLDS on one - so a
+            // DELETED row would claim clean and resurrect as an attribute-only
+            // stub with no tourId/kind/dueAt, which the poll would then send.
+            // Supersession deletes rows as a matter of course. Bare key name,
+            // no alias (it is not a reserved word) - the form at
+            // app/scripts/retire-paused-tour-reminders.ts:205-207.
             ConditionExpression:
-              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+              'attribute_exists(reminderId) AND attribute_not_exists(#sentAt) AND ' +
+              'attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#sentAt': 'sentAt',
               '#canceledAt': 'canceledAt',
@@ -336,8 +344,11 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
             TableName: table,
             Key: { reminderId },
             UpdateExpression: 'SET #skippedAt = :skippedAt, #skipReason = :reason',
+            // attribute_exists(reminderId): see claimSend - without it a DELETED
+            // row is resurrected as an attribute-only stub.
             ConditionExpression:
-              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+              'attribute_exists(reminderId) AND attribute_not_exists(#sentAt) AND ' +
+              'attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#sentAt': 'sentAt',
               '#canceledAt': 'canceledAt',
@@ -368,8 +379,11 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
             TableName: table,
             Key: { reminderId },
             UpdateExpression: 'SET #canceledAt = :canceledAt',
+            // attribute_exists(reminderId): see claimSend - without it a DELETED
+            // row is resurrected as an attribute-only stub.
             ConditionExpression:
-              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+              'attribute_exists(reminderId) AND attribute_not_exists(#sentAt) AND ' +
+              'attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#canceledAt': 'canceledAt',
               '#sentAt': 'sentAt',

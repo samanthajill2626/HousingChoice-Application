@@ -385,6 +385,99 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Supersession S1 - the claim guards (T1.4)
+  //
+  // claimSend/claimSkip/cancel are UpdateCommands conditioned only on
+  // attribute_not_exists(...). DynamoDB's UpdateItem CREATES a missing item, so
+  // against a DELETED row every one of those conditions HOLDS: the claim
+  // succeeds and an attribute-only stub springs into existence with no tourId,
+  // kind or dueAt - and the poll sends. Supersession makes deleted rows routine
+  // (D1 hard-deletes the superseded ladder), so each write gains
+  // attribute_exists(reminderId). uncancel already requires
+  // attribute_exists(canceledAt) and is deliberately untouched.
+  // ---------------------------------------------------------------------------
+  describe('a write against a DELETED row must lose, not resurrect it', () => {
+    const NOW_GUARD = '2026-09-15T12:00:00.000Z';
+
+    const deletedRow = async (label: string) => {
+      const tour = await tours.create({
+        tenantId: `contact-guard-${label}`,
+        unitId: `unit-guard-${label}`,
+        scheduledAt: '2026-09-20T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-09-19T23:30:00.000Z',
+      });
+      await deleteReminderRaw(row.reminderId);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+      return row;
+    };
+
+    it('claimSend returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('send');
+
+      expect(await tourReminders.claimSend(row.reminderId, NOW_GUARD)).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('claimSend with a sentBody returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('send-body');
+
+      expect(await tourReminders.claimSend(row.reminderId, NOW_GUARD, 'a body')).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('claimSkip returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('skip');
+
+      expect(await tourReminders.claimSkip(row.reminderId, NOW_GUARD, 'tour_missing')).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('cancel returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('cancel');
+
+      expect(await tourReminders.cancel(row.reminderId, NOW_GUARD)).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('the guard does not break the LIVE path: a real pending row still claims', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-guard-live',
+        unitId: 'unit-guard-live',
+        scheduledAt: '2026-09-21T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+      const send = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-09-20T23:30:00.000Z',
+      });
+      const skip = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: '2026-09-21T11:00:00.000Z',
+      });
+      const kill = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'en_route',
+        dueAt: '2026-09-21T14:00:00.000Z',
+      });
+
+      expect(await tourReminders.claimSend(send.reminderId, NOW_GUARD, 'body')).toBe(true);
+      expect(await tourReminders.claimSkip(skip.reminderId, NOW_GUARD, 'tour_missing')).toBe(true);
+      expect(await tourReminders.cancel(kill.reminderId, NOW_GUARD)).toBe(true);
+
+      expect((await rawReminder(send.reminderId))?.sentAt).toBe(NOW_GUARD);
+      expect((await rawReminder(skip.reminderId))?.skippedAt).toBe(NOW_GUARD);
+      expect((await rawReminder(kill.reminderId))?.canceledAt).toBe(NOW_GUARD);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Test 1 — arm: correct ladder dueAts for a future tour
   // ---------------------------------------------------------------------------
   it('armTourReminders creates all 3 reminder rows with correct dueAts', async () => {

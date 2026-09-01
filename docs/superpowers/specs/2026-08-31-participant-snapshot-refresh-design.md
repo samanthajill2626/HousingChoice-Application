@@ -194,7 +194,7 @@ IN SCOPE:
 
 | site | surface | slice |
 |---|---|---|
-| `routes/api.ts:1993-2002` | `GET /conversations/:id` - raw passthrough feeding five client readers | S2 |
+| `routes/api.ts:1993-2002` | `GET /conversations/:id` - raw passthrough | **NOT HYDRATED - see 5.5** |
 | `routes/api.ts:2190-2198` | `GET /calls/:callId` - sibling passthrough feeding QuickReply | S2 |
 | `routes/api.ts:2017-2117` | group-members panel - already resolves; reconcile, keep its write-back | S2 |
 | `routes/relayGroups.ts:456-492` | relay members panel - add rung 2; batch it | S2 |
@@ -296,6 +296,38 @@ Standing requirement, added because this happened three times across two review
 rounds (`contactName.ts:50-60`, `relayGroups.ts:471-474`,
 `rosterEdits.ts:437-441`). Every comment this branch makes wrong is amended in
 the same commit that makes it wrong. The list is in each slice.
+
+### 5.5 The thread-header route is NOT hydrated (read-cost ruling)
+
+**Cameron, 2026-08-31: do not add reads unnecessarily, especially on
+already-busy pages.** v3's first draft hydrated
+`routes/api.ts:1993-2002` `GET /conversations/:id`. That is the worst place to
+add a read - it is a zero-read passthrough refetched on a DEBOUNCED SSE TICK
+for the life of an open thread (`useGroupThread.ts:16`,
+`useRelayThread.ts:437`), and `GroupTextView.tsx:200-206` records a production
+symptom from latency on a sibling per-tick read.
+
+**It is also redundant.** Every view that fetches the header ALSO fetches a
+dedicated contact-resolved roster route on the same mount:
+
+| view | header | resolved roster |
+|---|---|---|
+| `ConversationDetail.tsx` | `:87` | `:212`, `:237` `/members` |
+| `PlacementConversation.tsx` | `:286` | `:291` `/members` |
+| `TourConversation.tsx` | `:430` | `:435` `/members` |
+| `GroupTextView.tsx` | via parent | `/group-members`, and its `:74-80` docblock says that read "carries the roster-name CONVERGENCE ... so the header has to adopt them" |
+
+So the thread views already receive fresh names through routes S2 hydrates
+(`/members`) or that already resolve (`/group-members`). Hydrating the header
+would pay a per-tick read for names the client already has.
+
+KNOWN GAP, accepted rather than paid for: `PlacementDetail.tsx:370-375` and
+`TourDetail.tsx:451-455` call `getConversation` WITHOUT a members call, to
+build a `memberSummary` string for a close-the-group confirmation dialog. Those
+names can be stale. It is a one-shot, user-action-triggered read on two pages
+whose every other name comes from `useRoster` (hydrated free by S3), and a
+possibly-stale name in a confirm dialog does not justify a per-tick read on
+every open thread.
 
 ## 6. Slices
 
@@ -505,7 +537,7 @@ Accessibility-first selectors per `e2e/support/selectors.md`.
 | risk | mitigation |
 |---|---|
 | Inbox read amplification | `getDisplaysByIds` projection; ids collected after filtering; test pins UNIQUE ID COUNT |
-| Thread-header route gains a read on a per-tick SSE path | one batch over ONE roster; `GroupTextView.tsx:200-206` names the symptom to watch |
+| Thread-header route gains a read on a per-tick SSE path | ELIMINATED - the header is not hydrated (5.5); the thread views already fetch a resolved roster |
 | A degraded batch blanks names | short-map default; unresolved members keep stored names - today's behavior exactly |
 | Merge conflict in `routes/relayGroups.ts` | phase-b co-edits a different function (2.2); sequence at merge time |
 | A `group_text` roster whose panel is never opened stays stale | stated gap (3); S5 sizes it |

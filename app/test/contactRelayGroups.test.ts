@@ -282,4 +282,65 @@ describe('GET /api/contacts/:id/relay-groups', () => {
     expect(res.status).toBe(200);
     expect(res.body.groups[0].owner).toEqual({ type: null });
   });
+
+  // M1 participant-snapshot-refresh: `participants[].name` is a write-time
+  // snapshot nothing refreshes, so a member renamed after the group was built
+  // kept showing their old name on this card. The card now resolves names from
+  // the contacts themselves at read time - in ONE batch.
+  it('RED: otherMemberNames come from the OTHER members contacts, not the stored snapshot', async () => {
+    seedContact();
+    world.contacts.push({
+      contactId: 'c-other',
+      type: 'landlord',
+      status: 'active',
+      phone: LANDLORD_PHONE,
+      firstName: 'Lena',
+      lastName: 'Landlord',
+    });
+    seedRelay(
+      'rg-1',
+      [
+        { contactId: TENANT, phone: PHONE_A, name: 'Me' },
+        { contactId: 'c-other', phone: LANDLORD_PHONE, name: 'Old Landlord' },
+      ],
+      { status: 'open' },
+    );
+    const res = await authedGet(`/api/contacts/${TENANT}/relay-groups`);
+    expect(res.status).toBe(200);
+    expect(res.body.groups[0].otherMemberNames).toEqual(['Lena Landlord']);
+  });
+
+  // THE READ BUDGET IS THE PROMISE. The route walks three status partitions, so
+  // the batch must sit OUTSIDE that loop and take the ids collected AFTER the
+  // membership filter - one read for the card, never one per partition and never
+  // one per member. A group this contact is NOT on contributes no ids.
+  it('RED: ONE batch per card, over exactly the ids of the groups this contact is in', async () => {
+    seedContact();
+    seedRelay(
+      'rg-open',
+      [
+        { contactId: TENANT, phone: PHONE_A },
+        { contactId: 'c-in-open', phone: LANDLORD_PHONE },
+      ],
+      { status: 'open' },
+    );
+    seedRelay(
+      'rg-closed',
+      [
+        { contactId: TENANT, phone: PHONE_A },
+        { contactId: 'c-in-closed', phone: '+15550100008' },
+      ],
+      { status: 'closed' },
+    );
+    seedRelay('rg-not-mine', [{ contactId: 'c-out', phone: '+15550100009' }], { status: 'open' });
+    const real = world.contactsRepo.getDisplaysByIds.bind(world.contactsRepo);
+    const batches: string[][] = [];
+    world.contactsRepo.getDisplaysByIds = async (ids) => {
+      batches.push([...ids]);
+      return real(ids);
+    };
+    await authedGet(`/api/contacts/${TENANT}/relay-groups`);
+    expect(batches).toHaveLength(1);
+    expect(new Set(batches[0])).toEqual(new Set([TENANT, 'c-in-open', 'c-in-closed']));
+  });
 });

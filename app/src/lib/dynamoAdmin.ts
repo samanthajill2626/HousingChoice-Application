@@ -152,7 +152,10 @@ const DEFAULT_ATTEMPTS = 4;
 //
 // WHAT IT BOUNDS IS ONE RETRIED SEND. It is read only before a RE-SEND, never
 // during one, so an attempt already in flight is not interrupted: the effective
-// bound is deadlineMs PLUS one attempt. It is not a budget for a whole
+// bound is deadlineMs PLUS one attempt PLUS, for the hooked callers, one
+// verification read (the landed-check runs before the deadline is consulted,
+// and that read is itself a control-plane call that can block ~10s under the
+// same lock-timeout signature). It is not a budget for a whole
 // ensureTable call either - on a TTL-bearing spec that makes up to THREE
 // retried sends (CreateTable, the pre-send DescribeTimeToLive, and
 // UpdateTimeToLive), each with its own fresh clock, plus up to 10s in

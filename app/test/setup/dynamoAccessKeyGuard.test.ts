@@ -118,6 +118,14 @@ function declaresNoContainerTables(absPath: string): boolean {
  * to be able to explain what it is exempt from, and a bare-substring version of
  * this check flagged this file's own declaring suite for saying the words
  * "src/lib/dynamo.js" in that explanation.
+ *
+ * A bare `new DynamoDBClient(...)` from the SDK is deliberately NOT matched:
+ * dynamoAdminRetry.test.ts case 13 constructs two purely to read
+ * config.endpoint and never sends. The evasion that leaves open - pairing a
+ * bare client with ensureTable against real table names - is narrow: such a
+ * file still matches the creates-tables regex above, so it is exempt ONLY by
+ * carrying a marker, and a `none` declaration on a file that really sends is a
+ * false statement a reviewer can see, not a silent hole.
  */
 const CONTAINER_REACHING = new RegExp(
   [

@@ -349,6 +349,14 @@ function resolveMemberRole(
  * A tour that has ALREADY STARTED is treated exactly as a tour with no time at
  * all - naked. See the tour branch below for why; the short version is that
  * "let us know when you're on the way" is not a sentence to send after the tour.
+ *
+ * That guard governs the COMPOSED variants only - precedence 2-4. An
+ * operator-EDITED `intro_body` (precedence 1) is applied by the caller ABOVE
+ * this function and still sends verbatim past the tour, by design: a human
+ * chose those words for this group, and second-guessing them on a clock is not
+ * this resolver's job. Narrow in practice - the quiet-hours deferral path drops
+ * the edit entirely (routes/tours.ts), so the only reachable case is a
+ * `connecting` group whose number purchase straddles the tour start.
  */
 export async function resolveRelayComposeInputs(
   owner: RelayOwner,
@@ -381,13 +389,25 @@ export async function resolveRelayComposeInputs(
       // reachable paths are an operator opening the group from a tour whose
       // outcome is not recorded yet, and a quiet-hours deferral that straddles
       // the tour start (routes/tours.ts defers the open to quiet-end, and this
-      // composes THEN). STRICTLY before: at the start instant the tour is
-      // beginning, not past, and the copy still reads correctly. An unparseable
-      // scheduledAt is NOT dropped here - Number.isFinite is false, so it falls
-      // through to the formatter's own try/catch, which already degrades it.
+      // composes THEN).
+      //
+      // AT-OR-AFTER, matching retiredByTourStart's `now >= start` exactly
+      // (round 2, R2-S1). An earlier draft was strictly-before while claiming
+      // kinship with that gate, which meant one codebase answering "is
+      // forward-looking tour copy stale at t=start" two ways, with the newer
+      // site citing the older one as its authority. Same sentence, same
+      // boundary.
+      //
+      // An unparseable scheduledAt is NOT dropped here - Number.isFinite is
+      // false, so it falls through to the formatter's own try/catch, which
+      // already degrades it. An unparseable `nowIso` likewise leaves the guard
+      // OFF (NaN comparisons are false) and the tour variant composes: a
+      // deliberate fail-OPEN, because this resolver's first duty is never to
+      // throw and never to lose an intro, and every production caller supplies
+      // an ISO instant (the quiet-hours state, or the job's own default).
       scheduledAt = tour.scheduledAt;
       const startedAt = Date.parse(scheduledAt ?? '');
-      if (Number.isFinite(startedAt) && startedAt < Date.parse(nowIso)) scheduledAt = undefined;
+      if (Number.isFinite(startedAt) && startedAt <= Date.parse(nowIso)) scheduledAt = undefined;
     } else {
       const placement = await deps.placementsRepo?.getById(owner.id);
       if (!placement) return { variant: 'naked' };

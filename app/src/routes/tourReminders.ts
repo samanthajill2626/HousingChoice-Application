@@ -510,7 +510,16 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // the tour has at least one UPCOMING rung on a 1:1 route — for THIS task the
     // unambiguous self_guided route (Task 4 tightens the group case). A
     // non-self_guided tour never gets an estimate here.
-    const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
+    // DISCONTINUED rungs do not count (round 2, R2-S3). This is the SECOND of
+    // the two 'upcoming' equality predicates spec 8.1 names - `next` below is
+    // the other - and they have to agree. A rung whose kind can never send
+    // reaches the discontinued short-circuit in the projection, which discards
+    // whatever this estimate produced, so counting one here buys a contact read
+    // and a conversation read per GET for an answer nothing reads. No
+    // correctness change: the chip is decided OUTSIDE the evaluator either way.
+    const hasUpcoming = rows.some(
+      (r) => stateOf(r) === 'upcoming' && !DISCONTINUED_REMINDER_KINDS.has(r.kind),
+    );
     let suppressionOf:
       | ((dueAt: string, paused: boolean, quietExempt: boolean) => ScheduledSuppression | undefined)
       | undefined;

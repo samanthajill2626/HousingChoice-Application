@@ -168,6 +168,10 @@ export function computeDueAt(
  *
  * SHARED with scripts/retire-paused-tour-reminders.ts (sweep population A) so
  * the sweep and the runtime can never disagree about the same row.
+ *
+ * INCLUSIVE at the start instant (`now >= start`): at t=start the forward-
+ * looking copy is already stale. jobs/relayFanOut.ts's past-tour guard gates the
+ * same sentence and uses the same boundary - one instant, one answer.
  */
 export function retiredByTourStart(
   row: Pick<TourReminderItem, 'dueAt'>,
@@ -187,11 +191,14 @@ export function retiredByTourStart(
   // no honest answer -> false, matching the unparseable-scheduledAt rule above.
   const due = Date.parse(row.dueAt);
   if (!Number.isFinite(due)) return false;
-  // `now` stays a string compare against the canonical form: it is produced by
-  // the runtime (new Date().toISOString() or the dev tick's normalized echo),
-  // never read out of a stored row.
-  const startIso = new Date(start).toISOString();
-  return due < start && now >= startIso;
+  // ALL THREE operands follow the ONE rule (round 2, B NOTE-4). `now` is
+  // runtime-produced at every call site today, so a text compare was not
+  // reachable - but an exported predicate whose arguments follow two different
+  // rules is precisely where the next half-normalized comparison hides, which is
+  // the finding that produced the dueAt half above.
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(nowMs)) return false;
+  return due < start && nowMs >= start;
 }
 
 /**

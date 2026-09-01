@@ -878,6 +878,61 @@ describe('GET /api/tours/:tourId/reminders', () => {
       expect(byId.get('rem-live-2')?.suppression).toEqual({ reason: 'contact_opted_out' });
     });
 
+    it('does NOT build a suppression estimate when the only pending rung is discontinued', async () => {
+      // Round 2, R2-S3. `hasUpcoming` is the second of the two 'upcoming'
+      // equality predicates spec 8.1 names; B-MF2 fixed the `next` one and left
+      // this one counting a rung that can never send. It gates a tenant read AND
+      // a conversation read per GET, for an estimate the discontinued
+      // short-circuit then throws away.
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'disc-noio', '+15550600045');
+      seedReminder(world, {
+        reminderId: 'rem-disc-noio',
+        tourId,
+        kind: 'confirmation',
+        dueAt: isoHoursFromNow(-4),
+      });
+
+      // findByParticipantPhone is reached ONLY through the suppression estimate
+      // (composeInputsOf reads the tenant contact but never the thread), so it is
+      // the clean signal for "the estimate block ran".
+      const realFind = world.conversationsRepo.findByParticipantPhone.bind(
+        world.conversationsRepo,
+      );
+      let threadReads = 0;
+      world.conversationsRepo.findByParticipantPhone = async (phone: string) => {
+        threadReads += 1;
+        return realFind(phone);
+      };
+      try {
+        const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+        expect(res.status).toBe(200);
+        expect(threadReads).toBe(0);
+        // ...and the chip is still right: skipping the estimate must not cost
+        // the answer, because `discontinued` is evaluated OUTSIDE the evaluator.
+        const upcoming = (
+          res.body.reminders as { state: string; suppression?: { reason: string } }[]
+        ).find((r) => r.state === 'upcoming');
+        expect(upcoming?.suppression).toEqual({ reason: 'discontinued' });
+
+        // ANTI-VACUITY: the same tour with a LIVE pending rung DOES read the
+        // thread, so the zero above is the exclusion and not a broken spy.
+        threadReads = 0;
+        seedReminder(world, {
+          reminderId: 'rem-live-noio',
+          tourId,
+          kind: 'day_before',
+          dueAt: isoHoursFromNow(24),
+        });
+        const res2 = await authed(app).get(`/api/tours/${tourId}/reminders`);
+        expect(res2.status).toBe(200);
+        expect(threadReads).toBeGreaterThan(0);
+      } finally {
+        world.conversationsRepo.findByParticipantPhone = realFind;
+      }
+    });
+
     it('a TERMINAL discontinued rung carries no estimate (state wins, as everywhere else)', async () => {
       const { app, world } = makeWebhookHarness();
       const tourId = await seedQuietTour(world, 'disc-3', '+15550600043');

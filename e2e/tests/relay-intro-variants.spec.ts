@@ -172,16 +172,6 @@ async function openRelay(
   };
 }
 
-/** Every member of the OPENED group, read back through the real roster route -
- *  so "every member" is the server's own answer, never a list this spec
- *  assembled and could quietly under-count. */
-async function rosterPhones(request: APIRequestContext, ownerPath: string): Promise<string[]> {
-  const res = await request.get(`${NEXT}${ownerPath}/roster`);
-  expect(res.ok(), await res.text()).toBeTruthy();
-  const { members } = (await res.json()) as { members: { phone?: string }[] };
-  return members.map((m) => m.phone).filter((p): p is string => typeof p === 'string' && p.length > 0);
-}
-
 /** Poll the fake until an OUTBOUND body EXACTLY equal to `body` reached `phone`.
  *  Exact, not a fragment: the whole point here is which of two copies landed. */
 async function expectExactSentTo(
@@ -353,12 +343,18 @@ test.describe('Relay intro variants + the member_added split', () => {
     const { conversationId, poolNumber } = await openRelay(req, ownerPath);
     expect(poolNumber, 'an opened relay group is assigned a masked pool number').not.toBe('');
 
-    // The roster is read back from the server AFTER the open, so this asserts
-    // over the members the fan-out actually addressed rather than over a list
-    // this spec guessed at.
-    const phones = await rosterPhones(req, ownerPath);
-    expect(phones.sort()).toEqual([owner.phone, tenant.phone].sort());
-    for (const phone of phones) {
+    // Asserted against the phones this walk MINTED, exactly as the tour walk
+    // above does. An earlier draft read them back from
+    // GET <ownerPath>/roster to make the SERVER name its own members - but that
+    // route answers RosterView, whose rows carry `phoneLast4` and never a full
+    // `phone` (the full number never leaves the server; see
+    // lib/rosterResolution.ts). The read returned nothing, so the leg-arrival
+    // assertions below - the entire substance of this walk - had nothing to
+    // iterate. Two minted numbers, named explicitly, cannot go quiet that way.
+    //
+    // The placement's default roster is the tenant plus the unit's
+    // landlord-of-record, so these two ARE every member.
+    for (const phone of [tenant.phone, owner.phone]) {
       await expectExactSentFromPool(req, phone, introBody, poolNumber);
     }
 

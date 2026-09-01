@@ -211,6 +211,22 @@ describe('retiredByTourStart - the ONE past-tour predicate (poll gate, force-sen
   it('false: an unparseable dueAt - no honest gate decision can be derived from it', () => {
     expect(retiredByTourStart({ dueAt: 'not-a-date' }, T, '2026-08-01T16:00:00.000Z')).toBe(false);
   });
+
+  // Round 2, B NOTE-4: `now` was the last operand still compared as TEXT, which
+  // left this exported predicate following two different rules across its three
+  // arguments - exactly the half-normalized shape A-S5 was raised about.
+  it('normalizes `now` too: an offset-bearing now is not judged by string order', () => {
+    // '2026-08-01T11:00:00-05:00' IS 16:00Z, an hour AFTER the tour - so the
+    // gate must fire. As raw text it sorts BELOW '2026-08-01T15:00:00.000Z'
+    // ('11' < '15') and the gate would silently decline to retire the rung.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T11:00:00-05:00'),
+    ).toBe(true);
+  });
+
+  it('false: an unparseable `now` - the same rule as the other two operands', () => {
+    expect(retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, 'not-a-date')).toBe(false);
+  });
 });
 
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {

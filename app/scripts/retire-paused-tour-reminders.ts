@@ -37,9 +37,14 @@
 // environment set on purpose. NO AGENT RUNS THIS AGAINST A REAL ENVIRONMENT;
 // an agent may run it only against a hermetic local lane.
 //
-// A row the sweep cannot decide is STEPPED OVER and counted `failed`, never
-// allowed to abort the run; and if the run aborts anyway, a PARTIAL report (the
-// counters as of the abort) is logged before the error and the exit code is 1.
+// FAILURE HANDLING, in one place. A row the sweep cannot PLAN (a malformed row)
+// is stepped over and counted `failed` - one bad row must not kill the run - but
+// a completed run with `failed > 0` still reports at WARN and exits 1, because
+// stepping over rows is not a clean pass. A WRITE failure is different in kind:
+// it is systemic until proven otherwise, so it ABORTS, and the run logs a
+// PARTIAL report (the counters as of the abort) before the error and exits 1.
+// The one write error that does NOT abort is the conditional check, which means
+// the runtime beat us to the row and its outcome is the right one.
 //
 // PII: logs COUNTS, tourIds and reminderIds only. Never a name, phone or body.
 //
@@ -47,7 +52,7 @@
 //   --dry-run   scan + report the plan (counts only); write NOTHING.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { retiredByTourStart } from '../src/jobs/tourReminders.js';
+import { DISCONTINUED_REMINDER_KINDS, retiredByTourStart } from '../src/jobs/tourReminders.js';
 import { tableName } from '../src/lib/config.js';
 import { getDocumentClient } from '../src/lib/dynamo.js';
 import { logger } from '../src/lib/logger.js';
@@ -75,7 +80,13 @@ export function planReminderRetirement(
     return 'skip'; // terminal rows are never touched - what makes re-runs safe
   }
   if (retiredByTourStart(row, scheduledAt, now)) return 'tour_already_passed';
-  if (row.kind === 'confirmation') return 'kind_retired';
+  // Population B reads the SHARED SET, never a kind literal - the same rule that
+  // put population A on retiredByTourStart. DISCONTINUED_REMINDER_KINDS is what
+  // stops a kind sending at every runtime surface, and this sweep is the ONE
+  // writer of `kind_retired`; a literal here means that discontinuing a second
+  // kind would leave its rows pending forever while every surface refused them,
+  // which is exactly the panel-hygiene hole population B exists to close.
+  if (DISCONTINUED_REMINDER_KINDS.has(row.kind)) return 'kind_retired';
   return 'skip';
 }
 
@@ -86,9 +97,10 @@ export interface ReminderRetirementResult {
   skipped: number;
   /** Writes whose condition failed because the row moved under the run. */
   skippedOnCondition: { tour_already_passed: number; kind_retired: number };
-  /** Rows whose OWN processing threw and were stepped over. Non-zero means the
-   *  table holds rows this sweep could not decide - re-run after investigating
-   *  the logged reminderIds; nothing about them was written. */
+  /** Rows the sweep could not PLAN (the tour read threw, a blank/absent tourId)
+   *  and stepped over. Nothing was written for them, so this is a re-run list,
+   *  not data loss - but a non-zero value makes the run exit 1
+   *  (reportRetirementRun). A WRITE failure never lands here: it aborts. */
   failed: number;
   /** Distinct tours read (the cache's saving is scanned - toursRead). */
   toursRead: number;
@@ -206,48 +218,95 @@ async function scanAndRetire(
     );
     for (const raw of (page.Items ?? []) as TourReminderItem[]) {
       result.scanned += 1;
-      // ONE ROW MUST NEVER ABORT THE SWEEP. There is deliberately no
-      // FilterExpression, so every row in the table reaches tourFor() unvalidated
-      // - and a row with a missing or empty tourId marshals to an EMPTY Key (the
-      // document client is removeUndefinedValues) which DynamoDB rejects with a
-      // ValidationException. A whole prod run dying on one malformed row is a
-      // strictly worse outcome than stepping over it: nothing is written for a
-      // failed row, so `failed` is a re-run list, not a data loss.
+      // TWO FAILURE CLASSES, OPPOSITE TREATMENT (round 2, R2-M1). The round-1
+      // ruling said only "per-row try/catch, continue", which was implemented
+      // literally and swallowed both - so a run whose every WRITE failed
+      // reported `failed: <every row>`, logged "done" and exited 0.
+      //
+      //   PLAN side (below) - deciding what this row needs. There is no
+      //   FilterExpression, so every row reaches tourFor() unvalidated, and a
+      //   row with a missing or blank tourId marshals to an EMPTY Key (the
+      //   client is removeUndefinedValues) which DynamoDB rejects. That is a
+      //   fact about ONE row: a whole prod run dying on one malformed row is
+      //   strictly worse than stepping over it. Counted `failed`, and nothing is
+      //   written for it, so `failed` is a re-run list rather than data loss.
+      let action: ReminderRetirementAction;
       try {
         const tour = await tourFor(raw.tourId);
-        const action = planReminderRetirement(raw, tour?.scheduledAt, now);
-        if (action === 'skip') {
-          result.skipped += 1;
-          continue;
-        }
-        if (dryRun) {
-          if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
-          else result.kindRetired += 1;
-          continue;
-        }
-        try {
-          await retire(raw.reminderId, action);
-          if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
-          else result.kindRetired += 1;
-        } catch (err) {
-          if (!(err instanceof ConditionalCheckFailedException)) throw err;
-          result.skippedOnCondition[action] += 1;
-          logger.info(
-            { reminderId: raw.reminderId, tourId: raw.tourId, action },
-            'retire-paused-tour-reminders - row moved under the run; skipped',
-          );
-        }
+        action = planReminderRetirement(raw, tour?.scheduledAt, now);
       } catch (err) {
         result.failed += 1;
         // PII: the two ids and the error. Never a name, phone or body.
         logger.error(
           { err, reminderId: raw.reminderId, tourId: raw.tourId },
-          'retire-paused-tour-reminders - row FAILED; stepped over and counted',
+          'retire-paused-tour-reminders - row could not be PLANNED; stepped over and counted `failed`',
+        );
+        continue;
+      }
+      if (action === 'skip') {
+        result.skipped += 1;
+        continue;
+      }
+      if (dryRun) {
+        if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
+        else result.kindRetired += 1;
+        continue;
+      }
+      //   WRITE side - a failure here is SYSTEMIC until proven otherwise
+      //   (rotated credentials, a missing dynamodb:UpdateItem, a wrong
+      //   TABLE_PREFIX, sustained throttling), and it is not a property of the
+      //   row at all. So it ABORTS: the throw escapes the paging loop, the
+      //   wrapper logs the PARTIAL counters and the process exits 1 - the
+      //   behaviour of the sibling this script is modelled on (RUNBOOK :95).
+      //   Continuing would convert "this run wrote nothing" into a report that
+      //   reads like a clean pass.
+      //
+      //   The ONE exception is the conditional check, which is not a failure at
+      //   all: it means the runtime sent/canceled/skipped the row between the
+      //   plan and the write, and the runtime's outcome is the correct one.
+      try {
+        await retire(raw.reminderId, action);
+        if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
+        else result.kindRetired += 1;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        result.skippedOnCondition[action] += 1;
+        logger.info(
+          { reminderId: raw.reminderId, tourId: raw.tourId, action },
+          'retire-paused-tour-reminders - row moved under the run; skipped',
         );
       }
     }
     exclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (exclusiveStartKey !== undefined);
+}
+
+/**
+ * The end-of-run report, and the EXIT CODE it earns. Exported so the exit-code
+ * rule is testable: `process.exitCode` lives in the CLI block below, which no
+ * test can reach.
+ *
+ * A COMPLETE run that stepped over rows is not a clean run (round 2, R2-M1).
+ * Stepping over a malformed row is what keeps the other rows repairable, but an
+ * operator who reads only the exit code - or skims for an error line - must not
+ * be told a run that could not decide 900 rows was a success. So `failed > 0`
+ * reports at WARN and exits 1: investigate the logged reminderIds, then re-run
+ * (every write is idempotent, so a re-run is always safe).
+ *
+ * Including on a DRY RUN, deliberately: the dry run is exactly where an
+ * undecidable row should surface, before the apply rather than during it.
+ */
+export function reportRetirementRun(result: ReminderRetirementResult, dryRun: boolean): 0 | 1 {
+  const suffix = dryRun ? ' (DRY RUN - nothing written)' : '';
+  if (result.failed > 0) {
+    logger.warn(
+      { ...result, dryRun },
+      `retire-paused-tour-reminders - COMPLETED WITH FAILURES${suffix}: ${result.failed} row(s) could not be planned and were stepped over (nothing was written for them). Investigate the logged reminderIds, then re-run - re-running is idempotent.`,
+    );
+    return 1;
+  }
+  logger.info({ ...result, dryRun }, `retire-paused-tour-reminders - done${suffix}`);
+  return 0;
 }
 
 const invokedDirectly =
@@ -258,10 +317,7 @@ if (invokedDirectly) {
   logger.info({ dryRun }, 'retire-paused-tour-reminders - starting');
   retirePausedTourReminders({ dryRun })
     .then((result) => {
-      logger.info(
-        { ...result, dryRun },
-        `retire-paused-tour-reminders - done${dryRun ? ' (DRY RUN - nothing written)' : ''}`,
-      );
+      process.exitCode = reportRetirementRun(result, dryRun);
     })
     .catch((err: unknown) => {
       // The PARTIAL counters were logged on the line ABOVE this one, by the

@@ -65,6 +65,12 @@ const MAX_ANCHOR_MS = 6 * 3_600_000;
  *
  * Shared with the placement-nudge card (usePlacementNudges), hence the
  * structural `suppression` shape rather than a view-specific type.
+ *
+ * That sharing is NOT in tension with the same wave reverting the placement
+ * card's `discontinued` chip branch (spec 3.1a): the revert concerned
+ * surface-specific RENDERING of copy a placement writer can never produce,
+ * while this is a pure helper keyed on the shared WIRE UNION - it reads a field
+ * the union defines and the tour panel needs. Different rule, same wave.
  */
 export function nextReminderRefetchDelay(
   reminders: (Pick<TourReminderView, 'state' | 'dueAt'> & {

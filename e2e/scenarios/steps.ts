@@ -2094,25 +2094,11 @@ export class Scenario {
    *  An EMPTY list throws: an assertion with nothing to assert must fail loudly
    *  rather than quietly prove nothing. */
   expectRungsRetiredPastTour(kinds: ReminderKind[]): Promise<void> {
-    const tour = this.requireActiveTour();
-    return step(`App: rungs retired - the tour had already happened (${kinds.join(', ')})`, async () => {
-      if (kinds.length === 0) {
-        throw new Error('expectRungsRetiredPastTour: no rungs to assert - the tick proved nothing');
-      }
-      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
-      expect(res.ok(), await res.text()).toBeTruthy();
-      const body = (await res.json()) as {
-        reminders: Array<{ kind: ReminderKind; state: string; skipReason?: string }>;
-      };
-      for (const kind of kinds) {
-        const rung = body.reminders.find((r) => r.kind === kind);
-        if (rung === undefined) {
-          throw new Error(`expectRungsRetiredPastTour: no '${kind}' rung on tour ${tour.tourId}`);
-        }
-        expect(rung.state, `'${kind}' state`).toBe('skipped');
-        expect(rung.skipReason, `'${kind}' skipReason`).toBe('tour_already_passed');
-      }
-    });
+    return this.expectRungsSkipped(
+      kinds,
+      'tour_already_passed',
+      'the tour had already happened',
+    );
   }
 
   /** [App] These rungs were retired by RELEASE SUPERSESSION: an earlier rung
@@ -2120,16 +2106,30 @@ export class Scenario {
    *  stale copy ("your tour is tomorrow" must not land beside "your tour is
    *  today"), so the poll claim-skips it `quiet_hours_superseded`.
    *
-   *  Same contract and same reasoning as expectRungsRetiredPastTour above,
-   *  including the empty-list throw: a clock-travel tick that sweeps a pending
-   *  rung into its batch causes a retirement, and spec 10 requires the converted
-   *  specs to ASSERT that retirement rather than be surprised by it. A comment
-   *  saying it happens is not an assertion. */
+   *  Same contract as the past-tour verb above: spec 10 requires the converted
+   *  specs to ASSERT the retirement a clock-travel tick causes rather than be
+   *  surprised by it, and a comment saying it happens is not an assertion. */
   expectRungsSuperseded(kinds: ReminderKind[]): Promise<void> {
+    return this.expectRungsSkipped(
+      kinds,
+      'quiet_hours_superseded',
+      'superseded by a later rung',
+    );
+  }
+
+  /** The shared body of the two retirement verbs above. Kept behind named verbs
+   *  rather than called directly: at a call site "expectRungsSuperseded" says
+   *  which MECHANISM the walk is asserting, which a bare reason string in an
+   *  argument list does not. */
+  private expectRungsSkipped(
+    kinds: ReminderKind[],
+    skipReason: string,
+    because: string,
+  ): Promise<void> {
     const tour = this.requireActiveTour();
-    return step(`App: rungs retired - superseded by a later rung (${kinds.join(', ')})`, async () => {
+    return step(`App: rungs retired - ${because} (${kinds.join(', ')})`, async () => {
       if (kinds.length === 0) {
-        throw new Error('expectRungsSuperseded: no rungs to assert - the tick proved nothing');
+        throw new Error(`expectRungsSkipped(${skipReason}): no rungs to assert - the tick proved nothing`);
       }
       const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
       expect(res.ok(), await res.text()).toBeTruthy();
@@ -2139,10 +2139,12 @@ export class Scenario {
       for (const kind of kinds) {
         const rung = body.reminders.find((r) => r.kind === kind);
         if (rung === undefined) {
-          throw new Error(`expectRungsSuperseded: no '${kind}' rung on tour ${tour.tourId}`);
+          throw new Error(
+            `expectRungsSkipped(${skipReason}): no '${kind}' rung on tour ${tour.tourId}`,
+          );
         }
         expect(rung.state, `'${kind}' state`).toBe('skipped');
-        expect(rung.skipReason, `'${kind}' skipReason`).toBe('quiet_hours_superseded');
+        expect(rung.skipReason, `'${kind}' skipReason`).toBe(skipReason);
       }
     });
   }

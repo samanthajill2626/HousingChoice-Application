@@ -1176,13 +1176,24 @@ describe('resolveRelayComposeInputs (spec 9.3) - owner routing, and it NEVER thr
     expect(dayAfter.tenantFirstName).toBe('Alicia');
   });
 
-  it('the past-tour boundary is STRICT: a tour at exactly nowIso still resolves the tour variant', async () => {
+  it('the boundary is INCLUSIVE: at exactly the start instant the tour copy is already stale', async () => {
+    // R2-S1. This has to agree with retiredByTourStart, which is `now >= start`
+    // and is pinned by a case named "exactly AT the tour start - the copy is
+    // already stale". Both gate the SAME forward-looking sentence ("let us know
+    // when you're on the way"), so one instant gets one answer.
     const inputs = await resolveRelayComposeInputs(
       { type: 'tour', id: 'tour-1' },
       fakeDeps({ nowIso: TOUR_AT }),
     );
-    expect(inputs.variant).toBe('tour_today');
-    expect(inputs.time).toBe('3:00 PM');
+    expect(inputs.variant).toBe('naked');
+    expect(inputs.time).toBeUndefined();
+    // One millisecond earlier the tour has NOT started, and the copy is right.
+    const justBefore = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({ nowIso: '2026-09-08T18:59:59.999Z' }),
+    );
+    expect(justBefore.variant).toBe('tour_today');
+    expect(justBefore.time).toBe('3:00 PM');
   });
 
   it('a placement owner resolves the placement variant (no time tokens at all)', async () => {

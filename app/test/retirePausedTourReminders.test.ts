@@ -7,7 +7,13 @@
 // untested, because the human runs it once against prod and never again.
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
-import { PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import {
+  PutCommand,
+  ScanCommand,
+  UpdateCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb';
+import { DISCONTINUED_REMINDER_KINDS } from '../src/jobs/tourReminders.js';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -16,6 +22,7 @@ import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
 import {
   planReminderRetirement,
+  reportRetirementRun,
   retirePausedTourReminders,
 } from '../scripts/retire-paused-tour-reminders.js';
 
@@ -73,6 +80,22 @@ describe('planReminderRetirement', () => {
       expect(
         planReminderRetirement({ kind: 'confirmation', dueAt: PAST, ...marker } as never, PAST, NOW),
       ).toBe('skip');
+    }
+  });
+
+  // Round 2, R2-S2. Population A was deliberately given the SHARED predicate so
+  // the sweep and the runtime can never disagree about a row; population B was
+  // the one enforcement left reading a hardcoded literal. This asserts the
+  // SOURCE, not the current membership: discontinue a second kind and every
+  // runtime surface refuses it while a literal-matching sweep would leave its
+  // rows pending forever - the exact panel-hygiene hole population B exists for.
+  it('population B is driven by DISCONTINUED_REMINDER_KINDS, not a hardcoded kind', () => {
+    expect(DISCONTINUED_REMINDER_KINDS.size).toBeGreaterThan(0);
+    for (const kind of DISCONTINUED_REMINDER_KINDS) {
+      expect(
+        planReminderRetirement(pending(kind, '2026-08-20T09:00:00.000Z'), FUTURE, NOW),
+        `'${kind}' is discontinued, so a pending rung of that kind is population B`,
+      ).toBe('kind_retired');
     }
   });
 
@@ -288,6 +311,66 @@ describe.skipIf(!reachable)('retirePausedTourReminders against DynamoDB Local', 
     );
   }, 120_000);
 
+  // Round 2, R2-M1. The two failure classes are DIFFERENT and get opposite
+  // treatment. A PLAN-side failure is local to one row - the sweep steps over it
+  // and keeps going. A WRITE failure is systemic until proven otherwise (rotated
+  // credentials, a missing dynamodb:UpdateItem, sustained throttling), so it
+  // ABORTS: continuing would turn "this run wrote nothing" into a clean-looking
+  // report. Both are covered below; neither existed before this wave.
+  it('a WRITE failure ABORTS the run (it is systemic until proven otherwise)', async () => {
+    const w = await seedWorld();
+    // Everything except the retirement write goes to the real client, so the
+    // scan and the tour reads behave normally and the ONLY novelty is the write.
+    const failingDoc = {
+      send: async (command: unknown) => {
+        if (command instanceof UpdateCommand) throw new Error('update-boom');
+        return await (doc as DynamoDBDocumentClient).send(command as never);
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    // It escapes the per-row catch AND the paging loop, which is what puts the
+    // PARTIAL report back within reach of the wrapper - with every row-level
+    // throw absorbed, the only things that could still reach it were the Scan
+    // and the table-name resolution.
+    await expect(
+      retirePausedTourReminders({ doc: failingDoc, env: w.env, now: NOW }),
+    ).rejects.toThrow('update-boom');
+
+    // ABORTED, not "continued and counted": the SECOND planned row never got a
+    // write either. A per-row `failed` counter here would have left both rows
+    // unstamped while the process exited 0 reporting "done".
+    expect((await w.row(w.pastMorningOf.reminderId, w.pastTour.tourId))?.skippedAt).toBeUndefined();
+    expect(
+      (await w.row(w.futureConfirm.reminderId, w.futureTour.tourId))?.skippedAt,
+    ).toBeUndefined();
+  }, 120_000);
+
+  it('a lost CONDITIONAL write is still not an abort - it is the one write error that continues', async () => {
+    // The counterpart to the case above, so "a write failure aborts" cannot be
+    // read as "any write error aborts". ConditionalCheckFailedException means the
+    // runtime won a race, which is a normal, reportable outcome - the existing
+    // race case pins it, and this one pins that the round-2 change did not
+    // reclassify it.
+    const w = await seedWorld();
+    let raced = false;
+    const racingDoc = {
+      send: async (command: unknown) => {
+        const out = await (doc as DynamoDBDocumentClient).send(command as never);
+        if (command instanceof ScanCommand && !raced) {
+          raced = true;
+          await w.reminders.claimSend(w.futureConfirm.reminderId, '2026-08-31T11:59:00.000Z');
+        }
+        return out;
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    const result = await retirePausedTourReminders({ doc: racingDoc, env: w.env, now: NOW });
+
+    expect(result.skippedOnCondition.kind_retired).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(reportRetirementRun(result, false)).toBe(0);
+  }, 120_000);
+
   it('one CORRUPT row is counted `failed` and does not abort the rest of the run', async () => {
     // Review round 1, B-S5. There is deliberately no FilterExpression, so EVERY
     // row in the table reaches tourFor(). A row with no tourId marshals to an
@@ -318,6 +401,13 @@ describe.skipIf(!reachable)('retirePausedTourReminders against DynamoDB Local', 
     expect((await w.row(w.futureConfirm.reminderId, w.futureTour.tourId))?.skipReason).toBe(
       'kind_retired',
     );
+    // ...but the RUN still reports failure. Stepping over a row is what keeps
+    // the other 899 rows repairable; it is not a clean bill of health, and an
+    // operator who reads only the exit code must not be told it was one.
+    expect(reportRetirementRun(result, false)).toBe(1);
+    // Including on a DRY RUN: the dry run is exactly where an undecidable row
+    // should be discovered, before the apply rather than during it.
+    expect(reportRetirementRun(result, true)).toBe(1);
   }, 120_000);
 
   it('pages the Scan, and reads each tour ONCE however many rungs it owns', async () => {

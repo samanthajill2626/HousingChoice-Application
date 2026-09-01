@@ -318,6 +318,93 @@ describe('RemindersPanel', () => {
     expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
   });
 
+  // OVERDUE (Phase B spec 8). The server derives it - the panel never compares
+  // clocks itself - and it exists because `state` is computed from terminal
+  // markers alone, so a rung stuck behind any pre-claim deferral reads
+  // "upcoming" with a dueAt weeks in the past and the chip keeps promising a
+  // send. "Sending shortly" on a rung that has been sending shortly for a
+  // fortnight is the same lie in a politer register.
+  it('replaces the fire-time promise with an Overdue chip when the server says overdue', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Overdue')).toBeInTheDocument());
+    // The promise this chip replaces.
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
+  });
+
+  it('an overdue rung still renders its suppression note alongside the chip', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+          suppression: { reason: 'quiet_hours' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Overdue')).toBeInTheDocument());
+    // COMPOSES rather than competes (spec 8.1): the chip says the send time has
+    // passed, the note says WHY nothing has gone out.
+    expect(screen.getByText(/Will wait . quiet hours/i)).toBeInTheDocument();
+  });
+
+  // CHIP ORDER (worklist R15): discontinued is ABOVE overdue. A rung nothing
+  // will ever send is not "overdue" - it is finished, and "Overdue" would read
+  // as something a navigator can chase.
+  it('a discontinued rung that is ALSO overdue still reads "No longer sent"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'confirmation',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+          suppression: { reason: 'discontinued' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('No longer sent')).toBeInTheDocument());
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument();
+  });
+
+  // ...and the other side of the order: overdue is ABOVE paused, so a rung a
+  // human still has to send by hand says so with the urgency it has earned.
+  it('an overdue rung that is ALSO paused chips Overdue, and keeps the paused note', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+          suppression: { reason: 'paused' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Overdue')).toBeInTheDocument());
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    expect(screen.getByText(/Paused . send manually/i)).toBeInTheDocument();
+  });
+
   it('keeps Send now on a paused rung (the whole point of leaving it pending)', async () => {
     getTourReminders.mockResolvedValue({
       reminders: [

@@ -111,10 +111,23 @@ function StateChip({
   // person can either (Send now refuses with kind_retired). ABOVE `paused`
   // deliberately - "Paused" would invite exactly that refused click.
   //
-  // CHIP ORDER: an `overdue` chip belongs BELOW this branch and ABOVE `paused`.
+  // CHIP ORDER: the `overdue` chip sits BELOW this branch and ABOVE `paused`.
   // A rung that will never send is never "overdue".
   if (rung.suppression?.reason === 'discontinued') {
     return <span className={`${styles.chip} ${styles.paused}`}>No longer sent</span>;
+  }
+  // OVERDUE (spec 8): the server says this rung's send time has passed and it
+  // still has not sent. It REPLACES the fire-time promise below rather than
+  // decorating it - "sending shortly" on a rung that has been sending shortly
+  // for a fortnight is the perpetual-promise lie in a politer register, and
+  // `state` alone cannot see it (it is derived from terminal markers, which a
+  // deferred rung has none of). Above `paused` deliberately: a rung a human
+  // still has to send by hand has earned the more urgent word, and the paused
+  // NOTE underneath still carries the "send manually" half. Never computed
+  // here - the panel does no clock arithmetic of its own, so a stale tab
+  // cannot invent an overdue rung.
+  if (rung.overdue === true) {
+    return <span className={`${styles.chip} ${styles.upcoming}`}>Overdue</span>;
   }
   // Held back from automatic sending (manual-only hold-back): the rung is armed
   // and sendable, but NOTHING is going to fire it. The fire-time wording below

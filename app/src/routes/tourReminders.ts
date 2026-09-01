@@ -155,6 +155,9 @@ export interface TourReminderView {
   body: string;
   /** Only computed for `upcoming` 1:1-routed rungs (see file header). */
   suppression?: ScheduledSuppression;
+  /** Derived, never stored: this rung's send time has passed and it still has
+   *  not sent. Composes with `suppression`, which says WHY. */
+  overdue?: boolean;
 }
 
 /** canceledAt wins over sentAt (a row is only canceled while unsent, but be safe);
@@ -341,12 +344,19 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
    *  2026-08-26 - see composeInputsOf), and this projection is sync. */
   const viewOf = (row: TourReminderItem, body: string): TourReminderView => {
     const state = stateOf(row);
+    // ITS OWN `nowIso` (spec 8.2). There is nothing to borrow: this path never
+    // computes one, and the GET route's is block-scoped inside its
+    // `self_guided && hasUpcoming` branch. The flag needs only row.dueAt and a
+    // clock, so this adds no IO to the PATCH echo.
+    const nowIso = new Date().toISOString();
+    const overdue = state === 'upcoming' && row.dueAt < nowIso;
     return {
       reminderId: row.reminderId,
       kind: row.kind,
       dueAt: row.dueAt,
       state,
       body,
+      ...(overdue && { overdue: true }),
       ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
       ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
       ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
@@ -591,6 +601,12 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     }
 
     const tally = newComposeFailTally();
+    // The list projection's OWN `nowIso` for the `overdue` flag (spec 8.2): the
+    // one above is block-scoped inside the self_guided branch and is NOT lifted
+    // - overdue-ness is a property of every rung on every tour type, and
+    // hoisting a variable out of a branch to share it is how the two builders
+    // would start disagreeing. viewOf computes a third for the same reason.
+    const listNowIso = new Date().toISOString();
     const reminderViews: TourReminderView[] = rows
       .map((row) => {
         const state = stateOf(row);
@@ -628,12 +644,18 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
                 : paused
                   ? ({ reason: 'paused' } as const)
                   : undefined;
+        // Spec 8: an ADDITIVE boolean, never a fifth `state` value - two
+        // predicates on this route test 'upcoming' by equality, and an
+        // 'overdue' state would drop overdue rungs out of the very places that
+        // surface them. Omitted when false, matching the spreads below.
+        const overdue = state === 'upcoming' && row.dueAt < listNowIso;
         const view: TourReminderView = {
           reminderId: row.reminderId,
           kind: row.kind,
           dueAt: row.dueAt,
           state,
           body: bodyFor(row, tour, window.timezone, address, names, readFlags, tally),
+          ...(overdue && { overdue: true }),
           ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
           ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),

@@ -1246,6 +1246,9 @@ export interface TourReminderView {
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
   suppression?: ScheduledSuppression;
+  /** Derived, never stored: this rung's send time has passed and it still has
+   *  not sent. Composes with `suppression`, which says WHY. */
+  overdue?: boolean;
 }
 
 /** GET /api/tours/:tourId/reminders response: the ladder + the NEXT rung to fire. */

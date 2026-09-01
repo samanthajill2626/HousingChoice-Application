@@ -866,6 +866,129 @@ describe('GET /api/tours/:tourId/reminders', () => {
   });
 });
 
+// ===========================================================================
+// THE `overdue` FLAG (Phase B spec 8).
+//
+// `state` is derived from terminal markers alone, so a rung stuck behind any
+// pre-claim deferral reads "upcoming" with a dueAt weeks in the past and
+// nothing says so. `overdue` is an ADDITIVE BOOLEAN - never a fifth state
+// value, because two predicates on this route test `'upcoming'` by equality
+// and an `'overdue'` state would drop overdue rungs out of exactly the places
+// that surface them.
+//
+// TWO BUILDERS, both of which must set it or the same rung disagrees with
+// itself depending on which request produced it: the GET list projection and
+// `viewOf` (the PATCH state echo). Each computes its OWN `nowIso`.
+//
+// Every dueAt below is RELATIVE to the wall clock (isoHoursFromNow), because
+// "past" and "future" are the whole subject: a fixed 2026-07-19 literal would
+// silently become a no-op test on a machine clock before that date.
+// ===========================================================================
+describe('GET/PATCH tour reminders - the derived overdue flag (spec 8)', () => {
+  async function seedOverdueTour(world: FakeWorld, suffix: string): Promise<string> {
+    // landlord_led on purpose: this route builds no suppression estimate for a
+    // group-routed tour, so nothing here can be confused with a suppression.
+    const created = await world.toursRepo.create({
+      tenantId: `contact-overdue-${suffix}`,
+      unitId: `unit-overdue-${suffix}`,
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'landlord_led',
+    });
+    return created.tourId;
+  }
+
+  it('GET: an upcoming rung past its dueAt carries overdue true; a future one carries no key', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedOverdueTour(world, 'get');
+    seedReminder(world, {
+      reminderId: 'rem-overdue-past',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(-30),
+    });
+    seedReminder(world, {
+      reminderId: 'rem-overdue-future',
+      tourId,
+      kind: 'morning_of',
+      dueAt: isoHoursFromNow(30),
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.reminders as { reminderId: string; overdue?: boolean }[]).map((r) => [
+        r.reminderId,
+        r,
+      ]),
+    );
+    expect(byId.get('rem-overdue-past')?.overdue).toBe(true);
+    // OMITTED, not `false`: the conditional-spread style this file's views use.
+    expect(byId.get('rem-overdue-future')).not.toHaveProperty('overdue');
+  });
+
+  it('GET: a sent or skipped rung never carries overdue, however far past its dueAt', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedOverdueTour(world, 'terminal');
+    // BOTH dueAts are deep in the past, so only the STATE gate can be what
+    // keeps the flag off these rows.
+    seedReminder(world, {
+      reminderId: 'rem-overdue-sent',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(-30),
+      sentAt: isoHoursFromNow(-29),
+    });
+    seedReminder(world, {
+      reminderId: 'rem-overdue-skipped',
+      tourId,
+      kind: 'morning_of',
+      dueAt: isoHoursFromNow(-28),
+      skippedAt: isoHoursFromNow(-27),
+      skipReason: 'tour_already_passed',
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.reminders as { reminderId: string; state: string }[]).map((r) => [r.reminderId, r]),
+    );
+    expect(byId.get('rem-overdue-sent')?.state).toBe('sent');
+    expect(byId.get('rem-overdue-sent')).not.toHaveProperty('overdue');
+    expect(byId.get('rem-overdue-skipped')?.state).toBe('skipped');
+    expect(byId.get('rem-overdue-skipped')).not.toHaveProperty('overdue');
+  });
+
+  it('PATCH: the cancel/restore state echo computes overdue identically to the list', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedOverdueTour(world, 'patch');
+    seedReminder(world, {
+      reminderId: 'rem-overdue-echo',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(-30),
+    });
+
+    // Canceled is a TERMINAL state, so the flag goes away with the promise.
+    const canceled = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-overdue-echo`)
+      .send({ canceled: true });
+    expect(canceled.status).toBe(200);
+    expect(canceled.body.reminder.state).toBe('canceled');
+    expect(canceled.body.reminder).not.toHaveProperty('overdue');
+
+    // ...and restoring it brings back a rung that is still past due. This is
+    // the assertion that fails if only ONE builder learned the rule: viewOf has
+    // no `nowIso` of its own to borrow from the GET route (whose one is
+    // block-scoped inside the self_guided branch).
+    const restored = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-overdue-echo`)
+      .send({ canceled: false });
+    expect(restored.status).toBe(200);
+    expect(restored.body.reminder.state).toBe('upcoming');
+    expect(restored.body.reminder.overdue).toBe(true);
+  });
+});
+
 // Operator cancel/restore of ONE rung (2026-07-14).
 describe('PATCH /api/tours/:tourId/reminders/:reminderId', () => {
   async function seedTourWithRung(world: FakeWorld) {

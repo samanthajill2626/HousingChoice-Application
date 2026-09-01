@@ -374,6 +374,17 @@ test('(2) Defer + release: a due rung WAITS inside the window, then sends once i
   const dayBeforeRow = reminderRow(page, 'day_before');
   await expect(dayBeforeRow.getByText(QUIET_NOTE)).toBeVisible({ timeout: 15_000 });
   await expect(dayBeforeRow.getByText(PAUSED_NOTE)).toHaveCount(0);
+  // NO `Overdue` ASSERTION HERE, and this is a derivation rather than an
+  // omission (Phase B spec 8, plan T12 step 3). The tick above is a
+  // TIME-INJECTED dev call; the panel's `overdue` flag is computed against the
+  // server's WALL CLOCK. This rung's dueAt is 19:30 org-local the evening
+  // before a tour booked two days out, i.e. genuinely in the future, so the
+  // rung is deferred WITHOUT being overdue and asserting the chip here would
+  // fail. Nor is the reverse reachable: a rung whose dueAt is really past is
+  // exactly what the live 30s worker sends. `overdue` is pinned on the route
+  // (app/test/tourRemindersApi.test.ts) and on the chip
+  // (dashboard/.../RemindersPanel.test.tsx) instead. Do not "fix" this by
+  // booking closer to now - that buys a wall-clock-dependent flake.
 
   // Tick again 5h later: still past the rung, now org-locally OUTSIDE the window
   // (00:30) - and 00:30 on tour day is still before morning_of at 10:00, so

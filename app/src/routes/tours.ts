@@ -60,11 +60,7 @@ import {
   type TourType,
 } from '../lib/toursModel.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
-import {
-  armTourReminders,
-  cancelTourReminders,
-  readQuietHoursWindow,
-} from '../jobs/tourReminders.js';
+import { armTourReminders, readQuietHoursWindow } from '../jobs/tourReminders.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -1184,7 +1180,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // arming must never happen on a tour that is not live (e.g. PATCH
     // {scheduledAt, status:'canceled'} must not text "Your tour is confirmed" at
     // the whole group), and a terminal transition (toured / no_show / canceled /
-    // closed) must cancel the still-pending rungs (a tenant who showed up, or a
+    // closed) must retire the still-pending rungs (a tenant who showed up, or a
     // tour flagged no-show, must never get a later "your tour is tomorrow"
     // reminder).
     //
@@ -1199,7 +1195,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // rungs were canceled and must come back).
     const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
     // The four terminal statuses, named ONCE and used twice (rotation decision
-    // here, cancel branch below) so the two can never drift apart.
+    // here, sweep branch below) so the two can never drift apart.
     const terminal =
       effectiveStatus === 'canceled' ||
       effectiveStatus === 'closed' ||
@@ -1226,10 +1222,22 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     }
 
     // Whether the reminder ladder changed on this patch — drives the ONE
-    // scheduled.updated emit below (arm/reschedule OR cancel, never both).
+    // scheduled.updated emit below (arm/reschedule OR retire, never both).
     let ladderChanged = false;
     if (armable && rearmTrigger) {
-      await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
+      // Spec 3.2 step 2, and the ORDER is the contract: the rotation above rode
+      // the patch write (step 1), so by the time this runs the old generation is
+      // already refused by every send and preview path - the sweep is what stops
+      // it being SHOWN, not what stops it firing. It must therefore run BEFORE
+      // the arm: sweeping after would delete the ladder we just armed, since the
+      // only filter is "never sent" (tourRemindersRepo.deleteSupersededForTour).
+      //
+      // No try/catch: the sweep swallows its own per-row failures and never
+      // throws for them, so anything that DOES escape is the list read failing -
+      // an unexpected store failure, which is exactly what this handler already
+      // throws on (the patch write above, the arm below). Silence here would
+      // leave the operator a 200 and a panel still showing the dead ladder.
+      await reminders.deleteSupersededForTour(tourId);
       let ladderId: string | null;
       try {
         ({ ladderId } = await armTourReminders(tour, getNow(), {
@@ -1273,17 +1281,25 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       }
       ladderChanged = true;
     } else if (terminal) {
-      // Dead, completed, or no-show: nothing left to auto-remind, so cancel any
-      // still-pending rungs. The no-show check-in is a MANUAL send from the tour
+      // Dead, completed, or no-show: nothing left to auto-remind, so DELETE the
+      // never-sent rungs. The no-show check-in is a MANUAL send from the tour
       // page now (not an auto-armed rung), so a no_show tour has nothing to
-      // preserve - and canceling stops its day_before/morning_of/en_route from
-      // later firing "your tour is tomorrow" at a tour already flagged no-show.
-      await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
+      // preserve - and the rotation above already stops its
+      // day_before/morning_of/en_route from later firing "your tour is
+      // tomorrow" at a tour already flagged no-show.
+      //
+      // Spec 3.2, terminal transitions: rotate then sweep, and STOP - no arm, so
+      // the rotated pointer is FINAL and matches nothing. Sent rungs survive
+      // (the sweep's only filter is "never sent") and read as earlier[]; the
+      // current ladder is empty. Same no-try/catch posture as the re-arm branch.
+      await reminders.deleteSupersededForTour(tourId);
       ladderChanged = true;
     }
-    // ONE emit after the cancel+arm pair (scheduled-message-visibility Task 6):
+    // ONE emit after the sweep+arm pair (scheduled-message-visibility Task 6):
     // the contact timeline's pinned "Upcoming" section refetches so the
-    // rescheduled/canceled future item moves live. ID-only, advisory payload.
+    // rescheduled/retired future item moves live. ID-only, advisory payload.
+    // Post-supersession the retired rows are DELETED, so the refetch drops them
+    // outright rather than re-rendering them as canceled.
     if (ladderChanged) {
       events.emit('scheduled.updated', { contactId: tour.tenantId });
     }

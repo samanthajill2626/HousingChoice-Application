@@ -1227,9 +1227,13 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
   // once that date expires. 10:00 EDT - outside the quiet window.
   const ARM_NOW = '2026-07-13T14:00:00.000Z';
   // PENDING = the rungs still waiting to fire. A row born SKIPPED has neither
-  // sentAt nor canceledAt, so it has to be excluded explicitly - and it must
-  // be, because cancelForTour deliberately leaves skipped rows alone (they are
-  // already terminal), so a cancel can never drive their count to zero.
+  // sentAt nor canceledAt, so it has to be excluded explicitly. Post-S9 the
+  // retirement is a DELETE (deleteSupersededForTour keeps only sentAt rows), so
+  // the canceledAt and skippedAt exclusions no longer partition anything on a
+  // swept tour - they still matter for a rung a human cancels by hand on a
+  // ladder that is still current, which is the only way those stamps survive.
+  // "Zero pending" is therefore a weak claim here; the cases that turn on the
+  // sweep assert ABSENCE from tourRemindersMap by reminderId instead.
   const pendingRows = (world: FakeWorld, tourId: string) =>
     [...world.tourRemindersMap.values()].filter(
       (r) =>
@@ -1239,40 +1243,57 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
         r.skippedAt === undefined,
     );
   /**
-   * Arm-time SKIPPED rows for a tour, keyed by kind. pendingRows above cannot
-   * serve this: a row born skipped has neither sentAt nor canceledAt, so it
-   * counts as "pending" there. The booked-too-late rules (spec section 8) write
-   * exactly this shape, so asserting the chip needs its own accessor.
+   * Arm-time SKIPPED rows of the tour's CURRENT ladder, keyed by kind.
+   * pendingRows above cannot serve this: a row born skipped has neither sentAt
+   * nor canceledAt, so it counts as "pending" there. The booked-too-late rules
+   * (spec section 8) write exactly this shape, so asserting the chip needs its
+   * own accessor.
+   *
+   * The currentLadderId filter is DELIBERATE (S9): a reschedule sweeps the old
+   * generation away, so reading every skipped row of the tour happens to name
+   * the fresh arm's chips today - but only by accident, and it would silently
+   * start reading two generations again the moment a sweep missed a row.
    */
-  const skippedByKind = (world: FakeWorld, tourId: string) =>
-    Object.fromEntries(
+  const skippedByKind = (world: FakeWorld, tourId: string) => {
+    const pointer = world.toursMap.get(tourId)?.currentLadderId;
+    expect(pointer).toEqual(expect.any(String));
+    return Object.fromEntries(
       [...world.tourRemindersMap.values()]
-        .filter((r) => r.tourId === tourId && r.skippedAt !== undefined)
+        .filter(
+          (r) => r.tourId === tourId && r.skippedAt !== undefined && r.ladderId === pointer,
+        )
         .map((r) => [r.kind, r]),
     );
+  };
 
-  it('PATCH {scheduledAt, status:canceled} cancels — it must NOT arm a ladder on a dead tour', async () => {
+  it('PATCH {scheduledAt, status:canceled} SWEEPS - it must NOT arm a ladder on a dead tour', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
-    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+    const armed = pendingRows(world, tourId).map((r) => r.reminderId);
+    expect(armed.length).toBeGreaterThan(0);
 
     const res = await authed(app)
       .patch(`/api/tours/${tourId}`)
       .send({ scheduledAt: '2026-08-01T15:00:00.000Z', status: 'canceled' });
     expect(res.status).toBe(200);
     expect(res.body.tour.status).toBe('canceled');
+    // ABSENT, not merely non-pending: a canceled row would still satisfy
+    // pendingRows() while staying in the store and in every read path.
+    for (const id of armed) expect(world.tourRemindersMap.has(id)).toBe(false);
     expect(pendingRows(world, tourId)).toHaveLength(0);
   });
 
-  it("PATCH {status:'toured'} cancels the still-pending rungs (no 'missed your tour' after attending)", async () => {
+  it("PATCH {status:'toured'} SWEEPS the still-pending rungs (no 'missed your tour' after attending)", async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
-    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+    const armed = pendingRows(world, tourId).map((r) => r.reminderId);
+    expect(armed.length).toBeGreaterThan(0);
 
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
     expect(res.status).toBe(200);
+    for (const id of armed) expect(world.tourRemindersMap.has(id)).toBe(false);
     expect(pendingRows(world, tourId)).toHaveLength(0);
   });
 
@@ -1376,7 +1397,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     expect(pendingRows(world, tourId).map((r) => r.kind).sort()).toEqual(['en_route']);
   });
 
-  it("status-only {status:'no_show'} cancels the pending rows (the check-in is a manual send now)", async () => {
+  it("status-only {status:'no_show'} SWEEPS the pending rows (the check-in is a manual send now)", async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
@@ -1385,9 +1406,10 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
 
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' });
     expect(res.status).toBe(200);
-    // no_show is terminal for auto-reminders now: the pending rungs are canceled so
-    // a tour flagged no-show never later fires "your tour is tomorrow". The
+    // no_show is terminal for auto-reminders now: the pending rungs are DELETED
+    // so a tour flagged no-show never later fires "your tour is tomorrow". The
     // "want to reschedule?" check-in is sent manually, not as an armed rung.
+    for (const id of before) expect(world.tourRemindersMap.has(id)).toBe(false);
     expect(pendingRows(world, tourId)).toHaveLength(0);
   });
 });
@@ -1535,15 +1557,26 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    // Reschedule — triggers cancel + re-arm.
+    const firstLadder = [...world.tourRemindersMap.values()].find(
+      (r) => r.tourId === tourId,
+    )?.ladderId;
+    expect(firstLadder).toEqual(expect.any(String));
+
+    // Reschedule - triggers sweep + re-arm.
     const res = await authed(app)
       .patch(`/api/tours/${tourId}`)
       .send({ scheduledAt: NEW_SCHEDULED });
     expect(res.status).toBe(200);
 
-    // New (uncanceled) rows should have dueAts relative to NEW_SCHEDULED and FIXED_NOW.
+    // The FRESH generation's rows should have dueAts relative to NEW_SCHEDULED
+    // and FIXED_NOW. Selected by the tour's pointer, not by "not canceled": the
+    // sweep DELETES the old rows, so a canceledAt filter partitions nothing.
     const allRows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
-    const newRows = allRows.filter((r) => r.canceledAt === undefined);
+    expect(allRows.some((r) => r.ladderId === firstLadder)).toBe(false);
+    const pointer = world.toursMap.get(tourId)?.currentLadderId;
+    expect(pointer).not.toBe(firstLadder);
+    const newRows = allRows.filter((r) => r.ladderId === pointer);
+    expect(newRows).toHaveLength(allRows.length);
     const byKind = Object.fromEntries(newRows.map((r) => [r.kind, r]));
 
     // The injected clock now shows through the arm-time skip rules rather than
@@ -1557,7 +1590,7 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
 
-  it('PATCH -> no_show cancels the still-pending rungs (no auto no-show check-in)', async () => {
+  it('PATCH -> no_show SWEEPS the still-pending rungs (no auto no-show check-in)', async () => {
     const FIXED_NOW = '2026-07-13T14:00:00.000Z';
     // Future tour at 14:00 EDT, so day_before/morning_of/en_route are all still
     // upcoming (an early-morning tour would lose its same-day rungs to the
@@ -1571,22 +1604,27 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    // Pre-no_show: rungs are armed and uncanceled (en_route among them).
-    const armed = [...world.tourRemindersMap.values()].filter(
-      (r) => r.tourId === tourId && r.canceledAt === undefined,
-    );
+    // Pre-no_show: rungs are armed (en_route among them).
+    const armed = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
     expect(armed.map((r) => r.kind)).toContain('en_route');
+    const armedLadder = armed[0]?.ladderId;
+    expect(armedLadder).toEqual(expect.any(String));
 
     // Staff can mark no_show even before the tour (canMarkNoShow is not start-gated).
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' });
     expect(res.status).toBe(200);
 
-    // Every rung for this tour is now canceled - nothing fires "your tour is
-    // tomorrow" at a tour flagged no-show, and there is no no_show_checkin rung.
+    // Post-S9: a terminal transition rotates the pointer and DELETES every
+    // never-sent rung, so the tour has no unsent rows at all - nothing fires
+    // "your tour is tomorrow" at a tour flagged no-show, and there was never a
+    // no_show_checkin rung to begin with.
     const after = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
-    expect(after.length).toBeGreaterThan(0);
-    expect(after.every((r) => r.canceledAt !== undefined)).toBe(true);
-    expect(after.some((r) => r.kind === 'no_show_checkin')).toBe(false);
+    expect(after).toHaveLength(0);
+    for (const r of armed) expect(world.tourRemindersMap.has(r.reminderId)).toBe(false);
+    // The pointer is PRESENT (never cleared) and names a ladder no row carries.
+    const stored = world.toursMap.get(tourId);
+    expect(typeof stored?.currentLadderId).toBe('string');
+    expect(stored?.currentLadderId).not.toBe(armedLadder);
   });
 });
 
@@ -1681,7 +1719,9 @@ describe('currentLadderId - the tour generation pointer', () => {
       .send({ scheduledAt: FARTHER });
     expect(res.status).toBe(200);
 
-    const live = rowsFor(world, tourId).filter((r) => r.canceledAt === undefined);
+    // Post-S9 the sweep DELETES the first generation, so every row left for the
+    // tour is the fresh ladder (a "not canceled" filter would partition nothing).
+    const live = rowsFor(world, tourId);
     expect(live.length).toBeGreaterThan(0);
     const secondLadder = soleLadderId(live);
     expect(secondLadder).not.toBe(firstLadder);
@@ -1699,11 +1739,14 @@ describe('currentLadderId - the tour generation pointer', () => {
     const tourId = created.body.tour.tourId as string;
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
     const deadPointer = world.toursMap.get(tourId)?.currentLadderId;
+    // The cancel swept the first ladder away, so the revival arms onto an EMPTY
+    // table for this tour - acceptance 6's "adopts no earlier rung".
+    expect(rowsFor(world, tourId)).toHaveLength(0);
 
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
     expect(res.status).toBe(200);
 
-    const live = rowsFor(world, tourId).filter((r) => r.canceledAt === undefined);
+    const live = rowsFor(world, tourId);
     const revivedLadder = soleLadderId(live);
     expect(revivedLadder).not.toBe(deadPointer);
     expect(res.body.tour.currentLadderId).toBe(revivedLadder);
@@ -1713,7 +1756,7 @@ describe('currentLadderId - the tour generation pointer', () => {
   // ---- T3.4 terminal transitions ------------------------------------------
 
   it.each(['canceled', 'toured', 'no_show', 'closed'] as const)(
-    'TERMINAL (%s): the pointer is PRESENT and matches no row',
+    'TERMINAL (%s): the pointer is PRESENT, the ladder is swept, and nothing matches',
     async (status) => {
       const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
 
@@ -1721,7 +1764,8 @@ describe('currentLadderId - the tour generation pointer', () => {
         .post('/api/tours')
         .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
       const tourId = created.body.tour.tourId as string;
-      const armedLadder = soleLadderId(rowsFor(world, tourId));
+      const armed = rowsFor(world, tourId);
+      const armedLadder = soleLadderId(armed);
 
       const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status });
       expect(res.status).toBe(200);
@@ -1732,13 +1776,74 @@ describe('currentLadderId - the tour generation pointer', () => {
       // would re-adopt this dead tour's rows as current.
       expect(typeof stored?.currentLadderId).toBe('string');
       expect(stored?.currentLadderId).not.toBe(armedLadder);
-      // The rows are still there (S3 does not delete); none of them match.
+      // S9 re-point: the rotation is now followed by the SWEEP, so every
+      // never-sent rung is gone rather than left canceled in place. This tour
+      // had no sent rung, so the whole ladder is absent - and the pointer still
+      // matches nothing, which is what a terminal tour must look like.
+      for (const r of armed) expect(world.tourRemindersMap.has(r.reminderId)).toBe(false);
       const rows = rowsFor(world, tourId);
-      expect(rows.length).toBeGreaterThan(0);
+      expect(rows).toHaveLength(0);
       expect(rows.some((r) => r.ladderId === stored?.currentLadderId)).toBe(false);
       expect(res.body.tour.currentLadderId).toBe(stored?.currentLadderId);
     },
   );
+
+  // ---- T9.3 / acceptance 1: two reschedules leave ONE generation -----------
+
+  it('TWO RESCHEDULES: the store holds exactly the third generation plus the sent row', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const gen1 = rowsFor(world, tourId);
+    const gen1Ladder = soleLadderId(gen1);
+    // Deliberately seeded SENT row: a send is a fact and the sweep must never
+    // erase it. Without this the "exactly one generation" claim below would be
+    // satisfied by a sweep that deletes EVERYTHING, which is a different bug.
+    const sentRow = gen1[0];
+    expect(sentRow).toBeDefined();
+    expect(await world.tourRemindersRepo.claimSend(sentRow!.reminderId, PTR_NOW)).toBe(true);
+    const supersededGen1 = gen1
+      .filter((r) => r.reminderId !== sentRow!.reminderId)
+      .map((r) => r.reminderId);
+    expect(supersededGen1.length).toBeGreaterThan(0);
+
+    const first = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHER });
+    expect(first.status).toBe(200);
+    const gen2 = rowsFor(world, tourId).filter(
+      (r) => r.sentAt === undefined && r.ladderId !== gen1Ladder,
+    );
+    const gen2Ids = gen2.map((r) => r.reminderId);
+    expect(gen2Ids.length).toBeGreaterThan(0);
+
+    const second = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHEST });
+    expect(second.status).toBe(200);
+
+    // Every row still in the store, by identity - not a count, and not a filter
+    // that a canceled row would also satisfy.
+    const remaining = rowsFor(world, tourId);
+    for (const id of [...supersededGen1, ...gen2Ids]) {
+      expect(world.tourRemindersMap.has(id)).toBe(false);
+    }
+    const survivors = remaining.filter((r) => r.sentAt === undefined);
+    expect(survivors.length).toBeGreaterThan(0);
+    const gen3Ladder = soleLadderId(survivors);
+    expect(gen3Ladder).not.toBe(gen1Ladder);
+    expect(new Set(gen2.map((r) => r.ladderId)).has(gen3Ladder)).toBe(false);
+
+    // The sent row survives, keeps its stamp, and is the ONLY non-gen-3 row.
+    const sent = remaining.filter((r) => r.sentAt !== undefined);
+    expect(sent.map((r) => r.reminderId)).toEqual([sentRow!.reminderId]);
+    expect(remaining).toHaveLength(survivors.length + 1);
+
+    // The pointer names the surviving generation, in the body and in the store.
+    expect(second.body.tour.currentLadderId).toBe(gen3Ladder);
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBe(gen3Ladder);
+  });
 
   // ---- T3.3 the compare-and-set --------------------------------------------
 
@@ -1788,9 +1893,12 @@ describe('currentLadderId - the tour generation pointer', () => {
 
     const pointer = world.toursMap.get(tourId)?.currentLadderId;
     expect(typeof pointer).toBe('string');
-    const live = rowsFor(world, tourId).filter((r) => r.canceledAt === undefined);
+    const live = rowsFor(world, tourId);
     // Both generations' rows are in the store - A's are unpointed, and stay
-    // visible until a later sweep - but the pointer names a REAL one.
+    // visible until a later sweep - but the pointer names a REAL one. (Each
+    // request swept BEFORE it armed, and A's arm is parked past B's sweep, so
+    // neither sweep can reach the other's rows: that is exactly the interleaving
+    // that leaves an unpointed generation behind.)
     expect(new Set(live.map((r) => r.ladderId)).size).toBe(2);
     expect(live.some((r) => r.ladderId === pointer)).toBe(true);
     // B won, so the pointer is B's ladder, and A returns the STORED tour.
@@ -1822,11 +1930,13 @@ describe('currentLadderId - the tour generation pointer', () => {
     // (the patch write's own catch rethrows anything that is not a CCFE).
     expect(res.status).toBe(500);
 
-    // The rotation already committed: a live scheduled tour pointing at nothing.
+    // The rotation AND the sweep already committed: a live scheduled tour with
+    // no rungs at all, pointing at nothing. Disarmed, not merely unsent - which
+    // is why the log line below has to be loud.
     const stored = world.toursMap.get(tourId);
     expect(typeof stored?.currentLadderId).toBe('string');
     expect(stored?.currentLadderId).not.toBe(armedLadder);
-    expect(rowsFor(world, tourId).some((r) => r.ladderId === stored?.currentLadderId)).toBe(false);
+    expect(rowsFor(world, tourId)).toHaveLength(0);
 
     const disarmed = errorsMatching(capture, 'arm failed after pointer rotation');
     expect(disarmed).toHaveLength(1);
@@ -1962,9 +2072,13 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
     expect(res.body.tour.scheduledAt).toBe(BOOKED_AT);
 
     // The ladder armed with dueAts computed from the injected clock (the
-    // pre-booking cancel is a safe no-op: no rows existed, so none canceled).
+    // pre-booking sweep is a safe no-op: no rows existed, so none were deleted).
+    // Selected by the tour's pointer, so this reads the generation the route
+    // just armed rather than "whatever is in the table".
+    const pointer = world.toursMap.get(tourId)?.currentLadderId;
+    expect(pointer).toEqual(expect.any(String));
     const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
-    expect(rows.every((r) => r.canceledAt === undefined)).toBe(true);
+    expect(rows.every((r) => r.ladderId === pointer)).toBe(true);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
     expect(byKind['confirmation']).toBeUndefined(); // stopped arming 2026-08-31
     expect(rows.every((r) => r.skippedAt === undefined)).toBe(true);
@@ -3099,8 +3213,12 @@ describe('PATCH /api/tours — requested → scheduled transition', () => {
     expect(patch.body.tour.scheduledAt).toBe(NEW_SCHED);
 
     // Reminder ladder should now be armed (rows exist with correct dueAts).
+    // Scoped to the tour's CURRENT ladder: post-S9 a "not canceled" filter
+    // partitions nothing, since a retired generation is deleted outright.
+    const pointer = patch.body.tour.currentLadderId as string | undefined;
+    expect(pointer).toEqual(expect.any(String));
     const rowsAfter = [...world.tourRemindersMap.values()].filter(
-      (r) => r.tourId === tourId && r.canceledAt === undefined,
+      (r) => r.tourId === tourId && r.ladderId === pointer,
     );
     expect(rowsAfter.length).toBeGreaterThan(0);
 

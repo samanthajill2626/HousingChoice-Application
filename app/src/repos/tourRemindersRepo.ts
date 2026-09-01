@@ -163,7 +163,7 @@ export interface TourRemindersRepo {
   /**
    * Atomically claim a reminder row BEFORE sending (claim-before-send pattern).
    * Sets `sentAt` with a condition that neither `sentAt` NOR `canceledAt` already
-   * exists — so a concurrent poll tick or a race with cancelForTour both lose.
+   * exists - so a concurrent poll tick and a race with an operator cancel both lose.
    * Returns `true` if this call won the claim, `false` if already claimed/canceled
    * (benign no-op; caller skips the send).
    *
@@ -205,17 +205,16 @@ export interface TourRemindersRepo {
    * shortly" is then honest.
    */
   uncancel(reminderId: string): Promise<boolean>;
-  /** Cancel all pending (not yet sent, canceled, or skipped) reminders for this tour. */
-  cancelForTour(tourId: string): Promise<void>;
   /**
    * HARD-DELETE every never-sent rung of this tour (supersession D1): pending,
    * operator-canceled and skipped alike. Only rows carrying `sentAt` survive -
    * a send is a fact and its history is never erased.
    *
-   * This is deliberately NOT cancelForTour's filter. That one keeps canceled
-   * and skipped rows, which are exactly the rows a superseded ladder must stop
+   * This REPLACED a tour-wide cancel (removed 2026-09-01) whose filter kept
+   * canceled and skipped rows - exactly the rows a superseded ladder must stop
    * showing: an operator who canceled a rung of a ladder that no longer exists
-   * is looking at debris, not at a decision.
+   * is looking at debris, not at a decision. `cancel` above is the per-rung
+   * operator action and is now the ONLY writer of `canceledAt`.
    *
    * Each delete is CONDITIONAL on `attribute_not_exists(sentAt)`, so a rung the
    * poll claims between the list and the delete keeps its send. A lost
@@ -404,9 +403,10 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
     },
 
     async cancel(reminderId, canceledAt) {
-      // The per-rung twin of cancelForTour's row update — same atomic
-      // no-terminal condition, so a race with claimSend/claimSkip resolves to
-      // exactly one outcome.
+      // The operator "Cancel" action, and the only writer of canceledAt since
+      // the tour-wide cancel was removed (2026-09-01) - same atomic no-terminal
+      // condition as claimSend/claimSkip, so a race resolves to exactly one
+      // outcome.
       try {
         await doc.send(
           new UpdateCommand({
@@ -466,53 +466,11 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
       }
     },
 
-    async cancelForTour(tourId) {
-      const rows = await this.listByTour(tourId);
-      const pending = rows.filter(
-        (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
-      );
-      const canceledAt = new Date().toISOString();
-      // Promise.allSettled so one lost conditional-update race (e.g., the poll
-      // claimed sentAt between listByTour and now) does not abort the remaining
-      // cancellations.
-      const results = await Promise.allSettled(
-        pending.map((r) =>
-          doc.send(
-            new UpdateCommand({
-              TableName: table,
-              Key: { reminderId: r.reminderId },
-              UpdateExpression: 'SET #canceledAt = :canceledAt',
-              ConditionExpression:
-                'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
-              ExpressionAttributeNames: {
-                '#canceledAt': 'canceledAt',
-                '#sentAt': 'sentAt',
-                '#skippedAt': 'skippedAt',
-              },
-              ExpressionAttributeValues: { ':canceledAt': canceledAt },
-            }),
-          ),
-        ),
-      );
-      // Log per-row races as debug (benign no-ops); rethrow unexpected errors.
-      let canceled = 0;
-      for (const result of results) {
-        if (result.status === 'fulfilled') {
-          canceled++;
-        } else if (result.reason instanceof ConditionalCheckFailedException) {
-          log.debug({ tourId }, 'tour reminder cancel: row already claimed/canceled — skipping');
-        } else {
-          log.error({ err: result.reason, tourId }, 'tour reminder cancel: unexpected error on row');
-        }
-      }
-      log.info({ tourId, canceled }, 'tour reminders canceled for tour');
-    },
-
     async deleteSupersededForTour(tourId) {
       const rows = await this.listByTour(tourId);
-      // THE ONLY FILTER IS "never sent". Deliberately not cancelForTour's
-      // triple: canceled and skipped rows are exactly what a superseded ladder
-      // must stop showing.
+      // THE ONLY FILTER IS "never sent". Deliberately not the removed tour-wide
+      // cancel's triple (no sentAt AND no canceledAt AND no skippedAt): canceled
+      // and skipped rows are exactly what a superseded ladder must stop showing.
       const unsent = rows.filter((r) => r.sentAt === undefined);
       // Promise.allSettled so one lost conditional delete (the poll claimed
       // sentAt between listByTour and now) does not abort the remaining rows.

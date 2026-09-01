@@ -12,14 +12,20 @@
 //   relative to `now`, which after the booked-too-late rules is reachable only
 //   for en_route and for clamped rungs. See the rule list in the loop.
 //
-// cancelTourReminders — marks all pending (unsent) rows as canceled.
+// Retirement of a whole ladder is NOT here: a reschedule or a terminal tour
+//   status rotates the tour's currentLadderId and calls
+//   tourRemindersRepo.deleteSupersededForTour, which HARD-DELETES every
+//   never-sent rung (supersession spec 3.2). There is no tour-wide cancel any
+//   more - `cancel` is the per-rung operator action and the only writer of
+//   canceledAt.
 //
 // runDueTourReminders — stateless poll: queries listDue(now), then for each
 //   row: CLAIMS it (claimSend) BEFORE sending. Only sends when the claim
 //   succeeds — two concurrent poll ticks over the same row both see it in
 //   listDue but only the first to claim wins. A row canceled between listDue
-//   and the claim also loses (cancelForTour sets canceledAt; the claim
-//   condition requires attribute_not_exists(canceledAt)). This closes both
+//   and the claim also loses (the operator cancel sets canceledAt; the claim
+//   condition requires attribute_not_exists(canceledAt)), and a row DELETED
+//   between the two loses on attribute_exists(reminderId). This closes both
 //   the double-send window and the cancel-then-poll race in one atomic step,
 //   mirroring the missedCallAutoText putJobExecutionMarker pattern.
 //   Designed to be called by a setInterval in worker.ts.
@@ -615,28 +621,6 @@ export async function armTourReminders(
   // A pointer that matches no row means "no live ladder", which is a rotation
   // the caller performs deliberately, never a side effect of an empty arm.
   return { ladderId: created.length === 0 ? null : ladderId, rows: created };
-}
-
-// ---------------------------------------------------------------------------
-// cancelTourReminders
-// ---------------------------------------------------------------------------
-
-export interface CancelTourRemindersDeps {
-  tourRemindersRepo: TourRemindersRepo;
-  logger?: Logger;
-}
-
-/**
- * Cancel all pending (unsent, uncanceled) reminders for a tour.
- * Used on reschedule and tour cancellation.
- */
-export async function cancelTourReminders(
-  tourId: string,
-  deps: CancelTourRemindersDeps,
-): Promise<void> {
-  const log = deps.logger ?? defaultLogger;
-  await deps.tourRemindersRepo.cancelForTour(tourId);
-  log.info({ tourId }, 'tour reminders canceled');
 }
 
 // ---------------------------------------------------------------------------
@@ -1399,7 +1383,7 @@ async function processReminderRow(
   // concurrent poll ticks both see the same due row but only the first to claim
   // wins. The claim condition also blocks canceledAt rows, closing the
   // cancel-then-poll TOCTOU race in one atomic step.
-  // If the claim fails (another tick or a cancelForTour won), skip silently —
+  // If the claim fails (another tick, an operator cancel, or a sweep won), skip silently -
   // a benign no-op, NOT an error (mirrors missedCallAutoText's marker pattern).
   const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now, body);
   if (!claimed) {

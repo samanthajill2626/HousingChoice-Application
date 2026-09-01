@@ -3,8 +3,8 @@
 // Covers:
 //   1. armTourReminders — correct ladder dueAts, past rows skipped
 //   2. runDueTourReminders — sends due reminders, stamps sentAt (idempotency)
-//   3. reschedule — cancel + re-arm, new dueAts
-//   4. cancelTourReminders — pending rows canceled
+//   3. reschedule - sweep + re-arm, new dueAts (the old generation is DELETED)
+//   4. deleteSupersededForTour - every never-sent row dropped (its own describe)
 //   5. same-day tour — day_before skipped (past), future rows armed
 //   6. listDue excludes sentAt/canceledAt rows
 //   7. [concurrency] two racing runDueTourReminders calls → exactly ONE send
@@ -52,7 +52,6 @@ import {
 } from '../src/services/sendMessage.js';
 import {
   armTourReminders,
-  cancelTourReminders,
   CONVERSION_CLAIM_GRACE_MS,
   DISCONTINUED_REMINDER_KINDS,
   forceSendReminder,
@@ -607,10 +606,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // Supersession S1 - deleteSupersededForTour (T1.5)
   //
   // D1: a superseded ladder's never-sent rungs are HARD-DELETED - pending,
-  // operator-canceled and skipped alike. Only sentAt survives. That is NOT
-  // cancelForTour's `pending` filter, which excludes canceled and skipped rows -
-  // exactly the rows this deletes. The only filter here is "no sentAt", and the
-  // ConditionExpression on the delete is what makes the race safe.
+  // operator-canceled and skipped alike. Only sentAt survives. The retirement
+  // this replaced stamped canceledAt and deliberately left canceled and skipped
+  // rows in place - exactly the rows this deletes, which is why "no pending row
+  // remains" was never the same claim as "the generation is gone". The only
+  // filter here is "no sentAt", and the ConditionExpression on the delete is
+  // what makes the race safe.
   // ---------------------------------------------------------------------------
   describe('deleteSupersededForTour', () => {
     const SWEEP_NOW = '2026-09-25T12:00:00.000Z';
@@ -1866,9 +1867,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 3 — reschedule: cancel old reminders, re-arm with new scheduledAt
+  // Test 3 - reschedule: SWEEP the old ladder, re-arm with new scheduledAt
   // ---------------------------------------------------------------------------
-  it('cancel + re-arm on reschedule produces new rows with updated dueAts', async () => {
+  it('sweep + re-arm on reschedule leaves ONLY the fresh ladder, with updated dueAts', async () => {
     const now0 = '2026-07-13T11:00:00.000Z';
     // Both tours sit at 15:00 / 14:00 EDT (they used to be 07:00 / 10:00 EDT):
     // an early-morning tour drops rungs for reasons this case is not about -
@@ -1892,13 +1893,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const origRows = await tourReminders.listByTour(tour.tourId);
     expect(origRows).toHaveLength(3);
+    const origIds = origRows.map((r) => r.reminderId);
 
-    // Cancel and re-arm with the new scheduledAt.
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
+    // Sweep and re-arm with the new scheduledAt - the route's order (S9 T9.1).
+    await tourReminders.deleteSupersededForTour(tour.tourId);
 
-    // All original rows should be canceled.
-    const afterCancel = await tourReminders.listByTour(tour.tourId);
-    expect(afterCancel.every((r) => r.canceledAt !== undefined)).toBe(true);
+    // Every original row is GONE, not canceled in place. Asserted by identity:
+    // "no pending row remains" was also true of the cancel this replaced.
+    expect(await tourReminders.listByTour(tour.tourId)).toHaveLength(0);
 
     // Patch the tour with the new scheduledAt.
     const patchedTour = await tours.patch(tour.tourId, { scheduledAt: newScheduledAt });
@@ -1908,10 +1910,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       logger,
     });
 
-    // New rows should exist in addition to the canceled ones.
-    const allRows = await tourReminders.listByTour(tour.tourId);
-    const newRows = allRows.filter((r) => r.canceledAt === undefined);
+    // The fresh ladder is the WHOLE table for this tour.
+    const newRows = await tourReminders.listByTour(tour.tourId);
     expect(newRows).toHaveLength(3);
+    expect(newRows.some((r) => origIds.includes(r.reminderId))).toBe(false);
 
     // New day_before should reflect the new scheduledAt: 19:30 org-local the
     // evening before its local date (Jul 20 EDT) = 19:30 EDT Jul 19.
@@ -1924,53 +1926,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 4 — cancel tour: all pending rows marked canceled
+  // Test 4 was `cancelTourReminders marks all pending rows canceled` and is
+  // DROPPED with the wrapper it named (S9 T9.2). Its subject no longer exists,
+  // and every assertion it still made is a strict subset of the
+  // `deleteSupersededForTour` describe above: that suite proves absence by raw
+  // GetCommand against the real table (this one only proved "no pending row
+  // remains", which a delete satisfies too) and proves the SENT row survives
+  // with its body, where this one ended in four lines of commentary conceding
+  // it could not tell. Arm-then-retire against a REAL armed ladder is kept: it
+  // is Test 3 above.
   // ---------------------------------------------------------------------------
-  it('cancelTourReminders marks all pending rows canceled', async () => {
-    const now0 = '2026-07-13T12:00:00.000Z';
-    const scheduledAt = '2026-07-16T10:00:00.000Z';
-
-    const tour = await tours.create({
-      tenantId: 'contact-cancel-1',
-      unitId: 'unit-cancel-1',
-      scheduledAt,
-      tourType: 'landlord_led',
-    });
-
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
-
-    // Manually mark the day_before row as sent (simulates one already fired).
-    // It rode `confirmation` until 2026-08-31; any armed kind does, and
-    // day_before is the earliest live rung.
-    const rows = await tourReminders.listByTour(tour.tourId);
-    const sentRow = rows.find((r) => r.kind === 'day_before');
-    await tourReminders.claimSend(sentRow!.reminderId, now0);
-
-    // Now cancel.
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
-
-    const afterCancel = await tourReminders.listByTour(tour.tourId);
-    // Pending = the same definition cancelForTour uses: no terminal stamp at
-    // all. (This 06:00 EDT tour births morning_of as a past_event skipped row -
-    // a visible trace, not a pending rung, so cancel rightly leaves it alone.)
-    const stillPending = afterCancel.filter(
-      (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
-    );
-    expect(stillPending).toHaveLength(0);
-
-    // The already-sent row should still be sent (not double-canceled).
-    const sentAfter = afterCancel.find((r) => r.kind === 'day_before');
-    expect(sentAfter?.sentAt).toBeDefined();
-    // canceledAt should NOT be set on the sent row (the condition guard).
-    // Note: the cancelForTour implementation only cancels rows with no sentAt AND no canceledAt.
-    // The sent row has sentAt set, so it should be excluded from cancelation.
-    // (If the conditional update races, it should fail silently — but in our test it's deterministic.)
-    // The sent row may or may not have canceledAt — depends on timing. But we verified stillPending=0.
-  });
 
   // ---------------------------------------------------------------------------
   // Test 5 - same-day tour: BOTH near rungs are retired booked_too_late
@@ -2304,11 +2269,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(forThisTour1.map((r) => r.kind).sort()).toEqual(['day_before', 'morning_of']);
 
     // Now retire both, one per terminal stamp: claimSend for sentAt (the
-    // production send path) and cancelTourReminders for canceledAt. Both
-    // exclusions are in this test's NAME, so both are exercised.
+    // production send path) and the per-rung cancel for canceledAt (the
+    // operator action - the only writer of that stamp now that the tour-wide
+    // cancel is gone). Both exclusions are in this test's NAME, so both are
+    // exercised.
     const dayBefore = forThisTour1.find((r) => r.kind === 'day_before')!;
+    const morningOf = forThisTour1.find((r) => r.kind === 'morning_of')!;
     await tourReminders.claimSend(dayBefore.reminderId, now0);
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
+    expect(await tourReminders.cancel(morningOf.reminderId, now0)).toBe(true);
 
     // Second listDue at the SAME instant - so nothing but the two terminal
     // stamps can explain the rows disappearing.
@@ -2439,13 +2407,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     // List due rows (simulating what runDueTourReminders does internally) —
-    // then cancel the tour BEFORE the claim fires.
+    // then cancel the rung BEFORE the claim fires.
     const dueRows = await tourReminders.listDue(now0);
     const pendingRow = dueRows.find((r) => r.tourId === tour.tourId && r.kind === 'day_before');
     expect(pendingRow).toBeDefined();
 
-    // Cancel the tour's reminders (simulates PATCH /tours/:id { status: 'canceled' }).
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
+    // Cancel the rung (the operator "Cancel" action on the reminders panel -
+    // the surviving writer of canceledAt; a tour-status PATCH now DELETES the
+    // row instead, which the claim guard covers separately).
+    expect(await tourReminders.cancel(pendingRow!.reminderId, now0)).toBe(true);
 
     // Now attempt to run — the claim should fail for the canceled row → zero sends.
     const cancelDeps = {

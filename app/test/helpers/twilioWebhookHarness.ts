@@ -3028,24 +3028,11 @@ export function createFakeWorld(): FakeWorld {
       tourRemindersMap.set(reminderId, r);
       return true;
     },
-    async cancelForTour(tourId) {
-      const now = new Date().toISOString();
-      for (const r of tourRemindersMap.values()) {
-        if (
-          r.tourId === tourId &&
-          r.sentAt === undefined &&
-          r.canceledAt === undefined &&
-          r.skippedAt === undefined
-        ) {
-          r.canceledAt = now;
-          tourRemindersMap.set(r.reminderId, r);
-        }
-      }
-    },
     async deleteSupersededForTour(tourId) {
       // Mirror the real sweep (supersession D1): the ONLY filter is "never
       // sent" - pending, operator-canceled and skipped rows all go, and every
-      // sentAt row stays. NOT cancelForTour's triple filter.
+      // sentAt row stays. NOT the removed tour-wide cancel's triple filter,
+      // which kept canceled and skipped rows in place.
       for (const r of [...tourRemindersMap.values()]) {
         if (r.tourId === tourId && r.sentAt === undefined) {
           tourRemindersMap.delete(r.reminderId);

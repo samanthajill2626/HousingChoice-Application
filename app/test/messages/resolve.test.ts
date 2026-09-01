@@ -82,6 +82,70 @@ describe('resolveMessage', () => {
   });
 });
 
+// relay.member_added declares ['joined','members'] today (pre-Task-13) and is
+// non-editable, which makes it the strict-mode probe. If Task 13 has already
+// landed when you run this, switch the probe id to 'relay.member_added_role'
+// with vars { name, role } - the four behaviours pinned here are id-agnostic.
+describe('interpolate is single-pass', () => {
+  it('a substituted value containing a later declared token is NOT re-expanded', () => {
+    const out = resolveMessage('relay.member_added', {
+      joined: 'A {members} joined this group chat.',
+      members: 'SECRET LIST',
+    });
+    // Pre-fix this emits 'A SECRET LIST joined...' - the token inside the
+    // substituted value must survive as literal text instead.
+    expect(out).toContain('A {members} joined this group chat.');
+    expect(out).toContain('SECRET LIST'); // the real token still resolves
+  });
+
+  it('replacement-pattern characters in values are inert ($& / $1 / $`)', () => {
+    const out = resolveMessage('relay.member_added', {
+      joined: '$& $1 $` $\' joined.',
+      members: 'M.',
+    });
+    expect(out).toContain("$& $1 $` $' joined.");
+  });
+
+  it('an UNDECLARED token in the template stays literal', () => {
+    const out = resolveMessage('relay.member_added', { joined: 'J.', members: 'M.' });
+    // No entry declares {nope}; craft via the override path instead: undeclared
+    // tokens simply are not in `allowed`, so assert on a template that has one.
+    // relay.media_only declares only ['name'].
+    const out2 = resolveMessage('relay.media_only', { name: 'Ann' }, {
+      'relay.media_only': '{name} sent {nope}.',
+    });
+    expect(out2).toBe('Ann sent {nope}.');
+    expect(out).toBeTypeOf('string');
+  });
+
+  it('strict default THROWS on a declared-but-missing token; override degrades to empty', () => {
+    expect(() => resolveMessage('relay.member_added', { joined: 'J.' })).toThrow(
+      /missing interpolation var "members"/,
+    );
+    const out = resolveMessage('relay.media_only', {}, { 'relay.media_only': 'Hi {name}!' });
+    expect(out).toBe('Hi !');
+  });
+
+  it('a declared token ABSENT from the template needs no value', () => {
+    // welcome.sms declares {firstName}; its default copy does not use it.
+    expect(() => resolveMessage('welcome.sms', {})).not.toThrow();
+  });
+});
+
+describe('catalog token charset (structural guard for the interpolate regex)', () => {
+  // interpolate() scans for /\{([A-Za-z][A-Za-z0-9_]*)\}/g. A future entry that
+  // declared a var outside that charset would silently never substitute - and
+  // grep cannot see it, because seven vars arrays are spread-built. Iterate the
+  // catalog instead so every entry added from here on is covered.
+  it('every declared var of every entry matches the interpolate token charset', () => {
+    for (const [id, def] of Object.entries(MESSAGE_CATALOG)) {
+      for (const token of def.vars) {
+        expect(token, `${id} declares ${token}`).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+      }
+    }
+  });
+});
+
 describe('settingsToOverrides', () => {
   it('maps welcomeText → welcome.sms and missedCallAutoText → missed_call.autotext', () => {
     const s: OrgSettings = {

@@ -29,8 +29,9 @@ import {
 } from '../src/jobs/jobs.js';
 import {
   composeIntroBody,
-  composeMemberAddedBody,
+  composeMemberAddedGroupBody,
   registerRelayFanOutJobHandler,
+  resolveRelayComposeInputs,
 } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -785,6 +786,12 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      // The OWNER-ROUTED copy's reads (Phase B spec 9.3): these groups are
+      // placement-owned, so the announcements take the owned path.
+      unitsRepo: world.unitsRepo,
+      toursRepo: world.toursRepo,
+      placementsRepo: world.placementsRepo,
+      settingsRepo: world.settingsRepo,
       logger,
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
@@ -809,6 +816,10 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
       unitId: 'unit-r',
       landlordId: 'c-owner',
       status: 'available',
+      // The STREET is load-bearing from Phase B on (spec 9.5): with no address
+      // the owner-routed intro degrades to the naked one, and the preview pins
+      // below would pass whether or not the ROUTE wired the resolver's picks.
+      address: { line1: '52 Edgewood Ave', city: 'Atlanta', state: 'GA', zip: '30303' },
       contacts: [
         { contactId: 'c-owner', role: 'owner', primaryContact: false },
         { contactId: 'c-pm', role: 'pm', primaryContact: true },
@@ -855,6 +866,10 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
       ai_mode: 'manual',
       // The stored row shape uses '' for "no contact" (nonEmpty() reads it as absent).
       participants: participants.map((p) => ({ ...p, contactId: p.contactId ?? '' })),
+      // What the real provision stamps - and from Phase B on it is what ROUTES
+      // the announcement copy (spec 9.1), so a thread faked without it would
+      // exercise the naked path only.
+      owner: { type: 'placement' as const, id: placementId },
       created_at: now,
     });
     await world.placementsRepo.update(placementId, { group_thread: 'conv-plive' });
@@ -986,7 +1001,26 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
 
     const open = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
     expect(open.status).toBe(200);
-    expect(open.body.body).toBe(composeIntroBody(['Tasha Tenant', 'Pat Manager']));
+    // PARITY, INTRO half (spec 9.0): the preview shows the variant the job will
+    // send, through the REAL route - which is what proves routes/placements.ts
+    // wired the resolver's optional picks. The resolved-copy half cannot pass
+    // vacuously; the equality half cannot drift.
+    expect(open.body.body).toContain('Excited to have you move into 52 Edgewood Ave.');
+    expect(open.body.body).toContain('Hey Tasha!');
+    expect(open.body.body).toBe(
+      composeIntroBody(
+        await resolveRelayComposeInputs(
+          { type: 'placement', id: placementId },
+          {
+            placementsRepo: world.placementsRepo,
+            unitsRepo: world.unitsRepo,
+            contactsRepo: world.contactsRepo,
+            settingsRepo: world.settingsRepo,
+          },
+        ),
+        ['Tasha Tenant', 'Pat Manager'],
+      ),
+    );
     expect(open.body.recipientCount).toBe(2);
     expect(open.body.deferred).toBe(false);
 
@@ -1003,9 +1037,10 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
       .post(`/api/placements/${placementId}/roster/preview-add`)
       .send({ contactId: 'c-caseworker' });
     expect(add.status).toBe(200);
-    expect(add.body.body).toBe(
-      composeMemberAddedBody('Casey Worker', ['Tasha Tenant', 'Pat Manager', 'Casey Worker']),
-    );
+    // The GROUP body (spec 9.0's ruling). The caseworker is on no unit roster
+    // and is not this placement's tenant, so no role resolves.
+    expect(add.body.body).toBe(composeMemberAddedGroupBody({ variant: 'naked' }, 'Casey Worker'));
+    expect(add.body.body).toBe('Hey, adding Casey to the group.');
     expect(add.body.recipientCount).toBe(3);
   });
 

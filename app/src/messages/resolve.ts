@@ -20,6 +20,17 @@ import type { OrgSettings } from '../repos/settingsRepo.js';
  *   data must NEVER crash a send path — a personalized welcomeText that uses
  *   {firstName} can fire on a path with no name (the START/keyword reply), and
  *   the confirmation must still go out rather than silently throwing.
+ *
+ * SINGLE PASS. The scan runs ONCE over the ORIGINAL template, so a substituted
+ * VALUE is never part of the string being scanned and can never re-open a token
+ * (message-interpolate-token-reexpansion): a name, or a relayed body, that
+ * happens to contain "{names}" stays literal text instead of expanding into
+ * another variable's value. The replacement is a CALLBACK, never a string -
+ * String.replace with a string argument interprets $&/$1/$`/$' inside the VALUE,
+ * which would trade token re-expansion for $-expansion. The token charset in the
+ * regex is guarded STRUCTURALLY by a test that iterates MESSAGE_CATALOG (grep
+ * cannot see it - several vars arrays are spread-built), because a declared var
+ * outside that charset would silently never substitute.
  */
 function interpolate(
   template: string,
@@ -27,21 +38,18 @@ function interpolate(
   allowed: readonly string[],
   strict: boolean,
 ): string {
-  let out = template;
-  for (const token of allowed) {
-    const needle = `{${token}}`;
-    if (!out.includes(needle)) continue;
+  const allowedSet = new Set(allowed);
+  return template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (match, token: string) => {
+    if (!allowedSet.has(token)) return match; // undeclared -> literal, as before
     const value = vars?.[token];
     if (typeof value !== 'string') {
       if (strict) {
         throw new Error(`resolveMessage: missing interpolation var "${token}"`);
       }
-      out = out.split(needle).join('');
-      continue;
+      return ''; // operator override degrades, never crashes a send path
     }
-    out = out.split(needle).join(value);
-  }
-  return out;
+    return value;
+  });
 }
 
 /**

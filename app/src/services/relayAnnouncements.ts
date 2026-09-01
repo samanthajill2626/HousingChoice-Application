@@ -116,6 +116,28 @@ export interface RelayAnnouncementInput {
   kind: string;
   /** false = legs-only (dev intro replay): send, persist nothing. Default true. */
   persist?: boolean;
+  /**
+   * PER-RECIPIENT BODY (Phase B spec 9.6) - the member-added split's mechanism,
+   * and the ONLY message in the product where recipients get different copy.
+   *
+   * A NAMED, DATED EXCEPTION (Cameron, 2026-08-31) to the founder decision of
+   * 2026-07-14 that everything sent into a relay group must be visible in its
+   * dashboard thread. Still ONE row, one bubble, one rollup chip: `body` is what
+   * is PERSISTED, previewed, and inherited by touchLastActivity's inbox preview;
+   * this selector overrides the copy on the outbound LEG only. The group-side
+   * copy therefore goes out to everyone else and is deliberately NOT shown in
+   * the thread - two rows would mean two bubbles and two chips for one event,
+   * which Cameron ruled out.
+   *
+   * Omitted, every leg gets `body` - byte-identical to the pre-Phase-B
+   * behaviour, so every other caller (tour reminders included) is unaffected.
+   *
+   * In `persist: false` legs-only mode the selector still drives per-member
+   * bodies and there is simply no row: the rule degrades rather than being
+   * undefined. Stated so "the persisted body is the new member's copy" is not
+   * read as a precondition that mode violates.
+   */
+  bodyFor?: (member: ConversationParticipant) => string;
 }
 
 export interface RelayAnnouncementResult {
@@ -252,10 +274,13 @@ export async function sendRelayAnnouncement(
       // A2P pacing: one token per real outbound SMS (shared combined-rate
       // bucket — same meter as the relay fan-out legs).
       await deps.tokenBucket?.acquire(1);
+      // Spec 9.6: the per-member override feeds the LEG ONLY. Persistence,
+      // touchLastActivity and the delivery slots above all keep `body`.
+      const legBody = input.bodyFor?.(member) ?? body;
       const result = await deps.adapter.sendMessage({
         to: member.phone,
         from: poolNumber,
-        body,
+        body: legBody,
       });
       sentCount += 1;
 

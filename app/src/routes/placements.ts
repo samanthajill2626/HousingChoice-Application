@@ -926,6 +926,12 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     contacts,
     // The seam that puts pending[]/skipped[] on every roster payload (Task 13).
     actions: rosterActions,
+    // The OWNER-ROUTED intro's extra reads (Phase B spec 9.0): the previews must
+    // show the same variant the intro job sends. `tours` rides along because
+    // this factory holds it and a roster owner is typed 'tour' | 'placement'.
+    tours,
+    placements,
+    settings: settingsRepo,
     log,
   };
 

@@ -1100,11 +1100,14 @@ export interface DuplicateOpenGroup {
  * What a group send WOULD do, resolved server-side. Returned as the BODY by
  * `GET .../roster/preview-open` and `POST .../roster/preview-add`.
  *
- * `body` is composed from the `relay.intro` / `relay.member_added` catalog
- * entries BY THE SERVER and is rendered verbatim: the templates are
- * founder-editable, so a browser-side copy would drift the first time one is
- * edited (spec 6.3). The client never rebuilds it and never re-derives
- * `quietEndsAt` (the DST-safe window math is the server's).
+ * `body` is composed from the relay intro / member_added catalog entries BY THE
+ * SERVER and is rendered verbatim: the templates are founder copy, so a
+ * browser-side copy would drift the first time one is edited (spec 6.3). The
+ * client never rebuilds it and never re-derives `quietEndsAt` (the DST-safe
+ * window math is the server's). Which entry it is, is the server's call too -
+ * since Phase B the intro is ROUTED on the group's owner (tour / placement /
+ * neither), and the add preview carries the body the EXISTING group receives,
+ * not the one the new member gets.
  *
  * `deferred` drives the dialog's THREE-button quiet-hours layout (spec 6.3):
  * confirming defers the whole change to `quietEndsAt` (the server answers 202
@@ -1147,7 +1150,11 @@ export type ScheduledSuppressionReason =
   | 'manual_mode'
   | 'stale_stage'
   | 'quiet_hours'
-  | 'paused';
+  | 'paused'
+  /** TERMINAL: the rung's KIND is retired, so no path will ever send it - not
+   *  the poll, and not a human pressing Send now. Outranks every reason above
+   *  it and is produced OUTSIDE the shared evaluator (app-side spec 3.1a). */
+  | 'discontinued';
 
 /** The suppression estimate a GET carries on an upcoming rung/card. */
 export interface ScheduledSuppression {
@@ -1163,10 +1170,18 @@ const EM_DASH = String.fromCharCode(0x2014);
  *  `paused` is neither of the other two and must never borrow their wording: the
  *  rung is not being dropped (it stays pending and sendable) and it is not
  *  waiting on a clock that will release it (nothing releases it but a person).
- *  Pairs with the 'send manually' label -> "Paused - send manually". */
+ *  Pairs with the 'send manually' label -> "Paused - send manually".
+ *
+ *  `discontinued` is a THIRD thing again, and must borrow none of the other
+ *  three: the rung is not deferred (no clock releases it), not held for a
+ *  person (nobody can release it - Send now refuses), and not "skipped" (that
+ *  describes THIS send being dropped, while the whole KIND has been retired).
+ *  Pairs with the 'turned off' label -> "No longer sent - turned off"; the
+ *  label deliberately does not repeat the lead, or the note stutters. */
 export function suppressionLead(reason: ScheduledSuppressionReason): string {
   if (reason === 'quiet_hours') return 'Will wait';
   if (reason === 'paused') return 'Paused';
+  if (reason === 'discontinued') return 'No longer sent';
   return 'Will be skipped';
 }
 
@@ -1220,11 +1235,23 @@ export interface TourReminderView {
     // ARM time: the tour was booked (or rescheduled) too close to this rung's
     // raw due time for it to usefully fire, so it was born skipped as a
     // visible trace rather than leaving a gap in the ladder.
-    | 'booked_too_late';
+    | 'booked_too_late'
+    // Phase B: the tour had already started when the rung came due (the
+    // fire-time past-tour gate), or the one-time sweep retired it.
+    | 'tour_already_passed'
+    // Phase B: the rung's KIND is discontinued (confirmation) - written by the
+    // one-time sweep script only; the poll excludes discontinued kinds.
+    | 'kind_retired'
+    // Phase B: name resolution kept failing for more than an hour past dueAt -
+    // the bounded twin of roster_unavailable.
+    | 'names_unavailable';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
   suppression?: ScheduledSuppression;
+  /** Derived, never stored: this rung's send time has passed and it still has
+   *  not sent. Composes with `suppression`, which says WHY. */
+  overdue?: boolean;
 }
 
 /** GET /api/tours/:tourId/reminders response: the ladder + the NEXT rung to fire. */
@@ -1265,6 +1292,9 @@ export const REMINDER_SUPPRESSION_LABELS: Readonly<
   stale_stage: 'tour no longer at this stage',
   quiet_hours: 'quiet hours',
   paused: 'send manually',
+  // Reads "No longer sent - turned off". Deliberately NOT a restatement of the
+  // lead: "no longer sent" here would render the phrase twice.
+  discontinued: 'turned off',
 };
 
 /** Human-readable phrasings for why a rung WAS retired unsent (state 'skipped'). */
@@ -1281,6 +1311,9 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   roster_unavailable: "couldn't read who is on the relay group - gave up after an hour",
   invalid_schedule: 'schedule unusable',
   booked_too_late: 'booked too late for this reminder',
+  tour_already_passed: 'the tour had already happened',
+  kind_retired: 'this reminder is no longer sent',
+  names_unavailable: "couldn't look up the names",
 };
 
 /**
@@ -1328,6 +1361,10 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   // right for a transient failure.)
   tenant_not_on_roster:
     'That person is not on this roster, so nothing was sent - add them back to send.',
+  // Reminder-only, PERMANENT refusals (Phase B). The generic retry fallback
+  // would be a lie for both - nothing about retrying can change the outcome.
+  tour_already_passed: 'That tour has already happened, so nothing was sent.',
+  kind_retired: 'Confirmation texts are no longer sent, so nothing was sent.',
   // Post-claim race (the gate flipped mid-send): the row IS consumed but nothing
   // went out, so these must read as errors, not successes.
   contact_no_consent: 'No SMS consent on file - record consent before sending this by hand.',

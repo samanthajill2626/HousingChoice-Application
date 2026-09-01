@@ -321,13 +321,13 @@ the plan. Both hold.
 by one.
 
 - `DescribeTimeToLive` is the only send whose output is consumed
-  (`dynamoAdmin.ts:128-130`) and it is on `sendWithRetry` with no hook. ✓
+  (`dynamoAdmin.ts:128-130`) and it is on `sendWithRetry` with no hook. OK
 - `UpdateTimeToLive` (`:132-137`) and `ensureGsis`'s `UpdateTable`
   (`db-update-gsis.ts:227-233`) both discard their output, so
   `sendWithRetryVerified` returning `void` fits; today's
   `sendWithInternalFailureRetry` is already `Promise<void>`
-  (`db-update-gsis.ts:103-109`) and `ensureGsis` discards it. ✓
-- `CreateTable` and `DeleteTable` discard output and take no hook. ✓
+  (`db-update-gsis.ts:103-109`) and `ensureGsis` discards it. OK
+- `CreateTable` and `DeleteTable` discard output and take no hook. OK
 - One implementation note, not a defect: `sendWithRetry<TOut>` with an
   unconstrained `TOut` will infer `unknown`, so the `DescribeTimeToLive` call
   site needs an explicit type argument (or the signature must take

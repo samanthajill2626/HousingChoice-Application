@@ -540,6 +540,12 @@ reason that has nothing to do with traversal.
 third revision it has broken in.** v1 planted one decoy one level up, v2
 planted two at depths the probes do not reach, and v3 mandated verifying
 reachability - all three were solving a problem that does not exist.
+[Superseded 2026-09-01 by the build's review fix wave 1 (b81ceb23,
+r1-adjudications A3): an adversarial reproduction showed the probes are
+unfalsifiable without a target (4/6 leak with one, 0/6 without), so decoys
+now live INSIDE the mkdtemp fixture root at the probed depths. The claim
+that send rejects '..' before the filesystem remains true and is why the
+decoys are never read today.]
 
 `send` decodes the request path and then tests it with `UP_PATH_REGEXP`
 (`node_modules/send/index.js:61`, tested at `:431`), which matches any

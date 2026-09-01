@@ -229,3 +229,34 @@ by the anchor's 180s timeout needs a much heavier load than one neighbour.
    S2 to have changed behaviour, that expectation should be reset now: the
    measurement says there is nothing material to cut inside the file, and the
    only lever with real leverage (`createProgram`) has no pre-committed remedy.
+
+## Addendum: logCallSiteGuard inside the S0 full runs (added 2026-09-01, planner fix wave)
+
+Everything above is the SOLO scope (one file, one workspace). The "31.5s worst
+loaded" figure that `logcallsiteguard-hook-budget-equals-its-own-cost.md:52-54`
+and the mission handback cite - the one the unchanged 180s hook budget is
+~5.7x - is NOT from that scope: it is this file's own per-file duration line
+INSIDE the four full `npm test` runs of S0, which
+until now lived only in gitignored run state (`.superpowers/sdd/s0-warmup.log`,
+`s0-run{1,2,3}.log`). Quoted here so the provenance is committed. The lines as
+the runs printed them, with the leading tick and the ANSI colouring stripped:
+
+```
+test/logCallSiteGuard.test.ts (3 tests) 12608ms     <- s0-warmup.log
+test/logCallSiteGuard.test.ts (3 tests) 31527ms     <- s0-run1.log
+test/logCallSiteGuard.test.ts (3 tests) 9972ms      <- s0-run2.log
+test/logCallSiteGuard.test.ts (3 tests) 13408ms     <- s0-run3.log
+```
+
+| S0 run | this file | machine state, per `s0-baseline.md`'s snapshot |
+|---|---|---|
+| warm-up | 12.6s | unlabelled (the warm-up carries no snapshot table) |
+| run 1 | **31.5s** | CONTENDED at start: host CPU 100%, 1 other live vitest run (the main checkout's `npm test --workspaces`) plus 2 e2e suites; QUIET by the end |
+| run 2 | 10.0s | CONTENDED by two live e2e suites, ZERO other vitest runs (host CPU 34%) |
+| run 3 | 13.4s | CONTENDED by one live e2e suite, ZERO other vitest runs |
+
+Read it as the load curve it is, not as four samples of one thing: the only run
+with a competing VITEST neighbour is the only run above 14s, and it is 3.1x the
+quietest of the four. That is the direct evidence behind sizing the hook budget
+well above 4x the solo cost (see "Budget arithmetic"), and it is a stronger
+version of the single-neighbour ~11% datum in the post-strip window above.

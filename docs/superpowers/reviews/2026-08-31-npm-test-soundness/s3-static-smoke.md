@@ -113,6 +113,11 @@ static serving, SPA fallback and reserved namespaces, no encoded `..` yields
 anything but the SPA shell or a 4xx. That is a property of how we wired it and a
 future static-serving change could lose it, which is why they are kept.
 
+[Note added 2026-09-01: the no-decoys statements in this section were true as of
+796b8632 and were superseded by fix wave 1 (b81ceb23) - decoys were added inside
+the fixture root after a review reproduction proved the probes unfalsifiable
+without a target. See code-review/r1-adjudications.md A3.]
+
 ## (c) - the diagnostic, and its three live branches OBSERVED
 
 Mechanism: `ctx.skip(note)` inside the `it` (vitest 3.2.6). `it.skipIf` takes a

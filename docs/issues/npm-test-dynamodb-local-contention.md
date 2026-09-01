@@ -16,7 +16,7 @@ The unprotected control-plane surface named below is closed: every mutating
 send in `app/src/lib/dynamoAdmin.ts` now retries `InternalFailure` /
 `InternalServerError` behind a fail-closed local-endpoint gate, with a
 verification hook for non-idempotent sends (a failed RESPONSE is not a failed
-REQUEST), a per-send 20s deadline, and a 22-case no-container acceptance
+REQUEST), a per-send 20s deadline, and a 25-case no-container acceptance
 suite (`app/test/dynamoAdminRetry.test.ts`); `db-update-gsis.ts`'s existing
 retry moved onto the same helper, and cases 15/16 prove the move did not
 disarm it. The issue itself is NOT closed: no sighting of suite B's signature
@@ -46,6 +46,12 @@ mission's scope: `db-create.ts:64`/`:76` call
 `npm test` teardown path (flat-20s second tick); the mission's gating means
 only a RETRIED delete can newly reach that waiter's slow path, and teardown
 timing showed no regression in six measured runs.
+
+WHAT THE NEXT SIGHTING MUST RECORD: `err.$metadata.httpStatusCode` and
+`err.$metadata.attempts`. No sighting in this issue's history captured either,
+so it is still unknown whether the SDK's own transient retry (5xx, 3 attempts
+by default) had already fired underneath ours - which is the difference between
+a helper attempt costing ~10s and ~30s. Two fields settle it for free.
 
 **REOPENED 2026-08-21, same day, by a run that contradicts the close below.**
 

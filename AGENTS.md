@@ -161,12 +161,14 @@ vs 75-95s in the A/B that justified it) - and it stands down 2
 swept on the way IN by `globalSetup` (`sweepLedgerResidue`), so the
 2026-08-23 residue effect (607s/9 failures vs 65s/0) has nothing left to
 beat; re-measured 2026-09-01 on a fresh container the explicit-key arm was
-not faster (default 231/190s vs explicit 189/165s, app workspace, light
-load - the spread tracked neighbour load, not the key). Transient
+in fact slightly FASTER (default 231/190s vs explicit 189/165s, app
+workspace) - tracking a declining e2e neighbour across the interleave, not
+the key scheme; the supersession rests on the code reading, not on wall
+clock. Transient
 control-plane faults from a contended container (`InternalFailure`,
 `InternalServerError: ... waiting for a lock`) are retried automatically
 since 2026-09-01 (`app/src/lib/dynamoAdmin.ts`, local-endpoint gated,
-verification-hooked, 22-case acceptance suite).
+verification-hooked, 25-case acceptance suite).
 
 What to do instead: (1) re-run the failing FILE alone, more than once
 (`cd app; npx vitest run test/<file>`); (2) run the full suite at the

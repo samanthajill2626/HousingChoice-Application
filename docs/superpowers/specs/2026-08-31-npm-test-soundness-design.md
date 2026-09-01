@@ -4,9 +4,10 @@
 - Branch: `feat/npm-test-soundness`
 - Worktree: `W:\tmp\npm-test-soundness`
 - Bundle: M7 of `docs/issues/_CLUSTERS.md` (re-derived 2026-08-31 @ `5ce9912f`)
-- Revision: v2, after adversarial round 1 (two independent reviewers;
-  adjudications at
-  `docs/superpowers/reviews/2026-08-31-npm-test-soundness/design-review/adjudications.md`)
+- Revision: **v3**, after adversarial rounds 1 (two independent reviewers)
+  and 2 (one continued reviewer). Adjudications:
+  `docs/superpowers/reviews/2026-08-31-npm-test-soundness/design-review/adjudications.md`
+  and `adjudications-r2.md`.
 
 ## The class
 
@@ -25,22 +26,15 @@ which is how a real regression ships.
 
 ## Corrections to the record, established before design
 
-Two beliefs were checked and are wrong. Both were re-checked by two
-adversarial reviewers and stand.
-
 1. **There is no 7-day soak clause on the anchor issue.** Its status is
-   `open` and its closing paragraph is a REOPEN trigger ("reopen if a full
-   `npm test` fails a DynamoDB suite that mints its own throwaway prefix,
-   on an otherwise-idle box, twice"), not a waiting period.
-2. **The `InternalFailure` RETRY exists in exactly one file.**
-   `app/scripts/db-update-gsis.ts:103-127`. (The string itself also appears
-   in comments elsewhere; the retry does not.) `app/src/lib/dynamoAdmin.ts`
-   has no retry on any of its control-plane sends.
-
-A third claim is unverified rather than wrong: the anchor's own last entry
-says the degraded-key numbers quoted in `AGENTS.md` have NOT been
-re-measured since `-inMemory` was replaced with SQLite on tmpfs, and "do
-that before citing those numbers again".
+   `open` and its closing paragraph is a REOPEN trigger, not a waiting
+   period.
+2. **The `InternalFailure` RETRY exists in exactly one file**,
+   `app/scripts/db-update-gsis.ts:103-127`. (The string appears in comments
+   elsewhere; the retry does not.) `app/src/lib/dynamoAdmin.ts` has no
+   retry on any control-plane send.
+3. **`AGENTS.md`'s clean-key recipe no longer means what it says** - see
+   item 1C. This is established by reading the code, not by measurement.
 
 ## Locked decisions (human, 2026-08-31)
 
@@ -48,7 +42,7 @@ that before citing those numbers again".
    `AGENTS.md` recipe, close on evidence. `groupCrossCheck` is MEASURED,
    not pre-emptively rewritten.
 2. **logCallSiteGuard: measure, then cut the cost** - not a bare budget
-   raise. The budget ends up a multiple of the new measured cost.
+   raise.
 3. **staticSmoke: split it** - no test's colour may depend on
    `dashboard/dist`.
 
@@ -57,9 +51,9 @@ that before citing those numbers again".
 ### What this is, stated honestly
 
 The anchor names its suite-B tail as `UpdateTable` `InternalFailure`.
-**That specific call IS already retried** (`db-update-gsis.ts:103-127`,
-applied at `:227`). This item does not close that tail; it closes the
-same failure MODE on the surface that was never protected. No record shows
+**That call IS already retried** (`db-update-gsis.ts:103-127`, applied at
+`:227`). This item does not close that tail; it closes the same failure
+MODE on the surface that was never protected. No record shows
 `dynamoAdmin.ts`'s sends failing by name - the justification is the class,
 not a specific open sighting, and the spec says so rather than borrowing
 suite B's evidence.
@@ -67,358 +61,388 @@ suite B's evidence.
 Under concurrent load DynamoDB Local answers control-plane calls with
 `InternalFailure`, or with `InternalServerError: This action timed out
 because it took too long waiting for a lock` - the container's own
-per-table `tryLock(10s)` expiring. Neither is a rejected request. The AWS
-SDK's default retry policy covers neither, so both escape to the caller
-and fail whatever gate is running.
+per-table `tryLock(10s)` expiring. Neither is a rejected request; the AWS
+SDK's retry policy covers neither.
 
-### The full control-plane surface (enumerated, not sampled)
+### The control-plane surface
 
-Nine local control-plane sends exist in the repo:
+Enumerated by this command, which is reproducible and which the builder
+must re-run rather than trust this table:
 
-| site | command | disposition |
-|---|---|---|
-| `dynamoAdmin.ts:88` | `CreateTable` | COVERED |
-| `dynamoAdmin.ts:129` | `DescribeTimeToLive` | COVERED |
-| `dynamoAdmin.ts:133` | `UpdateTimeToLive` | COVERED |
-| `dynamoAdmin.ts:146` | `DeleteTable` | COVERED |
-| `db-update-gsis.ts:228` | `UpdateTable` | already retried; unchanged |
-| `unreadIndexRepo.integration.test.ts:728` | `CreateTable` | COVERED - routed through the exported helper. This is suite B's OWN fixture setup |
-| `globalTeardown.ts:144` | `DeleteTable` | NOT covered - a failed residue drop is already tolerated and retried on the next run's way in |
-| `dynamoAccessKeyGuard.test.ts:327` | `CreateTable` | NOT covered - deliberate: this suite exists to prove the keying scheme, and a retry here could mask the very failure it asserts |
-| `dynamoAccessKeyGuard.test.ts:342` | `DeleteTable` | NOT covered - same reason |
+```
+grep -rn "new \(CreateTable\|DeleteTable\|UpdateTable\|UpdateTimeToLive\|DescribeTimeToLive\|DescribeTable\|ListTables\)Command\|waitUntilTableExists(" --include=*.ts --include=*.mjs app e2e scripts | grep -v node_modules
+```
 
-Every exclusion is a decision with a reason, not an omission.
+It finds ~25 sends and 3 waiter sites across 11 files. The v2 spec claimed
+"nine sends exist in the repo", which was command-type-limited and
+presented as exhaustive - worse than an admitted sample.
 
-**Live-ness note.** `DYNAMO_DISABLE_TTL: '1'` (`vitest.config.ts:119`)
-means `enableTtlIfNeeded` never runs under `npm test`, so the two TTL sends
-are dead on the gate path and live only under `db:create` and the e2e
-lanes. They are covered anyway - they are the same class - but no claim is
-made that they protect `npm test`.
+**Disposition rule, applied to all of them:**
+
+- **MUTATING sends in `dynamoAdmin.ts` are covered.** They are the shared
+  path every integration suite reaches.
+- **`db-update-gsis.ts:228` keeps its existing retry**, refactored onto the
+  shared helper with its index-status check as the verification hook.
+- **READS (`DescribeTable`, `ListTables`, `DescribeTimeToLive`) are NOT
+  covered on their own.** A failed read is not a half-applied mutation:
+  the caller either already tolerates it (`globalTeardown`, `devReset`) or
+  wants to see it. The one exception is `DescribeTimeToLive` inside
+  `enableTtlIfNeeded`, which is covered because it is the guard for a
+  mutation in the same function, not a standalone read.
+- **Test-owned sends are NOT covered**, each for a stated reason:
+  - `globalTeardown.ts:144` (`DeleteTable`) - a failed residue drop is
+    already tolerated and re-attempted on the next run's way in.
+  - `dynamoAccessKeyGuard.test.ts:327/:342` - this suite asserts cross-key
+    VISIBILITY, which no retry can mask; `:342` is already best-effort.
+    (The v2 reason - "a retry could mask the failure it asserts" - was
+    wrong, and a wrong reason for a right-looking decision is worse than
+    none.)
+  - `unreadIndexRepo.integration.test.ts:728` (`CreateTable`) - **v2
+    proposed routing this through the helper; that is DROPPED.** The site
+    has no `ResourceInUseException` catch of its own, so handing it a retry
+    would recreate at that line the exact defect this item fixes in
+    `ensureTable`.
+
+### Live-ness: corrected, and it inverts v2
+
+The v2 spec said `DYNAMO_DISABLE_TTL: '1'` (`vitest.config.ts:119`) made
+the two TTL sends dead under `npm test`. **That is backwards.**
+`app/test/globalSetup.ts:90-91` states in its own comment that "vitest
+`test.env` applies to workers, not globalSetup", and it sets only the
+credentials. So `globalSetup` -> `createAllTables` -> `ensureTable` ->
+`enableTtlIfNeeded` runs for all ~23 shared `hc-local-` tables on **every
+`npm test`**, before any test starts. `UpdateTimeToLive` is squarely on the
+gate path.
+
+**Second-order consequence, filed rather than fixed here:**
+`DYNAMO_DISABLE_TTL=1` therefore does NOT immunise the shared `hc-local-`
+tables - `globalSetup` re-enables the reaper on them every run. A future
+suite that pins a past clock and uses the shared tables carries the same
+time bomb `groupCrossCheck` did. A new Tier-2 issue records this; fixing it
+is not in this mission's scope.
 
 ### Per-command retry safety - corrected
 
-The v1 spec claimed all four were retry-safe by construction. **Three of
-those claims were wrong**, each in the same shape: a guard that is read
-ONCE, outside the send, and therefore stops being true on attempt 2. That
-is the identical defect `db-update-gsis.ts:70-86` documents about its own
-earlier version.
+The v1 spec claimed all four sends were retry-safe by construction. Three
+were wrong, all in one shape: **a guard read ONCE, outside the send, which
+stops being true on attempt 2** - the identical defect
+`db-update-gsis.ts:70-86` documents about its own earlier version.
 
 | command | the hole | the fix |
 |---|---|---|
-| `CreateTable` | attempt 2 after an accepted-but-unanswered attempt 1 throws `ResourceInUseException`; `ensureTable`'s catch (`:87-93`) returns `'exists'` WITHOUT `waitUntilTableExists`, handing back a still-CREATING table | the `ResourceInUseException` path waits for the table to exist before returning. This is a real hole in TODAY's code, independent of the retry |
-| `DeleteTable` | attempt 2 against a DELETING table throws `ResourceInUseException`, which `deleteTableIfExists` (`:146-149`) does not catch | tolerate it - a DELETING table means the delete landed |
-| `UpdateTimeToLive` | the ENABLED/ENABLING guard (`:128-131`) is outside the send, so a retry re-sends an enable whose status was read before attempt 1 | the status read becomes the retry's verification hook, re-read before each re-send |
+| `CreateTable` | attempt 2 after an accepted-but-unanswered attempt 1 throws `ResourceInUseException`; `ensureTable`'s catch (`:87-93`) returns `'exists'` without waiting, handing back a still-CREATING table | wait for the table to become ACTIVE on the `ResourceInUseException` path. This is a real hole in TODAY's code, independent of the retry |
+| `DeleteTable` | attempt 2 against a DELETING table throws `ResourceInUseException`, uncaught at `:146-149` | tolerate it - DELETING means the delete landed |
+| `UpdateTimeToLive` | the ENABLED/ENABLING guard (`:128-131`) is outside the send | the status read becomes the retry's verification hook, re-read before each re-send |
 | `DescribeTimeToLive` | none - read-only | - |
 
-### Mechanism
+**The wait must NOT be `waitUntilTableExists`.** The SDK waiter's default
+schedule makes its second poll a flat 20s and it throws at 60s - inside
+`ensureTable` calls that sit in `beforeAll` hooks budgeted at 60s. Arming a
+new false red while fixing an old one is this mission's own failure mode.
+Use a bounded `DescribeTable` poll with a short interval (~100ms) and an
+explicit ceiling well inside the caller's budget.
 
-`dynamoAdmin.ts` exports one bounded retry helper taking an optional
-"did attempt N already land?" verification hook. `db-update-gsis.ts`
-imports it and supplies its existing index-status check as that hook, so
-the two paths cannot drift. `ensureGsis`'s own behaviour is otherwise
-unchanged - its CLI is already hard-gated to a localhost endpoint
-(`db-update-gsis.ts:262-270`), so the new gate is additive there, never a
-loosening.
+### The verification hook must fail CLOSED
 
-Bounds: at most 4 attempts, linear backoff (`attempt * 250ms`), matching
-the existing helper. A retry loop that can outlive a test budget trades one
-false red for another.
+`db-update-gsis.ts:88-101`'s `indexStatus` catches everything and returns
+`undefined`, falling through to a re-send. That is fail-OPEN and it is
+tolerable there only because a re-sent GSI create is caught downstream.
 
-**`waitUntilTableExists` is excluded**, on the reasoning that the SDK
-waiter carries its own retry and polling policy and its failure mode is a
-timeout rather than an escaping `InternalFailure`. That reasoning is
-UNVERIFIED - reviewer B flagged it and could not check it either. It is a
-BUILD-TIME TASK to read the installed waiter and record the answer; if the
-waiter does let `InternalFailure` escape, the exclusion is revisited.
+**For `UpdateTimeToLive` it is not tolerable**: re-sending an enable for a
+TTL that is already enabled can draw a `ValidationException`, converting a
+transient container hiccup into a hard failure. So the shared helper's
+contract is: **if the verification hook itself throws, rethrow the ORIGINAL
+error rather than re-sending.** `db-update-gsis.ts` keeps its current
+fail-open behaviour explicitly, as its own documented choice.
 
 ### The local-endpoint gate, specified concretely
 
-The retry ACTIVATES only when the client's resolved endpoint is a
-localhost DynamoDB Local endpoint. Everything else gets today's behaviour
-exactly - no retry, no possibility of masking a real AWS fault.
+The retry ACTIVATES only when the client's resolved endpoint is a localhost
+DynamoDB Local endpoint. Everything else gets today's behaviour exactly.
 
-**`client.config.endpoint` is an async `Provider<Endpoint>`, not a URL
-string** - the v1 spec assumed otherwise and built a false "three lines of
-duplication" argument on it. It resolves to an object carrying
-protocol / hostname / port. The gate therefore awaits the provider,
-reads `hostname`, and treats `localhost`, `127.0.0.1` and `::1` as local.
+`client.config.endpoint` is an async `Provider<Endpoint>` returning an
+object with protocol / hostname / port - not a URL string. The gate awaits
+it and treats `localhost`, `127.0.0.1`, `::1` **and `[::1]`** as local.
+The bracketed form is the one `URL.hostname` actually yields, and
+`db-create.ts:25` already accepts both; omitting it was a v2 defect.
 
 **Fail closed.** No endpoint provider, a provider that throws, or a
 non-local hostname all mean NOT LOCAL and therefore no retry.
 
-The predicate is defined inside `dynamoAdmin.ts` rather than imported from
+The predicate lives in `dynamoAdmin.ts` rather than being imported from
 `app/scripts/db-create.ts`, because `lib` importing from `scripts` inverts
-the dependency direction the repo already keeps. It is not a copy of
-`isLocalEndpoint` - that one takes a URL string and this one takes a
-resolved endpoint object - so this is a sibling predicate, not duplication.
+the repo's dependency direction. It is not a copy: `isLocalEndpoint` takes
+a URL string, this one takes a resolved endpoint object.
 
 ### Acceptance - this item MUST be able to fail
 
-The v1 spec had no way to observe a retry: the only proposed evidence was
-a before/after `npm test`, which cannot see one. **The whole item could
-have shipped inert with five green gates.** So:
+The v1 spec had no way to observe a retry; the item could have shipped
+inert with five green gates. A new `app/test/dynamoAdminRetry.test.ts`
+drives a STUB client with a programmable `send`, no container involved.
 
-A new `app/test/dynamoAdminRetry.test.ts` drives a STUB client whose
-`send` is programmable, with no container involved:
+**Stub contract, specified because two rounds found ways to get it wrong:**
 
-1. a local-endpoint client whose `CreateTable` throws `InternalFailure`
-   twice then succeeds -> `ensureTable` returns, and `send` was called 3
-   times;
-2. the same, but attempt 1 is accepted-but-unanswered (throw
-   `InternalFailure`, then `ResourceInUseException`) -> returns `'exists'`
-   AND waits for the table before returning;
-3. `DeleteTable` throwing `InternalFailure` then `ResourceInUseException`
-   -> resolves, does not throw;
-4. `UpdateTimeToLive` retried -> the status is RE-READ between attempts;
-5. **a NON-local endpoint client throwing `InternalFailure` once -> throws
-   immediately, `send` called exactly once.** This is the test that stops
-   the gate shipping inert;
-6. no endpoint provider at all -> same as (5).
+- it must throw **real exception INSTANCES** (`ResourceInUseException`,
+  `ResourceNotFoundException` from `@aws-sdk/client-dynamodb`), because
+  `dynamoAdmin` discriminates by `instanceof` (`:91`, `:148`) while the
+  retry discriminates by `err.name`. A plain object would let a case pass
+  for the wrong reason;
+- it must answer `DescribeTable`, because the `ResourceInUseException` path
+  now polls;
+- it must expose a resolvable `config.endpoint` provider, settable per
+  case.
+
+Cases:
+
+1. local endpoint, `CreateTable` throws `InternalFailure` twice then
+   succeeds -> `ensureTable` returns, `send` called 3 times;
+2. local, attempt 1 accepted-but-unanswered (`InternalFailure`, then
+   `ResourceInUseException`) -> returns `'exists'` AND polled
+   `DescribeTable` until ACTIVE before returning;
+3. local, `DeleteTable` throws `InternalFailure` then
+   `ResourceInUseException` -> resolves, does not throw;
+4. local, `UpdateTimeToLive` retried -> status RE-READ between attempts;
+   and a re-read that THROWS -> the original error is rethrown, no
+   re-send;
+5. **non-local endpoint, `InternalFailure` once -> throws immediately,
+   `send` called exactly once.** This is the case that stops the gate
+   shipping inert;
+6. no endpoint provider at all -> same as (5);
+7. `[::1]` and `127.0.0.1` -> treated as local (pins the v2 omission);
+8. **`ensureGsis` still retries after the refactor** - a stub whose
+   `UpdateTable` throws `InternalFailure` then succeeds. Without this the
+   mission could silently disarm the only retry that exists today while
+   adding one that never fires.
 
 ## Item 1B - groupCrossCheck: measure, do not pre-rewrite
 
 The anchor lists suite A's remaining remedy as "make the ordering/window
 assertions robust to latency", on evidence that it "FAILS ALONE,
-sometimes". **That evidence predates two fixes now in that file**: the
+sometimes". **That evidence predates two fixes now in the file**: the
 injected `cleanupMs` - which is the ROOT CAUSE the issue itself identifies
 for the solo failures, a TTL time bomb rather than latency - and the
-`afterEach` partition drain. The file also mints a unique rail per test and
-filters every assertion to it.
+`afterEach` partition drain.
 
-- **Measure both arms.** 10 consecutive SOLO runs of
-  `app/test/groupCrossCheck.test.ts`, AND its behaviour across the three
-  contended full runs of item 1D. The solo arm alone cannot settle a
-  latency question, because it removes the latency by construction.
-- **If neither arm fails: that is the deliverable.** Record the runs and
-  strike the "latency-robust assertions" remedy as superseded by the TTL
-  fix, naming the evidence.
+- **Measure both arms.** 10 consecutive SOLO runs of the file, AND its
+  behaviour across the contended full runs of item 1D. The solo arm alone
+  cannot settle a latency question, because it removes the latency by
+  construction.
+- **If neither arm fails: that is the deliverable.** Strike the remedy as
+  superseded by the TTL fix, naming the evidence.
 - **If either fails: diagnose to root cause before editing.** No widening
-  of windows or timeouts as a first move - the anchor's history is a record
-  of that lever being pulled and the symptom returning under a new name.
+  of windows or timeouts as a first move.
 
 ## Item 1C - what `AWS_ACCESS_KEY_ID=hccleanrun001` actually does now
-
-**This item inverted under review, and the inversion is the finding.**
 
 `AGENTS.md` opens its `npm test` guidance with "re-run under a clean access
 key before blaming anything", citing 607s / 9 failures versus 65s / 0. The
 mental model is "a fresh key means an empty database, free of residue".
 
-Under per-file keys that model is wrong.
+**Under per-file keys that model is wrong.**
 `accessKeyForTestFile` (`app/test/setup/dynamoAccessKey.ts:118-120`)
 returns the explicit key for EVERY test file, so exporting
 `AWS_ACCESS_KEY_ID` collapses all ~53 integration suites back onto ONE
-database and one `queueLock`. That is not a clean-database arm - **it is
-precisely the OLD arm of the experiment that justified per-file keys**, the
-one that measured 446-509s against 75-95s.
+database and one `queueLock`. That is not a clean-database arm - it is
+**the OLD arm of the experiment that justified per-file keys**, the one
+that measured 446-509s against 75-95s.
 
 So the recipe now recommends the worse configuration while describing it as
-the clean one. Its 65s figure came from a regime where a fresh key really
-did mean a fresh single database; today the default path is already
-per-file, and the explicit key undoes it.
+the clean one. **This is established by reading the code.** The
+measurement's only job is to date the claim to THIS container - the anchor
+already ran the full experiment at its `:293-301`, and re-deriving a
+settled result would be ceremony.
 
-**This is established by reading the code, not by measurement.** The
-measurement's job is only to quantify the current gap, so the rewritten
-paragraph carries a number from this container rather than from the
-`-inMemory` era.
-
-### The measurement
-
-Two arms, app workspace only (matching AGENTS.md's own `cd app && npx
-vitest run`, not the five-workspace root script), **3 runs each**:
+**Two arms, app workspace only** (matching AGENTS.md's own
+`cd app && npx vitest run`, not the five-workspace root script), **2 runs
+each**:
 
 | arm | bash | PowerShell |
 |---|---|---|
 | default, per-file keys | `cd app && npx vitest run` | `cd app; npx vitest run` |
 | explicit shared key | `cd app && AWS_ACCESS_KEY_ID=hccleanrun001 npx vitest run` | `cd app; $env:AWS_ACCESS_KEY_ID='hccleanrun001'; npx vitest run` |
 
-Record per run: wall clock, exit code, failing FILE names, and the
-contention snapshot defined in 1D.
+Three confounds are recorded, not assumed away:
 
-Three confounds are recorded rather than assumed away:
-
-- **`sweepLedgerResidue` runs on the way IN** (`globalSetup.ts`, sweep in
-  `globalTeardown.ts:20-25`). It is the prime alternative explanation for
-  the residue effect having already vanished, and must be named in the
-  rewritten paragraph if the numbers no longer reproduce.
+- **`sweepLedgerResidue` runs on the way IN** (`globalSetup.ts`, sweep at
+  `globalTeardown.ts:20-25`) - the prime alternative explanation for the
+  residue effect having already vanished. It must be named in the rewritten
+  paragraph if the numbers no longer reproduce.
 - **The sweep's MODE depends on concurrency** (`globalTeardown.ts:33-45`):
   under a live neighbour it spares young tables instead of dropping them.
-  Record which mode each run took - baseline and post-fix runs are
-  otherwise not held constant.
+  Record the mode per run.
 - **Arm 2 changes the test SET**, not only timings:
   `dynamoAccessKeyGuard.test.ts:308` skips its per-file assertions when an
-  explicit key is present. The skip-count delta is expected; it is not a
-  failure.
+  explicit key is present. The skip-count delta is expected, not a failure.
 
 ## Item 1D - the evidence protocol
 
-Three other missions share this machine and one DynamoDB Local container
-tonight. That load is the condition the anchor exists for, so it is the
-acceptance environment.
+**The protocol must not become the load it is measuring.** v2 mandated ~12
+full app runs; a reviewer correctly pointed out that this mission would
+then be the dominant load source, invalidating its own contention
+snapshots. Cut to the minimum that can carry a verdict:
+
+| arm | runs |
+|---|---|
+| baseline, base commit, contended | 3 |
+| post-fix, contended | 3 |
+| item 1C, two arms | 2 each |
+
+**Ordering is fixed: baseline FIRST**, while the neighbouring missions are
+still live, because that is the only arm whose value depends on the
+contention being real.
 
 **"Contended" is operationally defined** and captured immediately before
-and after every run in the record: the count of other live vitest runs
+and after every run: the count of other live vitest runs
 (`app/test/helpers/testRunRegistry.ts` already tracks this), the
 worktree-filtered node/playwright process count, and the DynamoDB Local
 container's CPU and RSS. A run whose snapshot shows no neighbours is
-labelled QUIET and cannot stand as contended evidence.
+labelled QUIET.
+
+**Fallback, because the neighbours will finish.** If the post-fix arm can
+only be run QUIET, say so plainly and report the comparison as
+baseline-contended vs post-fix-quiet - clearly labelled as the weaker
+comparison it is. **Do not fabricate load** to match the baseline, and do
+not silently drop the label.
 
 1. **Install first.** `npm install` in this worktree BEFORE the baseline,
    plus one discarded warm-up run - otherwise the baseline pays a cold
-   install and a cold transform cache and the wall-clock comparison is
+   install and cold transform cache and the wall-clock comparison is
    meaningless.
-2. **BASELINE at the base commit, contended.** 3 full `npm test` runs from
-   this worktree before any edit. Exit code, wall clock, failing FILES.
-3. **The same 3 runs after the fix**, under a recorded contention
-   snapshot. Both sets appear in the handback.
-4. **The 1C comparison** as its own pair of 3-run arms.
-
-Single observations prove nothing about an intermittent fault - the
-anchor's own record has a green OLD arm 2 runs in 3. **Wall clock and
-failing FILE names are the durable signals; pass/fail on one run is not.**
+2. Single observations prove nothing about an intermittent fault. **Wall
+   clock and failing FILE names are the durable signals; pass/fail on one
+   run is not.**
 
 Hard constraints:
 
-- **The shared container may NOT be restarted** while the other three
-  missions are live. If the database-count axis is the blocker, measure it,
-  say so, and stop there.
+- **The shared container may NOT be restarted** while the other missions
+  are live. If the database-count axis is the blocker, measure it, say so,
+  and stop there.
 - **Never run a full e2e suite and an interactive session at once from
   this worktree.** Confirm no orphaned listener on the lane's ports before
   each e2e run - `reuseExistingServer` adopts an orphaned stack on a commit
   match alone.
-- **Do NOT set `E2E_CHILD_LOG_DIR`.** These are timing-sensitive symptoms;
-  piping a child's stdout makes `isTTY` false and block-buffers the stream,
-  changing the timings being measured. A trace is the artifact.
+- **Do NOT set `E2E_CHILD_LOG_DIR`.** Piping a child's stdout makes
+  `isTTY` false and block-buffers the stream, changing the timings being
+  measured. A trace is the artifact.
 - **Gates run BARE, under the DEFAULT per-file keys.** The clean-key run is
-  EVIDENCE, never a gate. `_CLUSTERS.md:235-237` suggests running M7's
-  gates under the clean key; that advice is superseded by item 1C's
-  finding and the supersession is recorded there.
+  EVIDENCE, never a gate.
 - **Adjudicating a contended gate-2 red**: re-run the failing FILES alone,
   run the full suite at the merge base, compare failing FILES rather than
-  failing cases, and report both runs.
+  failing cases, report both runs.
 
 ## Item 2 - logCallSiteGuard's self-defeating budget
 
-**Problem.** `app/test/logCallSiteGuard.test.ts` does its work in one
-`beforeAll` (`:140`) with a 180s budget (`:143`). Measured 2026-08-26 the
-file ran 196.2s ALONE on a clean key. Under any load it fails as
-`Hook timed out in 180000ms` with zero assertion failures. It touches no
-database, so it is a different mechanism from item 1 that presents
-identically.
+`app/test/logCallSiteGuard.test.ts` does its work in one `beforeAll`
+(`:140`) with a 180s budget (`:143`). Measured 2026-08-26 the file ran
+196.2s ALONE on a clean key. Under load it fails as `Hook timed out in
+180000ms` with zero assertion failures. It touches no database, so it is a
+different mechanism from item 1 that presents identically.
 
-### Correction: where the cost is NOT
+### Where the cost is NOT
 
-The v1 spec named `ts.getPreEmitDiagnostics` as the likely dominant cost
-and proposed cutting it. **It is not in the hook.** It runs inside the
-first `it` (`:152`), not the `beforeAll` (`:140-143`). Cutting it would
-remove exactly zero hook cost and would not have moved the failing
-timeout at all.
-
-Two independent reviewers caught this, and the arithmetic settles it
-without a measurement: the three `it`s run under `testTimeout: 60_000`
-(`vitest.config.ts:60`), so against the reported 179.1s aggregate the
-**hook is at least ~2/3 of the cost**. The hook contains exactly
-`buildProgram(true)` and `scanProgram`.
+The v1 spec named `ts.getPreEmitDiagnostics` as the dominant cost and
+proposed cutting it. **It is not in the hook** - it runs inside the first
+`it` (`:152`). Cutting it would have removed exactly zero hook cost.
+Arithmetic settles the rest without measuring: the three `it`s run under
+`testTimeout: 60_000`, so against the 179.1s aggregate the **hook is at
+least ~2/3 of the cost**. The hook is exactly `buildProgram(true)` plus
+`scanProgram`.
 
 ### Step 1: split the hook
 
-Instrument the two phases INSIDE the hook - `buildProgram` versus
-`scanProgram` - which is the split that is genuinely unknown. Also time
-the health `it` separately, because of step 4. The instrumentation is a
-MEASUREMENT: it is recorded in the mission records and removed before
-handback.
+Instrument `buildProgram` versus `scanProgram` inside the hook - the split
+that is genuinely unknown - and time the health `it` separately for step 4.
+The instrumentation is a MEASUREMENT: recorded in the mission records,
+removed before handback.
 
 ### Step 2: cut the measured dominant phase
 
-The remedy follows the measurement rather than preceding it.
-
-- If **`buildProgram`** dominates: the program is built over the real
-  `app/tsconfig.json` with a full `createCompilerHost`. Options are a
-  cheaper host (no type-checking services the scan does not use) or
-  narrowing the program's roots - constrained by the guard's own stated
-  requirement that it scan the REAL program, not a toy one.
-- If **`scanProgram`** dominates: the cost is in `checker` calls -
-  `isErrorTyped` calls `getTypeAtLocation` on every candidate node.
-  `isCatchDeclared` is purely syntactic and carries most of the guard's
-  value; ordering the cheap syntactic test first and short-circuiting is
-  the obvious cut, and it changes no result because the two are OR'd.
+- If **`scanProgram`** dominates: the cut is NOT reordering the
+  `isCatchDeclared || isErrorTyped` test - **`:98` and `:106` already
+  short-circuit**, which v2 missed. The real cost is the EAGER checker call
+  at `:97`: `getShorthandAssignmentValueSymbol` runs before `legal` is
+  consulted, so the checker is invoked even for a wired key that cannot
+  produce a finding. Hoist the `legal` test above it. This changes no
+  result.
+- If **`buildProgram`** dominates: **no remedy is pre-committed.** v2
+  proposed two that do not exist - `createCompilerHost` has no
+  type-checking to remove, and `include: ["src"]` leaves no roots to
+  narrow. Measure it, report it, and bring the remedy back as a decision.
 
 ### Step 3: the health probe may NOT be hollowed out
 
-The v1 spec argued the existing `sourceCount > 50` assertion already
-catches "the program resolved nothing". **It does not.**
-`app/tsconfig.json` is `"include": ["src"]`, so every file under `app/src`
-is a program ROOT and is counted regardless of whether its imports
-resolve. TS2307 covers a shape `sourceCount` structurally cannot see.
+The v1 argument that `sourceCount > 50` already catches "resolved nothing"
+is false: `app/tsconfig.json` is `"include": ["src"]`, so every file under
+`app/src` is a program ROOT and is counted regardless of whether its
+imports resolve. TS2307 covers a shape `sourceCount` structurally cannot.
 
-So the TS2307 probe is load-bearing. If it is replaced with something
-cheaper, **the replacement is validated by deliberately breaking module
-resolution and proving the probe still fails** - not by reasoning about
-it. If no cheaper probe survives that test, it stays as it is.
+The probe is load-bearing. Any cheaper replacement is validated by
+**deliberately breaking module resolution and proving the probe still
+fails** - not by reasoning. If none survives that test, it stays.
 
 ### Step 4: budget BOTH clocks
 
-- The hook budget becomes at least **4x** the new measured cost, with a
-  **ceiling of 600s** - past that, a 10-minute hook in a required gate is
-  its own problem and the item reports rather than ships it.
-- **The health `it` has its own exposure**: it runs under the shared
-  `testTimeout: 60_000` and carries `getPreEmitDiagnostics`, a whole-program
-  type-check. If step 1 measures it anywhere near 60s it gets an explicit
-  per-test budget on the same 4x rule. Missing this would fix the hook and
-  leave the next false red one line below it.
-- Every shipped budget comment cites **only what this mission measured
-  directly**, with its date. The 196.2s / 179.1s figures are inherited and
-  aggregate hook plus tests; they are context, not the justification.
+- Hook budget >= **4x** the new measured cost, **ceiling 600s**. Past that,
+  a ten-minute hook in a required gate is its own problem and the item
+  reports rather than ships it.
+- **The health `it` has its own exposure**: it runs under
+  `testTimeout: 60_000` and carries a whole-program type-check. If step 1
+  measures it near 60s it gets an explicit per-test budget on the same 4x
+  rule. Missing this would fix the hook and leave the next false red one
+  line below it.
+- Shipped budget comments cite **only what this mission measured
+  directly**, with the date. The inherited 196.2s / 179.1s figures
+  aggregate hook plus tests; they are context, not justification.
 
-**Fallback.** If the cost cannot be brought materially below ~196s, raise
-the budget to >= 4x measured (within the ceiling) and record why the cut
-failed. A justified large budget beats an unjustified small one.
+**Fallback.** If the cost cannot come materially below ~196s, raise the
+budget to >= 4x measured within the ceiling and record why the cut failed.
 
-**Out of scope:** giving the guard its own vitest project or lane.
+**Out of scope:** a separate vitest project or lane for the guard.
 
 ## Item 3 - staticSmoke must not depend on a gitignored artifact
 
-**Problem, in the human's framing:** a branch is green because the
-dashboard happened to be built in that worktree, and the same code reds on
-main where the build is stale. The colour tracks an untracked artifact, so
-neither green nor red carries information.
+A branch is green because the dashboard happened to be built in that
+worktree, and the same code reds on main where the build is stale. The
+colour tracks an untracked artifact, so neither colour carries information.
 
-Today the guard checks existence only (`:19`, `:28`). Absent dist -> clean
-skip. STALE dist -> the suite runs and fails, naming the manifest path, so
-the natural first move is to read PWA code that is fine.
+Today the guard checks existence only (`:19`, `:28`). Absent -> clean skip.
+STALE -> the suite runs and fails, naming the manifest path, so the natural
+first move is to read PWA code that is fine.
 
-`npm run smoke` cannot fix this: it builds the APP workspace
-(`package.json:68`), not the dashboard, and it runs AFTER `npm test`.
+`npm run smoke` cannot fix it: it builds the APP workspace
+(`package.json:68`), not the dashboard, and runs AFTER `npm test`.
 
 ### (a) App-serving behaviour -> a fixture the test writes. NEVER skips.
 
-The SPA fallback, reserved namespaces, hardening headers, both CSP
+SPA fallback, reserved namespaces, hardening headers, both CSP
 media-bucket shapes, the runtime `/app-identity/*` endpoints and the
-path-traversal probes are APP behaviour. They need SOME `index.html`.
-`devGating.test.ts:249-251` and `unitMediaServe.test.ts:171-173` already
-use a `mkdtemp` fixture for exactly this.
+path-traversal probes are APP behaviour needing SOME `index.html`.
+`devGating.test.ts:249-251` and `unitMediaServe.test.ts:171-173` already do
+this with `mkdtemp`.
 
-This is a coverage GAIN: today every one of those cases silently skips on
-any checkout where nobody built the dashboard - including this worktree.
+A coverage GAIN: today all of those silently skip on any checkout where
+nobody built the dashboard - including this worktree.
 
-**Fixture contents are specified, not left to the builder.** The fixture
-`index.html` must carry `HousingChoice` and `<div id="root">`, because
-existing assertions at `:41`, `:108`, `:165` and `:85` depend on them.
+**Fixture contents are specified.** The fixture `index.html` must carry
+`HousingChoice` and `<div id="root">`, because assertions at `:41`, `:108`,
+`:165` and `:85` depend on them.
 
-**The traversal decoy is placed against the actual probe strings.** The
-probes at `:148-154` escape TWO levels (`/%2e%2e%2f%2e%2e%2fpackage.json`)
-and THREE (`/assets/%2e%2e%2f%2e%2e%2f%2e%2e%2fpackage.json`) above the
-served root. The v1 spec planted one decoy one level up, which would have
-left every "no leak" assertion vacuous - the exact tautology it claimed to
-prevent. So the fixture is nested `<tmp>/x/y/dist/` with a decoy
-`package.json` containing `"version"` and `"private"` at BOTH `<tmp>/x/y/`
-and `<tmp>/x/`, so each probe depth has something real to find.
+**Traversal decoys are placed against the actual probe strings.** The
+probes at `:148-154` escape TWO levels
+(`/%2e%2e%2f%2e%2e%2fpackage.json`); the `/assets/...` probe at `:153`
+prefixes a path segment that `express.static` resolves within the same
+root, so it reaches the same depth rather than a third level. v2's single
+decoy one level up would have left every "no leak" assertion vacuous - the
+exact tautology it claimed to prevent. The builder places a decoy
+`package.json` containing `"version"` and `"private"` at **each depth the
+probe strings actually reach**, verified by asserting the decoy IS readable
+from disk at that path before asserting the server does not serve it. A
+decoy nobody can reach proves nothing.
 
 ### (b) The PWA identity contract -> tracked source. NEVER skips.
 
 `dashboard/index.html` is version-controlled, identical in every worktree,
-and is the file `2210f671` actually changed. The contract asserted there is
-the exact set:
+and is the file `2210f671` changed. The contract is exactly:
 
 - contains `href="/app-identity/manifest.webmanifest"`
 - contains `rel="icon" href="/app-identity/icon-192.png"`
@@ -428,36 +452,48 @@ the exact set:
 
 ### (c) The real build -> a diagnostic that can PASS or SKIP, never FAIL.
 
-When `dashboard/dist/index.html` exists, compare the five identity
-conditions above against it. Vite copies those link tags through
-untransformed. Only those five are compared - a Vite build also injects
-hashed asset tags and, under e2e, an `x-app-commit` meta, none of which are
-part of the contract.
+When `dashboard/dist/index.html` exists, compare those five conditions
+against it. Vite copies the link tags through untransformed; only those
+five are compared, since a build also injects hashed asset tags and, under
+e2e, an `x-app-commit` meta.
 
-**The mtime tie-breaker from v1 is deleted.** Git does not preserve
-mtimes, so a fresh clone, a new worktree, or the mission's own mandated
-`main` sync would rewrite `dashboard/index.html`'s mtime and silently flip
-a genuine failure into a skip. A predicate that the required workflow
-itself defeats is worse than no predicate.
-
-Without it the test cannot distinguish a stale build from a Vite
-regression - so it says so instead of guessing:
+**v2's mtime tie-breaker is deleted.** Git does not preserve mtimes, so a
+fresh clone, a new worktree, or this mission's own mandated `main` sync
+would rewrite `dashboard/index.html`'s mtime and silently flip a genuine
+failure into a skip. A predicate the required workflow itself defeats is
+worse than none.
 
 | dist state | outcome |
 |---|---|
 | absent | SKIP - "no built dashboard; run `npm run build -w dashboard`" |
-| present, all five conditions hold | PASS |
-| present, any condition fails | SKIP - "your `dashboard/dist` disagrees with `dashboard/index.html`: it is either stale or the dashboard build dropped the identity tags. Run `npm run build -w dashboard` and re-run." |
+| present, all five hold | PASS |
+| present, any fails | SKIP - see the message below |
 
-**Nothing in the gate chain builds `dashboard/dist`, and this worktree has
-none**, so (c)'s live branches would otherwise never execute. The mission
-therefore runs `npm run build -w dashboard` ONCE, by hand, and records
-both branches observed: the PASS on a current build, and the SKIP-with-
-message after mutating a copy of the built `index.html`.
+**The SKIP message must not send an operator round a loop.** If the
+dashboard build itself drops the tags, rebuilding reproduces the same skip
+forever. So the message says both causes and what distinguishes them:
+"`dashboard/dist` disagrees with `dashboard/index.html`. Most likely the
+dist is stale - run `npm run build -w dashboard`. **If a fresh build still
+reports this, the dashboard BUILD is dropping the identity tags, which is a
+real regression** - see `docs/issues/<slug>.md`."
 
-**Why this kills the class.** No outcome depends on an untracked artifact.
-Absent and disagreeing both skip; the only red left in this file comes from
-(a) or (b), which read tracked files identical on the branch and on main.
+**The honest cost, and it is filed rather than hidden.** With (c) unable to
+fail, **nothing anywhere asserts the BUILT dashboard's identity tags** - a
+`vite build` regression would go undetected indefinitely. That coverage
+cannot be recovered without building the dashboard inside a gate, which was
+considered and not chosen. So a Tier-2 issue records the gap, names the
+remedy (`npm run build -w dashboard` wired into the app workspace's pretest
+or `globalSetup`) and its cost (~15-40s on every `npm test`, on every
+branch, including the many that never touch the dashboard). An invisible
+gap becomes a tracked one.
+
+**(c)'s live branches must be observed, not assumed.** Nothing in the gate
+chain builds `dashboard/dist` and this worktree has none, so the mission
+runs `npm run build -w dashboard` ONCE by hand and records both branches:
+the PASS on a current build, and the SKIP-with-message after editing the
+built `dashboard/dist/index.html` in place (then restoring it). `distDir`
+is a fixed path at `:18`, so in-place mutation is the only available seam -
+the file is gitignored, so nothing is at risk.
 
 ## What this mission does NOT do
 
@@ -465,11 +501,11 @@ Absent and disagreeing both skip; the only red left in this file comes from
 - No container restart, no `db:stop` / `db:start`, no table sweeps outside
   this worktree's own lane.
 - No e2e harness changes; no new vitest project or lane.
-- No timeout or budget changes in `seedLive`, `seedProfile.integration` or
-  `unreadIndexRepo.integration` beyond routing the raw `CreateTable` at
-  `unreadIndexRepo.integration.test.ts:728` through the retry helper. C and
-  D are fixed per the record (per-test budgets); they are WATCH-ONLY, and
-  any further edit is a separate decision.
+- No changes to `seedLive`, `seedProfile.integration` or
+  `unreadIndexRepo.integration`. They are WATCH-ONLY; any edit is a
+  separate decision.
+- No fix for the `globalSetup` TTL re-enable or the built-dashboard
+  coverage gap - both are FILED, not built.
 - No merge, no deploy, no infrastructure, no cleanup.
 
 ## Deliverables
@@ -477,16 +513,20 @@ Absent and disagreeing both skip; the only red left in this file comes from
 1. The three code changes, each with the measurement that justifies it.
 2. `docs/issues/` closures: Resolution stamps on all three files, written
    against measured evidence. **The anchor closes only if its measurements
-   support it**; if the class survives, it stays open with the new numbers
-   and the mission says so.
-3. `npm run issues` re-run (regenerates the gitignored `INDEX.md`).
-4. **`AGENTS.md`'s "FIRST, if `npm test` is red on DynamoDB Local suites"
-   paragraph rewritten to what item 1C establishes** - that an explicit
-   `AWS_ACCESS_KEY_ID` collapses per-file isolation rather than providing a
-   clean database - and to the numbers this container actually produces.
-   Only what is proven. Guessing here would re-create the exact problem
-   this mission closes.
-5. Mission records committed to
+   support it**; if the class survives it stays open with the new numbers.
+3. **Two NEW Tier-2 issue files**, from `docs/issues/_TEMPLATE.md`:
+   - `globalSetup` re-enables TTL on the shared `hc-local-` tables every
+     run, defeating `DYNAMO_DISABLE_TTL` for those suites;
+   - no gate asserts the BUILT dashboard's PWA identity tags.
+4. **An edit to `docs/issues/_CLUSTERS.md`'s M7 entry** superseding its
+   "run its gates under a clean access key" advice, which item 1C shows
+   recommends the worse configuration. Asserting the supersession in a
+   review record is not a deliverable; changing the file is.
+5. `npm run issues` re-run (regenerates the gitignored `INDEX.md`).
+6. **`AGENTS.md`'s "FIRST, if `npm test` is red on DynamoDB Local suites"
+   paragraph rewritten** to what item 1C establishes, and to the numbers
+   this container actually produces. Only what is proven.
+7. Mission records committed to
    `docs/superpowers/reviews/2026-08-31-npm-test-soundness/` as produced.
 
 ## Gates
@@ -502,24 +542,24 @@ pre-handback:
 
 Gate 5 is no NEW lint errors in TOUCHED files, attributed by baseline
 comparison at the merge base - never by line number. The config lints
-`.ts`/`.tsx` only, so a green result on a `.mjs` path checked nothing.
+`.ts`/`.tsx` only.
 
 ## Risks and watch items
 
 - **Retrying can mask.** The local-endpoint gate is the only thing keeping
-  the retry out of any path that could reach real AWS, and test (5) is the
-  only thing proving the gate is not inert. Attack both.
-- **Cutting the health probe can hollow the guard.** Any replacement must
-  be proven by deliberately breaking module resolution.
-- **A fixture can make an assertion tautological.** This already happened
-  once in v1 with the traversal decoy. Anything a fixture-based assertion
-  would only be asserting back at itself belongs in (b).
-- **Measurement under shared load is noisy**, and the mission's own edits
-  change the machine's load. Report run counts and contention snapshots,
-  never a single observation.
+  the retry off any path that could reach real AWS, and acceptance cases 5
+  and 6 are the only things proving the gate is not inert.
+- **The refactor can disarm the working retry.** Case 8 exists solely for
+  that, and it is the difference between improving the harness and
+  quietly regressing it.
+- **A fixture can make an assertion tautological.** This has already
+  happened twice in this document - v1's traversal decoy and v2's
+  replacement. Verify the decoy is reachable before asserting it is not
+  served.
+- **Measurement under shared load is noisy, and this mission is part of the
+  load.** Report run counts and contention snapshots; label a QUIET arm as
+  QUIET.
 - **`groupCrossCheck` has been misdiagnosed three times.** Do not add a
-  fourth explanation without evidence that survives isolation AND load.
-- **This mission's changes touch the harness every other mission is being
-  gated by.** A defect here fails other people's branches, not just this
-  one. That is the argument for test (5) and for the enumerated
-  covered/not-covered table rather than a blanket retry.
+  fourth explanation without evidence surviving isolation AND load.
+- **These changes touch the harness every other mission is gated by.** A
+  defect here fails other people's branches, not just this one.

@@ -10,8 +10,17 @@ Plan: `docs/superpowers/plans/2026-09-01-participant-snapshot-refresh.md` (v2).
 ## Verdict
 
 MERGE-READY @16df7dfa on feat/participant-snapshot-refresh
-(W:\tmp\participant-snapshot-refresh), 0 behind main (synced @1ce48fef),
-UNMERGED (human gate).
+(W:\tmp\participant-snapshot-refresh), UNMERGED (human gate). Gates were run
+and are green at 16df7dfa; the commits above it are review records only
+(handback + this drift note).
+
+MAIN DRIFT AFTER THE SYNC (reported, not chased, per the one-sync rule):
+while the final gate battery ran, main advanced 3 commits - 065258b9
+feat(relay) "It's Sam." intro copy (code: app/src/messages/catalog.ts +
+app/test/relayFanOut.test.ts) plus two docs-only retirements (725a8746,
+b1dc8489). ZERO file intersection with this branch's 32 touched code files
+(verified by set comparison); outbound intro copy is exactly the surface this
+branch excludes by decision 6, so the merge should be clean.
 
 NO infra / post-merge ops owed: no dependency changes (no npm install), no
 terraform, no secrets, no restart/reseed, no data backfill (this branch

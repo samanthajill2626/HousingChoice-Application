@@ -1004,10 +1004,13 @@ describe('composed reminder bodies', () => {
       updated_at: '2026-07-13T00:00:00.000Z',
     });
     const reminderId = `rem-composed-${suffix}`;
+    // morning_of is the LIVE ladder kind whose copy renders the address clause
+    // ({addressLine}); the anti-vacuity assertion below needs a rung that
+    // actually prints the street, so the kind is load-bearing here.
     seedReminder(world, {
       reminderId,
       tourId,
-      kind: 'confirmation',
+      kind: 'morning_of',
       dueAt: '2026-01-10T10:00:00.000Z',
     });
     return { tourId, reminderId };
@@ -1055,7 +1058,7 @@ describe('composed reminder bodies', () => {
 
     // The OTHER half of the rule: a rung that was never claimed has no sentBody,
     // so it must keep composing LIVE and follow the tour to its new time. Its
-    // dueAt sits far past the confirmation's, so the send run below never
+    // dueAt sits far past the composed rung's, so the send run below never
     // claims it (and it is not in that release batch, so nothing supersedes it).
     const pendingId = 'rem-composed-history-pending';
     seedReminder(world, {

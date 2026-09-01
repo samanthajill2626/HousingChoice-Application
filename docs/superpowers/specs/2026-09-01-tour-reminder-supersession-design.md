@@ -243,13 +243,18 @@ block is shorter than 48px. The pill lights only on `null`; the pin never fires
 on `null`.
 
 **Every scroll WRITER must be converted, not just the growth pin.** The spec's
-earlier drafts specified one of five:
+earlier drafts specified one of six:
 
 - the growth pin (`:1911`) - anchor-driven, per the table above;
 - the conversation-switch reset (`:1890`, `scrollTop = scrollHeight`) - must
   target the SENTINEL, or every thread opens scrolled onto the Upcoming block
-  and acceptance 12 fails on open;
-- the post-send pin (`:1976`) - same, targets the sentinel;
+  and acceptance 13 fails on open;
+- the pill's own `scrollToBottom` (`:1840-1846`, its onClick) - targets the
+  sentinel, not `scrollHeight`, or the pill delivers the operator to the block
+  instead of the newest message; it also writes the flag being replaced;
+- the post-send pin (`:1976`, an `atBottomRef` write, not a scroll write) -
+  becomes an anchor write of `sentinel`, so the next growth pin lands on the
+  sentinel;
 - the pill-clear condition (`:1853`) - clears on `sentinel` or `below`, not on
   true-bottom;
 - the prepend restore (`:1900`) - anchored to prepended height, unaffected, and
@@ -365,7 +370,9 @@ and name.
     exactly as on `main`.
 13. Opening a conversation lands on the newest MESSAGE, not on the Upcoming
     block; the same after sending a message.
-14. On a 390px viewport, in a thread whose messages OVERFLOW the stream, at rest
+14. On the harness's narrow phone viewport (`NARROW_360`, 360px - the one
+    definition `e2e/support/viewport.ts` owns), in a thread whose messages
+    OVERFLOW the stream, at rest
     the view shows more messages than `main` and no Upcoming block; scrolling
     down reveals it; scrolling up removes it. (A thread shorter than the
     viewport has nothing to scroll and shows the block - correct.)

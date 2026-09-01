@@ -1362,6 +1362,74 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up[1]!.suppression).toEqual({ reason: 'contact_opted_out' });
   });
 
+  // SUPERSEDED rungs (spec 3.3, S6 T6.2). The SECOND preview surface, and the
+  // one furthest from the tour: a navigator reading a contact page has no way
+  // to know the tour was rescheduled, so a rung of a replaced ladder promising
+  // "sends in 3h" here is the lie in its purest form. Same shared predicate as
+  // the poll and the panel (lib/ladderPointer.ts) - the three cannot disagree.
+  it('marks a pointer-mismatched pending rung `superseded` on the timeline', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600051';
+    world.contacts.push({ contactId: 'ct-sup', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-sup', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-sup',
+      unitId: 'u-sup',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-tl-new' });
+    // LIVE kinds on both rungs: a discontinued kind would outrank the pointer
+    // check (it is tested ahead of it) and make this pass for the wrong reason.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+      ladderId: 'ladder-tl-old',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2099-01-09T10:00:00.000Z',
+      ladderId: 'ladder-tl-new',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-sup/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(2);
+    expect(up[0]!.reminderKind).toBe('day_before');
+    expect(up[0]!.suppression).toEqual({ reason: 'superseded' });
+    // ANTI-VACUITY: the current generation beside it still promises its send.
+    expect(up[1]!.reminderKind).toBe('morning_of');
+    expect(up[1]!.suppression).toBeUndefined();
+  });
+
+  it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed here either', async () => {
+    // Acceptance 12, on the surface with the most legacy rows behind it.
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600052';
+    world.contacts.push({ contactId: 'ct-sup-legacy', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-sup-legacy', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-sup-legacy',
+      unitId: 'u-sup-legacy',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-sup-legacy/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toBeUndefined();
+  });
+
   it('marks a paused NUDGE rung `paused` under the PRODUCTION hold-back', async () => {
     // The other ladder, held back since 2026-08-18. Its cards had the same
     // "sending shortly" lie until the tour pause brought the machinery in.

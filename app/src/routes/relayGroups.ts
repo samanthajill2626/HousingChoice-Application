@@ -70,6 +70,7 @@ import {
 } from '../lib/composeFailTally.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import { resolveTourContactNames } from '../lib/tourContacts.js';
+import { isSupersededRung } from '../lib/ladderPointer.js';
 import {
   DISCONTINUED_REMINDER_KINDS,
   readQuietHoursWindow,
@@ -340,9 +341,31 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         // ScheduledCard the contact timeline renders, while both other surfaces
         // said it will never go out. The note above about member-level opt-out
         // still stands and is why nothing ELSE is evaluated here.
-        ...(DISCONTINUED_REMINDER_KINDS.has(row.kind) && {
-          suppression: { reason: 'discontinued' as const },
-        }),
+        //
+        // THE SECOND exception (supersession spec 3.3, S6 T6.3): a rung whose
+        // `ladderId` no longer matches the owner tour's `currentLadderId`. It
+        // earns its place on the same two grounds as the first. It costs no
+        // recipient IO and no evaluator - the tour was already read at the top
+        // of this handler, so the compare is free - and without it a
+        // rescheduled tour's surviving old rungs would go on promising "sends
+        // in Nh" in this relay thread, through the SAME ScheduledCard, while
+        // the tour panel and the contact page both called them Replaced. The
+        // lie would also be a LONG one: `listDue` picks a row up only at
+        // `dueAt <= now`, so nothing retires it until the moment it would have
+        // fired. Ordered FIRST because a replaced generation is a fact about
+        // this row's storage, where `discontinued` is a fact about its kind;
+        // the spread below is skipped whenever this one applies, so the two
+        // cannot both annotate one card. The comparison itself is the SHARED
+        // one (lib/ladderPointer.ts) - the poll and all three preview surfaces
+        // call the same function, pre-migration exemption included, which is
+        // the only way four sites cannot disagree about one row. The
+        // member-level opt-out note above still stands and is still why nothing
+        // ELSE is evaluated here.
+        ...(isSupersededRung(row, tour)
+          ? { suppression: { reason: 'superseded' as const } }
+          : DISCONTINUED_REMINDER_KINDS.has(row.kind) && {
+              suppression: { reason: 'discontinued' as const },
+            }),
         conversationId,
         refType: 'tour' as const,
         refId: tour.tourId,

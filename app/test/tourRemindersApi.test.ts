@@ -100,6 +100,10 @@ function seedReminder(
     canceledAt?: string;
     skippedAt?: string;
     skipReason?: TourReminderItem['skipReason'];
+    /** The generation this rung was armed by (supersession S1). OMITTED by
+     *  default, which - paired with a tour that has no `currentLadderId` - is
+     *  the PRE-MIGRATION exemption every legacy case in this file relies on. */
+    ladderId?: string;
   },
 ): void {
   const item: TourReminderItem = {
@@ -109,6 +113,7 @@ function seedReminder(
     dueAt: input.dueAt,
     _reminderPartition: 'reminders',
     createdAt: '2026-07-13T00:00:00.000Z',
+    ...(input.ladderId !== undefined && { ladderId: input.ladderId }),
     ...(input.sentAt !== undefined && { sentAt: input.sentAt }),
     ...(input.canceledAt !== undefined && { canceledAt: input.canceledAt }),
     ...(input.skippedAt !== undefined && { skippedAt: input.skippedAt }),
@@ -942,6 +947,105 @@ describe('GET /api/tours/:tourId/reminders', () => {
         kind: 'confirmation',
         dueAt: isoHoursFromNow(-48),
         sentAt: isoHoursFromNow(-47),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const sent = (
+        res.body.reminders as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'sent');
+      expect(sent?.suppression).toBeUndefined();
+    });
+  });
+
+  // SUPERSEDED rungs (spec 3.3, S6 T6.1). The FIRST of the three preview
+  // surfaces. `listDue` only picks a row up at `dueAt <= now`, so a rung whose
+  // ladder the tour has replaced would go on promising "sends in 6 days" until
+  // it came due - not until the next tick - while both send paths (the poll and
+  // Send now) already refuse it. The check runs AHEAD of `discontinued` for the
+  // same reason `discontinued` runs ahead of the evaluator: it is a fact about
+  // stored state that no recipient-side reason should override.
+  describe('superseded rungs', () => {
+    it('chips a pointer-mismatched pending rung `superseded`, and never hands it `next`', async () => {
+      const { app, world } = makeWebhookHarness();
+      // Quiet hours OFF: the current-generation rung below asserts NO
+      // suppression, and the default window would chip it at some hours.
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'sup-1', '+15550600051');
+      await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-panel-new' });
+      seedReminder(world, {
+        reminderId: 'rem-sup-old',
+        tourId,
+        kind: 'day_before',
+        // EARLIEST on the ladder, so it is what `next` would pick today - the
+        // panel would tag "Next" on the one row the same response calls
+        // Replaced.
+        dueAt: isoHoursFromNow(6),
+        ladderId: 'ladder-panel-old',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-sup-current',
+        tourId,
+        kind: 'morning_of',
+        dueAt: isoHoursFromNow(24),
+        ladderId: 'ladder-panel-new',
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const { reminders, next } = res.body as {
+        reminders: { reminderId: string; state: string; suppression?: { reason: string } }[];
+        next?: { reminderId: string };
+      };
+      const byId = new Map(reminders.map((r) => [r.reminderId, r]));
+      // ANTI-VACUITY: the chipped rung really is still upcoming and really is
+      // still the earliest - the exclusion is the point, not the fixture having
+      // gone terminal.
+      expect(reminders[0]?.reminderId).toBe('rem-sup-old');
+      expect(byId.get('rem-sup-old')?.state).toBe('upcoming');
+      expect(byId.get('rem-sup-old')?.suppression).toEqual({ reason: 'superseded' });
+      // The current generation beside it is left promising its send.
+      expect(byId.get('rem-sup-current')?.suppression).toBeUndefined();
+      expect(next?.reminderId).toBe('rem-sup-current');
+    });
+
+    it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed', async () => {
+      // Acceptance 12. Without the exemption a literal build chips every rung
+      // armed before this feature, on every tour, on its first read.
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'sup-2', '+15550600052');
+      seedReminder(world, {
+        reminderId: 'rem-legacy-1',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(6),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const { reminders, next } = res.body as {
+        reminders: { reminderId: string; suppression?: { reason: string } }[];
+        next?: { reminderId: string };
+      };
+      expect(reminders[0]?.suppression).toBeUndefined();
+      expect(next?.reminderId).toBe('rem-legacy-1');
+    });
+
+    it('a SENT rung of a replaced ladder carries no suppression (state wins, as everywhere else)', async () => {
+      // `suppression` is an `upcoming`-only annotation on this projection, and
+      // supersession must not become the one reason that leaks onto history.
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'sup-3', '+15550600053');
+      await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-panel-new-3' });
+      seedReminder(world, {
+        reminderId: 'rem-sup-sent',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(-48),
+        sentAt: isoHoursFromNow(-47),
+        ladderId: 'ladder-panel-old-3',
       });
 
       const res = await authed(app).get(`/api/tours/${tourId}/reminders`);

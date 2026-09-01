@@ -1451,14 +1451,26 @@ describe('relay-group API (M1.7)', () => {
       const conversationId = created.body.conversation.conversationId as string;
       await world.conversationsRepo.rebindOwner(conversationId, { type: 'tour', id: tour.tourId });
       await world.toursRepo.patch(tour.tourId, { groupThreadId: conversationId });
-      await armTourReminders(tour, '2026-08-01T10:00:00.000Z', {
+      const { ladderId } = await armTourReminders(tour, '2026-08-01T10:00:00.000Z', {
         tourRemindersRepo: world.tourRemindersRepo,
         // Not a quiet-hours case: the window is stubbed OFF so the ladder's
         // dueAts stay exactly the raw offsets this bucket asserts on.
         settingsRepo: quietOffSettingsRepo(),
         logger,
       });
-      return { tour, conversationId };
+      // POINT THE TOUR AT WHAT WAS JUST ARMED, exactly as routes/tours.ts does
+      // after its own arm (S3). This helper arms for REAL against a tour it
+      // builds by hand, so without the pointer write its rows are STAMPED on a
+      // POINTERLESS tour - the interrupted-pointer-write cell - and every rung
+      // in this bucket reads `superseded` instead of upcoming.
+      if (ladderId !== null) {
+        await world.toursRepo.patch(tour.tourId, { currentLadderId: ladderId });
+      }
+      // `ladderId` is returned so a case adding a row BY HAND can stamp it into
+      // the same generation. An unstamped row on a pointed tour is the
+      // interrupted-pointer-write cell, which reads `superseded` - correct, but
+      // not what a case about some OTHER annotation means to test.
+      return { tour, conversationId, ladderId };
     }
 
     it('returns the group-routed upcoming rungs (dueAt order, resolved bodies); sent rungs drop out', async () => {
@@ -1526,16 +1538,22 @@ describe('relay-group API (M1.7)', () => {
       // time, never the group send itself, and the placement-nudge twin owns
       // the rest of that gap.
       const { app } = authedHarness(world, makeFakePoolNumbers());
-      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      const { tour, conversationId, ladderId } = await seedTourGroup(app, 'landlord_led');
       // A PAUSE-ERA row, written directly: arming stopped 2026-08-31 (Phase B),
       // so `armTourReminders` above no longer produces one - and this surface
       // exists precisely for the rows that were armed BEFORE it stopped and are
       // still sitting pending until the sweep reaches them. dueAt is the old
       // arm instant, which is what those rows actually carry.
+      //
+      // STAMPED WITH THE CURRENT GENERATION (S6): the pointer check runs ahead
+      // of the kind check, so an unstamped row on this pointed tour would read
+      // `superseded` and this case would prove the wrong annotation. Its own
+      // subject is the KIND, so it is pinned to the live ladder deliberately.
       await world.tourRemindersRepo.create({
         tourId: tour.tourId,
         kind: 'confirmation',
         dueAt: '2026-08-01T10:00:00.000Z',
+        ...(ladderId !== null && { ladderId }),
       });
 
       const res = await request(app)
@@ -1555,6 +1573,67 @@ describe('relay-group API (M1.7)', () => {
           scheduled.find((s) => s.reminderKind === kind)?.suppression,
           kind,
         ).toBeUndefined();
+      }
+    });
+
+    // SUPERSEDED rungs (spec 3.3, S6 T6.3) - the SECOND exception this bucket
+    // makes to "no suppression annotations here". Same argument as the first:
+    // it costs no recipient IO, and this bucket renders through the same
+    // ScheduledCard as the contact timeline, so without it a rescheduled tour's
+    // old rungs would keep promising "sends in Nh" in the relay thread while
+    // both other surfaces called them Replaced.
+    it('a rung of a REPLACED ladder carries the superseded suppression; the current generation carries none', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // The tour was rescheduled: a newer arm won the pointer, and one rung of
+      // the previous generation survived the sweep. LIVE kinds throughout - a
+      // discontinued kind is checked ahead of the pointer and would make this
+      // pass for the wrong reason.
+      const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
+      const stale = rows.find((r) => r.kind === 'day_before')!;
+      world.tourRemindersMap.get(stale.reminderId)!.ladderId = 'ladder-group-old';
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled.find((s) => s.reminderKind === 'day_before')?.suppression).toEqual({
+        reason: 'superseded',
+      });
+      // ANTI-VACUITY: the rungs the pointer still names promise their sends.
+      for (const kind of ['morning_of', 'en_route']) {
+        expect(scheduled.find((s) => s.reminderKind === kind)?.suppression, kind).toBeUndefined();
+      }
+    });
+
+    it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed in this bucket', async () => {
+      // Acceptance 12. The helper above points its tour, so this case builds
+      // the pre-migration shape deliberately: pointer cleared, rows unstamped.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      const stored = world.toursMap.get(tour.tourId)!;
+      delete stored.currentLadderId;
+      for (const row of await world.tourRemindersRepo.listByTour(tour.tourId)) {
+        delete world.tourRemindersMap.get(row.reminderId)!.ladderId;
+      }
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled).toHaveLength(3);
+      for (const item of scheduled) {
+        expect(item.suppression, item.reminderKind).toBeUndefined();
       }
     });
 

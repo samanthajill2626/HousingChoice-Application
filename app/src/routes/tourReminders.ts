@@ -72,6 +72,7 @@ import {
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
 import { isQuietTime } from '../lib/quietHours.js';
+import { isSupersededRung } from '../lib/ladderPointer.js';
 import {
   flushComposeFailTally,
   newComposeFailTally,
@@ -639,20 +640,34 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
         // never send. Nor does it belong IN the shared ordering: that ladder's
         // rationale is that a harder reason wins, and "we no longer send this
         // at all" is not a suppression anything should override.
+        //
+        // SUPERSEDED is checked FIRST OF ALL (spec 3.3, S6). The tour is
+        // already in hand from the 404 gate above, so this costs no read. It
+        // outranks even `discontinued` because it is a fact about THIS row's
+        // storage rather than about its kind: a rung of a replaced ladder is
+        // one both send paths already refuse, and `listDue` only picks a row up
+        // at `dueAt <= now`, so without the check the panel would promise
+        // "sends in 6 days" right up to the moment the poll retired it. The
+        // comparison is the SHARED one (lib/ladderPointer.ts) - the poll and
+        // the other two preview surfaces call the same function, which is the
+        // only way four sites can be made unable to disagree about one row.
+        const superseded = isSupersededRung(row, tour);
         const discontinued = DISCONTINUED_REMINDER_KINDS.has(row.kind);
         const paused = manualOnlyKinds.has(row.kind);
         const suppression =
           state !== 'upcoming'
             ? undefined
-            : discontinued
-              ? ({ reason: 'discontinued' } as const)
-              : suppressionOf !== undefined
-                ? // en_route is exempt from quiet hours at BOTH runtime sites
-                  // (spec 6), so the estimate must not promise a wait here.
-                  suppressionOf(row.dueAt, paused, row.kind === 'en_route')
-                : paused
-                  ? ({ reason: 'paused' } as const)
-                  : undefined;
+            : superseded
+              ? ({ reason: 'superseded' } as const)
+              : discontinued
+                ? ({ reason: 'discontinued' } as const)
+                : suppressionOf !== undefined
+                  ? // en_route is exempt from quiet hours at BOTH runtime sites
+                    // (spec 6), so the estimate must not promise a wait here.
+                    suppressionOf(row.dueAt, paused, row.kind === 'en_route')
+                  : paused
+                    ? ({ reason: 'paused' } as const)
+                    : undefined;
         // Spec 8: an ADDITIVE boolean, never a fifth `state` value - two
         // predicates on this route test 'upcoming' by equality, and an
         // 'overdue' state would drop overdue rungs out of the very places that
@@ -683,8 +698,21 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // earliest rung on every ladder it sits on, and it stays pending until the
     // one-time sweep reaches it. Without this the panel would point a navigator
     // at the one row the same response chips "No longer sent".
+    //
+    // SUPERSEDED is excluded for the same reason and by the same shape (S6
+    // T6.1): a rung of a replaced ladder is still `upcoming`, and a rescheduled
+    // tour's OLD day_before is routinely the earliest row on the response - so
+    // without this the panel would tag "Next" on the one row it also chips
+    // "Replaced". Both exclusions read the ANNOTATION rather than recomputing
+    // their predicate, so a rung can only lose `next` for a reason the same
+    // response shows the operator. S7 makes this moot for supersession by
+    // partitioning such rows into `earlier[]`; the exclusion stays regardless,
+    // because `next` must never depend on a sibling task having run.
     const next = reminderViews.find(
-      (v) => v.state === 'upcoming' && v.suppression?.reason !== 'discontinued',
+      (v) =>
+        v.state === 'upcoming' &&
+        v.suppression?.reason !== 'discontinued' &&
+        v.suppression?.reason !== 'superseded',
     );
 
     log.info(

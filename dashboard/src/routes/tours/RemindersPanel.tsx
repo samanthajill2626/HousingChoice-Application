@@ -36,6 +36,7 @@ import {
   REMINDER_KIND_LABELS,
   REMINDER_SKIP_REASON_LABELS,
   REMINDER_SUPPRESSION_LABELS,
+  type TourReminderEarlierView,
   type TourReminderView,
   type TourUpdatedEvent,
 } from '../../api/index.js';
@@ -108,7 +109,11 @@ function StateChip({
   rung,
   timezone,
 }: {
-  rung: TourReminderView;
+  // Typed on the EARLIER view rather than on TourReminderView so the one chip
+  // ladder serves both lists: the earlier view is the wider of the two (`body`
+  // optional, everything else identical), so a current rung is assignable to
+  // it. The chip reads no body, so there is nothing to lose.
+  rung: TourReminderEarlierView;
   timezone?: string;
 }): React.JSX.Element {
   if (rung.state === 'sent') {
@@ -189,6 +194,12 @@ function StateChip({
  *  the effect body). */
 interface Committed {
   reminders: TourReminderView[];
+  /** Survivors of ladders this tour has replaced (supersession spec 3.4).
+   *  Lives HERE beside `reminders` rather than in its own state slot on
+   *  purpose: the two describe one response, so a refetch that clears one must
+   *  clear the other, and holding them in one object makes that structural
+   *  rather than a thing to remember. */
+  earlier: TourReminderEarlierView[];
   nextId: string | undefined;
   error: string | null;
   /** Which tourId this state describes. */
@@ -206,6 +217,7 @@ interface Committed {
 export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Element {
   const [state, setState] = useState<Committed>({
     reminders: [],
+    earlier: [],
     nextId: undefined,
     error: null,
     forId: tourId,
@@ -229,6 +241,9 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
         if (controller.signal.aborted) return;
         setState({
           reminders: page.reminders,
+          // OMITTED by the server on the common single-generation tour, and on
+          // every wholly pre-migration one.
+          earlier: page.earlier ?? [],
           nextId: page.next?.reminderId,
           error: null,
           forId: tourId,
@@ -242,6 +257,10 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
         }
         setState({
           reminders: [],
+          // Cleared WITH the ladder: an error banner over a stale disclosure
+          // would show rows from a tour whose ladder the panel just said it
+          // could not read.
+          earlier: [],
           nextId: undefined,
           error: err instanceof ApiError ? err.message : 'Failed to load reminders',
           forId: tourId,
@@ -299,7 +318,10 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
     message: string;
   } | null>(null);
   const onToggleCanceled = useCallback(
-    (rung: TourReminderView) => {
+    // A Pick, not the whole view: the disclosure's Cancel (spec 3.4's one
+    // allowlisted earlier action) hands it a TourReminderEarlierView, and
+    // these two fields are all this handler has ever read.
+    (rung: Pick<TourReminderView, 'reminderId' | 'state'>) => {
       if (busyId !== null) return;
       setBusyId(rung.reminderId);
       setActionError(null);
@@ -346,7 +368,7 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
 
   // Committed state is for a previous tourId (or nothing landed yet) -> loading.
   const loading = state.forId !== tourId || !state.loaded;
-  const { reminders, nextId, error } = state;
+  const { reminders, earlier, nextId, error } = state;
 
   return (
     <Card title="Reminders">
@@ -496,6 +518,104 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
           })}
         </ul>
       )}
+      {/* EARLIER REMINDERS (supersession spec 3.4) - a SECOND CHILD of the
+          Card, deliberately OUTSIDE the ternary above. A terminal or converted
+          tour has an EMPTY current ladder and a full history, so a disclosure
+          written inside that chain would be invisible on precisely the tour
+          with the most to show; here "No reminders armed." and the disclosure
+          render together, which is the honest pair.
+
+          A raw <details>/<summary>: this dashboard has no shared disclosure
+          component, and the four existing sites (Timeline's transcript and
+          email blocks, UnmatchedRow, AiRunDetail) all do exactly this. Closed
+          by default because <details> has no `open` - decision D2 puts this
+          list out of the default view, and the native element gives us the
+          keyboard and screen-reader behaviour for free.
+
+          Gated on loading/error so it follows the ladder: a stale disclosure
+          under a loading or errored panel would be the one part of the card
+          still claiming to describe this tour. */}
+      {!loading && error === null && earlier.length > 0 ? (
+        <details className={styles.earlier}>
+          <summary className={styles.earlierToggle}>Earlier reminders ({earlier.length})</summary>
+          <ul className={`${styles.rows} ${styles.earlierRows}`}>
+            {earlier.map((rung) => {
+              const kindLabel = REMINDER_KIND_LABELS[rung.kind] ?? rung.kind;
+              const suppression =
+                rung.suppression !== undefined
+                  ? suppressionNote(
+                      rung.suppression.reason,
+                      REMINDER_SUPPRESSION_LABELS[rung.suppression.reason] ??
+                        rung.suppression.reason,
+                    )
+                  : undefined;
+              return (
+                <li key={rung.reminderId} className={styles.row}>
+                  <div className={styles.rowHead}>
+                    <span
+                      className={`${styles.kind} ${rung.state === 'canceled' ? styles.struck : ''}`}
+                    >
+                      {kindLabel}
+                    </span>
+                    <StateChip rung={rung} timezone={state.timezone} />
+                    {/* THE ACTION ALLOWLIST, BY STATE (spec 3.4's table) -
+                        written out here rather than inherited from the ladder
+                        above, which keys off `state` alone and would therefore
+                        offer Send now on this unsent rung (the server refuses
+                        it 409 superseded) and Restore on a canceled one, which
+                        would resurrect a rung into a ladder that no longer
+                        exists. sent / canceled / skipped get NOTHING.
+
+                        Cancel on a sweep miss is the operator's remedy of last
+                        resort. It cannot beat a rung the poll already
+                        claim-skipped - the repo's cancel requires
+                        attribute_not_exists(skippedAt) - and the refetch then
+                        reports the honest state, which is the right answer.
+
+                        "the earlier" is load-bearing, not decoration: the
+                        ladder's own Cancel interpolates the same kind label,
+                        so a bare reuse would give two buttons ONE accessible
+                        name - the strict-mode collision the comment above
+                        records and e2e/support/selectors.md pins. */}
+                    {rung.state === 'upcoming' ? (
+                      <button
+                        type="button"
+                        className={styles.action}
+                        disabled={busyId !== null}
+                        aria-label={`Cancel the earlier ${kindLabel} reminder`}
+                        onClick={() => onToggleCanceled(rung)}
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+                  {/* NO BODY, NOT "Preview unavailable" (spec 3.4, T7.7). The
+                      server sends a body here only when the row carries the
+                      claim-time snapshot; absence means there is nothing
+                      honest to show, which is a different thing from the
+                      ladder's empty-string "we could not compose it right
+                      now". Borrowing that sentence would send a navigator
+                      hunting for an outage that is not happening. */}
+                  {rung.body !== undefined && rung.body !== '' ? (
+                    <p
+                      className={`${styles.body} ${rung.state === 'canceled' ? styles.struck : ''}`}
+                    >
+                      {rung.body}
+                    </p>
+                  ) : null}
+                  {suppression !== undefined ? (
+                    // Always the muted tone here: every note in this list is
+                    // `Replaced`, which reports the consequence of a change the
+                    // operator themselves made. Amber would make a history
+                    // drawer read as a list of problems.
+                    <p className={styles.suppressionMuted}>{suppression}</p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      ) : null}
     </Card>
   );
 }

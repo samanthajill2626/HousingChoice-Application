@@ -187,6 +187,39 @@
   color: var(--c-text-muted);
 }
 
+/* --- Earlier reminders disclosure ----------------------------------------
+ * Survivors of ladders this tour has replaced (supersession spec 3.4). A
+ * history drawer, so it reads QUIETER than the live ladder above it: a muted
+ * summary line, and no border or surface of its own - the rows inside already
+ * carry `.row`, and a card-within-a-card would give the section more weight
+ * than the ladder it sits under. */
+.earlier {
+  margin-top: var(--sp-3);
+}
+
+.earlierToggle {
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}
+
+.earlierToggle:hover {
+  color: var(--c-text);
+}
+
+.earlierToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+/* Composed with `.rows` (which owns the list reset and the gap); this only
+ * separates the opened list from its summary. */
+.earlierRows {
+  margin-top: var(--sp-2);
+}
+
 /* A Send-now refusal, shown WITH the rung it refers to. Deliberately separate
  * from the fetch-error paragraph above, which replaces the whole ladder. */
 .rowError {

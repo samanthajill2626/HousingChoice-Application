@@ -8,10 +8,15 @@
 //
 // Pattern mirrors TourDetail.test.tsx: mock the api barrel, import after mocking,
 // assert accessibility-first. The SSE capture mirrors useTourActivity.test.tsx.
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { EventStreamHandlers, TourReminderView, TourRemindersPage } from '../../api/index.js';
+import type {
+  EventStreamHandlers,
+  TourReminderEarlierView,
+  TourReminderView,
+  TourRemindersPage,
+} from '../../api/index.js';
 
 const getTourReminders = vi.fn();
 const patchTourReminder = vi.fn();
@@ -39,6 +44,20 @@ function rung(over: Partial<TourReminderView> = {}): TourReminderView {
     dueAt: '2999-01-01T12:00:00Z',
     state: 'upcoming',
     body: 'Your tour is tomorrow at 2pm.',
+    ...over,
+  };
+}
+
+/** A rung of a ladder this tour has already replaced (supersession S7). NO
+ *  `body` by default - most earlier rungs predate the snapshot field, and
+ *  "there is nothing honest to show" is the default this projection has. */
+function earlierRung(over: Partial<TourReminderEarlierView> = {}): TourReminderEarlierView {
+  return {
+    reminderId: 'e-1',
+    kind: 'day_before',
+    dueAt: '2026-01-01T12:00:00Z',
+    state: 'sent',
+    sentAt: '2026-01-01T12:00:03Z',
     ...over,
   };
 }
@@ -951,5 +970,230 @@ describe('RemindersPanel - Send now', () => {
     expect(
       screen.getByRole('button', { name: 'Send the Day before reminder now' }),
     ).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// EARLIER REMINDERS - the collapsed disclosure (supersession spec 3.4, S7).
+//
+// A rescheduled or converted tour leaves survivors of the generation it
+// replaced. They are history, not a promise, so they sit BEHIND a disclosure
+// that is closed by default (decision D2: out of the default view) and below
+// the current ladder - including when the current ladder is EMPTY, which is
+// exactly what a terminal tour looks like.
+// ===========================================================================
+describe('RemindersPanel - earlier reminders disclosure', () => {
+  it('renders BOTH "No reminders armed." and the disclosure when the current ladder is empty', async () => {
+    // T7.3 / acceptance 10. The empty-ladder short-circuit at the top of the
+    // Card returns a single paragraph, so a disclosure written inside that
+    // ternary would be invisible on exactly the tour that has the most to
+    // show. Asserted on the RENDER, never on a derived flag.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({ reminderId: 'e-1', kind: 'day_before' }),
+        earlierRung({ reminderId: 'e-2', kind: 'morning_of' }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+
+    await waitFor(() => expect(screen.getByText(/No reminders armed/i)).toBeInTheDocument());
+    expect(screen.getByText('Earlier reminders (2)')).toBeInTheDocument();
+  });
+
+  it('is COLLAPSED by default and reveals its rows on click', async () => {
+    // T7.4. Every other assertion in this file passes just as well against an
+    // always-open block, so the default state needs its own case.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [earlierRung({ reminderId: 'e-1', kind: 'day_before' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+
+    const summary = await screen.findByText('Earlier reminders (1)');
+    // The content is in the DOM but NOT visible - a closed <details>.
+    expect(screen.getByText('Day before')).not.toBeVisible();
+
+    fireEvent.click(summary);
+    expect(screen.getByText('Day before')).toBeVisible();
+  });
+
+  it('allowlists actions BY STATE: only a sweep-missed upcoming rung offers Cancel', async () => {
+    // T7.5 / spec 3.4's table. The current ladder's action list keys off
+    // `state` alone, so inheriting it would put Send now on an unsent earlier
+    // rung and Restore on a canceled one - resurrecting a rung into a ladder
+    // that no longer exists.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({ reminderId: 'e-sent', kind: 'confirmation', state: 'sent' }),
+        earlierRung({
+          reminderId: 'e-upcoming',
+          kind: 'day_before',
+          state: 'upcoming',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+        earlierRung({
+          reminderId: 'e-canceled',
+          kind: 'morning_of',
+          state: 'canceled',
+          sentAt: undefined,
+          canceledAt: '2026-01-01T09:00:00Z',
+        }),
+        earlierRung({
+          reminderId: 'e-skipped',
+          kind: 'en_route',
+          state: 'skipped',
+          sentAt: undefined,
+          skippedAt: '2026-01-01T09:00:00Z',
+          skipReason: 'superseded',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (4)'));
+
+    // EXACTLY ONE action in the whole disclosure, and it is the Cancel on the
+    // sweep miss - under an accessible name that cannot collide with the
+    // current ladder's own "Cancel the Day before reminder".
+    const buttons = screen.getAllByRole('button');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toHaveAccessibleName('Cancel the earlier Day before reminder');
+    // No Send now anywhere: the server refuses every one of these 409
+    // superseded.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Restore/ })).not.toBeInTheDocument();
+  });
+
+  it('gives the earlier Cancel a name distinct from the current ladder rung of the SAME kind', async () => {
+    // G4 (research C 2.3): both aria-labels interpolate the kind, so a bare
+    // reuse would give two buttons one accessible name - a strict-mode
+    // violation for the e2e harness, and an ambiguous target for a navigator
+    // driving the panel by voice or keyboard.
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before', state: 'upcoming' })],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (1)'));
+
+    expect(
+      screen.getByRole('button', { name: 'Cancel the Day before reminder' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Cancel the earlier Day before reminder' }),
+    ).toBeInTheDocument();
+  });
+
+  it('Cancel on an earlier rung PATCHes {canceled:true} through the same handler', async () => {
+    patchTourReminder.mockResolvedValue({});
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-miss',
+          kind: 'day_before',
+          state: 'upcoming',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (1)'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel the earlier Day before reminder' }));
+    await waitFor(() =>
+      expect(patchTourReminder).toHaveBeenCalledWith('tour-1', 'e-miss', true),
+    );
+  });
+
+  it('shows the sentBody snapshot, and NO body paragraph at all when there is none', async () => {
+    // T7.7 / acceptance 11. The bodyless row must not borrow the current
+    // ladder's "Preview unavailable" sentence: nothing failed to compose here,
+    // there is simply no snapshot, and offering the failure copy would send a
+    // navigator hunting for an outage.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-snap',
+          kind: 'day_before',
+          body: 'Your tour is tomorrow at 10:00 AM.',
+        }),
+        earlierRung({ reminderId: 'e-bare', kind: 'morning_of' }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (2)'));
+
+    expect(screen.getByText('Your tour is tomorrow at 10:00 AM.')).toBeVisible();
+    expect(screen.queryByText(/Preview unavailable/i)).not.toBeInTheDocument();
+    // ANTI-VACUITY: the bodyless rung really did render - it is the paragraph
+    // that is missing, not the row.
+    const bare = screen.getByText('4 hours before').closest('li');
+    expect(bare).not.toBeNull();
+    expect(bare?.querySelectorAll('p')).toHaveLength(0);
+  });
+
+  it('chips a sweep-missed earlier rung "Replaced" and carries its note', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-miss',
+          kind: 'day_before',
+          state: 'upcoming',
+          // Long past due: a fall-through would chip "sending shortly" on a
+          // rung nothing will ever claim.
+          dueAt: '2000-01-01T00:00:00Z',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (1)'));
+
+    expect(screen.getByText('Replaced')).toBeVisible();
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Replaced . /)).toBeVisible();
+  });
+
+  it('renders no disclosure at all when the server sends no earlier rows', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Day before')).toBeInTheDocument());
+    expect(screen.queryByText(/Earlier reminders/i)).not.toBeInTheDocument();
+  });
+
+  it('a FAILED refetch clears the earlier rows alongside the ladder', async () => {
+    // G3 (research C 2.4). `earlier` lives in the same committed state object
+    // as `reminders`, and the error branch REPLACES that object. Miss it in
+    // either setState and the panel shows an error banner over a stale
+    // disclosure - rows from a tour whose ladder it just admitted it cannot
+    // read.
+    getTourReminders.mockResolvedValueOnce({
+      reminders: [],
+      earlier: [earlierRung({ reminderId: 'e-1', kind: 'day_before' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Earlier reminders (1)')).toBeInTheDocument());
+
+    getTourReminders.mockRejectedValueOnce(new ApiError(500, 'boom', 'boom'));
+    act(() => streamHandlers?.onScheduledUpdated?.({}));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.queryByText(/Earlier reminders/i)).not.toBeInTheDocument();
   });
 });

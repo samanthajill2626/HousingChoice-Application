@@ -1277,11 +1277,38 @@ export interface TourReminderView {
   overdue?: boolean;
 }
 
+/**
+ * One rung of a ladder the tour has ALREADY REPLACED - a reschedule, a
+ * terminal status change, a placement conversion (supersession spec 3.4).
+ * Mirrors the server's TourReminderEarlierView verbatim.
+ *
+ * Identical to `TourReminderView` except that `body` is OPTIONAL, which is the
+ * whole reason it is a separate type. The server never RECOMPOSES a body for
+ * one of these rows - a superseded generation recomposed against the tour's
+ * current schedule would be a sentence about a schedule that never existed -
+ * so `body` is the claim-time snapshot when the row has one and ABSENT when it
+ * does not. Absent is not `''`: the empty string already means "we could not
+ * compose it right now" on the ladder above, which the panel answers with
+ * "Preview unavailable". An earlier rung with no snapshot renders no body
+ * paragraph at all.
+ *
+ * `suppression` still arrives on a PENDING survivor (a rung the sweep missed),
+ * always `{ reason: 'superseded' }` - never on a sent/canceled/skipped one.
+ */
+export type TourReminderEarlierView = Omit<TourReminderView, 'body'> & { body?: string };
+
 /** GET /api/tours/:tourId/reminders response: the ladder + the NEXT rung to fire. */
 export interface TourRemindersPage {
   reminders: TourReminderView[];
   /** The next reminder due to fire (highlight it in the UI). Absent when none upcoming. */
   next?: TourReminderView;
+  /** Survivors of generations this tour has replaced, newest first by
+   *  `sentAt ?? dueAt`. Rendered behind a COLLAPSED disclosure below the
+   *  ladder - they are history, not a promise, and they never feed `next`.
+   *  Optional for the same bundle-outlives-response reason as `timezone`, and
+   *  because the server OMITS the key entirely when there are none (the common
+   *  single-generation tour, and every wholly pre-migration one). */
+  earlier?: TourReminderEarlierView[];
   /** The IANA zone the reminder bodies were composed in (the ORG's zone, spec
    *  D8) - render every timestamp shown beside those bodies in THIS zone, not
    *  the browser's. Optional in the same spirit as `upcoming` below: a client

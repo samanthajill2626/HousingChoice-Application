@@ -1066,7 +1066,10 @@ function MessageBubble({
               leg?.isFailure === true
                 ? deliveryReason(row.slot.errorCode, { media: isMms })
                 : undefined;
-            const recipientTransport = presentRecipientTransport(row.slot);
+            // Recipient slots inherit legacy compatibility from their parent.
+            // Missing slot facts are unresolved only on version-1 messages.
+            const recipientTransport =
+              msg.transport_schema_version === 1 ? presentRecipientTransport(row.slot) : null;
             const state = [leg === null ? null : chipText(leg, legReason), recipientTransport]
               .filter((part): part is string => part !== null)
               .join(' - ');

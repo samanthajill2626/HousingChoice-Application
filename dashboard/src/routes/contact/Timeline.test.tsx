@@ -1357,6 +1357,67 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.queryByText('delivered 0/2')).not.toBeInTheDocument();
   });
 
+  it('keeps legacy Relay recipient delivery copy free of an unresolved transport claim', () => {
+    renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
+
+    fireEvent.click(screen.getByText('Team reply to the group'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered' }),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/Unknown/)).not.toBeInTheDocument();
+  });
+
+  it('keeps legacy Group MMS recipient delivery copy free of an unresolved transport claim', () => {
+    const legacyGroupMms: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'legacy-group-mms-recipient',
+      tsMsgId: 'legacy-group-mms-recipient',
+      body: 'legacy Group MMS recipient',
+      type: 'mms',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+      },
+    };
+
+    renderTimeline({
+      items: [legacyGroupMms],
+      relayRoster: ROSTER,
+      rosterKind: 'group_text',
+    });
+
+    fireEvent.click(screen.getByText('legacy Group MMS recipient'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered' }),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/Unknown/)).not.toBeInTheDocument();
+  });
+
+  it('keeps Unknown on version-1 recipient slots with no transport facts', () => {
+    const unresolved: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'version-1-unresolved-recipient',
+      tsMsgId: 'version-1-unresolved-recipient',
+      body: 'version-1 unresolved recipient',
+      transport_schema_version: 1,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+      },
+    };
+
+    renderTimeline({ items: [unresolved], relayRoster: ROSTER });
+
+    fireEvent.click(screen.getByText('version-1 unresolved recipient'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - Unknown' }),
+    ).toBeInTheDocument();
+  });
+
   it('renders complete and incomplete relay transport aggregates without changing delivery state', () => {
     const complete: TimelineItem = {
       ...RELAY_OUT,

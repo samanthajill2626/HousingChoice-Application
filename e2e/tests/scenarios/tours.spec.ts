@@ -127,11 +127,13 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   // land in the GROUP (both members, from the pool number).
   const times = tourSchedule();
   await flow.teamBooksTour(times);
-  await flow.tickTourReminders();
-  await flow.expectReminderInGroup('confirmation', [tenant, owner]);
-  // 2026-07-14: the rung is ALSO visible in the dashboard group thread.
-  await flow.expectReminderVisibleInGroupThread('confirmation');
-  // day_before's dueAt is READ BACK from the server (2026-08-26): the rung now
+  // THE VEHICLE (Phase B spec 10), used by every reminder-arrival assertion in
+  // this suite: fire the ladder's EARLIEST live rung, `day_before`. Earliest is
+  // the point. Release supersession retires the EARLIER rungs of a batch and
+  // sends the latest one, so a tick on the earliest live rung can only ever
+  // retire something below it - never the rung asserted here - and the
+  // paragraph below shows no LATER rung joins this batch at any wall clock.
+  // day_before's dueAt is READ BACK from the server (2026-08-26): the rung
   // fires at 19:30 ORG-LOCAL the evening before the tour, which no host-local
   // mirror can compute.
   // SAFE AT ANY WALL CLOCK. tourSchedule() books now+48h, i.e. the same
@@ -148,6 +150,8 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   // rather than introduced here, and no assertion in e2e/ enforces it.
   await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
   await flow.expectReminderInGroup('day_before', [tenant, owner]);
+  // 2026-07-14: the rung is ALSO visible in the dashboard group thread.
+  await flow.expectReminderVisibleInGroupThread('day_before');
 
   // Tour day: the tenant is on the way → the landlord gets the heads-up in-group.
   await flow.tenantSendsOnMyWay();
@@ -193,11 +197,12 @@ test('PM-team: same shape with the PM in the landlord slot → exit NO (not a fi
   await flow.partyProposesTimeInGroup(tenant, 'Wednesday 4pm please!');
   await flow.expectRelayedInGroup(pm, tenant, 'Wednesday 4pm please!');
 
-  // Book → the confirmation lands in the GROUP (pm_team routes like landlord-led).
+  // Book -> the reminder lands in the GROUP (pm_team routes like landlord-led).
+  // Same vehicle as the landlord-led test above: tick the earliest live rung.
   const times = tourSchedule();
   await flow.teamBooksTour(times);
-  await flow.tickTourReminders();
-  await flow.expectReminderInGroup('confirmation', [tenant, pm]);
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
+  await flow.expectReminderInGroup('day_before', [tenant, pm]);
 
   // Toured -> exit gate NO -> the same PATCH closes the tour (not a fit). The
   // 'confirmed' status was removed 2026-07-08: scheduled -> toured directly.
@@ -236,12 +241,13 @@ test('self-guided: windows 1:1 (no group) → booked → 1:1 reminders → ID ga
   await flow.teamOffersTourWindows('Lockbox tour windows: Sat 10-12 or Sun 1-3.');
   await flow.tenantPicksWindow('Sun 1-3 works for me');
 
-  // Book → confirmation arrives 1:1 from the APP number (self-guided never
-  // routes to a group, per the founder rule).
+  // Book -> the reminder arrives 1:1 from the APP number (self-guided never
+  // routes to a group, per the founder rule). Same vehicle: the earliest live
+  // rung, whose dueAt the server computes.
   const times = tourSchedule();
   await flow.teamBooksTour(times);
-  await flow.tickTourReminders();
-  await flow.expectReminderTo1to1('confirmation', tenant);
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
+  await flow.expectReminderTo1to1('day_before', tenant);
 
   // The ID gate, before access: ask → (no code yet!) → ID arrives (MMS) → Team
   // reviews it on the timeline → only THEN the code goes out. NO ID, NO code.
@@ -250,8 +256,10 @@ test('self-guided: windows 1:1 (no group) → booked → 1:1 reminders → ID ga
   await flow.tenantSendsPhotoId();
   await flow.teamSendsLockboxCode(LOCKBOX_CODE);
 
-  // The en-route nudge fires 1:1 as the window approaches (earlier rungs ride
-  // along in the same tick — unasserted noise, within the breaker budget).
+  // The en-route nudge fires 1:1 as the window approaches. day_before already
+  // went out above; morning_of is still pending and IS in this batch, where
+  // release supersession retires it unsent (an earlier rung beside a later one
+  // is stale copy) - so this tick produces exactly one text, the one asserted.
   await flow.tickTourReminders(justAfter(times.enRoute));
   await flow.expectReminderTo1to1('en_route', tenant);
 
@@ -276,8 +284,9 @@ test('no-show: booked (no group -> 1:1 fallback) -> no auto check-in -> logged n
 
   const times = tourSchedule();
   await flow.teamBooksTour(times);
-  await flow.tickTourReminders();
-  await flow.expectReminderTo1to1('confirmation', tenant);
+  // Same vehicle: the earliest live rung, read back from the server.
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
+  await flow.expectReminderTo1to1('day_before', tenant);
 
   // The tenant never shows. The no-show check-in is no longer auto-armed - it is
   // a MANUAL send now (tour-no-show-checkin.spec.ts), so ticking past its OLD due
@@ -298,10 +307,10 @@ test('no-show: booked (no group -> 1:1 fallback) -> no auto check-in -> logged n
 
   // Team logs the no-show, then reschedules — no-show tours stay reschedulable,
   // and rescheduling cancels + RE-ARMS the ladder off the new time. Since the
-  // flip a rung's body carries its tour's TIME, so the fresh confirmation is
-  // textually DISTINCT from the first one: its arrival at all proves the re-arm
-  // (a stronger claim than the old "2 identical copies" count - a re-label could
-  // not produce a body composed off newTimes).
+  // flip a rung's body carries its tour's TIME, so a rung of the FRESH ladder is
+  // textually DISTINCT from anything the first ladder sent: its arrival at all
+  // proves the re-arm (a stronger claim than the old "2 identical copies" count -
+  // a re-label could not produce a body composed off newTimes).
   await flow.teamMarksNoShow();
   const newTimes = tourSchedule(72);
   await flow.teamReschedulesTour(newTimes);

@@ -8,11 +8,11 @@
   a test number, so "at the base commit" and "before any code edit" are the
   same measurement.
 - Records: `docs/superpowers/reviews/2026-08-31-npm-test-soundness/`
-- Revision: **v3**, after plan review round 1 (two independent reviewers,
-  38 findings, 38 accepted) and round 2 (one continued reviewer, 15
-  findings, 15 accepted). Adjudications:
-  `<records>/design-review/plan-adjudications.md` and
-  `plan-adjudications-r2.md`.
+- Revision: **v4**, after plan review round 1 (two independent reviewers,
+  38 findings) and rounds 2-3 (one continued reviewer, 15 and 12
+  findings). 65 findings, 65 accepted, 0 rejected. Adjudications:
+  `<records>/design-review/plan-adjudications.md`,
+  `plan-adjudications-r2.md`, `plan-adjudications-r3.md`.
 
 **Read the spec first, in full.** This plan does not restate its reasoning.
 Where the two disagree, the spec wins and the disagreement is a finding.
@@ -75,8 +75,12 @@ measures is tonight's.
      it.** `otherLiveRuns()` in `app/test/helpers/testRunRegistry.ts`
      prunes as a side effect, and its directory (`RUN_REGISTRY_DIR`,
      `testRunRegistry.ts:41`) is machine-global - other missions read it.
-     Count the marker files with a plain directory listing and say that is
-     what you did;
+     List the marker files, then **check each one's liveness yourself** -
+     the filename IS the pid (`testRunRegistry.ts:66`), and dead markers
+     are pruned only by `otherLiveRuns` (`:93-122`), which this plan
+     forbids calling. A raw file count therefore OVER-counts neighbours,
+     which would mislabel a QUIET run as contended - and that label is what
+     the anchor's one use restriction turns on;
    - node/playwright process count, filtered to other worktrees;
    - the container's CPU and RSS (`docker stats --no-stream`).
    A run with no neighbours is labelled **QUIET**.
@@ -158,6 +162,9 @@ is a finding for the handback, not a silent decision.
   `db-update-gsis.ts:188-191`) to SUCCEED and only the VERIFICATION read to
   throw. A stub that throws on all `DescribeTable`s makes `liveIndexNames`
   throw before the retry is ever reached, and the case proves nothing;
+- **counters must distinguish SENDS from HOOK CALLS.** Case 10 asserts
+  "hook called 3 times across 4 attempts", which per-command send counters
+  cannot express - the hook and the send may issue the same command;
 - **the stub must also satisfy what `ensureGsis` does AFTER the send.**
   `db-update-gsis.ts:234` calls `waitUntilTableExists` and `:235`
   `waitUntilIndexActive`, whose default ceiling is **900s** (`:158`) and
@@ -178,7 +185,7 @@ is a finding for the handback, not a silent decision.
 | 3 | local, `CreateTable` throws `ResourceInUseException` on the FIRST attempt, no retryable error | returns `'exists'` with **ZERO `DescribeTable` calls** - the hot path is unchanged |
 | 4 | local, `DeleteTable` `InternalFailure` then `ResourceInUseException` | resolves, does not throw |
 | 5 | local, `UpdateTimeToLive` `InternalFailure` then ok | status RE-READ between attempts; hook called once for that attempt |
-| 6 | local, `UpdateTimeToLive` `InternalFailure`, re-read reports **ENABLED** | helper returns WITHOUT re-sending. *Without this, a hook that always returns `false` passes every other case* |
+| 6 | local, `UpdateTimeToLive` `InternalFailure`, re-read reports **ENABLED** | helper returns WITHOUT re-sending. *Without this, a hook that always returns `false` passes every other case.* The stub's FIRST `DescribeTimeToLive` (the guard at `:131`) must report DISABLED, or `enableTtlIfNeeded` returns early and the case passes with ZERO `UpdateTimeToLive` sends - green, and proving nothing |
 | 7 | local, `UpdateTimeToLive` `InternalFailure`, re-read THROWS | ORIGINAL error rethrown; NO re-send |
 | 8 | local, **`CreateTable`** throws **`InternalServerError`** (the `waiting for a lock` signature) then ok | retried identically to `InternalFailure` |
 | 9 | local, `DescribeTimeToLive` (the PRE-SEND read) `InternalFailure` then ok | retried |
@@ -243,9 +250,9 @@ half; 3 protects the hot path; 6 is what makes the hook contract real.**
 
   Called **at most once per failed attempt**, never itself retried, and
   **not called at all on the final attempt** - the bound is checked first.
-- The predicate is local to `dynamoAdmin.ts`; `lib` must not import from
-  `scripts`. It is not a copy of `isLocalEndpoint` (URL string vs resolved
-  object).
+- The predicate is DEFINED in `dynamoAdmin.ts` and exported (see above);
+  `lib` must not import from `scripts`. It is not a copy of
+  `isLocalEndpoint` (URL string vs resolved object).
 
 ### S1.3 - apply it
 
@@ -280,11 +287,16 @@ half; 3 protects the hot path; 6 is what makes the hook contract real.**
   ```
 
   No shared state, correct under concurrency by construction.
-  - The poll: `DescribeTable`, **100ms interval, 10s ceiling**, gated on
-    the local endpoint like the retry, exported with injectable
-    interval/ceiling so case 17 needs no 10s sleep. On exhaustion rethrow
-    the original `ResourceInUseException` with the observed status. Its own
-    reads are NOT retried - a failed read counts as "not ACTIVE yet".
+  - The poll: `DescribeTable`, **100ms interval, 10s ceiling**, exported
+    with injectable interval/ceiling so case 17 needs no 10s sleep. On
+    exhaustion rethrow the original `ResourceInUseException` with the
+    observed status. Its own reads are NOT retried - a failed read counts
+    as "not ACTIVE yet".
+  - **The poll needs no endpoint gate of its own.** It is reached only when
+    `retried` is true, and `retried` can only be true on a local endpoint,
+    so a second gate would be dead code that reads as a live safeguard.
+    Case 17 calls it directly with a LOCAL client, which is the only way
+    the exhaustion path can be exercised at all.
   - The success path keeps `waitUntilTableExists` unchanged.
   - **Record, do not fix:** a genuinely CREATING pre-existing table is
     still returned as `'exists'` without a wait, exactly as today. That
@@ -373,6 +385,11 @@ REMOVED before handback.
 
 ### S2.2 - cut the measured dominant cost
 
+- **If `:106`'s `getSymbolAtLocation` is material**: it is already inside
+  `!legal &&`, so there is no ordering win - the remedy would have to
+  reduce the number of candidate identifiers reaching it, and **no remedy
+  is pre-committed**; report it as a decision. Naming a measurement site
+  with no destination is how a measurement becomes ceremony.
 - **If the eager symbol lookup at `:97` is material**: hoist the `legal`
   test above `getShorthandAssignmentValueSymbol` and skip the checker call
   when `legal` is true. **In the PROPERTY-ASSIGNMENT branch (`:101-111`)
@@ -426,7 +443,7 @@ silently dropped two.**
 
 | line | case | goes to |
 |---|---|---|
-| `:38` | serves index.html at / | **SPLIT** - status/content-type/`HousingChoice` to (a); the five identity assertions to (b)/(c) |
+| `:38` | serves index.html at / | **SPLIT** - status and content-type to (a), with `HousingChoice` REPLACED by the fixture marker per S3.1; the five identity assertions to (b)/(c) |
 | `:50` | runtime identity before static + SPA fallback | (a) |
 | `:88` | legacy `/manifest.webmanifest` redirect + its 403 origin-secret guard | (a) |
 | `:105` | SPA fallback for unknown GETs | (a) |
@@ -444,8 +461,10 @@ leaves the other pointed at a path that may not exist. **Create it BEFORE
 `buildApp`**: this file constructs the app in the DESCRIBE BODY at
 collection time (`:29`), so only `unitMediaServe.test.ts:171-173`'s shape
 (fixture in a `beforeAll`, app built inside it) is structurally
-compatible; restructure both describes accordingly. **Clean up with
-`rmSync`**, as both precedents do.
+compatible - restructure THAT describe. The second (`:177-215`) already
+builds its app per test (`:178-187`) and needs only the file-scoped
+`distDir`, not restructuring. **Clean up with `rmSync`**, as both
+precedents do.
 
 **Fixture `index.html`, positive AND negative:**
 
@@ -498,7 +517,8 @@ Assert against `dashboard/index.html`. Exactly five conditions:
 "`dashboard/dist` disagrees with `dashboard/index.html`. Most likely the
 dist is stale - run `npm run build -w dashboard`. If a fresh build still
 reports this, the dashboard BUILD is dropping the identity tags, which is a
-real regression - see `docs/issues/<slug>`."
+real regression - see `docs/issues/<slug>`." **A literal `<slug>` must not
+reach the shipped string.**
 
 **The slug must exist BEFORE this string is written, so S7.2's SECOND issue
 (the built-dashboard coverage gap) is FILED HERE, in S3, not in S7.** It
@@ -551,7 +571,7 @@ Confounds go in the record, not the conclusion:
   per-file assertions under an explicit key. Expected, not a failure.
 
 **Also run the TTL probe here.** It may NOT be done "after a run": vitest's
-teardown, returned from `globalSetup` (`globalSetup.ts:216`), calls
+teardown, returned from `globalSetup` (`globalSetup.ts:214`), calls
 `dropKeyedLocalTables` -> `dropAllTables` (`globalTeardown.ts:279`), so a
 completed run leaves NO `hc-local-` table to describe - the probe would find
 nothing and the claim would collapse back to the inference it exists to
@@ -568,9 +588,20 @@ created:
    only;
 2. `DescribeTimeToLive` on one of the tables it created and record the
    status;
-3. repeat with `DYNAMO_DISABLE_TTL=1` set in the process, for contrast;
-4. drop what you created (`dropKeyedLocalTables`), leaving the container as
-   found.
+3. **DROP the tables (`dropKeyedLocalTables`) before the second arm.**
+   Without a drop the contrast is FAKE: `ensureTable` short-circuits on
+   `ResourceInUseException` and, with the flag set, skips
+   `enableTtlIfNeeded` entirely (`dynamoAdmin.ts:116-119`) - so arm 2 would
+   describe a table arm 1 already enabled TTL on, both arms would report
+   ENABLED, and the issue would be filed on a false contrast;
+4. repeat from a clean slate with `DYNAMO_DISABLE_TTL=1` set in the
+   process;
+5. drop what you created, leaving the container as found.
+
+**Sequencing: run this AFTER S5's four full runs, not between them.** It
+creates and drops this worktree's shared `hc-local-` tables, which a
+concurrent run of its own would be using. The throwaway script itself is
+run state - put it in `.superpowers/sdd/`, not in the committed tree.
 
 **S7.2's first new issue is filed on THIS RESULT.** If the probe shows TTL
 is NOT enabled, the claim is wrong, the issue is not filed, and that is a
@@ -644,7 +675,11 @@ coordinator starvation, not a hook budget. It is already addressed by
 `npm-test-runner-rpc-starves-under-concurrent-e2e`. Say so; do not let the
 closure read as though a budget raise fixed an RPC fault.
 
-### S7.2 - file two NEW issues (copy `docs/issues/_TEMPLATE.md`)
+### S7.2 - file the ONE remaining new issue (copy `docs/issues/_TEMPLATE.md`)
+
+**The built-dashboard coverage gap was already filed in S3.3** - it depends
+on no measurement and its slug has to exist before S3's SKIP string is
+written. Do not file it again here.
 
 1. **`globalSetup` re-enables TTL on the shared `hc-local-` tables every
    run.** Lead with S5's PROBE RESULT. Mechanism: `globalSetup.ts:90-91`

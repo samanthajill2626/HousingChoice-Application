@@ -1,6 +1,6 @@
 # Message transport fidelity - design specification
 
-Status: v4 - round 3 adjudicated; awaiting final adversarial re-review and human gate
+Status: v5 - four review rounds complete; awaiting human specification gate
 Date: 2026-08-31
 Branch: `feat/message-transport-fidelity`
 Worktree: `W:\tmp\message-transport-fidelity`
@@ -201,8 +201,11 @@ rewritten and keeps its legacy `type` label.
 Extend each `delivery_recipients` entry additively:
 
 ```ts
+export type TransportAggregationState = 'planned' | 'attempted' | 'excluded';
+
 requestedTransport?: MessageTransport;
 actualTransport?: MessageTransport;
+transportAggregationState?: TransportAggregationState;
 ```
 
 `requestedTransport` records the adapter-selected transport intent for every new
@@ -213,6 +216,18 @@ always absent when no provider send occurred. A suppressed slot keeps its
 requested intent plus its existing suppression status/error contract. The source
 message may be an inbound relay message while its fan-out legs are outbound, so
 message-level direction cannot substitute for leg-level requested transport.
+
+`transportAggregationState` is transport-presentation bookkeeping for outbound
+multi-recipient legs, not provider evidence and not a routing instruction:
+
+- `planned`: the leg belongs to a roster resolved for a fan-out execution but no
+  provider invocation has begun;
+- `attempted`: the application reached the provider-call boundary for the leg;
+- `excluded`: no provider call should count for this leg because it was removed
+  before attempt or suppressed.
+
+The field is optional on single-recipient rows and source-time relay slots that
+have not yet been reconciled by a worker.
 
 The existing status, SID, error, sent timestamp, and delivered timestamp fields
 are unchanged.
@@ -321,20 +336,30 @@ and the common requested transport before the fan-out job is enqueued. Each
 recipient slot known at source creation is seeded with the same requested
 transport. A slot that is later suppressed retains that intent and receives no
 actual transport; this records what the application selected without claiming a
-provider attempt.
+provider attempt. Source-time slots do not enter transport aggregation until a
+worker resolves them against a current execution roster.
 
 For an inbound relay source, the source message records inbound actual evidence
 only.
 
 Every relay fan-out execution resolves the current roster where it does today,
 so membership-at-execution and retry behavior remain unchanged. Before
-suppression handling or a provider call for a current member with no slot, a
-conditional initial-slot operation creates that member's queued slot with
-requested intent. For a team-authored or persisted-announcement source, it copies
-the immutable source requested transport. For an inbound source, the adapter
-first classifies transport from durable source facts and the new slot stores that
-intent. The initializer succeeds only when the member slot is absent; on a race,
-the job reads and preserves the existing slot and requested value.
+the first provider send of an execution, a transport preflight conditionally
+creates every missing current-member slot and marks every never-attempted current
+candidate `planned`; an existing `attempted` slot stays attempted. For a
+team-authored or persisted-announcement source, a new slot copies the immutable
+source requested transport. For an inbound source, the adapter first classifies
+transport from durable source facts and the new slot stores that intent.
+Initializers succeed only when the member slot is absent; on a race, the job
+reads and preserves the existing slot and requested value.
+
+The same preflight changes a previously `planned`, never-attempted slot to
+`excluded` when that member is no longer in the current execution roster. A
+later re-add may change `excluded` back to `planned`. An `attempted` slot is never
+excluded later, because it represents a provider call that must remain part of
+the aggregate even if membership subsequently changes. A partial preflight
+failure aborts before any provider send, so the presenter cannot observe a
+completed subset while undiscovered current recipients remain.
 
 Existing relay slots are never recreated for a continuation. A transient failure
 remains queued and a continuation resends through the same member-key slot,
@@ -342,8 +367,11 @@ preserving the current one-slot-per-recipient delivery status, SID pointer, and
 callback routing model. This mission introduces no per-attempt relay history.
 
 After the slot and suppression checks, an eligible leg materializes fresh media
-URLs immediately before late preparation and provider send. No recipient-set
-snapshot, initialization marker, or prebuilt all-recipient send plan is added.
+URLs immediately before late preparation. Immediately before invoking the
+provider, the job changes `planned` to `attempted`; a crash at that boundary is
+conservatively pending until actual evidence arrives. A suppressed leg changes
+to `excluded` through the existing per-member suppression path. No routing
+snapshot or prebuilt all-recipient send plan is added.
 
 Each fan-out result is applied through child-field repository updates that
 preserve requested intent and concurrent status fields. It can populate immediate
@@ -367,7 +395,8 @@ post. New source messages and every recipient slot carry requested MMS. Because 
 current rail is exclusively Group MMS, the successful provider result supplies
 actual MMS for the source and every non-suppressed, provider-attempted slot.
 Suppressed slots retain requested MMS and carry no actual transport because
-Twilio creates no leg for them.
+Twilio creates no leg for them. Non-suppressed native-group slots store
+`attempted`; suppressed slots store `excluded`.
 
 Inbound native-group messages are normalized as actual MMS from the native
 group envelope and have no requested value.
@@ -414,7 +443,21 @@ the same operation as the rest of the new item/slot. No later generic update may
 replace it. Requested transport may survive a later suppression result because it
 records adapter intent, not proof of provider invocation.
 
-### 8.2 Actual transport state machine
+### 8.2 Aggregation state machine
+
+Allowed aggregation transitions are:
+
+- absent -> `planned` or `excluded`;
+- `planned` -> `attempted` or `excluded`;
+- `excluded` -> `planned` when a never-attempted member rejoins a later current
+  execution roster;
+- same value -> idempotent no-op.
+
+`attempted` is terminal. It means the application reached the provider-call
+boundary, not that the provider accepted the message and not that any particular
+transport was used. Only `actualTransport` makes the latter claim.
+
+### 8.3 Actual transport state machine
 
 Allowed actual transitions are:
 
@@ -428,7 +471,7 @@ and a structured warning records provider SID, message key or recipient key,
 current transport, and attempted transport. It never logs message content or a
 phone number.
 
-### 8.3 Independent evidence writes
+### 8.4 Independent evidence writes
 
 Transport evidence and delivery status are independent state machines. A
 duplicate or out-of-order callback that cannot advance delivery status may still
@@ -439,12 +482,14 @@ The status webhook and group receipt service emit the existing live-update event
 when either state machine makes a real write. They emit nothing when both are
 no-ops.
 
-### 8.4 Concurrency
+### 8.5 Concurrency
 
 Repository methods update only the relevant child field:
 
 - message `actual_transport` without rebuilding the message;
-- `delivery_recipients.<member>.actualTransport` without rebuilding the slot.
+- `delivery_recipients.<member>.actualTransport` without rebuilding the slot;
+- `delivery_recipients.<member>.transportAggregationState` under its own state
+  machine without rebuilding the slot.
 
 They must preserve concurrent status, SID, error, timestamp, and transport
 writes. Conditional expressions enforce the state machine against the value in
@@ -457,6 +502,12 @@ Replace later unconstrained whole-slot writes with a conditional operation
 when it is absent and otherwise returns or re-reads the existing slot. It is used
 for current-roster members first discovered by any relay execution and never
 replaces requested intent, status, or callback pointers.
+
+Add conditional aggregation operations for the all-current-member preflight,
+the reconciliation of stale never-attempted `planned` slots, and the immediate
+pre-provider `attempted` transition. They update only the aggregation child field
+and abort the execution before any send if the current-roster preflight cannot be
+completed.
 
 Add a send-result repository operation (conceptually
 `applyRecipientSendResult`) for relay fan-out and persisted announcement success
@@ -518,18 +569,20 @@ actual transport when at least one slot exists. On an inbound relay source, the
 main chip remains inbound actual-only and slots affect only the progressively
 populated recipient disclosure.
 
-- For outbound sources, the recipient slots initialized with the source message
-  are the expected set. Until every non-suppressed slot in that set has actual
-  evidence, the main chip shows only the message's requested transport.
+- For outbound sources, slots whose aggregation state is `planned` or `attempted`
+  are the expected set. State-absent and `excluded` slots do not participate.
+  Until every participating non-suppressed slot has actual evidence, the main
+  chip shows only the message's requested transport.
 - Once complete, one distinct actual transport uses the single-recipient table.
 - Once complete, two or more distinct actual transports use `Mixed` as actual.
 - A suppressed slot (`contact_opted_out`) is excluded from completeness and
   actual aggregation because no provider send occurred. It retains requested
-  intent but has no actual transport.
+  intent, stores aggregation state `excluded`, and has no actual transport.
 - A genuinely failed provider attempt remains included. If it has no actual
   evidence, the aggregate remains pending rather than inventing a channel.
 - If no requested transport is present, complete mixed evidence shows `Mixed`;
   otherwise malformed/incomplete data follows the `Unknown` rule.
+- If no slot participates, the outbound chip shows requested transport only.
 
 Expanded recipient rows are allowed for both outbound multi-recipient sources and
 inbound relay sources. They use their own requested/actual fields. A suppressed
@@ -598,8 +651,9 @@ be silently omitted.
 ### App
 
 - `app/src/repos/messagesRepo.ts`: domain type, message/recipient fields,
-  conditional child-field writers including the non-replacing producer-result
-  operation, append mapping, fake repository parity.
+  conditional child-field writers including aggregation preflight and the
+  non-replacing producer-result operation, append mapping, fake repository
+  parity.
 - `app/src/adapters/messaging.ts`: durable transport-intent classification,
   late send preparation, Twilio and console policy, callback-prefix normalizer.
 - `app/src/adapters/groupConversations.ts`: group intent, late post preparation,
@@ -661,16 +715,17 @@ Before full completion gates, add and run targeted tests for:
 5. Repository actual state machine: absent, duplicate, RCS fallback, refused
    conflicts, schema-absent legacy row, and unknown row/slot.
 6. DynamoDB Local concurrency: simultaneous status, SID, error, requested, and
-   actual transport writes to one recipient slot preserve every field; producer
-   results never whole-slot replace seeded intent.
+   actual transport writes plus aggregation-state transitions on one recipient
+   slot preserve every field; producer results never whole-slot replace seeded
+   intent.
 7. API/projection and dashboard hook propagation.
 8. Transport-only callback updates emit the existing live refetch event.
-9. Relay behavior parity: all executions use membership-at-each-execution; a
-   member added after source append gets a conditional requested-transport slot
-   before suppression/provider handling; continuations reuse the same slot and
-   callback pointer; media is materialized per leg immediately before send;
-   suppressed slots retain requested-only intent; and queued classification
-   drift warns but still sends.
+9. Relay behavior parity: all executions use membership-at-each-execution; the
+   all-current-member aggregation preflight finishes before the first provider
+   send; a member added after source append participates; a member removed before
+   attempt is excluded; continuations reuse the same slot and callback pointer;
+   media is materialized per leg immediately before send; suppressed slots retain
+   requested-only intent; and queued classification drift warns but still sends.
 
 ### 13.2 Browser proof
 
@@ -681,6 +736,8 @@ Hermetic Playwright coverage must prove at least:
 - an RCS fallback displays `RCS -> SMS`;
 - a complete mixed multi-recipient send displays `RCS -> Mixed` and expanded
   rows identify each recipient's transport;
+- outbound relay add/remove membership races do not create a false completed
+  transport or a permanently pending never-attempted leg;
 - an inbound relay source keeps its inbound main chip while its expanded rows
   show outbound leg transports;
 - a schema-absent message keeps its legacy label;
@@ -720,6 +777,8 @@ at base `5ce9912f` and exited 0:
 - Missing channel evidence is expected and produces no warning by itself.
 - Queued classification drift produces a structured warning, preserves the
   original requested value, and continues the existing send path.
+- An aggregation preflight failure aborts before provider sends and follows the
+  current job retry/error path; it cannot expose a falsely complete subset.
 - Provider payload names remain at adapter/webhook boundaries.
 - Logs contain safe IDs, enum values, and error codes only; no bodies or phone
   numbers.
@@ -764,3 +823,6 @@ The mission is complete only when all of the following are true:
 11. Relay membership races and continuation retries preserve the current routing,
     one-slot-per-member, and callback-pointer behavior while every newly
     discovered leg records requested intent before provider handling.
+12. Outbound aggregation includes current-roster additions, excludes members
+    removed before attempt, permanently retains attempted legs, and never calls a
+    partial execution complete.

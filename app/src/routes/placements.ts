@@ -826,7 +826,7 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
           'convert: a concurrent writer owns this ladder - skipping the superseded reminder sweep',
         );
       } else {
-        await reminders.deleteSupersededForTour(tour.tourId);
+        await reminders.deleteSupersededForTour(tour.tourId, rotatedLadderId);
       }
     } catch (err) {
       log.error(

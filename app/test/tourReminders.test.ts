@@ -20,6 +20,7 @@ import {
   DeleteCommand,
   GetCommand,
   QueryCommand,
+  TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
 import type {
@@ -315,6 +316,7 @@ describe('fake world repos mirror the S1 repo contracts', () => {
     const world = createFakeWorld();
     const mine = await newTour(world, 'sweep-mine');
     const theirs = await newTour(world, 'sweep-theirs');
+    await world.toursRepo.patch(mine.tourId, { currentLadderId: 'ladder-current' });
     const mk = (tourId: string, kind: ReminderKind) =>
       world.tourRemindersRepo.create({ tourId, kind, dueAt: '2026-11-30T23:30:00.000Z' });
 
@@ -331,7 +333,7 @@ describe('fake world repos mirror the S1 repo contracts', () => {
     );
     await world.tourRemindersRepo.claimSend(sent.reminderId, '2026-11-20T12:00:00.000Z');
 
-    await world.tourRemindersRepo.deleteSupersededForTour(mine.tourId);
+    await world.tourRemindersRepo.deleteSupersededForTour(mine.tourId, 'ladder-current');
 
     const left = await world.tourRemindersRepo.listByTour(mine.tourId);
     expect(left.map((r) => r.reminderId)).toEqual([sent.reminderId]);
@@ -340,6 +342,37 @@ describe('fake world repos mirror the S1 repo contracts', () => {
     expect((await world.tourRemindersRepo.listByTour(theirs.tourId)).map((r) => r.reminderId)).toEqual(
       [other.reminderId],
     );
+  });
+
+  it('deleteSupersededForTour KEEPS the expected generation and STOPS once the pointer moves', async () => {
+    const world = createFakeWorld();
+    const tour = await newTour(world, 'sweep-generation');
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-current' });
+    const mk = (kind: ReminderKind, ladderId: string) =>
+      world.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind,
+        dueAt: '2026-11-30T23:30:00.000Z',
+        ladderId,
+      });
+    const old = await mk('day_before', 'ladder-old');
+    const current = await mk('morning_of', 'ladder-current');
+
+    await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, 'ladder-current');
+
+    // The caller's OWN generation survives; the earlier one is gone.
+    expect(
+      (await world.tourRemindersRepo.listByTour(tour.tourId)).map((r) => r.reminderId),
+    ).toEqual([current.reminderId]);
+    expect(old.reminderId).not.toBe(current.reminderId);
+
+    // And a sweep for a generation the tour has ALREADY replaced deletes
+    // nothing - the fake mirrors the ConditionCheck the real repo rides.
+    const stale = await mk('en_route', 'ladder-older-still');
+    await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, 'ladder-not-stored');
+    expect(
+      (await world.tourRemindersRepo.listByTour(tour.tourId)).map((r) => r.reminderId).sort(),
+    ).toEqual([current.reminderId, stale.reminderId].sort());
   });
 
   it('the claim methods still refuse a row that is not there (the post-guard behaviour)', async () => {
@@ -615,34 +648,44 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ---------------------------------------------------------------------------
   describe('deleteSupersededForTour', () => {
     const SWEEP_NOW = '2026-09-25T12:00:00.000Z';
+    /** The generation the CALLER just pointed the tour at - never swept. */
+    const SWEEP_POINTER = 'ladder-current';
 
-    /** A tour carrying one row of every terminal shape, plus a pending one. */
+    /**
+     * A tour carrying one row of every terminal shape, plus a pending one, all
+     * on a SUPERSEDED generation - and one unsent row of the CURRENT generation,
+     * which the caller just armed and which the sweep must never touch. The
+     * tour's stored pointer is SWEEP_POINTER, which is what the transactional
+     * sweep's ConditionCheck reads.
+     */
     const sweepWorld = async (label: string) => {
       const tour = await tours.create({
         tenantId: `contact-sweep-${label}`,
         unitId: `unit-sweep-${label}`,
         scheduledAt: '2026-09-30T15:00:00.000Z',
         tourType: 'self_guided',
+        currentLadderId: SWEEP_POINTER,
       });
-      const mk = (kind: ReminderKind, dueAt: string) =>
-        tourReminders.create({ tourId: tour.tourId, kind, dueAt, ladderId: 'ladder-old' });
+      const mk = (kind: ReminderKind, dueAt: string, ladderId = 'ladder-old') =>
+        tourReminders.create({ tourId: tour.tourId, kind, dueAt, ladderId });
 
       const pending = await mk('day_before', '2026-09-29T23:30:00.000Z');
       const canceled = await mk('morning_of', '2026-09-30T11:00:00.000Z');
       const skipped = await mk('en_route', '2026-09-30T14:00:00.000Z');
       const sent = await mk('confirmation', '2026-09-20T13:00:00.000Z');
+      const current = await mk('day_before', '2026-09-29T23:45:00.000Z', SWEEP_POINTER);
 
       await tourReminders.cancel(canceled.reminderId, SWEEP_NOW);
       await tourReminders.claimSkip(skipped.reminderId, SWEEP_NOW, 'tour_missing');
       await tourReminders.claimSend(sent.reminderId, SWEEP_NOW, 'the body that went out');
 
-      return { tour, pending, canceled, skipped, sent };
+      return { tour, pending, canceled, skipped, sent, current };
     };
 
-    it('deletes pending, operator-canceled AND skipped rows; keeps every SENT row', async () => {
+    it('deletes pending, operator-canceled AND skipped rows of an EARLIER generation; keeps every SENT row and the CURRENT ladder', async () => {
       const w = await sweepWorld('mixed');
 
-      await tourReminders.deleteSupersededForTour(w.tour.tourId);
+      await tourReminders.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER);
 
       expect(await rawReminder(w.pending.reminderId)).toBeUndefined();
       expect(await rawReminder(w.canceled.reminderId)).toBeUndefined();
@@ -651,20 +694,23 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       const kept = await rawReminder(w.sent.reminderId);
       expect(kept?.sentAt).toBe(SWEEP_NOW);
       expect(kept?.sentBody).toBe('the body that went out');
+      // The caller's OWN generation survives untouched - this is what lets the
+      // re-arm caller sweep AFTER it arms.
+      expect(await rawReminder(w.current.reminderId)).toBeDefined();
 
-      // And the tour's live view holds exactly the sent row.
-      expect(await tourReminders.listByTour(w.tour.tourId)).toHaveLength(1);
+      // And the tour's live view holds exactly the sent row and the current one.
+      expect(await tourReminders.listByTour(w.tour.tourId)).toHaveLength(2);
     });
 
     it('touches no OTHER tour and is idempotent on a second call', async () => {
       const mine = await sweepWorld('mine');
       const theirs = await sweepWorld('theirs');
 
-      await tourReminders.deleteSupersededForTour(mine.tour.tourId);
-      await tourReminders.deleteSupersededForTour(mine.tour.tourId);
+      await tourReminders.deleteSupersededForTour(mine.tour.tourId, SWEEP_POINTER);
+      await tourReminders.deleteSupersededForTour(mine.tour.tourId, SWEEP_POINTER);
 
-      expect(await tourReminders.listByTour(mine.tour.tourId)).toHaveLength(1);
-      expect(await tourReminders.listByTour(theirs.tour.tourId)).toHaveLength(4);
+      expect(await tourReminders.listByTour(mine.tour.tourId)).toHaveLength(2);
+      expect(await tourReminders.listByTour(theirs.tour.tourId)).toHaveLength(5);
     });
 
     it('a row that gains sentAt BETWEEN the list and the delete SURVIVES', async () => {
@@ -687,7 +733,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       } as unknown as DynamoDBDocumentClient;
       const racingRepo = createTourRemindersRepo({ doc: racingDoc, env: testEnv, logger });
 
-      await racingRepo.deleteSupersededForTour(w.tour.tourId);
+      await racingRepo.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER);
 
       expect(raced).toBe(true);
       const survivor = await rawReminder(w.pending.reminderId);
@@ -698,15 +744,67 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(await rawReminder(w.skipped.reminderId)).toBeUndefined();
     });
 
+    it('the POINTER moving mid-sweep STOPS the sweep and the remaining rows SURVIVE', async () => {
+      const w = await sweepWorld('generation');
+
+      // THE case the check-then-act guard could not cover (review rounds
+      // B1/R2-1/NEW-1): a competing writer rotates the pointer AFTER this sweep
+      // has started, so from its first delete onward this request no longer owns
+      // the generation it is sweeping for. The ConditionCheck rides every
+      // delete, so the store itself refuses the rest - there is no window to
+      // accept and no read to be stale.
+      let rotated = false;
+      const rotatingDoc = {
+        send: async (command: unknown) => {
+          const out = await (doc as DynamoDBDocumentClient).send(command as never);
+          if (
+            !rotated &&
+            (command instanceof TransactWriteCommand || command instanceof DeleteCommand)
+          ) {
+            rotated = true;
+            await tours.patch(w.tour.tourId, { currentLadderId: 'ladder-someone-else' });
+          }
+          return out;
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const rotatingRepo = createTourRemindersRepo({ doc: rotatingDoc, env: testEnv, logger });
+
+      const before = logCapture.lines.length;
+      await rotatingRepo.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER);
+      expect(rotated).toBe(true);
+
+      // Exactly ONE candidate went (the delete that raced ahead of the
+      // rotation); the other two are still there, refused by the pointer check.
+      const left = await tourReminders.listByTour(w.tour.tourId);
+      const survivors = [w.pending, w.canceled, w.skipped].filter((r) =>
+        left.some((l) => l.reminderId === r.reminderId),
+      );
+      expect(survivors).toHaveLength(2);
+      // The sent row and the (now itself superseded) current-ladder row stand.
+      expect(await rawReminder(w.sent.reminderId)).toBeDefined();
+      expect(await rawReminder(w.current.reminderId)).toBeDefined();
+
+      // And the handover is VISIBLE: info, not error - a newer writer owning the
+      // ladder is the design working, not a failure.
+      const infos = logCapture.lines
+        .slice(before)
+        .filter((l) => l['level'] === 30 && l['tourId'] === w.tour.tourId);
+      expect(
+        infos.some((l) => String(l['msg'] ?? '').includes('newer generation')),
+      ).toBe(true);
+      expect(
+        logCapture.lines.slice(before).filter((l) => l['level'] === 50),
+      ).toHaveLength(0);
+    });
+
     it('an UNEXPECTED error on one row logs at error and does not abort the rest', async () => {
       const w = await sweepWorld('boom');
 
       const failingDoc = {
         send: async (command: unknown) => {
           if (
-            command instanceof DeleteCommand &&
-            (command.input.Key as { reminderId?: string } | undefined)?.reminderId ===
-              w.canceled.reminderId
+            command instanceof TransactWriteCommand &&
+            JSON.stringify(command.input.TransactItems ?? []).includes(w.canceled.reminderId)
           ) {
             throw new Error('throttled');
           }
@@ -717,7 +815,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
       const before = logCapture.lines.length;
       await expect(
-        failingRepo.deleteSupersededForTour(w.tour.tourId),
+        failingRepo.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER),
       ).resolves.toBeUndefined();
 
       // The failure is LOUD (never silently vanished) but not fatal.
@@ -738,10 +836,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         unitId: 'unit-sweep-empty',
         scheduledAt: '2026-10-05T15:00:00.000Z',
         tourType: 'self_guided',
+        currentLadderId: SWEEP_POINTER,
       });
 
       await expect(
-        tourReminders.deleteSupersededForTour(tour.tourId),
+        tourReminders.deleteSupersededForTour(tour.tourId, SWEEP_POINTER),
       ).resolves.toBeUndefined();
     });
   });
@@ -1896,7 +1995,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const origIds = origRows.map((r) => r.reminderId);
 
     // Sweep and re-arm with the new scheduledAt - the route's order (S9 T9.1).
-    await tourReminders.deleteSupersededForTour(tour.tourId);
+    // The sweep is generation-scoped, so it needs the pointer the caller just
+    // rotated to; this tour was created without one, so rotate it first exactly
+    // as the route's patch does.
+    await tours.patch(tour.tourId, { currentLadderId: 'ladder-rotation' });
+    await tourReminders.deleteSupersededForTour(tour.tourId, 'ladder-rotation');
 
     // Every original row is GONE, not canceled in place. Asserted by identity:
     // "no pending row remains" was also true of the cancel this replaced.

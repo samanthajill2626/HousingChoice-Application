@@ -1278,7 +1278,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         // spec 3.2's interruption posture demands that be logged at error with
         // the tourId (conformance F1), exactly as the arm branch below does.
         try {
-          await reminders.deleteSupersededForTour(tourId);
+          await reminders.deleteSupersededForTour(tourId, rotation);
         } catch (err) {
           log.error(
             { err, tourId },
@@ -1341,7 +1341,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       // the rotated pointer is FINAL and matches nothing. Sent rungs survive
       // (the sweep's only filter is "never sent") and read as earlier[]; the
       // current ladder is empty. Same no-try/catch posture as the re-arm branch.
-      await reminders.deleteSupersededForTour(tourId);
+      await reminders.deleteSupersededForTour(tourId, rotation);
       ladderChanged = true;
     }
     // ONE emit after the sweep+arm pair (scheduled-message-visibility Task 6):

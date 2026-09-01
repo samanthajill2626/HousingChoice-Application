@@ -3028,15 +3028,25 @@ export function createFakeWorld(): FakeWorld {
       tourRemindersMap.set(reminderId, r);
       return true;
     },
-    async deleteSupersededForTour(tourId) {
-      // Mirror the real sweep (supersession D1): the ONLY filter is "never
-      // sent" - pending, operator-canceled and skipped rows all go, and every
-      // sentAt row stays. NOT the removed tour-wide cancel's triple filter,
-      // which kept canceled and skipped rows in place.
-      for (const r of [...tourRemindersMap.values()]) {
-        if (r.tourId === tourId && r.sentAt === undefined) {
-          tourRemindersMap.delete(r.reminderId);
-        }
+    async deleteSupersededForTour(tourId, expectedPointer) {
+      // Mirror the real sweep (supersession D1 + review rounds B1/R2-1/NEW-1):
+      // the filters are "never sent" - pending, operator-canceled and skipped
+      // rows all go, and every sentAt row stays (NOT the removed tour-wide
+      // cancel's triple filter, which kept canceled and skipped rows in place) -
+      // AND "not the caller's own generation".
+      //
+      // The real repo rides every delete on a TransactWriteItems whose
+      // ConditionCheck reads the TOUR's currentLadderId, so a writer that
+      // rotates the pointer mid-sweep invalidates every remaining delete. Here
+      // that is a synchronous re-check per row (this fake has no transactions
+      // and needs none - it is strongly consistent by construction), and a
+      // mismatch STOPS the sweep exactly as a canceled pointer check does.
+      const candidates = [...tourRemindersMap.values()].filter(
+        (r) => r.tourId === tourId && r.sentAt === undefined && r.ladderId !== expectedPointer,
+      );
+      for (const r of candidates) {
+        if (toursMap.get(tourId)?.currentLadderId !== expectedPointer) return;
+        tourRemindersMap.delete(r.reminderId);
       }
     },
   };

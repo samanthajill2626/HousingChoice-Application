@@ -3,9 +3,10 @@ id: today-shows-phone-instead-of-name
 title: Today shows a bare phone number instead of the person's name on ~580 threads, because it reads a denormalized name nothing keeps in sync
 type: bug
 severity: high
-status: open
+status: resolved
 area: app/today
 created: 2026-08-25
+resolved: 2026-09-01
 refs: app/src/routes/today.ts:1074-1081, app/src/routes/contacts.ts:1613-1650, app/src/routes/inbox.ts:817
 ---
 
@@ -70,3 +71,18 @@ outbound message content - see
 [`group-roster-name-snapshot-never-refreshed`](./group-roster-name-snapshot-never-refreshed.md).
 Three denormalized name surfaces are now known; do not assume that is the whole
 set.
+
+**Resolution (2026-09-01, feat/participant-snapshot-refresh).** Option 1, and
+it added no reads. Today's `who` resolves from the contact the deleted-check
+already memoized (zero new reads), then the stored name, then the phone -
+`whoOfConversation` in `routes/today.ts`. The contact is fetched by the
+deleted-contact gate before the emit loop runs, so the resolution is a memo hit;
+a test pins the read count. The dashboard's offline Today fallback
+(`dashboard/src/routes/today/buildToday.ts` `conversationWho`) now requires the
+stored name to be NON-EMPTY before it wins, so a blank snapshot falls through to
+the formatted phone instead of rendering an empty row. `participant_display_name`
+keeps every writer it had; it is now the MIDDLE rung, not the source of truth,
+so no backfill was needed. The sibling roster field was fixed in the same branch
+- see
+[`group-roster-name-snapshot-never-refreshed`](./group-roster-name-snapshot-never-refreshed.md)
+for what that covered and what it deliberately did not.

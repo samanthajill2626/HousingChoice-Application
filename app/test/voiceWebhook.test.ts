@@ -121,6 +121,69 @@ describe('inbound masked voice — the bridge (M1.9a)', () => {
     expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(1);
   });
 
+  it('RED: call_party_label prefers the CONTACT (masked) over the stored roster name', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({
+      contactId: 'c-bob',
+      type: 'landlord',
+      phone: BOB,
+      firstName: 'Robert',
+      lastName: 'Renamed',
+    });
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+
+    const call = world.messages.find((m) => m.type === 'call')!;
+    expect(call.call_party_label).toBe('Robert R.');
+  });
+
+  it('RED: a soft-deleted contact supplies no name - the masked label falls back to the masked stored roster name', async () => {
+    const world = createFakeWorld();
+    // getById returns soft-deleted rows unchanged, so the label itself has to
+    // refuse the name: a deleted contact supplies NO name and the stored roster
+    // snapshot stands - still masked, never a full surname.
+    world.contacts.push({
+      contactId: 'c-bob',
+      type: 'landlord',
+      phone: BOB,
+      firstName: 'Robert',
+      lastName: 'Renamed',
+      deleted_at: '2026-01-01T00:00:00.000Z',
+    });
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob Builder' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+
+    const call = world.messages.find((m) => m.type === 'call')!;
+    expect(call.call_party_label).toBe('Bob B.');
+  });
+
+  it('RED: a stored full name with no contact is masked in the persisted label AND the spoken whisper', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, {
+      participants: [
+        { contactId: '', phone: ALICE, name: 'Alice Anderson' },
+        { contactId: '', phone: BOB, name: 'Bob Builder' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+
+    const call = world.messages.find((m) => m.type === 'call')!;
+    expect(call.call_party_label).toBe('Bob B.');
+    // The whisper URL carries the CALLER's label - what the callee hears.
+    expect(res.text).toContain(`callerLabel=${encodeURIComponent('Alice A.')}`);
+  });
+
   it('emits message.persisted once for the new call entry (live timeline)', async () => {
     const world = createFakeWorld();
     seedRelay(world);
@@ -913,6 +976,18 @@ describe('GET /api/calls/:callId (M1.9a, authed)', () => {
     expect(res.body.conversation.conversationId).toBe('conv-relay-voice-1');
     // The response carries the masked label, never a raw counterpart phone.
     expect(res.body.call.call_party_label).toBe('Bob');
+  });
+
+  it('RED: GET /api/calls/:callId hands back a roster with resolved names', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-bob', type: 'landlord', phone: BOB, firstName: 'Robert', lastName: 'Renamed' });
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+    const res = await request(app).get('/api/calls/CAinbound0001').set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const bob = (res.body.conversation.participants as { contactId: string; name?: string }[]).find((p) => p.contactId === 'c-bob');
+    expect(bob?.name).toBe('Robert Renamed');
   });
 
   it('404 for an unknown callId', async () => {

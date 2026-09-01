@@ -30,7 +30,8 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import pino from 'pino';
 
 import { iterateUnreadConversations } from '../src/lib/unreadFeed.js';
-import { createContactsRepo } from '../src/repos/contactsRepo.js';
+import { collectGroupRosters, tallyRosterDrift } from '../src/lib/rosterDriftTally.js';
+import { createContactsRepo, type ContactDisplayItem } from '../src/repos/contactsRepo.js';
 import { GROUP_DETECTION_ORIGIN } from '../src/services/groupMembers.js';
 import {
   createConversationsRepo,
@@ -583,6 +584,54 @@ async function auditDenorm(): Promise<void> {
       '  The `missing triage` line is the one to read twice: those threads are',
       '  invisible to the Unknown tab TODAY, so they are a correctness bug',
       '  already, independent of any performance work.',
+      '',
+    ].join('\n'),
+  );
+
+  await auditGroupRosters();
+}
+
+/**
+ * The GROUP half of --audit-denorm. Sourcing lives in lib/rosterDriftTally so
+ * it can be tested: the 1:1 walk above never sees a group_text or a closed
+ * relay. Counts only, never names. A requested id the batch did not return is
+ * reported separately from a genuinely dangling id, so a throttle never reads
+ * as data corruption.
+ */
+async function auditGroupRosters(): Promise<void> {
+  const { rosters, groupTextTruncated, relayTruncated } = await collectGroupRosters(conversations);
+  const ids = new Set<string>();
+  // Same predicate as the tally and collectRosterContactIds: an ABSENT
+  // contactId must not enter the batch - `undefined` marshals to an empty key,
+  // DynamoDB rejects the chunk, the repo swallows it, and up to 100 healthy
+  // members would read as "dangling" with a phantom throttle warning.
+  for (const roster of rosters)
+    for (const p of roster)
+      if (typeof p.contactId === 'string' && p.contactId.length > 0) ids.add(p.contactId);
+  const idList = [...ids];
+  const found = new Map<string, ContactDisplayItem>();
+  for (let i = 0; i < idList.length; i += 100) {
+    for (const [k, v] of await contacts.getDisplaysByIds(idList.slice(i, i + 100))) found.set(k, v);
+  }
+  const unreturned = idList.length - found.size;
+  const t = tallyRosterDrift(rosters, found);
+  console.log(
+    [
+      '',
+      'Group roster names - drift audit',
+      '================================',
+      `  rosters walked          ${t.rosters}${groupTextTruncated ? '  (group_text walk TRUNCATED)' : ''}${relayTruncated.length > 0 ? `  (relay ${relayTruncated.join('/')} TRUNCATED)` : ''}`,
+      `  members                 ${t.members}`,
+      `    with contactId        ${t.withContactId}`,
+      `      name MISSING, known ${t.nameMissingButKnown}  <- contact has a name; roster stores none`,
+      `      name DIFFERS        ${t.nameDrift}  <- roster shows a different name than the contact`,
+      `      name only STORED    ${t.nameOnlyStored}  <- contact readable but nameless; the stored name stands (kept by design)`,
+      `      soft-deleted        ${t.deletedContact}  <- the read path leaves these on the stored name`,
+      `      dangling contactId  ${t.danglingContactId}  <- no contact returned for the id`,
+      `    no contactId          ${t.noContactId}  <- bare-phone member; nothing to resolve`,
+      '',
+      `  ids requested ${idList.length}, returned ${found.size}, NOT RETURNED ${unreturned}` +
+        (unreturned > 0 ? '  <- a short batch (throttle?) inflates "dangling"; re-run before trusting it' : ''),
       '',
     ].join('\n'),
   );

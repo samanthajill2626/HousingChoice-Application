@@ -83,6 +83,7 @@ import {
   type UnreadWalkState,
 } from '../lib/unreadFeed.js';
 import { formatPhoneForDisplay } from '../lib/phone.js';
+import { hydrateConversationRosters } from '../lib/participantNames.js';
 import { createRateLimitedWarn } from '../lib/rateLimitedWarn.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -775,7 +776,11 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         );
       }
       for (const conv of unreadOneToOne) {
-        const who = whoOfConversation(conv);
+        const whoContactId = oneToOneContactId(conv);
+        const who = whoOfConversation(
+          conv,
+          whoContactId !== undefined ? await getContact(whoContactId) : undefined,
+        );
         if (conv.type === 'unknown_1to1') {
           // Untriaged inbound → link to the unknown CONTACT's page (the
           // auto-captured needs_review contact), NOT /conversations/:id — the
@@ -991,12 +996,18 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           'today: relay-group list truncated - some due nags may be missing',
         );
       }
-      for (const conv of openGroups) {
+      // Only groups with a DUE nag (<= now). No nag, or a future nag -> skip.
+      // A group with no pool number is dropped defensively.
+      const dueGroups = openGroups.filter((conv) => {
         const nagDueAt = conv.close_nag_next_at;
-        // Only groups with a DUE nag (<= now). No nag, or a future nag -> skip.
-        if (typeof nagDueAt !== 'string' || nagDueAt > nowIso) continue;
-        const poolNumber = conv.pool_number;
-        if (typeof poolNumber !== 'string' || poolNumber.length === 0) continue; // defensive
+        return typeof nagDueAt === 'string' && nagDueAt <= nowIso
+          && typeof conv.pool_number === 'string' && conv.pool_number.length > 0;
+      });
+      // ONE batch for every due group's roster (lib/participantNames): the card
+      // names people, and the stored roster names are a creation-time snapshot.
+      for (const conv of await hydrateConversationRosters(dueGroups, contacts, log)) {
+        const nagDueAt = conv.close_nag_next_at as string;
+        const poolNumber = conv.pool_number as string;
         const memberNames = (conv.participants ?? []).map(
           (p) => p.name ?? formatPhoneForDisplay(p.phone) ?? p.contactId,
         );
@@ -1070,9 +1081,14 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   return router;
 }
 
-/** Conversation `who`: the resolved display name, else the participant phone in
- *  staff-facing display form (email-only threads carry neither -> ''). */
-function whoOfConversation(conv: ConversationItem): string {
+/** Conversation `who`: the CONTACT's current name (already memoized by the
+ *  deleted-contact gate, so this adds no read), else the stored snapshot, else
+ *  the participant phone in staff-facing form (email-only threads carry
+ *  neither -> ''). Uses this file's own nameFromContact so Unreplied and the
+ *  placement/tour rows share one join rule. */
+function whoOfConversation(conv: ConversationItem, contact: ContactItem | undefined): string {
+  const live = nameFromContact(contact);
+  if (live !== undefined) return live;
   if (typeof conv.participant_display_name === 'string' && conv.participant_display_name.length > 0) {
     return conv.participant_display_name;
   }

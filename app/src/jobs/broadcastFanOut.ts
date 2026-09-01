@@ -54,6 +54,7 @@ import {
   createConversationsRepo,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
+import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
@@ -239,6 +240,55 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       return;
     }
 
+    // Pin the lazily-initialised repo. Capturing the reassignable `let` inside a
+    // closure loses TS's non-undefined narrowing wherever that closure sits,
+    // because the compiler cannot prove the binding is still set when it runs.
+    // `snapshot` is the same pin for the point-in-time item: a hoisted function
+    // declaration does not inherit the `if (!broadcast) return` narrowing.
+    const repo = broadcasts;
+    const snapshot = broadcast;
+
+    /**
+     * M5 D8: terminal-close every still-open recipient in `recipientKeys` with
+     * `code`, then finalize ONCE. Three situations need this and they are not
+     * one code path - the cap reached mid-ladder (close A), a pass beginning
+     * with the ladder already spent (close B), and a continuation the queue
+     * refused (close C, D9) - but all three must leave the SAME terminal shape:
+     * no recipient left `queued`, the persisted counters reconciled, the row no
+     * longer `sending`, and one operator ERROR line naming the reason (D10).
+     *
+     * NOT closed here: the unknown-error `throw` below, which is D12 and stays
+     * broken deliberately (filed as throw-for-redelivery-defeated-by-job-marker).
+     */
+    async function closeBroadcast(
+      recipientKeys: string[],
+      code: string,
+      cause?: unknown,
+    ): Promise<void> {
+      for (const contactKey of recipientKeys) {
+        // Both call sites pass an already-non-terminal set; re-checked against
+        // the pass snapshot so a future caller cannot double-count a slot.
+        if (isTerminal(snapshot.recipients?.[contactKey]?.status)) continue;
+        await recordRecipient(repo, payload.broadcastId, contactKey, { status: 'failed', errorCode: code });
+        emitBroadcastProgress(
+          events,
+          payload.broadcastId,
+          await repo.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
+        );
+      }
+      log.error(
+        {
+          broadcastId: payload.broadcastId,
+          deferred: recipientKeys.length,
+          closeCode: code,
+          attempt: payload.attempt,
+          ...(cause !== undefined && { err: cause }),
+        },
+        'broadcastFanOut: fan-out closed - remaining recipients marked failed',
+      );
+      await finalize(repo, events, payload.broadcastId, log, audit);
+    }
+
     // Resolve the unit-derived merge context ONCE (constant for the broadcast);
     // only [TenantName] is per-recipient.
     const unit =
@@ -254,6 +304,34 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       payload.recipientKeys !== undefined
         ? allKeys.filter((k) => payload.recipientKeys!.includes(k))
         : allKeys;
+
+    // M5 D1/D6: claim this pass on the DURABLE item before any send. The count
+    // used to live in the enqueued envelope, so it only advanced when the queue
+    // accepted the continuation - a broken queue froze it and the cap below
+    // could never be reached. Claimed here, BELOW the duplicate-delivery guard
+    // and only when this pass will actually attempt a send: a job that sends
+    // nothing must not spend a rung, and a redelivery must not either.
+    const pending = keys.filter((k) => !isTerminal(broadcast.recipients?.[k]?.status));
+    // Handler scope, not the branch: the continuation block reads it.
+    let claim: FanoutClaimResult | undefined;
+    if (pending.length > 0) {
+      claim = await repo.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
+      if (claim.outcome === 'missing') {
+        log.warn(
+          { broadcastId: payload.broadcastId },
+          'broadcastFanOut: broadcast vanished before the pass claim - nothing to send',
+        );
+        return;
+      }
+      if (claim.outcome === 'capped') {
+        // Close B: the ladder was already spent when this pass began, so there
+        // is nothing to attempt and nothing further will arrive.
+        await closeBroadcast(pending, 'transient_cap');
+        return;
+      }
+    }
+    // pending.length === 0 -> nothing to send; fall through to the trailing
+    // finalize without consuming a rung.
 
     const transientRemaining: string[] = [];
     let sentCount = 0;
@@ -476,35 +554,45 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     // Transient continuation: re-enqueue the remaining recipients with backoff,
     // capped. Beyond the cap → mark those failed (no silent black hole).
     if (transientRemaining.length > 0) {
-      const nextAttempt = (payload.attempt ?? 1) + 1;
-      if (nextAttempt > MAX_BROADCAST_ATTEMPTS) {
-        for (const contactKey of transientRemaining) {
-          await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'failed', errorCode: 'transient_cap' });
-          emitBroadcastProgress(
-            events,
-            payload.broadcastId,
-            await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
-          );
-        }
-        log.error(
-          { broadcastId: payload.broadcastId, deferred: transientRemaining.length, attempt: payload.attempt },
-          'broadcastFanOut: transient retry cap reached — remaining recipients marked failed',
-        );
-        await finalize(broadcasts, events, payload.broadcastId, log, audit);
+      if (claim?.outcome !== 'claimed') {
+        // Unreachable by construction: a key reaches transientRemaining only
+        // from inside the send loop, which only runs for a non-terminal slot -
+        // so `pending` was non-empty and the claim either succeeded or returned
+        // above. Narrowed rather than asserted, and closed rather than ignored,
+        // so D8 holds even if the impossible ever happens.
+        await closeBroadcast(transientRemaining, 'transient_cap');
         return;
       }
-      await enqueue(
-        BROADCAST_SEND_JOB,
-        {
-          broadcastId: payload.broadcastId,
-          attempt: nextAttempt,
-          recipientKeys: transientRemaining,
-        } satisfies BroadcastSendPayload,
-        // The continuation runs AS nextAttempt, so it waits ITS OWN backoff
-        // (attempt 1→2 waits the 2nd-step delay = 10s, 2→3 = 20s). Using the
-        // current attempt's delay here would under-wait by one step.
-        { runAt: new Date(Date.now() + broadcastBackoffMs(nextAttempt)) },
-      );
+      // The claimed pass number is the durable one; the envelope's `attempt` is
+      // advisory from M5 on.
+      const nextAttempt = claim.attempt + 1;
+      if (claim.attempt >= MAX_BROADCAST_ATTEMPTS) {
+        // Close A: this pass WAS the last rung, so no continuation follows and
+        // the still-deferred recipients close here (no silent black hole).
+        await closeBroadcast(transientRemaining, 'transient_cap');
+        return;
+      }
+      try {
+        await enqueue(
+          BROADCAST_SEND_JOB,
+          {
+            broadcastId: payload.broadcastId,
+            attempt: nextAttempt,
+            recipientKeys: transientRemaining,
+          } satisfies BroadcastSendPayload,
+          // The continuation runs AS nextAttempt, so it waits ITS OWN backoff
+          // (attempt 1->2 waits the 2nd-step delay = 10s, 2->3 = 20s). Using
+          // the current attempt's delay here would under-wait by one step.
+          { runAt: new Date(Date.now() + broadcastBackoffMs(nextAttempt)) },
+        );
+      } catch (err) {
+        // Close C (D9): the queue refused the continuation, so nothing will come
+        // back - a redelivery of THIS envelope is suppressed by the job marker
+        // above. Close now instead of leaving the broadcast 'sending' forever.
+        // The reason is its OWN code (D10): retries never ran here.
+        await closeBroadcast(transientRemaining, 'enqueue_failed', err);
+        return;
+      }
       // A continuation is still pending — do NOT finalize yet.
       return;
     }

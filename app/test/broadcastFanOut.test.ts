@@ -37,7 +37,7 @@ import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { DEV_SESSION_SECRET_DEFAULT } from '../src/lib/config.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
-import { createLogCapture } from './helpers/logCapture.js';
+import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
 const PUBLIC_BASE = 'https://dxxxx.cloudfront.example';
 
@@ -140,6 +140,43 @@ function wireHandler(world: FakeWorld, logger = createLogger({ destination: crea
     events: world.events,
     logger,
     ...(tokenBucket !== undefined && { tokenBucket }),
+  });
+}
+
+/**
+ * The single operator ERROR line every close writes (M5 D8): the cap reached
+ * mid-ladder, a pass beginning with the ladder already spent, and a failed
+ * continuation enqueue all land on one message, parameterised by closeCode.
+ * Matched by message so an unrelated error line cannot inflate the count.
+ */
+function closeLines(capture: LogCapture): Record<string, unknown>[] {
+  return capture
+    .atLevel(50)
+    .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('fan-out closed'));
+}
+
+/** A capturing logger whose ERROR lines the close assertions read. */
+function capturingLogger(): { capture: LogCapture; logger: ReturnType<typeof createLogger> } {
+  const capture = createLogCapture();
+  return { capture, logger: createLogger({ level: 'info', destination: capture.stream }) };
+}
+
+/**
+ * Send stubs as vi.fn COUNTERS. The messaging adapter is replaced wholesale
+ * here, so `world.sent` (appended inside the harness adapter) never fills for a
+ * deferring recipient - the stub's own call count is the only honest send count.
+ */
+/** A send stub that must never run - calling it fails the test loudly. */
+function neverSends() {
+  return vi.fn(async (): Promise<never> => {
+    throw new Error('sendMessage must not be called on this pass');
+  });
+}
+
+/** A send stub that always rate-limits (429 = transient -> continuation). */
+function alwaysRateLimits() {
+  return vi.fn(async (): Promise<never> => {
+    throw Object.assign(new Error('rate limited'), { code: 429 });
   });
 }
 
@@ -378,26 +415,119 @@ describe('broadcast.send (M1.8a)', () => {
     expect(payload.attempt).toBe(2);
     // Not finalized yet (a continuation is pending).
     expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+    // M5: pass 1 claimed rung 1 on the DURABLE item. The envelope's `attempt` is
+    // advisory from here on - this is the number the cap is read from.
+    expect(world.broadcasts.get('bcast-1')!.fanout_attempt).toBe(1);
   });
 
-  it('429 capped at MAX_BROADCAST_ATTEMPTS → remaining marked failed, finalized', async () => {
+  // --- M5: the three closes. Each leaves the SAME terminal shape - every
+  // recipient terminal, persisted stats.queued 0, the row finalized (never left
+  // 'sending'), and exactly one operator ERROR line (D8).
+  it('close A: 429 capped at MAX_BROADCAST_ATTEMPTS (ladder driven for real) -> remaining marked failed, finalized', async () => {
     const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
     seedUnit(world);
     seedBroadcast(world, [b]);
-    wireHandler(world, logger);
-    world.adapter.sendMessage = async () => {
-      throw Object.assign(new Error('rate limited'), { code: 429 });
-    };
+    const { capture, logger: capLogger } = capturingLogger();
+    wireHandler(world, capLogger);
+    const send = alwaysRateLimits();
+    world.adapter.sendMessage = send;
 
-    // attempt=3 is the last allowed; the next would be 4 > MAX(3) → cap reached.
-    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1', attempt: 3 });
+    // Drive the ladder the way PRODUCTION reaches the cap - three passes, each
+    // deferring - instead of injecting attempt=3 in the envelope, which the
+    // durable counter has made advisory.
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
     await outbound.settle();
+
+    // deliverDelayed drains TRANSITIVELY and empties delayed[], so one call
+    // would run passes 2 AND 3 and erase both delays. Shift one continuation at
+    // a time and dispatch it, recording the rung's delay first.
+    const delaysObserved: number[] = [];
+    for (let pass = 2; pass <= 3; pass += 1) {
+      const item = outbound.delayed.shift();
+      expect(item).toBeDefined();
+      delaysObserved.push(item!.delaySeconds);
+      await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)));
+    }
 
     const bcast = world.broadcasts.get('bcast-1')!;
     expect(bcast.recipients['c-b']?.status).toBe('failed');
     expect(bcast.recipients['c-b']?.errorCode).toBe('transient_cap');
     expect(bcast.stats.failed).toBe(1);
     expect(bcast.status).toBe('failed'); // all (1) failed
+    // The terminal shape, and the ladder's own shape.
+    expect(bcast.stats.queued).toBe(0);
+    expect(bcast.status).not.toBe('sending');
+    expect(outbound.delayed).toHaveLength(0); // no FOURTH continuation
+    expect(closeLines(capture)).toHaveLength(1);
+    // D7: pass count and delays are exactly main's - 3 sends, 10s then 20s.
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(delaysObserved).toEqual([10, 20]);
+    // The cap was reached on the DURABLE counter, not on the envelope.
+    expect(bcast.fanout_attempt).toBe(3);
+  });
+
+  it('close B: a pass that begins with the ladder already spent closes it, sending nothing', async () => {
+    const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [b]);
+    const { capture, logger: capLogger } = capturingLogger();
+    wireHandler(world, capLogger);
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    // Seed the STORED item at the cap (world.broadcasts holds the live object;
+    // getById returns a shallow copy). A FIRST-pass envelope - no attempt, no
+    // recipientKeys - so only the durable counter can refuse the claim.
+    world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(send).not.toHaveBeenCalled();
+    expect(bcast.recipients['c-b']?.status).toBe('failed');
+    expect(bcast.recipients['c-b']?.errorCode).toBe('transient_cap');
+    expect(bcast.stats.queued).toBe(0);
+    expect(bcast.status).toBe('failed');
+    expect(bcast.status).not.toBe('sending');
+    expect(closeLines(capture)).toHaveLength(1);
+    // A capped claim consumes nothing: the counter is UNCHANGED.
+    expect(bcast.fanout_attempt).toBe(3);
+    expect(outbound.delayed).toHaveLength(0);
+  });
+
+  it('close C: a continuation the queue REFUSES closes the broadcast instead of leaving it sending', async () => {
+    const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [b]);
+    const { capture, logger: capLogger } = capturingLogger();
+    wireHandler(world, capLogger);
+    const send = alwaysRateLimits();
+    world.adapter.sendMessage = send;
+
+    // DELAY-SELECTIVE: this file starts every job through the SAME adapter with
+    // delaySeconds 0, so an unconditional thrower would kill the test's own
+    // entry enqueue and the handler would never run.
+    configureOutboundQueue({
+      async enqueue(envelope, opts) {
+        if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+        return outbound.enqueue(envelope, opts);
+      },
+    });
+
+    // PASS 1 deliberately: runDeferred catches a handler throw (so settle()
+    // resolves and the assertions are reachable); deliverDelayed does not.
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.recipients['c-b']?.status).toBe('failed');
+    expect(bcast.recipients['c-b']?.errorCode).toBe('enqueue_failed');
+    expect(bcast.stats.queued).toBe(0);
+    expect(bcast.status).toBe('failed');
+    expect(bcast.status).not.toBe('sending'); // the anchor bug: stuck forever
+    expect(closeLines(capture)).toHaveLength(1);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it('30007 carrier filtering → recipient failed, NEVER retried', async () => {
@@ -446,11 +576,15 @@ describe('broadcast.send (M1.8a)', () => {
     const envelope = await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
     await outbound.settle();
     expect(world.sent).toHaveLength(1);
+    expect(world.broadcasts.get('bcast-1')!.fanout_attempt).toBe(1);
 
     // Re-dispatch the SAME envelope (SQS at-least-once): the jobId marker
     // suppresses it — no further sends.
     await dispatchJob(JSON.parse(JSON.stringify(envelope)));
     expect(world.sent).toHaveLength(1);
+    // D6: the duplicate returned above the claim, so it consumed NO rung. A
+    // claim placed earlier would burn the ladder on redeliveries alone.
+    expect(world.broadcasts.get('bcast-1')!.fanout_attempt).toBe(1);
   });
 
   it('per-recipient idempotency: a continuation skips a recipient already terminal', async () => {
@@ -467,6 +601,31 @@ describe('broadcast.send (M1.8a)', () => {
 
     // Only Bob is sent — Alice was already terminal.
     expect(world.sent.map((s) => s.to)).toEqual([b.phone]);
+  });
+
+  it('a pass whose recipients are ALL already terminal claims no rung and falls through to finalize', async () => {
+    const a = seedTenant(world, { contactId: 'c-a', phone: '+15550100001' });
+    seedUnit(world);
+    const seeded = seedBroadcast(world, [a]);
+    // A continuation that raced: every key in this pass is already terminal.
+    seeded.recipients['c-a'] = { status: 'sent', conversationId: 'conv-x', tsMsgId: 'ts-x' };
+    seeded.stats.sent = 1;
+    seeded.stats.queued = 0;
+    wireHandler(world, logger);
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(send).not.toHaveBeenCalled();
+    // D6: a pass that attempts no send consumes no rung - the attribute is
+    // still ABSENT, so a later real pass still gets the full ladder.
+    expect(bcast.fanout_attempt).toBeUndefined();
+    // It fell through to the trailing finalize rather than closing.
+    expect(bcast.status).toBe('sent');
+    expect(outbound.delayed).toHaveLength(0);
   });
 
   // --- FIX 2: a refused send (sendMessage SendRefusedError) spends NO token ---

@@ -26,6 +26,7 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createEventBus } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
+import { isQuietTime, quietHoursWindowOf } from '../src/lib/quietHours.js';
 import { ROSTER_UNAVAILABLE_GRACE_MS } from '../src/lib/rosterResolution.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import {
@@ -372,16 +373,24 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ===========================================================================
 
   // ---------------------------------------------------------------------------
-  // Test 1c - (b) a LATE-EVENING tour retires en_route past the event
+  // Test 1c - a LATE-EVENING tour arms its whole ladder, en_route included
   //
   // This case USED to show a clamped day_before losing its slot to morning_of.
-  // The 19:30-local retiming ends that: 19:30 is outside the DEFAULT window, so
+  // The 19:30-local retiming ended that: 19:30 is outside the DEFAULT window, so
   // day_before never clamps at all here. The day_before-clamp scenario now
   // requires an org with quietHoursStart <= 19:30, which Task 7's warn test
-  // pins. What survives in this fixture is the past-event retirement of a 10pm
-  // tour's en_route rung, so that is what the test is now named for.
+  // pins.
+  //
+  // RE-DERIVED 2026-08-31 (Phase B spec 6). It then became the past-event pin
+  // for a 10pm tour's en_route: at a one-hour lead that rung fell at 21:00 local
+  // EXACTLY, clamped forward to the next 08:00 and landed after the tour. The
+  // quiet-hours exemption removes that clamp, so the rung now arms at its raw
+  // 21:00 and the tenant of a 10pm tour gets the message they should always have
+  // had. Nothing here is skipped any more - which is the point of the fixture
+  // now, and why the past-event branch is pinned on morning_of in Tests 1f/1g
+  // instead.
   // ---------------------------------------------------------------------------
-  it('a late-evening tour retires en_route past the event, and the retimed day_before arms clear of the window', async () => {
+  it('a late-evening tour arms its whole ladder - the exempt en_route keeps its raw 21:00 slot', async () => {
     const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
     const scheduledAt = '2026-01-21T03:00:00.000Z'; // Jan 20 22:00 EST - a 10pm tour
 
@@ -408,33 +417,26 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T23:00:00.000Z');
     expect(byKind['morning_of']!.skippedAt).toBeUndefined();
 
-    // (b) past-event, and the ONE behaviour change the 2h -> 1h move introduces
-    // (founder decision 2026-08-18). At two hours this rung fired at Jan 20
-    // 20:00 EST, comfortably before the 21:00 window. At ONE hour it lands at
-    // 21:00 EST exactly - inside the window - so it clamps forward to the next
-    // 08:00 local, which is AFTER this 10pm tour has already happened.
-    //
-    // The ladder's existing rule then does the right thing on its own: a rung
-    // whose clamped dueAt lands at/after the tour is born SKIPPED rather than
-    // sent late. That is the intended posture (Cameron 2026-08-18) - a 10pm tour
-    // may well be a mistyped 10am, so a reminder that is useless by the time the
-    // window lifts should not go out at all. Only tours at/after ~10pm local are
-    // affected; everything earlier is unchanged.
-    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T13:00:00.000Z'); // Jan 21 08:00 EST
-    expect(byKind['en_route']!.skippedAt).toBe(now);
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
+    // THE EXEMPTION (spec 6). At a one-hour lead this rung falls at Jan 20
+    // 21:00 EST exactly - the first minute of the window - and it USED to clamp
+    // forward to the next 08:00, landing after the 10pm tour and being retired
+    // past_event. Sam's decision is that this rung never waits, so it is stored
+    // RAW and the 10pm tour gets its 9pm "on the way" text. No supersession
+    // either: morning_of is at 18:00 EST, hours EARLIER, so the widened
+    // predicate (a LATER rung firing at or before an earlier one) is false.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T02:00:00.000Z'); // Jan 20 21:00 EST
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
 
-    // Still three VISIBLE rows - a skipped rung stays as an honest trace in the
-    // panel rather than vanishing - and two are live now that the retimed
-    // day_before clears the window (day_before, morning_of).
+    // Three VISIBLE rows and all three live: with the exemption there is nothing
+    // left in this fixture for any skip rule to retire.
     expect(rows).toHaveLength(3);
-    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(2);
+    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
-  // Test 1d - (c) an en_route clamped onto the morning_of slot wins it
+  // Test 1d - (c) a morning_of clamped PAST the exempt en_route loses its slot
   // ---------------------------------------------------------------------------
-  it('an en_route clamped onto the morning_of slot supersedes morning_of', async () => {
+  it('a morning_of clamped past the exempt en_route is superseded by it', async () => {
     const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
     const scheduledAt = '2026-01-20T13:30:00.000Z'; // Jan 20 08:30 EST - an early tour
 
@@ -452,13 +454,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // en_route raw = Jan 20 06:30 EST (inside the window) -> clamps to 08:00 EST.
-    // morning_of raw = scheduledAt - 4h = Jan 20 04:30 EST, ALSO inside the
-    // window, so it clamps to the same 08:00 EST instant. en_route is the LATER
-    // rung, so it survives; morning_of stays behind as a VISIBLE skipped row.
-    // (Same outcome as before the retiming, by a different route: morning_of
-    // used to BE the 08:00-local slot rather than clamping onto it.)
-    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    // en_route raw = Jan 20 06:30 EST, inside the window and EXEMPT (spec 6), so
+    // it stays there. morning_of raw = scheduledAt - 4h = Jan 20 04:30 EST, also
+    // inside the window and NOT exempt, so it clamps forward to 08:00 EST -
+    // which is 90 minutes AFTER en_route. The ladder is inverted, and the
+    // WIDENED predicate (spec 6.2, `otherDue <= dueAt`) is what still retires
+    // morning_of: a later rung firing before it makes its copy stale. Under the
+    // old equality both would have armed and the tenant would get two texts.
+    // (Before the exemption both clamped onto the same 08:00 instant and plain
+    // equality did this job; that coincidence is gone.)
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T12:30:00.000Z');
     expect(byKind['en_route']!.skippedAt).toBeUndefined();
     expect(byKind['morning_of']!.skippedAt).toBe(now);
     expect(byKind['morning_of']!.skipReason).toBe('quiet_hours_superseded');
@@ -555,12 +560,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // morning_of raw = scheduledAt - 4h = Jan 20 03:30 EST (quiet) -> clamps to
     // Jan 20 08:00 EST, at/after the 07:30 EST start -> retired as a VISIBLE
-    // skipped row (past_event). en_route raw = Jan 20 06:30 EST (quiet) ->
-    // clamps to the same 08:00 EST, also at/after the start -> same trace.
+    // skipped row (past_event). This is the rung the case is named for: it is
+    // the CLAMP that puts a rung past the start, so an exempt rung can never
+    // reach this branch by that route.
     expect(byKind['morning_of']!.skippedAt).toBe(now);
     expect(byKind['morning_of']!.skipReason).toBe('past_event');
-    expect(byKind['en_route']!.skippedAt).toBe(now);
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
+
+    // en_route raw = Jan 20 06:30 EST, inside the window and EXEMPT (spec 6):
+    // it stays at its raw instant, an hour before the tour, and arms. Before the
+    // exemption it clamped onto the same 08:00 EST as morning_of and was
+    // past_event too - the behaviour change this fixture records.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T11:30:00.000Z');
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
 
     // day_before = 19:30 EST Jan 19 = Jan 20 00:30Z: outside the window, no
     // clamp. Its LOCAL date (Jan 19) is not the tour's local date (Jan 20), so
@@ -569,7 +580,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(byKind['day_before']!.skippedAt).toBeUndefined();
     expect(
       rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind).sort(),
-    ).toEqual(['day_before']);
+    ).toEqual(['day_before', 'en_route']);
   });
 
   // ---------------------------------------------------------------------------
@@ -585,7 +596,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // one-hour lead time, the rung no booked-too-late rule guards. Do NOT leave
   // the silent-drop branch trusting this comment; Task 7 owns that test.
   // ---------------------------------------------------------------------------
-  it('the retimed day_before arms where the old -24h anchor fell past due (the other rungs stay past_event)', async () => {
+  it('the retimed day_before arms where the old -24h anchor fell past due (morning_of stays past_event)', async () => {
     const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
     const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST
 
@@ -603,16 +614,20 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // day_before = 19:30 EST Jan 19 = Jan 20 00:30Z, outside the window and
-    // still ahead of `now` (10:00 EST) -> ARMED. Both same-day rungs clamp
-    // at/past the 07:30 start -> past-event, retired as VISIBLE skipped rows.
+    // still ahead of `now` (10:00 EST) -> ARMED. morning_of clamps at/past the
+    // 07:30 start -> past-event, retired as a VISIBLE skipped row. en_route is
+    // EXEMPT from the clamp (spec 6), so it arms at its raw 06:30 EST instead of
+    // joining morning_of on the past-event branch as it used to.
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
     expect(byKind['day_before']!.dueAt).toBe('2026-01-20T00:30:00.000Z');
     expect(byKind['day_before']!.skippedAt).toBeUndefined();
     expect(byKind['morning_of']!.skipReason).toBe('past_event');
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T11:30:00.000Z');
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
     // Creation order (REMINDER_KINDS), not sorted.
     expect(rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind)).toEqual([
       'day_before',
+      'en_route',
     ]);
   });
 
@@ -656,8 +671,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // Test 1i - a settings-read failure falls back to the DEFAULT window
   // ---------------------------------------------------------------------------
   it('a settings read failure still clamps, using the default window', async () => {
+    // RE-POINTED 2026-08-31 (Phase B spec 6) from Test 1c's 10pm tour to Test
+    // 1g's 07:30 tour. This case has to FAIL if the fallback ever became "no
+    // quiet hours", so it needs a rung the window actually MOVES. On the 10pm
+    // tour the only clamped rung was en_route - now exempt - which would have
+    // left every assertion here identical with the window on or off: a vacuous
+    // pass. morning_of on a 07:30 tour is the surviving clamp.
     const now = '2026-01-19T15:00:00.000Z';
-    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Test 1c's tour again
+    const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST - Test 1g's tour
 
     const tour = await tours.create({
       tenantId: 'contact-arm-settingsfail-1',
@@ -673,14 +694,17 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // Identical to Test 1c: the failure falls back to DEFAULT_ORG_SETTINGS
+    // Identical to Test 1g: the failure falls back to DEFAULT_ORG_SETTINGS
     // (enabled, 21:00-08:00, America/New_York) - never to "no quiet hours".
     expect(byKind['day_before']!.dueAt).toBe('2026-01-20T00:30:00.000Z');
-    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T23:00:00.000Z');
-    // ...including Test 1c's past-event en_route: the fallback window is what
-    // makes that rung clamp past the tour, so a read failure must reproduce the
-    // skip exactly. Two live rows, same as Test 1c.
-    expect(byKind['en_route']!.skipReason).toBe('past_event');
+    // THE DISCRIMINATING ASSERTION: morning_of's raw Jan 20 03:30 EST is inside
+    // the fallback window, so it clamps to 08:00 EST - past the 07:30 start -
+    // and is retired. With no window it would have armed at its raw time.
+    expect(byKind['morning_of']!.skipReason).toBe('past_event');
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    // en_route is exempt from the clamp either way, so it arms raw. Two live
+    // rows, same as Test 1g.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T11:30:00.000Z');
     expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(2);
   });
 
@@ -4205,6 +4229,192 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(result).toEqual({ outcome: 'sent' });
       expect(f.spy.sent).toHaveLength(1);
       expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
+    });
+  });
+
+  // ===========================================================================
+  // en_route QUIET-HOURS EXEMPTION (Phase B spec 6) + the WIDENED supersession
+  // predicate (spec 6.2).
+  //
+  // These cases live on their OWN November 2026 timeline, so no row from any
+  // other test in this file is ever due at their polls and none of their armed
+  // rows is ever swept by another test's tick. America/New_York is EST (UTC-5)
+  // from Nov 1 2026, and the default window is 21:00-08:00 local.
+  //
+  // The exemption is the founder's decision (Sam, 2026-08-31): the "on the way"
+  // rung is the one message whose whole value is that it lands an hour before
+  // the tour, so it is stored and fired at its RAW time even inside the window.
+  // Every other rung clamps exactly as before - clampOutOfQuietHours itself is
+  // untouched, because the placement ladder and the timeline share it.
+  // ===========================================================================
+  describe('en_route quiet-hours exemption (spec 6) + widened supersession (6.2)', () => {
+    const QUIET_WINDOW = quietHoursWindowOf({
+      quietHoursEnabled: true,
+      quietHoursStart: '21:00',
+      quietHoursEnd: '08:00',
+      timezone: DEFAULT_ORG_SETTINGS.timezone,
+    });
+
+    it('arm-time: en_route stores its RAW dueAt inside the quiet window; other rungs clamp', async () => {
+      // A 04:00-local tour - the unbounded consequence spec 6.1 names. en_route
+      // is due at 03:00 local, deep inside the window, and is stored THERE.
+      const now = '2026-11-17T15:00:00.000Z'; // Nov 17 10:00 EST
+      const scheduledAt = '2026-11-19T09:00:00.000Z'; // Nov 19 04:00 EST
+
+      const tour = await tours.create({
+        tenantId: 'contact-arm-enroute-1',
+        unitId: 'unit-arm-enroute-1',
+        scheduledAt,
+        tourType: 'self_guided',
+      });
+
+      const rows = await armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: stubSettingsRepo(),
+        logger,
+      });
+      const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+      // THE EXEMPTION: raw = scheduledAt - 1h = Nov 19 03:00 EST. Unclamped, and
+      // still armed (it is before the tour and no later rung shares its slot).
+      expect(byKind['en_route']!.dueAt).toBe('2026-11-19T08:00:00.000Z');
+      expect(byKind['en_route']!.skippedAt).toBeUndefined();
+      // ...and it really is inside the window - the assertion that would still
+      // pass if the exemption were reverted for a tour that happened to clamp
+      // to the same instant.
+      expect(isQuietTime(byKind['en_route']!.dueAt, QUIET_WINDOW)).toBe(true);
+
+      // EVERY OTHER RUNG CLAMPS. morning_of raw = Nov 19 00:00 EST (inside the
+      // window) -> 08:00 EST = 13:00Z, which is AFTER this 04:00 tour, so the
+      // pre-existing past-event rule retires it with a visible row.
+      expect(byKind['morning_of']!.dueAt).toBe('2026-11-19T13:00:00.000Z');
+      expect(byKind['morning_of']!.skipReason).toBe('past_event');
+
+      // day_before = 19:30 EST Nov 18, outside the window either way - the
+      // control that shows the exemption did not disable clamping wholesale.
+      expect(byKind['day_before']!.dueAt).toBe('2026-11-19T00:30:00.000Z');
+      expect(byKind['day_before']!.skippedAt).toBeUndefined();
+    });
+
+    it('fire-time: a due en_route sends during the quiet window; day_before defers', async () => {
+      // TWO TOURS on purpose: two rungs of the SAME tour due in one batch hit
+      // supersededInBatch (which retires the earlier one), and that would hide
+      // the deferral this case exists to pin.
+      const rig = createGroupTestRig();
+      const deps = quietOnDeps(rig.deps);
+      const seededAt = '2026-11-16T15:00:00.000Z';
+      const inWindow = '2026-11-18T03:00:00.000Z'; // Nov 17 22:00 EST
+      seedTenant(rig.world, 'contact-enroute-fire', '+15550260001', 'conv-enroute-fire', seededAt);
+      seedTenant(rig.world, 'contact-daybefore-fire', '+15550260002', 'conv-daybefore-fire', seededAt);
+
+      const enRouteTour = await tours.create({
+        tenantId: 'contact-enroute-fire',
+        unitId: 'unit-enroute-fire',
+        scheduledAt: '2026-11-18T04:00:00.000Z', // Nov 17 23:00 EST - the tour is still ahead
+        tourType: 'self_guided',
+      });
+      const dayBeforeTour = await tours.create({
+        tenantId: 'contact-daybefore-fire',
+        unitId: 'unit-daybefore-fire',
+        scheduledAt: '2026-11-20T20:00:00.000Z',
+        tourType: 'self_guided',
+      });
+      const enRoute = await createDueReminder(tourReminders, enRouteTour.tourId, 'en_route', inWindow);
+      const dayBefore = await createDueReminder(
+        tourReminders,
+        dayBeforeTour.tourId,
+        'day_before',
+        inWindow,
+      );
+
+      await runDueTourReminders(inWindow, deps);
+
+      // The exempt rung went out mid-window.
+      const enRouteAfter = (await tourReminders.listByTour(enRouteTour.tourId)).find(
+        (r) => r.reminderId === enRoute.reminderId,
+      );
+      expect(enRouteAfter?.sentAt).toBe(inWindow);
+      expect(rig.world.sent.map((s) => s.to)).toContain('+15550260001');
+
+      // The unexempt sibling is DEFERRED, not skipped: no claim, no stamp, and
+      // still in listDue so the tick after quiet-end picks it up.
+      const dayBeforeAfter = (await tourReminders.listByTour(dayBeforeTour.tourId)).find(
+        (r) => r.reminderId === dayBefore.reminderId,
+      );
+      expect(dayBeforeAfter?.sentAt).toBeUndefined();
+      expect(dayBeforeAfter?.skippedAt).toBeUndefined();
+      expect((await tourReminders.listDue(inWindow)).map((r) => r.reminderId)).toContain(
+        dayBefore.reminderId,
+      );
+      expect(rig.world.sent.map((s) => s.to)).not.toContain('+15550260002');
+    });
+
+    it('REGRESSION (the 08:30 double-send): morning_of clamped ONTO or PAST en_route is superseded at arm', async () => {
+      // Spec 6.2's counter-example, and the reason the predicate had to widen
+      // from equality to `<=`. Before the exemption both rungs clamped to 08:00
+      // and equality retired morning_of. With en_route unclamped at 07:30 the
+      // two slots SEPARATE and the ladder INVERTS - equality would arm both, and
+      // the tenant would get "she is headed that way shortly" at 07:30 followed
+      // by "looking forward to having you tour at 8:30 today" at 08:00.
+      const now = '2026-11-19T01:00:00.000Z'; // Nov 18 20:00 EST - the evening before
+      const scheduledAt = '2026-11-19T13:30:00.000Z'; // Nov 19 08:30 EST
+
+      const tour = await tours.create({
+        tenantId: 'contact-arm-0830',
+        unitId: 'unit-arm-0830',
+        scheduledAt,
+        tourType: 'self_guided',
+      });
+
+      const rows = await armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: stubSettingsRepo(),
+        logger,
+      });
+      const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+      // en_route raw = Nov 19 07:30 EST, inside the window, EXEMPT -> stored raw.
+      expect(byKind['en_route']!.dueAt).toBe('2026-11-19T12:30:00.000Z');
+      expect(byKind['en_route']!.skippedAt).toBeUndefined();
+      // morning_of raw = Nov 19 04:30 EST -> clamps to 08:00 EST = 13:00Z, which
+      // is now AFTER en_route. The widened predicate sees a later rung firing
+      // BEFORE this one and retires this one, visibly.
+      expect(byKind['morning_of']!.dueAt).toBe('2026-11-19T13:00:00.000Z');
+      expect(byKind['morning_of']!.skipReason).toBe('quiet_hours_superseded');
+      // day_before is booked-too-late at this arm instant (its 19:30 anchor was
+      // 30 minutes ago), so it is a visible skipped row too - which leaves
+      // en_route as the ONLY pending rung. ONE text goes out.
+      expect(byKind['day_before']!.skipReason).toBe('booked_too_late');
+      expect(rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind)).toEqual(['en_route']);
+    });
+
+    it('widened predicate is a NO-OP on an unclamped ladder', async () => {
+      // Spec 6.2's own regression test: with nothing clamping, the rungs are
+      // strictly increasing in time, so `otherDue <= dueAt` is false for every
+      // pair and the arm result is byte-for-byte the pre-change one.
+      const now = '2026-11-17T15:00:00.000Z'; // Nov 17 10:00 EST
+      const scheduledAt = '2026-11-19T20:00:00.000Z'; // Nov 19 15:00 EST - an ordinary afternoon
+
+      const tour = await tours.create({
+        tenantId: 'contact-arm-noop',
+        unitId: 'unit-arm-noop',
+        scheduledAt,
+        tourType: 'self_guided',
+      });
+
+      const rows = await armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: quietOff,
+        logger,
+      });
+      const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+      expect(byKind['day_before']!.dueAt).toBe('2026-11-19T00:30:00.000Z');
+      expect(byKind['morning_of']!.dueAt).toBe('2026-11-19T16:00:00.000Z');
+      expect(byKind['en_route']!.dueAt).toBe('2026-11-19T19:00:00.000Z');
+      // Zero supersession rows, zero skips of any kind.
+      expect(rows).toHaveLength(3);
+      expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
     });
   });
 });

@@ -373,6 +373,70 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(upcoming?.suppression).toEqual({ reason: 'quiet_hours' });
   });
 
+  // THE THIRD SITE of the en_route quiet-hours exemption (Phase B spec 6
+  // addendum). The poll no longer defers an en_route rung, so this panel must
+  // not promise that it will: chipping "Will wait" on a rung the machinery
+  // sends anyway is a promise broken within one poll tick. The exemption is
+  // scoped to the QUIET disjuncts only - opt-out, the kill switch and manual
+  // mode still suppress an en_route exactly as before (their own cases above
+  // and below are unchanged) - and it lives at THIS call site, never inside
+  // the shared evaluator.
+  it('never chips quiet_hours on an en_route rung, while its day_before sibling still does', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    const tourId = await seedQuietTour(world, 'view-enroute', '+15550600021');
+    // BOTH rungs due at the same wall time tomorrow: inside TOMORROW's
+    // occurrence of the window. The only difference between them is the kind,
+    // which is what makes the sibling a real control.
+    seedReminder(world, {
+      reminderId: 'rem-quiet-enroute',
+      tourId,
+      kind: 'en_route',
+      dueAt: isoHoursFromNow(24),
+    });
+    seedReminder(world, {
+      reminderId: 'rem-quiet-enroute-sibling',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(24),
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.reminders as { reminderId: string; suppression?: { reason: string } }[]).map((r) => [
+        r.reminderId,
+        r,
+      ]),
+    );
+    expect(byId.get('rem-quiet-enroute')?.suppression).toBeUndefined();
+    expect(byId.get('rem-quiet-enroute-sibling')?.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
+  // The other half of the exemption's scope, and the guard against "simplifying"
+  // it into skipping the evaluator for en_route altogether: only the QUIET
+  // operand is forced false. An opted-out contact still suppresses an en_route.
+  it('an en_route rung is exempt from quiet hours ONLY - opt-out still suppresses it', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    const tourId = await seedQuietTour(world, 'view-enroute-optout', '+15550600022');
+    world.contacts.find((c) => c.contactId === 'contact-quiet-view-enroute-optout')!.sms_opt_out =
+      true;
+    seedReminder(world, {
+      reminderId: 'rem-enroute-optout',
+      tourId,
+      kind: 'en_route',
+      dueAt: isoHoursFromNow(24),
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
+  });
+
   // The SF1 false positive: at 03:00 the wall clock is quiet, but a rung due
   // Friday afternoon will not wait for anything, so it must NOT be chipped -
   // while a rung already due IS being held by the fire-time backstop right now.

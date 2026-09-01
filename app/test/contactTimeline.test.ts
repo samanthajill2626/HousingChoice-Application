@@ -1604,6 +1604,61 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up.every((i) => JSON.stringify(i.suppression) === JSON.stringify({ reason: 'quiet_hours' }))).toBe(true);
   });
 
+  // THE THIRD SITE of the en_route quiet-hours exemption (Phase B spec 6
+  // addendum), on the surface that aggregates BOTH ladders. The exemption is
+  // applied at the REMINDER call site of suppressionFor - never inside
+  // suppressionFor or quietFor themselves, which the placement-nudge walk above
+  // shares: a placement nudge has no en_route and must keep its quiet
+  // suppression untouched, which the nudge in this fixture proves.
+  it('never chips quiet_hours on an en_route rung, while its day_before sibling and a placement nudge still do', async () => {
+    const { world, app } = makeGatherHarness(quietNowSettingsRepo());
+    const phone = '+15550600021';
+    world.contacts.push({ contactId: 'ct-21', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-21', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-21',
+      unitId: 'u-21',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Same wall time tomorrow for both rungs - inside TOMORROW's occurrence of
+    // the window. Only the KIND differs, which is what makes this a control.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'en_route',
+      dueAt: isoHoursFromNow(24),
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(24.5),
+    });
+    const placement = await world.placementsRepo.create({
+      tenantId: 'ct-21',
+      unitId: 'u-21',
+      stage: 'awaiting_receipt',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'receipt_check',
+      // Still inside tomorrow's occurrence (the stub window is now-1h..now+1h),
+      // just after the two rungs so the ordering below is deterministic.
+      dueAt: isoHoursFromNow(24.75),
+    });
+
+    const res = await request(app).get('/api/contacts/ct-21/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(3);
+    expect(up[0]!.reminderKind).toBe('en_route');
+    expect(up[0]!.suppression).toBeUndefined();
+    expect(up[1]!.reminderKind).toBe('day_before');
+    expect(up[1]!.suppression).toEqual({ reason: 'quiet_hours' });
+    // The SHARED helper is untouched: the placement ladder still chips.
+    expect(up[2]!.source).toBe('placement_nudge');
+    expect(up[2]!.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
   // The SF1 false positive: inside the window the wall clock says "quiet", but a
   // rung due days from now will not wait for tonight's window - while a rung
   // already due IS being held by the fire-time backstop right now.

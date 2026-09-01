@@ -502,7 +502,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // non-self_guided tour never gets an estimate here.
     const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
     let suppressionOf:
-      | ((dueAt: string, paused: boolean) => ScheduledSuppression | undefined)
+      | ((dueAt: string, paused: boolean, quietExempt: boolean) => ScheduledSuppression | undefined)
       | undefined;
     // Distinguishes "nothing was suppressed" from "we could not tell": with the
     // containment below, a contacts outage silently flips the `suppressed` log
@@ -563,9 +563,22 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       // body's by "optimizing" the two reads into one.
       try {
         const evaluate = await resolveTenantSuppression(tour, config, contacts, conversations);
-        suppressionOf = (dueAt: string, paused: boolean): ScheduledSuppression | undefined =>
+        // `quietExempt` is the en_route carve-out (Phase B spec 6 addendum),
+        // threaded in from the call site as a PRE-COMPUTED boolean rather than
+        // decided by kind here: the poll no longer defers an en_route rung, so
+        // chipping "Will wait" on one would be a promise the machinery breaks
+        // within a poll tick. It forces the QUIET operand alone - opt-out, the
+        // kill switch and manual mode still ride the shared evaluator, which is
+        // what keeps the exemption from becoming "en_route is never suppressed".
+        suppressionOf = (
+          dueAt: string,
+          paused: boolean,
+          quietExempt: boolean,
+        ): ScheduledSuppression | undefined =>
           evaluate(
-            (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
+            !quietExempt &&
+              ((dueAt > nowIso && isQuietTime(dueAt, window)) ||
+                (wallClockQuiet && dueAt <= nowIso)),
             paused,
           );
       } catch (err) {
@@ -609,7 +622,9 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
             : discontinued
               ? ({ reason: 'discontinued' } as const)
               : suppressionOf !== undefined
-                ? suppressionOf(row.dueAt, paused)
+                ? // en_route is exempt from quiet hours at BOTH runtime sites
+                  // (spec 6), so the estimate must not promise a wait here.
+                  suppressionOf(row.dueAt, paused, row.kind === 'en_route')
                 : paused
                   ? ({ reason: 'paused' } as const)
                   : undefined;

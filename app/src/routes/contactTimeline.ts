@@ -845,12 +845,22 @@ async function gatherUpcoming(params: {
   const landlordConv = convs.find((c) => c.type === 'landlord_1to1' || c.type === 'unknown_1to1');
   const contactOptOut = contact.sms_opt_out === true;
 
-  /** Preview suppression against a 1:1 thread (+ optional nudge stale-stage). */
+  /**
+   * Preview suppression against a 1:1 thread (+ optional nudge stale-stage).
+   *
+   * `quietExempt` is a PRE-COMPUTED boolean the caller supplies; this helper
+   * stays kind-blind on purpose. It is SHARED with the placement-nudge walk
+   * below, and `quietFor` is shared more widely still, so the en_route
+   * exemption (Phase B spec 6) must be decided at the reminder call site: a
+   * kind test in here would strip quiet suppression from placement nudges too.
+   * Only the QUIET operand is forced - every other reason still evaluates.
+   */
   const suppressionFor = (
     conv: ConversationItem | undefined,
     staleStage: boolean,
     dueAt: string,
     paused = false,
+    quietExempt = false,
   ): ScheduledSuppression | undefined =>
     evaluateScheduledSendSuppression({
       smsSendingEnabled: config.smsSendingEnabled,
@@ -862,7 +872,7 @@ async function gatherUpcoming(params: {
       // Quiet hours (spec 2026-08-03): the timeline is the THIRD evaluator
       // caller, so a deferred rung reads the same here as on the tour /
       // placement panels - including the per-RUNG scoping.
-      quietNow: quietFor(dueAt),
+      quietNow: !quietExempt && quietFor(dueAt),
     });
 
   /** Map upcoming nudge rows of ONE recipient on ONE placement → items. */
@@ -1010,6 +1020,12 @@ async function gatherUpcoming(params: {
           // read of the set rather than inheriting the tour panel's answer, and
           // that is the point: without it the contact page would keep promising
           // "sends in 3h" on a rung the panel one click away calls retired.
+          //
+          // en_route is EXEMPT FROM QUIET HOURS (spec 6): the poll neither
+          // clamps it at arm time nor defers it at fire time, so this surface
+          // must not chip "Will wait" on it either. The exemption is passed IN
+          // rather than decided inside suppressionFor / quietFor, which the
+          // placement-nudge walk above shares.
           const suppression = DISCONTINUED_REMINDER_KINDS.has(row.kind)
             ? ({ reason: 'discontinued' } as const)
             : suppressionFor(
@@ -1017,6 +1033,7 @@ async function gatherUpcoming(params: {
                 false,
                 row.dueAt,
                 manualOnlyReminderKinds.has(row.kind),
+                row.kind === 'en_route',
               );
           return {
             kind: 'scheduled',

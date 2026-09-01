@@ -60,6 +60,14 @@
 //     instant, used to share it and be retired by supersession as the earlier
 //     rung - it stopped arming on 2026-08-31, so there is no longer anything
 //     beside day_before to reason about.)
+//   - BOTH send tests ride `day_before` ON PURPOSE, and since 2026-08-31 that is
+//     load-bearing rather than incidental: `en_route` is EXEMPT from quiet hours
+//     at every site (Phase B spec 6 - unclamped at arm, undeferred at fire, and
+//     never chipped "Will wait" by the panel). Re-anchoring either test onto it
+//     would make the deferral this file exists to prove structurally impossible.
+//     Nothing else here changed under the exemption: the ladder is armed with
+//     quiet hours OFF, so no rung is clamped, and en_route (13:00 tour day) is
+//     in neither batch.
 //
 // LANE HYGIENE: the lean seed ships quiet hours OFF (worklist A1) so every other
 // spec stays time-of-day independent. This file turns it on explicitly and puts

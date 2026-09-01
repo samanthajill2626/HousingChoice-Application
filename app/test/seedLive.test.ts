@@ -80,7 +80,11 @@ function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): str
         return new Date(scheduled + 30 * 60 * 1000).toISOString();
     }
   })();
-  return clampOutOfQuietHours(raw, QUIET_WINDOW);
+  // EN_ROUTE IS EXEMPT from the clamp (Phase B spec 6, founder decision
+  // 2026-08-31) - mirrored from armTourReminders, which applies the exemption
+  // at its own call site and leaves clampOutOfQuietHours itself kind-blind.
+  // This copy exists to catch drift, so it moves in lockstep or it lies.
+  return kind === 'en_route' ? raw : clampOutOfQuietHours(raw, QUIET_WINDOW);
 }
 
 // Two kinds are intentionally NOT auto-armed, so both are omitted here to

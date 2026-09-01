@@ -186,10 +186,22 @@ export function retiredByTourStart(
 
 /**
  * Ladder order by proximity to the event. Supersession keeps the LATEST rung of
- * a colliding pair: clamping can only push an EARLIER rung forward onto a later
- * one's slot, and when it does, the earlier rung's copy is the stale one
- * ("your tour is tomorrow" landing on tour day). Exported for the fire-time
- * backstop's batch check.
+ * a colliding pair, because the later rung's copy is the current one ("your
+ * tour is tomorrow" must not land beside "your tour is today").
+ *
+ * THE COMPARISON IS AN INEQUALITY, NOT AN EQUALITY, and this paragraph is why
+ * (Phase B spec 6.2). An earlier draft of this docblock said clamping "can only
+ * push an EARLIER rung forward onto a later one's slot" - true while EVERY rung
+ * clamped to the same window edge, which is what made `otherDue === dueAt` a
+ * sufficient test. The en_route quiet-hours exemption (spec 6) breaks that
+ * coincidence: for an 08:30 tour, en_route stays at its raw 07:30 while
+ * morning_of clamps forward to 08:00, so the ladder INVERTS - a later rung now
+ * fires BEFORE an earlier one, and equality would arm both. The rule the
+ * equality was only ever a proxy for is "a rung is stale when a LATER rung
+ * fires at or before it", so that is what supersededBySlot tests. Do not
+ * narrow it back to equality.
+ *
+ * Exported for the fire-time backstop's batch check.
  */
 export const LADDER_ORDER: ReminderKind[] = [
   'confirmation',
@@ -374,7 +386,18 @@ export async function armTourReminders(
   for (const kind of REMINDER_KINDS) {
     const raw = computeDueAt(kind, scheduledAt, now, window);
     raws.set(kind, raw);
-    dues.set(kind, clampOutOfQuietHours(raw, window));
+    // EN_ROUTE IS EXEMPT FROM QUIET HOURS (founder decision, Sam 2026-08-31;
+    // Phase B spec 6). Its whole value is landing an hour before the tour - a
+    // clamped "she is headed that way shortly" at 08:00 for an 08:30 tour is
+    // not a late reminder, it is a wrong one, and for a tour at or before 08:00
+    // the clamp meant NO reminder at all. There is no floor on the tour hour:
+    // a 04:00 tour really does text at 03:00 (spec 6.1, handback item).
+    // The exemption lives HERE, at the call site, by kind:
+    // clampOutOfQuietHours is shared with the placement ladder and the
+    // timeline and must stay kind-blind. The fire-time backstop in
+    // processReminderRow carries the mirror-image exemption; one without the
+    // other reopens the hole.
+    dues.set(kind, kind === 'en_route' ? raw : clampOutOfQuietHours(raw, window));
   }
 
   // Spec 7.1: an org whose quiet window contains 19:30 makes every day_before
@@ -483,8 +506,16 @@ export async function armTourReminders(
     const supersededBySlot = REMINDER_KINDS.some((other) => {
       if (LADDER_ORDER.indexOf(other) <= myOrder) return false;
       const otherDue = dues.get(other);
-      // The later rung must itself be armable (not past-event) to supersede.
-      return otherDue === dueAt && otherDue < scheduledIso;
+      // WIDENED (Phase B 6.2): a LATER rung firing at or BEFORE this one makes
+      // this one's copy stale - equality was only ever a proxy that held while
+      // every rung clamped to the same window edge; the en_route exemption
+      // breaks that coincidence (08:30 tour: en_route 07:30, morning_of
+      // clamped 08:00 - reverse ladder order without this). On an unclamped
+      // ladder rungs are strictly increasing, so this is false for every pair.
+      // `undefined` never supersedes: absence is not an earlier send time.
+      // The trailing conjunct is unchanged: the later rung must itself be
+      // armable (not past-event) to supersede.
+      return otherDue !== undefined && otherDue <= dueAt && otherDue < scheduledIso;
     });
     const staleDayBefore =
       kind === 'day_before' && localDateOf(dueAt, window.timezone) === tourLocalDate;
@@ -1044,7 +1075,16 @@ async function processReminderRow(
   // re-fires within one poll tick of quiet-end. This must NEVER become a
   // post-claim refusal: claimSend IS the sentAt stamp, so a refusal after it
   // would destroy the message permanently.
-  if (isQuietTime(now, window)) {
+  //
+  // EN_ROUTE IS EXEMPT (Phase B spec 6) - the mirror image of the arm-time
+  // exemption above, and one without the other reopens the hole: an exempt row
+  // stored at 03:00 would arrive here and be deferred to 08:00 anyway. Quiet
+  // hours used to be the only brake on a worker returning from an outage
+  // overnight, which is why the PAST-TOUR GATE runs first, above this branch:
+  // it is what now bounds the catch-up backlog, retiring every en_route whose
+  // tour has already happened instead of texting it. Removing that gate would
+  // make this exemption unsafe.
+  if (row.kind !== 'en_route' && isQuietTime(now, window)) {
     log.info(
       { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
       'tour reminder due during quiet hours - deferred (not claimed)',

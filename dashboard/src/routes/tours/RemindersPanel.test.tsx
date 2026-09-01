@@ -270,6 +270,54 @@ describe('RemindersPanel', () => {
     expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
   });
 
+  // Discontinued (Phase B): the chip must NOT fall through to the fire-time
+  // promise, and must not borrow the Paused wording either - "Paused" invites a
+  // Send now that the job refuses with kind_retired.
+  //
+  // CHIP ORDER: this branch sits ABOVE `paused`, and the `overdue` chip (when it
+  // lands) must sit BELOW this one - a rung that will never send is never
+  // "overdue".
+  it('renders a discontinued rung as "No longer sent", never a fire time and never Paused', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'confirmation',
+          state: 'upcoming',
+          // Past its fire time: the fallthrough would chip "sending shortly"
+          // forever on a rung nothing will ever claim.
+          dueAt: '2000-01-01T00:00:00Z',
+          suppression: { reason: 'discontinued' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('No longer sent')).toBeInTheDocument());
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    // The note underneath carries the other half, without stuttering.
+    expect(screen.getByText(/No longer sent . turned off/)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Will wait/i)).not.toBeInTheDocument();
+  });
+
+  it('a discontinued rung still in the FUTURE does not promise "sends in Nh" either', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'confirmation',
+          state: 'upcoming',
+          dueAt: '2099-01-09T10:00:00Z',
+          suppression: { reason: 'discontinued' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('No longer sent')).toBeInTheDocument());
+    expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
+  });
+
   it('keeps Send now on a paused rung (the whole point of leaving it pending)', async () => {
     getTourReminders.mockResolvedValue({
       reminders: [

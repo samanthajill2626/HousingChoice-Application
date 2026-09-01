@@ -65,6 +65,7 @@ import {
 } from '../services/scheduledSendSuppression.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import {
+  DISCONTINUED_REMINDER_KINDS,
   forceSendReminder,
   readQuietHoursWindow,
   MANUAL_ONLY_REMINDER_KINDS,
@@ -591,15 +592,27 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
         // evaluator rather than around it, so a harder reason (opt-out, kill
         // switch, manual mode) still wins - see scheduledSendSuppression.ts for
         // why that ordering is the honest one.
+        //
+        // DISCONTINUED is checked FIRST and OUTSIDE the evaluator (spec 3.1a).
+        // Not a style choice: `suppressionOf` is built only for self_guided
+        // tours with an upcoming rung, so routing a kind-level fact through it
+        // would lose it on every group-routed tour - the ones most likely to
+        // have a relay group would chip "sending shortly" for a rung that can
+        // never send. Nor does it belong IN the shared ordering: that ladder's
+        // rationale is that a harder reason wins, and "we no longer send this
+        // at all" is not a suppression anything should override.
+        const discontinued = DISCONTINUED_REMINDER_KINDS.has(row.kind);
         const paused = manualOnlyKinds.has(row.kind);
         const suppression =
           state !== 'upcoming'
             ? undefined
-            : suppressionOf !== undefined
-              ? suppressionOf(row.dueAt, paused)
-              : paused
-                ? ({ reason: 'paused' } as const)
-                : undefined;
+            : discontinued
+              ? ({ reason: 'discontinued' } as const)
+              : suppressionOf !== undefined
+                ? suppressionOf(row.dueAt, paused)
+                : paused
+                  ? ({ reason: 'paused' } as const)
+                  : undefined;
         const view: TourReminderView = {
           reminderId: row.reminderId,
           kind: row.kind,

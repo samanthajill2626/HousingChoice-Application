@@ -392,7 +392,10 @@ describe('GET /api/tours/:tourId/reminders', () => {
     seedReminder(world, {
       reminderId: 'rem-quiet-overdue',
       tourId,
-      kind: 'confirmation',
+      // A LIVE kind: `confirmation` is discontinued since 2026-08-31, and
+      // discontinued outranks every other reason - it would mask the quiet
+      // estimate this case exists to prove (spec 3.1a / R2).
+      kind: 'morning_of',
       dueAt: isoHoursFromNow(-30),
     });
 
@@ -424,7 +427,8 @@ describe('GET /api/tours/:tourId/reminders', () => {
     seedReminder(world, {
       reminderId: 'rem-quiet-before',
       tourId,
-      kind: 'confirmation',
+      // A LIVE kind - see rem-quiet-overdue above.
+      kind: 'morning_of',
       dueAt: isoHoursFromNow(1), // future, but before the window opens
     });
 
@@ -454,7 +458,8 @@ describe('GET /api/tours/:tourId/reminders', () => {
     seedReminder(world, {
       reminderId: 'rem-quiet-staleheld',
       tourId,
-      kind: 'confirmation',
+      // A LIVE kind - see rem-quiet-overdue above.
+      kind: 'day_before',
       dueAt: isoHoursFromNow(-20),
     });
 
@@ -652,6 +657,130 @@ describe('GET /api/tours/:tourId/reminders', () => {
         // A PAUSED kind, deliberately: the point is that `state !== 'upcoming'`
         // wins over a live suppression cause, so the cause has to be live.
         kind: 'day_before',
+        dueAt: isoHoursFromNow(-48),
+        sentAt: isoHoursFromNow(-47),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const sent = (
+        res.body.reminders as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'sent');
+      expect(sent?.suppression).toBeUndefined();
+    });
+  });
+
+  // Discontinued kinds (Phase B spec 3.1 / 3.1a). A rung that can NEVER send
+  // must not chip a fire-time promise, and it must not chip "Paused" either -
+  // that would invite a Send now the job refuses.
+  describe('discontinued rungs', () => {
+    it('chips an upcoming discontinued rung `discontinued` on a self_guided tour', async () => {
+      const { app, world } = makeWebhookHarness();
+      // Quiet hours OFF: the anti-vacuity rung below asserts NO suppression, and
+      // the default window would chip it at some hours of the day and not others.
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'disc-1', '+15550600041');
+      seedReminder(world, {
+        reminderId: 'rem-disc-1',
+        tourId,
+        kind: 'confirmation',
+        // Already past due: without the chip the panel would promise "sending
+        // shortly" forever on a rung nothing will ever claim.
+        dueAt: isoHoursFromNow(-4),
+      });
+      seedReminder(world, {
+        reminderId: 'rem-live-1',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(24),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const byId = new Map(
+        (res.body.reminders as { reminderId: string; suppression?: { reason: string } }[]).map(
+          (r) => [r.reminderId, r],
+        ),
+      );
+      expect(byId.get('rem-disc-1')?.suppression).toEqual({ reason: 'discontinued' });
+      // ANTI-VACUITY: it is a per-KIND fact, not "this panel suppresses
+      // everything" - the live rung beside it is left promising its send.
+      expect(byId.get('rem-live-1')?.suppression).toBeUndefined();
+    });
+
+    it('chips a GROUP-routed tour too, where suppressionOf is never built (spec 3.1a)', async () => {
+      // The case the shared evaluator would lose. `suppressionOf` is only built
+      // for self_guided tours with an upcoming rung, so a landlord_led panel has
+      // no evaluator at all - routing a kind-level fact through it would leave
+      // the tours most likely to have a relay group reading "sending shortly".
+      const { app, world } = makeWebhookHarness();
+      const created = await world.toursRepo.create({
+        tenantId: 'contact-disc-group',
+        unitId: 'unit-disc-group',
+        scheduledAt: '2099-01-10T10:00:00.000Z',
+        tourType: 'landlord_led',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-disc-group',
+        tourId: created.tourId,
+        kind: 'confirmation',
+        dueAt: isoHoursFromNow(-1),
+      });
+
+      const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const upcoming = (
+        res.body.reminders as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'upcoming');
+      expect(upcoming?.suppression).toEqual({ reason: 'discontinued' });
+    });
+
+    it('OUTRANKS an opted-out contact: a rung that never sends reads discontinued, not the recipient state', async () => {
+      // Discontinued is TERMINAL and sits OUTSIDE the suppression ordering
+      // (spec 3.1a): the shared ladder's rationale is that a HARDER reason
+      // wins, and "we no longer send this at all" is not a reason anything
+      // should override. Contrast the `paused` case above, where the opt-out
+      // rightly wins because a human COULD still press Send now.
+      const { app, world } = makeWebhookHarness();
+      // Quiet hours OFF so the contrast rung's reason is unambiguously the
+      // opt-out (which would outrank quiet hours anyway, but say it plainly).
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'disc-2', '+15550600042');
+      const tenant = world.contacts.find((c) => c.contactId === 'contact-quiet-disc-2');
+      if (tenant !== undefined) tenant.sms_opt_out = true;
+      seedReminder(world, {
+        reminderId: 'rem-disc-2',
+        tourId,
+        kind: 'confirmation',
+        dueAt: isoHoursFromNow(24),
+      });
+      seedReminder(world, {
+        reminderId: 'rem-live-2',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(25),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const byId = new Map(
+        (res.body.reminders as { reminderId: string; suppression?: { reason: string } }[]).map(
+          (r) => [r.reminderId, r],
+        ),
+      );
+      expect(byId.get('rem-disc-2')?.suppression).toEqual({ reason: 'discontinued' });
+      // The opt-out is genuinely live on this tour - so the assertion above is
+      // a precedence proof, not an accident of a fixture that suppresses nothing.
+      expect(byId.get('rem-live-2')?.suppression).toEqual({ reason: 'contact_opted_out' });
+    });
+
+    it('a TERMINAL discontinued rung carries no estimate (state wins, as everywhere else)', async () => {
+      const { app, world } = makeWebhookHarness();
+      const tourId = await seedQuietTour(world, 'disc-3', '+15550600043');
+      seedReminder(world, {
+        reminderId: 'rem-disc-3',
+        tourId,
+        kind: 'confirmation',
         dueAt: isoHoursFromNow(-48),
         sentAt: isoHoursFromNow(-47),
       });
@@ -1591,10 +1720,14 @@ describe('name-read FAILURE on the tour-reminder route surfaces (spec 6.3b)', ()
     }
     expect(rungs.find((r) => r.kind === 'confirmation')!.body).toContain('your tour is set for');
     // THE PAUSED HALF IS THE POINT - and it must be the paused reason, not
-    // merely "some suppression" and not "no suppression".
+    // merely "some suppression" and not "no suppression". The confirmation rung
+    // is the exception and reads `discontinued`: that branch sits ABOVE the
+    // evaluator entirely, so it is unaffected by the outage this case creates.
     for (const rung of rungs) {
       expect(rung.state).toBe('upcoming');
-      expect(rung.suppression).toEqual({ reason: 'paused' });
+      expect(rung.suppression, rung.kind).toEqual({
+        reason: rung.kind === 'confirmation' ? 'discontinued' : 'paused',
+      });
     }
   });
 

@@ -70,7 +70,10 @@ import {
 } from '../lib/composeFailTally.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import { resolveTourContactNames } from '../lib/tourContacts.js';
-import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import {
+  DISCONTINUED_REMINDER_KINDS,
+  readQuietHoursWindow,
+} from '../jobs/tourReminders.js';
 import {
   buildStandaloneOpenPreview,
   type QuietHoursState,
@@ -330,6 +333,16 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
             throw err;
           }
         })(),
+        // The ONE suppression this bucket carries (Phase B spec 3.1, R3): a
+        // DISCONTINUED kind. It is a property of the kind alone - no recipient
+        // IO, no evaluator - and without it a pause-era `confirmation` would go
+        // on promising "sends in Nh" in every relay thread, through the SAME
+        // ScheduledCard the contact timeline renders, while both other surfaces
+        // said it will never go out. The note above about member-level opt-out
+        // still stands and is why nothing ELSE is evaluated here.
+        ...(DISCONTINUED_REMINDER_KINDS.has(row.kind) && {
+          suppression: { reason: 'discontinued' as const },
+        }),
         conversationId,
         refType: 'tour' as const,
         refId: tour.tourId,

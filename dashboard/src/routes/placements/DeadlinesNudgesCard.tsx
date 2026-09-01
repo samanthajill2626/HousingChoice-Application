@@ -70,6 +70,12 @@ const NUDGE_SUPPRESSION_LABELS: Readonly<Record<ScheduledSuppressionReason, stri
   // The manual-only hold-back (2026-08-18): the rung is armed and sendable, the
   // poll just will not send it. suppressionLead pairs this with "Paused".
   paused: 'send manually',
+  // COMPILE COMPLETENESS ONLY (Phase B spec 3.1a). `discontinued` belongs to the
+  // TOUR ladder; no placement-nudge writer emits it today, so this entry exists
+  // because the Record is exhaustive over the shared union - not because the
+  // placement surface has a retired kind. Kept identical to the tour copy so it
+  // reads correctly on the day one does.
+  discontinued: 'turned off',
 };
 
 /** A compact state chip for a single nudge rung (mirrors RemindersPanel's StateChip). */
@@ -93,6 +99,15 @@ function StateChip({ nudge }: { nudge: PlacementNudgeView }): React.JSX.Element 
         {reason !== undefined ? `Skipped - ${reason}` : 'Skipped'}
       </span>
     );
+  }
+  // UNREACHABLE TODAY, and deliberately present: `discontinued` is a TOUR-ladder
+  // reason and no placement-nudge writer emits it (spec 3.1a scopes the feature
+  // to tours). It sits here because the fallthrough below is a fire-time
+  // PROMISE, and the day a nudge kind is retired the missing branch would be a
+  // silent lie rather than a compile error - the union widening cannot see an
+  // equality test. ABOVE `paused`, matching the tour chip's order.
+  if (nudge.suppression?.reason === 'discontinued') {
+    return <span className={`${styles.chip} ${styles.paused}`}>No longer sent</span>;
   }
   // Held back from automatic sending (manual-only hold-back): armed and
   // sendable, but nothing is going to fire it - so it must not chip a fire time

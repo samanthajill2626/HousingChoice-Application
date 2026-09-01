@@ -1505,6 +1505,41 @@ describe('relay-group API (M1.7)', () => {
       ).toBe(false);
     });
 
+    it('a DISCONTINUED rung carries the discontinued suppression; live rungs carry none', async () => {
+      // The FIFTH read surface (Phase B spec 3.1's standing hazard: grep for
+      // readers, do not reason from the writer's side). This bucket renders
+      // through the SAME ScheduledCard as the contact timeline, in every relay
+      // thread - so without this a pause-era confirmation would keep promising
+      // "sends in Nh" here while the tour panel and the contact page both said
+      // it will never go out.
+      //
+      // NOTE what is deliberately NOT added: no other suppression is evaluated
+      // in this bucket. Member-level opt-out suppresses individual LEGS at send
+      // time, never the group send itself, and the placement-nudge twin owns
+      // the rest of that gap.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { conversationId } = await seedTourGroup(app, 'landlord_led');
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      const confirmation = scheduled.find((s) => s.reminderKind === 'confirmation');
+      expect(confirmation?.suppression).toEqual({ reason: 'discontinued' });
+      // ANTI-VACUITY: it is per-KIND, not "this bucket suppresses everything".
+      for (const kind of ['day_before', 'morning_of', 'en_route']) {
+        expect(
+          scheduled.find((s) => s.reminderKind === kind)?.suppression,
+          kind,
+        ).toBeUndefined();
+      }
+    });
+
     it('a self_guided owner routes 1:1 — the group bucket stays empty', async () => {
       const { app } = authedHarness(world, makeFakePoolNumbers());
       const { conversationId } = await seedTourGroup(app, 'self_guided');

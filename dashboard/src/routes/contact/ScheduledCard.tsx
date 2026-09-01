@@ -30,6 +30,10 @@ const SUPPRESSION_COPY: Readonly<
   // sms_sending_disabled copy above ("SMS sending paused"), which is the
   // env-wide kill switch rather than this one rung awaiting a person.
   paused: 'send manually',
+  // TERMINAL: the KIND is retired, so nothing sends this - not the poll and not
+  // a person. suppressionNote leads it "No longer sent", hence a label that
+  // does not repeat the phrase: "No longer sent - turned off".
+  discontinued: 'turned off',
 };
 
 /** The fire-time line: while the send is still in the future, "sends <relative> -
@@ -48,12 +52,16 @@ function fireTimeLabel(at: string, now: number, timezone?: string): string {
 /** Every string this line can carry is a PROMISE that the message goes out at a
  *  time. A held-back rung (manual-only hold-back) breaks that promise, so it gets
  *  the state instead of a time - "sending shortly" or "sends in 6 days" over a
- *  line reading "Paused" is a card arguing with itself. */
+ *  line reading "Paused" is a card arguing with itself. A DISCONTINUED rung
+ *  breaks it permanently, so it gets the same treatment one branch earlier. */
 function scheduledLabel(
   item: TimelineScheduled,
   now: number,
   timezone?: string,
 ): string {
+  // ABOVE `paused`: a discontinued rung is not waiting for a person either, and
+  // "Paused" would invite a Send now the server refuses with kind_retired.
+  if (item.suppression?.reason === 'discontinued') return 'No longer sent';
   if (item.suppression?.reason === 'paused') return 'Paused';
   return fireTimeLabel(item.at, now, timezone);
 }
@@ -110,10 +118,14 @@ export function ScheduledCard({
       )}
       {suppression !== undefined ? (
         // Quiet hours is a calm "sends later", not a problem - muted tone;
-        // every real suppression stays amber.
+        // every real suppression stays amber. `discontinued` is muted for a
+        // related reason: it is a settled decision, not something to act on,
+        // and it recurs on every pause-era rung - an always-amber timeline
+        // stops reading as a warning (the RemindersPanel twin argues the same).
         <p
           className={
-            item.suppression?.reason === 'quiet_hours'
+            item.suppression?.reason === 'quiet_hours' ||
+            item.suppression?.reason === 'discontinued'
               ? styles.scheduledSkipMuted
               : styles.scheduledSkip
           }

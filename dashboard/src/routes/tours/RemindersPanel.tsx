@@ -107,6 +107,15 @@ function StateChip({
       </span>
     );
   }
+  // TERMINAL: the rung's KIND is retired, so nothing will ever fire it and no
+  // person can either (Send now refuses with kind_retired). ABOVE `paused`
+  // deliberately - "Paused" would invite exactly that refused click.
+  //
+  // CHIP ORDER: an `overdue` chip belongs BELOW this branch and ABOVE `paused`.
+  // A rung that will never send is never "overdue".
+  if (rung.suppression?.reason === 'discontinued') {
+    return <span className={`${styles.chip} ${styles.paused}`}>No longer sent</span>;
+  }
   // Held back from automatic sending (manual-only hold-back): the rung is armed
   // and sendable, but NOTHING is going to fire it. The fire-time wording below
   // is a promise, so it must not be reached here - a chip reading "sending
@@ -395,11 +404,15 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   // `paused` takes the muted tone for the same reason and one
                   // more: while the ladder is paused EVERY rung of EVERY tour
                   // carries this line, and an amber panel that is amber always
-                  // stops reading as a warning at all.
+                  // stops reading as a warning at all. `discontinued` joins them
+                  // on the same argument: it is a settled decision, not a
+                  // problem to act on, and it recurs on every tour that still
+                  // has a pause-era rung.
                   <p
                     className={
                       rung.suppression?.reason === 'quiet_hours' ||
-                      rung.suppression?.reason === 'paused'
+                      rung.suppression?.reason === 'paused' ||
+                      rung.suppression?.reason === 'discontinued'
                         ? styles.suppressionMuted
                         : styles.suppression
                     }

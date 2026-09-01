@@ -250,10 +250,18 @@ export const MANUAL_ONLY_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<Rem
  * this goes out (Send now works, chip says Paused); "discontinued" means it
  * NEVER goes out (force-send refuses kind_retired, chip says "no longer
  * sent"). Conflating them put a working Send now button beside a Paused chip
- * on a kind we had retired. Four read surfaces, all mandatory: the poll
- * filter below, forceSendReminder, routes/tourReminders.ts's chip branch, and
- * routes/contactTimeline.ts's own read. NOT injectable via deps - e2e must
- * never grow a send path production lacks.
+ * on a kind we had retired.
+ *
+ * FIVE surfaces read this set, all mandatory. Two SEND surfaces: the poll's
+ * due-row filter below, and forceSendReminder. Three READ surfaces, each with
+ * its OWN read rather than inheriting another's answer - the tour panel
+ * (routes/tourReminders.ts), the contact timeline (routes/contactTimeline.ts),
+ * and the relay group thread's scheduled bucket (routes/relayGroups.ts). Miss
+ * any read surface and it goes on promising "sends in Nh" for a rung that can
+ * never send, which is the exact lie this mechanism exists to end. If you add
+ * a sixth surface that renders a pending rung, it reads this set too.
+ *
+ * NOT injectable via deps - e2e must never grow a send path production lacks.
  *
  * confirmation: founder decision, Sam 2026-08-24 - "No confirmation text at
  * all - I'm scheduling manually, so it's redundant." Armed rows from the

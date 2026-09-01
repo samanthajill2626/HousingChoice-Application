@@ -1,6 +1,14 @@
+// `discontinued` is in the UNION but is deliberately NOT produced by the
+// evaluator below: it is terminal and outranks every reason here, so the
+// callers that know about a retired KIND short-circuit ahead of the evaluator
+// (routes/tourReminders.ts, routes/contactTimeline.ts, routes/relayGroups.ts).
+// Ranking it inside would be wrong twice: the ladder's rationale is that a
+// HARDER reason wins, and a discontinued rung is not something a harder reason
+// should override - and the evaluator is never built at all for a group-routed
+// tour, which is exactly where a retired kind would then read "sending shortly".
 export type ScheduledSuppressionReason =
   | 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage'
-  | 'quiet_hours' | 'paused';
+  | 'quiet_hours' | 'paused' | 'discontinued';
 export interface ScheduledSuppression { reason: ScheduledSuppressionReason; }
 
 /** kill-switch is off only on an explicit `false` (mirrors sendMessage's `=== false`). */

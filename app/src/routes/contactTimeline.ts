@@ -81,6 +81,7 @@ import type { PlacementStage } from '../lib/statusModel.js';
 import { LISTING_STATUS_LABELS } from '../lib/statusModel.js';
 import {
   resolveUsableGroup,
+  DISCONTINUED_REMINDER_KINDS,
   MANUAL_ONLY_REMINDER_KINDS,
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
@@ -1001,12 +1002,22 @@ async function gatherUpcoming(params: {
           // 1:1-routed tours reach this walk (group-routed ones return [] just
           // above), so the evaluator always runs - no bare-`paused` fallback is
           // needed on this surface.
-          const suppression = suppressionFor(
-            tenantConv,
-            false,
-            row.dueAt,
-            manualOnlyReminderKinds.has(row.kind),
-          );
+          //
+          // A DISCONTINUED kind short-circuits AHEAD of the evaluator (spec
+          // 3.1a): it is terminal and outranks every reason the ladder ranks -
+          // including the opt-out - because a rung nothing will ever send is not
+          // something a harder reason should override. This surface has its OWN
+          // read of the set rather than inheriting the tour panel's answer, and
+          // that is the point: without it the contact page would keep promising
+          // "sends in 3h" on a rung the panel one click away calls retired.
+          const suppression = DISCONTINUED_REMINDER_KINDS.has(row.kind)
+            ? ({ reason: 'discontinued' } as const)
+            : suppressionFor(
+                tenantConv,
+                false,
+                row.dueAt,
+                manualOnlyReminderKinds.has(row.kind),
+              );
           return {
             kind: 'scheduled',
             id: `sched#tour_reminder#${row.reminderId}`,

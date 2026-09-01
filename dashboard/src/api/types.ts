@@ -1147,7 +1147,11 @@ export type ScheduledSuppressionReason =
   | 'manual_mode'
   | 'stale_stage'
   | 'quiet_hours'
-  | 'paused';
+  | 'paused'
+  /** TERMINAL: the rung's KIND is retired, so no path will ever send it - not
+   *  the poll, and not a human pressing Send now. Outranks every reason above
+   *  it and is produced OUTSIDE the shared evaluator (app-side spec 3.1a). */
+  | 'discontinued';
 
 /** The suppression estimate a GET carries on an upcoming rung/card. */
 export interface ScheduledSuppression {
@@ -1163,10 +1167,18 @@ const EM_DASH = String.fromCharCode(0x2014);
  *  `paused` is neither of the other two and must never borrow their wording: the
  *  rung is not being dropped (it stays pending and sendable) and it is not
  *  waiting on a clock that will release it (nothing releases it but a person).
- *  Pairs with the 'send manually' label -> "Paused - send manually". */
+ *  Pairs with the 'send manually' label -> "Paused - send manually".
+ *
+ *  `discontinued` is a THIRD thing again, and must borrow none of the other
+ *  three: the rung is not deferred (no clock releases it), not held for a
+ *  person (nobody can release it - Send now refuses), and not "skipped" (that
+ *  describes THIS send being dropped, while the whole KIND has been retired).
+ *  Pairs with the 'turned off' label -> "No longer sent - turned off"; the
+ *  label deliberately does not repeat the lead, or the note stutters. */
 export function suppressionLead(reason: ScheduledSuppressionReason): string {
   if (reason === 'quiet_hours') return 'Will wait';
   if (reason === 'paused') return 'Paused';
+  if (reason === 'discontinued') return 'No longer sent';
   return 'Will be skipped';
 }
 
@@ -1274,6 +1286,9 @@ export const REMINDER_SUPPRESSION_LABELS: Readonly<
   stale_stage: 'tour no longer at this stage',
   quiet_hours: 'quiet hours',
   paused: 'send manually',
+  // Reads "No longer sent - turned off". Deliberately NOT a restatement of the
+  // lead: "no longer sent" here would render the phrase twice.
+  discontinued: 'turned off',
 };
 
 /** Human-readable phrasings for why a rung WAS retired unsent (state 'skipped'). */

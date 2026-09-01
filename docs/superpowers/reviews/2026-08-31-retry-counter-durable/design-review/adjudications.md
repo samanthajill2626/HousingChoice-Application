@@ -830,3 +830,80 @@ history confined to this file.
 Rewritten at the scope Cameron chose. The rail section shrank to the ladder
 alone; the dashboard names all six call sites and the real discriminator; the
 ordering reverted. Next: another cold pass.
+
+---
+
+# Two cold reviewers on the rewrite - 24 findings, converging
+
+Reports: `spec-r8-cold-reviewer-1-followup.md` (12), `spec-r8-cold-reviewer-2.md`
+(12). Independent, one of them seeing the document for the first time.
+
+**They converged on the same three blocking findings.** Independent convergence
+is the strongest signal this process produces, and all three were introduced by
+the rewrite:
+
+- **Close A's trigger was never stated.** I wrote "delete the
+  `if (nextAttempt > MAX_*)` branch condition; its body survives as close A" -
+  without saying what now FIRES close A. Read literally, nothing does, and the
+  ladder collapses to one pass. Now explicit: `claim.attempt >= CAP` with
+  recipients remaining, which also keeps the timing identical to `main` instead
+  of deferring terminal by one backoff interval.
+- **`attempt: claim.attempt` shifts BOTH backoff ladders.** The two files pass
+  deliberately different arguments - broadcast `broadcastBackoffMs(nextAttempt)`,
+  relay `fanOutBackoffMs(payload.attempt ?? 1)` - and my "simplification" to one
+  form halves one and changes the other, directly contradicting Sec 3.7 two
+  sections later. **Test 6 would not have caught it: it counts sends, not
+  delays.** The arithmetic is now a four-row table of what each use gets, and
+  test 6a asserts the `runAt` values.
+- **Sec 2's In-list omitted all three files Sec 4.3 requires editing.** I
+  believed I had fixed this in the previous round; the rewrite dropped it again.
+
+## The most valuable non-blocking finding
+
+**The rail ladder covered the wrong read.** `ensureGroupRail` reads participants
+TWICE - after create and after repair - and it is the POST-REPAIR read whose
+short result produced the 2 false `rail_failed` records the issue cites as its
+own headline evidence. A ladder on the create read alone would have left the
+symptom intact while appearing to fix it. Both reads now ladder.
+
+## A change I dropped because it does nothing
+
+**50386/50437 handling is REMOVED from the spec.** Traced on the reviewer's
+challenge: repair failures are already collected and discarded without affecting
+the outcome (groupRail.ts:522-540) - the authoritative re-read decides - so the
+"treat them as success-pending-re-read" change alters no behavior. The 178
+refusal LOG LINES come from `adapters/groupConversations.ts:563-566`, a file
+this branch does not edit. Filed as a follow-up instead of shipped as a no-op
+that would have read like a fix.
+
+## Other accepted findings
+
+Close B's recipient set was undefined on a first-pass envelope (`recipientKeys`
+is absent there) - it now falls back to every non-terminal recipient on the row,
+with test 7a for exactly that case. The placement pseudocode ignored five relay
+early-returns that precede any send - the claim now sits below the
+nothing-to-do guards, which also gives close B the row it needs without an extra
+read. `relayFanOut` has no `bumpStats`, no progress emit and no `finalize()`, so
+"one shared helper" was wrong - one helper PER FILE. The broadcast badge is
+where the two internal codes actually surface, so Sec 5 could not call it
+"unchanged". `rosterKind` DEFAULTS to `'relay'` (Timeline.tsx:796), so the
+group-text exclusion rests on one site opting out and the test must pin it
+explicitly rather than trusting the default. Test 3's seam needed naming:
+`enqueue` is a module import, not a dep on the deps bag, so it needs `vi.mock`.
+Plus the header's "closes" overstating a three-of-five-callers fix, the
+pre-deploy in-flight envelope gaining a full ladder, the adopt path's identical
+exposure, `_CLUSTERS.md` needing amendment, and three citation drifts.
+
+## Where this stands
+
+The second cold reviewer recorded ~25 spec citations checked and found TRUE -
+the jobs/marker chain, both wholesale slot writers, every `PutCommand`, both
+enumerations, the relay-pointer-returns-first claim, the zero-hit grep, and all
+three forward-carries.
+
+**That is the shape of the remaining risk: the EVIDENCE has converged; the
+INSTRUCTIONS are what still break.** Every blocking finding in this round was
+"a builder following this literally produces the wrong thing" - not "this claim
+about the codebase is false". That is a materially different and later-stage
+failure mode than rounds 1-7, and it is the one a plan review is designed to
+catch.

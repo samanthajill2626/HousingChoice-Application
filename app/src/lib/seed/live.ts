@@ -502,6 +502,27 @@ export async function seedLive(
     const tourTomorrow = toursArr[1] as TourItem;
     const tourUpcoming = toursArr[2] as TourItem;
 
+    // Generation pointer (tour-reminder supersession, spec 3.1/3.2). The armer
+    // stamps every row it writes with one ladderId, and the CALLER owns the
+    // tour's currentLadderId - so a seeded ladder with no pointer would be
+    // refused by the poll as superseded and the whole demo world would go dark
+    // (acceptance 17). The tour rows are already persisted by the Put loop
+    // above, 20 lines before the first arm, so the pointer cannot be written
+    // inline: mutate the SAME object that was Put (toursArr holds those exact
+    // references) and re-Put it. A re-Put, not an UpdateCommand, because it
+    // keeps this file's single write mechanism and is byte-identical to the
+    // first write plus one attribute. All three live tours are 'scheduled', so
+    // none of them wants the rotated (terminal) pointer of spec 3.2.
+    const toursTable = namespace?.tableNameFor('tours') ?? tableName('tours');
+    const pointTourAtLadder = async (tour: TourItem, ladderId: string | null): Promise<void> => {
+      // ladderId is null only when the arm wrote NO rows (a tour with no
+      // scheduledAt). Pointing at an empty generation is worse than not
+      // pointing: it would refuse any legacy row the tour still carries.
+      if (ladderId === null) return;
+      tour.currentLadderId = ladderId;
+      await doc.send(new PutCommand({ TableName: toursTable, Item: tour }));
+    };
+
     // Arm TOUR-A (today, self-guided): a SAME-DAY booking, so most of the
     // ladder is retired at arm time and this is the demo's example of that.
     // day_before (19:30 org-local yesterday) and morning_of (scheduledAt - 4h)
@@ -515,6 +536,7 @@ export async function seedLive(
       tourRemindersRepo: remindersRepo,
       settingsRepo,
     });
+    await pointTourAtLadder(tourToday, armedToday.ladderId);
     console.log(
       `  seeded   tourReminders (live tour-today): ${armedToday.rows.length} reminder${armedToday.rows.length === 1 ? '' : 's'}`,
     );
@@ -529,6 +551,7 @@ export async function seedLive(
       tourRemindersRepo: remindersRepo,
       settingsRepo,
     });
+    await pointTourAtLadder(tourTomorrow, armedTomorrow.ladderId);
     console.log(
       `  seeded   tourReminders (live tour-tomorrow): ${armedTomorrow.rows.length} reminder${armedTomorrow.rows.length === 1 ? '' : 's'}`,
     );
@@ -539,6 +562,7 @@ export async function seedLive(
       tourRemindersRepo: remindersRepo,
       settingsRepo,
     });
+    await pointTourAtLadder(tourUpcoming, armedUpcoming.ladderId);
     console.log(
       `  seeded   tourReminders (live tour-upcoming): ${armedUpcoming.rows.length} reminder${armedUpcoming.rows.length === 1 ? '' : 's'}`,
     );

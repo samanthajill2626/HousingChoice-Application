@@ -12,6 +12,12 @@ describe('tallyRosterDrift', () => {
           { contactId: 'c-drift', phone: '+3', name: 'Old Name' },
           { contactId: 'c-dangling', phone: '+4', name: 'Ghost' },
           { contactId: 'c-deleted', phone: '+6', name: 'Was Here' },
+          // R2-4: the inverse of nameMissingButKnown. The contact is readable
+          // and NOT deleted but carries no display name, while the roster still
+          // stores one - the population T5 made permanent by no longer deleting
+          // the stored name. It used to fall through every branch and be
+          // counted nowhere past withContactId.
+          { contactId: 'c-nameless', phone: '+7', name: 'Kept Name' },
           { contactId: '', phone: '+5', name: 'Bare' },
         ],
         [{ contactId: 'c-ok', phone: '+1', name: 'Ada Ok' }],
@@ -21,11 +27,13 @@ describe('tallyRosterDrift', () => {
         ['c-missing', { contactId: 'c-missing', firstName: 'Has', lastName: 'Name' }],
         ['c-drift', { contactId: 'c-drift', firstName: 'New', lastName: 'Name' }],
         ['c-deleted', { contactId: 'c-deleted', firstName: 'Re', lastName: 'Named', deleted_at: '2026-01-01T00:00:00.000Z' }],
+        ['c-nameless', { contactId: 'c-nameless', phone: '+7' }],
       ]),
     );
     expect(tally).toEqual({
-      rosters: 2, members: 7, withContactId: 6,
-      nameMissingButKnown: 1, nameDrift: 1, danglingContactId: 1, deletedContact: 1, noContactId: 1,
+      rosters: 2, members: 8, withContactId: 7,
+      nameMissingButKnown: 1, nameDrift: 1, nameOnlyStored: 1,
+      danglingContactId: 1, deletedContact: 1, noContactId: 1,
     });
   });
 });

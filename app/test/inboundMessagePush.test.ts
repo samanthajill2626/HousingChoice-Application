@@ -429,6 +429,39 @@ describe('inbound message push - relay group', () => {
     });
   });
 
+  // R2-2: every other assertion on the sender label lives on the NATIVE GROUP
+  // arm, and this describe's world seeds no contacts at all - so `senderContact`
+  // was always undefined here and the relay arm read identically before and
+  // after the contact-first flip. The two arms resolve `senderContact` by
+  // different rules (relay: roster contactId only; group: contactId with a
+  // consistent read, else findByPhone), so the group-arm pin does not cover
+  // this one. Discriminating by construction: the roster's stored name and the
+  // contact's name differ, so whichever rung wins is visible in the assertion.
+  it('PIN: the relay push body prefix prefers the live CONTACT name over the stored roster name', async () => {
+    seedRelay(world, {
+      participants: [
+        // A creation-time snapshot that has since gone stale.
+        { contactId: 'c-alice', phone: ALICE, name: 'Old Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+        { contactId: 'c-carol', phone: CAROL, name: 'Carol' },
+      ],
+    });
+    world.contacts.push({
+      contactId: 'c-alice',
+      type: 'tenant',
+      phone: ALICE,
+      firstName: 'Alicia',
+      lastName: 'Live',
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, relayInboundParams());
+
+    // The TITLE still renders the stored snapshot (the push path passes it by
+    // decision - no awaited read on the ack path), so assert the body prefix.
+    expect(soleMessagePayload(world).body).toBe('Alicia Live: is the unit available?');
+  });
+
   it('UNKNOWN sender on the open-group fallback: pushes on the newest open group', async () => {
     seedGroup(world, {
       id: 'conv-open-old',

@@ -17,6 +17,16 @@ export interface RosterDriftTally {
   nameMissingButKnown: number;
   /** both present and different */
   nameDrift: number;
+  /**
+   * The roster stores a name; the readable, NON-deleted contact behind it has
+   * none. The read path cannot mask this one - it PRESERVES it, because
+   * withLiveNames only overwrites a stored name with a live one it actually
+   * found. This is the population relayGroups' member update made permanent
+   * when it stopped deleting the stored name, so clearing a contact's name no
+   * longer clears it from a roster and no in-product path will. Counted so the
+   * audit can price the branch's own cost.
+   */
+  nameOnlyStored: number;
   /** contactId present, no contact behind it (or the read did not return it) */
   danglingContactId: number;
   /** contact is soft-deleted: the read path deliberately leaves these alone */
@@ -31,7 +41,7 @@ export function tallyRosterDrift(
 ): RosterDriftTally {
   const t: RosterDriftTally = {
     rosters: rosters.length, members: 0, withContactId: 0, nameMissingButKnown: 0,
-    nameDrift: 0, danglingContactId: 0, deletedContact: 0, noContactId: 0,
+    nameDrift: 0, nameOnlyStored: 0, danglingContactId: 0, deletedContact: 0, noContactId: 0,
   };
   for (const roster of rosters) {
     for (const p of roster) {
@@ -43,8 +53,12 @@ export function tallyRosterDrift(
       if (isDeleted(contact)) { t.deletedContact += 1; continue; }
       const want = contactDisplayName(contact);
       const have = typeof p.name === 'string' && p.name.trim().length > 0 ? p.name.trim() : undefined;
+      // One bucket per member, in the chain's own order: noContactId ->
+      // dangling -> deleted -> these three. The fourth combination (neither
+      // side has a name) is nothing to report and lands in no bucket.
       if (want !== undefined && have === undefined) t.nameMissingButKnown += 1;
       else if (want !== undefined && have !== undefined && want !== have) t.nameDrift += 1;
+      else if (want === undefined && have !== undefined) t.nameOnlyStored += 1;
     }
   }
   return t;

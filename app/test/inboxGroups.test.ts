@@ -517,4 +517,47 @@ describe('roster names resolve on read (M1)', () => {
     const row = page.rows.find((r) => r.conversationId === 'relay-1');
     expect(row?.name).toBe('With Annika');
   });
+
+  // R2-1, ACCEPTED BY DESIGN and pinned here so it can never happen silently.
+  // relayThreadLabel's tag rung only ever beat RAW DIGITS: member labels win
+  // whenever ANY member is named (groupTitle.ts's carve-out), so an operator's
+  // placement_tag was always a fallback for a roster nobody could name.
+  // Resolving names on read widens "named" from the stored snapshot to the
+  // contact record, which is the whole point of M1 - so a tagged group whose
+  // members store no name but DO resolve to named contacts now titles by those
+  // names, exactly as a freshly created group would. The push title still shows
+  // the tag (it passes the stored snapshot by decision), so this is a visible
+  // inbox-vs-push divergence, declared rather than accidental.
+  it('PIN: a tagged, snapshot-nameless roster titles by the CONTACT names once hydrated (tag only ever beat raw digits)', async () => {
+    const { deps } = makeDeps({
+      relay: [
+        {
+          conversationId: 'relay-tagged',
+          status: 'open',
+          type: 'relay_group',
+          pool_number: '+15550160001',
+          // The operator's label rides the index signature under this exact key.
+          placement_tag: 'Maple St - Dana',
+          // A post-migration roster: contactIds, but not one stored name.
+          participants: [
+            { contactId: 'c-ana', phone: '+14045550121' },
+            { contactId: 'c-ben', phone: '+14045550122' },
+          ],
+          last_activity_at: '2026-06-17T22:00:00.000Z',
+          created_at: '2026-06-17T22:00:00.000Z',
+          ai_mode: 'manual',
+        } as ConversationItem,
+      ],
+      contacts: [
+        { contactId: 'c-ana', phone: '+14045550121', name: 'Ana Reyes' },
+        { contactId: 'c-ben', phone: '+14045550122', name: 'Ben Ortiz' },
+      ],
+    });
+
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    const row = page.rows.find((r) => r.conversationId === 'relay-tagged');
+    // Whole names, not first names: the relay chain does not shorten.
+    expect(row?.name).toBe('With Ana Reyes & Ben Ortiz');
+    expect(row?.name).not.toBe('Maple St - Dana');
+  });
 });

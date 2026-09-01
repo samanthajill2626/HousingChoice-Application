@@ -10,6 +10,13 @@
 // imported roster is nameless, so the inbox said "With (555) 010-0002 & ..." and
 // the card said "Group text" while the header showed the real names.
 //
+// INPUT CONTRACT (2026-09-01): one rule is not one result. Every function here
+// renders whatever roster the CALLER passes and reads no contact of its own -
+// callers wanting live names hydrate through lib/participantNames first (the
+// inbox rows and the contact card's group/relay lists do), while the webhook
+// push titles pass the stored snapshot by decision, so the same thread can be
+// titled from a fresher roster in the inbox than in the push that announced it.
+//
 // MIRROR: dashboard/src/lib/groupThread.ts `groupThreadLabel` implements the
 // identical rule client-side for the thread header, whose route is a raw
 // passthrough that hands down no label and which cannot import from app/src.
@@ -25,7 +32,11 @@ import type { ConversationItem, ConversationParticipant } from '../repos/convers
 export const GROUP_TITLE_NAMES = 3;
 
 /** The title. `members` is the roster (or the roster minus self, on the contact
- *  card - "the OTHERS in this group" is the same rule over a smaller set). */
+ *  card - "the OTHERS in this group" is the same rule over a smaller set).
+ *  ONE RULE, whatever roster arrives: it reads no contact, so a caller wanting
+ *  LIVE names hydrates via lib/participantNames first (routes/inbox.ts does at
+ *  :1205) while the push title in routes/webhooks/twilio.ts passes the STORED
+ *  snapshot by decision - same rule, deliberately different input. */
 export function groupThreadLabel(
   members: readonly ConversationParticipant[] | undefined,
 ): string {
@@ -153,7 +164,10 @@ export function relayThreadLabel(conv: ConversationItem): string {
   // under the key `placement_tag` (NOT `tag`) and is untyped.
   const tag = typeof conv['placement_tag'] === 'string' ? conv['placement_tag'].trim() : '';
   // The tag carve-out: raw digits lose to a deliberate operator label, but only
-  // when there is no real name anywhere on the roster.
+  // when there is no real name anywhere on the roster. Hydrated callers (inbox
+  // rows, contact cards) have fed this LIVE contact names since 2026-09-01, so
+  // the tag now yields to a name resolved at read time exactly as it always
+  // yielded to a stored one - the rung is unchanged, its input got fresher.
   if (labels.length > 0 && (anyNamed || tag.length === 0)) return `With ${labels.join(' & ')}`;
   if (tag.length > 0) return tag;
   const pool =

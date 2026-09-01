@@ -619,6 +619,7 @@ async function auditGroupRosters(): Promise<void> {
       `    with contactId        ${t.withContactId}`,
       `      name MISSING, known ${t.nameMissingButKnown}  <- contact has a name; roster stores none`,
       `      name DIFFERS        ${t.nameDrift}  <- roster shows a different name than the contact`,
+      `      name only STORED    ${t.nameOnlyStored}  <- contact readable but nameless; the stored name stands (kept by design)`,
       `      soft-deleted        ${t.deletedContact}  <- the read path leaves these on the stored name`,
       `      dangling contactId  ${t.danglingContactId}  <- no contact returned for the id`,
       `    no contactId          ${t.noContactId}  <- bare-phone member; nothing to resolve`,

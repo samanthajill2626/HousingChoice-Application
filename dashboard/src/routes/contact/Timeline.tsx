@@ -586,7 +586,11 @@ function recipientSummaryName(
       ? deliveryReason(row.slot.errorCode, { media })
       : undefined;
     const transport = includeRecipientTransport ? presentRecipientTransport(row.slot) : null;
-    const details = [leg === null ? null : chipText(leg, legReason), transport].filter(
+    const details = [
+      leg === null ? null : chipText(leg, legReason),
+      transport,
+      row.when.length > 0 ? row.when : null,
+    ].filter(
       (detail): detail is string => detail !== null,
     );
     // A row with neither presentation still names the person and claims no

@@ -468,29 +468,35 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
 });
 
 describe('Timeline per-recipient delivery - the chip that carries the accessible summary', () => {
-  it('escalates on the FIRST render, with no tick and no interaction, and names both legs', () => {
+  it('escalates on the FIRST render, with no tick and no interaction, and names both legs with their own times', () => {
     // The 2026-08-23 headline case: a founder opens a thread whose leg went
     // quiet hours ago. If the clock initialised lazily this would render
     // exactly as it did before the feature.
+    const deliveredAt = '2026-06-08T14:47:00.000Z';
+    const sentAt = '2026-06-08T15:03:00.000Z';
     const msg: TimelineItem = {
       ...RELAY_OUT,
       delivery_recipients: {
-        c1: { status: 'delivered' },
-        c2: { status: 'sent' },
+        c1: { status: 'delivered', deliveredAt },
+        c2: { status: 'sent', sentAt },
       },
     };
+    expect(formatTime(deliveredAt)).not.toBe(formatTime(sentAt));
     renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
     const chip = screen.getByText('delivered 1/2 - 1 not confirmed');
     expect(chip.className).toMatch(/toneDanger/);
     expect(chip).toHaveAttribute('role', 'img');
     expect(chip).toHaveAccessibleName(
-      'delivered 1 of 2, 1 not confirmed. Keisha Kane: Delivered. Lars Landlord: Sent, not confirmed.',
+      `delivered 1 of 2, 1 not confirmed. Keisha Kane: Delivered, ${formatTime(deliveredAt)}. ` +
+        `Lars Landlord: Sent, not confirmed, ${formatTime(sentAt)}.`,
     );
   });
 
   it('puts the summary on the MESSAGE-LEVEL chip when the rollup is null (all opted out)', () => {
     // Branch 0: no rollup chip exists, so without this clause a screen-reader
     // user would get the aggregate sentence and no names at all.
+    const annSentAt = '2026-06-08T14:47:00.000Z';
+    const boSentAt = '2026-06-08T15:03:00.000Z';
     const msg: TimelineItem = {
       ...RELAY_OUT,
       id: 'g-optout',
@@ -499,17 +505,26 @@ describe('Timeline per-recipient delivery - the chip that carries the accessible
       delivery_status: 'undelivered',
       error_code: 'contact_opted_out',
       delivery_recipients: {
-        'phone#+14045550111': { status: 'undelivered', errorCode: 'contact_opted_out' },
-        'phone#+14045550112': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'phone#+14045550111': {
+          status: 'undelivered',
+          errorCode: 'contact_opted_out',
+          sentAt: annSentAt,
+        },
+        'phone#+14045550112': {
+          status: 'undelivered',
+          errorCode: 'contact_opted_out',
+          sentAt: boSentAt,
+        },
       },
     };
+    expect(formatTime(annSentAt)).not.toBe(formatTime(boSentAt));
     renderTimeline({ items: [msg], relayRoster: GROUP_ROSTER, rosterKind: 'group_text' });
     const chip = screen.getByText('Undelivered - Everyone here has opted out - nothing was sent');
     expect(chip).toHaveAttribute('role', 'img');
     expect(chip).toHaveAccessibleName(
       'Undelivered, Everyone here has opted out, nothing was sent. ' +
-        'Ann Tenant: Not sent, opted out (Twilio skips them). ' +
-        'Bo Tenant: Not sent, opted out (Twilio skips them).',
+        `Ann Tenant: Not sent, opted out (Twilio skips them), ${formatTime(annSentAt)}. ` +
+        `Bo Tenant: Not sent, opted out (Twilio skips them), ${formatTime(boSentAt)}.`,
     );
     // The title stays for mouse users; the aria-label supersedes it.
     expect(chip).toHaveAttribute('title', 'Everyone here has opted out - nothing was sent');

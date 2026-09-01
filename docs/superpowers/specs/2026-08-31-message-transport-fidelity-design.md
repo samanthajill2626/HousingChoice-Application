@@ -1,6 +1,6 @@
 # Message transport fidelity - design specification
 
-Status: v6 - independent v5 review adjudicated; awaiting human specification gate
+Status: v6 - independent re-review PASS; awaiting human specification gate
 Date: 2026-08-31
 Revised: 2026-09-01
 Branch: `feat/message-transport-fidelity`

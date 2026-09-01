@@ -80,10 +80,9 @@ export interface FakeTwilioEngineDeps {
   sidSeqStart?: number;
 }
 
-/** A random high base for the SID counter, in [10_000_000, 90_000_000) — always
- *  8 digits and well clear of the low `SMfake0000000N` range that older runs (and
- *  a from-zero counter) emit, so two fake processes' SID ranges effectively never
- *  overlap. Local mock only; SIDs are opaque (no test asserts a literal value). */
+/** A random high base for the SID counter, in [10_000_000, 90_000_000). The
+ *  counter is encoded as 32 hex digits so the fake emits provider-shaped SIDs,
+ *  while the high start keeps restarted process ranges from colliding. */
 function randomSidSeqStart(): number {
   return 10_000_000 + Math.floor(Math.random() * 80_000_000);
 }
@@ -132,7 +131,7 @@ export class FakeTwilioEngine {
 
   private mintSid(prefix: 'SM' | 'MM'): string {
     this.sidSeq += 1;
-    return `${prefix}fake${String(this.sidSeq).padStart(8, '0')}`;
+    return `${prefix}${this.sidSeq.toString(16).padStart(32, '0')}`;
   }
 
   list(): Persona[] {
@@ -165,6 +164,10 @@ export class FakeTwilioEngine {
     return persona;
   }
   setDeliveryOutcome(input: SetDeliveryOutcomeInput): void {
+    const channelPrefix = input.profile.transportEvidence?.channelPrefix;
+    if (channelPrefix !== undefined && channelPrefix !== 'rcs') {
+      throw new TypeError('transportEvidence.channelPrefix must be rcs when supplied');
+    }
     this.nextProfile.set(input.partyNumber, input.profile);
   }
   reset(): void {
@@ -261,6 +264,8 @@ export class FakeTwilioEngine {
       ...(input.otherRecipientsShape !== undefined && {
         otherRecipientsShape: input.otherRecipientsShape,
       }),
+      ...(input.channelPrefix !== undefined && { channelPrefix: input.channelPrefix }),
+      ...(input.channelMetadata !== undefined && { channelMetadata: input.channelMetadata }),
     });
     // FIX 2a: surface a rejected inbound webhook (e.g. a signing regression → non-2xx)
     // to the control-API caller instead of silently succeeding.
@@ -496,6 +501,14 @@ export class FakeTwilioEngine {
         if (i === 0) return;
         const params = buildStatusParams({
           messageSid: sid, status: state,
+          from: profile.transportEvidence?.from ?? message.from,
+          to: profile.transportEvidence?.to ?? message.to,
+          ...(profile.transportEvidence?.channelPrefix !== undefined && {
+            channelPrefix: profile.transportEvidence.channelPrefix,
+          }),
+          ...(profile.transportEvidence?.channelMetadata !== undefined && {
+            channelMetadata: profile.transportEvidence.channelMetadata,
+          }),
           ...(profile.kind === 'fail' && state === (profile.failState ?? 'failed') && profile.errorCode !== undefined
             ? { errorCode: profile.errorCode }
             : {}),

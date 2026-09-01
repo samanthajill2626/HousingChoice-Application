@@ -19,6 +19,36 @@ const contacts = SEED['contacts'] ?? [];
 const units = SEED['units'] ?? [];
 const placements = SEED['placements'] ?? [];
 const auditEvents = SEED['audit_events'] ?? [];
+const messages = SEED['messages'] ?? [];
+
+describe('seed message transport declarations', () => {
+  it('declares ordinary SMS and native Group MMS without consulting legacy type', () => {
+    const outbound = messages.find((message) => String(message['tsMsgId']).endsWith('#msg-0001'));
+    const inbound = messages.find((message) => String(message['tsMsgId']).endsWith('#msg-0002'));
+    const group = messages.find((message) => String(message['tsMsgId']).endsWith('#msg-group-0002'));
+    expect(outbound).toMatchObject({ transport_schema_version: 1, requested_transport: 'sms', actual_transport: 'sms' });
+    expect(inbound).toMatchObject({ transport_schema_version: 1, actual_transport: 'sms' });
+    expect(inbound).not.toHaveProperty('requested_transport');
+    expect(group).toMatchObject({ type: 'sms', transport_schema_version: 1, requested_transport: 'mms', actual_transport: 'mms' });
+  });
+
+  it('contains explicit pending, fallback, mixed, unresolved, and legacy fixtures', () => {
+    const bySuffix = (suffix: string) => messages.find((message) => String(message['tsMsgId']).endsWith(suffix));
+    expect(bySuffix('#msg-transport-pending')).toMatchObject({ transport_schema_version: 1, requested_transport: 'rcs' });
+    expect(bySuffix('#msg-transport-fallback')).toMatchObject({ transport_schema_version: 1, requested_transport: 'rcs', actual_transport: 'sms' });
+    expect(bySuffix('#msg-transport-mixed')).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      delivery_recipients: {
+        'seed-mixed-rcs': { requestedTransport: 'rcs', actualTransport: 'rcs', transportAggregationState: 'attempted' },
+        'seed-mixed-sms': { requestedTransport: 'rcs', actualTransport: 'sms', transportAggregationState: 'attempted' },
+      },
+    });
+    expect(bySuffix('#msg-transport-unresolved')).toMatchObject({ transport_schema_version: 1 });
+    expect(bySuffix('#msg-transport-unresolved')).not.toHaveProperty('actual_transport');
+    expect(bySuffix('#msg-transport-legacy')).not.toHaveProperty('transport_schema_version');
+  });
+});
 
 describe('seed data field casing', () => {
   it('seeds at least the canonical tenant + landlord contacts', () => {

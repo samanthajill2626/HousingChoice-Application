@@ -152,6 +152,11 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
   // ---------------------------------------------------------------------------
   // Today tour assertions
   // ---------------------------------------------------------------------------
+  it('adds no synthetic carrier rows of its own', async () => {
+    const { Items } = await doc.send(new ScanCommand({ TableName: `${prefix}messages` }));
+    expect(Items ?? []).toHaveLength(0);
+  });
+
   describe('TOUR-A (today, self-guided)', () => {
     it('scheduledAt is on FIXED_NOW\'s UTC date at 14:00', () => {
       const expectedYmd = FIXED_NOW_ISO.slice(0, 10);

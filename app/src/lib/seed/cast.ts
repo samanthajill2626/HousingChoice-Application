@@ -13,6 +13,40 @@
 import { conversationIdForGroup } from '../import/ids.js';
 import { CAST_RECORDING_KEY, CAST_PHOTO_KEY } from './media.js';
 import type { SeedConversationRow } from './types.js';
+import { withSeedTransport, type SeedCarrierTransport } from './messageTransport.js';
+
+const CAST_INBOUND_SMS_IDS = [
+  'msg-cast-unk-001', 'msg-cast-intake-001', 'msg-cast-intake-003', 'msg-cast-intake-005',
+  'msg-cast-norta-002', 'msg-cast-norta-004', 'msg-cast-norta-006', 'msg-cast-srch-002',
+  'msg-cast-srch-005', 'msg-cast-srch-relay-002', 'msg-cast-srch-relay-003',
+  'msg-cast-srch-relay-004', 'msg-cast-srch-relay-005', 'msg-cast-toury-002',
+  'msg-cast-toury-004', 'msg-cast-toury-relay-002', 'msg-cast-toury-relay-003',
+  'msg-cast-nsign-002', 'msg-cast-nsign-005', 'msg-cast-nsign-006', 'msg-cast-park-003',
+  'msg-cast-milu-002', 'msg-cast-milu-003',
+] as const;
+const CAST_OUTBOUND_SMS_IDS = [
+  'msg-cast-intake-002', 'msg-cast-intake-004', 'msg-cast-intake-006', 'msg-cast-norta-001',
+  'msg-cast-norta-003', 'msg-cast-norta-005', 'msg-cast-srch-001', 'msg-cast-srch-003',
+  'msg-cast-srch-004', 'msg-cast-srch-relay-001', 'msg-cast-toury-001', 'msg-cast-toury-003',
+  'msg-cast-toury-relay-001', 'msg-cast-nsign-001', 'msg-cast-nsign-003',
+  'msg-cast-nsign-004', 'msg-cast-park-001', 'msg-cast-park-002', 'msg-cast-milu-001',
+  'msg-cast-milu-004', 'msg-cast-milu-005',
+] as const;
+const CAST_INBOUND_MMS_IDS = ['msg-cast-grp-a-001', 'msg-cast-grp-a-003', 'msg-cast-grp-b-001'] as const;
+const CAST_OUTBOUND_MMS_IDS = ['msg-cast-grp-a-002', 'msg-cast-grp-b-002'] as const;
+
+const CAST_TRANSPORT_DECLARATIONS: Readonly<Record<string, SeedCarrierTransport>> = Object.freeze({
+  ...Object.fromEntries(CAST_INBOUND_SMS_IDS.map((id) => [id, { kind: 'versioned', actual: 'sms' } as const])),
+  ...Object.fromEntries(CAST_OUTBOUND_SMS_IDS.map((id) => [id, { kind: 'versioned', requested: 'sms', actual: 'sms' } as const])),
+  ...Object.fromEntries(CAST_INBOUND_MMS_IDS.map((id) => [id, { kind: 'versioned', actual: 'mms' } as const])),
+  ...Object.fromEntries(CAST_OUTBOUND_MMS_IDS.map((id) => [id, { kind: 'versioned', requested: 'mms', actual: 'mms' } as const])),
+});
+
+function declareCastMessageTransport(message: Record<string, unknown>): Record<string, unknown> {
+  const id = typeof message['tsMsgId'] === 'string' ? message['tsMsgId'].split('#').at(-1) : undefined;
+  const declaration = id === undefined ? undefined : CAST_TRANSPORT_DECLARATIONS[id];
+  return declaration === undefined ? message : withSeedTransport(message, declaration);
+}
 
 // ---------------------------------------------------------------------------
 // Fixed past timestamps (byte-stable across reseeds)
@@ -1503,7 +1537,7 @@ export function castItems(): Record<string, Record<string, unknown>[]> {
     ...midIntakeUnitLandlord.messages,
     ...groupTextTwoMember.messages,
     ...groupTextThreeMember.messages,
-  ];
+  ].map(declareCastMessageTransport);
 
   const tours: Record<string, unknown>[] = [
     searchingTenant.tour,

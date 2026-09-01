@@ -561,6 +561,11 @@ describe('generatePerformanceSeed', () => {
     const config = resolvePerformanceSeedConfig({}, ANCHOR);
     const { tables } = generatePerformanceSeed(config);
     const byConversation = new Map<string, typeof tables.messages>();
+    const nativeGroupIds = new Set(
+      tables.conversations
+        .filter((conversation) => conversation.type === 'group_text')
+        .map((conversation) => conversation.conversationId),
+    );
     for (const message of tables.messages) {
       const rows = byConversation.get(message.conversationId) ?? [];
       rows.push(message);
@@ -574,7 +579,16 @@ describe('generatePerformanceSeed', () => {
         provider_ts: expect.any(String),
         delivery_status: expect.any(String),
         created_at: expect.any(String),
+        transport_schema_version: 1,
       });
+      if (message.direction === 'inbound') {
+        expect(message.requested_transport).toBeUndefined();
+        expect(message.actual_transport).toBe(nativeGroupIds.has(message.conversationId) ? 'mms' : 'sms');
+      } else {
+        const transport = nativeGroupIds.has(message.conversationId) ? 'mms' : 'sms';
+        expect(message.requested_transport).toBe(transport);
+        expect(message.actual_transport).toBe(transport);
+      }
     }
     expect(tables.messages).toHaveLength(config.totalMessageCount);
     for (const conversation of tables.conversations) {

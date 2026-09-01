@@ -53,7 +53,14 @@ function signTwilio(url: string, params: Record<string, string>): string {
  */
 export async function postInboundSms(
   request: APIRequestContext,
-  input: { from: string; body: string; messageSid: string; to?: string },
+  input: {
+    from: string;
+    body: string;
+    messageSid: string;
+    to?: string;
+    channelPrefix?: string;
+    channelMetadata?: Record<string, unknown> | string;
+  },
 ): Promise<{ status: number; body: string }> {
   const params: Record<string, string> = {
     MessageSid: input.messageSid,
@@ -63,6 +70,12 @@ export async function postInboundSms(
     SmsStatus: 'received',
     ApiVersion: '2010-04-01',
     NumMedia: '0',
+    ...(input.channelPrefix !== undefined && { ChannelPrefix: input.channelPrefix }),
+    ...(input.channelMetadata !== undefined && {
+      ChannelMetadata: typeof input.channelMetadata === 'string'
+        ? input.channelMetadata
+        : JSON.stringify(input.channelMetadata),
+    }),
   };
   const path = '/webhooks/twilio/sms';
   const signature = signTwilio(`${APP_PUBLIC_BASE_URL}${path}`, params);
@@ -288,7 +301,17 @@ export async function setDeliveryOutcome(
   request: APIRequestContext,
   input: {
     partyNumber: string;
-    profile: { kind: 'normal' | 'stall' | 'fail'; failState?: string; errorCode?: string };
+    profile: {
+      kind: 'normal' | 'stall' | 'fail';
+      failState?: string;
+      errorCode?: string;
+      transportEvidence?: {
+        from?: string;
+        to?: string;
+        channelPrefix?: string;
+        channelMetadata?: Record<string, unknown> | string;
+      };
+    };
   },
 ): Promise<void> {
   const res = await request.post(`${FAKE_BASE}/control/delivery-outcome`, { data: input });

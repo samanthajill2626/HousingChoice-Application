@@ -16,6 +16,7 @@ import type {
   ConversationType,
 } from '../../repos/conversationsRepo.js';
 import type { MessageItem } from '../../repos/messagesRepo.js';
+import { withSeedTransport } from './messageTransport.js';
 import type { PlacementItem } from '../../repos/placementsRepo.js';
 import type { TourItem } from '../../repos/toursRepo.js';
 import type { UnitItem } from '../../repos/unitsRepo.js';
@@ -926,7 +927,7 @@ function buildMessage(
   const createdAt = at(lastActivityMs, -(messagesPerConversation - messageIndex - 1) * MINUTE_MS);
   const messageId = `perf-msg-${padded(conversationIndex)}-${padded(messageIndex, 3)}`;
   const direction = messageIndex % 2 === 0 ? 'inbound' : 'outbound';
-  return {
+  const message = {
     conversationId: conversation.conversationId,
     tsMsgId: `${createdAt}#${messageId}`,
     type: 'sms',
@@ -938,6 +939,12 @@ function buildMessage(
     delivery_status: 'delivered',
     created_at: createdAt,
   } satisfies MessageItem;
+  return withSeedTransport(
+    message,
+    direction === 'inbound'
+      ? { kind: 'versioned', actual: 'sms' }
+      : { kind: 'versioned', requested: 'sms', actual: 'sms' },
+  ) as MessageItem;
 }
 
 function nativeAuthor(type: NativeContactReference['type']): MessageItem['author'] {
@@ -958,7 +965,7 @@ function buildNativeMessage(
   const direction = messageIndex % 2 === 0 ? 'inbound' : 'outbound';
   const sender = roster[messageIndex % roster.length];
   if (!sender) throw new Error('native conversation has no roster sender');
-  return {
+  const message = {
     conversationId: conversation.conversationId,
     tsMsgId: `${createdAt}#${messageId}`,
     type: 'sms',
@@ -971,6 +978,12 @@ function buildNativeMessage(
     delivery_status: 'delivered',
     created_at: createdAt,
   } satisfies MessageItem;
+  return withSeedTransport(
+    message,
+    direction === 'inbound'
+      ? { kind: 'versioned', actual: 'mms' }
+      : { kind: 'versioned', requested: 'mms', actual: 'mms' },
+  ) as MessageItem;
 }
 
 function recipientStatus(status: BroadcastItem['status']): BroadcastRecipient {

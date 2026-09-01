@@ -68,6 +68,21 @@ const allUnits = PROFILE['units'] ?? [];
 const allPlacements = PROFILE['placements'] ?? [];
 const allTours = PROFILE['tours'] ?? [];
 const allReminders = PROFILE['tourReminders'] ?? [];
+const allMessages = PROFILE['messages'] ?? [];
+
+describe('full seed transport declarations', () => {
+  it('the matrix layer does not invent carrier rows', () => {
+    expect(matrixItems()['messages'] ?? []).toHaveLength(0);
+  });
+
+  it('keeps only the named legacy fixture schema-absent', () => {
+    const carrier = allMessages.filter((message) => message['type'] === 'sms' || message['type'] === 'mms');
+    const legacy = carrier.filter((message) => message['transport_schema_version'] === undefined);
+    expect(legacy).toHaveLength(1);
+    expect(String(legacy[0]?.['tsMsgId'])).toContain('msg-transport-legacy');
+    expect(carrier.filter((message) => message['transport_schema_version'] === 1)).toHaveLength(carrier.length - 1);
+  });
+});
 const allUsers = PROFILE['users'] ?? [];
 const allBroadcasts = PROFILE['broadcasts'] ?? [];
 const allSettings = PROFILE['settings'] ?? [];

@@ -78,6 +78,8 @@ import {
   type GroupSendStalenessService,
 } from '../services/groupSendStaleness.js';
 import { joinViSentences, type ChannelRoles } from '../services/voiceTranscripts.js';
+import { MESSAGE_TRANSPORTS, type MessageTransport } from '../lib/messageTransport.js';
+import { withSeedTransport, type SeedCarrierTransport } from '../lib/seed/messageTransport.js';
 
 /** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
  *  and ENQUEUES the real relay.intro job per well-formed one — so it needs only
@@ -831,6 +833,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       body?: unknown;
       createdAt?: unknown;
       direction?: unknown;
+      transport?: unknown;
     };
     const conversationId = typeof reqBody.conversationId === 'string' ? reqBody.conversationId : '';
     const messageBody = typeof reqBody.body === 'string' ? reqBody.body : '';
@@ -846,7 +849,43 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     // tsMsgId keeps the repo's `<ts>#<msgId>` sort-key shape, so the planted row
     // sorts by its aged timestamp in listByConversation too - not just in the
     // created_at filter.
-    const item: MessageItem = {
+    let declaration: SeedCarrierTransport;
+    const rawTransport = reqBody.transport;
+    if (rawTransport === undefined) {
+      declaration = { kind: 'versioned', actual: 'sms' };
+    } else if (typeof rawTransport !== 'object' || rawTransport === null) {
+      res.status(400).json({ error: 'transport must be an object' });
+      return;
+    } else {
+      const transport = rawTransport as { mode?: unknown; requested?: unknown; actual?: unknown };
+      if (transport.mode === 'legacy') {
+        if (transport.requested !== undefined || transport.actual !== undefined) {
+          res.status(400).json({ error: 'legacy transport cannot carry requested or actual facts' });
+          return;
+        }
+        declaration = { kind: 'legacy' };
+      } else if (transport.mode === 'versioned') {
+        const valid = (value: unknown): value is MessageTransport =>
+          value === undefined || MESSAGE_TRANSPORTS.includes(value as MessageTransport);
+        if (!valid(transport.requested) || !valid(transport.actual)) {
+          res.status(400).json({ error: 'invalid requested or actual transport' });
+          return;
+        }
+        declaration = {
+          kind: 'versioned',
+          ...(transport.requested !== undefined && { requested: transport.requested }),
+          ...(transport.actual !== undefined && { actual: transport.actual }),
+        };
+      } else {
+        res.status(400).json({ error: 'transport.mode must be legacy or versioned' });
+        return;
+      }
+    }
+    if (direction === 'inbound' && declaration.kind === 'versioned' && declaration.requested !== undefined) {
+      res.status(400).json({ error: 'inbound fixtures cannot request a transport' });
+      return;
+    }
+    const item: MessageItem = withSeedTransport({
       conversationId,
       tsMsgId: `${createdAt}#${providerSid}`,
       type: 'sms',
@@ -857,7 +896,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       provider_ts: createdAt,
       delivery_status: 'delivered',
       created_at: createdAt,
-    };
+    }, declaration) as MessageItem;
     await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
     log.info(
       { conversationId, tsMsgId: item.tsMsgId, direction, createdAt },

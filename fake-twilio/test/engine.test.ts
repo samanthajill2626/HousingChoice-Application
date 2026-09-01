@@ -17,7 +17,7 @@ describe('FakeTwilioEngine', () => {
   it('sendAsParty records an inbound message and dispatches a signed /sms webhook', async () => {
     const { engine, posted } = makeEngine();
     const sid = await engine.sendAsParty({ from: '+15550100001', body: 'I want a 2BR' });
-    expect(sid).toMatch(/^SM/);
+    expect(sid).toMatch(/^SM[0-9a-f]{32}$/);
     expect(posted[0]?.path).toBe('/webhooks/twilio/sms');
     expect(posted[0]?.params).toMatchObject({ From: '+15550100001', To: '+15550009999', Body: 'I want a 2BR' });
     const thread = engine.listThreads().find((t) => t.partyNumber === '+15550100001');
@@ -35,6 +35,37 @@ describe('FakeTwilioEngine', () => {
     expect(statuses).toEqual(['sent', 'undelivered']);
     const last = posted.filter((p) => p.path === '/webhooks/twilio/status').at(-1);
     expect(last?.params).toMatchObject({ MessageSid: sid, ErrorCode: '30005' });
+  });
+
+  it('propagates stored endpoints and explicit transport evidence through scheduled callbacks', async () => {
+    const { engine, clock, posted } = makeEngine();
+    engine.setDeliveryOutcome({
+      partyNumber: '+15550100001',
+      profile: {
+        kind: 'normal',
+        transportEvidence: {
+          from: 'rcs:agent',
+          channelPrefix: 'rcs',
+          channelMetadata: { type: 'rcs' },
+        },
+      },
+    });
+    const sid = engine.recordOutboundFromApp({
+      to: '+15550100001',
+      from: '+15550009999',
+      body: 'hi',
+    });
+    clock.flush();
+    await Promise.resolve();
+    const callbacks = posted.filter((entry) => entry.path === '/webhooks/twilio/status');
+    expect(callbacks).not.toHaveLength(0);
+    expect(callbacks.every((entry) => entry.params['MessageSid'] === sid)).toBe(true);
+    expect(callbacks.at(-1)?.params).toMatchObject({
+      From: 'rcs:agent',
+      To: '+15550100001',
+      ChannelPrefix: 'rcs',
+      ChannelMetadata: JSON.stringify({ type: 'rcs' }),
+    });
   });
 
   it('reset clears threads and delivery overrides', async () => {
@@ -94,7 +125,7 @@ describe('FakeTwilioEngine', () => {
     // a restart lands in a different range than any prior run's low SIDs.
     const { engine } = makeEngine();
     const sid = await engine.sendAsParty({ from: '+15550100001', body: 'x' });
-    const n = Number(sid.replace(/^SMfake/, ''));
+    const n = Number.parseInt(sid.slice(2), 16);
     expect(n).toBeGreaterThanOrEqual(10_000_000);
   });
 
@@ -103,6 +134,6 @@ describe('FakeTwilioEngine', () => {
     const dispatcher = { post: async () => 200 };
     const engine = new FakeTwilioEngine({ clock, dispatcher, hub: new EventHub(), sidSeqStart: 42 });
     const sid = await engine.sendAsParty({ from: '+15550100001', body: 'x' });
-    expect(sid).toBe('SMfake00000043');
+    expect(sid).toBe(`SM${'2b'.padStart(32, '0')}`);
   });
 });

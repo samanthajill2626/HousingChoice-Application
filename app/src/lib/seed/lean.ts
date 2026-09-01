@@ -12,6 +12,7 @@
 
 import { conversationIdForGroup } from '../import/ids.js';
 import type { SeedConversationRow } from './types.js';
+import { withSeedTransport } from './messageTransport.js';
 
 // Stable timestamps so re-runs write byte-identical items.
 const T0 = '2026-06-01T14:00:00.000Z';
@@ -278,7 +279,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
     },
   ],
   messages: [
-    {
+    withSeedTransport({
       conversationId: IDS.conversation,
       tsMsgId: `${T0}#msg-0001`, // SK value shape: <ISO ts>#<msgId> (doc: ts#msgId)
       type: 'sms',
@@ -287,8 +288,8 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       body: 'Hi Tasha! A 2BR near MARTA just opened up — want to tour it this week?',
       ts: T0,
       created_at: T0, // production stamps every appended message; absent, the extraction window silently DROPS the row (docs/issues/seed-messages-missing-created-at.md)
-    },
-    {
+    }, { kind: 'versioned', requested: 'sms', actual: 'sms' }),
+    withSeedTransport({
       conversationId: IDS.conversation,
       tsMsgId: `${T1}#msg-0002`,
       type: 'sms',
@@ -297,8 +298,8 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       body: 'Yes! Could we do Saturday morning?',
       ts: T1,
       created_at: T1,
-    },
-    {
+    }, { kind: 'versioned', actual: 'sms' }),
+    withSeedTransport({
       conversationId: IDS.conversation,
       tsMsgId: `${T2}#msg-0003`,
       type: 'sms',
@@ -307,11 +308,11 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       body: 'Booked: Saturday 6/13 at 10am. Address: 1450 Joseph E. Boone Blvd NW.',
       ts: T2,
       created_at: T2,
-    },
+    }, { kind: 'versioned', requested: 'sms', actual: 'sms' }),
     // The carrier group's transcript. Inbound rows carry `relay_sender_key` -
     // the SHARED sender-attribution field - keyed PHONE-scoped (`phone#<E164>`)
     // for a group text, never contactId-scoped the way a relay group keys it.
-    {
+    withSeedTransport({
       conversationId: GROUP_TEXT_ID,
       tsMsgId: `${TG0}#msg-group-0001`,
       type: 'sms',
@@ -322,8 +323,8 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       relay_sender_key: `phone#${GROUP_TEXT_MEMBERS[0]}`,
       ts: TG0,
       created_at: TG0,
-    },
-    {
+    }, { kind: 'versioned', actual: 'mms' }),
+    withSeedTransport({
       conversationId: GROUP_TEXT_ID,
       tsMsgId: `${TG1}#msg-group-0002`,
       type: 'sms',
@@ -333,8 +334,8 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       delivery_status: 'delivered',
       ts: TG1,
       created_at: TG1,
-    },
-    {
+    }, { kind: 'versioned', requested: 'mms', actual: 'mms' }),
+    withSeedTransport({
       conversationId: GROUP_TEXT_ID,
       tsMsgId: `${TG2}#msg-group-0003`,
       type: 'sms',
@@ -345,7 +346,47 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       relay_sender_key: `phone#${GROUP_TEXT_MEMBERS[1]}`,
       ts: TG2,
       created_at: TG2,
-    },
+    }, { kind: 'versioned', actual: 'mms' }),
+    withSeedTransport({
+      conversationId: IDS.conversation,
+      tsMsgId: '2026-06-01T12:50:00.000Z#msg-transport-pending',
+      type: 'sms', direction: 'outbound', author: 'teammate', body: 'Pending rich-channel fixture.',
+      ts: '2026-06-01T12:50:00.000Z', created_at: '2026-06-01T12:50:00.000Z',
+    }, { kind: 'versioned', requested: 'rcs' }),
+    withSeedTransport({
+      conversationId: IDS.conversation,
+      tsMsgId: '2026-06-01T12:51:00.000Z#msg-transport-fallback',
+      type: 'sms', direction: 'outbound', author: 'teammate', body: 'Fallback fixture.',
+      ts: '2026-06-01T12:51:00.000Z', created_at: '2026-06-01T12:51:00.000Z',
+    }, { kind: 'versioned', requested: 'rcs', actual: 'sms' }),
+    withSeedTransport({
+      conversationId: IDS.conversation,
+      tsMsgId: '2026-06-01T12:52:00.000Z#msg-transport-mixed',
+      type: 'sms', direction: 'outbound', author: 'teammate', body: 'Mixed fixture.',
+      ts: '2026-06-01T12:52:00.000Z', created_at: '2026-06-01T12:52:00.000Z',
+      delivery_recipients: {
+        'seed-mixed-rcs': { status: 'delivered' },
+        'seed-mixed-sms': { status: 'delivered' },
+      },
+    }, {
+      kind: 'versioned', requested: 'rcs',
+      recipients: {
+        'seed-mixed-rcs': { requestedTransport: 'rcs', actualTransport: 'rcs', transportAggregationState: 'attempted' },
+        'seed-mixed-sms': { requestedTransport: 'rcs', actualTransport: 'sms', transportAggregationState: 'attempted' },
+      },
+    }),
+    withSeedTransport({
+      conversationId: IDS.conversation,
+      tsMsgId: '2026-06-01T12:53:00.000Z#msg-transport-unresolved',
+      type: 'sms', direction: 'inbound', author: 'tenant', body: 'Unresolved inbound fixture.',
+      ts: '2026-06-01T12:53:00.000Z', created_at: '2026-06-01T12:53:00.000Z',
+    }, { kind: 'versioned' }),
+    withSeedTransport({
+      conversationId: IDS.conversation,
+      tsMsgId: '2026-06-01T12:54:00.000Z#msg-transport-legacy',
+      type: 'sms', direction: 'outbound', author: 'teammate', body: 'Legacy fixture.',
+      ts: '2026-06-01T12:54:00.000Z', created_at: '2026-06-01T12:54:00.000Z',
+    }, { kind: 'legacy' }),
   ],
   matches: [
     {

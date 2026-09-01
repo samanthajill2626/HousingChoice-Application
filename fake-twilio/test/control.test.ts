@@ -16,7 +16,7 @@ function makeApp() {
     dispatcher: { post: async (path, params) => { posted.push({ path, params }); return 200; } },
     hub: new EventHub(),
   });
-  return { app: buildFakeTwilioApp({ config, engine }), posted };
+  return { app: buildFakeTwilioApp({ config, engine }), engine, posted };
 }
 
 describe('control API', () => {
@@ -47,6 +47,39 @@ describe('control API', () => {
     const { app } = makeApp();
     const res = await request(app).post('/control/delivery-outcome').send({ partyNumber: '+15550100001', profile: { kind: 'fail', errorCode: '30005' } });
     expect(res.status).toBe(200);
+  });
+
+  it('POST /control/delivery-outcome preserves explicit transport evidence', async () => {
+    const { app, engine } = makeApp();
+    const res = await request(app).post('/control/delivery-outcome').send({
+      partyNumber: '+15550100001',
+      profile: {
+        kind: 'normal',
+        transportEvidence: {
+          from: 'rcs:agent',
+          to: '+15550100001',
+          channelPrefix: 'rcs',
+          channelMetadata: { type: 'rcs' },
+        },
+      },
+    });
+    expect(res.status).toBe(200);
+    const profile = engine.takeDeliveryProfile('+15550100001');
+    expect(profile.transportEvidence).toEqual({
+      from: 'rcs:agent',
+      to: '+15550100001',
+      channelPrefix: 'rcs',
+      channelMetadata: { type: 'rcs' },
+    });
+  });
+
+  it('rejects fabricated SMS or MMS ChannelPrefix evidence', async () => {
+    const { app } = makeApp();
+    const response = await request(app).post('/control/delivery-outcome').send({
+      partyNumber: '+15550100001',
+      profile: { kind: 'normal', transportEvidence: { channelPrefix: 'sms' } },
+    });
+    expect(response.status).toBe(400);
   });
 
   it('POST /control/reset clears threads', async () => {

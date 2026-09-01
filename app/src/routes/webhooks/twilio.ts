@@ -16,7 +16,16 @@ import {
   mapTwilioStatus,
   type MessagingAdapter,
 } from '../../adapters/messaging.js';
+import {
+  normalizeTwilioTransportEvidence,
+  type NormalizedTransportEvidence,
+  type TwilioTransportEvidenceInput,
+} from '../../adapters/twilioMessageTransport.js';
 import { mergeContext } from '../../lib/context.js';
+import {
+  TRANSPORT_SCHEMA_VERSION,
+  type MessageTransport,
+} from '../../lib/messageTransport.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
 import {
   appEvents,
@@ -336,6 +345,26 @@ function pushMessageBody(body: string | undefined, mediaCount: number, sender?: 
 export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const log = deps.logger ?? defaultLogger;
+  const normalizeTransportEvidence = (
+    input: TwilioTransportEvidenceInput,
+  ): NormalizedTransportEvidence => {
+    const evidence = normalizeTwilioTransportEvidence(input);
+    if (evidence.kind === 'conflict') {
+      log.warn(
+        {
+          event: 'message_transport_evidence_conflict',
+          providerSid: input.messageSid,
+          ...(input.requestedTransport !== undefined && {
+            requestedTransport: input.requestedTransport,
+          }),
+          evidenceSource: evidence.source,
+          ...evidence.safeFacts,
+        },
+        'twilio webhook carried conflicting transport evidence',
+      );
+    }
+    return evidence;
+  };
   const adapter = deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger });
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
@@ -547,9 +576,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       To: string;
       Body: string | undefined;
       params: WebhookParams;
+      actualTransport: MessageTransport | undefined;
     },
   ): Promise<void> {
-    const { MessageSid, From, Body } = msg;
+    const { MessageSid, From, Body, actualTransport } = msg;
     mergeContext({ conversationId: relay.conversationId });
 
     // Inbound MMS into a relay thread (tenant<->landlord photos/docs). Capture
@@ -594,6 +624,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       direction: 'inbound',
       author,
       deliveryStatus: 'delivered',
+      transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+      ...(actualTransport !== undefined && { actualTransport }),
       relaySenderKey: senderKey,
       deliveryRecipients: {},
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
@@ -926,9 +958,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       From: string;
       Body: string | undefined;
       params: WebhookParams;
+      actualTransport: MessageTransport | undefined;
     },
   ): Promise<void> {
-    const { MessageSid, From, Body } = msg;
+    const { MessageSid, From, Body, actualTransport } = msg;
     const mediaUrls = parseInboundMediaUrls(msg.params);
 
     // INVARIANT 13.1, THE FIFTH FILING PATH. This intercept runs at step (1.5),
@@ -972,6 +1005,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           : 'unknown',
       // Inbound messages are received by definition.
       deliveryStatus: 'delivered',
+      transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+      ...(actualTransport !== undefined && { actualTransport }),
       // Provenance: the pool number this reached only matches From on the CLOSED
       // group <group.conversationId>. The dashboard badges the 1:1 bubble off it.
       viaClosedGroup: group.conversationId,
@@ -1702,6 +1737,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       direction: 'inbound',
       author,
       deliveryStatus: 'delivered',
+      transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+      actualTransport: 'mms',
       relaySenderKey: senderKey,
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
@@ -1906,6 +1943,22 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       return;
     }
 
+    const inboundEvidence = normalizeTransportEvidence({
+      direction: 'inbound',
+      messageSid: MessageSid,
+      from: From,
+      ...(To !== undefined && { to: To }),
+      ...(params['ChannelPrefix'] !== undefined && {
+        channelPrefix: params['ChannelPrefix'],
+      }),
+      ...(params['ChannelMetadata'] !== undefined && {
+        channelMetadata: params['ChannelMetadata'],
+      }),
+      authenticatedProviderTraffic: true,
+    });
+    const inboundActualTransport =
+      inboundEvidence.kind === 'observed' ? inboundEvidence.transport : undefined;
+
     // (1) Echo/author check FIRST (doc §7.1 defense 1): From matching one of
     // OUR numbers means this is our own outbound projected back — acknowledge
     // and STOP, no side-effect pipeline. From-match is the deterministic
@@ -1959,7 +2012,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         }
         // Empty ack, keyword or not: the open path processes STOP/HELP/opt-in
         // and Twilio's Advanced Opt-Out sends the confirmation.
-        await handleRelayInbound(resolution.group, { MessageSid, From, To, Body, params });
+        await handleRelayInbound(resolution.group, {
+          MessageSid,
+          From,
+          To,
+          Body,
+          params,
+          actualTransport: inboundActualTransport,
+        });
         res.type('text/xml').send(EMPTY_TWIML);
         return;
       }
@@ -1973,6 +2033,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           From,
           Body,
           params,
+          actualTransport: inboundActualTransport,
         });
         res.type('text/xml').send(EMPTY_TWIML);
         return;
@@ -1982,7 +2043,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         //     persist on the newest open group for the record, no fan-out.
         //     Same contract as the open-roster match above (an unknown-sender
         //     STOP is still recorded; Twilio still confirms it).
-        await handleRelayInbound(resolution.group, { MessageSid, From, To, Body, params });
+        await handleRelayInbound(resolution.group, {
+          MessageSid,
+          From,
+          To,
+          Body,
+          params,
+          actualTransport: inboundActualTransport,
+        });
         res.type('text/xml').send(EMPTY_TWIML);
         return;
       }
@@ -2121,6 +2189,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Inbound messages are received by definition; the outbound delivery
       // machine never transitions them.
       deliveryStatus: 'delivered',
+      transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+      ...(inboundActualTransport !== undefined && {
+        actualTransport: inboundActualTransport,
+      }),
       // Fail-open group filing (spec 5.4): this message MAY be carrier-group
       // content, so AI fact extraction must not attribute it to this contact.
       ...(groupAmbiguousOrigin && { groupAmbiguousOrigin: true }),
@@ -2357,6 +2429,23 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     }): Promise<void> => {
       mergeContext({ conversationId: ptr.conversationId });
       const mapped = mapTwilioStatus(MessageStatus);
+      const source = await messages.getByTsMsgId(ptr.conversationId, ptr.tsMsgId);
+      const requestedTransport =
+        source?.delivery_recipients?.[ptr.memberKey]?.requestedTransport;
+      const transportEvidence = normalizeTransportEvidence({
+        direction: 'outbound',
+        ...(requestedTransport !== undefined && { requestedTransport }),
+        messageSid: MessageSid,
+        ...(params['From'] !== undefined && { from: params['From'] }),
+        ...(params['To'] !== undefined && { to: params['To'] }),
+        ...(params['ChannelPrefix'] !== undefined && {
+          channelPrefix: params['ChannelPrefix'],
+        }),
+        ...(params['ChannelMetadata'] !== undefined && {
+          channelMetadata: params['ChannelMetadata'],
+        }),
+        authenticatedProviderTraffic: true,
+      });
       const transitioned = await messages.updateRecipientDeliveryStatus(
         ptr.conversationId,
         ptr.tsMsgId,
@@ -2364,8 +2453,25 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         mapped,
         ErrorCode,
       );
+      const transportOutcome =
+        transportEvidence.kind === 'observed'
+          ? await messages.setRecipientActualTransport(
+              ptr.conversationId,
+              ptr.tsMsgId,
+              ptr.memberKey,
+              transportEvidence.transport,
+            )
+          : undefined;
+      const transportUpdated = transportOutcome === 'updated';
       log.info(
-        { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned, relay: true },
+        {
+          providerSid: MessageSid,
+          providerStatus: MessageStatus,
+          errorCode: ErrorCode,
+          transitioned,
+          transportOutcome,
+          relay: true,
+        },
         'twilio relay-recipient delivery status callback processed',
       );
       // Delivery-failure marker (doc §9): a relay fan-out leg that resolved
@@ -2386,7 +2492,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         if (isTerminalDeliveryFailure(ErrorCode)) log.error(failure, failureMsg);
         else log.warn(failure, failureMsg);
       }
-      if (transitioned) {
+      if (transitioned || transportUpdated) {
         // Refresh the UI: a per-recipient delivery move re-renders the relay
         // thread (the source message's delivery_recipients changed).
         events.emit('message.persisted', {
@@ -2395,6 +2501,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           direction: 'inbound',
           deliveryStatus: mapped,
         });
+      }
+      if (transitioned) {
         // (M1.10c) A failed relay leg is a failed send on the placement
         // (the relay thread carries conversation.placementId) → escalate.
         if (mapped === 'undelivered' || mapped === 'failed') {
@@ -2468,9 +2576,40 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // are SKIPPED, which also makes redelivered failure callbacks enqueue
     // exactly one retry.
     const mappedStatus = mapTwilioStatus(MessageStatus);
+    const transportEvidence = normalizeTransportEvidence({
+      direction: 'outbound',
+      ...(message.requested_transport !== undefined && {
+        requestedTransport: message.requested_transport,
+      }),
+      messageSid: MessageSid,
+      ...(params['From'] !== undefined && { from: params['From'] }),
+      ...(params['To'] !== undefined && { to: params['To'] }),
+      ...(params['ChannelPrefix'] !== undefined && {
+        channelPrefix: params['ChannelPrefix'],
+      }),
+      ...(params['ChannelMetadata'] !== undefined && {
+        channelMetadata: params['ChannelMetadata'],
+      }),
+      authenticatedProviderTraffic: true,
+    });
     const transitioned = await messages.updateDeliveryStatus(MessageSid, mappedStatus, ErrorCode);
+    const transportOutcome =
+      transportEvidence.kind === 'observed'
+        ? await messages.setMessageActualTransport(
+            message.conversationId,
+            message.tsMsgId,
+            transportEvidence.transport,
+          )
+        : undefined;
+    const transportUpdated = transportOutcome === 'updated';
     log.info(
-      { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned },
+      {
+        providerSid: MessageSid,
+        providerStatus: MessageStatus,
+        errorCode: ErrorCode,
+        transitioned,
+        transportOutcome,
+      },
       'twilio delivery status callback processed',
     );
 
@@ -2493,7 +2632,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       else log.warn(failure, failureMsg);
     }
 
-    if (transitioned) {
+    if (transitioned || transportUpdated) {
       // SSE (M1.2): a REAL transition updates delivery badges live.
       // Regressions/duplicates were no-ops above and emit nothing — so a
       // redelivered callback never re-fires the dashboard.
@@ -2503,7 +2642,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         direction: message.direction,
         deliveryStatus: mappedStatus,
       });
+    }
 
+    if (transitioned) {
       // (M1.8a) Share-broadcast rollup: when THIS message belongs to a
       // broadcast, fold its delivered/failed terminal status into the
       // broadcast's recipient slot (forward-only) + stats, and emit the

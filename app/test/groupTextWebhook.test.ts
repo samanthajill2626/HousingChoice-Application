@@ -401,6 +401,11 @@ describe('group detection: filing (T3.3)', () => {
     // The message is on the GROUP thread and NOWHERE else - never also 1:1.
     expect(world.messages).toHaveLength(1);
     expect(world.messages[0]?.conversationId).toBe(GROUP_ID);
+    expect(world.messages[0]).toMatchObject({
+      transport_schema_version: 1,
+      actual_transport: 'mms',
+    });
+    expect(world.messages[0]?.requested_transport).toBeUndefined();
     expect(world.conversations.size).toBe(1);
   });
 

@@ -2,7 +2,14 @@
 // trip (flip to manual + ERROR log), manual-mode semantics, persist-at-send.
 // All repos/adapters are in-memory fakes: no DynamoDB, no network.
 import { describe, expect, it } from 'vitest';
-import type { MessagingAdapter, SendMessageParams } from '../src/adapters/messaging.js';
+import type {
+  CarrierMessageSender,
+  MessagingAdapter,
+  MessageTransportFacts,
+  PreparedMessageSend,
+  SendMessageParams,
+} from '../src/adapters/messaging.js';
+import type { MessageTransport } from '../src/lib/messageTransport.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createEventBus, type AppEventName } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
@@ -33,6 +40,8 @@ interface Fakes {
   conversation: ConversationItem;
   contact: ContactItem | undefined;
   sent: SendMessageParams[];
+  classified: MessageTransportFacts[];
+  prepared: PreparedMessageSend[];
   appended: NewMessage[];
   touched: { previewText: string | undefined; ts: string }[];
   modeSets: string[];
@@ -49,6 +58,8 @@ function makeFakes(
     contact?: ContactItem | null;
     /** Extra env passed to loadConfig (e.g. SMS_SENDING_ENABLED). */
     env?: Record<string, string>;
+    actualTransport?: MessageTransport | null;
+    sendError?: Error;
   } = {},
 ): Fakes {
   const conversation: ConversationItem = {
@@ -78,6 +89,8 @@ function makeFakes(
     conversation,
     contact,
     sent: [] as SendMessageParams[],
+    classified: [] as MessageTransportFacts[],
+    prepared: [] as PreparedMessageSend[],
     appended: [] as NewMessage[],
     touched: [] as { previewText: string | undefined; ts: string }[],
     modeSets: [] as string[],
@@ -288,7 +301,32 @@ function makeFakes(
     },
     listByEntity: async () => [],
   };
-  const adapter: MessagingAdapter = {
+  const adapter: MessagingAdapter & CarrierMessageSender = {
+    classifyMessageTransport(facts) {
+      fakes.classified.push(facts);
+      return Object.freeze({
+        requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms',
+      });
+    },
+    prepareMessageSend(intent, params) {
+      const prepared = Object.freeze({ requestedTransport: intent.requestedTransport, params });
+      fakes.prepared.push(prepared);
+      return prepared;
+    },
+    async sendPreparedMessage(prepared) {
+      if (overrides.sendError !== undefined) throw overrides.sendError;
+      fakes.sent.push(prepared.params);
+      const actualTransport =
+        overrides.actualTransport === undefined
+          ? prepared.requestedTransport
+          : overrides.actualTransport;
+      return {
+        providerSid: `SMfake-${fakes.sent.length}`,
+        status: 'queued',
+        providerTs: '2026-06-12T10:00:00.000Z',
+        ...(actualTransport !== null && { actualTransport }),
+      };
+    },
     sendMessage: async (params) => {
       fakes.sent.push(params);
       return { providerSid: `SMfake-${fakes.sent.length}`, status: 'queued', providerTs: '2026-06-12T10:00:00.000Z' };
@@ -356,7 +394,12 @@ describe('sendMessage service', () => {
       direction: 'outbound',
       author: 'teammate',
       deliveryStatus: 'queued',
+      transportSchemaVersion: 1,
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
     });
+    expect(f.classified).toEqual([{ hasForwardableMedia: false }]);
+    expect(f.prepared).toHaveLength(1);
     expect(f.touched).toEqual([{ previewText: 'hello there', ts: '2026-06-12T10:00:00.000Z' }]);
     expect(outcome).toEqual({
       conversationId: 'conv-1',
@@ -380,7 +423,55 @@ describe('sendMessage service', () => {
   it('marks sends with media as mms', async () => {
     const f = makeFakes();
     await f.service({ conversationId: 'conv-1', mediaUrls: ['https://m/1'] });
-    expect(f.appended[0]).toMatchObject({ type: 'mms', mediaUrls: ['https://m/1'] });
+    expect(f.appended[0]).toMatchObject({
+      type: 'mms',
+      mediaUrls: ['https://m/1'],
+      transportSchemaVersion: 1,
+      requestedTransport: 'mms',
+      actualTransport: 'mms',
+    });
+    expect(f.classified).toEqual([{ hasForwardableMedia: true }]);
+  });
+
+  it('keeps requested transport when the provider result has no actual evidence', async () => {
+    const f = makeFakes({ actualTransport: null });
+    await f.service({ conversationId: 'conv-1', body: 'pending evidence' });
+
+    expect(f.appended[0]).toMatchObject({
+      transportSchemaVersion: 1,
+      requestedTransport: 'sms',
+    });
+    expect(f.appended[0]).not.toHaveProperty('actualTransport');
+  });
+
+  it('does not append a provisional row when the prepared provider send fails', async () => {
+    const f = makeFakes({ sendError: new Error('provider unavailable') });
+
+    await expect(
+      f.service({ conversationId: 'conv-1', body: 'not accepted' }),
+    ).rejects.toThrow('provider unavailable');
+    expect(f.classified).toEqual([{ hasForwardableMedia: false }]);
+    expect(f.prepared).toHaveLength(1);
+    expect(f.appended).toHaveLength(0);
+  });
+
+  it('classifies broadcast and retry attempts independently without copying prior actual evidence', async () => {
+    const f = makeFakes({ actualTransport: 'sms' });
+    await f.service({
+      conversationId: 'conv-1',
+      body: 'retry body',
+      broadcastId: 'broadcast-1',
+      retryOf: 'prior-message',
+    });
+
+    expect(f.classified).toEqual([{ hasForwardableMedia: false }]);
+    expect(f.appended[0]).toMatchObject({
+      broadcastId: 'broadcast-1',
+      retryOf: 'prior-message',
+      transportSchemaVersion: 1,
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
+    });
   });
 
   it('outbound MMS: persists media_attachments (durable s3Keys) alongside the presigned mediaUrls', async () => {

@@ -28,6 +28,9 @@ import {
 const WARN = 40;
 const ERROR = 50;
 const SMS_PATH = '/webhooks/twilio/sms';
+const VALID_SMS_SID = `SM${'1'.repeat(32)}`;
+const VALID_MMS_SID = `MM${'2'.repeat(32)}`;
+const VALID_RCS_SID = `SM${'3'.repeat(32)}`;
 
 describe('webhook harness classification fence', () => {
   it('preserves sequential kind epochs and blocks an older guarded delete', async () => {
@@ -150,6 +153,82 @@ describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () 
       .atLevel(WARN)
       .find((l) => String(l['msg']).includes('WITHOUT signature validation'));
     expect(warn).toBeDefined();
+  });
+});
+
+describe('POST /webhooks/twilio/sms - normalized inbound transport evidence', () => {
+  it('stores versioned actual SMS/MMS from authenticated SID and endpoint evidence only', async () => {
+    const { app, world } = makeWebhookHarness();
+
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ MessageSid: VALID_SMS_SID, NumMedia: '0' }),
+    );
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ MessageSid: VALID_MMS_SID, NumMedia: '0' }),
+    );
+
+    expect(world.messages.find((message) => message.provider_sid === VALID_SMS_SID)).toMatchObject({
+      transport_schema_version: 1,
+      actual_transport: 'sms',
+    });
+    expect(world.messages.find((message) => message.provider_sid === VALID_MMS_SID)).toMatchObject({
+      transport_schema_version: 1,
+      actual_transport: 'mms',
+    });
+    expect(world.messages.every((message) => message.requested_transport === undefined)).toBe(true);
+  });
+
+  it('stores explicit RCS evidence and leaves missing/conflicting evidence unresolved', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({
+        MessageSid: VALID_RCS_SID,
+        ChannelMetadata: JSON.stringify({ type: 'rcs' }),
+      }),
+    );
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ MessageSid: 'fixture-no-provider-evidence' }),
+    );
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({
+        MessageSid: `MM${'4'.repeat(32)}`,
+        ChannelPrefix: 'whatsapp',
+      }),
+    );
+
+    const rcs = world.messages.find((message) => message.provider_sid === VALID_RCS_SID);
+    const missing = world.messages.find(
+      (message) => message.provider_sid === 'fixture-no-provider-evidence',
+    );
+    const conflict = world.messages.find((message) => message.provider_sid === `MM${'4'.repeat(32)}`);
+    expect(rcs).toMatchObject({ transport_schema_version: 1, actual_transport: 'rcs' });
+    expect(missing).toMatchObject({ transport_schema_version: 1 });
+    expect(missing?.actual_transport).toBeUndefined();
+    expect(conflict).toMatchObject({ transport_schema_version: 1 });
+    expect(conflict?.actual_transport).toBeUndefined();
+
+    const transportWarn = capture
+      .atLevel(WARN)
+      .find((line) => line['event'] === 'message_transport_evidence_conflict');
+    expect(transportWarn).toMatchObject({
+      providerSid: `MM${'4'.repeat(32)}`,
+      evidenceSource: 'unknown-rich-channel-evidence',
+      sidPrefix: 'MM',
+      channelScheme: 'whatsapp',
+    });
+    expect(JSON.stringify(transportWarn)).not.toContain(TENANT_PHONE);
+    expect(JSON.stringify(transportWarn)).not.toContain(OUR_NUMBER);
   });
 });
 

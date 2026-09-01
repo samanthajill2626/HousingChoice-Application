@@ -17,7 +17,11 @@ import { loadConfig, type AppConfig } from '../lib/config.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
-import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import {
+  createMessagingAdapter,
+  type CarrierMessageSender,
+  type MessagingAdapter,
+} from '../adapters/messaging.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createContactsRepo,
@@ -36,6 +40,7 @@ import {
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
 import { isKillSwitchOff, isManualMode, isOptedOut } from './scheduledSendSuppression.js';
+import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 
 // --- Typed errors (route maps these to HTTP statuses) ----------------------
 
@@ -245,7 +250,7 @@ export interface SendMessageOutcome {
 export interface SendMessageServiceDeps {
   config?: AppConfig;
   logger?: Logger;
-  adapter?: MessagingAdapter;
+  adapter?: MessagingAdapter & CarrierMessageSender;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
@@ -376,12 +381,17 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // An unconfigured BUSINESS_PHONE_NUMBER (dev/test only — prod+twilio
     // fail-fasts at boot) degrades to the previous service-picks behavior.
     const sender = from ?? config.businessPhoneNumber;
-    const result = await adapter.sendMessage({
+    const transportIntent = adapter.classifyMessageTransport({
+      hasForwardableMedia:
+        (attachments?.length ?? 0) > 0 || (mediaUrls?.length ?? 0) > 0,
+    });
+    const prepared = adapter.prepareMessageSend(transportIntent, {
       to: participantPhone,
       ...(body !== undefined && { body }),
       ...(mediaUrls !== undefined && { mediaUrls }),
       ...(sender !== undefined && { from: sender }),
     });
+    const result = await adapter.sendPreparedMessage(prepared);
 
     // (4) Persist at send time under the provider SID/timestamp — the
     // webhook echo of this same message dedupes against this item.
@@ -404,6 +414,11 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       // inbound mirror feeds). Absent on text-only / legacy raw-mediaUrls sends.
       ...(attachments !== undefined && attachments.length > 0 && { mediaAttachments: attachments }),
       deliveryStatus: result.status,
+      transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+      requestedTransport: transportIntent.requestedTransport,
+      ...(result.actualTransport !== undefined && {
+        actualTransport: result.actualTransport,
+      }),
       // M1.8a: stamp the broadcast id so the delivery-callback rollup can find
       // this recipient's broadcast slot by the SID alone (additive — absent on
       // 1:1 / relay sends).

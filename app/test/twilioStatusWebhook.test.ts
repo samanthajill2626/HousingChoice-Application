@@ -43,6 +43,7 @@ import {
 const WARN = 40;
 const ERROR = 50;
 const STATUS_PATH = '/webhooks/twilio/status';
+const DIRECT_RCS_SID = `SM${'6'.repeat(32)}`;
 
 /** Seed one outbound message (the thing callbacks are about) into the world. */
 async function seedOutbound(
@@ -100,6 +101,113 @@ describe('POST /webhooks/twilio/status — transitions', () => {
 
     const message = await world.messagesRepo.getByProviderSid('SMout0001');
     expect(message?.delivery_status).toBe('delivered');
+  });
+
+  it('writes actual transport and emits once even when delivery status is unchanged', async () => {
+    const { app, world } = makeWebhookHarness();
+    await seedOutbound(world, DIRECT_RCS_SID, {
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+    });
+
+    const params = statusParams({
+      MessageSid: DIRECT_RCS_SID,
+      MessageStatus: 'queued',
+    });
+    await signedTwilioPost(app, STATUS_PATH, params);
+
+    expect((await world.messagesRepo.getByProviderSid(DIRECT_RCS_SID))?.actual_transport).toBe(
+      'sms',
+    );
+    expect(world.emitted.filter((event) => event.event === 'message.persisted')).toHaveLength(1);
+
+    await signedTwilioPost(app, STATUS_PATH, params);
+    expect(world.emitted.filter((event) => event.event === 'message.persisted')).toHaveLength(1);
+  });
+
+  it('advances delivery status without inventing actual transport when evidence is missing', async () => {
+    const { app, world } = makeWebhookHarness();
+    const sid = `SM${'7'.repeat(32)}`;
+    await seedOutbound(world, sid, {
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+    });
+
+    await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: sid, MessageStatus: 'sent', From: '' }),
+    );
+
+    expect(await world.messagesRepo.getByProviderSid(sid)).toMatchObject({
+      delivery_status: 'sent',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+    });
+    expect((await world.messagesRepo.getByProviderSid(sid))?.actual_transport).toBeUndefined();
+    expect(world.emitted.filter((event) => event.event === 'message.persisted')).toHaveLength(1);
+  });
+
+  it('uses the stored request to classify identical callback evidence and preserves legacy status behavior', async () => {
+    const { app, world } = makeWebhookHarness();
+    const smsRequestSid = `SM${'8'.repeat(32)}`;
+    const missingRequestSid = `SM${'9'.repeat(32)}`;
+    const legacySid = `SM${'a'.repeat(32)}`;
+    await seedOutbound(world, smsRequestSid, {
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+    });
+    await seedOutbound(world, missingRequestSid, { transport_schema_version: 1 });
+    await seedOutbound(world, legacySid);
+
+    for (const sid of [smsRequestSid, missingRequestSid, legacySid]) {
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageSid: sid, MessageStatus: 'sent' }),
+      );
+    }
+
+    expect((await world.messagesRepo.getByProviderSid(smsRequestSid))?.actual_transport).toBe('sms');
+    expect((await world.messagesRepo.getByProviderSid(missingRequestSid))?.actual_transport).toBeUndefined();
+    expect(await world.messagesRepo.getByProviderSid(legacySid)).toMatchObject({
+      delivery_status: 'sent',
+    });
+    expect((await world.messagesRepo.getByProviderSid(legacySid))?.actual_transport).toBeUndefined();
+  });
+
+  it('treats post-fallback RCS as stale and rejects non-RCS conflicts without emitting', async () => {
+    const { app, world } = makeWebhookHarness();
+    const staleSid = `SM${'b'.repeat(32)}`;
+    const conflictSid = `SM${'c'.repeat(32)}`;
+    await seedOutbound(world, staleSid, {
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+    });
+    await seedOutbound(world, conflictSid, {
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+      actual_transport: 'sms',
+    });
+    const before = world.emitted.length;
+
+    for (const sid of [staleSid, conflictSid]) {
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({
+          MessageSid: sid,
+          MessageStatus: 'queued',
+          From: 'rcs:sender-id',
+          ChannelPrefix: 'rcs',
+        }),
+      );
+    }
+
+    expect((await world.messagesRepo.getByProviderSid(staleSid))?.actual_transport).toBe('sms');
+    expect((await world.messagesRepo.getByProviderSid(conflictSid))?.actual_transport).toBe('sms');
+    expect(world.emitted).toHaveLength(before);
   });
 
   it('unknown SID that appears WITHIN the retry window (send/append race) is processed normally', async () => {
@@ -783,6 +891,12 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(retried.retry_of).toBe(buildTsMsgId(seeded.provider_ts, 'SMout0001'));
     expect(retried.retry_attempt).toBe(1);
     expect(retried.direction).toBe('outbound');
+    expect(retried).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+      actual_transport: 'sms',
+    });
+    expect(seeded.actual_transport).toBeUndefined();
   });
 
   it('AUTOMATED RETRY re-presigns media_attachments FRESH (never replays the stored stale URLs)', async () => {

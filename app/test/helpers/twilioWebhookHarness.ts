@@ -15,6 +15,7 @@ import { RangeNotSatisfiableError } from '../../src/adapters/mediaStore.js';
 import type { Semaphore } from '../../src/lib/semaphore.js';
 import {
   MediaFetchHttpError,
+  type CarrierMessageSender,
   type InitiateCallParams,
   type MessagingAdapter,
   type SendMessageParams,
@@ -331,7 +332,7 @@ export interface FakeWorld {
   >;
   /** Set by a test to force the fake inline createViTranscript to throw (fallback path). */
   viCreateError?: Error;
-  adapter: MessagingAdapter;
+  adapter: MessagingAdapter & CarrierMessageSender;
   mediaStore: MediaStore;
   /** In-memory tours (Tours feature), keyed by tourId. */
   toursMap: Map<string, TourItem>;
@@ -3610,13 +3611,31 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
-  const adapter: MessagingAdapter = {
+  const adapter: MessagingAdapter & CarrierMessageSender = {
+    classifyMessageTransport(facts) {
+      return Object.freeze({
+        requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms',
+      });
+    },
+    prepareMessageSend(intent, params) {
+      return Object.freeze({ requestedTransport: intent.requestedTransport, params });
+    },
+    async sendPreparedMessage(prepared): Promise<SendMessageResult> {
+      sent.push(prepared.params);
+      return {
+        providerSid: `SMfake-out-${++sidCounter}`,
+        status: 'queued',
+        providerTs: new Date().toISOString(),
+        actualTransport: prepared.requestedTransport,
+      };
+    },
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
       return {
         providerSid: `SMfake-out-${++sidCounter}`,
         status: 'queued',
         providerTs: new Date().toISOString(),
+        actualTransport: (params.mediaUrls?.length ?? 0) > 0 ? 'mms' : 'sms',
       };
     },
     async getMediaStream(mediaUrl) {

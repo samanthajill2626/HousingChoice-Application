@@ -730,6 +730,57 @@ describe('relay.fanOut (M1.7)', () => {
     expect(stored.fanout_attempt).toBe(1);
   });
 
+  it('the claim reports `missing` (source deleted between the handler read and the claim) -> warn, NOTHING sent, NO slot written, NO close', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedSource(world, 'hi', 'c-alice');
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    // The RACE, and an override is the only way to model it: the handler re-reads
+    // the source message near the top and claims further down, so `missing` means
+    // a delete landed in that window. The fake's own claim scans the live message
+    // array, which still holds the seeded row, so it could never answer `missing`.
+    world.messagesRepo.claimFanoutPass = async () => ({ outcome: 'missing' });
+
+    // A local queue carrying the CAPTURING logger: runDeferred swallows a handler
+    // throw and logs it at ERROR, so with this wiring the empty error-level
+    // assertion below is a real "returned cleanly" check.
+    const queue = new InProcessOutboundQueueAdapter({
+      dispatch: dispatchJob,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    configureOutboundQueue(queue);
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await queue.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(send).not.toHaveBeenCalled();
+    // NOTHING written: no delivery slot, no rung consumed, no relaysid pointer.
+    // `missing` has nothing to close (D8's close would write slots onto a row
+    // that no longer exists), so the handler logs and returns - no close line,
+    // and no ERROR of any kind.
+    expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
+    expect(stored.fanout_attempt).toBeUndefined();
+    expect(closeLines(capture)).toHaveLength(0);
+    expect(capture.atLevel(50)).toHaveLength(0);
+    expect(queue.delayed).toHaveLength(0);
+    // The ONE operator line the arm does write, at WARN.
+    expect(
+      capture
+        .atLevel(40)
+        .filter((l) => String(l['msg']).includes('vanished before the pass claim')),
+    ).toHaveLength(1);
+  });
+
   it('a pass whose recipients are ALL already terminal claims no rung and enqueues nothing', async () => {
     seedRelay(world, {
       participants: [

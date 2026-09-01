@@ -821,6 +821,8 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     // narrowing either.
     const repo = messages;
     const snapshot = sourceMessage;
+    // The hoisted close function below reads this, so it is declared above it (TDZ).
+    let claim: FanoutClaimResult | undefined;
 
     /**
      * M5 D8: terminal-close every still-open member key in `memberKeys` with
@@ -846,11 +848,13 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         if (isTerminal(snapshot.delivery_recipients?.[key]?.status)) continue;
         await markRecipient(repo, payload, key, { status: 'failed', errorCode: code });
       }
-      // D10: the ONE operator line names the number the close was DECIDED on,
-      // which is the DURABLE counter, never the envelope's. `capped` carries the
-      // unchanged stored count (close B: 3 beside a first-pass envelope's 1),
-      // `claimed` the number this pass took. The envelope value stays alongside,
-      // renamed, for correlation only - the two must not be confusable.
+      // D10: the ONE operator line carries the DURABLE pass number, never the
+      // envelope's. On the LADDER closes (A and B) that is the number the close
+      // was decided on - `capped` the unchanged stored count (close B: 3 beside
+      // a first-pass envelope's 1), `claimed` the number this pass took; on
+      // close C the queue refusal decided it and the claimed pass is context
+      // only. The envelope value stays alongside, renamed, for correlation only
+      // - the two must not be confusable.
       const fanoutAttempt =
         claim !== undefined && claim.outcome !== 'missing' ? claim.attempt : undefined;
       log.error(
@@ -878,8 +882,6 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     const pending = recipients.filter(
       (m) => !isTerminal(snapshot.delivery_recipients?.[relayMemberKey(m)]?.status),
     );
-    // Handler scope, not the branch: the continuation block reads it.
-    let claim: FanoutClaimResult | undefined;
     if (pending.length > 0) {
       claim = await repo.claimFanoutPass(
         payload.relayConversationId,

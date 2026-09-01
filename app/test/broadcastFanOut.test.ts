@@ -538,6 +538,52 @@ describe('broadcast.send (M1.8a)', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('the claim reports `missing` (item deleted between the handler read and the claim) -> warn, NOTHING sent, NOTHING written, NO close', async () => {
+    const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [b]);
+    const { capture, logger: capLogger } = capturingLogger();
+    wireHandler(world, capLogger);
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    // The RACE, and an override is the only way to model it: the handler reads
+    // the broadcast at the top and claims further down, so `missing` means a
+    // delete landed in that window. The fake's own claim reads the live map,
+    // which still holds the seeded row, so it could never answer `missing` here.
+    world.broadcastsRepo.claimFanoutPass = async () => ({ outcome: 'missing' });
+
+    // A local queue carrying the CAPTURING logger: runDeferred swallows a
+    // handler throw and logs it at ERROR, so with this wiring the empty
+    // error-level assertion below is a real "returned cleanly" check.
+    const queue = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob, logger: capLogger });
+    configureOutboundQueue(queue);
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await queue.settle();
+
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(send).not.toHaveBeenCalled();
+    // NOTHING written: the slot is untouched, the counters are untouched, and
+    // the row is NOT finalized. `missing` has nothing to close (D8's close would
+    // write recipient rows onto an item that no longer exists), so the handler
+    // logs and returns - no close line, and no ERROR of any kind.
+    expect(bcast.recipients['c-b']?.status).toBe('queued');
+    expect(bcast.recipients['c-b']?.errorCode).toBeUndefined();
+    expect(bcast.stats.queued).toBe(1);
+    expect(bcast.stats.failed).toBe(0);
+    expect(bcast.stats.sent).toBe(0);
+    expect(bcast.status).toBe('sending');
+    expect(closeLines(capture)).toHaveLength(0);
+    expect(capture.atLevel(50)).toHaveLength(0);
+    expect(queue.delayed).toHaveLength(0);
+    // The ONE operator line the arm does write, at WARN.
+    expect(
+      capture
+        .atLevel(40)
+        .filter((l) => String(l['msg']).includes('vanished before the pass claim')),
+    ).toHaveLength(1);
+  });
+
   it('30007 carrier filtering → recipient failed, NEVER retried', async () => {
     const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
     seedUnit(world);

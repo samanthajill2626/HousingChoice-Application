@@ -861,9 +861,11 @@ function MessageBubble({
   // retries - the exact inversion D20 forbids.
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code, { media: isMms }) : undefined;
   // The product flag for every LEG-scoped reason in this bubble: the rollup, the
-  // accessible-name recital and the per-recipient row. ONE derivation, so the
-  // three cannot disagree (D21) - the same argument the single `isMms` above
-  // already makes for media.
+  // accessible-name recital and the per-recipient row. ONE PROP, derived twice
+  // from the same value - this flag serves the rollup and the row, and the
+  // recital recomputes `rosterKind === 'relay'` inside recipientSummaryName -
+  // so the three still cannot disagree (D21), the same argument the single
+  // `isMms` above already makes for media.
   const isRelayLeg = rosterKind === 'relay';
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because

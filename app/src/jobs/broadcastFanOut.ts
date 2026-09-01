@@ -247,6 +247,8 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     // declaration does not inherit the `if (!broadcast) return` narrowing.
     const repo = broadcasts;
     const snapshot = broadcast;
+    // The hoisted close function below reads this, so it is declared above it (TDZ).
+    let claim: FanoutClaimResult | undefined;
 
     /**
      * M5 D8: terminal-close every still-open recipient in `recipientKeys` with
@@ -276,11 +278,13 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           await repo.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
         );
       }
-      // D10: the ONE operator line names the number the close was DECIDED on,
-      // which is the DURABLE counter, never the envelope's. `capped` carries the
-      // unchanged stored count (close B: 3 beside a first-pass envelope's 1),
-      // `claimed` the number this pass took. The envelope value stays alongside,
-      // renamed, for correlation only - the two must not be confusable.
+      // D10: the ONE operator line carries the DURABLE pass number, never the
+      // envelope's. On the LADDER closes (A and B) that is the number the close
+      // was decided on - `capped` the unchanged stored count (close B: 3 beside
+      // a first-pass envelope's 1), `claimed` the number this pass took; on
+      // close C the queue refusal decided it and the claimed pass is context
+      // only. The envelope value stays alongside, renamed, for correlation only
+      // - the two must not be confusable.
       const fanoutAttempt =
         claim !== undefined && claim.outcome !== 'missing' ? claim.attempt : undefined;
       log.error(
@@ -320,8 +324,6 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     // and only when this pass will actually attempt a send: a job that sends
     // nothing must not spend a rung, and a redelivery must not either.
     const pending = keys.filter((k) => !isTerminal(broadcast.recipients?.[k]?.status));
-    // Handler scope, not the branch: the continuation block reads it.
-    let claim: FanoutClaimResult | undefined;
     if (pending.length > 0) {
       claim = await repo.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
       if (claim.outcome === 'missing') {

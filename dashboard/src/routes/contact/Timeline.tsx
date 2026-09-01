@@ -970,6 +970,21 @@ function MessageBubble({
           msg.transport_schema_version === 1,
         )
       : undefined;
+  // Inbound Relay sources have no outbound delivery chip to own the collapsed
+  // recital. Keep their source transport actual-only and expose the fan-out
+  // facts through a separate, visually hidden semantic group.
+  const inboundRecipientName =
+    showRecipients && !outbound && rosterKind === 'relay'
+      ? recipientSummaryName(
+          RECIPIENT_LIST_LABEL,
+          recipientRows,
+          rosterKind,
+          messageAtMs,
+          bubbleNowMs,
+          isMms,
+          msg.transport_schema_version === 1,
+        )
+      : undefined;
 
   // The transport - number - time line is hidden by default; a click/tap on the
   // bubble reveals it (the grouped time labels give the at-a-glance time). Don't
@@ -1033,6 +1048,9 @@ function MessageBubble({
           </span>
         ) : null}
       </div>
+      {inboundRecipientName !== undefined ? (
+        <div className={styles.srOnly} role="group" aria-label={inboundRecipientName} />
+      ) : null}
       {/* Who the send actually reached. CONDITIONALLY RENDERED on the reveal -
        *  NOT the meta line's display:none - so presence/absence is a real unit
        *  assertion in a css:false environment and no hidden row TEXT sits in the

@@ -1543,6 +1543,77 @@ describe('Timeline relay-group annotations', () => {
     ).toBeInTheDocument();
   });
 
+  it('exposes inbound relay leg facts before interaction without changing the source transport', () => {
+    const inbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'relay-inbound-collapsed-accessibility',
+      tsMsgId: 'relay-inbound-collapsed-accessibility',
+      body: 'inbound relay accessibility',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          deliveredAt: '2026-06-08T09:25:00',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'sms',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({ items: [inbound], relayRoster: ROSTER });
+
+    expect(screen.getByText(/^SMS - \(404\) 010-0007 - 9:14a$/)).toBeInTheDocument();
+    expect(screen.queryByText(/^RCS -> SMS -/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Delivery by recipient' })).not.toBeInTheDocument();
+
+    const disclosure = screen.getByRole('group', { name: /Delivery by recipient/ });
+    const expectedName =
+      'Delivery by recipient. Keisha Kane: Delivered, RCS -> SMS, 9:25a. ' +
+      'Lars Landlord: Delivered, SMS.';
+    expect(disclosure).toHaveAccessibleName(expectedName);
+    const accessibleName = disclosure.getAttribute('aria-label');
+    expect(accessibleName?.split('9:25a')).toHaveLength(2);
+    expect(accessibleName).not.toContain('9:14a');
+  });
+
+  it('does not add the inbound Relay accessibility owner to a native group message', () => {
+    const nativeGroupInbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'native-group-inbound-accessibility',
+      tsMsgId: 'native-group-inbound-accessibility',
+      transport_schema_version: 1,
+      actual_transport: 'mms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'mms',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({
+      items: [nativeGroupInbound],
+      relayRoster: ROSTER,
+      rosterKind: 'group_text',
+    });
+
+    expect(screen.queryByRole('group', { name: /Delivery by recipient/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/^MMS -/)).toBeInTheDocument();
+  });
+
   it('attributes an inbound relay bubble to the sending member', () => {
     const inbound: TimelineItem = {
       kind: 'message',

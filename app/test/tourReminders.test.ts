@@ -5455,6 +5455,83 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(newErrors[0]!['tourId']).toBe(tour.tourId);
     });
 
+    // The grace runs from max(dueAt, tour.updatedAt), not from dueAt alone
+    // (review round M2). claimConversion bumps updatedAt when it writes the
+    // sentinel, so a FRESH claim always gets the full window - even on a rung
+    // that has been pending for hours, which is routine (a quiet-hours
+    // deferral, a roster wait, an hour of worker downtime) rather than an
+    // outage. Both cases drive the poll with a stubbed tour read because the
+    // repo's own patch always bumps updatedAt to the wall clock.
+    const claimedTourDeps = (
+      rig: ReturnType<typeof createGroupTestRig>,
+      tour: TourItem,
+      updatedAt: string,
+    ) => {
+      const claimed: TourItem = {
+        ...tour,
+        convertedPlacementId: `pending:${randomUUID()}`,
+        updatedAt,
+      };
+      return {
+        ...rig.deps,
+        toursRepo: {
+          ...tours,
+          // Only OUR tour: the batch is the whole table's due set, so another
+          // suite's leftover row must still read its own tour.
+          get: async (id: string) => (id === tour.tourId ? claimed : tours.get(id)),
+        },
+      };
+    };
+
+    it('DEFERS a rung hours past due when the claim is FRESH (grace from updatedAt)', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'freshclaim', '+15550280011');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-07T02:00:00.000Z',
+      });
+
+      // Five hours overdue, claimed THIS instant.
+      const pollAt = '2026-12-07T07:00:00.000Z';
+      await runDueTourReminders(pollAt, claimedTourDeps(rig, tour, pollAt));
+
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      // NOTHING STAMPED - the conversion may still fail and release the claim,
+      // and skippedAt could not be undone if it did.
+      expect(after?.skippedAt).toBeUndefined();
+      expect(after?.skipReason).toBeUndefined();
+      expect(after?.sentAt).toBeUndefined();
+      expect((await tourReminders.listDue(pollAt)).map((r) => r.reminderId)).toContain(
+        row.reminderId,
+      );
+    });
+
+    it('RETIRES the same rung once the CLAIM itself outlives the window', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'staleclaim', '+15550280012');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-07T03:00:00.000Z',
+      });
+
+      // Same five-hours-overdue rung; the claim is two hours old, so the window
+      // has genuinely elapsed and the sentinel is stuck.
+      const pollAt = '2026-12-07T08:00:00.000Z';
+      const claimedAt = '2026-12-07T06:00:00.000Z';
+      await runDueTourReminders(pollAt, claimedTourDeps(rig, tour, claimedAt));
+
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBe(pollAt);
+      expect(after?.skipReason).toBe('conversion_stalled');
+    });
+
     it('does NOT defer a FINALIZED tour - a real placementId is not a pending claim', async () => {
       // The trap the spec names: finalize REPLACES the sentinel with a real
       // placement id, so a bare "is a string" predicate would defer every

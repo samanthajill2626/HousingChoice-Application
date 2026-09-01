@@ -322,22 +322,42 @@ export const DISCONTINUED_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<Re
  * to sweep it. But a crashed conversion leaves that sentinel with no TTL and no
  * recovery route, so an unbounded deferral is the perpetual-"sending shortly"
  * lie in a new costume. Bounded exactly like the roster and names waits
- * (ROSTER_UNAVAILABLE_GRACE_MS, lib/rosterResolution.ts): measured from the
- * rung's own dueAt, because the rows carry no stamp for when the claim started,
- * and one hour is long enough that a slow write or a redeploy never trips it.
+ * (ROSTER_UNAVAILABLE_GRACE_MS, lib/rosterResolution.ts), and one hour is long
+ * enough that a slow write or a redeploy never trips it.
  */
 export const CONVERSION_CLAIM_GRACE_MS = 60 * 60 * 1000;
 
 /**
- * Has a rung due at `dueAt` waited longer than the grace window for a
- * conversion claim to resolve? Unparseable stamps answer false - "keep waiting"
- * is the safer half of this decision, the same call rosterWaitExpired makes.
+ * Has this rung waited longer than the grace window for a conversion claim to
+ * resolve?
+ *
+ * Measured from `max(dueAt, tour.updatedAt)`, NOT from `dueAt` alone (review
+ * round M2). The rows carry no claim-start stamp, but `claimConversion` bumps
+ * the TOUR's `updatedAt` when it writes the sentinel, so the tour does - and
+ * from dueAt alone the predicate is already true at t=0 for any rung more than
+ * an hour past its own due time, which is a ROUTINE state rather than an
+ * outage: a quiet-hours-deferred rung, a rung waiting out a roster/names grace,
+ * or any worker downtime longer than an hour. A perfectly healthy conversion
+ * would then retire such a rung `conversion_stalled` on its very first tick -
+ * terminally, since skippedAt cannot be undone, and blamed on something that
+ * did not happen if the conversion later failed and released its claim.
+ *
+ * A fresh claim therefore always gets the full window; a LATER tour edit only
+ * extends the deferral (the safe direction); and a crashed claim on an
+ * untouched tour still expires an hour after it was written. Unparseable or
+ * absent stamps answer false - "keep waiting" is the safer half of this
+ * decision, the same call rosterWaitExpired makes.
  */
-function conversionClaimExpired(dueAt: string, nowIso: string): boolean {
+function conversionClaimExpired(
+  dueAt: string,
+  tourUpdatedAt: string | undefined,
+  nowIso: string,
+): boolean {
   const due = Date.parse(dueAt);
+  const claimed = tourUpdatedAt === undefined ? Number.NaN : Date.parse(tourUpdatedAt);
   const now = Date.parse(nowIso);
-  if (Number.isNaN(due) || Number.isNaN(now)) return false;
-  return now - due > CONVERSION_CLAIM_GRACE_MS;
+  if (Number.isNaN(due) || Number.isNaN(claimed) || Number.isNaN(now)) return false;
+  return now - Math.max(due, claimed) > CONVERSION_CLAIM_GRACE_MS;
 }
 
 /**
@@ -1131,7 +1151,7 @@ async function processReminderRow(
     typeof tour.convertedPlacementId === 'string' &&
     tour.convertedPlacementId.startsWith('pending:')
   ) {
-    if (conversionClaimExpired(row.dueAt, now)) {
+    if (conversionClaimExpired(row.dueAt, tour.updatedAt, now)) {
       log.error(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
         'tour reminder: placement conversion claim STILL unresolved past the grace window - retiring (claim-skipped)',

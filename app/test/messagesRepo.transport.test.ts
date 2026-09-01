@@ -342,6 +342,47 @@ describe.skipIf(!reachable)('versioned message transport persistence', () => {
     expect(duplicate?.sentAt).toBe(firstSentAt);
   });
 
+  it('clears a queued accepted transient error while preserving the first acceptance metadata', async () => {
+    const firstSentAt = '2026-09-01T13:30:00.000Z';
+    const { message, tsMsgId } = await append({
+      deliveryRecipients: {
+        member: {
+          status: 'queued',
+          errorCode: '30003',
+          requestedTransport: 'sms',
+        },
+      },
+    });
+
+    await expect(
+      repo.applyRecipientSendResult(message.conversationId, tsMsgId, 'member', {
+        status: 'queued',
+        sid: 'SMaccepted-first',
+        sentAt: firstSentAt,
+      }),
+    ).resolves.toBe('updated');
+    expect((await read(message.conversationId, tsMsgId)).delivery_recipients?.member).toEqual({
+      status: 'queued',
+      sid: 'SMaccepted-first',
+      sentAt: firstSentAt,
+      requestedTransport: 'sms',
+    });
+
+    await expect(
+      repo.applyRecipientSendResult(message.conversationId, tsMsgId, 'member', {
+        status: 'queued',
+        sid: 'SMaccepted-duplicate',
+        sentAt: '2026-09-01T13:31:00.000Z',
+      }),
+    ).resolves.toBe('idempotent');
+    expect((await read(message.conversationId, tsMsgId)).delivery_recipients?.member).toEqual({
+      status: 'queued',
+      sid: 'SMaccepted-first',
+      sentAt: firstSentAt,
+      requestedTransport: 'sms',
+    });
+  });
+
   it('does not regress status but still fills absent metadata and actual transport', async () => {
     const { message, tsMsgId } = await append({
       deliveryRecipients: {

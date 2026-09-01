@@ -140,6 +140,10 @@ export function allowedPriorStatuses(next: DeliveryStatus): DeliveryStatus[] {
   return ALLOWED_PRIOR[next];
 }
 
+export function isSuccessfulDeliveryStatus(status: DeliveryStatus): boolean {
+  return status === 'queued' || status === 'sent' || status === 'delivered';
+}
+
 /**
  * Per-recipient delivery state for a relay-group fan-out (M1.7). The relayed
  * message is stored ONCE (the inbound source message); this map records the
@@ -1897,7 +1901,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       slot.status === 'delivered' || slot.status === 'undelivered' || slot.status === 'failed';
     const errorEligible = (statusAdvances || statusSame) && !(terminalCurrent && statusStale);
     const clearsTransientError =
-      patch.errorCode === undefined && patch.status === 'sent' && errorEligible && slot.errorCode !== undefined;
+      patch.errorCode === undefined && isSuccessfulDeliveryStatus(patch.status) && errorEligible && slot.errorCode !== undefined;
     const writesError =
       patch.errorCode !== undefined &&
       errorEligible &&
@@ -3269,7 +3273,9 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
         if (errorEligible) {
           if (patch.errorCode === undefined) {
-            if (patch.status === 'sent' && slot.errorCode !== undefined) {
+            if (
+              isSuccessfulDeliveryStatus(patch.status) && slot.errorCode !== undefined
+            ) {
               names['#error'] = 'errorCode';
               removes.push('#dr.#mk.#error');
               names['#status'] = 'status';

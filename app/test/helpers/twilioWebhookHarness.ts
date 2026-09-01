@@ -90,6 +90,7 @@ import {
   allowedPriorCallStatuses,
   allowedPriorStatuses,
   buildTsMsgId,
+  isSuccessfulDeliveryStatus,
   mediaAttachmentsOf,
   mediaPointerSk,
   type MediaPointer,
@@ -1463,7 +1464,11 @@ export function createFakeWorld(): FakeWorld {
       const terminalCurrent =
         slot.status === 'delivered' || slot.status === 'undelivered' || slot.status === 'failed';
       if ((statusAdvances || statusSame) && !(terminalCurrent && statusStale)) {
-        if (patch.errorCode === undefined && patch.status === 'sent' && slot.errorCode !== undefined) {
+        if (
+          patch.errorCode === undefined &&
+          isSuccessfulDeliveryStatus(patch.status) &&
+          slot.errorCode !== undefined
+        ) {
           delete slot.errorCode;
           updated = true;
         } else if (patch.errorCode !== undefined && slot.errorCode !== patch.errorCode) {

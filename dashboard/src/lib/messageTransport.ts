@@ -59,7 +59,11 @@ export function includedRecipientEntries<T extends RecipientPresentationFields>(
 export function presentRecipientTransport(
   slot: RelayRecipientDelivery,
 ): string | null {
-  if (slot.transportAggregationState === 'excluded') return null;
+  if (slot.transportAggregationState === 'excluded') {
+    return slot.errorCode === 'contact_opted_out'
+      ? presentRequestedOnly(slot.requestedTransport)
+      : null;
+  }
   if (slot.requestedTransport !== undefined && slot.actualTransport !== undefined) {
     return presentKnownPair(slot.requestedTransport, slot.actualTransport);
   }
@@ -77,7 +81,9 @@ function presentOutboundRecipientAggregate(
 ): string {
   const slots = includedRecipientEntries(input.recipients).map(([, slot]) => slot);
   const expected = slots.filter(
-    (slot) => slot.transportAggregationState !== 'excluded',
+    (slot) =>
+      slot.transportAggregationState === 'planned' ||
+      slot.transportAggregationState === 'attempted',
   );
   const complete =
     expected.length > 0 &&
@@ -97,7 +103,8 @@ function presentOutboundRecipientAggregate(
   }
 
   const actual = expected[0]?.actualTransport;
-  if (input.requestedTransport === undefined || actual === undefined) return 'Unknown';
+  if (actual === undefined) return 'Unknown';
+  if (input.requestedTransport === undefined) return transportLabel(actual);
   return presentKnownPair(input.requestedTransport, actual);
 }
 
@@ -119,7 +126,7 @@ export function presentMessageTransport(
     return presentOutboundRecipientAggregate(input);
   }
 
-  if (input.requestedTransport === undefined) return 'Unknown';
-  if (input.actualTransport === undefined) return transportLabel(input.requestedTransport);
+  if (input.actualTransport === undefined) return presentRequestedOnly(input.requestedTransport);
+  if (input.requestedTransport === undefined) return transportLabel(input.actualTransport);
   return presentKnownPair(input.requestedTransport, input.actualTransport);
 }

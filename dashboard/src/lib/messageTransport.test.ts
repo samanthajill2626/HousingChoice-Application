@@ -118,15 +118,18 @@ describe('presentMessageTransport', () => {
     expect(presentMessageTransport(versionedOutbound({ requestedTransport }))).toBe(expected);
   });
 
-  it('shows Unknown when a versioned outbound message has no request', () => {
+  it('shows Unknown when a versioned outbound message has neither transport fact', () => {
     expect(
       presentMessageTransport(versionedOutbound({ requestedTransport: undefined })),
     ).toBe('Unknown');
+  });
+
+  it('shows a known actual transport when a versioned outbound message has no request', () => {
     expect(
       presentMessageTransport(
         versionedOutbound({ requestedTransport: undefined, actualTransport: 'mms' }),
       ),
-    ).toBe('Unknown');
+    ).toBe('MMS');
   });
 
   it('uses complete attempted recipient evidence instead of message-level actual', () => {
@@ -141,6 +144,23 @@ describe('presentMessageTransport', () => {
         }),
       ),
     ).toBe('SMS -> MMS');
+  });
+
+  it('shows a uniform completed recipient actual when the message request is absent', () => {
+    expect(
+      presentMessageTransport(
+        versionedOutbound({
+          requestedTransport: undefined,
+          recipients: {
+            first: {
+              status: 'sent',
+              actualTransport: 'mms',
+              transportAggregationState: 'attempted',
+            },
+          },
+        }),
+      ),
+    ).toBe('MMS');
   });
 
   it('shows Mixed only when every attempted leg has actual and the actuals diverge', () => {
@@ -169,7 +189,7 @@ describe('presentMessageTransport', () => {
     ).toBe('RCS');
   });
 
-  it('treats planned and source-time state-absent slots as incomplete', () => {
+  it('treats planned slots as incomplete', () => {
     expect(
       presentMessageTransport(
         versionedOutbound({
@@ -186,6 +206,9 @@ describe('presentMessageTransport', () => {
         }),
       ),
     ).toBe('RCS');
+  });
+
+  it('ignores state-absent slots when aggregating complete attempted recipient evidence', () => {
     expect(
       presentMessageTransport(
         versionedOutbound({
@@ -200,7 +223,7 @@ describe('presentMessageTransport', () => {
           },
         }),
       ),
-    ).toBe('RCS');
+    ).toBe('RCS -> SMS');
   });
 
   it('ignores excluded slots for completeness and actual aggregation', () => {
@@ -284,16 +307,19 @@ describe('presentRecipientTransport', () => {
     expect(presentRecipientTransport(slot)).toBe(expected);
   });
 
-  it.each([
-    { status: 'queued', transportAggregationState: 'excluded' },
-    {
+  it('returns null for an excluded recipient transport without a suppression code', () => {
+    const slot = { status: 'queued', transportAggregationState: 'excluded' } satisfies RelayRecipientDelivery;
+    expect(presentRecipientTransport(slot)).toBeNull();
+  });
+
+  it('shows requested transport for an opted-out excluded recipient', () => {
+    const slot = {
       status: 'failed',
       errorCode: 'contact_opted_out',
       requestedTransport: 'sms',
       transportAggregationState: 'excluded',
-    },
-  ] satisfies RelayRecipientDelivery[])('returns null for an excluded recipient transport', (slot) => {
-    expect(presentRecipientTransport(slot)).toBeNull();
+    } satisfies RelayRecipientDelivery;
+    expect(presentRecipientTransport(slot)).toBe('SMS');
   });
 });
 

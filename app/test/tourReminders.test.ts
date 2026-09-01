@@ -43,6 +43,7 @@ import {
   cancelTourReminders,
   forceSendReminder,
   MANUAL_ONLY_REMINDER_KINDS,
+  retiredByTourStart,
   runDueTourReminders as runDueTourRemindersRaw,
   type RunDueTourRemindersDeps,
 } from '../src/jobs/tourReminders.js';
@@ -126,6 +127,60 @@ function rungBody(
     names,
   });
 }
+
+// ---------------------------------------------------------------------------
+// The past-tour predicate (Phase B 6.1a). PURE, so it sits OUTSIDE the
+// DynamoDB-gated describe below: it needs no table and must run even on a
+// machine with no DynamoDB Local. The same function backs the poll gate, the
+// force-send refusal, and scripts/retire-paused-tour-reminders.ts - if those
+// three could ever disagree about a row, one of them would be wrong.
+// ---------------------------------------------------------------------------
+describe('retiredByTourStart - the ONE past-tour predicate (poll gate, force-send, sweep)', () => {
+  const T = '2026-08-01T15:00:00.000Z'; // tour start
+
+  it('true: a pre-tour rung after the tour started', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T15:00:01.000Z'),
+    ).toBe(true);
+  });
+
+  it('true: exactly AT the tour start - the copy is already stale', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T15:00:00.000Z'),
+    ).toBe(true);
+  });
+
+  it('false: the tour has not started yet', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, T, '2026-08-01T14:59:59.000Z'),
+    ).toBe(false);
+  });
+
+  it('false: no_show_checkin shape - dueAt AFTER the tour is exempt by construction', () => {
+    // The exemption is DERIVED from the ladder's own data (dueAt vs start), never
+    // from a name in a list - the rung an operator needs after a no-show survives.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T15:30:00.000Z' }, T, '2026-08-01T16:00:00.000Z'),
+    ).toBe(false);
+  });
+
+  it('false: absent or unparseable scheduledAt (invalid_schedule owns those)', () => {
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, undefined, '2026-08-02T00:00:00.000Z'),
+    ).toBe(false);
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, 'not-a-date', '2026-08-02T00:00:00.000Z'),
+    ).toBe(false);
+  });
+
+  it('normalizes a non-canonical ISO scheduledAt before comparing', () => {
+    // A stored scheduledAt without milliseconds must not decide the gate by
+    // lexicographic accident - '...15:00:00Z' sorts BEFORE '...14:00:00.000Z'.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, '2026-08-01T15:00:00Z', '2026-08-01T15:00:01.000Z'),
+    ).toBe(true);
+  });
+});
 
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };

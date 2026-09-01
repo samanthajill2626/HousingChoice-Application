@@ -156,6 +156,35 @@ export function computeDueAt(
 }
 
 /**
+ * THE past-tour predicate (Phase B 6.1a): a rung whose OWN dueAt precedes the
+ * tour, on a tour that has already started, must not send - its copy assumes
+ * the tour has not happened yet. no_show_checkin (dueAt = scheduledAt + 30m)
+ * is exempt BY CONSTRUCTION, never by a name in a list: its dueAt does not
+ * precede the tour. Absent/unparseable scheduledAt -> false; invalid_schedule
+ * owns those rows and this gate must not steal the more accurate token.
+ *
+ * NOT called "start passed": that already names a different, CLIENT-side gate
+ * (e2e/tests/tour-no-show-checkin.spec.ts) on the very kind this one exempts.
+ *
+ * SHARED with scripts/retire-paused-tour-reminders.ts (sweep population A) so
+ * the sweep and the runtime can never disagree about the same row.
+ */
+export function retiredByTourStart(
+  row: Pick<TourReminderItem, 'dueAt'>,
+  scheduledAt: string | undefined,
+  now: string,
+): boolean {
+  if (typeof scheduledAt !== 'string') return false;
+  const start = Date.parse(scheduledAt);
+  if (!Number.isFinite(start)) return false;
+  // Canonicalize before comparing: a stored '...T15:00:00Z' would otherwise
+  // sort BEFORE '...T14:00:00.000Z' and decide the gate by lexicographic
+  // accident rather than by time.
+  const startIso = new Date(start).toISOString();
+  return row.dueAt < startIso && now >= startIso;
+}
+
+/**
  * Ladder order by proximity to the event. Supersession keeps the LATEST rung of
  * a colliding pair: clamping can only push an EARLIER rung forward onto a later
  * one's slot, and when it does, the earlier rung's copy is the stale one

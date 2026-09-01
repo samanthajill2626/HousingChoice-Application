@@ -525,6 +525,9 @@ nobody built the dashboard - including this worktree.
 **Fixture contents are specified, positively and negatively.** The fixture
 `index.html` must carry `HousingChoice` and `<div id="root">`, because
 assertions at `:41`, `:108`, `:165` and `:85` depend on them.
+[Superseded by plan S3.1 after plan review round 1: the fixture carries a
+distinctive marker instead; `HousingChoice` is asserted in (b)/(c) against the
+tracked source. Recorded in code-review/r1-adjudications.md C1.]
 
 It must ALSO NOT contain the strings `"version"`, `"private"` or `root:`.
 That constraint was cosmetic while a decoy existed; dropping the decoy made

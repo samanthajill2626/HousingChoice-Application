@@ -362,3 +362,89 @@ The lesson to carry: the four-round cap is about diminishing returns from ONE
 reviewer's accumulated context, not about a document being finished. A fresh
 cold pass at the end is cheap and, here, caught the most consequential defect of
 the five rounds.
+
+---
+
+# PLAN round 1 - two cold reviewers (opus + fable, parallel, independent)
+
+31 findings, 4 distinct BLOCKING. ACCEPT 31, REJECT 0. Both reviewers were
+dispatched fresh and told not to read the spec-round reports until their own
+findings were written.
+
+**PA-1 / PB-4 - `superseded` was added to the WRONG union. ACCEPT, BLOCKING.**
+Verified: `ScheduledSuppressionReason` is a separate closed union at
+`app/src/services/scheduledSendSuppression.ts:9-11` and the plan widened only
+`ReminderSkipReason`. S6's three preview surfaces render SUPPRESSION, so they
+were unbuildable and acceptance 4 undeliverable. Fixed, and pointed at the
+`discontinued` precedent documented at the head of that same file: a token that
+lives in the union but is never produced by the evaluator, because the callers
+short-circuit ahead of it. A pointer mismatch is caller knowledge in exactly the
+same way.
+
+**PA-2 / PB-1 - "the fake needs no change" was wrong three ways. ACCEPT,
+BLOCKING, my error.** I generalized a true statement about `claimSend` into a
+blanket instruction. In fact the fake must gain `deleteSupersededForTour` and
+lose `cancelForTour` (so S1's own typecheck gate was unsatisfiable as written),
+and its hand-built `create` (`twilioWebhookHarness.ts:2933-2952`) would silently
+drop `ladderId` - the exact scar the file documents at `:2939-2946`, where
+dropping `input.skipped` once made every arm-time skip look like a live rung to
+route-level suites. Only its claim-on-missing-row behavior was correctly
+left alone. T1.6 now spells out all three.
+
+**PA-3 / PB-7 - T3.3's compare-and-set had no repo capability. ACCEPT,
+BLOCKING.** Verified at `toursRepo.ts:354`: `patch` conditions only on
+`attribute_exists(tourId)`. T1.3 now adds a value-guarded write, and both it and
+T1.4's claim guard are explicitly required to be proven against DynamoDB Local
+rather than the fake.
+
+**PB-2 - the conversion path deletes with NO refusal backstop. ACCEPT,
+BLOCKING.** The sharpest finding of the round, and unique to reviewer B. After
+finalize the sentinel is gone (so T5.4's deferral ends), the pointer still
+matches (I had removed the rotation from this path at spec round 5), and the
+poll has no tour-status check - so a rung the sweep MISSED sends on a converted
+tour, permanently. The plan's central slice-order guarantee was FALSE at S8.
+T8.3 restores it by rotating the pointer together with the post-finalize sweep;
+the rotation was only unsafe BEFORE finalize, where reversibility mattered.
+
+**PA-5 / PB-3 - a SIXTH scroll writer. ACCEPT.** `scrollToBottom` at
+`Timeline.tsx:1840-1846` is the pill's own onClick; post-move it would scroll the
+operator to the block instead of the newest message, and it writes the
+`atBottomRef` being replaced. PB-14 also caught line drift in the table
+(`:1912`, not `:1911`; the `:1976` citation is an `atBottomRef` write, not a
+scroll write).
+
+**PA-4 / PB-4 - the copy census was wrong in BOTH directions again**, for the
+third review in a row. ACCEPT. T5.2 now gives a METHOD rather than a list: probe
+with `discontinued`, the most recently added token, and treat every map or union
+it appears in as a surface.
+
+**PA-6 / PB-8 - T5.4's deferral was unbounded with an undefined predicate.
+ACCEPT.** The sentinel is `pending:${randomUUID()}` (`placements.ts:699`), so
+the predicate is that literal prefix - a bare "is a string" test would defer
+every FINALIZED converted tour forever, since finalize replaces the sentinel
+with a real placement id. And a crashed conversion leaves no TTL and no recovery
+route, so the deferral is now bounded by this job's own documented grace-window
+pattern (`tourReminders.ts:1193-1206`).
+
+**PB-5 - S6 omitted T5.3's pre-migration exemption. ACCEPT.** A literal build
+would mark every legacy pending rung suppressed on all three preview surfaces.
+
+**PA-7 / PB-6 - acceptance 16 had no delivering task** (T10.8), **PA-13 / PB-12 -
+R6's live phone QA and R4's interruption logging had none** (T10.9, T3.6),
+**PA-8 / PB-15 - `earlier[]` views carrying `suppression`** (T7.6), and the
+disclosure's default collapsed state (T7.4). ALL ACCEPT.
+
+**PB-10 - T1.4's RED test called a nonexistent `getById`. ACCEPT.** There is no
+such method, and `listByTour` is a VACUOUS substitute: the resurrected row is an
+attribute-only stub with no `tourId`, so it cannot appear in a `byTour` query
+whether or not the bug is present. The test now asserts absence with a raw
+`GetCommand`.
+
+**PA-9 (check placement in `processReminderRow`, whose comment reads "POSITION
+IS BEHAVIOUR here"), PA-10 / PB (S11's list was closed and incomplete - now
+explicitly open, with a grep), PA-14 (do not copy `cancelForTour`'s `pending`
+filter, which excludes exactly the rows D1 deletes), PA-15 / PB-9 (`seed/cast.ts`
+is a third raw writer), PB-11 (390px contradicted the harness's `NARROW_360`,
+and "more messages than main" has no in-run pass/fail), PB-13 (the
+ResizeObserver must wire into the existing effect, not a standalone one),
+PB-16 (seeded terminal tours), PA-12, PA-11, PB-15 - ALL ACCEPT** and folded in.

@@ -22,7 +22,13 @@
 //
 // PII (doc §9): never log the body, the sender's phone, or member phones —
 // IDs / member keys / counts only, correlated via the pino mixin.
-import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import {
+  createMessagingAdapter,
+  type CarrierMessageSender,
+  type MessagingAdapter,
+  type MessageTransportIntent,
+  type SendMessageParams,
+} from '../adapters/messaging.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -37,12 +43,19 @@ import {
   createMessagesRepo,
   mediaAttachmentsOf,
   relayMemberKey,
+  type MessageItem,
   type MessagesRepo,
   type RelayRecipientDelivery,
+  type TransportMutationOutcome,
 } from '../repos/messagesRepo.js';
+import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
 import { SendRefusedError } from '../services/sendMessage.js';
-import { isMemberSuppressed, sendRelayAnnouncement } from '../services/relayAnnouncements.js';
+import {
+  isMemberSuppressed,
+  logSafeMemberKey,
+  sendRelayAnnouncement,
+} from '../services/relayAnnouncements.js';
 import { resolveMessage } from '../messages/index.js';
 import { defineJobHandler, enqueue } from './jobs.js';
 
@@ -298,7 +311,7 @@ export function parseRelayMemberAddedPayload(payload: unknown): RelayMemberAdded
 }
 
 export interface RelayFanOutJobDeps {
-  adapter?: MessagingAdapter;
+  adapter?: MessagingAdapter & CarrierMessageSender;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
@@ -388,213 +401,22 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       log.warn({ conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId }, 'relayFanOut: source message not found');
       return;
     }
-    const body = typeof sourceMessage.body === 'string' ? sourceMessage.body : '';
-    // Media both directions (design Sec 7): the source's DURABLE attachment keys
-    // (a team MMS's hub attachments, or a member's mirrored inbound MMS keys) are
-    // re-presigned PER LEG below and forwarded to the other members.
-    const sourceMedia = mediaAttachmentsOf(sourceMessage);
-    const hasMedia = sourceMedia.length > 0;
-
-    // Resolve CURRENT membership at execution time (a mid-thread remove must
-    // take effect on the very next fan-out). Sender is excluded by key.
-    const roster = (conversation.participants ?? []) as ConversationParticipant[];
-    const senderMember = roster.find((m) => relayMemberKey(m) === payload.senderKey);
-    // FIX 2: a TEAM message carries an explicit override label (no member
-    // sender, senderKey matches nobody so no member is excluded); a normal
-    // member-relayed message derives the prefix from the sender's name.
-    const senderName = payload.senderNameOverride ?? senderMember?.name;
-
-    // Body for the leg: text (with the "<name>: " prefix) rides media along; a
-    // MEDIA-ONLY source uses the relay.media_only catalog copy (no hard-coded
-    // string). A source with NEITHER text NOR media is the only true no-op.
-    const senderLabel =
-      senderName && senderName.trim().length > 0 ? senderName : ANONYMOUS_SENDER_LABEL;
-    let relayBody: string;
-    if (body.length > 0) {
-      relayBody = composeRelayBody(senderName, body);
-    } else if (hasMedia) {
-      relayBody = resolveMessage('relay.media_only', { name: senderLabel });
-    } else {
-      // Nothing to relay - never send an empty body.
-      log.info(
-        { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId },
-        'relayFanOut: source has neither text nor media - nothing relayed',
-      );
+    const execution: RelayFanOutExecutionDeps = {
+      adapter,
+      conversations,
+      messages,
+      contacts,
+      conversation,
+      poolNumber,
+      mediaStore,
+      tokenBucket: deps.tokenBucket,
+      log,
+    };
+    if (sourceMessage.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) {
+      await runLegacyRelayFanOut(sourceMessage, payload, execution);
       return;
     }
-    if (hasMedia && !mediaStore) {
-      // Degenerate no-bucket config: relay the text notice, but there is no
-      // store to presign the media from. Log once (IDs/counts only).
-      log.error(
-        { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId, mediaCount: sourceMedia.length },
-        'relayFanOut: source has media but no MediaStore - relaying body only, media dropped',
-      );
-    }
-
-    let recipients = roster.filter((m) => relayMemberKey(m) !== payload.senderKey);
-    if (payload.recipientKeys !== undefined) {
-      const allowed = new Set(payload.recipientKeys);
-      recipients = recipients.filter((m) => allowed.has(relayMemberKey(m)));
-    }
-
-    const transientRemaining: string[] = [];
-    let sentCount = 0;
-
-    for (const member of recipients) {
-      const key = relayMemberKey(member);
-      const priorSlot = sourceMessage.delivery_recipients?.[key];
-      if (isTerminal(priorSlot?.status)) {
-        continue; // already delivered/sent/failed — never double-send
-      }
-
-      // Opt-out suppression: relay bypasses the 1:1 sendMessage opt-out gate, so
-      // enforce STOP here — an opted-out member is NEVER relayed to. Mark the
-      // slot failed/contact_opted_out (terminal → a continuation skips it, no
-      // retry) so the thread + Today attention surface can show the member is
-      // suppressed. A repo failure propagates (fail CLOSED → job redelivers).
-      if (await isMemberSuppressed(contacts, conversations, member)) {
-        await markRecipient(messages, payload, key, {
-          status: 'failed',
-          errorCode: 'contact_opted_out',
-        });
-        // Annotate the conversation so staff get a Today attention item linking
-        // to the member's contact page (they investigate/remove there). BEST-
-        // EFFORT: a failure to annotate must NEVER break the fan-out. PII: log
-        // IDs/keys only — the stored phone/name are DATA (for display), not a log.
-        try {
-          await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
-            ...(member.contactId !== undefined &&
-              member.contactId.length > 0 && { contactId: member.contactId }),
-            phone: member.phone,
-            ...(member.name !== undefined && { name: member.name }),
-            at: new Date().toISOString(),
-          });
-        } catch (err) {
-          log.error(
-            { err, conversationId: payload.relayConversationId, memberKey: key },
-            'relayFanOut: annotating conversation with member opt-out failed — continuing',
-          );
-        }
-        log.info(
-          { conversationId: payload.relayConversationId, memberKey: key },
-          'relayFanOut: recipient opted out (sms_opt_out) — skipped, not sent',
-        );
-        continue;
-      }
-
-      // A2P meter (FIX 6): ONE token per real outbound SMS — acquired here,
-      // per recipient, inside the handler (the correct per-message meter; the
-      // producers do not throttle). Paces the fan-out under the registered tier.
-      await deps.tokenBucket?.acquire(1);
-
-      // Presign the source media FRESH for THIS leg (design Sec 7: per leg, at
-      // leg-send time - a paced roster or backed-off continuation must never
-      // hand Twilio an expired URL). Presigned URLs are bearer tokens: passed to
-      // the adapter, never logged (the leg logs member keys / counts only).
-      let legMediaUrls: string[] | undefined;
-      if (hasMedia && mediaStore) {
-        const store = mediaStore; // pin for the closure (mediaStore is a let)
-        legMediaUrls = await Promise.all(
-          sourceMedia.map((a) => store.presign(a.s3Key, RELAY_PRESIGN_TTL_SECONDS)),
-        );
-      }
-
-      let result;
-      try {
-        result = await adapter.sendMessage({
-          to: member.phone,
-          from: poolNumber,
-          body: relayBody,
-          ...(legMediaUrls !== undefined && { mediaUrls: legMediaUrls }),
-        });
-      } catch (err) {
-        if (err instanceof SendRefusedError) {
-          // Opt-out / breaker / manual — by-design refusal for THIS recipient.
-          await markRecipient(messages, payload, key, { status: 'failed', errorCode: err.code });
-          log.warn({ conversationId: payload.relayConversationId, memberKey: key, refusal: err.code }, 'relayFanOut: send refused for recipient — marked failed, continuing');
-          continue;
-        }
-        // Provider-shaped error: classify by code when present.
-        const code = errorCodeOf(err);
-        if (code === CARRIER_FILTERED_CODE) {
-          await markRecipient(messages, payload, key, { status: 'failed', errorCode: code });
-          log.error({ conversationId: payload.relayConversationId, memberKey: key, errorCode: code }, 'relayFanOut: carrier filtering (30007) — recipient failed, NOT retried');
-          continue;
-        }
-        if (code !== undefined && TRANSIENT_CODES.has(code)) {
-          // Defer this recipient to a backed-off continuation; keep the slot
-          // 'queued' so the continuation re-sends it.
-          await markRecipient(messages, payload, key, { status: 'queued', errorCode: code });
-          transientRemaining.push(key);
-          log.warn({ conversationId: payload.relayConversationId, memberKey: key, errorCode: code, attempt: payload.attempt }, 'relayFanOut: transient send error — deferring recipient to continuation');
-          continue;
-        }
-        // Unknown error: leave the recipient queued and let the job FAIL so
-        // SQS redelivers the whole envelope (the marker is per-jobId; the
-        // redelivery is a fresh jobId via the visibility timeout).
-        throw err;
-      }
-
-      // Success: record the per-recipient send result + the relaysid pointer.
-      const delivery: RelayRecipientDelivery = {
-        status: result.status === 'queued' ? 'queued' : 'sent',
-        sid: result.providerSid,
-        sentAt: result.providerTs,
-      };
-      await markRecipient(messages, payload, key, delivery);
-      await messages.putRelaySidPointer(result.providerSid, {
-        conversationId: payload.relayConversationId,
-        tsMsgId: payload.sourceTsMsgId,
-        memberKey: key,
-      });
-      sentCount += 1;
-    }
-
-    log.info(
-      {
-        conversationId: payload.relayConversationId,
-        tsMsgId: payload.sourceTsMsgId,
-        recipientCount: recipients.length,
-        sentCount,
-        deferred: transientRemaining.length,
-        attempt: payload.attempt,
-      },
-      'relay fan-out complete',
-    );
-
-    // Transient continuation: re-enqueue the remaining recipients with backoff,
-    // capped. enqueue() with runAt routes through SQS DelaySeconds (5/10/20s is
-    // well within the 12min cap), so the backoff is EXACT — no EventBridge 60s
-    // floor inflating a 5s wait to 60s.
-    if (transientRemaining.length > 0) {
-      const nextAttempt = (payload.attempt ?? 1) + 1;
-      if (nextAttempt > MAX_FANOUT_ATTEMPTS) {
-        // Cap reached: mark the still-deferred recipients failed so the thread
-        // shows the honest outcome (no silent black hole).
-        for (const key of transientRemaining) {
-          await markRecipient(messages, payload, key, { status: 'failed', errorCode: 'transient_cap' });
-        }
-        log.error(
-          { conversationId: payload.relayConversationId, deferred: transientRemaining.length, attempt: payload.attempt },
-          'relayFanOut: transient retry cap reached — remaining recipients marked failed',
-        );
-        return;
-      }
-      await enqueue(
-        RELAY_FANOUT_JOB,
-        {
-          relayConversationId: payload.relayConversationId,
-          sourceTsMsgId: payload.sourceTsMsgId,
-          senderKey: payload.senderKey,
-          ...(payload.senderNameOverride !== undefined && {
-            senderNameOverride: payload.senderNameOverride,
-          }),
-          attempt: nextAttempt,
-          recipientKeys: transientRemaining,
-        } satisfies RelayFanOutPayload,
-        { runAt: new Date(Date.now() + fanOutBackoffMs(payload.attempt ?? 1)) },
-      );
-    }
+    await runVersionedRelayFanOut(sourceMessage, payload, execution);
   });
 
   // relay.intro (M1.7): on relay-group creation, announce the group to each
@@ -696,6 +518,450 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       { conversationId: payload.relayConversationId, body, kind: 'relay.member_added' },
     );
   });
+}
+
+interface RelayFanOutExecutionDeps {
+  adapter: MessagingAdapter & CarrierMessageSender;
+  conversations: ConversationsRepo;
+  messages: MessagesRepo;
+  contacts: ContactsRepo;
+  conversation: Awaited<ReturnType<ConversationsRepo['getById']>> & {};
+  poolNumber: string;
+  mediaStore: MediaStore | undefined;
+  tokenBucket: TokenBucket | undefined;
+  log: Logger;
+}
+
+type RelayTransportMode =
+  | { kind: 'legacy' }
+  | { kind: 'versioned'; intent: MessageTransportIntent };
+
+async function runLegacyRelayFanOut(
+  source: MessageItem,
+  payload: RelayFanOutPayload,
+  deps: RelayFanOutExecutionDeps,
+): Promise<void> {
+  await runRelayFanOutExecution(source, payload, deps, { kind: 'legacy' });
+}
+
+async function runVersionedRelayFanOut(
+  source: MessageItem,
+  payload: RelayFanOutPayload,
+  deps: RelayFanOutExecutionDeps,
+): Promise<void> {
+  const durableMedia = mediaAttachmentsOf(source);
+  const intent = deps.adapter.classifyMessageTransport({
+    hasForwardableMedia: durableMedia.length > 0 && deps.mediaStore !== undefined,
+  });
+  await runRelayFanOutExecution(source, payload, deps, { kind: 'versioned', intent });
+}
+
+async function runRelayFanOutExecution(
+  source: MessageItem,
+  payload: RelayFanOutPayload,
+  deps: RelayFanOutExecutionDeps,
+  transport: RelayTransportMode,
+): Promise<void> {
+  const { adapter, conversations, messages, contacts, conversation, poolNumber, mediaStore, log } = deps;
+  const body = typeof source.body === 'string' ? source.body : '';
+  const sourceMedia = mediaAttachmentsOf(source);
+  const hasMedia = sourceMedia.length > 0;
+  const roster = (conversation.participants ?? []) as ConversationParticipant[];
+  const senderMember = roster.find((member) => relayMemberKey(member) === payload.senderKey);
+  const senderName = payload.senderNameOverride ?? senderMember?.name;
+  const senderLabel =
+    senderName && senderName.trim().length > 0 ? senderName : ANONYMOUS_SENDER_LABEL;
+  let relayBody: string;
+  if (body.length > 0) {
+    relayBody = composeRelayBody(senderName, body);
+  } else if (hasMedia) {
+    relayBody = resolveMessage('relay.media_only', { name: senderLabel });
+  } else {
+    log.info(
+      { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId },
+      'relayFanOut: source has neither text nor media - nothing relayed',
+    );
+    return;
+  }
+  if (hasMedia && !mediaStore) {
+    log.error(
+      {
+        conversationId: payload.relayConversationId,
+        tsMsgId: payload.sourceTsMsgId,
+        mediaCount: sourceMedia.length,
+      },
+      'relayFanOut: source has media but no MediaStore - relaying body only, media dropped',
+    );
+  }
+
+  let recipients = roster.filter((member) => relayMemberKey(member) !== payload.senderKey);
+  if (payload.recipientKeys !== undefined) {
+    const allowed = new Set(payload.recipientKeys);
+    recipients = recipients.filter((member) => allowed.has(relayMemberKey(member)));
+  }
+
+  let currentSource = source;
+  if (transport.kind === 'versioned') {
+    currentSource = await preflightVersionedRecipients(
+      source,
+      payload,
+      recipients,
+      transport.intent,
+      messages,
+    );
+    const persistedRequests = new Set(
+      recipients
+        .map((member) => currentSource.delivery_recipients?.[relayMemberKey(member)]?.requestedTransport)
+        .filter((value): value is NonNullable<typeof value> => value !== undefined),
+    );
+    if (
+      (source.requested_transport !== undefined &&
+        source.requested_transport !== transport.intent.requestedTransport) ||
+      [...persistedRequests].some((request) => request !== transport.intent.requestedTransport)
+    ) {
+      log.warn(
+        {
+          conversationId: payload.relayConversationId,
+          tsMsgId: payload.sourceTsMsgId,
+          requestedTransport: source.requested_transport,
+          executionTransport: transport.intent.requestedTransport,
+        },
+        'relayFanOut: persisted transport intent differs from execution classification',
+      );
+    }
+  }
+
+  const transientRemaining: string[] = [];
+  let sentCount = 0;
+  for (const member of recipients) {
+    const key = relayMemberKey(member);
+    const priorSlot = currentSource.delivery_recipients?.[key];
+    if (isTerminal(priorSlot?.status)) continue;
+
+    if (await isMemberSuppressed(contacts, conversations, member)) {
+      if (transport.kind === 'versioned') {
+        await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
+      }
+      await persistRelayRecipientResult(messages, payload, key, {
+        status: 'failed',
+        errorCode: 'contact_opted_out',
+      }, transport);
+      try {
+        await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
+          ...(member.contactId !== undefined &&
+            member.contactId.length > 0 && { contactId: member.contactId }),
+          phone: member.phone,
+          ...(member.name !== undefined && { name: member.name }),
+          at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.error(
+          {
+            err,
+            conversationId: payload.relayConversationId,
+            memberKey: logSafeMemberKey(member),
+          },
+          'relayFanOut: annotating conversation with member opt-out failed - continuing',
+        );
+      }
+      log.info(
+        {
+          conversationId: payload.relayConversationId,
+          memberKey: logSafeMemberKey(member),
+        },
+        'relayFanOut: recipient opted out (sms_opt_out) - skipped, not sent',
+      );
+      continue;
+    }
+
+    await deps.tokenBucket?.acquire(1);
+    let legMediaUrls: string[] | undefined;
+    if (hasMedia && mediaStore) {
+      legMediaUrls = await Promise.all(
+        sourceMedia.map((attachment) =>
+          mediaStore.presign(attachment.s3Key, RELAY_PRESIGN_TTL_SECONDS),
+        ),
+      );
+    }
+    const params: SendMessageParams = {
+      to: member.phone,
+      from: poolNumber,
+      body: relayBody,
+      ...(legMediaUrls !== undefined && { mediaUrls: legMediaUrls }),
+    };
+    const prepared =
+      transport.kind === 'versioned'
+        ? adapter.prepareMessageSend(transport.intent, params)
+        : undefined;
+
+    if (transport.kind === 'versioned') {
+      await setVersionedAggregationState(messages, payload, key, 'attempted', ['attempted']);
+    }
+
+    let result;
+    try {
+      result =
+        transport.kind === 'versioned'
+          ? await adapter.sendPreparedMessage(prepared!)
+          : await adapter.sendMessage(params);
+    } catch (err) {
+      if (err instanceof SendRefusedError) {
+        await persistRelayRecipientResult(
+          messages,
+          payload,
+          key,
+          { status: 'failed', errorCode: err.code },
+          transport,
+        );
+        log.warn(
+          {
+            conversationId: payload.relayConversationId,
+            memberKey: logSafeMemberKey(member),
+            refusal: err.code,
+          },
+          'relayFanOut: send refused for recipient - marked failed, continuing',
+        );
+        continue;
+      }
+      const code = errorCodeOf(err);
+      if (code === CARRIER_FILTERED_CODE) {
+        await persistRelayRecipientResult(
+          messages,
+          payload,
+          key,
+          { status: 'failed', errorCode: code },
+          transport,
+        );
+        log.error(
+          {
+            conversationId: payload.relayConversationId,
+            memberKey: logSafeMemberKey(member),
+            errorCode: code,
+          },
+          'relayFanOut: carrier filtering (30007) - recipient failed, NOT retried',
+        );
+        continue;
+      }
+      if (code !== undefined && TRANSIENT_CODES.has(code)) {
+        await persistRelayRecipientResult(
+          messages,
+          payload,
+          key,
+          { status: 'queued', errorCode: code },
+          transport,
+        );
+        transientRemaining.push(key);
+        log.warn(
+          {
+            conversationId: payload.relayConversationId,
+            memberKey: logSafeMemberKey(member),
+            errorCode: code,
+            attempt: payload.attempt,
+          },
+          'relayFanOut: transient send error - deferring recipient to continuation',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    await persistRelayRecipientResult(
+      messages,
+      payload,
+      key,
+      {
+        status: result.status === 'queued' ? 'queued' : 'sent',
+        sid: result.providerSid,
+        sentAt: result.providerTs,
+        ...(transport.kind === 'versioned' &&
+          result.actualTransport !== undefined && { actualTransport: result.actualTransport }),
+      },
+      transport,
+    );
+    await messages.putRelaySidPointer(result.providerSid, {
+      conversationId: payload.relayConversationId,
+      tsMsgId: payload.sourceTsMsgId,
+      memberKey: key,
+    });
+    sentCount += 1;
+  }
+
+  log.info(
+    {
+      conversationId: payload.relayConversationId,
+      tsMsgId: payload.sourceTsMsgId,
+      recipientCount: recipients.length,
+      sentCount,
+      deferred: transientRemaining.length,
+      attempt: payload.attempt,
+    },
+    'relay fan-out complete',
+  );
+
+  if (transientRemaining.length === 0) return;
+  const nextAttempt = (payload.attempt ?? 1) + 1;
+  if (nextAttempt > MAX_FANOUT_ATTEMPTS) {
+    for (const key of transientRemaining) {
+      await persistRelayRecipientResult(
+        messages,
+        payload,
+        key,
+        { status: 'failed', errorCode: 'transient_cap' },
+        transport,
+      );
+    }
+    log.error(
+      {
+        conversationId: payload.relayConversationId,
+        deferred: transientRemaining.length,
+        attempt: payload.attempt,
+      },
+      'relayFanOut: transient retry cap reached - remaining recipients marked failed',
+    );
+    return;
+  }
+  await enqueue(
+    RELAY_FANOUT_JOB,
+    {
+      relayConversationId: payload.relayConversationId,
+      sourceTsMsgId: payload.sourceTsMsgId,
+      senderKey: payload.senderKey,
+      ...(payload.senderNameOverride !== undefined && {
+        senderNameOverride: payload.senderNameOverride,
+      }),
+      attempt: nextAttempt,
+      recipientKeys: transientRemaining,
+    } satisfies RelayFanOutPayload,
+    { runAt: new Date(Date.now() + fanOutBackoffMs(payload.attempt ?? 1)) },
+  );
+}
+
+async function preflightVersionedRecipients(
+  source: MessageItem,
+  payload: RelayFanOutPayload,
+  recipients: ConversationParticipant[],
+  intent: MessageTransportIntent,
+  messages: MessagesRepo,
+): Promise<MessageItem> {
+  const eligibleKeys = new Set(recipients.map((member) => relayMemberKey(member)));
+  const requestedTransport = source.requested_transport ?? intent.requestedTransport;
+  for (const member of recipients) {
+    const key = relayMemberKey(member);
+    if (source.delivery_recipients?.[key] === undefined) {
+      const outcome = await messages.initializeRecipientDelivery(
+        payload.relayConversationId,
+        payload.sourceTsMsgId,
+        key,
+        {
+          status: 'queued',
+          requestedTransport,
+          transportAggregationState: 'planned',
+        },
+      );
+      if (outcome !== 'created' && outcome !== 'existing') {
+        throw new Error(`relayFanOut: v1 preflight initialize failed: ${outcome}`);
+      }
+    }
+  }
+
+  let current = await readVersionedSource(messages, payload);
+  for (const member of recipients) {
+    const key = relayMemberKey(member);
+    const slot = current.delivery_recipients?.[key];
+    if (!slot) throw new Error('relayFanOut: v1 preflight recipient slot missing');
+    if (
+      slot.transportAggregationState === undefined ||
+      slot.transportAggregationState === 'excluded'
+    ) {
+      await setVersionedAggregationState(
+        messages,
+        payload,
+        key,
+        'planned',
+        ['planned', 'attempted'],
+      );
+    }
+  }
+
+  current = await readVersionedSource(messages, payload);
+  for (const [key, slot] of Object.entries(current.delivery_recipients ?? {})) {
+    if (
+      !eligibleKeys.has(key) &&
+      (slot.transportAggregationState === undefined ||
+        slot.transportAggregationState === 'planned') &&
+      (slot.transportAggregationState === 'planned' ||
+        (slot.sid === undefined &&
+          slot.sentAt === undefined &&
+          slot.actualTransport === undefined))
+    ) {
+      await setVersionedAggregationState(
+        messages,
+        payload,
+        key,
+        'excluded',
+        ['excluded', 'attempted'],
+      );
+    }
+  }
+  return readVersionedSource(messages, payload);
+}
+
+async function readVersionedSource(
+  messages: MessagesRepo,
+  payload: RelayFanOutPayload,
+): Promise<MessageItem> {
+  const source = await messages.getByTsMsgId(
+    payload.relayConversationId,
+    payload.sourceTsMsgId,
+  );
+  if (!source || source.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) {
+    throw new Error('relayFanOut: v1 preflight source missing or changed schema');
+  }
+  return source;
+}
+
+async function setVersionedAggregationState(
+  messages: MessagesRepo,
+  payload: RelayFanOutPayload,
+  memberKey: string,
+  next: NonNullable<RelayRecipientDelivery['transportAggregationState']>,
+  acceptableStates: NonNullable<RelayRecipientDelivery['transportAggregationState']>[],
+): Promise<void> {
+  const outcome = await messages.setRecipientTransportAggregationState(
+    payload.relayConversationId,
+    payload.sourceTsMsgId,
+    memberKey,
+    next,
+  );
+  if (outcome === 'updated' || outcome === 'idempotent') return;
+  if (outcome === 'conflict') {
+    const source = await readVersionedSource(messages, payload);
+    const current = source.delivery_recipients?.[memberKey]?.transportAggregationState;
+    if (current !== undefined && acceptableStates.includes(current)) return;
+  }
+  throw new Error(`relayFanOut: v1 preflight aggregation failed: ${outcome}`);
+}
+
+async function persistRelayRecipientResult(
+  messages: MessagesRepo,
+  payload: RelayFanOutPayload,
+  memberKey: string,
+  delivery: RelayRecipientDelivery,
+  transport: RelayTransportMode,
+): Promise<void> {
+  if (transport.kind === 'legacy') {
+    await markRecipient(messages, payload, memberKey, delivery);
+    return;
+  }
+  const outcome: TransportMutationOutcome = await messages.applyRecipientSendResult(
+    payload.relayConversationId,
+    payload.sourceTsMsgId,
+    memberKey,
+    delivery,
+  );
+  if (outcome === 'missing' || outcome === 'legacy_noop') {
+    throw new Error(`relayFanOut: v1 recipient result failed: ${outcome}`);
+  }
 }
 
 /** Persist one recipient's delivery slot on the source message. */

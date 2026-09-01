@@ -5,7 +5,7 @@
 // intro naming every member. Driven through the real jobs envelope machinery
 // (enqueue → InMemoryScheduler/InProcessOutboundQueue → dispatchJob) so the
 // jobId-marker idempotency guard is exercised for real.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -36,6 +36,8 @@ import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversat
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
+import { TRANSPORT_SCHEMA_VERSION } from '../src/lib/messageTransport.js';
+import { flushQueuedMessages } from '../src/services/relayQueuedMessages.js';
 
 const POOL = '+15550109000';
 const ALICE = '+15550100001';
@@ -85,6 +87,20 @@ function seedSource(world: FakeWorld, body: string, senderKey: string): MessageI
   return item;
 }
 
+function seedVersionedSource(
+  world: FakeWorld,
+  body: string,
+  senderKey: string,
+  overrides: Partial<MessageItem> = {},
+): MessageItem {
+  const source = seedSource(world, body, senderKey);
+  source.transport_schema_version = TRANSPORT_SCHEMA_VERSION;
+  source.requested_transport = 'sms';
+  source.delivery_recipients = {};
+  Object.assign(source, overrides);
+  return source;
+}
+
 describe('relay.fanOut (M1.7)', () => {
   let world: FakeWorld;
   let outbound: InProcessOutboundQueueAdapter;
@@ -108,7 +124,7 @@ describe('relay.fanOut (M1.7)', () => {
     // through the SQS path (outbound adapter), NOT EventBridge. In tests the
     // InProcess adapter dispatches immediate jobs in-process and RECORDS delayed
     // ones in `delayed[]` for assertions (no real sleep).
-    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob, logger });
     configureOutboundQueue(outbound);
   });
 
@@ -145,6 +161,233 @@ describe('relay.fanOut (M1.7)', () => {
 
     // A relaysid pointer was written per recipient (delivery-callback routing).
     expect(world.relaySidPointers.size).toBe(2);
+  });
+
+  it('keeps the schema-absent path mechanically free of transport hooks for a continuation', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'legacy continuation', 'c-alice');
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const prepare = vi.spyOn(world.adapter, 'prepareMessageSend');
+    const initialize = vi.spyOn(world.messagesRepo, 'initializeRecipientDelivery');
+    const aggregate = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+    const apply = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-carol'],
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((sent) => sent.to)).toEqual([CAROL]);
+    expect(source.delivery_recipients?.['c-carol']?.sid).toMatch(/^SMfake-out-/);
+    expect(classify).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(aggregate).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('preflights every filtered eligible v1 slot before provider call zero', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'versioned', 'c-alice');
+    const sourceRead = vi.spyOn(world.messagesRepo, 'listByConversation');
+    const initialize = vi.spyOn(world.messagesRepo, 'initializeRecipientDelivery');
+    const legacyWrite = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+    const snapshots: Array<Record<string, unknown>> = [];
+    const originalSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      snapshots.push(structuredClone(source.delivery_recipients ?? {}));
+      return originalSend(prepared);
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      recipientKeys: ['c-bob', 'c-carol'],
+    });
+    await outbound.settle();
+
+    expect(source.delivery_recipients?.['c-alice']).toBeUndefined();
+    expect(sourceRead.mock.invocationCallOrder[0]).toBeLessThan(
+      initialize.mock.invocationCallOrder[0]!,
+    );
+    expect(legacyWrite).not.toHaveBeenCalled();
+    expect(Object.keys(snapshots[0] ?? {}).sort()).toEqual(['c-bob', 'c-carol']);
+    expect(snapshots[0]).toMatchObject({
+      'c-bob': { requestedTransport: 'sms' },
+      'c-carol': { requestedTransport: 'sms', transportAggregationState: 'planned' },
+    });
+    expect(source.delivery_recipients).toMatchObject({
+      'c-bob': {
+        status: 'queued',
+        requestedTransport: 'sms',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+      'c-carol': {
+        status: 'queued',
+        requestedTransport: 'sms',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+    });
+  });
+
+  it('aborts a v1 execution before provider call zero when preflight cannot initialize a slot', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'preflight failure', 'c-alice');
+    const initialize = vi
+      .spyOn(world.messagesRepo, 'initializeRecipientDelivery')
+      .mockResolvedValue('missing');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+    expect(world.sent).toHaveLength(0);
+    expect(initialize).toHaveBeenCalled();
+  });
+
+  it('reconciles stale planned slots, preserves attempted slots, and excludes suppression', async () => {
+    const conversation = seedRelay(world);
+    conversation.participants = conversation.participants?.slice(0, 2);
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+    const source = seedVersionedSource(world, 'states', 'c-alice', {
+      delivery_recipients: {
+        'c-alice': { status: 'queued', requestedTransport: 'sms' },
+        'c-bob': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+        'c-carol': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        'c-removed': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    expect(source.delivery_recipients?.['c-alice']?.transportAggregationState).toBe('excluded');
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+    });
+    expect(source.delivery_recipients?.['c-bob']?.actualTransport).toBeUndefined();
+    expect(source.delivery_recipients?.['c-carol']?.transportAggregationState).toBe('attempted');
+    expect(source.delivery_recipients?.['c-removed']?.transportAggregationState).toBe('excluded');
+  });
+
+  it('preserves first callback pointers while a v1 continuation adds actual evidence and clears transient error', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'retry', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'queued',
+          sid: 'SMfirst',
+          sentAt: '2026-08-31T12:00:00.000Z',
+          errorCode: '30022',
+          requestedTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'queued',
+      sid: 'SMfirst',
+      sentAt: '2026-08-31T12:00:00.000Z',
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
+      transportAggregationState: 'attempted',
+    });
+    expect(source.delivery_recipients?.['c-bob']?.errorCode).toBeUndefined();
+    expect(world.relaySidPointers.size).toBe(1);
+  });
+
+  it('keeps a schema-absent queued_pending release on the exact legacy path', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'held legacy', TEAM_SENDER_KEY);
+    source.direction = 'outbound';
+    source.delivery_status = 'queued_pending';
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const apply = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
+
+    await flushQueuedMessages('conv-relay-1', {
+      messagesRepo: world.messagesRepo,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(source.delivery_status).toBe('queued');
+    expect(classify).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('preserves a durable mms request when unavailable media storage reclassifies execution to sms', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'media fallback', 'c-alice', {
+      type: 'mms',
+      requested_transport: 'mms',
+      media_attachments: [{ s3Key: 'uploads/unavailable-key', contentType: 'image/png' }],
+      delivery_recipients: {
+        'c-bob': { status: 'queued', requestedTransport: 'mms' },
+        'c-carol': { status: 'queued', requestedTransport: 'mms' },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(2);
+    expect(world.sent.every((sent) => sent.mediaUrls === undefined)).toBe(true);
+    expect(source.requested_transport).toBe('mms');
+    expect(source.delivery_recipients).toMatchObject({
+      'c-bob': { requestedTransport: 'mms', actualTransport: 'sms' },
+      'c-carol': { requestedTransport: 'mms', actualTransport: 'sms' },
+    });
+    expect(
+      capture.lines.filter(
+        (line) =>
+          line['msg'] ===
+          'relayFanOut: persisted transport intent differs from execution classification',
+      ),
+    ).toHaveLength(1);
   });
 
   it('does NOT fan out when the group closed after the message was enqueued (status gate, AF-2)', async () => {
@@ -755,6 +998,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
     body: string,
     senderKey: string,
     media: { s3Key: string; contentType: string }[],
+    overrides: Partial<MessageItem> = {},
   ): MessageItem {
     const providerTs = new Date().toISOString();
     const tsMsgId = buildTsMsgId(providerTs, 'SMrelay-mms-1');
@@ -771,6 +1015,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
       created_at: providerTs,
       relay_sender_key: senderKey,
       media_attachments: media,
+      ...overrides,
     };
     world.messages.push(item);
     return item;
@@ -868,5 +1113,36 @@ describe('relay.fanOut media (outbound MMS)', () => {
     expect(url1).toContain('uploads/shared-key');
     // ...but are DISTINCT presigns (per-leg, not one batched URL reused).
     expect(url0).not.toBe(url1);
+  });
+
+  it('uses fresh URLs with the persisted v1 request and records adapter actual evidence', async () => {
+    seedRelay(world);
+    const source = seedMediaSource(
+      'versioned media',
+      'c-alice',
+      [{ s3Key: 'uploads/versioned-key', contentType: 'image/png' }],
+      {
+        transport_schema_version: TRANSPORT_SCHEMA_VERSION,
+        requested_transport: 'mms',
+        delivery_recipients: {
+          'c-bob': { status: 'queued', requestedTransport: 'mms' },
+          'c-carol': { status: 'queued', requestedTransport: 'mms' },
+        },
+      },
+    );
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(2);
+    expect(world.sent[0]?.mediaUrls?.[0]).not.toBe(world.sent[1]?.mediaUrls?.[0]);
+    expect(source.delivery_recipients).toMatchObject({
+      'c-bob': { requestedTransport: 'mms', actualTransport: 'mms' },
+      'c-carol': { requestedTransport: 'mms', actualTransport: 'mms' },
+    });
   });
 });

@@ -19,7 +19,11 @@ import {
   type MediaStore,
 } from '../adapters/mediaStore.js';
 import type { Semaphore } from '../lib/semaphore.js';
-import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import {
+  createMessagingAdapter,
+  type CarrierMessageSender,
+  type MessagingAdapter,
+} from '../adapters/messaging.js';
 import {
   isHandoffMediaType,
   isTwilioDeliverableType,
@@ -320,7 +324,7 @@ export interface ApiRouterDeps {
    * self cell verify-start (adapter.sendMessage directly) use it. Injected in
    * tests (the world fake); defaults to the real adapter.
    */
-  adapter?: MessagingAdapter;
+  adapter?: MessagingAdapter & CarrierMessageSender;
   /** M1.4 System Status — injected in tests (fake, no AWS); defaults to the real service. */
   systemStatusService?: SystemStatusService;
   /** M1.5 records & intake — injected in tests; default to the real repo. */
@@ -1687,10 +1691,17 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // team-send append below (same TEAM sentinel + seeded per-member slots) so the
     // fan-out has a parent delivery_recipients map to write into once it runs.
     if (conversation.status === 'connecting') {
+      const sourceIntent = adapter.classifyMessageTransport({
+        hasForwardableMedia:
+          mediaStore !== undefined && (attachments?.length ?? 0) > 0,
+      });
       const connectingRoster = conversation.participants ?? [];
       const queuedRecipients: Record<string, RelayRecipientDelivery> = {};
       for (const member of connectingRoster) {
-        queuedRecipients[relayMemberKey(member)] = { status: 'queued' };
+        queuedRecipients[relayMemberKey(member)] = {
+          status: 'queued',
+          requestedTransport: sourceIntent.requestedTransport,
+        };
       }
       const queuedTs = new Date().toISOString();
       const queuedSid = `team-${randomUUID()}`;
@@ -1706,6 +1717,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         direction: 'outbound',
         author: 'teammate',
         deliveryStatus: 'queued_pending',
+        transportSchemaVersion: 1,
+        requestedTransport: sourceIntent.requestedTransport,
         relaySenderKey: TEAM_SENDER_KEY,
         deliveryRecipients: queuedRecipients,
         ...(bodyText !== undefined && { body: bodyText }),
@@ -1765,9 +1778,16 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // expression), so the parent delivery_recipients map must exist before the
     // first per-recipient write — appending it whole here guarantees that.
     const roster = conversation.participants ?? [];
+    const sourceIntent = adapter.classifyMessageTransport({
+      hasForwardableMedia:
+        mediaStore !== undefined && (attachments?.length ?? 0) > 0,
+    });
     const deliveryRecipients: Record<string, RelayRecipientDelivery> = {};
     for (const member of roster) {
-      deliveryRecipients[relayMemberKey(member)] = { status: 'queued' };
+      deliveryRecipients[relayMemberKey(member)] = {
+        status: 'queued',
+        requestedTransport: sourceIntent.requestedTransport,
+      };
     }
 
     // Persist the source message ONCE (the relayed message is stored once;
@@ -1789,6 +1809,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       direction: 'outbound',
       author: 'teammate',
       deliveryStatus: 'queued',
+      transportSchemaVersion: 1,
+      requestedTransport: sourceIntent.requestedTransport,
       relaySenderKey: TEAM_SENDER_KEY,
       deliveryRecipients,
       ...(bodyText !== undefined && { body: bodyText }),

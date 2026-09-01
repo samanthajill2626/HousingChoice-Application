@@ -198,6 +198,12 @@ for (const thread of railed) {
   const result = await rail.ensureGroupRail({
     conversationId: thread.conversationId,
     members: thread.participants ?? [],
+    // An operator run has no latency budget. Note this is largely INERT here:
+    // every thread this script iterates already carries a rail sid, so it
+    // adopts, and the ladder is skipped on an adopted rail. It bites only on the
+    // delete-and-recreate branch, when the rail behind the sid turned out to be
+    // closed - which is precisely when a re-created rail is seconds old.
+    awaitBindingPropagation: true,
   });
   if (result.status === 'existing') totals.verified += 1;
   else if (result.status === 'created') totals.repaired += 1;

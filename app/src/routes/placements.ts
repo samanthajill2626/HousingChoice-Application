@@ -807,27 +807,15 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     // replaced, not a regression introduced here - the difference is that the
     // stale rows are now DELETED rather than canceled, so the refetch drops them
     // entirely instead of re-rendering them as canceled.
-    // OWNERSHIP-GUARDED (spec 3.2 step 2, review round B1). The sweep is
-    // generation-BLIND, so a concurrent reschedule that landed between the
-    // finalize and here owns a LIVE ladder this sweep would delete outright.
-    // Re-read and skip unless the finalize's own rotation still stands; the 201
-    // stands either way - the conversion is persisted and is never rolled back
-    // for a sweep decision.
+    // GENERATION-SCOPED (spec 3.2 step 4, review rounds B1/NEW-1). The sweep is
+    // handed the finalize's own rotation and rides a ConditionCheck on it, so a
+    // concurrent reschedule that landed between the finalize and here keeps its
+    // freshly armed ladder: the store refuses this sweep outright rather than
+    // this handler guessing from a read. The ownership re-read that stood here
+    // is gone - it was an eventually consistent GetItem, so it could not deliver
+    // the guarantee it was added for.
     try {
-      const owner = await tours.get(tour.tourId);
-      if (owner?.currentLadderId !== rotatedLadderId) {
-        log.error(
-          {
-            tourId: tour.tourId,
-            placementId: created.placementId,
-            rotatedLadderId,
-            storedLadderId: owner?.currentLadderId,
-          },
-          'convert: a concurrent writer owns this ladder - skipping the superseded reminder sweep',
-        );
-      } else {
-        await reminders.deleteSupersededForTour(tour.tourId, rotatedLadderId);
-      }
+      await reminders.deleteSupersededForTour(tour.tourId, rotatedLadderId);
     } catch (err) {
       log.error(
         { err, tourId: tour.tourId, placementId: created.placementId, rotatedLadderId },

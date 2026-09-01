@@ -288,7 +288,7 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect((res.body.tour as Record<string, unknown>)['currentLadderId']).toBe(rotated);
   });
 
-  it('CONCURRENT REVIVAL: the post-finalize sweep is SKIPPED when another writer owns the ladder', async () => {
+  it('CONCURRENT REVIVAL: the post-finalize sweep is REFUSED BY THE STORE when another writer owns the ladder', async () => {
     const { app, world, capture } = makeWebhookHarness();
     const { tenantId, unitId } = seedTenantAndUnit(world);
 
@@ -296,9 +296,11 @@ describe('POST /api/placements/from-tour — conversion', () => {
     const ids = await seedArmedConvertibleTour(world, tourId, tenantId, unitId);
 
     // A concurrent reschedule lands between the finalize and the sweep: it
-    // rotates the pointer to its OWN ladder and arms it. The sweep is
-    // generation-BLIND, so without the ownership guard (spec 3.2 step 2, review
-    // round B1) it deletes the winner's live rungs on its way past.
+    // rotates the pointer to its OWN ladder and arms it. Every delete in the
+    // sweep rides a ConditionCheck on the finalize's own rotation (spec 3.2
+    // step 4, review rounds B1/NEW-1), so the STORE refuses the whole sweep -
+    // no read, no window, and the winner's live rungs are untouchable rather
+    // than merely un-deleted-this-time.
     const REVIVAL_LADDER = 'ladder-concurrent-revival';
     const revived: string[] = [];
     const realPatch = world.toursRepo.patch;
@@ -334,11 +336,11 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect(world.tourRemindersMap.has(ids.enRouteId)).toBe(true);
     expect(world.toursMap.get(tourId)!.currentLadderId).toBe(REVIVAL_LADDER);
 
-    const owned = capture
-      .atLevel(50)
-      .filter((l) => String(l['msg'] ?? '').includes('a concurrent writer owns this ladder'));
-    expect(owned).toHaveLength(1);
-    expect(owned[0]?.['tourId']).toBe(tourId);
+    // And NOTHING is logged at error: a newer generation taking the tour is the
+    // design working, not a failure. The repo says so at info instead.
+    expect(
+      capture.atLevel(50).filter((l) => l['tourId'] === tourId),
+    ).toHaveLength(0);
   });
 
   it('no groupThreadId on the tour → 201 with no group_thread and no rebind', async () => {

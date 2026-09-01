@@ -1209,12 +1209,22 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // justification and its only effect is to destroy reminder history. It also
     // churned a pointer write, an updatedAt bump and an SSE emit on every note
     // or outcome edit of every completed tour, in perpetuity.
+    //
+    // And a TRANSITION, not a restatement (review round NEW-4/R2-2): the patched
+    // status must also differ from the one the tour already holds. `* -> canceled`
+    // is legal from anywhere and nothing rejects a same-status PATCH, so a repeat
+    // `{status:'canceled'}` on an already-canceled tour is a 200 that would take
+    // this branch - and on the exact population M3 was fixed to protect (a
+    // PRE-MIGRATION terminal tour still carrying the old tour-wide cancel's
+    // rungs, which no post-deploy sweep has ever reached) it hard-deletes that
+    // history. The same idempotency guard the milestone emits below already use.
     const patchedStatus = patch['status'] as TourStatus | undefined;
     const terminal =
-      patchedStatus === 'canceled' ||
-      patchedStatus === 'closed' ||
-      patchedStatus === 'toured' ||
-      patchedStatus === 'no_show';
+      patchedStatus !== currentStatus &&
+      (patchedStatus === 'canceled' ||
+        patchedStatus === 'closed' ||
+        patchedStatus === 'toured' ||
+        patchedStatus === 'no_show');
     // Minted unconditionally so the compare-and-set below can name it without a
     // non-null assertion; it only reaches the store when this patch ends the
     // current ladder. On a re-arm it is a placeholder the arm's real ladderId
@@ -1239,96 +1249,108 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // scheduled.updated emit below (arm/reschedule OR retire, never both).
     let ladderChanged = false;
     if (armable && rearmTrigger) {
-      // OWNERSHIP GUARD (spec 3.2 step 2, review round B1). The sweep is
-      // generation-BLIND - its only filter is "never sent" - so a request that
-      // has already lost the pointer to a concurrent reschedule would delete the
-      // WINNER's freshly armed rows on its way past: a tour pointing at a ladder
-      // with zero rows, two 200s, and only the loser's log. Re-read the tour and
-      // abandon the whole re-arm (sweep AND arm) unless our own step-1 rotation
-      // still stands; the winner's ladder is live and correct, so there is
-      // nothing left for this request to do but report it.
+      // THE ORDER IS THE CONTRACT (spec 3.2 steps 2-4): rotate (done, riding the
+      // patch above) -> ARM -> compare-and-set the pointer onto what was armed
+      // -> and ONLY if that write WON, sweep.
       //
-      // The residual window - a full competing request landing between this read
-      // and the sweep below - is named and ACCEPTED in spec 3.2: it fires
-      // nothing, one side logs at error, and the next reschedule repairs it.
-      const owner = await tours.get(tourId);
-      if (owner?.currentLadderId !== rotation) {
+      // The sweep moved BELOW the arm when it became generation-scoped: it
+      // excludes the ladder it is handed, so it can no longer delete the rows
+      // this request just created, and running it after the compare-and-set is
+      // what makes "this request still owns the generation" a fact the STORE
+      // enforces rather than a fact a read guessed at.
+      //
+      // What stood here before was an ownership re-read - check-then-act - and
+      // review round 2 broke it twice: `toursRepo.get` was eventually consistent
+      // (NEW-1: one uncontended reschedule could take the loser branch, return
+      // the OLD time and disarm the tour with no emit), and the terminal branch
+      // below never got the guard at all (R2-1). The transactional sweep needs
+      // no read, has no window, and covers all three callers identically.
+      let ladderId: string | null;
+      try {
+        ({ ladderId } = await armTourReminders(tour, getNow(), {
+          tourRemindersRepo: reminders,
+          settingsRepo,
+          logger: log,
+        }));
+      } catch (err) {
+        // The rotation already committed, so this leaves a LIVE scheduled tour
+        // whose pointer matches nothing: disarmed, not merely unsent. Nothing
+        // fires, but nothing repairs it either - only a later scheduledAt change
+        // or an explicit move into 'scheduled' re-arms (spec 3.2, interruption
+        // posture). Rethrow: the handler's posture for an unexpected failure is
+        // to throw (see the patch write's catch above). The OLD generation's
+        // rows survive here (the sweep is below the arm now), unpointed and
+        // refused by every send path - the named earlier[]-until-next-sweep
+        // residue, which is strictly better than the empty ladder the old order
+        // left behind.
         log.error(
-          { tourId, rotation, storedLadderId: owner?.currentLadderId },
-          'tour reminders: a concurrent reschedule owns this ladder - skipping the sweep and the arm',
+          { err, tourId },
+          'tour reminders: arm failed after pointer rotation - tour is DISARMED until the next reschedule',
         );
-        // Report the WINNER's stored state; `tour` is our own patch return and
-        // still carries the rotation placeholder we just abandoned.
-        if (owner !== undefined) tour = owner;
+        throw err;
+      }
+      // The generation this request is entitled to sweep FOR, or null when it is
+      // entitled to sweep at all.
+      let sweepPointer: string | null = null;
+      if (ladderId !== null) {
+        // Spec 3.2 step 3: CONDITIONAL on the rotation still standing. Two
+        // concurrent reschedules can otherwise interleave so the pointer names a
+        // ladder the other request already retired - two 200s, a silently
+        // disarmed tour, no error.
+        const won = await tours.setLadderIdIf(tourId, rotation, ladderId);
+        if (won) {
+          // Fold the winning pointer into the response: `tour` is the pre-CAS
+          // patch return, so it still carries the placeholder rotation.
+          tour = { ...tour, currentLadderId: ladderId };
+          sweepPointer = ladderId;
+        } else {
+          log.error(
+            { tourId, rotation, ladderId },
+            'tour reminders: pointer write lost a concurrent reschedule - this ladder is unpointed',
+          );
+          // Leave the WINNER's pointer and report it, and sweep NOTHING - the
+          // rows this request armed stay in the store, unpointed and refused,
+          // until the winner's next sweep. The re-read is CONSISTENT (review
+          // round NEW-5): this response is about to tell the operator what
+          // happened to their reschedule, and an eventually consistent read can
+          // serve the pre-patch row and report that it did not happen.
+          const fresh = await tours.get(tourId, { consistentRead: true });
+          if (fresh !== undefined) tour = fresh;
+        }
       } else {
-        // Spec 3.2 step 2, and the ORDER is the contract: the rotation above rode
-        // the patch write (step 1), so by the time this runs the old generation is
-        // already refused by every send and preview path - the sweep is what stops
-        // it being SHOWN, not what stops it firing. It must therefore run BEFORE
-        // the arm: sweeping after would delete the ladder we just armed, since the
-        // only filter is "never sent" (tourRemindersRepo.deleteSupersededForTour).
-        //
+        // The arm produced NO rows (every rung clamped past the tour start, say),
+        // so there is no pointer write to win or lose. The rotation stands as
+        // this tour's final generation - matching nothing, exactly as on a
+        // terminal transition - and it is what this request sweeps for. Without
+        // this the old ladder would survive a re-arm that armed nothing, which
+        // is the one case the pre-arm sweep used to cover for free.
+        sweepPointer = rotation;
+      }
+      if (sweepPointer !== null) {
         // The catch RETHROWS: the sweep swallows its own per-row failures and
         // never throws for them, so anything that DOES escape is the list read
         // failing - an unexpected store failure, which is exactly what this
-        // handler already throws on (the patch write above, the arm below).
+        // handler already throws on (the patch write above, the arm above).
         // Silence here would leave the operator a 200 and a panel still showing
-        // the dead ladder. But the rotation has already committed, so the throw
-        // exits with a live `scheduled` tour whose pointer matches nothing -
-        // spec 3.2's interruption posture demands that be logged at error with
-        // the tourId (conformance F1), exactly as the arm branch below does.
+        // the dead ladder. Spec 3.2's interruption posture demands the tourId at
+        // error before it goes (conformance F1).
+        //
+        // The end state is NO LONGER the disarmed one the old order produced.
+        // The arm and the pointer write already succeeded, so the tour has a
+        // live ladder; what survives is the superseded generation, refused by
+        // every send path and visible in earlier[] until the next sweep. The
+        // wording says so rather than crying disarm.
         try {
-          await reminders.deleteSupersededForTour(tourId, rotation);
+          await reminders.deleteSupersededForTour(tourId, sweepPointer);
         } catch (err) {
           log.error(
             { err, tourId },
-            'tour reminders: sweep failed after pointer rotation - tour is DISARMED until the next reschedule',
+            'tour reminders: sweep failed after the pointer rotation - the superseded generation survives, refused but visible, until the next sweep',
           );
           throw err;
         }
-        let ladderId: string | null;
-        try {
-          ({ ladderId } = await armTourReminders(tour, getNow(), {
-            tourRemindersRepo: reminders,
-            settingsRepo,
-            logger: log,
-          }));
-        } catch (err) {
-          // The rotation already committed, so this leaves a LIVE scheduled tour
-          // whose pointer matches nothing: disarmed, not merely unsent. Nothing
-          // fires, but nothing repairs it either - only a later scheduledAt change
-          // or an explicit move into 'scheduled' re-arms (spec 3.2, interruption
-          // posture). Rethrow: the handler's posture for an unexpected failure is
-          // to throw (see the patch write's catch above).
-          log.error(
-            { err, tourId },
-            'tour reminders: arm failed after pointer rotation - tour is DISARMED until the next reschedule',
-          );
-          throw err;
-        }
-        if (ladderId !== null) {
-          // Spec 3.2 step 4: CONDITIONAL on the rotation still standing. Two
-          // concurrent reschedules can otherwise interleave so the pointer names a
-          // ladder the other request already retired - two 200s, a silently
-          // disarmed tour, no error.
-          const won = await tours.setLadderIdIf(tourId, rotation, ladderId);
-          if (won) {
-            // Fold the winning pointer into the response: `tour` is the pre-CAS
-            // patch return, so it still carries the placeholder rotation.
-            tour = { ...tour, currentLadderId: ladderId };
-          } else {
-            log.error(
-              { tourId, rotation, ladderId },
-              'tour reminders: pointer write lost a concurrent reschedule - this ladder is unpointed',
-            );
-            // Leave the WINNER's pointer and report it. This ladder's rows stay in
-            // the store, unpointed and refused, until the next sweep.
-            const fresh = await tours.get(tourId);
-            if (fresh !== undefined) tour = fresh;
-          }
-        }
-        ladderChanged = true;
       }
+      ladderChanged = true;
     } else if (terminal) {
       // Dead, completed, or no-show: nothing left to auto-remind, so DELETE the
       // never-sent rungs. The no-show check-in is a MANUAL send from the tour
@@ -1340,8 +1362,30 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       // Spec 3.2, terminal transitions: rotate then sweep, and STOP - no arm, so
       // the rotated pointer is FINAL and matches nothing. Sent rungs survive
       // (the sweep's only filter is "never sent") and read as earlier[]; the
-      // current ladder is empty. Same no-try/catch posture as the re-arm branch.
-      await reminders.deleteSupersededForTour(tourId, rotation);
+      // current ladder is empty.
+      //
+      // The sweep is the SAME transactional machinery the re-arm branch uses,
+      // with the rotation as the expected pointer (review round R2-1). This
+      // branch previously swept unconditionally, with no guard, no try/catch and
+      // no log: a terminal PATCH parked before its sweep, with a revival PATCH
+      // completing underneath, deleted the revival's freshly armed ladder and
+      // produced two 200s, a live scheduled tour with zero rows, and not one
+      // error line. The ConditionCheck on `rotation` is what refuses that now,
+      // and the log below is the failure signal the branch never had. (The
+      // comment that used to sit here claimed a "no-try/catch posture" the
+      // re-arm branch had already stopped having.)
+      try {
+        await reminders.deleteSupersededForTour(tourId, rotation);
+      } catch (err) {
+        // Disarmed IS the intended end state here, so the loss is the surviving
+        // debris rather than a dead ladder - but the handler's posture for an
+        // unexpected store failure is still to log the tourId and throw.
+        log.error(
+          { err, tourId },
+          'tour reminders: sweep failed after the terminal rotation - the retired generation survives, refused but visible, until the next sweep',
+        );
+        throw err;
+      }
       ladderChanged = true;
     }
     // ONE emit after the sweep+arm pair (scheduled-message-visibility Task 6):

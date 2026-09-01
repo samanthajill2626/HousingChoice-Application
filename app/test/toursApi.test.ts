@@ -1899,6 +1899,52 @@ describe('currentLadderId - the tour generation pointer', () => {
     expect(world.emitted.filter((e) => e.event === 'scheduled.updated')).toHaveLength(0);
   });
 
+  it('REPEAT terminal PATCH to the status the tour ALREADY holds rotates nothing and sweeps nothing', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    // The SECOND door onto M3's data loss (review round NEW-4/R2-2). `* ->
+    // canceled` is legal from anywhere and nothing rejects a same-status PATCH,
+    // so an idempotent re-cancel used to be a 200 that took the terminal branch
+    // and hard-deleted the legacy rungs. The population is the one M3 was filed
+    // to protect: a PRE-MIGRATION terminal tour nothing has ever swept, whose
+    // rows are the old tour-wide cancel's.
+    const tourId = 'tour-legacy-recancel';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId: 'contact-tenant-1',
+      unitId: 'unit-abc',
+      tourType: 'self_guided',
+      status: 'canceled',
+      scheduledAt: FAR,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+    const canceled = await world.tourRemindersRepo.create({
+      tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-19T22:00:00.000Z',
+    });
+    expect(await world.tourRemindersRepo.cancel(canceled.reminderId, PTR_NOW)).toBe(true);
+    const pending = await world.tourRemindersRepo.create({
+      tourId,
+      kind: 'morning_of',
+      dueAt: '2026-07-20T13:00:00.000Z',
+    });
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(res.status).toBe(200);
+
+    // Not a transition, so not a retirement: both legacy rows stand, untouched.
+    expect(world.tourRemindersMap.get(canceled.reminderId)?.canceledAt).toBe(PTR_NOW);
+    expect(world.tourRemindersMap.has(pending.reminderId)).toBe(true);
+    // ABSENT stays absent - a rotation here would also flip the tour out of the
+    // pre-migration cell permanently and orphan both rows.
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBeUndefined();
+    expect(res.body.tour.currentLadderId).toBeUndefined();
+    expect(world.emitted.filter((e) => e.event === 'scheduled.updated')).toHaveLength(0);
+  });
+
   // ---- T3.3 the compare-and-set --------------------------------------------
 
   it('CONCURRENT RESCHEDULES: the surviving pointer names a ladder whose rows exist; the loser logs', async () => {
@@ -1949,10 +1995,11 @@ describe('currentLadderId - the tour generation pointer', () => {
     expect(typeof pointer).toBe('string');
     const live = rowsFor(world, tourId);
     // Both generations' rows are in the store - A's are unpointed, and stay
-    // visible until a later sweep - but the pointer names a REAL one. (Each
-    // request swept BEFORE it armed, and A's arm is parked past B's sweep, so
-    // neither sweep can reach the other's rows: that is exactly the interleaving
-    // that leaves an unpointed generation behind.)
+    // visible until a later sweep - but the pointer names a REAL one. (B swept
+    // while A was still parked inside its arm, so B's sweep never saw A's rows;
+    // A then lost the compare-and-set and, per spec 3.2 step 4, swept nothing.
+    // That is exactly the interleaving that leaves an unpointed generation
+    // behind, and it is the residue the spec names and accepts.)
     expect(new Set(live.map((r) => r.ladderId)).size).toBe(2);
     expect(live.some((r) => r.ladderId === pointer)).toBe(true);
     // B won, so the pointer is B's ladder, and A returns the STORED tour.
@@ -1973,11 +2020,17 @@ describe('currentLadderId - the tour generation pointer', () => {
     const tourId = created.body.tour.tourId as string;
 
     // Park request A between its ROTATION (which rides the patch write, spec 3.2
-    // step 1) and its SWEEP - the exact gap review round B1's interleaving needs:
-    // A patches, B runs to completion underneath it, and A's generation-blind
-    // sweep then deletes B's freshly armed rows. Parking inside
-    // deleteSupersededForTour instead would park A PAST the ownership read, which
-    // is the residual window spec 3.2 names and ACCEPTS - not the defect.
+    // step 1) and everything after it - the exact gap review round B1's
+    // interleaving needs: A patches, B runs to completion underneath it, and A's
+    // once-generation-blind sweep then deleted B's freshly armed rows.
+    //
+    // THERE IS NO LONGER AN ACCEPTED WINDOW TO PARK OUTSIDE OF. Round 1 sat this
+    // parking point against a check-then-act ownership read and had to argue
+    // which side of the read it fell on; round 2 replaced that read with a
+    // ConditionCheck riding every delete, so the parking point no longer selects
+    // between a defect and an accepted residue. A can be parked ANYWHERE after
+    // its rotation and the winner's rows survive, because the store - not this
+    // handler's reading of a stale GetItem - is what refuses the delete.
     let releaseA: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
       releaseA = resolve;
@@ -2017,19 +2070,93 @@ describe('currentLadderId - the tour generation pointer', () => {
     // The winner's rows are all still there, BY IDENTITY - a count would be
     // satisfied by A having armed a replacement generation of the same size.
     for (const id of winnerRows) expect(world.tourRemindersMap.has(id)).toBe(true);
-    const live = rowsFor(world, tourId);
-    expect(new Set(live.map((r) => r.ladderId))).toEqual(new Set([winnerLadder]));
 
-    // The pointer names the winner, and the loser reports the winner's state.
+    // The pointer names the winner, and the loser reports the winner's state -
+    // from a CONSISTENT re-read (review round NEW-5), never from its own
+    // abandoned patch return.
     expect(world.toursMap.get(tourId)?.currentLadderId).toBe(winnerLadder);
     expect(resA.body.tour.currentLadderId).toBe(winnerLadder);
+    expect(resA.body.tour.scheduledAt).toBe(FARTHEST);
 
-    // The loser logs at error, and it is the OWNERSHIP line - it abandoned the
-    // whole re-arm, so it never reached the compare-and-set.
-    const owned = errorsMatching(capture, 'a concurrent reschedule owns this ladder');
-    expect(owned).toHaveLength(1);
-    expect(owned[0]?.['tourId']).toBe(tourId);
-    expect(errorsMatching(capture, 'pointer write lost a concurrent reschedule')).toHaveLength(0);
+    // A DID arm, because the arm no longer waits on an ownership read - it armed
+    // and then lost the compare-and-set. Its rows are the named
+    // earlier[]-until-the-next-sweep residue: present, unpointed, refused by
+    // every send path. That is the whole cost of the interleaving now.
+    const live = rowsFor(world, tourId);
+    expect(new Set(live.map((r) => r.ladderId)).size).toBe(2);
+    expect(live.some((r) => r.ladderId === winnerLadder)).toBe(true);
+
+    // One error line, and it is the compare-and-set's. The ownership line the
+    // check-then-act guard used to emit does not exist any more.
+    const lost = errorsMatching(capture, 'pointer write lost a concurrent reschedule');
+    expect(lost).toHaveLength(1);
+    expect(lost[0]?.['tourId']).toBe(tourId);
+    expect(errorsMatching(capture, 'a concurrent reschedule owns this ladder')).toHaveLength(0);
+  });
+
+  it('TERMINAL vs REVIVAL: a canceling PATCH parked before its sweep never deletes the revival\'s ladder', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    const tourId = created.body.tour.tourId as string;
+
+    // Conformance round-2 R2-1, reproduced: the terminal branch was the one
+    // caller the fix-wave-1 ownership read never reached, so a terminal PATCH
+    // could be delayed arbitrarily after its rotation committed and then delete
+    // every unsent row regardless of generation. A = PATCH {status:'canceled'},
+    // parked right after its rotation lands; B = PATCH {scheduledAt}, which
+    // auto-advances a canceled tour back to 'scheduled' (a first-class product
+    // flow) and arms a fresh ladder underneath A.
+    let releaseA: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let signalEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let parked = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates) => {
+      const out = await realPatch(id, updates);
+      if (!parked) {
+        parked = true;
+        signalEntered();
+        await gate;
+      }
+      return out;
+    };
+
+    const pendingA = authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ status: 'canceled' })
+      .then((r) => r);
+    await entered;
+
+    const resB = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHEST });
+    expect(resB.status).toBe(200);
+    expect(resB.body.tour.status).toBe('scheduled');
+    const winnerLadder = resB.body.tour.currentLadderId as string;
+    const winnerRows = rowsFor(world, tourId).map((r) => r.reminderId);
+    expect(winnerRows.length).toBeGreaterThan(0);
+
+    releaseA();
+    const resA = await pendingA;
+    expect(resA.status).toBe(200);
+
+    // BY IDENTITY: every row B armed is still there. The measured end state
+    // before this fix was rowsLeft=0 - a live scheduled tour pointing at a
+    // ladder with no rungs, two 200s, and not one error log.
+    for (const id of winnerRows) expect(world.tourRemindersMap.has(id)).toBe(true);
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBe(winnerLadder);
+    expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
+    const live = rowsFor(world, tourId);
+    expect(live.some((r) => r.ladderId === winnerLadder)).toBe(true);
+
+    // The store refused A's sweep; nothing failed, so nothing is logged at error.
+    expect(capture.atLevel(50).filter((l) => l['tourId'] === tourId)).toHaveLength(0);
   });
 
   // ---- T3.6 interruption logging -------------------------------------------
@@ -2052,20 +2179,28 @@ describe('currentLadderId - the tour generation pointer', () => {
     // (the patch write's own catch rethrows anything that is not a CCFE).
     expect(res.status).toBe(500);
 
-    // The rotation AND the sweep already committed: a live scheduled tour with
-    // no rungs at all, pointing at nothing. Disarmed, not merely unsent - which
-    // is why the log line below has to be loud.
+    // The rotation already committed and the arm did not, so the tour is a live
+    // scheduled one pointing at a ladder no row carries: disarmed, not merely
+    // unsent - which is why the log line below has to be loud.
     const stored = world.toursMap.get(tourId);
     expect(typeof stored?.currentLadderId).toBe('string');
     expect(stored?.currentLadderId).not.toBe(armedLadder);
-    expect(rowsFor(world, tourId)).toHaveLength(0);
+    // The OLD generation's rows SURVIVE now that the sweep sits below the arm
+    // (review round NEW-1's redesign). They are unpointed and refused by every
+    // send path, and they read as earlier[] until the next sweep - strictly more
+    // recoverable than the zero-row end state the pre-arm sweep produced, and
+    // the reason the log line is about the arm rather than about the rows.
+    const left = rowsFor(world, tourId);
+    expect(left.length).toBeGreaterThan(0);
+    expect(new Set(left.map((r) => r.ladderId))).toEqual(new Set([armedLadder]));
+    expect(left.some((r) => r.ladderId === stored?.currentLadderId)).toBe(false);
 
     const disarmed = errorsMatching(capture, 'arm failed after pointer rotation');
     expect(disarmed).toHaveLength(1);
     expect(disarmed[0]?.['tourId']).toBe(tourId);
   });
 
-  it('SWEEP FAILURE after the rotation is LOUD too - the same disarmed end state', async () => {
+  it('SWEEP FAILURE after the re-arm is LOUD too - and the ladder it armed is LIVE', async () => {
     const { app, world, capture } = makeWebhookHarness({ toursNow: () => PTR_NOW });
 
     const created = await authed(app)
@@ -2075,9 +2210,9 @@ describe('currentLadderId - the tour generation pointer', () => {
     const armedLadder = soleLadderId(rowsFor(world, tourId));
 
     // The sweep swallows its own per-row failures, so anything escaping it is the
-    // LIST read failing. Same posture as the arm below it: rethrow - but the
-    // rotation has already committed, so spec 3.2's interruption posture wants
-    // the tourId logged at error before it goes (conformance F1).
+    // LIST read failing. Same posture as the arm above it: rethrow - and spec
+    // 3.2's interruption posture wants the tourId logged at error before it goes
+    // (conformance F1).
     world.tourRemindersRepo.deleteSupersededForTour = async () => {
       throw new Error('reminder store unavailable');
     };
@@ -2085,13 +2220,20 @@ describe('currentLadderId - the tour generation pointer', () => {
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHER });
     expect(res.status).toBe(500);
 
+    // NOT the disarmed end state any more: the sweep runs last, so the arm and
+    // the pointer write both landed and the tour points at a REAL ladder. What
+    // survives is the superseded generation - refused, and visible in earlier[]
+    // until the next sweep. The log line says exactly that.
     const stored = world.toursMap.get(tourId);
     expect(typeof stored?.currentLadderId).toBe('string');
     expect(stored?.currentLadderId).not.toBe(armedLadder);
+    const live = rowsFor(world, tourId);
+    expect(live.some((r) => r.ladderId === stored?.currentLadderId)).toBe(true);
+    expect(live.some((r) => r.ladderId === armedLadder)).toBe(true);
 
-    const disarmed = errorsMatching(capture, 'sweep failed after pointer rotation');
-    expect(disarmed).toHaveLength(1);
-    expect(disarmed[0]?.['tourId']).toBe(tourId);
+    const loud = errorsMatching(capture, 'sweep failed after the pointer rotation');
+    expect(loud).toHaveLength(1);
+    expect(loud[0]?.['tourId']).toBe(tourId);
   });
 
   it('CREATE-path pointer write failure is LOUD, and the 201 still lands', async () => {

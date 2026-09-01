@@ -8,11 +8,17 @@ design and plan are frozen at
 [`2026-08-26-tour-reminder-ladder-design.md`](../../specs/2026-08-26-tour-reminder-ladder-design.md)
 and [`2026-08-26-tour-reminder-ladder.md`](../../plans/2026-08-26-tour-reminder-ladder.md).
 
-**Phase B is LIVE and continues this work on the same five files**, naming
-Phase A's spec as its predecessor - see
+**Phase B continued this work on the same five files** and names Phase A's spec
+as its predecessor - see
 [`2026-08-31-tour-reminder-ladder-phase-b-design.md`](../../specs/2026-08-31-tour-reminder-ladder-phase-b-design.md).
-A third effort, tour-reminder supersession cleanup, is parked behind it on the
-same seam. Read those before treating anything here as settled.
+**Phase B is merged too** (0 ahead as of 2026-09-01), so that spec is history as
+well; read the CODE for current behaviour.
+
+**A third effort, tour-reminder supersession cleanup, is IN FLIGHT** on this same
+seam - unmerged and well ahead - and will move these files again. Its records are
+being written to `docs/superpowers/reviews/2026-09-01-tour-reminder-supersession/`
+under the current keep-the-reasoning rule, so they will land with it rather than
+needing rescue.
 
 ## Layout
 

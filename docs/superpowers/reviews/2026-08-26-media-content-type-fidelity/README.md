@@ -46,10 +46,10 @@ branch had been merged into `feat/mms-image-viewer` at `5b2d3a37` as an
 authorized prerequisite and rode in from there. Only
 `git merge-base --is-ancestor` plus a 0-ahead count settles it.
 
-**STILL OUTSTANDING, human-run:** the content-type **backfill** - per
-environment, AFTER that environment's deploy, `--dry-run` first, dev fully
-through before prod. Until it runs, historical inbound media stays opaque and
-only newly-arriving media is correct. `RUNBOOK.md` carries the procedure.
+**Nothing is outstanding.** The content-type **backfill has been RUN in every
+environment** (operator-confirmed 2026-09-01), so historical inbound media is
+repaired, not just newly-arriving media. `RUNBOOK.md` keeps the procedure as the
+record of how it was done and for any future dataset.
 
 ## Why this record is worth keeping
 

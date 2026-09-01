@@ -3,10 +3,11 @@
 > describes how this work was *designed/planned at the time of writing*. Phase A shipped to
 > `main` and its feature branch + worktree were deleted during worktree cleanup. **This file
 > is NOT current documentation, and the live code may have drifted from it.** Phase B
-> continues this work and names this file as its predecessor - for anything still moving read
-> `docs/superpowers/specs/2026-08-31-tour-reminder-ladder-phase-b-design.md`, then the code.
-> The mission's review record is preserved at
-> `docs/superpowers/reviews/2026-08-30-tour-reminder-ladder/`.
+> continued this work and names this file as its predecessor; it is ALSO merged, so
+> `docs/superpowers/specs/2026-08-31-tour-reminder-ladder-phase-b-design.md` is history too -
+> read the CODE for current behaviour. A third effort, tour-reminder supersession cleanup, is
+> IN FLIGHT on this same seam and will move these files again. The mission's review record is
+> preserved at `docs/superpowers/reviews/2026-08-30-tour-reminder-ladder/`.
 
 # Tour Reminder Ladder Implementation Plan
 

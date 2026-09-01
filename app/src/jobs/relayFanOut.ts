@@ -29,10 +29,20 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import {
   createConversationsRepo,
+  getOwner,
   type ConversationParticipant,
   type ConversationsRepo,
+  type RelayOwner,
 } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
+import { createUnitsRepo, unitContacts, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
+import { resolveTourContactNames, type TourContactNames } from '../lib/tourContacts.js';
+import { formatStreet } from '../lib/address.js';
+import { formatLocalDate, formatLocalTime } from '../lib/localTime.js';
+import { localDateOf, resolveQuietHoursTimezone } from '../lib/quietHours.js';
 import {
   createMessagesRepo,
   mediaAttachmentsOf,
@@ -226,82 +236,293 @@ export function composeNameList(memberNames: (string | undefined)[]): string {
  * phone with no contact row, and an unvalued `{name}` in a non-editable default
  * throws rather than degrading.
  *
- * Lower-cased, unlike the sentence-initial ANONYMOUS_JOINED_LABEL it replaces,
- * because Sam's Phase B wording puts it MID-sentence: "Hey, adding a new member
- * to the group." Written and pinned here; WIRED in Task 14, which deletes
- * ANONYMOUS_JOINED_LABEL rather than leaving it beside this.
+ * Lower-cased, unlike the sentence-initial constant it replaced ("A new
+ * member"), because Sam's Phase B wording puts it MID-sentence: "Hey, adding a
+ * new member to the group."
  */
 export function joinedName(name: string | undefined): string {
   return name && name.trim().length > 0 ? firstNameOnly(name) : 'a new member';
 }
 
 /**
- * Intro body naming everyone connected (M1.7). E.g. "HousingChoice. You're
- * now connected with Alice, Bob, and Carol on this number. Reply here and
- * everyone in the group sees it. Reply STOP to opt out."
+ * The plain values the two relay composers interpolate, resolved ONCE by
+ * resolveRelayComposeInputs below and then handed to a PURE, synchronous
+ * composer - the same resolver/composer split Phase A's tour copy uses
+ * (messages/tourCopy.ts). No repo read lives below this shape.
  *
- * A2P (spec §5): the intro is a first-contact message, so it carries the brand
- * identity (leading) and the opt-out instruction (trailing — founder wording
- * 2026-07-14: content first, STOP last). Both fold into the catalog default.
+ * `variant` is the entry selection (spec 9.1): tour today / tour any other day
+ * / placement / the naked intro. `role` is the member-added half only (9.4) and
+ * is resolved INDEPENDENTLY of the variant - a group whose intro degraded to
+ * naked for want of a street still knows who joined it.
  */
-export function composeIntroBody(memberNames: (string | undefined)[]): string {
-  // The count-plurality / Oxford-list name list feeds the {names} token of the
-  // `relay.intro` catalog default, which now carries the connection sentence
-  // itself (Phase B spec 9.2). Signature unchanged on purpose: Task 13 rewires
-  // the token WITHOUT moving any call site, and the byte-identity pin in
-  // relayFanOut.test.ts proves the seam. Task 14 changes the signature when the
-  // owner-routed variants land.
+export interface RelayComposeInputs {
+  variant: 'tour_today' | 'tour' | 'placement' | 'naked';
+  /** Absent -> the composer substitutes 'there' (spec 9.5's in-sentence exception). */
+  tenantFirstName?: string;
+  /** Absence forces variant 'naked' (spec 9.5). */
+  propertyContactFirstName?: string;
+  /** The STREET only (formatStreet). Empty forces variant 'naked' (spec 9.5). */
+  where?: string;
+  /** "Tue, Sep 8 at 3:00 PM" - the dated tour variant only. */
+  when?: string;
+  /** "3:00 PM" - the today tour variant only. */
+  time?: string;
+  /** member_added only (spec 9.4's role table). */
+  role?: 'property manager' | 'landlord' | 'tenant';
+}
+
+/**
+ * What the resolver reads, all OPTIONAL (ruling R11).
+ *
+ * The JOB wires every one of them; a PREVIEW caller wires what its route holds,
+ * and `services/rosterEdits` threads them off RosterResolutionDeps, whose new
+ * picks are optional so the ~25 hand-built deps objects in rosterEdits.test.ts
+ * stay valid. An absent repo is simply a read that cannot answer, which lands
+ * in the same place every failed read does: `variant: 'naked'` (spec 9.5).
+ *
+ * `nowIso` is the instant the "is the tour TODAY" test is made against. The
+ * preview passes its QuietHoursState's own `nowIso` (the routes' injected
+ * clock), so a pinned-clock test sees a deterministic variant.
+ */
+export interface RelayComposeDeps {
+  toursRepo?: Pick<ToursRepo, 'get'>;
+  placementsRepo?: Pick<PlacementsRepo, 'getById'>;
+  unitsRepo?: Pick<UnitsRepo, 'getById'>;
+  contactsRepo?: Pick<ContactsRepo, 'getById'>;
+  settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
+  nowIso?: string;
+  logger?: Logger;
+}
+
+/** Spec 9.4's role table. Source is UnitContact.role (repos/unitsRepo.ts), NOT
+ *  ContactItem.type, which has no property-manager value at all. The owning
+ *  tour's / placement's own tenant outranks any roster row they might also
+ *  hold. Anything else - 'other', a stranger, a bare-phone member with no
+ *  contactId, no unit - resolves to NO role, which routes the announcement to
+ *  the no-role entry rather than faking one. */
+function resolveMemberRole(
+  unit: UnitItem | undefined,
+  tenantId: string,
+  addedContactId: string | undefined,
+): RelayComposeInputs['role'] | undefined {
+  if (addedContactId === undefined || addedContactId.length === 0) return undefined;
+  if (addedContactId === tenantId) return 'tenant';
+  if (unit === undefined) return undefined;
+  const row = unitContacts(unit).find((c) => c.contactId === addedContactId);
+  switch (row?.role) {
+    case 'pm':
+      return 'property manager';
+    case 'landlord':
+    case 'owner':
+      return 'landlord';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Resolve everything the relay intro / member-added copy needs, from the
+ * conversation's OWNER (spec 9.3).
+ *
+ * Keyed on the owner `{type, id}` rather than on a conversation ON PURPOSE:
+ * buildOpenPreview (services/rosterEdits.ts) has no conversation to pass -
+ * preview-open runs BEFORE provisioning and 409s once a thread exists - so a
+ * conversation-keyed resolver would be uncallable from the very authoring path
+ * that stores the operator's edited intro_body. Both jobs and both owner
+ * previews go through this one function, so the preview cannot drift from the
+ * send by construction rather than by discipline.
+ *
+ * IT NEVER THROWS. Every read gets its OWN try/catch and degrades toward
+ * `variant: 'naked'` (spec 9.5): a relay intro must never be lost over a failed
+ * unit read - it is composed AFTER the job's putJobExecutionMarker claim, so a
+ * throw loses the announcement rather than retrying it - and the preview route
+ * must never 500. formatLocalDate / formatLocalTime RangeError on an
+ * unparseable instant, so they are inside the try as well.
+ *
+ * A SETTINGS read failure degrades the tour variants to naked rather than
+ * assuming the default zone (choice recorded here): {time} and {when} are FACTS
+ * in a tenant's SMS, and a wrong-zone "3:00 PM" is worse copy than the naked
+ * intro. getOrgSettings already answers with defaults when no row exists, so a
+ * throw here is a genuine read failure, not an unconfigured org. The placement
+ * variant reads no settings at all.
+ */
+export async function resolveRelayComposeInputs(
+  owner: RelayOwner,
+  deps: RelayComposeDeps,
+  /** member_added only: resolve {role} for THIS contact (spec 9.4). */
+  addedContactId?: string,
+): Promise<RelayComposeInputs> {
+  const log = deps.logger ?? defaultLogger;
+  if (owner.type === null) return { variant: 'naked' };
+
+  let tenantId: string;
+  let unitId: string;
+  let scheduledAt: string | undefined;
+  try {
+    if (owner.type === 'tour') {
+      // ToursRepo's getter is get(), never getById().
+      const tour = await deps.toursRepo?.get(owner.id);
+      if (!tour) return { variant: 'naked' };
+      tenantId = tour.tenantId;
+      unitId = tour.unitId;
+      // OPTIONAL on TourItem: a 'requested' tour has no time at all, which
+      // spec 9.5 routes to the naked intro (there is no {when} to render).
+      scheduledAt = tour.scheduledAt;
+    } else {
+      const placement = await deps.placementsRepo?.getById(owner.id);
+      if (!placement) return { variant: 'naked' };
+      tenantId = placement.tenantId;
+      unitId = placement.unitId;
+    }
+  } catch (err) {
+    log.warn({ err, ownerType: owner.type, ownerId: owner.id }, 'relay copy: owner read failed - naked intro');
+    return { variant: 'naked' };
+  }
+
+  let unit: UnitItem | undefined;
+  try {
+    unit = await deps.unitsRepo?.getById(unitId);
+  } catch (err) {
+    log.warn({ err, unitId }, 'relay copy: unit read failed - naked intro');
+  }
+
+  // The role is a DIFFERENT question from the intro variant and is answered
+  // even when the variant degrades: it needs only the unit roster.
+  const role = resolveMemberRole(unit, tenantId, addedContactId);
+  const withRole = role !== undefined ? { role } : {};
+
+  // REUSE (spec 9.3): resolveTourContactNames already applies the primary-
+  // contact-then-landlord rule, the tenant de-dupe, and inertName's brace
+  // stripping (which is what keeps a user-supplied name from re-opening a
+  // token). It never throws; the try is belt-and-braces around the repo pick.
+  let names: TourContactNames = {};
+  if (deps.contactsRepo !== undefined) {
+    try {
+      const resolved = await resolveTourContactNames({
+        tenantId,
+        unit,
+        contactsRepo: deps.contactsRepo,
+        ...(deps.logger !== undefined && { logger: deps.logger }),
+      });
+      names = resolved.names;
+    } catch (err) {
+      log.warn({ err, unitId }, 'relay copy: name resolution failed - naked intro');
+    }
+  }
+  const withNames = {
+    ...(names.tenantFirstName !== undefined && { tenantFirstName: names.tenantFirstName }),
+    ...withRole,
+  };
+
+  const where = formatStreet(unit?.address);
+  if (names.propertyContactFirstName === undefined || where.length === 0) {
+    return { variant: 'naked', ...withNames };
+  }
+  const named = {
+    ...withNames,
+    propertyContactFirstName: names.propertyContactFirstName,
+    where,
+  };
+
+  if (owner.type === 'placement') return { variant: 'placement', ...named };
+  if (scheduledAt === undefined) return { variant: 'naked', ...withNames };
+
+  let timezone: string;
+  try {
+    const settings = await deps.settingsRepo?.getOrgSettings();
+    if (!settings) return { variant: 'naked', ...withNames };
+    // The SAME seam the booked-too-late same-day test uses, so "today" here and
+    // "today" there can never disagree (spec 9.1).
+    timezone = resolveQuietHoursTimezone(settings);
+  } catch (err) {
+    log.warn({ err }, 'relay copy: org settings read failed - naked intro');
+    return { variant: 'naked', ...withNames };
+  }
+
+  try {
+    const nowIso = deps.nowIso ?? new Date().toISOString();
+    const time = formatLocalTime(scheduledAt, timezone);
+    if (localDateOf(nowIso, timezone) === localDateOf(scheduledAt, timezone)) {
+      return { variant: 'tour_today', ...named, time };
+    }
+    // "on {when}", not Sam's "at {when}": our {when} renders "Tue, Sep 8 at
+    // 3:00 PM" (tourCopy.ts builds it the same way), so "at Tue, Sep 8 at
+    // 3:00 PM" reads badly. Cameron approved "on" for the dated form.
+    return { variant: 'tour', ...named, when: `${formatLocalDate(scheduledAt, timezone)} at ${time}` };
+  } catch (err) {
+    log.warn({ err, ownerId: owner.id }, 'relay copy: tour time unformattable - naked intro');
+    return { variant: 'naked', ...withNames };
+  }
+}
+
+/**
+ * The relay intro body, routed on the conversation's owner (spec 9.1).
+ *
+ * PURE and synchronous: everything it needs was resolved above. Precedence 1 -
+ * an operator-edited intro_body - is applied by the CALLER, above this.
+ *
+ * TOTAL, twice over. `tenantFirstName` falls back to 'there' the way Phase A
+ * does (messages/tourCopy.ts), because the tour and placement entries OPEN with
+ * "Hey {tenantFirstName}!" and are strict non-editable defaults - an unvalued
+ * declared token there THROWS rather than degrading. And a variant whose own
+ * tokens are missing falls back to the naked entry rather than throwing: the
+ * resolver already guarantees they are present, but this is the last line of
+ * spec 9.5's defence for a hand-built inputs value.
+ */
+export function composeIntroBody(
+  inputs: RelayComposeInputs,
+  memberNames: (string | undefined)[],
+): string {
+  const tenantFirstName = inputs.tenantFirstName ?? 'there';
+  const propertyContactFirstName = inputs.propertyContactFirstName ?? '';
+  const where = inputs.where ?? '';
+  if (propertyContactFirstName.length > 0 && where.length > 0) {
+    if (inputs.variant === 'tour_today' && inputs.time !== undefined) {
+      return resolveMessage('relay.intro_tour_today', {
+        tenantFirstName,
+        propertyContactFirstName,
+        time: inputs.time,
+        where,
+      });
+    }
+    if (inputs.variant === 'tour' && inputs.when !== undefined) {
+      return resolveMessage('relay.intro_tour', {
+        tenantFirstName,
+        propertyContactFirstName,
+        when: inputs.when,
+        where,
+      });
+    }
+    if (inputs.variant === 'placement') {
+      return resolveMessage('relay.intro_placement', {
+        tenantFirstName,
+        propertyContactFirstName,
+        where,
+      });
+    }
+  }
+  // The naked intro: the live copy, unchanged, naming whoever is connected.
   return resolveMessage('relay.intro', { names: composeNameList(memberNames) });
 }
 
-/** Neutral joined label when the added member has no resolved name (never a phone). */
-const ANONYMOUS_JOINED_LABEL = 'A new member';
-
 /**
- * The pre-Phase-B connection SENTENCE, kept module-private for the ONE caller
- * still on the old `relay.member_added` shape.
+ * The GROUP half of the member-added split (spec 9.4): what everyone ALREADY on
+ * the thread receives. The NEW member receives the naked intro instead
+ * (composeIntroBody with variant 'naked'), which is defined at the member-added
+ * job handler below and at buildAddPreview's docblock.
  *
- * Phase B moves that copy into the catalog for the intro (spec 9.2), but
- * `relay.member_added` is deliberately NOT touched in Task 13 - it is rewritten
- * ONCE in Task 14, with the per-recipient split, so the seven assertion sites
- * across three app suites and three e2e files re-baseline exactly once. Keeping
- * the old text here rather than rebuilding it from composeNameList preserves the
- * one branch the two disagree on: a single nameless member RESTRUCTURED this
- * sentence, and 9.2's token form cannot. DELETED in Task 14 together with
- * ANONYMOUS_JOINED_LABEL.
+ * Two entries rather than one with an empty clause, because {role} sits
+ * MID-sentence and Phase A spec 6.4's empty-clause trick only works for a
+ * trailing sentence. `{name}` is TOTAL (joinedName) - never a phone.
  */
-function legacyConnectionSentence(memberNames: (string | undefined)[]): string {
-  const anyNamed = memberNames.some((n) => n !== undefined && n.trim().length > 0);
-  if (!anyNamed && memberNames.length <= 1) {
-    return `You're now connected on this number. Reply here and the group sees it.`;
-  }
-  return `You're now connected with ${composeNameList(memberNames)} on this number. Reply here and everyone in the group sees it.`;
-}
-
-/**
- * Member-added announcement (founder decision 2026-07-14): one body sent to
- * the WHOLE group — the new member's first contact on this number (leading
- * brand + trailing STOP fold in like the intro) doubling as the join notice
- * for everyone else. E.g. "Hey! Carol joined this group chat. You're now
- * connected with Alice, Bob, and Carol on this number. Reply here and everyone
- * in the group sees it."
- *
- * The joiner is named by FIRST name (2026-08-20), matching the connection
- * sentence - mixing "Carol Brown joined" with "connected with ... Carol" in one
- * body reads like two different people.
- */
-export function composeMemberAddedBody(
+export function composeMemberAddedGroupBody(
+  inputs: RelayComposeInputs,
   newMemberName: string | undefined,
-  memberNames: (string | undefined)[],
 ): string {
-  const who =
-    newMemberName && newMemberName.trim().length > 0
-      ? firstNameOnly(newMemberName)
-      : ANONYMOUS_JOINED_LABEL;
-  return resolveMessage('relay.member_added', {
-    joined: `${who} joined this group chat.`,
-    members: legacyConnectionSentence(memberNames),
-  });
+  const name = joinedName(newMemberName);
+  return inputs.role !== undefined
+    ? resolveMessage('relay.member_added_role', { name, role: inputs.role })
+    : resolveMessage('relay.member_added', { name });
 }
 
 export interface RelayIntroPayload {
@@ -358,6 +579,15 @@ export interface RelayFanOutJobDeps {
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
   /**
+   * The four reads the OWNER-ROUTED intro / member-added copy needs (Phase B
+   * spec 9.3). Optional and lazily created like every repo above; a test injects
+   * fakes through them. Absent at runtime they are built on first job run.
+   */
+  unitsRepo?: UnitsRepo;
+  toursRepo?: ToursRepo;
+  placementsRepo?: PlacementsRepo;
+  settingsRepo?: SettingsRepo;
+  /**
    * Media bucket store for presigning relay-leg media (outbound MMS). Undefined
    * when MEDIA_BUCKET is unset (a no-bucket dev loop): the media-only body still
    * relays as text, but no media is attached. Lazily created on first job run.
@@ -375,10 +605,55 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
   let conversations = deps.conversationsRepo;
   let messages = deps.messagesRepo;
   let contacts = deps.contactsRepo;
+  // The owner-routed copy's reads (spec 9.3), lazy on the same `??=` pattern.
+  let units = deps.unitsRepo;
+  let tours = deps.toursRepo;
+  let placements = deps.placementsRepo;
+  let settings = deps.settingsRepo;
   // MediaStore can legitimately resolve to undefined (no MEDIA_BUCKET), so a
   // separate init flag drives the lazy build (not `??=`, which would rebuild).
   let mediaStore = deps.mediaStore;
   let mediaStoreInit = deps.mediaStore !== undefined;
+
+  /**
+   * The owner-routed copy inputs for both announcement handlers (spec 9.3).
+   *
+   * The four repos are built ONLY on the owned path: a standalone group's owner
+   * is `{type:null}`, the resolver answers naked without reading anything, and
+   * building four DynamoDB-backed repos to learn that would be waste - and would
+   * drag every standalone relay test into needing them injected.
+   */
+  async function resolveOwnerInputs(
+    owner: RelayOwner,
+    addedContactId?: string,
+  ): Promise<RelayComposeInputs> {
+    if (owner.type === null) return { variant: 'naked' };
+    try {
+      units ??= createUnitsRepo({ logger: deps.logger });
+      tours ??= createToursRepo({ logger: deps.logger });
+      placements ??= createPlacementsRepo({ logger: deps.logger });
+      settings ??= createSettingsRepo({ logger: deps.logger });
+    } catch (err) {
+      // CONSTRUCTION, not a read - and it is outside resolveRelayComposeInputs'
+      // own try/catches, so without this an unbuildable repo would throw here,
+      // AFTER the idempotency claim, and LOSE the announcement. The whole point
+      // of spec 9.5 is that a failure downgrades the copy, never the send.
+      log.warn({ err, ownerType: owner.type }, 'relay copy: repo construction failed - naked intro');
+      return { variant: 'naked' };
+    }
+    return resolveRelayComposeInputs(
+      owner,
+      {
+        toursRepo: tours,
+        placementsRepo: placements,
+        unitsRepo: units,
+        ...(contacts !== undefined && { contactsRepo: contacts }),
+        settingsRepo: settings,
+        ...(deps.logger !== undefined && { logger: deps.logger }),
+      },
+      addedContactId,
+    );
+  }
 
   defineJobHandler(RELAY_FANOUT_JOB, async (rawPayload) => {
     const payload = parseRelayFanOutPayload(rawPayload);
@@ -686,11 +961,24 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     // still change between the preview and this job, and a composed body follows
     // it while a pinned one cannot. Edited text wins anyway: a human chose it.
     const edited = typeof conversation?.intro_body === 'string' ? conversation.intro_body : '';
-    const body = edited.length > 0 ? edited : composeIntroBody(roster.map((m) => m.name));
+    let body: string;
     if (edited.length > 0) {
+      // PRECEDENCE 1 (spec 9.1), applied FIRST and verbatim: an operator-edited
+      // body wins outright, so the four owner reads below are not even made.
+      body = edited;
       log.info(
         { conversationId: payload.relayConversationId },
         'relay intro: sending the operator-edited body, not the composed default',
+      );
+    } else {
+      // Precedence 2-4: tour, then placement, then naked - routed on the
+      // conversation's own owner, which this handler already holds.
+      const inputs = await resolveOwnerInputs(
+        conversation ? getOwner(conversation) : { type: null },
+      );
+      body = composeIntroBody(
+        inputs,
+        roster.map((m) => m.name),
       );
     }
     await sendRelayAnnouncement(
@@ -711,11 +999,13 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     );
   });
 
-  // relay.memberAdded (founder decision 2026-07-14): announce a member added
-  // to an EXISTING group to the WHOLE group — the new member's welcome (their
-  // first contact on this number) doubling as everyone else's join notice.
-  // Persisted as a system announcement (visible in the dashboard thread) with
-  // per-member delivery slots. Idempotent via the job execution marker.
+  // relay.memberAdded. The founder decision of 2026-07-14 made this ONE body to
+  // the whole group, precisely so it could double as the new member's first
+  // contact. Phase B REVERSES that (Cameron 2026-08-31, on Sam's 2026-08-24
+  // wording, spec 9.4): the group hears "Hey, adding <name> to the group[ as the
+  // <role>]." and the new member gets the naked intro. Still ONE persisted row
+  // with per-member delivery slots - carrying the NEW MEMBER's body (spec 9.6).
+  // Idempotent via the job execution marker.
   defineJobHandler(RELAY_MEMBER_ADDED_JOB, async (rawPayload) => {
     const payload = parseRelayMemberAddedPayload(rawPayload);
     adapter ??= createMessagingAdapter({ logger: deps.logger });
@@ -733,10 +1023,26 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     }
 
     const conversation = await conversations.getById(payload.relayConversationId);
+    // The POST-ADD roster: the add landed before this job was enqueued, so the
+    // new member is on it (a raced remove degrades to the neutral joined label).
     const roster = (conversation?.participants ?? []) as ConversationParticipant[];
     const added = roster.find((m) => relayMemberKey(m) === payload.addedMemberKey);
-    const body = composeMemberAddedBody(
-      added?.name,
+    // addedMemberKey is a relayMemberKey - the contactId when there is one, ELSE
+    // `phone#<E164>` - so it is NOT a contactId in general. The role lookup
+    // needs a real contactId, which only the roster row can supply.
+    const addedContactId =
+      added?.contactId !== undefined && added.contactId.length > 0 ? added.contactId : undefined;
+    const inputs = await resolveOwnerInputs(
+      conversation ? getOwner(conversation) : { type: null },
+      addedContactId,
+    );
+    // THE SPLIT (spec 9.4): the group hears who joined; the NEW member gets the
+    // naked intro instead, because they can see no history - a relay member
+    // receives forward traffic only - so this message IS their whole context,
+    // and the naked intro is the one that says "it's Sam" and names the group.
+    const groupBody = composeMemberAddedGroupBody(inputs, added?.name);
+    const newMemberBody = composeIntroBody(
+      { ...inputs, variant: 'naked' },
       roster.map((m) => m.name),
     );
     await sendRelayAnnouncement(
@@ -748,7 +1054,16 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
         ...(deps.logger !== undefined && { logger: deps.logger }),
       },
-      { conversationId: payload.relayConversationId, body, kind: 'relay.member_added' },
+      {
+        conversationId: payload.relayConversationId,
+        // ONE row, and the persisted body is the NEW MEMBER's (spec 9.6,
+        // Cameron 2026-08-31): one bubble, one rollup chip, and of the two
+        // copies the new member's is the one worth seeing in the thread.
+        body: newMemberBody,
+        kind: 'relay.member_added',
+        bodyFor: (m) =>
+          relayMemberKey(m) === payload.addedMemberKey ? newMemberBody : groupBody,
+      },
     );
   });
 }

@@ -385,21 +385,43 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     channel: 'sms',
     vars: ['tenantFirstName', 'propertyContactFirstName', 'where'],
   },
-  // Member added to an EXISTING group: announced to the WHOLE group. {joined} =
-  // "<Name> joined this group chat." and {members} = the connection sentence,
-  // both computed in code (jobs/relayFanOut.ts composeMemberAddedBody). The
-  // founder's wording also wanted the new member's ROLE ("who is
-  // tenant/landlord/property manager"); there is no role token on this job, so
-  // it is left out rather than faked. TODO(founder-message-template-updates-owed).
-  // editable:false for the same reason as relay.intro above - composeMemberAdded-
-  // Body passes no overrides either, and nothing can store one.
+  // Member added to an EXISTING group - the NO-ROLE wording (spec 9.4), sent to
+  // everyone ALREADY on the thread.
+  //
+  // do-not-remove-without-reading - THIS ENTRY REVERSES THE FOUNDER DECISION OF
+  // 2026-07-14, dated here so nobody re-derives the old rationale and "fixes" it
+  // back. That decision made member_added a SINGLE body to the whole group
+  // ("Hey! <Name> joined this group chat. You're now connected with ...")
+  // precisely so it could double as the new member's first contact. Phase B
+  // splits it per recipient: the group hears this line, and the NEW MEMBER
+  // receives the naked relay.intro instead, with the full post-add roster in
+  // {names} - the right body for them because a relay member can see no history
+  // (they receive forward traffic only), so that message IS their whole context,
+  // and it is the one that carries "it's Sam" and says who else is on the
+  // number. Authority: Cameron, 2026-08-31, on Sam's 2026-08-24 wording.
+  //
+  // Superseded wording, for reference:
+  //   relay.member_added (..2026-08-31)  `Hey! {joined} {members}`
+  //     with {joined} = "<Name> joined this group chat." and {members} = the
+  //     whole connection sentence, both computed in code.
+  //
+  // The ROLE clause the old comment recorded as OWED now lives on
+  // relay.member_added_role below; this entry is the fallback for when the role
+  // does not resolve, because {role} sits MID-sentence and Phase A spec 6.4's
+  // empty-clause trick only works for a trailing sentence.
+  //
+  // {name} is the FIRST name and is TOTAL - "a new member" when nothing
+  // resolves (joinedName), lower-cased so it reads mid-sentence, never a phone.
+  // STOP omitted per changelog 1.2.1 #7 (the new member's first contact IS an
+  // intro, so the same logged A2P decision governs). editable:false for the same
+  // reason as relay.intro above - nothing can store or route an override.
   'relay.member_added': {
     id: 'relay.member_added',
-    default: 'Hey! {joined} {members}',
+    default: 'Hey, adding {name} to the group.',
     class: 'operational',
     editable: false,
     channel: 'sms',
-    vars: ['joined', 'members'],
+    vars: ['name'],
   },
   // do-not-remove-without-reading - FOUNDER WORDING, Sam 2026-08-24, authorised
   // by Cameron 2026-08-31 (Phase B spec 9.4). This is the role clause the
@@ -412,9 +434,9 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // trailing sentence. When the role does not resolve, the no-role wording lives
   // on relay.member_added instead.
   //
-  // Written and pinned in Task 13; WIRED in Task 14, which also rewrites
-  // relay.member_added to the no-role wording and splits the announcement per
-  // recipient (the new member gets the naked intro, not this).
+  // The role source is UnitContact.role on the OWNING tour's / placement's unit;
+  // the owner's own tenant reads 'tenant' whatever the property roster says.
+  // Absent a role, the announcement uses relay.member_added above.
   //
   // {name} is the FIRST name and is TOTAL - "a new member" when nothing
   // resolves, lower-cased so it reads mid-sentence, never a phone. An unvalued

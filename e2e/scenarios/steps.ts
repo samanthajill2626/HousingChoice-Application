@@ -396,6 +396,28 @@ export function hoursFromNow(hours: number): string {
  */
 const POOL_NUMBER_RE = /^\+1\d{3}019\d{4}$/;
 
+/** Which relay intro a group's OWNER routes to (Phase B spec 9.1). */
+export type RelayIntroVariant = 'naked' | 'tour' | 'placement';
+
+/**
+ * A copy-stable needle per variant: text common to BOTH tour forms (the
+ * today one says "at {time}", any other day "on {when}"), so a fixture whose
+ * tour could straddle midnight in the org zone still matches.
+ *
+ * WHY EVERY CALLER OF THE TWO HELPERS BELOW STILL PASSES 'naked': all of them
+ * open the group on a TIMELESS tour (teamCreatesTourFromInterest creates a
+ * 'requested' tour "no time yet", and every book happens AFTER the open), and
+ * spec 9.5 routes a tour with no scheduledAt to the naked intro. The tour
+ * variant is exercised by the spec that books FIRST - e2e/tests/relay-intro-
+ * variants.spec.ts. Book before opening in any new scenario and this argument
+ * is what you change.
+ */
+const INTRO_NEEDLE: Record<RelayIntroVariant, RegExp> = {
+  naked: /You're now connected with/,
+  tour: /Putting you in a group text with/,
+  placement: /Excited to have you move into/,
+};
+
 /** The tour a Scenario is driving. `tourId` is known from create; the group pair
  *  and the copy context (`scheduledAt`, `addressLine1`) fill in as the flow
  *  reaches the verbs that produce them. */
@@ -1834,7 +1856,7 @@ export class Scenario {
    * server-side ([tenant, unit's landlord]); the 201 response is captured to
    * record the pool number + groupThreadId for the group assertions.
    */
-  teamOpensTourGroup(): Promise<void> {
+  teamOpensTourGroup(variant: RelayIntroVariant = 'naked'): Promise<void> {
     const tour = this.requireActiveTour();
     return step('Team opens the masked relay group on the tour', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
@@ -1888,7 +1910,7 @@ export class Scenario {
       // Everything sent into a relay group is VISIBLE in its dashboard thread
       // (2026-07-14): the intro persists as an "Automated" bubble, appearing
       // via the SSE refetch once the intro job lands.
-      await expect(this.page.getByText(/You're now connected with/)).toBeVisible({
+      await expect(this.page.getByText(INTRO_NEEDLE[variant])).toBeVisible({
         timeout: 15_000,
       });
       await expect(this.page.getByText('Automated').first()).toBeVisible();
@@ -1923,14 +1945,22 @@ export class Scenario {
   }
 
   /** [App→each member, AUTO] The intro message naming everyone connected reached
-   *  EVERY member's fake thread FROM the pool number. */
-  expectGroupIntros(members: Contact[]): Promise<void> {
+   *  EVERY member's fake thread FROM the pool number.
+   *
+   *  Phase B routes the copy on the group's OWNER, so which intro that is now
+   *  depends on `variant`.
+   *
+   *  `members` is who the COPY names, which is not always the whole roster: the
+   *  naked intro lists everyone connected, while the tour and placement intros
+   *  name the tenant and the property contact only. Pass the people the chosen
+   *  variant actually names. */
+  expectGroupIntros(members: Contact[], variant: RelayIntroVariant = 'naked'): Promise<void> {
     const pool = this.requireActiveTourGroup().poolNumber;
-    return step('App sends the group intros (naming everyone connected)', async () => {
-      // FIRST names: the connection sentence has named people by first name
-      // since the founder decision of 2026-08-20 (a landlord came through as
-      // "First Last" beside a bare-first-name tenant). displayNameOf here would
-      // assert a full name the intro no longer contains.
+    return step(`App sends the group intros (${variant} variant)`, async () => {
+      // FIRST names: every variant names people by first name since the founder
+      // decision of 2026-08-20 (a landlord came through as "First Last" beside a
+      // bare-first-name tenant). displayNameOf here would assert a full name no
+      // intro contains.
       const names = members.map((m) => m.firstName);
       for (const member of members) {
         await expect
@@ -1943,7 +1973,7 @@ export class Scenario {
                   (m) =>
                     m.direction === 'outbound' &&
                     m.from === pool &&
-                    /You're now connected with/.test(m.body ?? '') &&
+                    INTRO_NEEDLE[variant].test(m.body ?? '') &&
                     names.every((n) => (m.body ?? '').includes(n)),
                 ) ?? false
               );

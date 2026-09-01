@@ -240,11 +240,19 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     // server-side and NEVER rebuilt in the browser), so an edit to the
     // `relay.intro` CATALOG DEFAULT moves the expectation and the UI together.
     // Only the default: this route has no override path to drift from - the
-    // entry is `editable: true`, but composeIntroBody (jobs/relayFanOut.ts:199)
-    // calls resolveMessage with no override map, and the expectation below is
-    // pinned to MESSAGE_CATALOG[...].default rather than to a resolved template.
-    // Fetched BEFORE the confirm is accepted: preview-open 409s
+    // entry is `editable: false` (2026-08-20) and composeIntroBody calls
+    // resolveMessage with no override map either way, so the expectation below
+    // is pinned to MESSAGE_CATALOG[...].default rather than to a resolved
+    // template. Fetched BEFORE the confirm is accepted: preview-open 409s
     // `relay_already_provisioned` once a thread exists.
+    //
+    // WHY THE NAKED ENTRY IS STILL THE RIGHT TARGET after Phase B's owner
+    // routing (spec 9.1): createTour above makes a TIMELESS tour, and spec 9.5
+    // routes a tour with no scheduledAt to relay.intro. The split trick is only
+    // valid on that entry - the tour variants OPEN with a token, so `introHead`
+    // would be empty and the guards below would fire. If this walk ever books
+    // the tour, move these assertions to resolved tour copy (the pattern is in
+    // e2e/tests/relay-intro-variants.spec.ts).
     const previewRes = await req.get(`${NEXT}/api/tours/${tourId}/roster/preview-open`);
     expect(previewRes.ok(), await previewRes.text()).toBeTruthy();
     const introBody = ((await previewRes.json()) as { body: string }).body;

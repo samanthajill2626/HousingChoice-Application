@@ -106,6 +106,12 @@ describe('MESSAGE_CATALOG', () => {
       'propertyContactFirstName',
       'where',
     ]);
+    // relay.member_added is the no-role fallback: ONE token, rewritten in Task
+    // 14 with the split (it declared ['joined','members'] before).
+    expect(MESSAGE_CATALOG['relay.member_added'].vars).toEqual(['name']);
+    expect(MESSAGE_CATALOG['relay.member_added'].default).toBe(
+      'Hey, adding {name} to the group.',
+    );
     expect(MESSAGE_CATALOG['relay.member_added_role'].vars).toEqual(['name', 'role']);
     for (const id of ['relay.intro_tour_today', 'relay.intro_tour', 'relay.intro_placement'] as const) {
       const vars = MESSAGE_CATALOG[id].vars;

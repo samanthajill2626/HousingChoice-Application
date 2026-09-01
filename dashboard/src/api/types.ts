@@ -1100,11 +1100,14 @@ export interface DuplicateOpenGroup {
  * What a group send WOULD do, resolved server-side. Returned as the BODY by
  * `GET .../roster/preview-open` and `POST .../roster/preview-add`.
  *
- * `body` is composed from the `relay.intro` / `relay.member_added` catalog
- * entries BY THE SERVER and is rendered verbatim: the templates are
- * founder-editable, so a browser-side copy would drift the first time one is
- * edited (spec 6.3). The client never rebuilds it and never re-derives
- * `quietEndsAt` (the DST-safe window math is the server's).
+ * `body` is composed from the relay intro / member_added catalog entries BY THE
+ * SERVER and is rendered verbatim: the templates are founder copy, so a
+ * browser-side copy would drift the first time one is edited (spec 6.3). The
+ * client never rebuilds it and never re-derives `quietEndsAt` (the DST-safe
+ * window math is the server's). Which entry it is, is the server's call too -
+ * since Phase B the intro is ROUTED on the group's owner (tour / placement /
+ * neither), and the add preview carries the body the EXISTING group receives,
+ * not the one the new member gets.
  *
  * `deferred` drives the dialog's THREE-button quiet-hours layout (spec 6.3):
  * confirming defers the whole change to `quietEndsAt` (the server answers 202

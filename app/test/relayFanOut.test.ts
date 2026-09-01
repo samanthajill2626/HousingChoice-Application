@@ -26,15 +26,19 @@ import {
   TEAM_SENDER_KEY,
   TEAM_SENDER_LABEL,
   composeIntroBody,
-  composeMemberAddedBody,
+  composeMemberAddedGroupBody,
   composeNameList,
   composeRelayBody,
   joinedName,
   registerRelayFanOutJobHandler,
+  resolveRelayComposeInputs,
+  type RelayComposeDeps,
+  type RelayComposeInputs,
 } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
@@ -627,9 +631,11 @@ describe('relay.fanOut (M1.7)', () => {
     expect(world.relaySidPointers.size).toBe(0);
   });
 
-  // Member added to an EXISTING group (founder decision 2026-07-14): one
-  // announcement to the WHOLE group, persisted as a system row in the thread.
-  it('relay.memberAdded names the new member, sends to EVERYONE, and persists a system row', async () => {
+  // Member added to an EXISTING group. Phase B (spec 9.4 / 9.6, Cameron
+  // 2026-08-31) SPLITS the one 2026-07-14 body per recipient: the group hears
+  // who joined, the new member gets the naked intro, and the ONE persisted row
+  // carries the NEW MEMBER's copy.
+  it('relay.memberAdded splits the copy per recipient and persists the NEW MEMBER\'s body', async () => {
     seedRelay(world);
     await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
       relayConversationId: 'conv-relay-1',
@@ -637,19 +643,32 @@ describe('relay.fanOut (M1.7)', () => {
     });
     await outbound.settle();
 
-    // Every member gets the same body FROM the pool (Carol's welcome doubles
-    // as Alice/Bob's join notice).
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
     expect(world.sent.every((s) => s.from === POOL)).toBe(true);
-    expect(world.sent[0]!.body).toContain('Carol joined this group chat.');
-    expect(world.sent[0]!.body).toContain('Alice, Bob, and Carol');
+    // This group has no owner, so there is no role: the no-role entry.
+    const groupBody = 'Hey, adding Carol to the group.';
+    const carolLeg = world.sent.find((s) => s.to === CAROL)!;
+    const aliceLeg = world.sent.find((s) => s.to === ALICE)!;
+    const bobLeg = world.sent.find((s) => s.to === BOB)!;
+    expect(aliceLeg.body).toBe(groupBody);
+    expect(bobLeg.body).toBe(groupBody);
+    // The new member's own leg is the naked intro naming the POST-ADD roster -
+    // their entire context, since a relay member sees no history.
+    expect(carolLeg.body).toContain("You're now connected with Alice, Bob, and Carol");
+    expect(carolLeg.body).not.toBe(groupBody);
 
-    // Persisted once as a system announcement with a slot per member.
+    // Still ONE row with a slot per member (one bubble, one rollup chip)...
     const rows = world.messages.filter((m) => m.conversationId === 'conv-relay-1');
     expect(rows).toHaveLength(1);
     expect(rows[0]!.relay_sender_key).toBe('system');
-    expect(rows[0]!.body).toBe(world.sent[0]!.body);
     expect(Object.keys(rows[0]!.delivery_recipients ?? {})).toHaveLength(3);
+    // ...and spec 9.6's named exception to the 2026-07-14 visibility rule: the
+    // persisted body is the NEW MEMBER's leg, NOT an existing member's.
+    expect(rows[0]!.body).toBe(carolLeg.body);
+    expect(rows[0]!.body).not.toBe(aliceLeg.body);
+    // The inbox preview inherits the same (persisted) body, by construction.
+    const conv = world.conversations.get('conv-relay-1')!;
+    expect(rows[0]!.body!.startsWith((conv.last_message_preview ?? '').slice(0, 20))).toBe(true);
   });
 
   it('relay.memberAdded degrades to the neutral joined label when the key matches no member', async () => {
@@ -661,9 +680,15 @@ describe('relay.fanOut (M1.7)', () => {
     });
     await outbound.settle();
 
-    expect(world.sent[0]!.body).toContain('A new member joined this group chat.');
+    // Nobody on the roster matches the key, so EVERY leg is the group body -
+    // and the neutral label is lower-cased for Sam's mid-sentence wording.
+    expect(world.sent[0]!.body).toBe('Hey, adding a new member to the group.');
   });
 });
+
+/** The no-owner inputs value: a standalone group, or any owner-routed case that
+ *  spec 9.5 degraded. Phase B gave both composers an `inputs` first argument. */
+const NAKED: RelayComposeInputs = { variant: 'naked' };
 
 describe('relay body/intro composition (M1.7)', () => {
   it('composeRelayBody prefixes the sender name, falls back to a neutral label', () => {
@@ -672,12 +697,16 @@ describe('relay body/intro composition (M1.7)', () => {
     expect(composeRelayBody('  ', 'hi')).toBe('A member: hi');
   });
 
+  // NAKED is the variant these pin: every one of these rosters is a standalone
+  // group (no owner), which is what a `{ variant: 'naked' }` inputs value means.
   it('composeIntroBody lists names with an Oxford-style join, never a phone', () => {
-    expect(composeIntroBody(['Alice', 'Bob', 'Carol'])).toContain('Alice, Bob, and Carol');
-    expect(composeIntroBody(['Alice', 'Bob'])).toContain('Alice and Bob');
-    expect(composeIntroBody(['Alice'])).toContain('Alice');
+    expect(composeIntroBody(NAKED, ['Alice', 'Bob', 'Carol'])).toContain('Alice, Bob, and Carol');
+    expect(composeIntroBody(NAKED, ['Alice', 'Bob'])).toContain('Alice and Bob');
+    expect(composeIntroBody(NAKED, ['Alice'])).toContain('Alice');
     // No names → a neutral count phrasing.
-    expect(composeIntroBody([undefined, undefined])).toMatch(/connected with 1 other person/);
+    expect(composeIntroBody(NAKED, [undefined, undefined])).toMatch(
+      /connected with 1 other person/,
+    );
   });
 
   // FOUNDER DECISIONS 2026-08-18 (opt-out line) and 2026-08-20 (brand): the
@@ -687,7 +716,7 @@ describe('relay body/intro composition (M1.7)', () => {
   // act that trips a test, never a silent drift.
   it('the intro carries NO opt-out line and NO brand identity (founder decisions)', () => {
     for (const names of [['Alice', 'Bob', 'Carol'], ['Alice'], [undefined, undefined]] as (string | undefined)[][]) {
-      const body = composeIntroBody(names);
+      const body = composeIntroBody(NAKED, names);
       expect(body).not.toContain('HousingChoice');
       expect(body).not.toContain('Reply STOP');
       // It still says who is texting, by first name.
@@ -696,26 +725,30 @@ describe('relay body/intro composition (M1.7)', () => {
   });
 
   it('the connection sentence uses FIRST names only (founder decision 2026-08-20)', () => {
-    const body = composeIntroBody(['Brenda Morris', 'Sam Whitfield']);
+    const body = composeIntroBody(NAKED, ['Brenda Morris', 'Sam Whitfield']);
     expect(body).toContain('Brenda and Sam');
     expect(body).not.toContain('Morris');
     expect(body).not.toContain('Whitfield');
   });
 
-  it('composeMemberAddedBody names the joiner (neutral fallback), with no opt-out line', () => {
-    const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
+  // Re-baselined for the Phase B split (spec 9.4, Cameron 2026-08-31). The old
+  // one-body announcement ("Hey! Carol joined this group chat. You're now
+  // connected with Alice, Bob, and Carol ...") is GONE: the group hears only who
+  // joined, and the name list belongs to the NEW member's naked intro instead.
+  // The FIRST-name rule (2026-08-20) and the no-opt-out rule both survive.
+  it('the group announcement names the joiner by FIRST name, with no opt-out line', () => {
+    const body = composeMemberAddedGroupBody(NAKED, 'Carol Brown');
     expect(body).not.toContain('Reply STOP');
-    // First name on BOTH halves (2026-08-20) - never "Carol Brown joined ...
-    // connected with ... Carol", which reads like two different people.
-    expect(body).toContain('Carol joined this group chat.');
-    expect(body).toContain("You're now connected with Alice, Bob, and Carol");
+    expect(body).toBe('Hey, adding Carol to the group.');
     expect(body).not.toContain('Brown');
+    // The name list moved OUT of this body - it is the new member's intro now.
+    expect(body).not.toContain("You're now connected with");
     // No name (phone-only member) → neutral label, NEVER a phone.
-    expect(composeMemberAddedBody(undefined, ['Alice', undefined])).toContain(
-      'A new member joined this group chat.',
+    expect(composeMemberAddedGroupBody(NAKED, undefined)).toBe(
+      'Hey, adding a new member to the group.',
     );
-    expect(composeMemberAddedBody('  ', ['Alice'])).toContain(
-      'A new member joined this group chat.',
+    expect(composeMemberAddedGroupBody(NAKED, '  ')).toBe(
+      'Hey, adding a new member to the group.',
     );
   });
 });
@@ -780,16 +813,16 @@ describe('relay catalog entries (spec 9.2a)', () => {
       'that comes up. It can be a long process, so ask me anything in here!';
     expect(resolveMessage('relay.intro', { names: composeNameList(names) })).toBe(expected);
     // ...and the composer that every call site still goes through agrees.
-    expect(composeIntroBody(names)).toBe(expected);
+    expect(composeIntroBody(NAKED, names)).toBe(expected);
   });
 
   it('the nameless multi-member intro is BYTE-IDENTICAL too', () => {
-    expect(composeIntroBody([undefined, undefined, undefined])).toBe(
+    expect(composeIntroBody(NAKED, [undefined, undefined, undefined])).toBe(
       "Hey, it's Sam. You're now connected with 2 other people on this number. Reply here " +
         'and everyone in the group sees it. Use this group text for anything that comes up. ' +
         'It can be a long process, so ask me anything in here!',
     );
-    expect(composeIntroBody([undefined, undefined])).toBe(
+    expect(composeIntroBody(NAKED, [undefined, undefined])).toBe(
       "Hey, it's Sam. You're now connected with 1 other person on this number. Reply here " +
         'and everyone in the group sees it. Use this group text for anything that comes up. ' +
         'It can be a long process, so ask me anything in here!',
@@ -802,7 +835,7 @@ describe('relay catalog entries (spec 9.2a)', () => {
     // As a token {names} cannot restructure the one sentence in the template, so
     // 9.2's table routes it to the "1 other person" phrasing instead - mildly
     // wrong copy on an edge case, in exchange for a template that always works.
-    const body = composeIntroBody([undefined]);
+    const body = composeIntroBody(NAKED, [undefined]);
     expect(body).toBe(
       "Hey, it's Sam. You're now connected with 1 other person on this number. Reply here " +
         'and everyone in the group sees it. Use this group text for anything that comes up. ' +
@@ -1005,5 +1038,525 @@ describe('relay.fanOut media (outbound MMS)', () => {
     expect(url1).toContain('uploads/shared-key');
     // ...but are DISTINCT presigns (per-leg, not one batched URL reused).
     expect(url0).not.toBe(url1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase B spec 9.0 / 9.3 / 9.4 / 9.5: the OWNER-ROUTED resolver and the two
+// pure composers it feeds. The resolver does every repo read; the composers
+// stay pure and synchronous (the same split Phase A's tour copy uses).
+//
+// The load-bearing property is TOTALITY. Both entry families are non-editable
+// catalog DEFAULTS, so an unvalued declared token does not degrade - it THROWS
+// (messages/resolve.ts), and the intro job composes AFTER its
+// putJobExecutionMarker claim, so a throw loses the announcement instead of
+// retrying it, and 500s the preview route. Hence: the resolver NEVER throws
+// (every read gets its own try/catch and degrades toward 'naked'), and the
+// composers answer for every input they can be handed.
+// ---------------------------------------------------------------------------
+
+const NY = 'America/New_York';
+/** 2026-09-08 15:00 New York (19:00Z, EDT). */
+const TOUR_AT = '2026-09-08T19:00:00.000Z';
+/** 09:00 New York on the SAME local day as TOUR_AT. */
+const SAME_DAY_NOW = '2026-09-08T13:00:00.000Z';
+/** 09:00 New York the day BEFORE - "today" must be false. */
+const DAY_BEFORE_NOW = '2026-09-07T13:00:00.000Z';
+
+function fakeUnit(over: Record<string, unknown> = {}): UnitItem {
+  return {
+    unitId: 'unit-1',
+    landlordId: 'c-landlord',
+    status: 'available',
+    address: { line1: '412 Oak St', city: 'Atlanta', state: 'GA', zip: '30314' },
+    contacts: [{ contactId: 'c-landlord', role: 'landlord', primaryContact: true }],
+    created_at: '2026-07-01T00:00:00.000Z',
+    updated_at: '2026-07-01T00:00:00.000Z',
+    ...over,
+  } as UnitItem;
+}
+
+/** Deps whose every read succeeds: a scheduled tour on a unit with a landlord. */
+function fakeDeps(
+  over: Partial<RelayComposeDeps> = {},
+  unit: UnitItem | undefined = fakeUnit(),
+  tour: Record<string, unknown> = {
+    tourId: 'tour-1',
+    tenantId: 'c-tenant',
+    unitId: 'unit-1',
+    scheduledAt: TOUR_AT,
+  },
+): RelayComposeDeps {
+  return {
+    toursRepo: { get: async () => tour as never },
+    placementsRepo: {
+      getById: async () =>
+        ({ placementId: 'plc-1', tenantId: 'c-tenant', unitId: 'unit-1' }) as never,
+    },
+    unitsRepo: { getById: async () => unit as never },
+    contactsRepo: {
+      getById: async (id: string) =>
+        (id === 'c-tenant'
+          ? { contactId: 'c-tenant', type: 'tenant', firstName: 'Alicia', lastName: 'Reyes' }
+          : id === 'c-landlord'
+            ? { contactId: 'c-landlord', type: 'landlord', firstName: 'Marcus', lastName: 'Webb' }
+            : undefined) as never,
+    },
+    settingsRepo: { getOrgSettings: async () => ({ timezone: NY }) as never },
+    nowIso: DAY_BEFORE_NOW,
+    ...over,
+  };
+}
+
+describe('resolveRelayComposeInputs (spec 9.3) - owner routing, and it NEVER throws', () => {
+  it('a tour TODAY in the org timezone resolves the today variant with {time}', async () => {
+    const inputs = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({ nowIso: SAME_DAY_NOW }),
+    );
+    expect(inputs.variant).toBe('tour_today');
+    expect(inputs.time).toBe('3:00 PM');
+    expect(inputs.when).toBeUndefined();
+    expect(inputs.where).toBe('412 Oak St');
+    expect(inputs.tenantFirstName).toBe('Alicia');
+    expect(inputs.propertyContactFirstName).toBe('Marcus');
+  });
+
+  it('a tour on any OTHER day resolves the dated variant with {when}', async () => {
+    const inputs = await resolveRelayComposeInputs({ type: 'tour', id: 'tour-1' }, fakeDeps());
+    expect(inputs.variant).toBe('tour');
+    expect(inputs.when).toBe('Tue, Sep 8 at 3:00 PM');
+    expect(inputs.time).toBeUndefined();
+  });
+
+  it('"today" is judged in the ORG zone, not UTC (the booked-too-late zone)', async () => {
+    // 2026-09-08T02:00Z is 22:00 on Sep 7 in New York - the day BEFORE the tour,
+    // even though UTC already says the 8th. resolveQuietHoursTimezone is the
+    // same seam the same-day booking test uses, so the two cannot disagree.
+    const inputs = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({ nowIso: '2026-09-08T02:00:00.000Z' }),
+    );
+    expect(inputs.variant).toBe('tour');
+  });
+
+  it('a placement owner resolves the placement variant (no time tokens at all)', async () => {
+    const inputs = await resolveRelayComposeInputs({ type: 'placement', id: 'plc-1' }, fakeDeps());
+    expect(inputs.variant).toBe('placement');
+    expect(inputs.where).toBe('412 Oak St');
+    expect(inputs.when).toBeUndefined();
+    expect(inputs.time).toBeUndefined();
+  });
+
+  it('a null owner (a standalone group) is naked - and reads NOTHING', async () => {
+    let reads = 0;
+    const inputs = await resolveRelayComposeInputs(
+      { type: null },
+      fakeDeps({
+        toursRepo: {
+          get: async () => {
+            reads += 1;
+            return undefined as never;
+          },
+        },
+      }),
+    );
+    expect(inputs).toEqual({ variant: 'naked' });
+    expect(reads).toBe(0);
+  });
+
+  // Spec 9.5: ONE rule - a missing landlord, address or tour time falls back to
+  // the naked intro rather than emptying a clause, because both new intros use
+  // {where} MID-sentence (Phase A spec 6.4's empty-clause trick cannot help).
+  it('EVERY missing input degrades to naked (never a throw, never a blank clause)', async () => {
+    const rows: [string, RelayComposeDeps][] = [
+      ['the tour row is gone', fakeDeps({ toursRepo: { get: async () => undefined as never } })],
+      [
+        'no scheduledAt (a requested tour)',
+        fakeDeps({}, fakeUnit(), { tourId: 'tour-1', tenantId: 'c-tenant', unitId: 'unit-1' }),
+      ],
+      // NOT fakeDeps({}, undefined): an explicit undefined takes the default
+      // parameter, which would hand back the healthy unit.
+      ['no unit row', fakeDeps({ unitsRepo: { getById: async () => undefined as never } })],
+      ['the unit has no street', fakeDeps({}, fakeUnit({ address: undefined }))],
+      [
+        'no property contact resolves',
+        fakeDeps({}, fakeUnit({ landlordId: undefined, contacts: [] })),
+      ],
+      [
+        'the tour read THROWS',
+        fakeDeps({
+          toursRepo: {
+            get: async () => {
+              throw new Error('tours-boom');
+            },
+          },
+        }),
+      ],
+      [
+        'the unit read THROWS',
+        fakeDeps({
+          unitsRepo: {
+            getById: async () => {
+              throw new Error('units-boom');
+            },
+          },
+        }),
+      ],
+      [
+        'the settings read THROWS',
+        fakeDeps({
+          settingsRepo: {
+            getOrgSettings: async () => {
+              throw new Error('settings-boom');
+            },
+          },
+        }),
+      ],
+      [
+        'scheduledAt is unparseable (formatLocalTime would RangeError)',
+        fakeDeps({}, fakeUnit(), {
+          tourId: 'tour-1',
+          tenantId: 'c-tenant',
+          unitId: 'unit-1',
+          scheduledAt: 'not-a-date',
+        }),
+      ],
+      // R11: the preview deps are OPTIONAL picks; a caller that wires none of
+      // them degrades rather than failing - rosterEdits.test.ts hand-builds
+      // deps ~25 times without them.
+      ['no repos wired at all', { nowIso: DAY_BEFORE_NOW }],
+    ];
+    for (const [why, deps] of rows) {
+      const inputs = await resolveRelayComposeInputs({ type: 'tour', id: 'tour-1' }, deps);
+      expect(inputs.variant, why).toBe('naked');
+    }
+  });
+
+  it('a missing TENANT first name KEEPS the variant (it degrades in-sentence)', async () => {
+    const inputs = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({
+        contactsRepo: {
+          getById: async (id: string) =>
+            (id === 'c-landlord'
+              ? { contactId: 'c-landlord', type: 'landlord', firstName: 'Marcus' }
+              : { contactId: 'c-tenant', type: 'tenant' }) as never,
+        },
+      }),
+    );
+    expect(inputs.variant).toBe('tour');
+    expect(inputs.tenantFirstName).toBeUndefined();
+  });
+
+  // Spec 9.4's role table. The source is UnitContact.role, NOT ContactItem.type
+  // (which has no property-manager value at all).
+  it('maps the roster role for the ADDED member, tenant included', async () => {
+    const unit = fakeUnit({
+      contacts: [
+        { contactId: 'c-landlord', role: 'landlord', primaryContact: true },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+        { contactId: 'c-other', role: 'other', primaryContact: false },
+      ],
+    });
+    const roleOf = async (addedContactId?: string) =>
+      (
+        await resolveRelayComposeInputs(
+          { type: 'tour', id: 'tour-1' },
+          fakeDeps({}, unit),
+          addedContactId,
+        )
+      ).role;
+    expect(await roleOf('c-pm')).toBe('property manager');
+    expect(await roleOf('c-landlord')).toBe('landlord');
+    expect(await roleOf('c-owner')).toBe('landlord');
+    // The OWNING tour's tenant is 'tenant' whatever the property roster says.
+    expect(await roleOf('c-tenant')).toBe('tenant');
+    // No role: 'other', a stranger, and a phone-only member with no contactId.
+    expect(await roleOf('c-other')).toBeUndefined();
+    expect(await roleOf('c-stranger')).toBeUndefined();
+    expect(await roleOf(undefined)).toBeUndefined();
+  });
+
+  it('resolves the ROLE even when the INTRO degrades to naked', async () => {
+    // The two are independent questions: a unit with a roster but no street
+    // cannot compose a tour intro (9.5) and still knows who the joiner is.
+    const inputs = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({}, fakeUnit({ address: undefined })),
+      'c-landlord',
+    );
+    expect(inputs.variant).toBe('naked');
+    expect(inputs.role).toBe('landlord');
+  });
+});
+
+describe('composeIntroBody (spec 9.1) - entry selection from the resolved variant', () => {
+  const TOUR_INPUTS: RelayComposeInputs = {
+    variant: 'tour',
+    tenantFirstName: 'Alicia',
+    propertyContactFirstName: 'Marcus',
+    when: 'Tue, Sep 8 at 3:00 PM',
+    where: '412 Oak St',
+  };
+
+  it('routes each variant to its founder entry', () => {
+    expect(composeIntroBody(TOUR_INPUTS, ['Alicia Reyes', 'Marcus Webb'])).toBe(
+      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 ' +
+        'at 3:00 PM. Looking forward to you seeing the property and meeting Marcus! Please ' +
+        "let us know when you're on the way.",
+    );
+    expect(
+      composeIntroBody({ ...TOUR_INPUTS, variant: 'tour_today', when: undefined, time: '3:00 PM' }, [
+        'Alicia Reyes',
+      ]),
+    ).toBe(
+      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. ' +
+        'Looking forward to you seeing the property and meeting Marcus! Please let us know ' +
+        "when you're on the way.",
+    );
+    expect(
+      composeIntroBody({ ...TOUR_INPUTS, variant: 'placement', when: undefined }, ['Alicia Reyes']),
+    ).toContain('Excited to have you move into 412 Oak St.');
+  });
+
+  it('the NAKED variant is the live copy, unchanged, and names the roster', () => {
+    expect(composeIntroBody({ variant: 'naked' }, ['Alicia Reyes', 'Marcus Webb'])).toBe(
+      "Hey, it's Sam. You're now connected with Alicia and Marcus on this number. " +
+        'Reply here and everyone in the group sees it. Use this group text for anything ' +
+        'that comes up. It can be a long process, so ask me anything in here!',
+    );
+  });
+
+  // TOTALITY (plan review P3). The tour/placement entries OPEN with
+  // "Hey {tenantFirstName}!" and are strict non-editable defaults, so an absent
+  // tenant name must never reach resolveMessage as undefined. Phase A's own
+  // fallback (messages/tourCopy.ts) is the one used.
+  it('a variant with NO tenant name greets "Hey there!" and does not throw', () => {
+    const body = composeIntroBody({ ...TOUR_INPUTS, tenantFirstName: undefined }, []);
+    expect(body).toContain('Hey there! Putting you in a group text with Marcus');
+  });
+
+  // The composer is the LAST line of 9.5's defence: the resolver already
+  // guarantees these, but a hand-built inputs value must never throw either.
+  it('a variant missing its own tokens falls back to the naked entry', () => {
+    for (const broken of [
+      { ...TOUR_INPUTS, propertyContactFirstName: undefined },
+      { ...TOUR_INPUTS, where: undefined },
+      { ...TOUR_INPUTS, when: undefined },
+      { ...TOUR_INPUTS, variant: 'tour_today' as const, when: undefined },
+    ]) {
+      const body = composeIntroBody(broken, ['Alicia Reyes', 'Marcus Webb']);
+      expect(body).toContain("You're now connected with Alicia and Marcus");
+    }
+  });
+});
+
+describe('composeMemberAddedGroupBody (spec 9.4) - the GROUP half of the split', () => {
+  it('uses the role entry when the role resolved, the no-role entry otherwise', () => {
+    expect(
+      composeMemberAddedGroupBody({ variant: 'naked', role: 'property manager' }, 'Dana Cole'),
+    ).toBe('Hey, adding Dana to the group as the property manager.');
+    expect(composeMemberAddedGroupBody({ variant: 'naked', role: 'landlord' }, 'Dana Cole')).toBe(
+      'Hey, adding Dana to the group as the landlord.',
+    );
+    expect(composeMemberAddedGroupBody({ variant: 'naked' }, 'Dana Cole')).toBe(
+      'Hey, adding Dana to the group.',
+    );
+  });
+
+  it('is TOTAL on a nameless joiner (a bare-phone member), and never a phone', () => {
+    expect(composeMemberAddedGroupBody({ variant: 'naked' }, undefined)).toBe(
+      'Hey, adding a new member to the group.',
+    );
+    expect(composeMemberAddedGroupBody({ variant: 'naked', role: 'tenant' }, '  ')).toBe(
+      'Hey, adding a new member to the group as the tenant.',
+    );
+  });
+
+  it('carries NO opt-out line and NO brand (the same founder decisions)', () => {
+    const body = composeMemberAddedGroupBody({ variant: 'naked', role: 'landlord' }, 'Dana');
+    expect(body).not.toContain('Reply STOP');
+    expect(body).not.toContain('HousingChoice');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The JOBS, owner-routed end to end (spec 9.1 / 9.4 / 9.6). Its own world +
+// registration because these handlers need the four extra repos wired; the
+// suite above deliberately registers WITHOUT them (an unowned group must still
+// compose, which is what keeps the naked path honest).
+// ---------------------------------------------------------------------------
+describe('relay.intro / relay.memberAdded on an OWNED group', () => {
+  const TENANT = '+15550100051';
+  const LANDLORD = '+15550100052';
+  const PM = '+15550100053';
+  const OWNED_POOL = '+15550109050';
+  let world: FakeWorld;
+  let outbound: InProcessOutboundQueueAdapter;
+
+  beforeEach(async () => {
+    _resetForTests();
+    const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      unitsRepo: world.unitsRepo,
+      toursRepo: world.toursRepo,
+      placementsRepo: world.placementsRepo,
+      settingsRepo: world.settingsRepo,
+      logger,
+    });
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
+
+    world.contacts.push(
+      { contactId: 'c-tenant', type: 'tenant', phone: TENANT, firstName: 'Tina', lastName: 'Tenant' },
+      { contactId: 'c-land', type: 'landlord', phone: LANDLORD, firstName: 'Larry', lastName: 'Land' },
+      { contactId: 'c-pm', type: 'landlord', phone: PM, firstName: 'Pat', lastName: 'Manager' },
+    );
+    world.units.set('unit-owned', {
+      unitId: 'unit-owned',
+      landlordId: 'c-land',
+      status: 'available',
+      address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30314' },
+      contacts: [
+        { contactId: 'c-land', role: 'landlord', primaryContact: true },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      ],
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    } as never);
+    // A FIXED far-future instant, so "today" is deterministic whatever day the
+    // suite runs: the dated variant, never the today one.
+    world.toursMap.set('tour-owned', {
+      tourId: 'tour-owned',
+      tenantId: 'c-tenant',
+      unitId: 'unit-owned',
+      scheduledAt: '2026-09-08T19:00:00.000Z',
+      status: 'scheduled',
+      tourType: 'landlord_led',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    } as never);
+    await world.settingsRepo.putOrgSettings({ timezone: 'America/New_York' });
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  function seedOwnedRelay(participants: { contactId: string; phone: string; name?: string }[]): void {
+    const now = '2026-07-10T00:00:00.000Z';
+    world.conversations.set('conv-owned', {
+      conversationId: 'conv-owned',
+      participant_phone: OWNED_POOL,
+      pool_number: OWNED_POOL,
+      status: 'open',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants,
+      owner: { type: 'tour', id: 'tour-owned' },
+      created_at: now,
+    });
+  }
+
+  it('a TOUR-owned group sends Sam tour intro to every member, not the naked one', async () => {
+    seedOwnedRelay([
+      { contactId: 'c-tenant', phone: TENANT, name: 'Tina Tenant' },
+      { contactId: 'c-land', phone: LANDLORD, name: 'Larry Land' },
+    ]);
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-owned' });
+    await outbound.settle();
+
+    const expected =
+      'Hey Tina! Putting you in a group text with Larry to tour 77 Peachtree St on ' +
+      'Tue, Sep 8 at 3:00 PM. Looking forward to you seeing the property and meeting ' +
+      "Larry! Please let us know when you're on the way.";
+    expect(world.sent.map((s) => s.to).sort()).toEqual([TENANT, LANDLORD].sort());
+    for (const sent of world.sent) expect(sent.body).toBe(expected);
+    // Persisted verbatim - one row, the same body (the intro is NOT split).
+    const row = world.messages.find((m) => m.conversationId === 'conv-owned')!;
+    expect(row.body).toBe(expected);
+  });
+
+  // Precedence rule 1 (spec 9.1): Sam asked for the manual opener to keep
+  // winning outright, and it must win over the OWNER ROUTING too.
+  it('an operator-edited intro_body still wins over the tour variant', async () => {
+    seedOwnedRelay([
+      { contactId: 'c-tenant', phone: TENANT, name: 'Tina Tenant' },
+      { contactId: 'c-land', phone: LANDLORD, name: 'Larry Land' },
+    ]);
+    const conv = world.conversations.get('conv-owned')!;
+    world.conversations.set('conv-owned', { ...conv, intro_body: 'Hand-written by the operator.' });
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-owned' });
+    await outbound.settle();
+    for (const sent of world.sent) expect(sent.body).toBe('Hand-written by the operator.');
+  });
+
+  // Spec 9.5: the SAME group, with the tour's time removed (a 'requested' tour),
+  // falls all the way back to the naked intro rather than emptying a clause.
+  it('the same group with no scheduledAt falls back to the naked intro', async () => {
+    const tour = world.toursMap.get('tour-owned')!;
+    const { scheduledAt: _dropped, ...timeless } = tour;
+    world.toursMap.set('tour-owned', timeless as never);
+    seedOwnedRelay([
+      { contactId: 'c-tenant', phone: TENANT, name: 'Tina Tenant' },
+      { contactId: 'c-land', phone: LANDLORD, name: 'Larry Land' },
+    ]);
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-owned' });
+    await outbound.settle();
+    for (const sent of world.sent) {
+      expect(sent.body).toContain("You're now connected with Tina and Larry");
+    }
+  });
+
+  it('member_added on an owned group carries the ROLE, and the new member the naked intro', async () => {
+    seedOwnedRelay([
+      { contactId: 'c-tenant', phone: TENANT, name: 'Tina Tenant' },
+      { contactId: 'c-land', phone: LANDLORD, name: 'Larry Land' },
+      { contactId: 'c-pm', phone: PM, name: 'Pat Manager' },
+    ]);
+    await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
+      relayConversationId: 'conv-owned',
+      addedMemberKey: 'c-pm',
+    });
+    await outbound.settle();
+
+    // UnitContact.role 'pm' -> "property manager" (spec 9.4's table).
+    const groupBody = 'Hey, adding Pat to the group as the property manager.';
+    expect(world.sent.find((s) => s.to === TENANT)!.body).toBe(groupBody);
+    expect(world.sent.find((s) => s.to === LANDLORD)!.body).toBe(groupBody);
+    const pmLeg = world.sent.find((s) => s.to === PM)!;
+    // The new member gets the NAKED intro even on a tour-owned group: one
+    // message, no variants (spec 9.4).
+    expect(pmLeg.body).toContain("You're now connected with Tina, Larry, and Pat");
+    expect(pmLeg.body).not.toContain('Putting you in a group text');
+    // ONE row, carrying the new member's copy (spec 9.6).
+    const rows = world.messages.filter((m) => m.conversationId === 'conv-owned');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.body).toBe(pmLeg.body);
+  });
+
+  it('the TENANT joining an owned group reads as the tenant role', async () => {
+    seedOwnedRelay([
+      { contactId: 'c-land', phone: LANDLORD, name: 'Larry Land' },
+      { contactId: 'c-tenant', phone: TENANT, name: 'Tina Tenant' },
+    ]);
+    await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
+      relayConversationId: 'conv-owned',
+      addedMemberKey: 'c-tenant',
+    });
+    await outbound.settle();
+    expect(world.sent.find((s) => s.to === LANDLORD)!.body).toBe(
+      'Hey, adding Tina to the group as the tenant.',
+    );
   });
 });

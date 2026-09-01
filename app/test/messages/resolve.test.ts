@@ -82,32 +82,33 @@ describe('resolveMessage', () => {
   });
 });
 
-// relay.member_added declares ['joined','members'] today (pre-Task-13) and is
-// non-editable, which makes it the strict-mode probe. If Task 13 has already
-// landed when you run this, switch the probe id to 'relay.member_added_role'
-// with vars { name, role } - the four behaviours pinned here are id-agnostic.
+// relay.member_added_role declares ['name','role'] and is non-editable, which
+// makes it the strict-mode probe: TWO declared tokens (so one value can carry
+// the other's token) on an entry no override can reach. The four behaviours
+// pinned here are id-agnostic; the probe moved here from relay.member_added
+// when Phase B narrowed that entry to a single {name} (spec 9.4).
 describe('interpolate is single-pass', () => {
   it('a substituted value containing a later declared token is NOT re-expanded', () => {
-    const out = resolveMessage('relay.member_added', {
-      joined: 'A {members} joined this group chat.',
-      members: 'SECRET LIST',
+    const out = resolveMessage('relay.member_added_role', {
+      name: 'A {role} person',
+      role: 'SECRET ROLE',
     });
-    // Pre-fix this emits 'A SECRET LIST joined...' - the token inside the
+    // Pre-fix this emits 'A SECRET ROLE person' - the token inside the
     // substituted value must survive as literal text instead.
-    expect(out).toContain('A {members} joined this group chat.');
-    expect(out).toContain('SECRET LIST'); // the real token still resolves
+    expect(out).toContain('A {role} person');
+    expect(out).toContain('SECRET ROLE'); // the real token still resolves
   });
 
   it('replacement-pattern characters in values are inert ($& / $1 / $`)', () => {
-    const out = resolveMessage('relay.member_added', {
-      joined: '$& $1 $` $\' joined.',
-      members: 'M.',
+    const out = resolveMessage('relay.member_added_role', {
+      name: '$& $1 $` $\' joined.',
+      role: 'M.',
     });
     expect(out).toContain("$& $1 $` $' joined.");
   });
 
   it('an UNDECLARED token in the template stays literal', () => {
-    const out = resolveMessage('relay.member_added', { joined: 'J.', members: 'M.' });
+    const out = resolveMessage('relay.member_added_role', { name: 'J.', role: 'M.' });
     // No entry declares {nope}; craft via the override path instead: undeclared
     // tokens simply are not in `allowed`, so assert on a template that has one.
     // relay.media_only declares only ['name'].
@@ -119,8 +120,8 @@ describe('interpolate is single-pass', () => {
   });
 
   it('strict default THROWS on a declared-but-missing token; override degrades to empty', () => {
-    expect(() => resolveMessage('relay.member_added', { joined: 'J.' })).toThrow(
-      /missing interpolation var "members"/,
+    expect(() => resolveMessage('relay.member_added_role', { name: 'J.' })).toThrow(
+      /missing interpolation var "role"/,
     );
     const out = resolveMessage('relay.media_only', {}, { 'relay.media_only': 'Hi {name}!' });
     expect(out).toBe('Hi !');

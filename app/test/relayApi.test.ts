@@ -1040,16 +1040,22 @@ describe('relay-group API (M1.7)', () => {
       .send({ phone: BOB, name: 'Bob' });
     expect(add.status).toBe(200);
 
-    // Announced to BOTH members (Bob's welcome doubles as Alice's notice).
+    // Announced to BOTH members - but with DIFFERENT copy since Phase B (spec
+    // 9.4): Alice hears who joined, Bob gets the naked intro as his first
+    // contact. This group is STANDALONE, so no owner and therefore no role.
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
     expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
-    expect(world.sent[0]!.body).toContain('Bob joined this group chat.');
-    // Persisted in the thread: the intro row + ONE join-notice row.
+    expect(world.sent.find((s) => s.to === ALICE)!.body).toBe('Hey, adding Bob to the group.');
+    const bobLeg = world.sent.find((s) => s.to === BOB)!;
+    expect(bobLeg.body).toContain("You're now connected with Alice and Bob");
+    // Persisted in the thread: the intro row + ONE join-notice row - and spec
+    // 9.6's named exception, the join row carries the NEW MEMBER's body.
     const systemRows = world.messages.filter(
       (m) => m.conversationId === id && m.relay_sender_key === 'system',
     );
     expect(systemRows).toHaveLength(2);
-    expect(systemRows.some((m) => (m.body ?? '').includes('Bob joined this group chat.'))).toBe(true);
+    expect(systemRows.some((m) => (m.body ?? '') === bobLeg.body)).toBe(true);
+    expect(systemRows.some((m) => (m.body ?? '').includes('Hey, adding Bob'))).toBe(false);
 
     // Idempotent re-add: no new announcement, no new sends.
     world.sent.length = 0;

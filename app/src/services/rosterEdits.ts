@@ -19,10 +19,13 @@
 //   2. PREVIEWS. The confirm dialogs (spec 6.3 / 6.4) render the body the
 //      group will ACTUALLY receive, so it is composed here with the SAME
 //      composers the fan-out uses (jobs/relayFanOut composeIntroBody /
-//      composeMemberAddedBody) - never resolveMessage directly, or a template
-//      edit would drift preview from send. INPUT IS THE OWNER ONLY: the roster
-//      is resolved server-side, so a client list can never disagree with what
-//      provision resolves.
+//      composeMemberAddedGroupBody) - never resolveMessage directly, or a
+//      template edit would drift preview from send. Phase B (spec 9.0) extends
+//      that to the OWNER ROUTING: the same resolver picks the variant here and
+//      in the job, so the preview cannot show a different intro than the one
+//      that goes out. INPUT IS THE OWNER ONLY: the roster is resolved
+//      server-side, so a client list can never disagree with what provision
+//      resolves.
 //
 // The resolver's 'unavailable' state (pointer set, thread unreadable) NEVER
 // falls through to the plan or the default here either - it refuses.
@@ -35,7 +38,13 @@
 // "Unnamed number ...1234" from `phoneLast4`, so a navigator can tell two nameless
 // members apart. The FULL number still never leaves the server on either shape.
 // The two lists are built separately here; keep them that way.
-import { composeIntroBody, composeMemberAddedBody } from '../jobs/relayFanOut.js';
+import {
+  composeIntroBody,
+  composeMemberAddedGroupBody,
+  resolveRelayComposeInputs,
+  type RelayComposeDeps,
+  type RelayComposeInputs,
+} from '../jobs/relayFanOut.js';
 import {
   clampOutOfQuietHours,
   isQuietTime,
@@ -445,6 +454,28 @@ export interface OpenPreviewParts {
   recipients: PreviewRecipientRow[];
   /** Set by the two OPEN builders; the ADD preview never sets it (spec 5). */
   duplicateOf?: DuplicateOpenGroup;
+  /**
+   * The OWNER-ROUTED copy inputs (Phase B spec 9.0): which intro variant this
+   * open will actually send. OPTIONAL - the STANDALONE preview has no owner and
+   * a caller that resolves none degrades to the naked intro, which is the same
+   * body it composed before Phase B (its pins re-verify UNCHANGED).
+   */
+  inputs?: RelayComposeInputs;
+}
+
+/** The resolver deps a preview can offer, off RosterResolutionDeps' optional
+ *  picks (ruling R11). `nowIso` comes from the QuietHoursState so a route with
+ *  a pinned clock previews a deterministic variant. */
+function composeDepsOf(deps: RosterResolutionDeps, quiet: QuietHoursState): RelayComposeDeps {
+  return {
+    ...(deps.tours !== undefined && { toursRepo: deps.tours }),
+    ...(deps.placements !== undefined && { placementsRepo: deps.placements }),
+    unitsRepo: deps.units,
+    contactsRepo: deps.contacts,
+    ...(deps.settings !== undefined && { settingsRepo: deps.settings }),
+    nowIso: quiet.nowIso,
+    logger: deps.log,
+  };
 }
 
 /**
@@ -470,7 +501,7 @@ export function buildOpenPreviewFromParts(
   );
   const recipientCount = parts.bodyMembers.filter((m) => reachableKeys.has(m.memberKey)).length;
   const preview = withQuietHours(
-    composeIntroBody(parts.bodyMembers.map((m) => m.name)),
+    composeIntroBody(parts.inputs ?? { variant: 'naked' }, parts.bodyMembers.map((m) => m.name)),
     parts.recipients.map(toRecipient),
     recipientCount,
     quiet,
@@ -535,10 +566,20 @@ export async function buildOpenPreview(
   const duplicateOf =
     findDuplicate === undefined ? undefined : await findDuplicate(new Set(seenPhones));
 
+  // Spec 9.0: the preview shows the SAME variant the job would send. Anything
+  // else breaks 9.5's escape hatch and, worse, an operator who tweaks a
+  // previewed naked intro pins the wrong variant permanently (precedence rule 1
+  // stores what they EDITED). Never throws - degrades to the naked intro.
+  const inputs = await resolveRelayComposeInputs(
+    { type: owner.type, id: owner.id },
+    composeDepsOf(deps, quiet),
+  );
+
   return {
     ok: true,
     preview: buildOpenPreviewFromParts(
       {
+        inputs,
         bodyMembers: provisioned.map((m) => ({
           ...(m.name !== undefined && { name: m.name }),
           memberKey: resolvedMemberKey(m),
@@ -647,13 +688,20 @@ export interface RosterCandidate {
 
 /**
  * Preview ADDING a member to a live group: the relay.member_added body the
- * WHOLE group receives, per-member deliverability including the candidate, and
+ * whole group receives, per-member deliverability including the candidate, and
  * the recipient count.
  *
- * Parity with the job (jobs/relayFanOut RELAY_MEMBER_ADDED_JOB): it composes
- * from the roster AFTER the add, so the candidate is appended to the member
- * names here - unless they are already a participant, in which case the add is
- * idempotent and the roster is unchanged.
+ * WHAT THE NEW MEMBER GETS IS DIFFERENT, and is not previewed (spec 9.0 / 9.4,
+ * Cameron 2026-08-31). The job now sends TWO bodies: this GROUP line to everyone
+ * already on the thread, and the naked relay.intro to the joiner - defined at
+ * jobs/relayFanOut.ts's RELAY_MEMBER_ADDED_JOB handler. The preview shows the
+ * GROUP body because that is what the operator is authoring and announcing; the
+ * new member's body is the fixed naked intro and needs no preview.
+ *
+ * Parity with the job otherwise: the ROLE clause is resolved from the same
+ * owner-routed resolver the job uses, for this candidate. The member NAME LIST
+ * no longer enters this body at all (the group line names only the joiner), so
+ * the post-add roster matters here only for the recipient count.
  */
 export async function buildAddPreview(
   deps: RosterResolutionDeps,
@@ -669,11 +717,12 @@ export async function buildAddPreview(
   const alreadyMember = resolved.members.some(
     (m) => m.contactId === candidate.contactId || m.phone === candidate.phone,
   );
-  const memberNames = resolved.members.map((m) => m.name);
-  const body = composeMemberAddedBody(
-    candidate.name,
-    alreadyMember ? memberNames : [...memberNames, candidate.name],
+  const inputs = await resolveRelayComposeInputs(
+    { type: owner.type, id: owner.id },
+    composeDepsOf(deps, quiet),
+    candidate.contactId,
   );
+  const body = composeMemberAddedGroupBody(inputs, candidate.name);
 
   const reachableKeys = new Set(
     view.members.filter((m) => m.reachability === 'reachable').map((m) => m.memberKey),

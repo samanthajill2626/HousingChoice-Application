@@ -23,8 +23,9 @@ import {
 } from '../src/jobs/jobs.js';
 import {
   composeIntroBody,
-  composeMemberAddedBody,
+  composeMemberAddedGroupBody,
   registerRelayFanOutJobHandler,
+  resolveRelayComposeInputs,
 } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
@@ -1885,6 +1886,12 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      // The OWNER-ROUTED copy's reads (Phase B spec 9.3): this suite provisions
+      // TOUR-OWNED groups, so the intro job takes the owned path.
+      unitsRepo: world.unitsRepo,
+      toursRepo: world.toursRepo,
+      placementsRepo: world.placementsRepo,
+      settingsRepo: world.settingsRepo,
       logger,
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
@@ -3435,6 +3442,12 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      // The OWNER-ROUTED copy's reads (Phase B spec 9.3). Without them the job
+      // would build the real DynamoDB-backed repos on the owned path below.
+      unitsRepo: world.unitsRepo,
+      toursRepo: world.toursRepo,
+      placementsRepo: world.placementsRepo,
+      settingsRepo: world.settingsRepo,
       logger,
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
@@ -3475,6 +3488,10 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       unitId: 'unit-abc',
       landlordId: 'c-owner',
       status: 'available',
+      // The STREET is load-bearing from Phase B on (spec 9.5): with no address
+      // the owner-routed intro degrades to the naked one, and the preview pins
+      // below would pass whether or not the ROUTE wired the resolver's repos.
+      address: { line1: '318 Marietta St', city: 'Atlanta', state: 'GA', zip: '30313' },
       contacts: [
         { contactId: 'c-owner', role: 'owner', primaryContact: false },
         { contactId: 'c-pm', role: 'pm', primaryContact: true },
@@ -3512,6 +3529,10 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       ai_mode: 'manual',
       // The stored row shape uses '' for "no contact" (nonEmpty() reads it as absent).
       participants: participants.map((p) => ({ ...p, contactId: p.contactId ?? '' })),
+      // What POST /api/tours/:id/relay stamps when it really provisions - and
+      // from Phase B on it is what ROUTES the announcement copy (spec 9.1), so
+      // a thread faked without it would exercise the naked path only.
+      owner: { type: 'tour' as const, id: tourId },
       created_at: now,
       ...(opts.optedOutKeys !== undefined && {
         relay_opted_out_members: Object.fromEntries(opts.optedOutKeys.map((k) => [k, { at: now }])),
@@ -3805,6 +3826,14 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     ]);
     world.sent.length = 0;
 
+    // PARITY, MEMBER_ADDED half (spec 9.0 / 9.6), captured through the REAL
+    // preview route BEFORE the add: the preview shows the GROUP body, and the
+    // job's persisted row carries the NEW MEMBER's instead.
+    const preview = await authed(app)
+      .post(`/api/tours/${tourId}/roster/preview-add`)
+      .send({ contactId: 'c-caseworker' });
+    expect(preview.status).toBe(200);
+
     const res = await authed(app)
       .post(`/api/tours/${tourId}/roster/live-members`)
       .send({ contactId: 'c-caseworker' });
@@ -3816,8 +3845,48 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual(
       [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
     );
-    // FIRST name only since 2026-08-20 (founder decision) - not "Casey Worker".
-    expect(world.sent[0]!.body).toContain('Casey joined this group chat.');
+    // The SPLIT (spec 9.4). The caseworker is on no unit roster and is not the
+    // tour's tenant, so no role resolves and the group hears the no-role line -
+    // FIRST name only, as since 2026-08-20.
+    const groupBody = 'Hey, adding Casey to the group.';
+    expect(world.sent.find((s) => s.to === TENANT_PHONE)!.body).toBe(groupBody);
+    expect(world.sent.find((s) => s.to === PM_PHONE)!.body).toBe(groupBody);
+    const newMemberLeg = world.sent.find((s) => s.to === CASEWORKER_PHONE)!;
+    expect(newMemberLeg.body).toContain("You're now connected with Tina, Pat, and Casey");
+    // Preview === the job's GROUP leg; the persisted row === the NEW member's.
+    expect(preview.body.body).toBe(groupBody);
+    const rows = world.messages.filter((m) => m.conversationId === 'conv-live');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.body).toBe(newMemberLeg.body);
+  });
+
+  // The role half of the same split: the PM is on the unit's roster with
+  // role 'pm', so adding THEM names the role (spec 9.4's table).
+  it('LIVE add of a rostered PM announces the ROLE clause to the group', async () => {
+    const { app } = makeWebhookHarness({ world, poolNumbersService: makeFakePoolNumbers() });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-caseworker', phone: CASEWORKER_PHONE, name: 'Casey Worker' },
+    ]);
+    world.sent.length = 0;
+
+    const preview = await authed(app)
+      .post(`/api/tours/${tourId}/roster/preview-add`)
+      .send({ contactId: 'c-pm' });
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-pm' });
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    const groupBody = 'Hey, adding Pat to the group as the property manager.';
+    expect(preview.body.body).toBe(groupBody);
+    expect(world.sent.find((s) => s.to === TENANT_PHONE)!.body).toBe(groupBody);
+    // ...and the new member still gets the naked intro, never a role line.
+    expect(world.sent.find((s) => s.to === PM_PHONE)!.body).toContain(
+      "You're now connected with Tina, Casey, and Pat",
+    );
   });
 
   it('LIVE add on a CLOSED thread is silent and immediate - never announced, never deferred', async () => {
@@ -4001,8 +4070,27 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
 
     expect(res.status).toBe(200);
-    // Parity: the SAME composer relayFanOut's relay.intro handler uses.
-    expect(res.body.body).toBe(composeIntroBody(['Tina Tenant', 'Pat Manager']));
+    // PARITY, INTRO half (spec 9.0): the preview must show the variant the job
+    // would send - the same resolver, through the REAL route, which is what
+    // proves routes/tours.ts wired the resolver's optional repo picks. Asserted
+    // twice on purpose: the resolved-copy half below cannot pass vacuously (a
+    // naked body contains none of it), and the equality half cannot drift.
+    expect(res.body.body).toContain('Putting you in a group text with Pat to tour 318 Marietta St');
+    expect(res.body.body).toContain('Hey Tina!');
+    expect(res.body.body).toBe(
+      composeIntroBody(
+        await resolveRelayComposeInputs(
+          { type: 'tour', id: tourId },
+          {
+            toursRepo: world.toursRepo,
+            unitsRepo: world.unitsRepo,
+            contactsRepo: world.contactsRepo,
+            settingsRepo: world.settingsRepo,
+          },
+        ),
+        ['Tina Tenant', 'Pat Manager'],
+      ),
+    );
     expect(res.body.recipients).toEqual([
       { name: 'Tina Tenant', reachability: 'reachable' },
       { name: 'Pat Manager', reachability: 'reachable' },
@@ -4098,9 +4186,13 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       { name: 'Otto Out', reachability: 'opted_out' },
     ]);
     expect(res.body.recipientCount).toBe(2);
-    // The opted-out member is still NAMED in the body - they are a participant
-    // whose leg is suppressed at send, exactly as the fan-out composes it.
-    expect(res.body.body).toBe(composeIntroBody(['Tina Tenant', 'Pat Manager', 'Otto Out']));
+    // The tour intro names the TENANT and the PROPERTY CONTACT only, so the
+    // roster no longer shows up in the body at all - the opted-out member is
+    // listed as a recipient and excluded from the count, which is where that
+    // rule now lives. (The naked intro's "everyone is named" pin survives on
+    // the standalone previews in relayGroupPreview.test.ts.)
+    expect(res.body.body).toContain('Putting you in a group text with Pat');
+    expect(res.body.body).not.toContain('Otto');
   });
 
   it('preview during PINNED quiet hours reports deferred:true with the clamped quiet-end instant', async () => {
@@ -4137,9 +4229,11 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       .send({ contactId: 'c-caseworker' });
 
     expect(res.status).toBe(200);
-    expect(res.body.body).toBe(
-      composeMemberAddedBody('Casey Worker', ['Tina Tenant', 'Pat Manager', 'Casey Worker']),
-    );
+    // The GROUP body (spec 9.0's ruling): what the operator is authoring and
+    // announcing. The new member receives the naked intro instead, which is not
+    // previewed - the live-add test above pins both halves against the job.
+    expect(res.body.body).toBe(composeMemberAddedGroupBody({ variant: 'naked' }, 'Casey Worker'));
+    expect(res.body.body).toBe('Hey, adding Casey to the group.');
     expect(res.body.recipients).toEqual([
       { name: 'Tina Tenant', reachability: 'reachable' },
       { name: 'Pat Manager', reachability: 'reachable' },

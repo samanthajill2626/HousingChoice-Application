@@ -579,7 +579,13 @@ function recipientSummaryName(
     // A null presentation (an unrecognised wire status) names the person and
     // claims no state - never a blank row, never an invented one.
     if (leg === null) return `${who}.`;
-    const legReason = leg.isFailure ? deliveryReason(row.slot.errorCode, { media }) : undefined;
+    // `relay` is the same product flag the rollup and the visible row pass, for
+    // the same reason `media` is passed to all three: a relay 30003 promises a
+    // retry that does not exist (D19), and a screen-reader user hearing "will
+    // retry" while the chip beside it does not say so is the D21 contradiction.
+    const legReason = leg.isFailure
+      ? deliveryReason(row.slot.errorCode, { media, relay: rosterKind === 'relay' })
+      : undefined;
     return `${who}: ${speakDeliveryText(chipText(leg, legReason))}.`;
   });
   return `${spoken}. ${recital.join(' ')}`;
@@ -846,7 +852,19 @@ function MessageBubble({
   // that path breaks is deliberately unnamed - see
   // docs/issues/mms-silent-drop-dish-textnow.md.
   const isMms = msg.type === 'mms';
+  // DELIBERATELY no `relay` flag here, and this is the one place in this
+  // component where that is a decision rather than an omission. This site reads
+  // the MESSAGE's own error_code, not a leg's. A relay source message never gets
+  // one (the relay path writes SLOTS only); the code that does reach it is the
+  // native-group-text aggregate, whose 30003 retry is real (D20). Passing
+  // `rosterKind` here would drop the promise from a group text that genuinely
+  // retries - the exact inversion D20 forbids.
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code, { media: isMms }) : undefined;
+  // The product flag for every LEG-scoped reason in this bubble: the rollup, the
+  // accessible-name recital and the per-recipient row. ONE derivation, so the
+  // three cannot disagree (D21) - the same argument the single `isMms` above
+  // already makes for media.
+  const isRelayLeg = rosterKind === 'relay';
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because
   // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
@@ -893,7 +911,7 @@ function MessageBubble({
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(
           recipientEntries.map(([, slot]) => slot),
-          { media: isMms, messageAtMs, nowMs: bubbleNowMs },
+          { media: isMms, relay: isRelayLeg, messageAtMs, nowMs: bubbleNowMs },
         )
       : null;
   const recipientRows = orderRecipientRows(recipientEntries, relayRoster);
@@ -1040,9 +1058,14 @@ function MessageBubble({
             // so this NEW surface would contradict the message-level chip
             // directly above it. One `isMms` feeds the rollup, this row and the
             // accessible name, so the three cannot disagree.
+            //
+            // `relay` is the second flag on exactly the same footing (D19/D21):
+            // a relay leg's 30003 keeps its carrier code and drops the "will
+            // retry" tail, because no relay retry is scheduled - while a native
+            // group text, whose 30003 retry IS real, keeps the promise.
             const legReason =
               leg?.isFailure === true
-                ? deliveryReason(row.slot.errorCode, { media: isMms })
+                ? deliveryReason(row.slot.errorCode, { media: isMms, relay: isRelayLeg })
                 : undefined;
             return (
               <li key={row.key} className={styles.recipientRow}>

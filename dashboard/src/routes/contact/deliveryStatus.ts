@@ -583,9 +583,47 @@ const MMS_ERROR_CODE_REASONS: Record<string, string> = {
   '30006': "Attachment didn't get through, texts may still work",
 };
 
-/** Whether the failing leg carried media - an MMS bubble or a relay MMS rollup. */
+/**
+ * Overrides that apply ONLY to a RELAY leg, checked after MMS_ERROR_CODE_REASONS
+ * and before ERROR_CODE_REASONS.
+ *
+ * 30003 is the whole map, and the reason is D19: NO RELAY RETRY EXISTS. The
+ * status webhook returns on the relay-pointer branch before it ever reaches the
+ * 1:1 30003 retry enqueue, and the retry-counter branch that added this map adds
+ * no relay retry either. So "will retry" on a relay leg is a promise the product
+ * cannot keep - it was false before this change and it is false after it - and
+ * staff read it as "leave this alone, it is still going".
+ *
+ * NATIVE GROUP TEXT IS DELIBERATELY EXCLUDED (D20), which is why this is scoped
+ * by product rather than applied to ERROR_CODE_REASONS outright. A group text's
+ * 30003 retry is real: the 30005/30006 and 21610 arms of the webhook each carry a
+ * group_text guard and the 30003 arm carries none, so a group-text leg reaches
+ * the retry enqueue exactly as a 1:1 does. The 1:1 entry above therefore stays
+ * byte-for-byte as it is, em dash and all.
+ *
+ * THE CARRIER CODE IS KEPT. Only the promise is dropped: 30003 is a real number
+ * an operator can look up, unlike the app-invented codes in
+ * INTERNAL_CODE_REASONS. Nothing here appends it - the `(error <code>)` template
+ * at the end of `deliveryReason` does, which is why the string below stops at the
+ * observation.
+ */
+const RELAY_ERROR_CODE_REASONS: Record<string, string> = {
+  '30003': 'Phone unreachable',
+};
+
+/** What SCOPES a reason to the leg that actually failed. Both flags are hints,
+ *  not routing: an unmapped code reads the same whatever they say.
+ *
+ *  `media` and `relay` are independent, and their ORDER is decided in
+ *  `deliveryReason` rather than here - see the chain there. */
 export interface DeliveryReasonOptions {
+  /** The failing leg carried media - an MMS bubble or a relay MMS rollup. */
   media?: boolean;
+  /** The failing leg is a RELAY fan-out leg, as opposed to a native group text,
+   *  a 1:1 message, an email or a broadcast recipient. Set from the timeline's
+   *  `rosterKind`; absent everywhere the presenter has no product input, which is
+   *  exactly the set of positions D19 leaves alone. */
+  relay?: boolean;
 }
 
 /**
@@ -651,8 +689,20 @@ export function deliveryReason(
   if (errorCode === undefined || errorCode.length === 0) return undefined;
   const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
   if (internal !== undefined) return internal;
+  // THE ORDER IS LOAD-BEARING, and it is pinned by a test because nothing
+  // observable depends on it today: media FIRST, relay SECOND, base LAST. The
+  // two override maps are disjoint right now (media holds 30005/30006, relay
+  // holds 30003), so either order gives the same answers - which is precisely
+  // why it has to be decided before the maps grow. Consulted the other way
+  // round, a relay map that ever gained a 30005 would silently un-hedge the
+  // prod-2026-08-24 MMS copy on a relay attachment leg, on the very surface whose
+  // own comment (Timeline.tsx per-recipient row) calls that contradiction the
+  // thing it exists to prevent. The MMS hedge is about what the CARRIER could not
+  // move; the relay override is about what THIS APP will not do next. When both
+  // apply, the carrier's reading is the one staff need first.
   const mapped =
     (opts.media === true ? ownReason(MMS_ERROR_CODE_REASONS, errorCode) : undefined) ??
+    (opts.relay === true ? ownReason(RELAY_ERROR_CODE_REASONS, errorCode) : undefined) ??
     ownReason(ERROR_CODE_REASONS, errorCode);
   return mapped !== undefined
     ? `${mapped} (error ${errorCode})`

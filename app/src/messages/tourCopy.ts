@@ -169,7 +169,7 @@ function idFor(
  *  exist in Phase A (settingsToOverrides maps only welcome.sms and
  *  missed_call.autotext - messages/resolve.ts:74-79, and no tour compose
  *  site passes an overrides argument at all).
- *  TODO(tour-reminder-ladder-phase-b): the day a generic override map lands,
+ *  TODO(tour-copy-where-token-declared-not-passed): the day a generic override map lands,
  *  widen this to the EFFECTIVE template - ComposeTourReminderInput.overrides
  *  already exists, so activating the hazard is one call-site argument away,
  *  and an override could add a name token the default lacks. */

@@ -46,3 +46,28 @@ cheap shape:
 Take it with the tours fix as the reference implementation so the two ladders
 keep rendering through one shared chip vocabulary (the `suppression` field's
 docblock at `:141` already states that as the standing intent).
+
+**Two more surfaces, assigned here (2026-08-31).** The tours fix shipped on
+`feat/tour-reminder-ladder-phase-b`, and its spec section 8.2 sets `overdue` on
+the TWO `TourReminderView` builders in `app/src/routes/tourReminders.ts` only.
+It EXPLICITLY EXCLUDES two other readers of the same pending rungs and assigns
+them to THIS item's scope, on the grounds that both are a different wire shape
+with their own reason vocabulary:
+
+- `app/src/routes/contactTimeline.ts` - the upcoming bucket, which projects
+  `TimelineScheduled` and aggregates across tours AND placements, so a per-rung
+  staleness flag there is this item's problem, not the tour ladder's.
+- `app/src/routes/relayGroups.ts` - GET `/api/conversations/:id/scheduled`, the
+  group scheduled view, which renders a group's scheduled sends rather than the
+  tour ladder.
+
+Both render through `dashboard/src/routes/contact/ScheduledCard.tsx`, whose
+`fireTimeLabel` still returns the literal `sending shortly` for any rung whose
+`at` is at or past `now` - so on both surfaces a rung stalled for days reads as
+one about to go out. That string is where an `overdue` signal would land when
+this item is built; the card's `scheduledLabel` already short-circuits ahead of
+it for `discontinued` and `paused`, which is the pattern to follow.
+
+Recorded here because Phase B's spec asserted these two surfaces were already
+named in this file and they were not - the exclusion had no record anywhere
+until this paragraph.

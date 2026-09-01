@@ -54,6 +54,7 @@ import {
 } from '../repos/tourRemindersRepo.js';
 import { type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import type { UnitItem, UnitsRepo } from '../repos/unitsRepo.js';
+import { isSupersededRung } from '../lib/ladderPointer.js';
 import { isOnRoster, resolveRoster, rosterWaitExpired } from '../lib/rosterResolution.js';
 import {
   SendRefusedError,
@@ -305,6 +306,33 @@ export const MANUAL_ONLY_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<Rem
 export const DISCONTINUED_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([
   'confirmation',
 ]);
+
+/**
+ * How long the poll DEFERS a rung whose tour carries an unresolved
+ * placement-conversion claim before retiring it (supersession spec 3.3).
+ *
+ * A conversion normally holds its `pending:` sentinel for milliseconds, and
+ * while it does, the rung's fate is genuinely undecided - the finalize is about
+ * to sweep it. But a crashed conversion leaves that sentinel with no TTL and no
+ * recovery route, so an unbounded deferral is the perpetual-"sending shortly"
+ * lie in a new costume. Bounded exactly like the roster and names waits
+ * (ROSTER_UNAVAILABLE_GRACE_MS, lib/rosterResolution.ts): measured from the
+ * rung's own dueAt, because the rows carry no stamp for when the claim started,
+ * and one hour is long enough that a slow write or a redeploy never trips it.
+ */
+export const CONVERSION_CLAIM_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Has a rung due at `dueAt` waited longer than the grace window for a
+ * conversion claim to resolve? Unparseable stamps answer false - "keep waiting"
+ * is the safer half of this decision, the same call rosterWaitExpired makes.
+ */
+function conversionClaimExpired(dueAt: string, nowIso: string): boolean {
+  const due = Date.parse(dueAt);
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(due) || Number.isNaN(now)) return false;
+  return now - due > CONVERSION_CLAIM_GRACE_MS;
+}
 
 /**
  * Read the org quiet-hours window. A settings failure falls back to the
@@ -1095,6 +1123,67 @@ async function processReminderRow(
       'tour reminder: tour already started - retiring (claim-skipped)',
     );
     await claimSkipRow(row, 'tour_already_passed', now, deps, tour.tenantId);
+    return;
+  }
+
+  // CONVERSION CLAIM IN FLIGHT (supersession spec 3.3). POSITION IS BEHAVIOUR
+  // here too, in both directions:
+  //   - ABOVE the batch-supersession block below, because that block STAMPS
+  //     (skippedAt is terminal). A rung deferred for a claim would be retired
+  //     on its way past, under a token naming the wrong cause, and nothing
+  //     could undo it when the conversion released.
+  //   - ABOVE the pointer check below, so a claim in flight is answered ONCE
+  //     and never re-examined. placements.ts rotates the pointer only when the
+  //     finalize lands, so mid-claim the pointer usually still matches - but on
+  //     a tour that was ALSO rescheduled, deferring is still the truer answer:
+  //     the conversion is about to decide this rung's fate by deleting it.
+  //   - BELOW the past-tour gate, on the gate's own argument: a rung whose tour
+  //     has already happened is not waiting on anything.
+  // The PREFIX is the predicate, not string-ness: the sentinel is
+  // `pending:${randomUUID()}` (routes/placements.ts) and the FINALIZE replaces
+  // it with a real placementId in the same field, so a bare is-a-string test
+  // would defer every converted tour forever.
+  if (
+    typeof tour.convertedPlacementId === 'string' &&
+    tour.convertedPlacementId.startsWith('pending:')
+  ) {
+    if (conversionClaimExpired(row.dueAt, now)) {
+      log.error(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+        'tour reminder: placement conversion claim STILL unresolved past the grace window - retiring (claim-skipped)',
+      );
+      await claimSkipRow(row, 'conversion_stalled', now, deps, tour.tenantId);
+      return;
+    }
+    // UNCLAIMED, nothing stamped: the row re-lists on the next tick, and the
+    // conversion's own sweep will delete it if the finalize lands.
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: placement conversion in flight - deferred (not claimed)',
+    );
+    return;
+  }
+
+  // GENERATION POINTER (supersession spec 3.3): this rung belongs to a ladder
+  // the tour has already replaced, so no path may send it. POSITION, again:
+  //   - BELOW the past-tour gate because `tour_already_passed` is the truer
+  //     answer when both hold - the tour happening outranks the schedule being
+  //     rewritten.
+  //   - ABOVE the batch-supersession block below, or a mismatched rung sharing
+  //     a batch with a later rung would be stamped `quiet_hours_superseded`:
+  //     the wrong token for the wrong cause, on the panel, permanently.
+  //   - ABOVE the quiet-hours backstop, or a mismatched rung due inside the
+  //     window would be deferred unclaimed to quiet-end before being refused
+  //     anyway - a rung nothing will ever send is not waiting for quiet-end.
+  // A pre-migration pair (no pointer, no ladderId) is EXEMPT and behaves
+  // exactly as it did before this feature; see lib/ladderPointer.ts for the
+  // whole four-cell argument.
+  if (isSupersededRung(row, tour)) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: ladder superseded by a newer generation - retiring (claim-skipped)',
+    );
+    await claimSkipRow(row, 'superseded', now, deps, tour.tenantId);
     return;
   }
 

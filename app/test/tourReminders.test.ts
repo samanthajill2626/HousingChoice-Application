@@ -53,6 +53,7 @@ import {
 import {
   armTourReminders,
   cancelTourReminders,
+  CONVERSION_CLAIM_GRACE_MS,
   DISCONTINUED_REMINDER_KINDS,
   forceSendReminder,
   MANUAL_ONLY_REMINDER_KINDS,
@@ -3663,11 +3664,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     if (opts.groupThreadId !== undefined) {
       await tours.patch(tour.tourId, { groupThreadId: opts.groupThreadId });
     }
-    await armTourReminders(tour, NOW_D11, {
+    const { ladderId } = await armTourReminders(tour, NOW_D11, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
     });
+    // POINT THE TOUR AT WHAT WAS JUST ARMED, exactly as the route does after
+    // the arm (S3). Without it these rows are STAMPED on a POINTERLESS tour -
+    // the interrupted-pointer-write cell - and the poll refuses every one of
+    // them `superseded` before any D11 roster rule is reached.
+    if (ladderId !== null) await tours.patch(tour.tourId, { currentLadderId: ladderId });
     return tour;
   }
 
@@ -5294,6 +5300,215 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       // Zero supersession rows, zero skips of any kind.
       expect(rows).toHaveLength(3);
       expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
+    });
+  });
+
+  // ===========================================================================
+  // SUPERSESSION REFUSAL (2026-09-01 spec 3.3). The poll refuses a rung whose
+  // generation pointer no longer matches its tour's, and DEFERS - unclaimed -
+  // a rung of a tour with a placement-conversion claim in flight.
+  //
+  // Own DECEMBER 2026 timeline, the file's isolation idiom: no row from any
+  // other test is due at these polls and none of these rows is swept by another
+  // tick. Each case takes a FRESH world (createGroupTestRig), so `world.sent`
+  // counts only its own sends.
+  // ===========================================================================
+  describe('supersession refusal and the conversion-claim deferral (spec 3.3)', () => {
+    const SEEDED_AT = '2026-12-01T15:00:00.000Z';
+
+    /** A tenant + 1:1 thread + a self_guided tour (the unambiguous 1:1 route). */
+    async function seedSupersessionTour(
+      rig: ReturnType<typeof createGroupTestRig>,
+      suffix: string,
+      phone: string,
+    ): Promise<TourItem> {
+      seedTenant(rig.world, `contact-sup-${suffix}`, phone, `conv-sup-${suffix}`, SEEDED_AT);
+      return tours.create({
+        tenantId: `contact-sup-${suffix}`,
+        unitId: `unit-sup-${suffix}`,
+        scheduledAt: '2026-12-10T20:00:00.000Z',
+        tourType: 'self_guided',
+      });
+    }
+
+    it('claim-skips a rung whose ladderId does not match the tour pointer, and nudges the live surfaces', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'mismatch', '+15550280001');
+      // The tour has been rearmed since: its pointer names a generation this
+      // row never belonged to.
+      await tours.patch(tour.tourId, { currentLadderId: 'ladder-sup-new' });
+      const stale = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T20:00:00.000Z',
+        ladderId: 'ladder-sup-old',
+      });
+
+      const events = createEventBus({ logger });
+      const emitted: Array<{ contactId?: string }> = [];
+      events.on('scheduled.updated', (p) => emitted.push(p));
+      const pollAt = '2026-12-09T20:01:00.000Z';
+      await runDueTourReminders(pollAt, { ...rig.deps, events });
+
+      expect(rig.world.sent).toHaveLength(0);
+      expect(rig.groupSends).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === stale.reminderId,
+      );
+      expect(after?.skippedAt).toBe(pollAt);
+      expect(after?.skipReason).toBe('superseded');
+      expect(after?.sentAt).toBeUndefined();
+      // The claim-skip's own emit, so the panel and both Upcoming buckets flip
+      // to the "Replaced" chip without a reload. Filtered by contactId: the
+      // batch is the whole table's due set, so other suites' leftover rows emit
+      // their own claim-skips on this tick.
+      expect(emitted.filter((p) => p.contactId === 'contact-sup-mismatch')).toHaveLength(1);
+      // ...and it leaves listDue exactly once, never re-listed.
+      expect((await tourReminders.listDue(pollAt)).map((r) => r.reminderId)).not.toContain(
+        stale.reminderId,
+      );
+    });
+
+    it('ANTI-VACUITY: a pre-migration pair (bare row, bare tour) still sends', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'legacy', '+15550280002');
+      const legacy = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T21:00:00.000Z',
+      });
+
+      await runDueTourReminders('2026-12-09T21:01:00.000Z', rig.deps);
+
+      expect(rig.world.sent).toHaveLength(1);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === legacy.reminderId,
+      );
+      expect(after?.sentAt).toBe('2026-12-09T21:01:00.000Z');
+      expect(after?.skipReason).toBeUndefined();
+    });
+
+    it('refuses a STAMPED rung on a tour with no pointer (the interrupted pointer write)', async () => {
+      // S3/T3.6's case: the arm stamped the rows and the pointer write failed,
+      // which the route logs LOUDLY. Those rows are refused, not exempt - the
+      // alternative reads a stamped row as pre-migration and sends from a
+      // generation nothing can name.
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'unpointed', '+15550280003');
+      const stamped = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T22:00:00.000Z',
+        ladderId: 'ladder-sup-unpointed',
+      });
+
+      const pollAt = '2026-12-09T22:01:00.000Z';
+      await runDueTourReminders(pollAt, rig.deps);
+
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === stamped.reminderId,
+      );
+      expect(after?.skipReason).toBe('superseded');
+    });
+
+    // -------------------------------------------------------------------------
+    // T5.4 - the conversion-claim deferral. `pending:<uuid>` is the sentinel
+    // routes/placements.ts writes while a conversion is mid-flight.
+    // -------------------------------------------------------------------------
+    it('DEFERS a rung unclaimed while a conversion claim is in flight, then sends it once the claim clears', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'claim', '+15550280004');
+      const sentinel = `pending:${randomUUID()}`;
+      await tours.claimConversion(tour.tourId, sentinel);
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T23:00:00.000Z',
+      });
+
+      const inWindow = '2026-12-09T23:05:00.000Z'; // 5 minutes past due
+      await runDueTourReminders(inWindow, rig.deps);
+
+      expect(rig.world.sent).toHaveLength(0);
+      // NOTHING STAMPED: skippedAt is terminal, so a claim-skip inside the
+      // window could never be undone when the conversion releases.
+      const deferred = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(deferred?.skippedAt).toBeUndefined();
+      expect(deferred?.skipReason).toBeUndefined();
+      expect(deferred?.sentAt).toBeUndefined();
+      expect(deferred?.canceledAt).toBeUndefined();
+      // Still live in listDue - it re-fires on the next tick.
+      expect((await tourReminders.listDue(inWindow)).map((r) => r.reminderId)).toContain(
+        row.reminderId,
+      );
+
+      // The conversion was abandoned and the claim released: the rung sends.
+      await tours.releaseConversionClaim(tour.tourId, sentinel);
+      await runDueTourReminders('2026-12-09T23:06:00.000Z', rig.deps);
+      expect(rig.world.sent).toHaveLength(1);
+    });
+
+    it('RETIRES the rung conversion_stalled once the claim outlives the grace window', async () => {
+      const rig = createGroupTestRig();
+      const errorsBefore = logCapture.atLevel(50).length;
+      const tour = await seedSupersessionTour(rig, 'stuck', '+15550280005');
+      await tours.claimConversion(tour.tourId, `pending:${randomUUID()}`);
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-08T10:00:00.000Z',
+      });
+
+      // One millisecond past the hour: the boundary is exclusive, exactly like
+      // rosterWaitExpired's.
+      const pastWindow = new Date(
+        Date.parse('2026-12-08T10:00:00.000Z') + CONVERSION_CLAIM_GRACE_MS + 1,
+      ).toISOString();
+      await runDueTourReminders(pastWindow, rig.deps);
+
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBe(pastWindow);
+      expect(after?.skipReason).toBe('conversion_stalled');
+      // LOUD: a stuck sentinel has no TTL and no recovery route, so this retire
+      // is the only thing that will ever say so.
+      const newErrors = logCapture
+        .atLevel(50)
+        .slice(errorsBefore)
+        .filter((l) => /conversion claim/i.test(String(l['msg'] ?? '')));
+      expect(newErrors).toHaveLength(1);
+      expect(newErrors[0]!['tourId']).toBe(tour.tourId);
+    });
+
+    it('does NOT defer a FINALIZED tour - a real placementId is not a pending claim', async () => {
+      // The trap the spec names: finalize REPLACES the sentinel with a real
+      // placement id, so a bare "is a string" predicate would defer every
+      // converted tour forever.
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'final', '+15550280006');
+      await tours.patch(tour.tourId, { convertedPlacementId: 'placement-sup-final' });
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T23:30:00.000Z',
+      });
+
+      const pollAt = '2026-12-09T23:31:00.000Z';
+      await runDueTourReminders(pollAt, rig.deps);
+
+      // Post-S8 such a tour's pointer is rotated and the rung is swept; here
+      // (pre-S8, bare row and bare pointer) the pre-migration exemption applies
+      // and the rung is DECIDED - sent - rather than deferred forever.
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBe(pollAt);
+      expect(after?.skipReason).toBeUndefined();
     });
   });
 });

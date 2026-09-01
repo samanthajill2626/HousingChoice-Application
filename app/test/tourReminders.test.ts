@@ -4230,6 +4230,252 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(f.spy.sent).toHaveLength(1);
       expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
     });
+
+    // =========================================================================
+    // THE ONE-HOUR BOUND on the names re-list (Phase B spec 7, ledger item 7).
+    //
+    // Phase A accepted an UNBOUNDED defer here because the poll sat behind the
+    // manual-only hold-back; that acceptance expired with the pause. A read
+    // that throws forever re-lists the rung every tick with nothing on the
+    // panel to say why, and when the table recovers the whole backlog fires
+    // carrying copy whose moment has passed. The bound mirrors the roster twin
+    // exactly (ROSTER_UNAVAILABLE_GRACE_MS, one hour past the rung's dueAt):
+    // inside the hour a blip still costs nothing, past it the rung is retired
+    // VISIBLY. One hour and not longer because an "on the way" text landing
+    // ninety minutes late is worse than a chip saying it did not send.
+    //
+    // BOTH send routes need it. The GROUP route matters most: a landlord_led
+    // en_route rung is the only rung in the whole ladder whose copy FORKS on
+    // the property-contact name, so it is the single rung-differential names
+    // failure there is - bounding the 1:1 alone would close the smaller half.
+    //
+    // FORCE-SEND is deliberately unbounded on both routes: a human action never
+    // retires a rung, so it keeps refusing `names_unavailable` for as long as
+    // the rung stays pending.
+    // =========================================================================
+    describe('the one-hour names bound (spec 7)', () => {
+      /** dueAt + 1 minute: past due, well inside the grace window. */
+      const NF_EARLY_POLL = '2026-03-11T15:01:00.000Z';
+      /** dueAt + 61 minutes: past the one-hour grace (rosterWaitExpired is `>`). */
+      const NF_LATE_POLL = '2026-03-11T16:01:00.000Z';
+      const RETIRE_ERROR =
+        'tour reminder: name resolution STILL failing past the grace window - retiring (claim-skipped)';
+
+      /**
+       * The GROUP twin of nameFailRig: a landlord_led tour WITH a usable open
+       * relay group, so delivery routes to sendGroupReminder rather than
+       * falling back to the tenant 1:1. The unit's property contact is the read
+       * that throws - the fork en_route's group copy depends on.
+       *
+       * The throwing read cannot make the group unusable: memberFromContact
+       * catches its own contact-read throw, so the roster still resolves and a
+       * red here can only be the compose gate.
+       *
+       * THE TENANT'S 1:1 CONVERSATION IS DELETED after seeding, deliberately.
+       * Without that these cases would pass identically if the group were
+       * unusable and routing quietly fell back to the 1:1 - i.e. they would
+       * prove the 1:1 bound twice and the group bound never. With no 1:1 thread
+       * to fall back TO, a routing failure claim-skips `no_conversation`
+       * instead, which every assertion below would catch.
+       */
+      async function groupNameFailRig(opts: {
+        suffix: string;
+        phone: string;
+        landlordPhone: string;
+        kind: ReminderKind;
+      }) {
+        const rig = createGroupTestRig();
+        const spy = makeForceSendSpy();
+        const tenantId = `contact-gnf-${opts.suffix}`;
+        const unitId = `unit-gnf-${opts.suffix}`;
+        const landlordId = `c-gboom-${opts.suffix}`;
+        const groupConvId = `conv-gnf-group-${opts.suffix}`;
+        seedForceTenant(rig.world, {
+          contactId: tenantId,
+          phone: opts.phone,
+          convId: `conv-gnf-${opts.suffix}`,
+          now: NF_SEEDED,
+        });
+        // See the docblock: no 1:1 thread, so nothing can silently fall back.
+        rig.world.conversations.delete(`conv-gnf-${opts.suffix}`);
+        rig.world.units.set(unitId, {
+          unitId,
+          landlordId,
+          status: 'available',
+          created_at: NF_SEEDED,
+          updated_at: NF_SEEDED,
+        });
+        const realGetById = rig.world.contactsRepo.getById.bind(rig.world.contactsRepo);
+        rig.world.contactsRepo.getById = async (contactId: string) => {
+          if (contactId === landlordId) throw new Error('contacts unavailable');
+          return realGetById(contactId);
+        };
+        seedRelayGroup(rig.world, {
+          convId: groupConvId,
+          poolNumber: '+15550190901',
+          participants: [
+            { contactId: tenantId, phone: opts.phone, name: 'Tina Tenant' },
+            { contactId: landlordId, phone: opts.landlordPhone, name: 'Larry Landlord' },
+          ],
+          now: NF_SEEDED,
+        });
+        const tour = await tours.create({
+          tenantId,
+          unitId,
+          scheduledAt: NF_SCHEDULED,
+          tourType: 'landlord_led',
+        });
+        await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+        const row = await tourReminders.create({
+          tourId: tour.tourId,
+          kind: opts.kind,
+          dueAt: NF_DUE,
+        });
+        const deps = { ...rig.deps, sendMessageService: spy.service };
+        return { rig, spy, deps, tour, row };
+      }
+
+      it('1:1 route (a): INSIDE the hour the rung is still left unclaimed and re-lists', async () => {
+        const f = await nameFailRig({
+          suffix: 'bound1a',
+          phone: '+15550240011',
+          kind: 'en_route',
+          throwing: 'property',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_EARLY_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+        expect(f.spy.sent).toHaveLength(0);
+        // The warn string is unchanged and asserted verbatim: the inside-the-hour
+        // branch is exactly the Phase A behaviour, and only its bound is new.
+        expect(msgsSince(from)).toContain(DEFER_WARN);
+        expect(msgsSince(from)).not.toContain(RETIRE_ERROR);
+        // Still live: the next tick retries it.
+        expect((await tourReminders.listDue(NF_EARLY_POLL)).map((r) => r.reminderId)).toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('1:1 route (b): PAST the hour it is claim-skipped names_unavailable, exactly once', async () => {
+        const f = await nameFailRig({
+          suffix: 'bound1b',
+          phone: '+15550240012',
+          kind: 'en_route',
+          throwing: 'property',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_LATE_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.skippedAt).toBe(NF_LATE_POLL);
+        expect(after?.skipReason).toBe('names_unavailable');
+        expect(after?.sentAt).toBeUndefined();
+        expect(f.spy.sent).toHaveLength(0);
+        expect(msgsSince(from)).toContain(RETIRE_ERROR);
+        // EXACTLY ONCE is the whole point of a claim-skip over a bare return:
+        // the row leaves listDue, so a second tick has nothing to re-retire.
+        expect((await tourReminders.listDue(NF_LATE_POLL)).map((r) => r.reminderId)).not.toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('1:1 route (c): FORCE-SEND past the hour still refuses names_unavailable and never retires', async () => {
+        const f = await nameFailRig({
+          suffix: 'bound1c',
+          phone: '+15550240013',
+          kind: 'en_route',
+          throwing: 'property',
+        });
+
+        const result = await forceSendReminder(
+          f.row.reminderId,
+          f.tour.tourId,
+          NF_LATE_POLL,
+          true,
+          f.deps,
+        );
+
+        // The bound is a POLL rule. A human pressing Send now gets an answer and
+        // keeps the rung, so they can push it through the moment the table
+        // recovers - however long past due that is.
+        expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+      });
+
+      it('GROUP route (a): INSIDE the hour the rung is still left unclaimed and re-lists', async () => {
+        const f = await groupNameFailRig({
+          suffix: 'bound2a',
+          phone: '+15550240021',
+          landlordPhone: '+15550240121',
+          kind: 'en_route',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_EARLY_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+        // Nothing announced into the group thread either.
+        expect(f.rig.groupSends).toHaveLength(0);
+        expect(msgsSince(from)).toContain(DEFER_WARN);
+        expect(msgsSince(from)).not.toContain(RETIRE_ERROR);
+        expect((await tourReminders.listDue(NF_EARLY_POLL)).map((r) => r.reminderId)).toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('GROUP route (b): PAST the hour it is claim-skipped names_unavailable, exactly once', async () => {
+        const f = await groupNameFailRig({
+          suffix: 'bound2b',
+          phone: '+15550240022',
+          landlordPhone: '+15550240122',
+          kind: 'en_route',
+        });
+        const from = logCapture.lines.length;
+
+        await runDueTourReminders(NF_LATE_POLL, f.deps);
+
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.skippedAt).toBe(NF_LATE_POLL);
+        expect(after?.skipReason).toBe('names_unavailable');
+        expect(f.rig.groupSends).toHaveLength(0);
+        expect(msgsSince(from)).toContain(RETIRE_ERROR);
+        expect((await tourReminders.listDue(NF_LATE_POLL)).map((r) => r.reminderId)).not.toContain(
+          f.row.reminderId,
+        );
+      });
+
+      it('GROUP route (c): FORCE-SEND past the hour still refuses names_unavailable and never retires', async () => {
+        const f = await groupNameFailRig({
+          suffix: 'bound2c',
+          phone: '+15550240023',
+          landlordPhone: '+15550240123',
+          kind: 'en_route',
+        });
+
+        const result = await forceSendReminder(
+          f.row.reminderId,
+          f.tour.tourId,
+          NF_LATE_POLL,
+          true,
+          f.deps,
+        );
+
+        expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+        expect(f.rig.groupSends).toHaveLength(0);
+        const after = await rowOf(f.tour.tourId, f.row.reminderId);
+        expect(after?.sentAt).toBeUndefined();
+        expect(after?.skippedAt).toBeUndefined();
+      });
+    });
   });
 
   // ===========================================================================

@@ -1221,6 +1221,19 @@ async function processReminderRow(
       return;
     }
     if (err instanceof ReminderNamesUnavailableError) {
+      // BOUNDED (Phase B spec 7, ledger item 7 - the acceptance that expired
+      // with the pause): same grace as the roster twin above. Past it the copy
+      // is stale regardless of recovery - an "on the way" text landing ninety
+      // minutes late is worse than a chip saying it did not send - so retire
+      // visibly instead of re-listing forever.
+      if (rosterWaitExpired(row.dueAt, now)) {
+        log.error(
+          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+          'tour reminder: name resolution STILL failing past the grace window - retiring (claim-skipped)',
+        );
+        await claimSkipRow(row, 'names_unavailable', now, deps, tour.tenantId);
+        return;
+      }
       log.warn(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
         'tour reminder: name resolution read failed - leaving the rung unclaimed for the next tick',
@@ -1387,13 +1400,24 @@ async function sendGroupReminder(
       await claimSkipRow(row, 'invalid_schedule', now, deps, tour.tenantId);
       return;
     }
-    // THE QUIET BACKSTOP, deliberately: no claim, no skip stamp. A PERMANENTLY
-    // failing read therefore re-lists every tick with NO self-clearing bound -
-    // accepted for Phase A because the production poll sits behind the
-    // manual-only filter and spec 8.2 grants no reason token for a bounded
-    // escalation. That acceptance EXPIRES with the pause; it is item (7) of
-    // the Phase B ledger issue, which is what gets read at unpause.
+    // BOUNDED (Phase B spec 7, ledger item 7 - DISCHARGED here, not carried).
+    // Phase A left this branch unbounded: no claim, no skip stamp, so a
+    // PERMANENTLY failing read re-listed every tick forever. That was accepted
+    // only because the production poll sat behind the manual-only filter, and
+    // the filter is empty again. THIS route is the one that matters most: a
+    // landlord_led / pm_team en_route rung is the ONLY rung whose copy forks on
+    // the property-contact name, so it is the single rung-differential names
+    // failure in the whole ladder - bounding the 1:1 twin alone would have
+    // closed the smaller half of the hole. Same grace as that twin.
     if (err instanceof ReminderNamesUnavailableError) {
+      if (rosterWaitExpired(row.dueAt, now)) {
+        log.error(
+          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+          'tour reminder: name resolution STILL failing past the grace window - retiring (claim-skipped)',
+        );
+        await claimSkipRow(row, 'names_unavailable', now, deps, tour.tenantId);
+        return;
+      }
       log.warn(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
         'tour reminder: name resolution read failed - leaving the rung unclaimed for the next tick',

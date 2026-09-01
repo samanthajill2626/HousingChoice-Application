@@ -40,9 +40,16 @@ for both observations without additional geometry evidence.
   main baseline on 2026-09-01 also passed 6/6. That narrows the problem to
   full-suite state or timing; it does not excuse the failure.
 - The fresh traced baseline arranged Timeline at its maximum scroll offset
-  (`top=193`, `maximumTop=193`). This makes the newer `+288px` observation
-  compatible with bottom anchoring after 288px of content growth, but only a
-  failing run can prove that its maximum and content height grew together.
+  (`top=193`, `maximumTop=193`) and stayed there without a native scroll event.
+- A fresh traced full run passed all 6 outbound-MMS cases. Its target case began
+  at Timeline `top=509`, `maximumTop=809`. Three background mutations changed
+  `scrollHeight` from `989` to `997`, then `975`, and finally `977`; the offset
+  stayed `509`, while the final maximum became `797`.
+- The newer historical failure's received value was exactly that control maximum:
+  expected `509`, received `797`. This strongly supports a snap to bottom after a
+  Timeline refresh in that occurrence. It does not prove which write triggered it,
+  and it does not explain the older opposite-direction Timeline movement plus
+  AppFrame reset.
 - The full-run browser artifacts from both historical failures were overwritten
   before they could be inspected. Their screenshots and paths are not evidence
   that can still be recovered.
@@ -60,11 +67,15 @@ deciding whether to change product code or narrow that assertion.
 ## Open questions
 
 The missing evidence is the first event that changes either scroll owner and the
-geometry at that instant. Plausible sources include a delayed Timeline render, a
-cross-spec browser or service-worker actor, a periodic application refresh, or a
-layout resize that clamps or repins a scroll owner. Pan pointer leakage is lower
-probability because the viewer is portaled above an inert background, but it is
-still testable from the event sequence.
+geometry at that instant. For the newer occurrence, the leading hypothesis is a
+Timeline cluster refresh reaching the `atBottomRef` branch and assigning
+`scrollTop = scrollHeight` after the test captured an offset 288px above the final
+maximum. The open question is why that ref would still be true after programmatic
+arrangement moved the stream away from the bottom. The older occurrence still
+requires a different write or a larger layout shift. Plausible sources include a
+cross-spec actor, a periodic application refresh, or a resize that clamps or
+repins a scroll owner. Pan pointer leakage remains lower probability because the
+viewer is portaled above an inert background.
 
 ## Diagnostic experiment
 
@@ -75,12 +86,19 @@ failing test. The recorder must not alter product behavior. It records:
 - native `scroll` events for AppFrame and the Timeline stream;
 - relevant DOM mutations and resize notifications;
 - `scrollTop`, `scrollHeight`, `clientHeight`, maximum scroll, and bounding boxes
-  for both owners and the route root at every sample.
+  for both owners and the route root at every sample;
+- compact changed-node descriptions plus Timeline header, upcoming-panel,
+  load-older, new-messages-pill, and child-count state.
 
 Attach the recorder JSON before the while-open assertion and again after dismissal.
 If any run fails, copy the complete Playwright result directory and JSON report to
 a durable diagnostic directory before any rerun. Do not use `E2E_CHILD_LOG_DIR`:
 redirected child output changes timing for this symptom.
+
+The 2026-09-01 traced control completed 258 passed / 4 failed in 41.0 minutes; all
+six outbound-MMS cases passed. Its complete report and the four non-target failure
+traces are preserved under
+`W:\tmp\outbound-mms-scroll-flake\.artifacts\full-trace-20260901-1239-86db0010`.
 
 ## Fix decision after evidence
 

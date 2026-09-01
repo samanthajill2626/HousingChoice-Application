@@ -186,13 +186,22 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
     const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
     const timeline = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
     const routeRoot = appFrame?.firstElementChild;
+    const comms = timeline?.closest<HTMLElement>(
+      'section[aria-label="Communications and activity"]',
+    );
     if (
       appFrame === null ||
       timeline === null ||
-      !(routeRoot instanceof HTMLElement)
+      !(routeRoot instanceof HTMLElement) ||
+      !(comms instanceof HTMLElement)
     ) {
       throw new Error('viewer scroll diagnostic owners missing');
     }
+
+    const compactText = (value: string | null): string | null => {
+      const normalized = value?.replace(/\s+/g, ' ').trim() ?? '';
+      return normalized === '' ? null : normalized.slice(0, 120);
+    };
 
     const describeTarget = (target: EventTarget | Node): string => {
       if (!(target instanceof Element)) {
@@ -203,9 +212,25 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
       if (target === routeRoot) return 'routeRoot';
       const testId = target.getAttribute('data-testid');
       const role = target.getAttribute('role');
-      const suffix = testId !== null ? `[data-testid=${testId}]` : role !== null ? `[role=${role}]` : '';
+      const ariaLabel = target.getAttribute('aria-label');
+      const classes = [...target.classList].slice(0, 2).join('.');
+      const suffix =
+        testId !== null
+          ? `[data-testid=${testId}]`
+          : ariaLabel !== null
+            ? `[aria-label=${ariaLabel}]`
+            : role !== null
+              ? `[role=${role}]`
+              : classes === ''
+                ? ''
+                : `.${classes}`;
       return `${target.tagName.toLowerCase()}${suffix}`;
     };
+
+    const describeNode = (node: Node): Record<string, unknown> => ({
+      target: describeTarget(node),
+      text: compactText(node.textContent),
+    });
 
     const measure = (element: HTMLElement) => {
       const rect = element.getBoundingClientRect();
@@ -245,6 +270,24 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
           ...measure(routeRoot),
           childElementCount: routeRoot.childElementCount,
         },
+        timelineContext: {
+          streamChildElementCount: timeline.childElementCount,
+          commsChildElementCount: comms.childElementCount,
+          headerHeight:
+            comms.querySelector<HTMLElement>(':scope > header')?.getBoundingClientRect().height ??
+            null,
+          upcomingHeight:
+            comms
+              .querySelector<HTMLElement>(
+                ':scope > section[aria-label="Upcoming scheduled messages"]',
+              )
+              ?.getBoundingClientRect().height ?? null,
+          loadOlderPresent: [...comms.querySelectorAll('button')].some(
+            (button) => compactText(button.textContent) === 'Load older messages',
+          ),
+          newMessagesPillPresent:
+            comms.querySelector('[aria-label="Jump to the newest messages"]') !== null,
+        },
       });
       if (events.length > 800) events.splice(0, events.length - 800);
     };
@@ -264,6 +307,8 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
           attributeName: mutation.attributeName,
           addedNodes: mutation.addedNodes.length,
           removedNodes: mutation.removedNodes.length,
+          added: [...mutation.addedNodes].slice(0, 5).map(describeNode),
+          removed: [...mutation.removedNodes].slice(0, 5).map(describeNode),
         })),
       );
     });

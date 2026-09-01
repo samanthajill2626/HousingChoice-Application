@@ -1,546 +1,735 @@
-# Issue clusters - a fix-the-highs work plan
+# Issue bundles - a mission-sized work queue
 
 Hand-maintained triage companion to the generated `INDEX.md`. The underscore
 prefix keeps `npm run issues` from treating it as an issue file.
 
-**Built 2026-08-21** against 283 open issues, at main `95d3d156`.
+**Re-derived 2026-08-31** against 266 open issues (264 `open`, 2
+`in-progress`) at main `ec32170a`. Supersedes the 2026-08-21 ten-cluster
+edition; the old cluster names survive only as a lineage column at the bottom.
 
-**Merge pass, same day.** Seven issue files were deleted outright and their
-content folded into the issue they duplicated - not closed as `resolved`, deleted,
-because a duplicate is not a fixed problem and leaving one as a closed record
-invites re-filing:
+## Why this edition is shaped differently
 
-| deleted | absorbed into |
-|---|---|
-| `markread-fanout-depends-on-stale-participant-gsi` | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) |
-| `npm-test-red-on-main-dynamodb-local-contention` | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) (renamed - main FLAKES, it is not deterministically red) |
-| `group-cross-check-integration-nondeterminism` | same |
-| `db-update-gsis-integration-flake-under-load` | same |
-| `seed-profile-integration-timeout-flake` | same |
-| `matching-entry-points-picker-click-flake` | [matching-entry-points-property-first-e2e-flake](./matching-entry-points-property-first-e2e-flake.md) |
-| `e2e-lane-probe-bind-toctou` | [e2e-lane-allocation-cross-worktree-race](./e2e-lane-allocation-cross-worktree-race.md) |
+The 08-21 edition grouped ~276 issues into 10 clusters of 10-30 issues each.
+Working C1 took a full mission and twelve re-adjudication agents, because a
+cluster that size carries an unmade design decision in the middle and a dozen
+remedies that decay while it waits. So this edition applies three rules:
 
-Plus [ported-number-not-on-a2p-campaign](./ported-number-not-on-a2p-campaign.md)
-closed as genuinely resolved. Net: 283 -> 276 open, 9 open highs.
+1. **One bundle = one `/abt:feature-mission` branch.** A bundle is one
+   coherent edit to one file/function seam, 3-8 issues, sized so a single
+   mission closes all of them. If a bundle needs two branches, it is two
+   bundles.
+2. **Decisions are not build work.** An issue whose remedy is an unmade
+   PRODUCT ruling (`type: decision`, or a bug whose "Suggested fix" is
+   "decide") goes in a **decision bundle** - a brainstorm-only session with
+   Cameron whose output is a ruling committed to the issue file, no code.
+   The build bundle that needs the ruling is marked `gated-on`. Technical
+   approach choices (read-time vs write-fanout) are NOT decisions in this
+   sense; the mission's own spec phase settles those.
+3. **Lows ride, they do not steer.** A low is in a bundle only because the
+   bundle already opens its file. A bundle that is ALL lows is marked
+   `opportunistic` and is not on the ordered list.
 
-**2026-08-25: that high count is now stale by at least two.** C1's
-`unread-badge-request-round-trip-cost` was deferred to `low` on measured data and
-`mark-read-fanout-stale-gsi-skip` dropped to `med`, so C1 has NO high left. The
-per-cluster counts below were not re-derived; re-derive before using this file
-to pick work.
+Membership was derived mechanically from the `refs:` file lists (261 of 266
+open issues carry one), then confirmed by reading each candidate bundle's
+Problem paragraphs - two issues sharing a file is necessary but not
+sufficient. `conflicts` names other bundles that edit the same file, because
+two bundles on `twilio.ts` cannot be concurrent missions.
 
-**Deliberately NOT merged:** the five `relay-duplicate-*` issues share one file
-and one feature but describe five different defects with five different remedies
-and five recorded design decisions. Same for the three `load-older-*` issues.
-Sharing a file is not being a duplicate.
+**You do not have to work all of these.** Tier 1 is the ordered list worth
+running as missions; ~12 bundles cover every open high plus the two
+go-live-adjacent mediums. Tier 2 is the rest of the registry, bundled so it
+is schedulable if someone opens those files, and so nothing is orphaned.
 
-## What this is for
-
-Every one of the 10 open `high` issues is anchored in exactly one cluster below.
-Each cluster is a set of issues that touch the SAME files, functions, or product
-seam, so the med/low items ride along on a mission that was going to open those
-files anyway. Items are listed high-first; `(also Cn)` marks an issue that
-legitimately belongs to two clusters.
-
-Re-derive membership after any batch of closes - this file is a snapshot, not a
-generated artifact.
+Re-derive after any batch of closes. This is a snapshot, not a generated
+artifact; Cameron edits issue files on main concurrently.
 
 ---
 
-## C1 - Inbox unread read path: stale-GSI correctness + read amplification
+## In flight - not schedulable
 
-**Highs: ONE, and it is not either of the two this cluster was scoped around.**
-[inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) was raised
-`medium` -> `high` on 2026-08-25 after measurement: an Unknown-tab page render
-EXHAUSTS the open partition every time - 693 contact lookups to return 17 rows
-in prod, 637 for 13 in dev - and the hook re-issues it on every debounced SSE
-event. The two originally-filed highs are gone, and neither on a whim.
-[unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md)
-is DEFERRED at `low` on measured data - dev 774 conversations / 0 unread rows,
-prod 885 / 1, zero counter-only in either, so the walk it optimises costs about
-ONE Query rather than the filed 2000.
-[mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) is
-`med`: the skip is sticky, not permanent.
-
-**The cluster's most valuable fix is now
-[inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md)** - it reads the
-OPEN partition rather than the sparse unread index, so unlike the badge it is
-paying a real per-pass cost today, and `useInbox` re-issues it on every debounced
-SSE event while an operator sits on that tab. **Measure it before scoping work
-off it** (`--audit-walk` on
-`app/scripts/measure-unread-contact-coverage.ts`); that instruction is the
-badge's lesson, paid for.
-
-**Shared surface:** `app/src/lib/unreadFeed.ts` (`collectUnreadRows`),
-`app/src/routes/inbox.ts`, `app/src/routes/contacts.ts`,
-`app/src/repos/conversationsRepo.ts`, `app/src/repos/contactsRepo.ts`.
-
-> Restated 2026-08-21 after commit `95d3d156` landed on main mid-triage. It split
-> the old `contacts-batchget-amplified-reads` high: the unread-collector half
-> became the new high above, and the mechanical BatchGet sweep dropped to `med`.
-> The reason matters for planning - **BatchGetItem cannot read a GSI**, so
-> `findByPhones` was never buildable. The collector needs a design decision
-> (denormalize `contactId` onto the conversation item) rather than a sweep.
-
-> **Re-adjudicated 2026-08-25 against main `@88ac7b36`** - twelve independent
-> read-only agents, one per issue, each briefed without the planner's priors.
-> Result: **6 still-valid, 6 remedy-wrong, 0 already-fixed.** Nothing self-healed;
-> every defect still reproduces. What decayed is the REMEDIES - half the
-> "Suggested fix" sections were wrong, no-ops, or aimed at a path that does not
-> behave the way the issue says. Reports:
-> `W:\tmp\handbacks\c1-readjudication-2026-08-25\`.
->
-> Two claims below were DISPROVEN and are corrected in this section:
-> the badge and the page-fill loop are DIFFERENT endpoints (`countUnreadRows`
-> makes exactly ONE collect, and its `maxRows` already equals the internal page
-> size), so the fill loop was never "contributor 2" of the badge and sequencing
-> it first would have measured no badge improvement; and the badge's blocking
-> premise - that no `contactId` exists on the conversation item - is false.
-> `participants[].contactId` exists on the item and `contacts.getManyByIds`
-> shipped 2026-08-21.
->
-> TWO SUPPORTING CLAIMS IN THAT PARAGRAPH WERE LATER WITHDRAWN and must not be
-> scoped off: `contactCapture` claims the link before indexing on only ONE of
-> six `incrementUnread` paths, and `today.ts` reads `participants[0]` as a RULE
-> and drives its deleted-contact skip from it - a bug to file, not precedent.
-> The premise held without them, and the fix was cut anyway on measured data.
-
-The two former highs are NOT the same walk. The badge was a read amplification
-on the `byUnread` walk - one contact resolved per index item SCANNED, unbounded
-to 2000. The mark-read fan-out is a WRITE path that trusts a lagging
-`byParticipantPhone` image. They share a cluster because they share the unread
-state, not a code path.
-
-**And the real relationship between them runs the other way from how this
-cluster was scoped.** The fan-out skip is what strands threads permanently in
-the sparse index; a residue wall is the ONLY thing that would make the badge
-walk long. So the write-path fix does not ride the read-path fix - it is what
-prevents the read-path cost from ever arriving. Fixing 
-[mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) is what
-keeps the deferred badge issue deferred.
-
-**Re-sliced 2026-08-25.** The four issues marked `[gen]` below are not four
-independent riders. They are one tangle in the collect generator's exit and
-flag semantics in `app/src/lib/unreadFeed.ts` - `capped`, `scanExhausted`,
-`truncated`, and the missing `consumedAll`. Three agents independently proposed
-edits to the same few lines, and two found a neighbour's remedy was a no-op or
-unreachable precisely because of that coupling. Build them as ONE slice with a
-single coherent flag contract.
-
-| sev | issue | why it rides along |
+| branch / worktree | carries | blocks |
 |---|---|---|
-| ~~high~~ low | [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md) | **DEFERRED 2026-08-25 on measured data** - real defect, nobody paying for it. Reopen if unread becomes PER-USER, or if an audit shows sustained unread depth in the hundreds. Its cut also removed the `contactId` denormalization, which `inbox-filter-tabs-full-walk` had been riding |
-| med | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) | anchor - conditional write; `high -> med`, the skip is sticky but not permanent. Its counter-only objection is now CLOSED on direct evidence: zero counter-only rows in dev or prod on 2026-08-25 |
-| med | [unread-fill-loop-query-amplification](./unread-fill-loop-query-amplification.md) | `[gen]` - page path only, NOT the badge; both filed remedies disproven |
-| low | [unread-budget-truncation-has-no-forward-path](./unread-budget-truncation-has-no-forward-path.md) | `[gen]` - `med -> low`; the exits are already mutually exclusive |
-| med | [inbox-truncated-flag-two-meanings](./inbox-truncated-flag-two-meanings.md) | `[gen]` - four producers, one boolean, exactly one consumer mis-served |
-| ~~med~~ | ~~[unread-index-integration-coverage-requires-local-dynamo](./unread-index-integration-coverage-requires-local-dynamo.md)~~ | **RESOLVED 2026-08-21** by the `globalSetup` throw - this row was stale when C1 was scoped. C1 is TWELVE open issues, not thirteen |
-| low | [unread-load-more-empty-on-exact-multiple](./unread-load-more-empty-on-exact-multiple.md) | `[gen]` - filed remedy is a literal no-op; needs 3 coordinated edits |
-| low | [seen-set-max-equals-max-inbox-limit](./seen-set-max-equals-max-inbox-limit.md) | filed symptom is INVERTED and never reproduced; retitled to the real invariant |
-| low | [unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md) | extra probes in the collector (also C8); carrier must be keyed by `conversationId` |
-| low | [inbox-parselimit-empty-one-row](./inbox-parselimit-empty-one-row.md) | same route's limit parsing; the `aiRuns` line it says to copy has since changed |
-| **high** | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | `low -> medium -> HIGH` on measured data (693 lookups per render, 17 rows returned; partition exhausted every pass). **The cluster's anchor now.** Root cause is the `conv.type` divergence, now sized: ~610 open rows claim `unknown_1to1` while their contact is typed. Cost INVERTS with triage quality - a cleared tab is the expensive one. Last unbounded read on the route, over the OPEN partition. Its part (B) is gone with the badge's cut and it needs its own remedy. MEASURE FIRST |
-| low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice; All/Groups tabs only |
-| low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | THREE renderers, not two; one crosses a package boundary, group threads bypass `deriveLatest` |
+| `feat/tour-reminder-ladder-phase-b` (`W:\tmp\tour-reminder-ladder-phase-b`, dirty, 10 commits ahead) | [tour-reminder-ladder-phase-b](./tour-reminder-ladder-phase-b.md), closed [message-interpolate-token-reexpansion](./message-interpolate-token-reexpansion.md) on-branch | every bundle touching `jobs/tourReminders.ts`, `messages/tourCopy.ts`, `routes/tourReminders.ts`, `routes/contactTimeline.ts`: T-TOURS-TZ, T-CATALOG, T-REMINDERS-TAIL, and one member of T-SOFT-DELETED |
+| [a2p-compliance-hardening](./a2p-compliance-hardening.md) `in-progress` | P0/P1/P2 scoped inside the file; dev unfenced, prod flags unflipped | M-A2P below is its tail, not a new start |
 
-**Spin-off, DONE** - `feat/contacts-batchget` shipped and merged (`65179d73`,
-2026-08-21); the branch and its worktree are retired.
-[contacts-batchget-amplified-reads](./contacts-batchget-amplified-reads.md) is
-resolved: all six mechanical surfaces are batched.
-[broadcast-results-enrichment-read-cost](./broadcast-results-enrichment-read-cost.md)
-(low) stays open - same function, but the caching half of the remedy.
-
-Three further surfaces were found while batching the first six (`c0e60882`) and
-were triaged rather than swept: `today.ts` `getContact` spun out to
-[today-contact-hydration-fan-out](./today-contact-hydration-fan-out.md) (it is
-NOT mechanical), `rosterResolution.ts` `nameOf` is a drive-by to fold into the
-next change touching that file, and the `api.ts` unread-counts-by-contact rail
-remains unswept. The shape lesson survives the branch: two of those three need
-WHOLE items (`today.ts` does a soft-delete check; `api.ts` reads `phone_ref` /
-`email_ref`, which a display projection does not carry) while
-`rosterResolution.ts` is display-only - so the repo wants BOTH `getManyByIds`
-and `getDisplaysByIds`, not one of them.
+Merged since the 08-21 edition, worktrees still present but `ahead=0`:
+`feat/tour-reminder-ladder`, `feat/inbox-unread-read-path`,
+`feat/media-content-type-fidelity`, `feat/relay-inbound-caller-identity`.
+Cleanup is separate work.
 
 ---
 
-## C2 - Retry loops and terminal state: nothing may hang forever
+## Tier 1 - the ordered mission queue
 
-**High:** [retry-counter-in-envelope-makes-caps-unreachable](./retry-counter-in-envelope-makes-caps-unreachable.md)
+Every open high is anchored in exactly one of these. Order below is the
+recommended order; the reasoning is in "Suggested order" at the end.
 
-**Shared surface:** `app/src/jobs/*` (`broadcastFanOut.ts`, `relayFanOut.ts`,
-`retrySend.ts`, `groupRail.ts`), plus every claim/release pair in the repos.
+### M1 - Participant name and phone snapshots nothing refreshes
 
-One invariant unifies the whole cluster: *if the mechanism that advances state
-fails permanently, does this path still reach a terminal state?* The high is the
-enqueue-counter case; the rest are stranded claims, unbounded holds, and rows that
-never leave their in-flight status. Same review lens, same test shape.
+**Highs: 2, both founder-observed.** One mechanism: `participants[].name`,
+`participant_display_name` and `participants[].phone` are write-time
+snapshots on the conversation row, and the only writer (the contact-update
+fan-out in `routes/contacts.ts`) reaches 1:1 threads only. Measured
+2026-08-25: ~580 open prod threads carry no name while the contact has one.
 
-| sev | issue | why it rides along |
+**Anchor files:** `routes/today.ts`, `routes/contacts.ts` (the fan-out),
+`lib/rosterResolution.ts`, `lib/groupTitle.ts`, `lib/contactName.ts`,
+`repos/conversationsRepo.ts`.
+
+| sev | issue | why it ships here |
 |---|---|---|
-| high | [retry-counter-in-envelope-makes-caps-unreachable](./retry-counter-in-envelope-makes-caps-unreachable.md) | anchor - move attempt counts into the durable record |
-| med | [extraction-stranded-claim-no-reaper](./extraction-stranded-claim-no-reaper.md) | claimed row with no re-arm path |
-| med | [extraction-driver-call-unbounded](./extraction-driver-call-unbounded.md) | holds the same claim ~30 min |
-| med | [recording-claim-redelivery-loss-window](./recording-claim-redelivery-loss-window.md) | claim -> fetch -> release window under redelivery |
-| med | [relay-provisioning-sentinel-leak](./relay-provisioning-sentinel-leak.md) | crashed provision leaks the sentinel pointer |
-| med | [placement-relay-no-atomic-claim](./placement-relay-no-atomic-claim.md) | same non-atomic claim shape |
-| med | [voice-caller-abandon-no-dial-summary](./voice-caller-abandon-no-dial-summary.md) | call row stays `ringing` with no terminal write |
-| med | [messaging-delivery-alarms](./messaging-delivery-alarms.md) | the detection half - a loop that never terminates pages nobody |
-| low | [email-outbound-stuck-queued-on-crash](./email-outbound-stuck-queued-on-crash.md) | stranded `queued` on crash |
-| low | [paused-reminder-rows-grow-listdue-without-bound](./paused-reminder-rows-grow-listdue-without-bound.md) | rows that never leave the due batch |
-| low | [relay-warm-ladder-dedup-window](./relay-warm-ladder-dedup-window.md) | un-deduped window past SQS visibility timeout |
-| low | [push-broadcast-no-send-timeout-or-concurrency-bound](./push-broadcast-no-send-timeout-or-concurrency-bound.md) | unbounded in-flight fan-out |
-| low | [rail-binding-propagation-retry](./rail-binding-propagation-retry.md) | retry ladder in the same job family |
-| low | [extraction-claimedat-stamped-from-poll-clock](./extraction-claimedat-stamped-from-poll-clock.md) | the field a reaper would need to be correct |
+| high | [today-shows-phone-instead-of-name](./today-shows-phone-instead-of-name.md) | anchor - Today reads the snapshot; the inbox hydrates and is correct, which is the tell |
+| high | [group-roster-name-snapshot-never-refreshed](./group-roster-name-snapshot-never-refreshed.md) | anchor - same snapshot, group titles and member chips |
+| med | [relay-stale-participant-phone](./relay-stale-participant-phone.md) | the PHONE half of the same snapshot; the roster texts the stored row phone forever |
+| low | [consolidate-contact-display-name-helpers](./consolidate-contact-display-name-helpers.md) | six private name-join copies in exactly the files this opens |
+| low | [today-contact-hydration-fan-out](./today-contact-hydration-fan-out.md) | if Today resolves names live, this is the read it pays for - measure it in the same pass |
 
-**Also flagged inside the high, not yet filed:** the sweep for other
-`!== 'success'` provider-status fallthroughs. Worth a file if it is not done as
-part of this cluster.
+**The spec decision the mission must make first:** refresh-on-write
+(extend the fan-out to group rosters) vs resolve-on-read (hydrate names the
+way the inbox already does). The measurement script
+(`app/scripts/measure-unread-contact-coverage.ts --audit-denorm`) exists;
+extend it to group rosters, which it currently skips.
 
----
+**conflicts:** M6, M8 (`routes/contacts.ts`, `conversationsRepo.ts`);
+T-DUP-DETECT (`rosterResolution.ts`). **gated-on:** nothing.
 
-## C3 - Log hygiene: vendor errors, PII, and alarm noise
+### M2 - Media serving privacy: relay fan-out and the authenticated media route
 
-**High:** [twilio-sdk-error-logs-leak-credentials](./twilio-sdk-error-logs-leak-credentials.md)
+**Highs: 2, one `security`.** Both are "bytes go where they should not":
+relay forwards every received attachment to every member with no
+content-type gate (a video 12300-fails the whole leg, so the other members
+get NOTHING, body text included), and the authenticated media route's
+`Cache-Control: private` lets a browser reuse bytes across a logout.
 
-**Shared surface:** `app/src/lib/logger.ts`, `app/src/lib/errors.ts`,
-`app/src/adapters/messaging.ts`, every `log.*({ err })` call site.
+**Anchor files:** `jobs/relayFanOut.ts` (media block), `routes/api.ts`
+(media GET), `lib/mediaTypes.ts`, `lib/mmsRenditions.ts`.
 
-The high asks for a repo-wide sweep plus a `summarizeVendorError` helper and a
-lint/guard test. The moment that sweep runs, it passes every other bad logging
-call site in this list.
-
-| sev | issue | why it rides along |
+| sev | issue | why it ships here |
 |---|---|---|
-| high | [twilio-sdk-error-logs-leak-credentials](./twilio-sdk-error-logs-leak-credentials.md) | anchor - sanitized vendor-error summary + enforcement rule |
-| med | [telemetry-phone-in-url-pii](./telemetry-phone-in-url-pii.md) | **PROD GATE** before prod OTLP; same redaction seam |
-| low | [relay-intro-dlr-unknown-sid-noise](./relay-intro-dlr-unknown-sid-noise.md) | error-level noise from a known-benign case |
-| low | [relay-direct-sends-unknown-sid-callbacks](./relay-direct-sends-unknown-sid-callbacks.md) | same unknown-SID error class |
-| low | [push-users-scan-failure-logs-error-per-message](./push-users-scan-failure-logs-error-per-message.md) | one ERROR per message, no backoff |
-| low | [push-failure-status-not-surfaced](./push-failure-status-not-surfaced.md) | vendor failure detail dropped instead of summarized |
-| low | [voice-push-pii-masking-outdated](./voice-push-pii-masking-outdated.md) | PII posture alignment |
-| low | [abandoned-journal-pii-until-next-contact-read](./abandoned-journal-pii-until-next-contact-read.md) | PII retention decision, same review |
-| low | [ai-runs-throttled-batchget-renders-expired](./ai-runs-throttled-batchget-renders-expired.md) | a vendor throttle rendered as a domain outcome |
+| high | [relay-forwards-undeliverable-media](./relay-forwards-undeliverable-media.md) | anchor - needs a deliverable-type gate AND a privacy ruling on forwarding at all |
+| high | [authenticated-mms-media-browser-cache](./authenticated-mms-media-browser-cache.md) | anchor - `no-store` on the authenticated media response |
+| low | [mms-forward-received-media](./mms-forward-received-media.md) | the deferred "forward from gallery" feature; the privacy ruling above decides whether it is ever built |
+| low | [mms-deliver-path-trusts-content-type](./mms-deliver-path-trusts-content-type.md) | same `mediaTypes` seam - the deliver path trusts the pinned type without a sniff |
+| low | [mms-originalkey-unvalidated-pre-rcs](./mms-originalkey-unvalidated-pre-rcs.md) | same `api.ts` media route, existence check before presign |
 
-**Adjacent but a separate mission** (AWS blast radius, not logging):
-[one-off-scripts-missing-account-guard](./one-off-scripts-missing-account-guard.md) (med) +
-[aws-cli-identity-can-diverge-from-account-guard](./aws-cli-identity-can-diverge-from-account-guard.md) (low).
+**conflicts:** M3, M5, T-DELIVERY-CHIPS (`relayFanOut.ts`); T-SEND-IDEMP,
+T-SOFT-DELETED (`routes/api.ts`). **gated-on:** nothing, but the forwarding
+privacy question is a product ruling the mission should put to Cameron in
+its brainstorm, not decide alone.
 
----
+### M3 - Relay roster change notification texts (GO-LIVE gate)
 
-## C4 - Native group texting: inbound detection, outbound send, group identity
+**High: 1.** Adds the add/remove notification sends. Everything here is
+inside `addMember` / `removeMember` / the announce path or the preview that
+fronts them, and each one changes WHO gets the new text or WHEN it may go.
 
-**Highs:** [inbound-group-mms-detection](./inbound-group-mms-detection.md),
-[regular-group-texting-for-imported-groups](./regular-group-texting-for-imported-groups.md)
+**Anchor files:** `routes/relayGroups.ts`, `services/relayMembers.ts`,
+`services/relayAnnouncements.ts`, `services/numberSuppression.ts`,
+`jobs/relayFanOut.ts`, `jobs/rosterActions.ts`, `messages/catalog.ts`.
 
-**Shared surface:** `app/src/routes/webhooks/twilio.ts` (the group block and the
-closed-group intercept), `app/src/repos/conversationsRepo.ts`,
-`app/src/lib/import/apply.ts`.
-
-Detection must land first (Cameron's ruling); outbound is a full brainstorm ->
-spec -> plan feature. Everything below is the same webhook routing decision or
-the same group-identity key.
-
-| sev | issue | why it rides along |
+| sev | issue | why it ships here |
 |---|---|---|
-| high | [inbound-group-mms-detection](./inbound-group-mms-detection.md) | anchor - land FIRST; needs the empirical Twilio payload check |
-| high | [regular-group-texting-for-imported-groups](./regular-group-texting-for-imported-groups.md) | anchor - outbound half, full feature pipeline |
-| med | [group-mms-including-pool-numbers](./group-mms-including-pool-numbers.md) | the exact routing precedence detection changes |
-| med | [group-identity-pool-number-mutability](./group-identity-pool-number-mutability.md) | participant-set identity is the key detection mints |
-| med | [tripwire-extraction-scope](./tripwire-extraction-scope.md) | the missing-envelope heuristic real detection would retire |
-| med | [import-group-thread-retraction](./import-group-thread-retraction.md) | the 132 imported threads this feature must migrate |
-| med | [group-outbound-media](./group-outbound-media.md) | the v1 outbound limitation to lift in the same pass |
-| med | [group-text-tour-placement-attachment](./group-text-tour-placement-attachment.md) | attaches the new thread shape to tours/placements |
-| low | [group-identity-fingerprint-worker-and-pool-coverage](./group-identity-fingerprint-worker-and-pool-coverage.md) | same identity fingerprint |
-| low | [group-roster-contact-id-can-dangle](./group-roster-contact-id-can-dangle.md) | the roster the new shape carries (also C8) |
-| low | [closed-intercept-skips-contact-capture](./closed-intercept-skips-contact-capture.md) | `handleClosedGroupInbound`, same function detection edits |
-| low | [group-text-conversion-unwindowed-log-assert](./group-text-conversion-unwindowed-log-assert.md) | the spec that covers this seam |
-
----
-
-## C5 - Relay roster mutation: notify, announce, and roster truth
-
-**High:** [relay-roster-change-notification-texts](./relay-roster-change-notification-texts.md) (GO-LIVE gate)
-
-**Shared surface:** `app/src/routes/relayGroups.ts`, `app/src/services/relayMembers.ts`,
-`app/src/jobs/relayFanOut.ts`, `app/src/messages/catalog.ts`.
-
-The high adds sends on add/remove. Every issue in the core list is inside
-`addMember` / `removeMember` / the announce path or the preview that fronts them.
-
-**Core (do with the high):**
-
-| sev | issue | why it rides along |
-|---|---|---|
-| high | [relay-roster-change-notification-texts](./relay-roster-change-notification-texts.md) | anchor - reuse the throttled `relay.intro` machinery, copy in the catalog |
-| med | [relay-stale-participant-phone](./relay-stale-participant-phone.md) | the phone the new notify would send to |
-| med | [relay-member-suppression-diverges-from-number-seam](./relay-member-suppression-diverges-from-number-seam.md) | who the notify must SKIP |
-| med | [relay-groups-ignore-member-deletion](./relay-groups-ignore-member-deletion.md) | remove-path semantics the notify makes visible (also C8) |
-| med | [standalone-relay-group-no-reachable-floor](./standalone-relay-group-no-reachable-floor.md) | same create/roster route |
-| med | [relay-preview-lists-members-provisioning-drops](./relay-preview-lists-members-provisioning-drops.md) | preview must agree with what actually gets texted |
+| high | [relay-roster-change-notification-texts](./relay-roster-change-notification-texts.md) | anchor - reuse the throttled `relay.intro` machinery, copy through the catalog |
+| med | [relay-member-suppression-diverges-from-number-seam](./relay-member-suppression-diverges-from-number-seam.md) | who the notify must SKIP - and the two seams currently disagree |
+| med | [number-suppression-change-emits-no-cross-thread-event](./number-suppression-change-emits-no-cross-thread-event.md) | the suppression list the skip reads; a change is invisible to other threads |
 | med | [relay-group-routes-unbounded-members](./relay-group-routes-unbounded-members.md) | same routes, now with a per-member send cost |
-| med | [standalone-relay-group-quiet-hours-deferral](./standalone-relay-group-quiet-hours-deferral.md) | when a roster-change send is allowed to go (also C7) |
+| med | [standalone-relay-group-quiet-hours-deferral](./standalone-relay-group-quiet-hours-deferral.md) | when a roster-change send is allowed to go |
+| med | [pending-roster-actions-uncapped-walker](./pending-roster-actions-uncapped-walker.md) | the one uncapped `queryAll` left, in the roster-actions repo this job reads |
 | low | [relay-add-double-announce-race](./relay-add-double-announce-race.md) | the announce this high turns into a real text |
 | low | [member-add-burn-first-residuals](./member-add-burn-first-residuals.md) | the add path's 409 residuals |
-| low | [relay-preview-memberkey-collision-overcount](./relay-preview-memberkey-collision-overcount.md) | preview recipient count |
-| low | [roster-plan-version-write-unguarded](./roster-plan-version-write-unguarded.md) | same conditional roster write |
-| low | [relay-provisioning-stale-comments](./relay-provisioning-stale-comments.md) | comments in the files being edited |
 
-**Sub-bundle - closed/reopen semantics** (one decision, then the code):
-[relay-reopen-semantics](./relay-reopen-semantics.md) (med),
+**conflicts:** M2, M5, T-DELIVERY-CHIPS (`relayFanOut.ts`); M9
+(`rosterEdits.ts`); M4, T-RELAY-REOPEN (`twilio.ts`). **gated-on:** M1's
+phone half is a soft dependency - the notify sends to the participant row
+phone, which M1 may change the source of. Sequence M1 first or accept the
+row phone knowingly.
+
+### M4 - Inbound group MMS detection
+
+**High: 1.** Cameron's ruling stands: detection lands before any outbound
+feature. Everything here is the same webhook routing decision or the
+group-identity key that detection mints.
+
+**Anchor files:** `routes/webhooks/twilio.ts` (group block, closed-group
+intercept), `services/groupIdentity.ts`, `services/groupIdentityFingerprint.ts`,
+`services/groupEnvelope.ts`.
+
+| sev | issue | why it ships here |
+|---|---|---|
+| high | [inbound-group-mms-detection](./inbound-group-mms-detection.md) | anchor - needs the empirical Twilio payload check on Cameron's phone |
+| med | [group-mms-including-pool-numbers](./group-mms-including-pool-numbers.md) | the exact routing precedence detection changes |
+| med | [group-identity-pool-number-mutability](./group-identity-pool-number-mutability.md) | the identity key detection mints - retiring a pool number re-mints it silently |
+| med | [tripwire-extraction-scope](./tripwire-extraction-scope.md) | the missing-envelope heuristic real detection retires |
+| low | [group-identity-fingerprint-worker-and-pool-coverage](./group-identity-fingerprint-worker-and-pool-coverage.md) | same fingerprint, pins the wrong list |
+| low | [closed-intercept-skips-contact-capture](./closed-intercept-skips-contact-capture.md) | `handleClosedGroupInbound`, same function detection edits |
+
+**conflicts:** M3, M12, T-PUSH, T-RELAY-REOPEN (`twilio.ts`); M11
+(`jobs/extraction.ts` via tripwire). **gated-on:** the payload check is an
+EVIDENCE gate, not a decision - the mission cannot start until a real group
+MMS has been received on the ported number and its webhook body captured.
+**Feeds:** F-GROUP-OUTBOUND.
+
+### M5 - Retry counters and the cap-and-close branch
+
+**High: 1.** Retry counts live in the enqueued envelope, so a failing
+enqueue freezes the count and the cap is unreachable. The invariant for the
+whole bundle: *if the mechanism that advances state fails, does this path
+still terminate?*
+
+**Anchor files:** `jobs/retrySend.ts`, `jobs/broadcastFanOut.ts`,
+`jobs/relayFanOut.ts`, `jobs/groupRail.ts`, `repos/messagesRepo.ts`.
+
+| sev | issue | why it ships here |
+|---|---|---|
+| high | [retry-counter-in-envelope-makes-caps-unreachable](./retry-counter-in-envelope-makes-caps-unreachable.md) | anchor - move attempt counts into the durable record |
+| med | [relay-30003-retry-lineage](./relay-30003-retry-lineage.md) | the relay retry that does not exist yet, and needs lineage under one visible delivery row - the durable attempt record above is what it hangs off |
+| low | [rail-binding-propagation-retry](./rail-binding-propagation-retry.md) | retry ladder in the same job family |
+
+Small on purpose. The high's file also flags an unfiled sweep for other
+`!== 'success'` provider-status fallthroughs; do it here or file it.
+
+**conflicts:** M2, M3, T-DELIVERY-CHIPS (`relayFanOut.ts`; the 30003 issue
+has a dashboard half in `deliveryStatus.ts` - land the backend lineage here
+and let T-DELIVERY-CHIPS render it). **gated-on:** nothing.
+
+### M6 - Inbox Unknown tab walks the open partition
+
+**High: 1, raised on measurement** (693 contact lookups to return 17 rows;
+partition exhausted every render; re-issued on every debounced SSE event).
+The root is the `conv.type` divergence - ~610 open rows claim `unknown_1to1`
+while their contact is typed - so cost INVERTS with triage quality.
+
+**Anchor files:** `routes/inbox.ts` (Unknown tab), `lib/unknownQueue.ts`,
+`repos/contactsRepo.ts`, `lib/tables.ts`, `dashboard/routes/inbox/useInbox.ts`.
+
+| sev | issue | why it ships here |
+|---|---|---|
+| high | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | anchor - MEASURE FIRST with `--audit-walk`; the badge's lesson, paid for |
+| med | [unknown-queue-status-flip-duplicates-across-pages](./unknown-queue-status-flip-duplicates-across-pages.md) | the same walk's cursor carries a position, not a seen-set |
+| med | [unknown-queue-page-head-drop-after-filled-page](./unknown-queue-page-head-drop-after-filled-page.md) | the same walk drops a row with zero retries |
+| low | [denormalize-contact-last-activity-for-ordered-paging](./denormalize-contact-last-activity-for-ordered-paging.md) | the candidate remedy shape - a contact-side GSI so the tab pages in activity order without walking |
+| low | [inbox-parselimit-empty-one-row](./inbox-parselimit-empty-one-row.md) | same route's limit parsing |
+
+**conflicts:** M1, M8, T-UNREAD-GEN (`routes/inbox.ts`); M1
+(`routes/contacts.ts`). **gated-on:** nothing. Part (B) of the anchor -
+the `contactId` denormalization - was cut with the badge issue and does
+not come back here; the remedy is on the contact side.
+
+### M7 - npm test is not reliably green
+
+**High: 1**, raised since the 08-21 edition. The write-lock cause is fixed
+(one database per test file) but an `UpdateTable InternalFailure` tail and
+two self-defeating hook budgets remain. These are the unit-test-side gate
+soundness items; the e2e-under-load items are T-E2E-LOAD.
+
+**Anchor files:** `app/vitest.config.ts`, `lib/dynamoAdmin.ts`,
+`app/test/groupCrossCheck.test.ts`, `app/test/logCallSiteGuard.test.ts`,
+`app/test/staticSmoke.test.ts`.
+
+| sev | issue | why it ships here |
+|---|---|---|
+| high | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | anchor - suite A latency-robust assertions, suite B retry `UpdateTable` on `InternalFailure` |
+| med | [logcallsiteguard-hook-budget-equals-its-own-cost](./logcallsiteguard-hook-budget-equals-its-own-cost.md) | a `beforeAll` budget smaller than the hook's own cost - fails on load, not on defect |
+| med | [static-smoke-fails-on-stale-dashboard-dist](./static-smoke-fails-on-stale-dashboard-dist.md) | skips on ABSENT dist, fails on STALE dist, blames the wrong thing |
+
+**conflicts:** none. **gated-on:** nothing. Run its gates under a clean
+access key (`AWS_ACCESS_KEY_ID=hccleanrun001`) or the anchor's own symptom
+contaminates the verdict.
+
+### M8 - Who owns the conversation-to-contact link
+
+**No high; four mediums on one seam.** `participants[].contactId` is
+written by six paths and trusted by the mark-read fan-out, extraction, and
+the importer, and they disagree. The 08-21 C1 re-adjudication found this
+while cutting the badge fix: `contactCapture` claims the link before
+indexing on only ONE of six `incrementUnread` paths.
+
+**Anchor files:** `lib/contactThreads.ts`, `services/contactCapture.ts`,
+`repos/conversationsRepo.ts`, `routes/contacts.ts`, `lib/import/apply.ts`.
+
+| sev | issue | why it ships here |
+|---|---|---|
+| med | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) | anchor - conditional write; the skip is sticky. Fixing this is what keeps the deferred badge issue deferred |
+| med | [extraction-conversation-contact-divergence](./extraction-conversation-contact-divergence.md) | same link, read by extraction, aimed at the wrong contact |
+| med | [import-blanks-conversation-participant-contactid](./import-blanks-conversation-participant-contactid.md) | same link, blanked by a re-import |
+| low | [group-roster-contact-id-can-dangle](./group-roster-contact-id-can-dangle.md) | same link on a group roster, never re-minted |
+
+**conflicts:** M1, M6 (`routes/contacts.ts`, `conversationsRepo.ts`);
+M11 (`jobs/extraction.ts`); T-IMPORT (`lib/import/apply.ts`).
+**gated-on:** nothing.
+
+### M9 - Relay provisioning atomicity and preview truth
+
+**No high; eight mediums-and-lows on `rosterProvision` / `rosterEdits`.**
+One shape: a non-atomic claim, a best-effort link, and a preview that
+promises members provisioning will drop.
+
+**Anchor files:** `services/rosterProvision.ts`, `services/rosterEdits.ts`,
+`services/relayProvisioning.ts`, `routes/relayGroups.ts`,
+`dashboard/routes/shared/RosterConfirmDialog.tsx`.
+
+| sev | issue |
+|---|---|
+| med | [relay-provisioning-sentinel-leak](./relay-provisioning-sentinel-leak.md) |
+| med | [placement-relay-no-atomic-claim](./placement-relay-no-atomic-claim.md) |
+| med | [relay-preview-lists-members-provisioning-drops](./relay-preview-lists-members-provisioning-drops.md) |
+| med | [standalone-relay-group-no-reachable-floor](./standalone-relay-group-no-reachable-floor.md) |
+| med | [relay-confirm-dialog-overstates-tier3-send](./relay-confirm-dialog-overstates-tier3-send.md) |
+| low | [relay-preview-memberkey-collision-overcount](./relay-preview-memberkey-collision-overcount.md) |
+| low | [roster-plan-version-write-unguarded](./roster-plan-version-write-unguarded.md) |
+| low | [relay-provisioning-stale-comments](./relay-provisioning-stale-comments.md) |
+
+**conflicts:** M3 (`rosterEdits.ts`, `relayGroups.ts`); T-MODALS
+(`RosterConfirmDialog.tsx`). **gated-on:** nothing. Sequence after M3 or
+before it, never alongside.
+
+### M10 - Voice webhook terminal state
+
+**No high; the C2 invariant applied to `voice.ts`.** A call row that stays
+`ringing`, a recording lost in a claim window, an originate leg with no
+durable terminal status - none of these reach a terminal state when the
+thing that advances them fails.
+
+**Anchor files:** `routes/webhooks/voice.ts`, `services/originateCall.ts`,
+`adapters/messaging.ts`, `repos/messagesRepo.ts`.
+
+| sev | issue |
+|---|---|
+| med | [voice-caller-abandon-no-dial-summary](./voice-caller-abandon-no-dial-summary.md) |
+| med | [recording-claim-redelivery-loss-window](./recording-claim-redelivery-loss-window.md) |
+| med | [originate-leg-status-callback](./originate-leg-status-callback.md) |
+| med | [voice-business-number-roster](./voice-business-number-roster.md) |
+| low | [refusal-stamp-announce-extra-round-trips](./refusal-stamp-announce-extra-round-trips.md) |
+| low | [missed-call-push-fans-out-duplicate-replies](./missed-call-push-fans-out-duplicate-replies.md) |
+
+**conflicts:** none with Tier 1. `call-recording-consent` also lives in
+`voice.ts` but is a compliance decision - D-A2P. **gated-on:** nothing.
+
+### M11 - Extraction claim lifecycle
+
+**No high; the C2 invariant applied to the extraction job.** A stranded
+claim with no reaper, a driver call that holds it ~30 minutes, and the
+`claimedAt` a reaper would need, stamped from the wrong clock.
+
+**Anchor files:** `jobs/extraction.ts`, `repos/extractionRepo.ts`,
+`adapters/extraction.ts`, `services/extraction/runWindow.ts`.
+
+| sev | issue |
+|---|---|
+| med | [extraction-stranded-claim-no-reaper](./extraction-stranded-claim-no-reaper.md) |
+| med | [extraction-driver-call-unbounded](./extraction-driver-call-unbounded.md) |
+| med | [anthropic-extraction-driver-unit-coverage-gaps](./anthropic-extraction-driver-unit-coverage-gaps.md) |
+| low | [extraction-claimedat-stamped-from-poll-clock](./extraction-claimedat-stamped-from-poll-clock.md) |
+| low | [extraction-runwindow-module-cycle](./extraction-runwindow-module-cycle.md) |
+
+**conflicts:** M4 (tripwire), M8 (`jobs/extraction.ts`); T-EXTRACT-CONTENT
+(`services/extraction/*` - different files, same job). **gated-on:** nothing.
+
+### M12 - Media content-type fidelity tail
+
+**No high; two `security` mediums.** The 08-26 fidelity branch has merged
+(`ahead=0`) but left a read-modify-write that can revert its own backfill,
+an inbound index mismatch, and three filename-sanitization gaps. **The
+backfill run itself is still owed** - check the branch's handback before
+scoping.
+
+**Anchor files:** `lib/mediaFilename.ts`, `lib/mediaTypes.ts`,
+`app/jobs/mediaMirror.ts`, `app/scripts/backfill-media-content-types.ts`,
+`routes/webhooks/twilio.ts` (inbound mirror).
+
+| sev | issue |
+|---|---|
+| med/security | [outbound-email-attachment-filename-unsanitized](./outbound-email-attachment-filename-unsanitized.md) |
+| med | [media-mirror-reverts-backfilled-types](./media-mirror-reverts-backfilled-types.md) |
+| med | [inbound-media-content-type-index-mismatch](./inbound-media-content-type-index-mismatch.md) |
+| low/security | [declarable-office-doc-types-double-click](./declarable-office-doc-types-double-click.md) |
+| low/security | [timeline-filename-bidi-display](./timeline-filename-bidi-display.md) |
+| low/security | [backfill-scan-pulls-message-bodies](./backfill-scan-pulls-message-bodies.md) |
+
+**conflicts:** M2 (`lib/mediaTypes.ts`); M4 (`twilio.ts`); T-LOAD-OLDER,
+T-DELIVERY-CHIPS (`Timeline.tsx`). **gated-on:** nothing.
+
+### M-A2P - A2P compliance tail (in-progress high)
+
+Not a new mission; the tail of the running one. The two catalog
+enforcement items ride because the disclosure work edits the same
+`sendMessage` floor.
+
+| sev | issue |
+|---|---|
+| high (in-progress) | [a2p-compliance-hardening](./a2p-compliance-hardening.md) |
+| med | [consent-copy-cross-stack-drift](./consent-copy-cross-stack-drift.md) |
+| med | [automated-sms-length-guard](./automated-sms-length-guard.md) |
+| low | [sms-copy-non-gsm7-characters](./sms-copy-non-gsm7-characters.md) |
+
+**gated-on:** D-A2P for the brand and opt-out precedence rulings, which
+the P1 re-file needs before prod.
+
+---
+
+## Feature seeds - own missions, not bundles
+
+Each is a full brainstorm -> spec -> plan feature. They carry riders only
+where the rider is the feature's own limitation.
+
+| feature | anchor | riders | gated-on |
+|---|---|---|---|
+| **F-GROUP-OUTBOUND** native group texting for the 132 imported groups | [regular-group-texting-for-imported-groups](./regular-group-texting-for-imported-groups.md) (high) | [import-group-thread-retraction](./import-group-thread-retraction.md), [group-outbound-media](./group-outbound-media.md), [group-text-tour-placement-attachment](./group-text-tour-placement-attachment.md) | **M4** |
+| **F-SEARCH** | [total-product-search](./total-product-search.md), [typeahead-scale-needs-server-side-search](./typeahead-scale-needs-server-side-search.md) | - | - |
+| **F-UNIT-INTAKE** | [unit-onboarding-fields](./unit-onboarding-fields.md), [tenant-support-contacts-structured](./tenant-support-contacts-structured.md) | - | - |
+| **F-TOURS-OFF-PLACEMENT** | [tour-scheduling-off-placement](./tour-scheduling-off-placement.md) | [today-next-tour-reminder-from-ladder](./today-next-tour-reminder-from-ladder.md) | phase-b merge |
+| **F-MMS-FEATURES** | [broadcast-mms](./broadcast-mms.md), [mms-attach-unit-photos](./mms-attach-unit-photos.md), [inbound-media-attach-to-unit](./inbound-media-attach-to-unit.md) | [mms-upload-endpoint-hardening](./mms-upload-endpoint-hardening.md), [mms-uploads-no-lifecycle-orphans](./mms-uploads-no-lifecycle-orphans.md) | M2's forwarding ruling |
+| **F-EMAIL-V2** | [email-identity-collision-followup](./email-identity-collision-followup.md), [email-blocklist-management-ui](./email-blocklist-management-ui.md) | [email-cc-mirroring](./email-cc-mirroring.md) | - |
+
+---
+
+## Decision bundles - Cameron rulings, no code
+
+One brainstorm session each. Output: the ruling written into each issue
+file, and the build bundle it gates un-gated.
+
+| bundle | decisions | un-gates |
+|---|---|---|
+| **D-A2P** | [sms-brand-diverges-from-registered-a2p-brand](./sms-brand-diverges-from-registered-a2p-brand.md), [staff-unmute-vs-per-phone-optout](./staff-unmute-vs-per-phone-optout.md), [call-recording-consent](./call-recording-consent.md), [quiet-hours-ungated-automated-paths](./quiet-hours-ungated-automated-paths.md), [dnc-registry-scrubbing](./dnc-registry-scrubbing.md) (deferred - confirm it stays so) | M-A2P prod re-file |
+| **D-RELAY-LIFECYCLE** | [relay-reopen-semantics](./relay-reopen-semantics.md), [relay-groups-ignore-member-deletion](./relay-groups-ignore-member-deletion.md), [relay-single-live-conversation-per-pair](./relay-single-live-conversation-per-pair.md), [converted-tour-roster-endpoints-live](./converted-tour-roster-endpoints-live.md) | T-RELAY-REOPEN, T-SOFT-DELETED, T-DUP-DETECT |
+| **D-EXTRACTION-TRUST** | [voice-transcribed-names-unreliable](./voice-transcribed-names-unreliable.md), [voice-extraction-window-demotion-persistence](./voice-extraction-window-demotion-persistence.md), [manual-extraction-route-has-no-spend-fence](./manual-extraction-route-has-no-spend-fence.md) | T-EXTRACT-CONTENT |
+| **D-PLACEMENT-MODEL** | [approval-move-in-audit](./approval-move-in-audit.md), [stuck-case-thresholds-need-tuning](./stuck-case-thresholds-need-tuning.md), [placement-date-units-compact-vs-spelled](./placement-date-units-compact-vs-spelled.md), [self-guided-group-reminder-gate](./self-guided-group-reminder-gate.md) | T-PLACEMENT-CAPTURES |
+| **D-PUSH** | [message-push-no-ttl-doze-flush-renotify](./message-push-no-ttl-doze-flush-renotify.md), [unit-photo-confirm-replay-duplicate-renditions](./unit-photo-confirm-replay-duplicate-renditions.md), [ai-runs-inflight-row-kind-undeclared](./ai-runs-inflight-row-kind-undeclared.md), [inbox-reconcile-failure-blanks-list](./inbox-reconcile-failure-blanks-list.md) | small rulings, batched so they get made |
+
+---
+
+## Tier 2 - the rest, bundled so it is schedulable
+
+Compact form. Same rules apply. `opp` = opportunistic (all lows).
+
+### Inbox and unread
+
+**T-UNREAD-GEN** - the collect generator's flag contract in `lib/unreadFeed.ts`
++ `routes/inbox.ts`. Build as ONE slice with one coherent contract
+(`capped`, `scanExhausted`, `truncated`, missing `consumedAll`) - three
+08-25 agents proposed edits to the same lines and two found a neighbour's
+remedy a no-op because of the coupling.
+[unread-fill-loop-query-amplification](./unread-fill-loop-query-amplification.md) (med),
+[inbox-truncated-flag-two-meanings](./inbox-truncated-flag-two-meanings.md) (med),
+[unread-budget-truncation-has-no-forward-path](./unread-budget-truncation-has-no-forward-path.md),
+[unread-load-more-empty-on-exact-multiple](./unread-load-more-empty-on-exact-multiple.md),
+[unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md),
+[seen-set-max-equals-max-inbox-limit](./seen-set-max-equals-max-inbox-limit.md),
+[inbox-read-accounting-gaps](./inbox-read-accounting-gaps.md),
+[inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md).
+conflicts: M6, M8. Deferred at low, not here:
+[unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md).
+
+### Relay
+
+**T-RELAY-REOPEN** - closed/reopen semantics. gated-on D-RELAY-LIFECYCLE.
 [inbound-reflags-closed-relay-group](./inbound-reflags-closed-relay-group.md) (med),
 [relay-open-no-live-refresh](./relay-open-no-live-refresh.md) (med),
-[relay-open-keyword-phantom-1to1](./relay-open-keyword-phantom-1to1.md) (low),
-[relay-duplicate-via-reopen](./relay-duplicate-via-reopen.md) (low).
+[relay-open-keyword-phantom-1to1](./relay-open-keyword-phantom-1to1.md),
+[relay-duplicate-via-reopen](./relay-duplicate-via-reopen.md),
+[relay-group-view-stale-open-composer](./relay-group-view-stale-open-composer.md).
+conflicts: M3, M4 (`twilio.ts`).
 
-**Sub-bundle - duplicate detection** (one file, five issues, no high - cheap to
-sweep together):
+**T-DUP-DETECT** `opp` - `services/relayGroupDuplicates.ts`, five issues,
+five defects, deliberately NOT merged (sharing a file is not being a
+duplicate).
 [relay-duplicate-detection-scan-cost](./relay-duplicate-detection-scan-cost.md),
 [relay-duplicate-warning-stale-after-defer](./relay-duplicate-warning-stale-after-defer.md),
 [relay-duplicate-across-contact-handsets](./relay-duplicate-across-contact-handsets.md),
-[relay-duplicate-via-roster-removal](./relay-duplicate-via-roster-removal.md),
-[relay-duplicate-detection-fake-partition-drift](./relay-duplicate-detection-fake-partition-drift.md).
+[relay-duplicate-via-roster-removal](./relay-duplicate-via-roster-removal.md).
+gated-on D-RELAY-LIFECYCLE for the pair ruling. conflicts: M1
+(`rosterResolution.ts`).
 
-**Sub-bundle - dashboard relay surface** (front end of the same feature):
+**T-RELAY-SURFACE** - the dashboard side.
 [relay-group-no-dashboard-surface](./relay-group-no-dashboard-surface.md) (med),
-[relay-confirm-dialog-overstates-tier3-send](./relay-confirm-dialog-overstates-tier3-send.md) (med),
-[roster-confirm-dialog-unclosable-on-hung-confirm](./roster-confirm-dialog-unclosable-on-hung-confirm.md) (med),
-[relay-group-view-stale-open-composer](./relay-group-view-stale-open-composer.md) (low),
-[relay-group-composer-footer-copy](./relay-group-composer-footer-copy.md) (low),
-[masked-relay-calls-invisible](./masked-relay-calls-invisible.md) (med).
+[relay-group-composer-footer-copy](./relay-group-composer-footer-copy.md),
+[relay-inbound-resolution-residuals](./relay-inbound-resolution-residuals.md),
+[relay-warm-ladder-dedup-window](./relay-warm-ladder-dedup-window.md).
 
----
+### Delivery and sending
 
-## C6 - Test and E2E harness determinism
+**T-DELIVERY-CHIPS** - `dashboard/routes/contact/deliveryStatus.ts` +
+`Timeline.tsx` chip logic + `services/groupReceipts.ts`. Renders what M5's
+lineage produces.
+[one-to-one-delivery-chip-escalates-nondeterministically](./one-to-one-delivery-chip-escalates-nondeterministically.md) (med),
+[relay-21610-keeps-raw-code-and-counts-as-failed](./relay-21610-keeps-raw-code-and-counts-as-failed.md) (med),
+[inbound-multi-party-bubbles-have-no-per-recipient-delivery](./inbound-multi-party-bubbles-have-no-per-recipient-delivery.md) (med),
+[relay-all-opted-out-message-chip-stuck-sending](./relay-all-opted-out-message-chip-stuck-sending.md),
+[phone-key-discriminator-defined-in-three-places](./phone-key-discriminator-defined-in-three-places.md),
+[optional-call-outcome-breaks-already-loaded-bundles](./optional-call-outcome-breaks-already-loaded-bundles.md) (med),
+[inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) (three call-outcome renderers, one normalizes).
+conflicts: M2, M3, M5, M12, T-LOAD-OLDER, T-THREAD-PAGING. Sequence after M5.
 
-**High:** [e2e-lane-allocation-cross-worktree-race](./e2e-lane-allocation-cross-worktree-race.md)
+**T-SEND-IDEMP** - one idempotency seam in `routes/api.ts` +
+`services/sendMessage.ts` + `sendEmailMessage.ts`.
+[send-idempotency-key](./send-idempotency-key.md) (med),
+[exactly-once-send-intent](./exactly-once-send-intent.md),
+[email-route-500-on-contactless-conversation](./email-route-500-on-contactless-conversation.md),
+[email-outbound-stuck-queued-on-crash](./email-outbound-stuck-queued-on-crash.md).
+conflicts: M2 (`api.ts`).
 
-**Shared surface:** `e2e/support/lane.mjs`, `scripts/e2e-session.mjs`, the shared
-DynamoDB Local / MinIO containers.
+**T-MMS-CARRIER** - the carrier hunt, evidence-gated:
+[mms-silent-drop-dish-textnow](./mms-silent-drop-dish-textnow.md) (med). A
+30005 alone identifies no mechanism; check `date_updated - date_sent`.
 
-The high's fix (an atomic, compare-before-delete lane lease with owner tokens) is
-the same root cause as every "passes alone, fails in suite" item in the first
-list. Doing it first makes the second list diagnosable instead of guesswork.
+### Contacts and soft-delete
 
-> **WAVE 1 IS DONE** - `fix/e2e-harness-determinism`, merged `987e39fd`
-> (2026-08-21). Five issues closed; all three gates green; `npm run e2e` 251
-> passed. Only `npm-test-dynamodb-local-contention` remains open from wave 1,
-> and it is now the first step of the C11 campaign below.
-
-**Wave 1 - infra contention (the actual root cause):**
-
-| sev | issue | |
-|---|---|---|
-| high | [e2e-lane-allocation-cross-worktree-race](./e2e-lane-allocation-cross-worktree-race.md) | DONE |
-| med | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | **OPEN - C11 step 1** |
-| med | [e2e-lane-tables-stale-schema](./e2e-lane-tables-stale-schema.md) | DONE |
-| med | [broadcast-fanout-tests-blow-default-hooktimeout](./broadcast-fanout-tests-blow-default-hooktimeout.md) | DONE |
-| low | [e2e-lane-cold-start-container-race](./e2e-lane-cold-start-container-race.md) | DONE |
-| low | [e2e-session-lane-mismatch](./e2e-session-lane-mismatch.md) | DONE |
-
-**Wave 2 - per-spec determinism (only after wave 1):**
-[tour-reminders-panel-e2e-flake](./tour-reminders-panel-e2e-flake.md),
-[today-heading-selector-ambiguity](./today-heading-selector-ambiguity.md),
-[matching-entry-points-property-first-e2e-flake](./matching-entry-points-property-first-e2e-flake.md),
-[inbox-row-appearance-e2e-flake](./inbox-row-appearance-e2e-flake.md),
-[landlord-onboarding-e2e-suite-only-flake](./landlord-onboarding-e2e-suite-only-flake.md),
-[tours-pm-exit-closed-chip-flake](./tours-pm-exit-closed-chip-flake.md),
-[deleted-contact-resurfacing-e2e-401-flake](./deleted-contact-resurfacing-e2e-401-flake.md),
-[roster-quiet-hours-e2e-timezone-skew](./roster-quiet-hours-e2e-timezone-skew.md),
-[conversationdetail-members-mock-suite-flake](./conversationdetail-members-mock-suite-flake.md),
-[tourdetail-composer-footer-suite-flake](./tourdetail-composer-footer-suite-flake.md),
-[schedule-tour-form-test-flake](./schedule-tour-form-test-flake.md).
-
-Two of these (`tour-reminders-panel-e2e-flake`,
-`conversationdetail-members-mock-suite-flake`) are the AGENTS.md known flakes that
-every mission currently has to re-run and report around. Closing them is a
-recurring-cost win, not just a tidy-up.
-
-**RETRACTED 2026-08-21.** An earlier version of this section claimed
-`tour-reminders-panel-e2e-flake` was NOT a flake but a deterministic pre-08:00
-failure, and that `AGENTS.md`'s "re-run once" rule could therefore never clear
-it. **That was wrong.** The deterministic half was closed on 2026-08-05 by
-`150fbfa4` ("full-ladder assertions book a 14:00-local tour - kills the
-00:00-08:00 wall-clock flake"); the issue's TITLE still advertised it, and the
-claim came from reading that title instead of the body directly beneath it.
-
-The real remaining scope is a rare rung-visibility timing flake, last seen
-2026-08-03. Re-running once IS the correct response, and `AGENTS.md` needs no
-change. The issue title has been corrected and its severity dropped to `low`.
-
-Worth keeping as a caution: a stale issue TITLE is load-bearing. Every triage
-pass in this file reads titles first.
-
----
-
-## C11 - Test-suite SOUNDNESS: the gate is green and proves less than it looks
-
-**No high, and that is a mis-rating rather than a judgement** - nothing here
-breaks a user flow, so nothing was rated high, but the cost is false confidence
-in every other rating on this board.
-
-**Shared surface:** `app/test/helpers/*` (the fakes), `dashboard/public/sw.js` vs
-`dashboard/src/sw/*`, `app/vitest.config.ts`, the build/gate scripts.
-
-C6 fixed an UNRELIABLE gate - red when nothing is wrong. This is an UNSOUND one -
-**green when something is wrong.** Different cost, different urgency: a flake
-wastes time, unsoundness spends confidence you did not know you had lost.
-
-**One mechanism explains most of it.** Wherever a fake hand-mirrors real
-semantics, the mirror is enforced only by whoever remembers it. Four of these are
-literally that; the last two are the same shape one layer out - the toolchain
-mirroring production, and the fake mirroring the service.
-
-| sev | issue | the evidence, which is DEMONSTRATED not theorised |
-|---|---|---|
-| med | [update-call-status-fake-mirrors-real-so-a-broken-repo-is-invisible](./update-call-status-fake-mirrors-real-so-a-broken-repo-is-invisible.md) | Two mutation probes. Break the FAKE -> red. Break the **REAL repo** -> **green, exit 0.** The logic protects a live call from a redelivered webhook |
-| med | [compiled-dist-boot-unverified](./compiled-dist-boot-unverified.md) | Gates run tsx/esbuild (bundler resolution); prod runs `node dist/` (stricter ESM). The email channel shipped a directory import: all suites green, dev deploy crash-looped, caught only by the deploy health check |
-| med | [sw-mirror-test-pins-literals-not-behaviour](./sw-mirror-test-pins-literals-not-behaviour.md) | `mirror.test.ts` asserts `toContain('<literal>')` and never compares the files. A 1-char divergence lived from `26a01b9f` to 2026-08-20, through the entire life of the test written to prevent it. Found by READING |
-| med | [unread-index-integration-coverage-requires-local-dynamo](./unread-index-integration-coverage-requires-local-dynamo.md) | The only suite proving real `byUnread` semantics self-skips with no Docker - and the fake modelled `LastEvaluatedKey` WRONGLY until 2026-08-16, so every call-count assertion was calibrated one round trip short of production |
-| med | [group-text-conversion-unwindowed-log-assert](./group-text-conversion-unwindowed-log-assert.md) | Asserts zero error lines over an UNWINDOWED log tail - passes for reasons unrelated to the spec |
-| low | [relay-duplicate-detection-fake-partition-drift](./relay-duplicate-detection-fake-partition-drift.md) | Fake filters `status`, real repo queries `relay_status`. Fake is strictly MORE permissive, and now drives user-visible confirm-dialog copy |
-| low | [audit-fake-before-cursor-fidelity](./audit-fake-before-cursor-fidelity.md) | Fake treats `before` as a numeric seq; the real SK is a lexical ISO string |
-| low | [sw-mirror-control-char-divergence](./sw-mirror-control-char-divergence.md) | The specific DEL-character instance of the row above |
-| low | [e2e-documentelement-overflow-check-vacuous](./e2e-documentelement-overflow-check-vacuous.md) | Hand-rolled overflow checks are vacuous in this app shell - they cannot fail |
-
-**The remedy shape is the same for all of them:** make the mirror CHECKED rather
-than remembered - a real integration test, a file comparison instead of literal
-pins, a loud or failing skip, a dist boot smoke.
-
----
-
-## The C6+C11 campaign - sequence and why
-
-Goal, in Cameron's words: the suite **runs properly even under resource
-contention when multiple e2e runs happen at once.** That is the acceptance test,
-and it is deliberately the LAST step rather than an assumption.
-
-**Phase 1 - make contention survivable.** `npm-test-dynamodb-local-contention`:
-suite A (`groupCrossCheck`) latency-robust assertions, suite B retry
-`UpdateTable` on `InternalFailure`.
-*First because everything downstream either adds integration tests or re-runs
-them; doing it later means re-diagnosing every new red.* Suite A is the harder
-half - it fails ALONE sometimes, so the cause is genuine timing assumptions
-(spy-order and window predicates), not only the container.
-
-**Phase 2 - make the gate honest about what it did NOT run.**
-`unread-index-integration-coverage-requires-local-dynamo` (loud/failing skip, or
-boot DynamoDB Local in the gate) and `compiled-dist-boot-unverified` (dist boot
-smoke).
-*Before phase 3, because there is no point adding integration tests to a gate
-that can silently skip them. The dist smoke is independent of DynamoDB entirely
-and closes a whole resolution class cheaply.*
-
-**Phase 3 - close the fakes that lie.** `update-call-status-fake...`, the two
-`sw-mirror-*`, `relay-duplicate-detection-fake-partition-drift`,
-`audit-fake-before-cursor-fidelity`, `group-text-conversion-unwindowed-log-assert`,
-`e2e-documentelement-overflow-check-vacuous`.
-*After phase 1, because the remedy for the first two is MORE DynamoDB Local
-integration tests - exactly what is flaking today. The issues flag this tension
-themselves.*
-
-**Phase 4 - per-spec determinism.** C6 wave 2, all eleven.
-*Last, and deliberately RE-MEASURED first: several ("suite-only", "passes
-alone") may simply stop reproducing once phase 1 lands, since they were filed as
-contention symptoms. Measure which still fail before spending effort on each.*
-Start with the two cheap certainties: `tour-reminders-panel-e2e-flake` (a
-deterministic clock dependency, plus the `AGENTS.md` correction) and
-`today-heading-selector-ambiguity` (a substring-match selector bug; the older duplicate slug was merged into it).
-
-**Phase 5 - prove it.** Two concurrent full e2e suites from different worktrees,
-both green, plus a `npm test` running against the same containers. That is the
-stated goal and nothing before it demonstrates it.
-
----
-
-## C7 - A2P, consent, and compliance copy
-
-**High:** [a2p-compliance-hardening](./a2p-compliance-hardening.md) (in-progress)
-
-**Shared surface:** `app/src/lib/smsCompliance.ts`, `app/src/messages/catalog.ts`,
-`app/src/services/sendMessage.ts`, `app/src/routes/settings.ts`,
-`dashboard/src/routes/public/IntakeForm.tsx`, `docs/a2p/campaign-resubmission.md`.
-
-[`ported-number-not-on-a2p-campaign`](./ported-number-not-on-a2p-campaign.md) was
-the second high here and is **CLOSED 2026-08-21** - Cameron confirmed the ported
-number is on the campaign's Messaging Service. Its only tail is doc-only: naming
-the number in `campaign-resubmission.md` item 9, which the anchor below owns.
-
-| sev | issue | why it rides along |
-|---|---|---|
-| high | [a2p-compliance-hardening](./a2p-compliance-hardening.md) | anchor - P0/P1/P2 already scoped in the file |
-| med | [sms-brand-diverges-from-registered-a2p-brand](./sms-brand-diverges-from-registered-a2p-brand.md) | same re-file decision |
-| med | [call-recording-consent](./call-recording-consent.md) | the voice-side half of the same consent regime |
-| med | [consent-copy-cross-stack-drift](./consent-copy-cross-stack-drift.md) | the copy the P0 work writes, hand-mirrored today |
-| med | [automated-sms-length-guard](./automated-sms-length-guard.md) | catalog enforcement, same validation floor |
-| med | [founder-message-template-updates-owed](./founder-message-template-updates-owed.md) | same templates the disclosure work edits |
-| med | [quiet-hours-ungated-automated-paths](./quiet-hours-ungated-automated-paths.md) | TCPA calling-hours sibling of the consent gate |
-| med | [number-suppression-change-emits-no-cross-thread-event](./number-suppression-change-emits-no-cross-thread-event.md) | the suppression list the whole regime rests on |
-| med | [pool-audit-reimport-strands-business-number](./pool-audit-reimport-strands-business-number.md) | number inventory, same campaign item 9 |
-| low | [sms-copy-non-gsm7-characters](./sms-copy-non-gsm7-characters.md) | remaining scope is the Settings-UI override advisory |
-| low | [tourcopy-messageid-cast-unguarded](./tourcopy-messageid-cast-unguarded.md) | same catalog cast |
-| low | [message-catalog-legacy-override-migration](./message-catalog-legacy-override-migration.md) | same override map |
-| low | [quiet-hours-dst-gap-window-end-clamp](./quiet-hours-dst-gap-window-end-clamp.md) | same clamp (also C10) |
-| low | [staff-unmute-vs-per-phone-optout](./staff-unmute-vs-per-phone-optout.md) | opt-out precedence decision |
-| low | [dnc-registry-scrubbing](./dnc-registry-scrubbing.md) | voice-side deferred obligation |
-
----
-
-## Clusters with no high, kept because they are cheap adjacency
-
-These are not on the critical path, but each is one coherent category that
-overlaps a cluster above. Fold the overlapping members in rather than opening the
-same files twice.
-
-**C8 - Soft-deleted contact handling** (overlaps C1, C4, C5). One rule -
-"a soft-deleted contact is not a send/write target, but stays discoverable" -
-applied consistently:
+**T-SOFT-DELETED** - one rule, "a soft-deleted contact is not a send/write
+target but stays discoverable", applied at every gate. gated-on
+D-RELAY-LIFECYCLE for the relay-membership half.
 [deleted-contact-web-signup-silent](./deleted-contact-web-signup-silent.md) (med),
 [outbound-voice-ignores-deleted-contacts](./outbound-voice-ignores-deleted-contacts.md) (med),
-[scheduled-sends-to-deleted-contacts-silent-burn](./scheduled-sends-to-deleted-contacts-silent-burn.md) (med),
+[scheduled-sends-to-deleted-contacts-silent-burn](./scheduled-sends-to-deleted-contacts-silent-burn.md) (med, **blocked - `tourReminders.ts` is phase-b's**),
 [soft-deleted-contact-still-extractable](./soft-deleted-contact-still-extractable.md) (med),
-[relay-groups-ignore-member-deletion](./relay-groups-ignore-member-deletion.md) (med),
-[unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md) (low),
-[group-roster-contact-id-can-dangle](./group-roster-contact-id-can-dangle.md) (low),
-[stale-suggestions-survive-contact-retype](./stale-suggestions-survive-contact-retype.md) (low),
-[deleted-contact-resurfacing-e2e-401-flake](./deleted-contact-resurfacing-e2e-401-flake.md) (low).
+[stale-suggestions-survive-contact-retype](./stale-suggestions-survive-contact-retype.md).
+conflicts: M2 (`api.ts`), M11 (`extraction.ts`), M6 (`inbox.ts`).
 
-**C9 - Thread paging + SSE refetch in the dashboard.** The stateful half of thread
-paging is copy-pasted across three hooks and has already drifted; every item below
-is a symptom of that one duplication:
+**T-CONTACT-PAGE** - dashboard state races on the contact/tour/placement
+panes, plus the client with no request timeout.
+[contact-page-late-async-writes](./contact-page-late-async-writes.md) (med),
+[tab-contact-load-failure-no-retry](./tab-contact-load-failure-no-retry.md) (med),
+[dashboard-api-client-has-no-request-timeout](./dashboard-api-client-has-no-request-timeout.md) (med),
+[oauth-return-drops-deep-link](./oauth-return-drops-deep-link.md) (med),
+[pane-override-stale-refetch-race](./pane-override-stale-refetch-race.md),
+[usecontactfile-unstable-return-identity](./usecontactfile-unstable-return-identity.md),
+[contact-file-dead-media-slice](./contact-file-dead-media-slice.md).
+
+**T-AUTHORITY-VOCAB** - housing authority has two vocabularies and two
+field names; every item is that drift or the import that feeds it.
+[housing-authority-free-text-drift](./housing-authority-free-text-drift.md) (med),
+[retire-humanize-authority](./retire-humanize-authority.md) (med),
+[contact-authority-clear-empty-string-500](./contact-authority-clear-empty-string-500.md) (med),
+[properties-authority-filter-invisible-lock](./properties-authority-filter-invisible-lock.md) (med),
+[unit-accepted-authorities-edge-cases](./unit-accepted-authorities-edge-cases.md),
+[similar-units-authority-score-always-on](./similar-units-authority-score-always-on.md),
+[import-address-cells-needing-cleanup](./import-address-cells-needing-cleanup.md) (med),
+[seed-addresses-unstructured](./seed-addresses-unstructured.md).
+conflicts: M8 (`lib/import/apply.ts`).
+
+**T-IMPORT** - fold into whichever of M8 / T-AUTHORITY-VOCAB opens
+`lib/import/apply.ts` first:
+[contacts-create-does-not-require-status](./contacts-create-does-not-require-status.md).
+
+### Dashboard timeline and threads
+
+**T-THREAD-PAGING** - the stateful half of thread paging is copy-pasted
+across three hooks and has drifted; every item is a symptom of that one
+duplication. `useContactTimeline`, `useGroupThread`, `useRelayThread`,
+`shared/threadPaging.ts`.
 [thread-paging-stateful-half-duplicated](./thread-paging-stateful-half-duplicated.md) (med),
 [thread-hooks-refetch-whole-page-per-event](./thread-hooks-refetch-whole-page-per-event.md) (med),
 [thread-merge-leaves-a-hole-after-an-sse-gap](./thread-merge-leaves-a-hole-after-an-sse-gap.md) (med),
 [relay-thread-unfiltered-sse-resorts-paged-history](./relay-thread-unfiltered-sse-resorts-paged-history.md) (med),
 [contact-timeline-sse-refetch-unfiltered](./contact-timeline-sse-refetch-unfiltered.md) (med),
-[older-page-can-remove-the-default-reply-target](./older-page-can-remove-the-default-reply-target.md) (med),
-[prepend-anchor-misses-height-changes-with-no-render](./prepend-anchor-misses-height-changes-with-no-render.md) (med),
-[load-older-control-loses-focus-and-announces-nothing](./load-older-control-loses-focus-and-announces-nothing.md) (med),
-[load-older-control-unmount-jumps-the-reader](./load-older-control-unmount-jumps-the-reader.md) (low),
-[timeline-load-older-remounts-and-collapses-reveals](./timeline-load-older-remounts-and-collapses-reveals.md) (low).
+[older-page-can-remove-the-default-reply-target](./older-page-can-remove-the-default-reply-target.md) (med).
+conflicts: T-LOAD-OLDER, T-DELIVERY-CHIPS.
 
-**C10 - Timezone truth** (overlaps C7's quiet hours). Org zone vs browser zone vs
-property zone, decided once:
+**T-LOAD-OLDER** - the Load-older control and the prepend anchor in
+`Timeline.tsx`, plus its keyboard reachability.
+[load-older-control-loses-focus-and-announces-nothing](./load-older-control-loses-focus-and-announces-nothing.md) (med),
+[prepend-anchor-misses-height-changes-with-no-render](./prepend-anchor-misses-height-changes-with-no-render.md) (med),
+[message-bubble-reveal-not-keyboard-reachable](./message-bubble-reveal-not-keyboard-reachable.md) (med),
+[load-older-control-unmount-jumps-the-reader](./load-older-control-unmount-jumps-the-reader.md),
+[timeline-load-older-remounts-and-collapses-reveals](./timeline-load-older-remounts-and-collapses-reveals.md).
+conflicts: T-THREAD-PAGING, T-DELIVERY-CHIPS, M12.
+
+**T-MODALS** - the shared `Modal` and `RosterConfirmDialog`, plus phone-width
+layout and a11y.
+[modal-tab-focus-containment](./modal-tab-focus-containment.md) (med),
+[modal-footers-do-not-stack-at-phone-width](./modal-footers-do-not-stack-at-phone-width.md) (med),
+[roster-confirm-dialog-unclosable-on-hung-confirm](./roster-confirm-dialog-unclosable-on-hung-confirm.md) (med),
+[modal-busy-close-affordance](./modal-busy-close-affordance.md),
+[kebab-menus-keyboard-navigation](./kebab-menus-keyboard-navigation.md),
+[photo-actions-touch-reachability](./photo-actions-touch-reachability.md),
+[comms-pane-overflows-on-short-viewports](./comms-pane-overflows-on-short-viewports.md),
+[tenant-row-longname-midpane-overflow](./tenant-row-longname-midpane-overflow.md).
+conflicts: M9 (`RosterConfirmDialog.tsx`).
+
+### Push
+
+**T-PUSH** - `services/pushService.ts`, `adapters/webPush.ts`, the SW.
+gated-on D-PUSH for the TTL ruling.
+[inbound-push-fanout-unthrottled](./inbound-push-fanout-unthrottled.md) (med/security),
+[push-subscription-change-not-handled](./push-subscription-change-not-handled.md) (med),
+[push-subscription-prune-rmw-lost-update](./push-subscription-prune-rmw-lost-update.md),
+[push-broadcast-no-send-timeout-or-concurrency-bound](./push-broadcast-no-send-timeout-or-concurrency-bound.md),
+[message-push-payload-built-in-two-layers](./message-push-payload-built-in-two-layers.md),
+[sw-notificationclick-message-has-no-listener](./sw-notificationclick-message-has-no-listener.md),
+[e2e-push-seam-missing](./e2e-push-seam-missing.md).
+conflicts: M4, M12 (`twilio.ts`); F-EMAIL-V2 (`inboundEmail.ts`).
+
+### Extraction and suggestions
+
+**T-SUGGESTION-RESOLUTION** - `services/suggestionResolution.ts` +
+`repos/suggestionResolutionRepo.ts`.
+[suggestion-phone-ownership-pointer-only-arbitration](./suggestion-phone-ownership-pointer-only-arbitration.md) (med),
+[suggestion-status-accept-contract-drift](./suggestion-status-accept-contract-drift.md) (med),
+[ai-run-log-refused-accept-replay-200](./ai-run-log-refused-accept-replay-200.md),
+[ai-run-log-hot-path-round-trips](./ai-run-log-hot-path-round-trips.md),
+[journal-sweep-truth-check-lease-collision-false-positive](./journal-sweep-truth-check-lease-collision-false-positive.md),
+[resolution-fault-injection-hooks-in-prod-path](./resolution-fault-injection-hooks-in-prod-path.md),
+[patch-supersession-no-suggestion-event](./patch-supersession-no-suggestion-event.md),
+[ai-run-log-dead-code-cleanup](./ai-run-log-dead-code-cleanup.md).
+
+**T-EXTRACT-CONTENT** - `services/extraction/{apply,prompt,schema}.ts`.
+gated-on D-EXTRACTION-TRUST.
+[extraction-notes-current-state-summary](./extraction-notes-current-state-summary.md) (med),
+[extraction-tour-outcome-and-application-intent](./extraction-tour-outcome-and-application-intent.md),
+[voice-transcript-prefix-collision](./voice-transcript-prefix-collision.md).
+conflicts: M11.
+
+**T-AI-RUN-LOG-UI** `opp` -
+[ai-run-log-ui-polish-batch](./ai-run-log-ui-polish-batch.md),
+[ai-run-detail-drops-skip-reason](./ai-run-detail-drops-skip-reason.md),
+[ai-run-log-final-review-followups](./ai-run-log-final-review-followups.md).
+
+### Tours, reminders, timezones - ALL blocked behind phase-b
+
+**T-REMINDERS-TAIL** - what phase-b does not close:
+[paused-reminder-rows-grow-listdue-without-bound](./paused-reminder-rows-grow-listdue-without-bound.md),
+[reminder-state-sent-overstates-delivery](./reminder-state-sent-overstates-delivery.md),
+[tour-reminder-zero-primary-e2e-gap](./tour-reminder-zero-primary-e2e-gap.md),
+[placement-nudge-overdue-invisible-on-card](./placement-nudge-overdue-invisible-on-card.md) (med),
+[placement-nudge-suppression-opt-out-parity](./placement-nudge-suppression-opt-out-parity.md),
+[scheduled-send-surface-cues](./scheduled-send-surface-cues.md).
+Re-derive against phase-b's handback; some of these may close on-branch.
+
+**T-TOURS-TZ** - org zone vs browser zone vs property zone, decided once.
 [tour-times-assume-org-timezone](./tour-times-assume-org-timezone.md) (med),
-[tour-page-mixed-timezones](./tour-page-mixed-timezones.md) (low),
-[quiet-hours-dst-gap-window-end-clamp](./quiet-hours-dst-gap-window-end-clamp.md) (low),
-[roster-quiet-hours-e2e-timezone-skew](./roster-quiet-hours-e2e-timezone-skew.md) (low).
+[tour-page-mixed-timezones](./tour-page-mixed-timezones.md),
+[tour-morning-of-today-crosses-local-midnight](./tour-morning-of-today-crosses-local-midnight.md),
+[quiet-hours-dst-gap-window-end-clamp](./quiet-hours-dst-gap-window-end-clamp.md).
+
+**T-CATALOG** - `messages/catalog.ts` + `resolve.ts` + `tourCopy.ts`. Its
+med anchor was closed on phase-b; what is left:
+[founder-message-template-updates-owed](./founder-message-template-updates-owed.md) (med),
+[tour-copy-where-token-declared-not-passed](./tour-copy-where-token-declared-not-passed.md),
+[message-catalog-legacy-override-migration](./message-catalog-legacy-override-migration.md),
+[founder-whisper-copy-unguarded-after-press-0-removal](./founder-whisper-copy-unguarded-after-press-0-removal.md).
+
+**T-TOURS-PAGE** -
+[tours-dialog-unit-label-glossary](./tours-dialog-unit-label-glossary.md),
+[tour-outcome-close-not-backend-enforced](./tour-outcome-close-not-backend-enforced.md),
+[tour-id-gate-tracked-state](./tour-id-gate-tracked-state.md),
+[rta-documents-mms-unmodeled](./rta-documents-mms-unmodeled.md) (med).
+
+### Placements
+
+**T-PLACEMENT-CAPTURES** - the Approval & Move-in captures and the gates
+the board does not forward. gated-on D-PLACEMENT-MODEL.
+[determined-rent-capture](./determined-rent-capture.md) (med),
+[inspection-date-capture](./inspection-date-capture.md) (med),
+[paperwork-checklist-capture](./paperwork-checklist-capture.md) (med),
+[placement-followup-hidden-when-not-soonest](./placement-followup-hidden-when-not-soonest.md) (med),
+[move-in-ready-required-items-advisory](./move-in-ready-required-items-advisory.md),
+[placements-board-new-gate-deadends](./placements-board-new-gate-deadends.md),
+[park-reason-prompt-on-pill](./park-reason-prompt-on-pill.md).
+
+### Units and photos
+
+**T-UNIT-PHOTOS** - `routes/units.ts` photo pipeline, one file.
+[unit-photo-bulk-transcode-async-ux](./unit-photo-bulk-transcode-async-ux.md) (med),
+[unit-media-dangling-reference-race](./unit-media-dangling-reference-race.md),
+[unit-photo-presign-empty-filetype](./unit-photo-presign-empty-filetype.md),
+[unit-photo-presign-ttl-size-window](./unit-photo-presign-ttl-size-window.md),
+[unit-photo-removal-never-deletes-s3-objects](./unit-photo-removal-never-deletes-s3-objects.md),
+[shared-transcode-gate-couples-mms-and-photo-availability](./shared-transcode-gate-couples-mms-and-photo-availability.md),
+[buffertostream-helper-duplicated](./buffertostream-helper-duplicated.md),
+[property-card-409-settle-dead-code](./property-card-409-settle-dead-code.md).
+gated-on D-PUSH for the confirm-replay ruling.
+
+### Broadcasts
+
+**T-BROADCAST-AUDIENCE** - `services/audienceResolution.ts` and the
+composer. The truncation item is the GSI-range-key-as-hidden-priority-order
+defect, live again.
+[broadcast-audience-truncation-drops-searching-tenants](./broadcast-audience-truncation-drops-searching-tenants.md) (med),
+[broadcast-4plus-exact-match-underreach](./broadcast-4plus-exact-match-underreach.md) (med),
+[broadcast-results-enrichment-read-cost](./broadcast-results-enrichment-read-cost.md),
+[broadcasts-list-liveness-worker-seam](./broadcasts-list-liveness-worker-seam.md),
+[broadcast-draft-curation-persistence](./broadcast-draft-curation-persistence.md),
+[matching-draft-resume-seed-rehydration](./matching-draft-resume-seed-rehydration.md).
+
+### Harness, ops, hygiene
+
+**T-E2E-LOAD** - e2e specs that fail under multi-suite load. RE-MEASURE
+FIRST; several were filed as contention symptoms and M7 may retire them.
+The anchor is a deliberate soak that ENUMERATES the small budgets.
+[concurrent-capacity-budget-tail](./concurrent-capacity-budget-tail.md) (med),
+[placement-stage-more-actions-suite-only-flake](./placement-stage-more-actions-suite-only-flake.md) (med),
+[placement-detail-bundle-fetch-stall](./placement-detail-bundle-fetch-stall.md) (med - the fix merged; open for the misnamed message),
+[e2e-image-viewer-scroll-flake](./e2e-image-viewer-scroll-flake.md) (med),
+[relay-late-text-1to1-badge-not-visible](./relay-late-text-1to1-badge-not-visible.md) (med),
+[inbox-row-appearance-e2e-flake](./inbox-row-appearance-e2e-flake.md).
+NOT a timing-log job: a trace, not `E2E_CHILD_LOG_DIR`.
+
+**T-LINT** - one sweep, its own branch:
+[lint-backlog-repo-wide](./lint-backlog-repo-wide.md) (med). When it hits
+zero, gate 5 becomes bare `npm run lint`.
+
+**T-AWS-GUARD** - AWS blast radius in one-off scripts.
+[one-off-scripts-missing-account-guard](./one-off-scripts-missing-account-guard.md) (med/security),
+[pool-audit-reimport-strands-business-number](./pool-audit-reimport-strands-business-number.md) (med),
+[aws-cli-identity-can-diverge-from-account-guard](./aws-cli-identity-can-diverge-from-account-guard.md),
+[twilio-config-into-terraform](./twilio-config-into-terraform.md),
+[sns-prod-alert-confirmation](./sns-prod-alert-confirmation.md).
+
+**T-LOG-HYGIENE-TAIL** - what C3 left.
+[messaging-delivery-alarms](./messaging-delivery-alarms.md) (med),
+[cloudwatch-log-cp1252-mojibake](./cloudwatch-log-cp1252-mojibake.md),
+[err-string-log-sites-remain](./err-string-log-sites-remain.md),
+[otlp-telemetry-adoption](./otlp-telemetry-adoption.md),
+[phone-in-url-paths-structural](./phone-in-url-paths-structural.md).
+
+**T-POOL-ADMIN** `opp` -
+[pool-numbers-admin-unbounded-inventory](./pool-numbers-admin-unbounded-inventory.md),
+[poolnumbers-retry-unguarded-permanent-spinner](./poolnumbers-retry-unguarded-permanent-spinner.md).
+
+**T-DEAD-CODE** `opp` - fold into whatever opens the file:
+[remove-dead-relay-roster-alias](./remove-dead-relay-roster-alias.md),
+[remove-media-s3-keys-legacy](./remove-media-s3-keys-legacy.md),
+[event-bridge-hardening-followups](./event-bridge-hardening-followups.md),
+[phone-display-formatter-stragglers](./phone-display-formatter-stragglers.md),
+[stagemenu-statusmenu-consolidation](./stagemenu-statusmenu-consolidation.md),
+[roster-card-shared-edit-pattern](./roster-card-shared-edit-pattern.md),
+[change-order-1-still-specifies-press-0](./change-order-1-still-specifies-press-0.md).
+
+---
+
+## Lineage - where the 08-21 clusters went
+
+| 08-21 cluster | now |
+|---|---|
+| C1 inbox unread read path | M6 (the anchor high), M8 (the fan-out), T-UNREAD-GEN (the `[gen]` tangle); badge deferred at low |
+| C2 retry loops / terminal state | M5, M10, M11, and the provisioning half in M9 |
+| C3 log hygiene | MERGED 2026-08-25; T-LOG-HYGIENE-TAIL is the residue |
+| C4 native group texting | M4 (detection), F-GROUP-OUTBOUND (outbound feature) |
+| C5 relay roster mutation | M3 (notify), M9 (provisioning), T-RELAY-REOPEN, T-DUP-DETECT, T-RELAY-SURFACE, D-RELAY-LIFECYCLE |
+| C6 harness determinism | wave 1 MERGED; T-E2E-LOAD is wave 2 re-measured |
+| C7 A2P / consent | M-A2P, D-A2P, T-CATALOG |
+| C8 soft-deleted contacts | T-SOFT-DELETED |
+| C9 thread paging + SSE | T-THREAD-PAGING, T-LOAD-OLDER |
+| C10 timezone truth | T-TOURS-TZ |
+| C11 test-suite soundness | M7; `compiled-dist-boot-unverified` and the sw-mirror pair are RESOLVED (the smoke gate exists) |
+| (unclustered, filed after 08-21) | M1, M2, M12, T-DELIVERY-CHIPS, T-CONTACT-PAGE, T-AUTHORITY-VOCAB |
 
 ---
 
 ## Suggested order
 
-1. ~~**C7 ops confirm**~~ - DONE 2026-08-21, `ported-number-not-on-a2p-campaign`
-   closed.
-2. **C6 wave 1** - the lane lease. It is the harness every other mission's gates
-   run on; fixing it first makes every later run trustworthy.
-3. **C1** - two highs, and the nav badge is the app's highest-frequency request.
-   Inside it: fix `unread-fill-loop-query-amplification` first (cheap, no schema
-   change, biggest single reduction), re-measure, THEN decide the contact-lookup
-   half on fresh evidence.
-4. **C3** - a live credential in CloudWatch, plus the telemetry PII prod gate.
-5. **C2** - the "stuck forever" sweep. Same class as the prod voicemail incident.
-6. **C4 detection half** - the group blind spot on the ported number.
-7. **C5 core** - the go-live-gated roster notifications.
-8. **C7 code** (P0/P1) and **C4 outbound half** - both full feature pipelines.
+1. **M1** - two founder-observed highs, one mechanism, no gate, and M3
+   reads the phone it may change.
+2. **M2** - two highs, one is a security cache leak; small, self-contained.
+3. **M7** - the gate every later mission's verdict rests on. Cheap.
+4. **M3** - the go-live gate. After M1.
+5. **M5** - the "stuck forever" class, same as the prod voicemail incident.
+6. **M6** - measure first; the last unbounded read on the route.
+7. **M4** - as soon as the payload evidence exists. Nothing else can
+   proceed on group texting without it.
+8. **M8, M9, M10, M11, M12** - no highs; run in any order the file
+   conflicts allow. M9 never alongside M3; M8 never alongside M1/M6.
+9. **D-A2P**, then **M-A2P** to prod.
+10. **D-RELAY-LIFECYCLE** - it un-gates three Tier 2 bundles at once.
 
-C8/C9/C10 fold into whichever of the above opens their files first.
+Then F-GROUP-OUTBOUND, and Tier 2 as files open. Re-derive this file after
+phase-b merges; it will move T-REMINDERS-TAIL and may close part of it.

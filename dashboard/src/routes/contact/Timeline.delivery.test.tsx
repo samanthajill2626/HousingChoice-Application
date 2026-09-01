@@ -60,6 +60,13 @@ const GROUP_ROSTER = [
   { contactId: 'c2', phone: '+14045550112', name: 'Bo Tenant' },
 ];
 
+/** The separator inside the SHIPPED 1:1 / group-text 30003 reason: one U+2014 EM
+ *  DASH with an ASCII space each side. Built from a codepoint so every line this
+ *  slice added stays ASCII (AGENTS.md), and so the character is never copied into
+ *  new copy - the relay override uses a plain hyphen like every newer string in
+ *  the presenter module. */
+const EM_DASH = String.fromCharCode(0x2014);
+
 /** Naive-local `at`, three weeks before the pinned clock (setup.ts pins
  *  2026-07-01T12:00:00Z), so a clock-less `sent` leg ages from it and is stale.
  *  formatTime(RELAY_AT) is '9:20a'. */
@@ -448,6 +455,143 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     expect(within(retryingRow).getByText('Sending\u2026')).toBeInTheDocument();
     expect(within(retryingRow).queryByText(/30003/)).not.toBeInTheDocument();
     expect(within(retryingRow).queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+
+  // ---- Slice 5a: the relay 30003 override (D19-D21) --------------------------
+  //
+  // D19: no relay retry is scheduled. The status webhook returns on the
+  // relay-pointer branch BEFORE the 1:1 retry enqueue, and this branch adds no
+  // relay retry - so "will retry" beside a relay member's name is a promise the
+  // product cannot keep, in both worlds.
+  //
+  // D21: one flag feeds the rollup, the recital and the row, so the three cannot
+  // disagree; a partial fix that left a row contradicting the chip above it would
+  // be worse than none. Each test below therefore asserts ALL THREE positions,
+  // and the PROVING assertion at each is the NEGATIVE.
+  it('drops the retry promise on a RELAY 30003 leg at all three positions, code intact', () => {
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-30003',
+      tsMsgId: 'r-30003',
+      body: 'relay note to the group',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'undelivered', errorCode: '30003' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    // POSITION 1 - the rollup chip (deliveryStatus.ts:416), visible with no
+    // reveal. EXACT text: the whole question is WHICH sentence renders.
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent('delivered 1/2 - 1 failed - Phone unreachable (error 30003)');
+    // POSITION 2 - the accessible-name recital (Timeline.tsx:582), computed
+    // whether or not the list is revealed, so a screen-reader user gets the same
+    // sentence a sighted one does.
+    expect(rollup).toHaveAccessibleName(
+      'delivered 1 of 2, 1 failed, Phone unreachable (error 30003). ' +
+        'Keisha Kane: Delivered. Lars Landlord: Undelivered, Phone unreachable (error 30003).',
+    );
+    // POSITION 3 - the per-recipient row (Timeline.tsx:1045), REVEALED.
+    reveal('relay note to the group');
+    const failedRow = rows()[1] as HTMLElement;
+    expect(failedRow).toHaveTextContent('Lars Landlord');
+    expect(
+      within(failedRow).getByText('Undelivered - Phone unreachable (error 30003)'),
+    ).toBeInTheDocument();
+    // THE PROVING ASSERTION, and it is PAGE-WIDE on purpose. Besides the three
+    // positions it also covers the message-level chip (Timeline.tsx:849), which
+    // must never pick a code off a SLOT - research F4: that site's safety rests
+    // on group-delivery behavior in files this branch does not edit, so it is
+    // pinned here rather than asserted in a table.
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+
+  // D20, pinned EXPLICITLY rather than by relying on a default. `rosterKind`
+  // defaults to 'relay' (Timeline.tsx:1519, the operative one - MessageBubble's
+  // own :796 default is dead in production because :2083 always supplies a
+  // value), so exactly ONE production caller opts out: GroupTextView. A
+  // group-text 30003 really does reach the retry enqueue - the 30005/30006 and
+  // 21610 arms each carry a group_text guard and the 30003 arm carries none - so
+  // the promise is TRUE there and must survive byte for byte.
+  it('keeps the retry promise on the SAME leg in a native GROUP TEXT', () => {
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'g-30003',
+      tsMsgId: 'g-30003',
+      body: 'group text to the pair',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'undelivered', errorCode: '30003' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: GROUP_ROSTER, rosterKind: 'group_text' });
+    const base = `Phone unreachable ${EM_DASH} will retry (error 30003)`;
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent(`delivered 1/2 - 1 failed - ${base}`);
+    expect(rollup).toHaveAccessibleName(
+      `delivered 1 of 2, 1 failed, ${base}. Ann Tenant: Delivered. Bo Tenant: Undelivered, ${base}.`,
+    );
+    reveal('group text to the pair');
+    const failedRow = rows()[1] as HTMLElement;
+    expect(within(failedRow).getByText(`Undelivered - ${base}`)).toBeInTheDocument();
+  });
+
+  // THE PRECEDENCE, at the CALL SITES rather than in the pure function: both
+  // flags are handed to deliveryReason from the same three places, and adding
+  // `relay` must not displace `media`. A relay MMS leg that fails 30003 misses
+  // the media map (which holds 30005/30006 only) and lands on the relay copy; a
+  // relay MMS leg that fails 30005 keeps the MMS hedge.
+  it('keeps the MMS hedge on a relay ATTACHMENT leg, and still overrides its 30003', () => {
+    const mms: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-mms-30003',
+      tsMsgId: 'r-mms-30003',
+      type: 'mms',
+      body: 'photos and a dead line',
+      delivery_recipients: {
+        c1: { status: 'failed', errorCode: '30005' },
+        c2: { status: 'undelivered', errorCode: '30003' },
+      },
+    };
+    renderTimeline({ items: [mms], relayRoster: RELAY_ROSTER });
+    reveal('photos and a dead line');
+    const list = rows();
+    expect(
+      within(list[0] as HTMLElement).getByText(
+        "Failed - Attachment didn't get through, texts may still work (error 30005)",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(list[1] as HTMLElement).getByText('Undelivered - Phone unreachable (error 30003)'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+
+  // Timeline.tsx:849 - the MESSAGE-LEVEL chip - is NOT overridden. It reads
+  // `msg.error_code`, gets no product flag, and is reached by 1:1 bubbles and by
+  // the native-group-text aggregate (services/groupDelivery.ts copies the worst
+  // leg's code onto the message row for group texts ONLY). Both keep a real
+  // retry, so the base copy has to survive here even though this timeline's
+  // rosterKind is 'relay' by default - which is exactly what would break if the
+  // override were applied to the message level instead of to relay LEGS.
+  it('leaves the MESSAGE-LEVEL chip on the base copy, relay default notwithstanding', () => {
+    const oneToOne: TimelineItem = {
+      kind: 'message',
+      id: 'm-30003',
+      at: RELAY_AT,
+      conversationId: 'c1',
+      tsMsgId: 'm-30003',
+      direction: 'outbound',
+      author: 'teammate',
+      type: 'sms',
+      delivery_status: 'undelivered',
+      error_code: '30003',
+      body: 'one to one, no roster',
+    };
+    renderTimeline({ items: [oneToOne] });
+    expect(
+      screen.getByText(`Undelivered - Phone unreachable ${EM_DASH} will retry (error 30003)`),
+    ).toBeInTheDocument();
   });
 
   it('revealed, a queued_pending HOLD still renders no list', () => {

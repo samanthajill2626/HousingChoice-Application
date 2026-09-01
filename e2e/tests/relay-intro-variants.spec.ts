@@ -353,8 +353,18 @@ test.describe('Relay intro variants + the member_added split', () => {
     // iterate. Two minted numbers, named explicitly, cannot go quiet that way.
     //
     // The placement's default roster is the tenant plus the unit's
-    // landlord-of-record, so these two ARE every member.
-    for (const phone of [tenant.phone, owner.phone]) {
+    // landlord-of-record, so these two ARE every member - and the server is
+    // made to say so (review R3, S-R3-1): RosterView does serve `phoneLast4`,
+    // so the COMPLETENESS half rides that field while the leg assertions ride
+    // the full minted numbers. A third roster member would fail here loudly.
+    const minted = [tenant.phone, owner.phone];
+    const rosterRes = await req.get(`${NEXT}${ownerPath}/roster`);
+    expect(rosterRes.ok(), await rosterRes.text()).toBeTruthy();
+    const { members } = (await rosterRes.json()) as { members: { phoneLast4?: string }[] };
+    expect(members.map((m) => m.phoneLast4).sort()).toEqual(
+      minted.map((p) => p.slice(-4)).sort(),
+    );
+    for (const phone of minted) {
       await expectExactSentFromPool(req, phone, introBody, poolNumber);
     }
 

@@ -67,7 +67,7 @@ tour walk never asserted either. A one-line comment names the default roster
 Tests, both new: "a WRITE failure ABORTS the run" (injects a `doc` whose `send`
 rejects on `UpdateCommand`; asserts the promise REJECTS and that NEITHER planned
 row was stamped - i.e. it aborted rather than continuing) and the corrupt-row
-case extended with `reportRetirementRun(result, false) === 1` and `(…, true) === 1`.
+case extended with `reportRetirementRun(result, false) === 1` and `(..., true) === 1`.
 A third test pins the boundary the other way: "a lost CONDITIONAL write is still
 not an abort", so "a write failure aborts" cannot be misread as "any write error
 aborts".

@@ -19,9 +19,10 @@
 //      disagree about a row, one of them would be wrong. no_show_checkin is
 //      exempt by construction (its dueAt follows the tour).
 //
-//   B. kind_retired - every pending `confirmation`, regardless of tour date.
-//      The kind is discontinued, and REMINDER_KINDS governs ARMING only, so an
-//      in-flight confirmation for a FUTURE tour survives the kind removal.
+//   B. kind_retired - every pending rung of a DISCONTINUED kind (read from
+//      DISCONTINUED_REMINDER_KINDS - today only `confirmation`), regardless of
+//      tour date. The kind is discontinued, and REMINDER_KINDS governs ARMING
+//      only, so an in-flight confirmation for a FUTURE tour survives the kind removal.
 //      This arm is PANEL HYGIENE: DISCONTINUED_REMINDER_KINDS is what stops
 //      those rows sending. Without the sweep they sit in the ladder forever
 //      reading "no longer sent" against a tour that has not happened yet.

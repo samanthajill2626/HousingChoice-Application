@@ -75,7 +75,21 @@ export type ReminderSkipReason =
    *  unlike the silent past-dueAt drop, so a founder who booked late sees WHY
    *  the rung is missing instead of finding a gap. dueAt on such a row is the
    *  CLAMPED value, like every other arm-time skip row. */
-  | 'booked_too_late';
+  | 'booked_too_late'
+  /** Phase B (2026-08-31): the tour had already started when this rung came
+   *  due (fire-time past-tour gate, jobs/tourReminders.ts) or was swept
+   *  (scripts/retire-paused-tour-reminders.ts). Applies only to rungs whose
+   *  own dueAt precedes the tour - never no_show_checkin. */
+  | 'tour_already_passed'
+  /** Phase B: the rung's KIND is discontinued (confirmation). Written by the
+   *  one-time sweep script ONLY - the runtime poll EXCLUDES discontinued
+   *  kinds rather than claim-skipping them (DISCONTINUED_REMINDER_KINDS),
+   *  so this token has no in-app writer. */
+  | 'kind_retired'
+  /** Phase B (ledger item 7): name resolution kept THROWING for more than
+   *  ROSTER_UNAVAILABLE_GRACE_MS past dueAt - the bounded twin of
+   *  roster_unavailable, decided at both unclaimed-return sites. */
+  | 'names_unavailable';
 
 export interface TourReminderItem {
   /** PK */

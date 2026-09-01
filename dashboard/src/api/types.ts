@@ -1220,7 +1220,16 @@ export interface TourReminderView {
     // ARM time: the tour was booked (or rescheduled) too close to this rung's
     // raw due time for it to usefully fire, so it was born skipped as a
     // visible trace rather than leaving a gap in the ladder.
-    | 'booked_too_late';
+    | 'booked_too_late'
+    // Phase B: the tour had already started when the rung came due (the
+    // fire-time past-tour gate), or the one-time sweep retired it.
+    | 'tour_already_passed'
+    // Phase B: the rung's KIND is discontinued (confirmation) - written by the
+    // one-time sweep script only; the poll excludes discontinued kinds.
+    | 'kind_retired'
+    // Phase B: name resolution kept failing for more than an hour past dueAt -
+    // the bounded twin of roster_unavailable.
+    | 'names_unavailable';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -1281,6 +1290,9 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   roster_unavailable: "couldn't read who is on the relay group - gave up after an hour",
   invalid_schedule: 'schedule unusable',
   booked_too_late: 'booked too late for this reminder',
+  tour_already_passed: 'the tour had already happened',
+  kind_retired: 'this reminder is no longer sent',
+  names_unavailable: "couldn't look up the names",
 };
 
 /**
@@ -1328,6 +1340,10 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   // right for a transient failure.)
   tenant_not_on_roster:
     'That person is not on this roster, so nothing was sent - add them back to send.',
+  // Reminder-only, PERMANENT refusals (Phase B). The generic retry fallback
+  // would be a lie for both - nothing about retrying can change the outcome.
+  tour_already_passed: 'That tour has already happened, so nothing was sent.',
+  kind_retired: 'Confirmation texts are no longer sent, so nothing was sent.',
   // Post-claim race (the gate flipped mid-send): the row IS consumed but nothing
   // went out, so these must read as errors, not successes.
   contact_no_consent: 'No SMS consent on file - record consent before sending this by hand.',

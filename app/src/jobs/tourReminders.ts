@@ -1326,6 +1326,12 @@ export type ForceSendRefusal =
    *  lookup, not a name. Pre-claim, row left pending; the operator copy is
    *  deliberately cause-agnostic ("everything this message needs"). */
   | 'names_unavailable'
+  /** Phase B: the tour had already started, so this rung's copy is stale (the
+   *  same fire-time gate the poll applies). Permanent - never a retry. */
+  | 'tour_already_passed'
+  /** Phase B: the rung's KIND is discontinued (confirmation), so no path may
+   *  send it - the human path least of all. Permanent - never a retry. */
+  | 'kind_retired'
   | ReminderResolutionFailure;
 
 export type ForceSendResult =

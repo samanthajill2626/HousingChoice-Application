@@ -103,6 +103,9 @@ const SKIP_REASONS = [
   'roster_unavailable',
   'invalid_schedule',
   'booked_too_late',
+  'tour_already_passed',
+  'kind_retired',
+  'names_unavailable',
 ];
 
 describe('REMINDER_SKIP_REASON_LABELS', () => {
@@ -122,6 +125,23 @@ describe('REMINDER_SKIP_REASON_LABELS', () => {
   it('never puts a machine token in front of staff', () => {
     for (const [reason, label] of Object.entries(REMINDER_SKIP_REASON_LABELS)) {
       expect(label, reason).not.toContain('_');
+    }
+  });
+});
+
+describe('SEND_NOW_ERROR_COPY', () => {
+  // Refusal codes whose generic "try again" fallback would be a LIE - the
+  // condition is permanent, so retrying can never work. Every such code MUST
+  // carry explicit copy. names_unavailable is deliberately NOT listed: it keeps
+  // its existing cause-agnostic copy, because there retrying IS the right
+  // advice (spec 7.2). SEND_NOW_ERROR_COPY is module-private, so this asserts
+  // through the exported resolver.
+  const PERMANENT_REFUSALS = ['tour_already_passed', 'kind_retired'];
+  it('carries explicit copy for every permanent refusal', () => {
+    for (const code of PERMANENT_REFUSALS) {
+      expect(sendNowErrorMessage(code), code).not.toBe(
+        "Couldn't send that just now - please try again.",
+      );
     }
   });
 });

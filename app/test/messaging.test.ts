@@ -148,6 +148,141 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
 });
 
 describe('TwilioMessagingDriver', () => {
+  it('classifies a frozen serializable intent from durable forwardable-media facts', () => {
+    const { client } = makeFakeTwilioClient();
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      appEnv: 'local',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+
+    const textIntent = driver.classifyMessageTransport({ hasForwardableMedia: false });
+    const mediaIntent = driver.classifyMessageTransport({ hasForwardableMedia: true });
+
+    expect(textIntent).toEqual({ requestedTransport: 'sms' });
+    expect(mediaIntent).toEqual({ requestedTransport: 'mms' });
+    expect(Object.isFrozen(textIntent)).toBe(true);
+    expect(Object.getPrototypeOf(textIntent)).toBe(Object.prototype);
+    expect(JSON.parse(JSON.stringify(textIntent))).toEqual({ requestedTransport: 'sms' });
+  });
+
+  it('prepares without reclassifying and calls Twilio only from the execute stage', async () => {
+    const created: Record<string, unknown>[] = [];
+    const client: TwilioClientLike = {
+      messages: {
+        create: async (params) => {
+          created.push(params as unknown as Record<string, unknown>);
+          return {
+            sid: `MM${'a'.repeat(32)}`,
+            status: 'accepted',
+            dateCreated: new Date('2026-06-12T10:00:00.000Z'),
+          };
+        },
+      },
+    };
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      appEnv: 'local',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const intent = driver.classifyMessageTransport({ hasForwardableMedia: true });
+    const params = {
+      to: '+15550100001',
+      from: '+15550109001',
+      body: 'hello',
+      mediaUrls: ['https://media.example/fresh'],
+    };
+
+    const prepared = driver.prepareMessageSend(intent, params);
+
+    expect(prepared).toEqual({ requestedTransport: 'mms', params });
+    expect(created).toHaveLength(0);
+
+    await expect(driver.sendPreparedMessage(prepared)).resolves.toEqual({
+      providerSid: `MM${'a'.repeat(32)}`,
+      status: 'queued',
+      providerTs: '2026-06-12T10:00:00.000Z',
+      actualTransport: 'mms',
+    });
+    expect(created).toEqual([
+      {
+        to: '+15550100001',
+        from: '+15550109001',
+        body: 'hello',
+        mediaUrl: ['https://media.example/fresh'],
+        messagingServiceSid: 'MGtest',
+      },
+    ]);
+  });
+
+  it('normalizes valid SMS evidence and leaves actual absent when evidence is missing', async () => {
+    const sids = [`SM${'b'.repeat(32)}`, 'SMfixture'];
+    const client: TwilioClientLike = {
+      messages: {
+        create: async () => ({
+          sid: sids.shift()!,
+          status: 'sent',
+          dateCreated: new Date('2026-06-12T10:00:00.000Z'),
+        }),
+      },
+    };
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      appEnv: 'local',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+
+    const observed = await driver.sendMessage({ to: '+15550100001', body: 'one' });
+    const missing = await driver.sendMessage({ to: '+15550100001', body: 'two' });
+
+    expect(observed.actualTransport).toBe('sms');
+    expect(missing).not.toHaveProperty('actualTransport');
+  });
+
+  it('warns once on conflicting provider evidence and leaves actual absent', async () => {
+    const capture = createLogCapture();
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      appEnv: 'local',
+      client: {
+        messages: {
+          create: async () => ({
+            sid: `ZZ${'c'.repeat(32)}`,
+            status: 'accepted',
+            dateCreated: new Date('2026-06-12T10:00:00.000Z'),
+          }),
+        },
+      },
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await driver.sendMessage({ to: '+15550100001', body: 'hello' });
+
+    expect(result).not.toHaveProperty('actualTransport');
+    const warnings = capture.lines.filter((line) => line['event'] === 'message_transport_evidence_conflict');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      providerSid: `ZZ${'c'.repeat(32)}`,
+      requestedTransport: 'sms',
+      sidPrefix: 'ZZ',
+    });
+  });
+
   it('sends via the Messaging Service (no per-message statusCallback) and maps the result', async () => {
     const { client, created } = makeFakeTwilioClient();
     const driver = new TwilioMessagingDriver({
@@ -461,6 +596,27 @@ describe('TwilioMessagingDriver.getMediaStream — SSRF guard + size cap', () =>
 });
 
 describe('ConsoleMessagingDriver', () => {
+  it('uses its own provider boundary to return requested transport as actual', async () => {
+    const driver = new ConsoleMessagingDriver({
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const intent = driver.classifyMessageTransport({ hasForwardableMedia: true });
+    const prepared = driver.prepareMessageSend(intent, {
+      to: '+15550100001',
+      body: 'hello',
+      mediaUrls: ['https://media.example/fresh'],
+      idempotencyKey: 'transport-intent',
+    });
+
+    expect(await driver.sendPreparedMessage(prepared)).toMatchObject({
+      providerSid: 'SMconsole-transport-intent',
+      actualTransport: 'mms',
+    });
+    await expect(
+      driver.sendMessage({ to: '+15550100001', body: 'text', idempotencyKey: 'text-intent' }),
+    ).resolves.toMatchObject({ actualTransport: 'sms' });
+  });
+
   it('returns deterministic fake SIDs, status sent, and never logs the body', async () => {
     const capture = createLogCapture();
     const driver = new ConsoleMessagingDriver({

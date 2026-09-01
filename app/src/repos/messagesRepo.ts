@@ -1882,6 +1882,40 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     return memberKey.startsWith('phone#') ? 'phone#redacted' : memberKey;
   }
 
+  function classifyRecipientSendResult(
+    slot: RelayRecipientDelivery,
+    patch: RecipientSendResultPatch,
+  ): TransportMutationOutcome {
+    const statusAdvances = allowedPriorStatuses(patch.status).includes(slot.status);
+    const statusSame = slot.status === patch.status;
+    const statusStale = !statusAdvances && !statusSame;
+    const actualDecision =
+      patch.actualTransport === undefined
+        ? undefined
+        : decideActualTransportWrite(slot.actualTransport, patch.actualTransport, slot.requestedTransport);
+    const terminalCurrent =
+      slot.status === 'delivered' || slot.status === 'undelivered' || slot.status === 'failed';
+    const errorEligible = (statusAdvances || statusSame) && !(terminalCurrent && statusStale);
+    const clearsTransientError =
+      patch.errorCode === undefined && patch.status === 'sent' && errorEligible && slot.errorCode !== undefined;
+    const writesError =
+      patch.errorCode !== undefined &&
+      errorEligible &&
+      slot.errorCode !== patch.errorCode &&
+      !(terminalCurrent && statusSame && slot.errorCode !== undefined);
+    const stillWritable =
+      statusAdvances ||
+      (patch.sid !== undefined && slot.sid === undefined) ||
+      (patch.sentAt !== undefined && slot.sentAt === undefined) ||
+      actualDecision?.kind === 'write' ||
+      clearsTransientError ||
+      writesError;
+
+    if (stillWritable || actualDecision?.kind === 'conflict') return 'conflict';
+    if (actualDecision?.kind === 'stale-rcs-observation' || statusStale) return 'stale';
+    return 'idempotent';
+  }
+
   /**
    * DISCARD STALE CREDITS AND TAKE A PENDING SLOT, returning the new balance.
    *
@@ -2966,10 +3000,20 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           {
             conversationId,
             tsMsgId,
-            currentTransport: decision.current,
-            attemptedTransport: decision.attempted,
+            currentTransport: message.actual_transport,
+            attemptedTransport: observed,
           },
           'message actual transport conflict refused',
+        );
+      } else if (decision.kind === 'stale-rcs-observation') {
+        log.info(
+          {
+            conversationId,
+            tsMsgId,
+            currentTransport: message.actual_transport,
+            attemptedTransport: observed,
+          },
+          'message actual transport stale after RCS fallback',
         );
       }
       return actualDecisionOutcome(decision);
@@ -3138,10 +3182,21 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             conversationId,
             tsMsgId,
             memberKey: safeMemberKey(memberKey),
-            currentTransport: decision.current,
-            attemptedTransport: decision.attempted,
+            currentTransport: slot.actualTransport,
+            attemptedTransport: observed,
           },
           'recipient actual transport conflict refused',
+        );
+      } else if (decision.kind === 'stale-rcs-observation') {
+        log.info(
+          {
+            conversationId,
+            tsMsgId,
+            memberKey: safeMemberKey(memberKey),
+            currentTransport: slot.actualTransport,
+            attemptedTransport: observed,
+          },
+          'recipient actual transport stale after RCS fallback',
         );
       }
       return actualDecisionOutcome(decision);
@@ -3213,9 +3268,9 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         }
 
         if (errorEligible) {
-          names['#error'] = 'errorCode';
           if (patch.errorCode === undefined) {
-            if (slot.errorCode !== undefined) {
+            if (patch.status === 'sent' && slot.errorCode !== undefined) {
+              names['#error'] = 'errorCode';
               removes.push('#dr.#mk.#error');
               names['#status'] = 'status';
               values[':currentStatus'] = slot.status;
@@ -3224,6 +3279,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
               }
             }
           } else if (slot.errorCode !== patch.errorCode) {
+            names['#error'] = 'errorCode';
             values[':error'] = patch.errorCode;
             names['#status'] = 'status';
             values[':currentStatus'] = slot.status;
@@ -3278,7 +3334,12 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           if (!(err instanceof ConditionalCheckFailedException)) throw err;
         }
       }
-      return 'conflict';
+      const finalMessage = await getMessageConsistent(conversationId, tsMsgId);
+      if (!finalMessage) return 'missing';
+      if (finalMessage.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const finalSlot = finalMessage.delivery_recipients?.[memberKey];
+      if (!finalSlot) return 'missing';
+      return classifyRecipientSendResult(finalSlot, patch);
     },
 
     async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {

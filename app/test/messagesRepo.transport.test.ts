@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { GetCommand } from '@aws-sdk/lib-dynamodb';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -211,6 +212,7 @@ describe.skipIf(!reachable)('versioned message transport persistence', () => {
   it('applies recipient actual transitions and resolves a conditional race', async () => {
     const { message, tsMsgId } = await append({
       requestedTransport: 'rcs',
+      actualTransport: 'sms',
       deliveryRecipients: {
         member: { status: 'queued', requestedTransport: 'rcs' },
       },
@@ -297,12 +299,12 @@ describe.skipIf(!reachable)('versioned message transport persistence', () => {
     ]).toContainEqual(slot);
   });
 
-  it('writes queued same-status metadata and actual evidence while clearing a transient error', async () => {
+  it('writes same-status success metadata and actual evidence while clearing a transient error', async () => {
     const firstSentAt = '2026-09-01T13:00:00.000Z';
     const { message, tsMsgId } = await append({
       deliveryRecipients: {
         member: {
-          status: 'queued',
+          status: 'sent',
           errorCode: 'temporary',
           requestedTransport: 'rcs',
           transportAggregationState: 'attempted',
@@ -312,14 +314,14 @@ describe.skipIf(!reachable)('versioned message transport persistence', () => {
 
     await expect(
       repo.applyRecipientSendResult(message.conversationId, tsMsgId, 'member', {
-        status: 'queued',
+        status: 'sent',
         sid: 'SMfirst',
         sentAt: firstSentAt,
         actualTransport: 'sms',
       }),
     ).resolves.toBe('updated');
     expect((await read(message.conversationId, tsMsgId)).delivery_recipients?.member).toEqual({
-      status: 'queued',
+      status: 'sent',
       sid: 'SMfirst',
       sentAt: firstSentAt,
       requestedTransport: 'rcs',
@@ -329,7 +331,7 @@ describe.skipIf(!reachable)('versioned message transport persistence', () => {
 
     await expect(
       repo.applyRecipientSendResult(message.conversationId, tsMsgId, 'member', {
-        status: 'queued',
+        status: 'sent',
         sid: 'SMsecond',
         sentAt: '2026-09-01T13:01:00.000Z',
         actualTransport: 'sms',
@@ -413,6 +415,111 @@ describe.skipIf(!reachable)('versioned message transport persistence', () => {
       errorCode: 'terminal-provider-error',
       requestedTransport: 'sms',
     });
+  });
+
+  it('retains a terminal diagnostic when a duplicate failed result has no error code', async () => {
+    const { message, tsMsgId } = await append({
+      deliveryRecipients: {
+        member: { status: 'failed', errorCode: 'terminal-provider-error', requestedTransport: 'sms' },
+      },
+    });
+
+    await expect(
+      repo.applyRecipientSendResult(message.conversationId, tsMsgId, 'member', { status: 'failed' }),
+    ).resolves.toBe('idempotent');
+    expect((await read(message.conversationId, tsMsgId)).delivery_recipients?.member).toEqual({
+      status: 'failed',
+      errorCode: 'terminal-provider-error',
+      requestedTransport: 'sms',
+    });
+  });
+
+  it('reclassifies an identical durable winner after the final conditional race', async () => {
+    const { message, tsMsgId } = await append({
+      deliveryRecipients: {
+        member: { status: 'queued', requestedTransport: 'sms' },
+      },
+    });
+    let forcedConditionalFailures = 0;
+    const raceRepo = createMessagesRepo({
+      doc: {
+        async send(command: unknown) {
+          if (
+            command instanceof UpdateCommand &&
+            command.input.Key?.conversationId === message.conversationId &&
+            command.input.Key.tsMsgId === tsMsgId
+          ) {
+            forcedConditionalFailures += 1;
+            if (forcedConditionalFailures === 4) await doc.send(command);
+            throw new ConditionalCheckFailedException({ message: 'forced conditional race', $metadata: {} });
+          }
+          return doc.send(command as never);
+        },
+      } as never,
+      env: testEnv,
+    });
+
+    await expect(
+      raceRepo.applyRecipientSendResult(message.conversationId, tsMsgId, 'member', {
+        status: 'sent',
+        sid: 'SMdurable-winner',
+      }),
+    ).resolves.toBe('idempotent');
+    expect(forcedConditionalFailures).toBe(4);
+    expect((await read(message.conversationId, tsMsgId)).delivery_recipients?.member).toEqual({
+      status: 'sent',
+      sid: 'SMdurable-winner',
+      requestedTransport: 'sms',
+    });
+  });
+
+  it('logs a safe info event for stale RCS evidence after durable SMS fallback', async () => {
+    const { message, tsMsgId } = await append({
+      requestedTransport: 'rcs',
+      actualTransport: 'sms',
+      deliveryRecipients: {
+        'phone#+15555550100': {
+          status: 'sent',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+        },
+      },
+    });
+    const info = vi.fn();
+    const warn = vi.fn();
+    const observingRepo = createMessagesRepo({
+      doc,
+      env: testEnv,
+      logger: { info, warn } as never,
+    });
+
+    await expect(
+      observingRepo.setRecipientActualTransport(message.conversationId, tsMsgId, 'phone#+15555550100', 'rcs'),
+    ).resolves.toBe('stale');
+    await expect(observingRepo.setMessageActualTransport(message.conversationId, tsMsgId, 'rcs')).resolves.toBe(
+      'stale',
+    );
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: message.conversationId,
+        tsMsgId,
+        memberKey: 'phone#redacted',
+        currentTransport: 'sms',
+        attemptedTransport: 'rcs',
+      }),
+      expect.stringContaining('stale'),
+    );
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: message.conversationId,
+        tsMsgId,
+        currentTransport: 'sms',
+        attemptedTransport: 'rcs',
+      }),
+      expect.stringContaining('stale'),
+    );
+    expect(warn).not.toHaveBeenCalled();
+    expect(JSON.stringify(info.mock.calls)).not.toContain('5555550100');
   });
 
   it('preserves independent concurrent status, SID, error, time, actual, and aggregation writes', async () => {

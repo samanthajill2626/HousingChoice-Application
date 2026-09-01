@@ -340,3 +340,85 @@ The pattern worth naming for round 3: **every blocking finding in this round was
 in material written to close the previous round's blocking findings.** Round 3's
 sharpest question is therefore the same one again - not "are round 2's findings
 closed" but "what did the round-2 rewrite break".
+
+---
+
+# Spec round 3 - adjudications, and the scope decision
+
+Report: `spec-r3-reviewer-a.md`, 16 findings. Six blocking, **all six in
+round-3 material**, and the reviewer answered "no" to all three questions I
+flagged as my least confident.
+
+Verified before acting on them:
+
+- **R3-1** - the single-write promotion condition reads the lineage value the
+  same write must set. A genuine catch-22 I created while fixing R2-F9's
+  two-write race: either two writes (stranding on a crash) or one write whose
+  condition reads its own effect. Fixable by setting BOTH paths in one update,
+  but my text was wrong.
+- **R3-3** - the inline rail path leaks the `rail_creating` claim. VERIFIED:
+  released only by `setTwilioConversation` or `recordRailFailure`
+  (conversationsRepo.ts:1001-1008). Every variant of my "send but do not
+  finalize coverage" split either leaks the claim or requires editing
+  `conversationsRepo.ts`, **a Sec 2 hard fence owned by M1**.
+- **R3-2, R3-6** - missing cap/outcome clauses on the new gate, and a second
+  duplicated section number. Drafting failures, the second one a repeat.
+- **R3-7, R3-10** - the dashboard scoping as written named a surface that
+  renders no reason. Investigated: `deliveryReason` already swaps reason maps
+  from an `opts.media` flag (deliveryStatus.ts:628-640), and
+  `presentRelayDelivery` (:387-416) already passes opts - so the scoping IS
+  expressible, and better than I had it, because relay legs and native
+  group-text legs both lack a retry and both want the corrected copy.
+
+**On my adjudications:** B18 confirmed completely closed; A18 half closed (the
+payload-size question is now answered explicitly in Sec 3.3); A17, B17, R2-3 and
+R2-5 all closed.
+
+## The decision: SPLIT the bundle
+
+Put to Cameron with the open findings, per the review loop's rule about a design
+that is not converging. **Cameron chose to split.**
+
+The evidence for splitting, three rounds of it:
+
+| round | decisions moved | blocking findings in the PREVIOUS round's fixes |
+|---|---|---|
+| 1 | 4 | - |
+| 2 | 5 | 3 of 5 |
+| 3 | 6 | **6 of 6** |
+
+The findings clustered almost entirely in `relay-30003-retry-lineage`'s state
+machine. The anchor issue converged after round 1 and produced no blocking
+finding in rounds 2 or 3. That is a scope signal, not a drafting signal: the
+lineage work is a mission (nine acceptance criteria, a new job, a new store, a
+webhook change and dashboard rendering), and pairing it with the anchor was
+holding a converged high-severity fix hostage to an unconverged medium one.
+
+**Resolution.** This branch closes the high and the low. `relay-30003` stays
+OPEN and is re-bundled as its own mission, starting from the durable attempt
+substrate this branch lands - which is the exact dependency M5 cited when it
+paired them, so nothing is lost by sequencing them instead.
+
+Two things got SIMPLER as a direct result, both worth noting because they
+removed whole classes of the findings above:
+
+1. `routes/webhooks/twilio.ts` leaves the branch entirely. No reason to touch a
+   file three other bundles own.
+2. The producer/consumer close split collapses - both remaining sites are
+   consumer-side, so the rule is just "throw and let the redelivery reach the
+   cap".
+
+The rail fix also narrowed to the job and import paths, which is where the
+measured harm actually occurred (the 2026-08-13 migration), leaving the request
+path and the claim lifecycle untouched.
+
+## Round 4
+
+The spec was REWRITTEN at the reduced scope rather than patched - three layers
+of "an earlier revision said X" annotations had become archaeology a builder
+would have to read past. The corrections that PREVENT a builder from re-making a
+mistake were kept (the counter cannot live in the slot; the cap branch already
+finalizes; do not touch the inline rail path or the backoff); the rest was cut.
+
+A rewrite is new unreviewed material, so round 4 runs on it - the last permitted
+round, and the stop rule applies: if it changes no decision, the design is done.

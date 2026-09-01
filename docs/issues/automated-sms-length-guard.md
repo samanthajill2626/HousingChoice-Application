@@ -30,7 +30,9 @@ object, so it never applies to a legacy plain-STRING address, and the seeds writ
 straight to DynamoDB bypassing `unitFields` altogether - which is why every
 seeded address is an uncapped plain string. Those have no bound whatsoever.
 
-The same shape applies to `{members}` in the relay intro (a large roster), to
+The same shape applies to `{names}` in the relay intro (a large roster; was
+`{members}` until Phase B, 2026-08-31, which also added a ~370-character
+`relay.intro_placement` - three segments on its own before any token), to
 `{firstName}` in an operator-overridden welcome, and to any future token.
 
 The catalog's own `maxChars` field is the intended guard. It was written as

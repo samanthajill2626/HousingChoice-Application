@@ -75,7 +75,21 @@ export type ReminderSkipReason =
    *  unlike the silent past-dueAt drop, so a founder who booked late sees WHY
    *  the rung is missing instead of finding a gap. dueAt on such a row is the
    *  CLAMPED value, like every other arm-time skip row. */
-  | 'booked_too_late';
+  | 'booked_too_late'
+  /** Phase B (2026-08-31): the tour had already started when this rung came
+   *  due (fire-time past-tour gate, jobs/tourReminders.ts) or was swept
+   *  (scripts/retire-paused-tour-reminders.ts). Applies only to rungs whose
+   *  own dueAt precedes the tour - never no_show_checkin. */
+  | 'tour_already_passed'
+  /** Phase B: the rung's KIND is discontinued (confirmation). Written by the
+   *  one-time sweep script ONLY - the runtime poll EXCLUDES discontinued
+   *  kinds rather than claim-skipping them (DISCONTINUED_REMINDER_KINDS),
+   *  so this token has no in-app writer. */
+  | 'kind_retired'
+  /** Phase B (ledger item 7): name resolution kept THROWING for more than
+   *  ROSTER_UNAVAILABLE_GRACE_MS past dueAt - the bounded twin of
+   *  roster_unavailable, decided at both unclaimed-return sites. */
+  | 'names_unavailable';
 
 export interface TourReminderItem {
   /** PK */
@@ -152,9 +166,17 @@ export interface TourRemindersRepo {
   /**
    * Restore ONE canceled rung to pending (operator un-cancel). Conditional on
    * canceledAt existing AND no sentAt/skippedAt — restoring a sent or
-   * never-canceled rung is a benign false. A restored PAST-DUE rung fires on
-   * the next poll tick (the panel shows "sending shortly" — deliberate: an
-   * un-canceled confirmation means "send it after all").
+   * never-canceled rung is a benign false.
+   *
+   * A restored PAST-DUE rung fires on the next poll tick ONLY if it clears two
+   * Phase B gates, and the "Restore" button is offered on rows that clear
+   * neither - so do not read this as a promise. (1) Its KIND must not be in
+   * DISCONTINUED_REMINDER_KINDS: a `confirmation` can never fire by any path,
+   * poll or Send now (jobs/tourReminders.ts). (2) The tour must not have
+   * STARTED: a rung whose own dueAt precedes a tour already under way is
+   * claim-skipped `tour_already_passed` instead of sent (retiredByTourStart).
+   * A restored rung that clears both does fire, and the panel's "sending
+   * shortly" is then honest.
    */
   uncancel(reminderId: string): Promise<boolean>;
   /** Cancel all pending (not yet sent, canceled, or skipped) reminders for this tour. */

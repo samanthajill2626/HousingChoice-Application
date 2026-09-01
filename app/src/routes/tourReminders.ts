@@ -65,6 +65,7 @@ import {
 } from '../services/scheduledSendSuppression.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import {
+  DISCONTINUED_REMINDER_KINDS,
   forceSendReminder,
   readQuietHoursWindow,
   MANUAL_ONLY_REMINDER_KINDS,
@@ -107,12 +108,17 @@ export interface TourRemindersRouterDeps {
   /**
    * Rung kinds the POLL holds back, mirrored here so an upcoming rung the poll
    * will never claim chips `paused` instead of "sending shortly". Defaults to
-   * MANUAL_ONLY_REMINDER_KINDS.
+   * MANUAL_ONLY_REMINDER_KINDS, which is EMPTY today (2026-08-31, Phase B).
    *
-   * Test seam: `paused` outranks quiet hours, so with the production default
-   * every upcoming rung chips `paused` and the quiet-hours preview below becomes
-   * unobservable. The quiet-hours suite passes an EMPTY set to keep exercising
-   * that formula - the same posture the dev tick route takes for the poll.
+   * So this is now a TEST SEAM in the opposite direction from the one it was
+   * built as: with nothing paused in production, a suite that wants to see the
+   * `paused` chip INJECTS a non-empty set here. (It used to exist because the
+   * production default paused everything and `paused` outranks quiet hours,
+   * which made the quiet-hours preview below unobservable; the quiet suites now
+   * need no injection at all.)
+   *
+   * It has NOTHING to do with DISCONTINUED_REMINDER_KINDS, which is permanent
+   * and which no deps object anywhere can override.
    */
   manualOnlyKinds?: ReadonlySet<ReminderKind>;
   // ---- Send-now deps (quiet-hours spec section 7) --------------------------
@@ -149,6 +155,9 @@ export interface TourReminderView {
   body: string;
   /** Only computed for `upcoming` 1:1-routed rungs (see file header). */
   suppression?: ScheduledSuppression;
+  /** Derived, never stored: this rung's send time has passed and it still has
+   *  not sent. Composes with `suppression`, which says WHY. */
+  overdue?: boolean;
 }
 
 /** canceledAt wins over sentAt (a row is only canceled while unsent, but be safe);
@@ -335,12 +344,19 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
    *  2026-08-26 - see composeInputsOf), and this projection is sync. */
   const viewOf = (row: TourReminderItem, body: string): TourReminderView => {
     const state = stateOf(row);
+    // ITS OWN `nowIso` (spec 8.2). There is nothing to borrow: this path never
+    // computes one, and the GET route's is block-scoped inside its
+    // `self_guided && hasUpcoming` branch. The flag needs only row.dueAt and a
+    // clock, so this adds no IO to the PATCH echo.
+    const nowIso = new Date().toISOString();
+    const overdue = state === 'upcoming' && row.dueAt < nowIso;
     return {
       reminderId: row.reminderId,
       kind: row.kind,
       dueAt: row.dueAt,
       state,
       body,
+      ...(overdue && { overdue: true }),
       ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
       ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
       ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
@@ -494,9 +510,18 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // the tour has at least one UPCOMING rung on a 1:1 route — for THIS task the
     // unambiguous self_guided route (Task 4 tightens the group case). A
     // non-self_guided tour never gets an estimate here.
-    const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
+    // DISCONTINUED rungs do not count (round 2, R2-S3). This is the SECOND of
+    // the two 'upcoming' equality predicates spec 8.1 names - `next` below is
+    // the other - and they have to agree. A rung whose kind can never send
+    // reaches the discontinued short-circuit in the projection, which discards
+    // whatever this estimate produced, so counting one here buys a contact read
+    // and a conversation read per GET for an answer nothing reads. No
+    // correctness change: the chip is decided OUTSIDE the evaluator either way.
+    const hasUpcoming = rows.some(
+      (r) => stateOf(r) === 'upcoming' && !DISCONTINUED_REMINDER_KINDS.has(r.kind),
+    );
     let suppressionOf:
-      | ((dueAt: string, paused: boolean) => ScheduledSuppression | undefined)
+      | ((dueAt: string, paused: boolean, quietExempt: boolean) => ScheduledSuppression | undefined)
       | undefined;
     // Distinguishes "nothing was suppressed" from "we could not tell": with the
     // containment below, a contacts outage silently flips the `suppressed` log
@@ -557,9 +582,22 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       // body's by "optimizing" the two reads into one.
       try {
         const evaluate = await resolveTenantSuppression(tour, config, contacts, conversations);
-        suppressionOf = (dueAt: string, paused: boolean): ScheduledSuppression | undefined =>
+        // `quietExempt` is the en_route carve-out (Phase B spec 6 addendum),
+        // threaded in from the call site as a PRE-COMPUTED boolean rather than
+        // decided by kind here: the poll no longer defers an en_route rung, so
+        // chipping "Will wait" on one would be a promise the machinery breaks
+        // within a poll tick. It forces the QUIET operand alone - opt-out, the
+        // kill switch and manual mode still ride the shared evaluator, which is
+        // what keeps the exemption from becoming "en_route is never suppressed".
+        suppressionOf = (
+          dueAt: string,
+          paused: boolean,
+          quietExempt: boolean,
+        ): ScheduledSuppression | undefined =>
           evaluate(
-            (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
+            !quietExempt &&
+              ((dueAt > nowIso && isQuietTime(dueAt, window)) ||
+                (wallClockQuiet && dueAt <= nowIso)),
             paused,
           );
       } catch (err) {
@@ -572,6 +610,12 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     }
 
     const tally = newComposeFailTally();
+    // The list projection's OWN `nowIso` for the `overdue` flag (spec 8.2): the
+    // one above is block-scoped inside the self_guided branch and is NOT lifted
+    // - overdue-ness is a property of every rung on every tour type, and
+    // hoisting a variable out of a branch to share it is how the two builders
+    // would start disagreeing. viewOf computes a third for the same reason.
+    const listNowIso = new Date().toISOString();
     const reminderViews: TourReminderView[] = rows
       .map((row) => {
         const state = stateOf(row);
@@ -586,21 +630,41 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
         // evaluator rather than around it, so a harder reason (opt-out, kill
         // switch, manual mode) still wins - see scheduledSendSuppression.ts for
         // why that ordering is the honest one.
+        //
+        // DISCONTINUED is checked FIRST and OUTSIDE the evaluator (spec 3.1a).
+        // Not a style choice: `suppressionOf` is built only for self_guided
+        // tours with an upcoming rung, so routing a kind-level fact through it
+        // would lose it on every group-routed tour - the ones most likely to
+        // have a relay group would chip "sending shortly" for a rung that can
+        // never send. Nor does it belong IN the shared ordering: that ladder's
+        // rationale is that a harder reason wins, and "we no longer send this
+        // at all" is not a suppression anything should override.
+        const discontinued = DISCONTINUED_REMINDER_KINDS.has(row.kind);
         const paused = manualOnlyKinds.has(row.kind);
         const suppression =
           state !== 'upcoming'
             ? undefined
-            : suppressionOf !== undefined
-              ? suppressionOf(row.dueAt, paused)
-              : paused
-                ? ({ reason: 'paused' } as const)
-                : undefined;
+            : discontinued
+              ? ({ reason: 'discontinued' } as const)
+              : suppressionOf !== undefined
+                ? // en_route is exempt from quiet hours at BOTH runtime sites
+                  // (spec 6), so the estimate must not promise a wait here.
+                  suppressionOf(row.dueAt, paused, row.kind === 'en_route')
+                : paused
+                  ? ({ reason: 'paused' } as const)
+                  : undefined;
+        // Spec 8: an ADDITIVE boolean, never a fifth `state` value - two
+        // predicates on this route test 'upcoming' by equality, and an
+        // 'overdue' state would drop overdue rungs out of the very places that
+        // surface them. Omitted when false, matching the spreads below.
+        const overdue = state === 'upcoming' && row.dueAt < listNowIso;
         const view: TourReminderView = {
           reminderId: row.reminderId,
           kind: row.kind,
           dueAt: row.dueAt,
           state,
           body: bodyFor(row, tour, window.timezone, address, names, readFlags, tally),
+          ...(overdue && { overdue: true }),
           ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
           ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
@@ -613,7 +677,15 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       .sort((a, b) => (a.dueAt < b.dueAt ? -1 : a.dueAt > b.dueAt ? 1 : 0));
     flushComposeFailTally(tally, log, 'tour_reminders_list');
 
-    const next = reminderViews.find((v) => v.state === 'upcoming');
+    // `next` drives the panel's "Next" tag and its aria-current="step", so a
+    // DISCONTINUED rung must be excluded even though it is still `upcoming`: a
+    // pause-era confirmation's dueAt is the BOOKING instant, which makes it the
+    // earliest rung on every ladder it sits on, and it stays pending until the
+    // one-time sweep reaches it. Without this the panel would point a navigator
+    // at the one row the same response chips "No longer sent".
+    const next = reminderViews.find(
+      (v) => v.state === 'upcoming' && v.suppression?.reason !== 'discontinued',
+    );
 
     log.info(
       {

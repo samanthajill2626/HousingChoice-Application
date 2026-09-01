@@ -183,6 +183,15 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      // The OWNER-ROUTED copy's reads (Phase B spec 9.3). These groups are
+      // placement-owned, so the intro job takes the owned path: left uninjected
+      // it would build the real DynamoDB-backed repos and read across the
+      // network, which is both wrong for a unit test and slow enough that the
+      // in-process intro no longer lands inside the provisioning request.
+      unitsRepo: world.unitsRepo,
+      toursRepo: world.toursRepo,
+      placementsRepo: world.placementsRepo,
+      settingsRepo: world.settingsRepo,
       logger,
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });

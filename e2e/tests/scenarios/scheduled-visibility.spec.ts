@@ -108,11 +108,13 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   const flow = new Scenario(page, request);
   const { tenant, unit, times } = await bookedSelfGuidedTour(flow, 'Ladder');
 
-  // The whole ladder is armed and upcoming right after booking; confirmation
-  // (dueAt = arm-time now) is the earliest → the highlighted NEXT rung.
+  // The whole ladder is armed and upcoming right after booking. day_before is
+  // the earliest rung -> the highlighted NEXT one. (It took that place on
+  // 2026-08-31, when `confirmation` - whose dueAt was the arm instant, and so
+  // always the earliest - stopped arming; the kind itself still renders, it is
+  // simply never born any more.)
   await flow.openTourReminders();
-  await flow.expectReminderRung('confirmation', 'next');
-  await flow.expectReminderRung('day_before', 'upcoming');
+  await flow.expectReminderRung('day_before', 'next');
   // The morning_of row is now found by the relabelled staff string
   // ('Morning of' -> '4 hours before', REMINDER_KIND_LABELS). Verified at the
   // relabel: nothing else the Reminders card renders contains "4 hours" - no
@@ -131,7 +133,9 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   // reaches a skip rule for it - and in any case a 14:00 booking two days out
   // trips neither booked-too-late rule (day_before's RAW is ~19:30 D-1, far more
   // than 4h out; morning_of's rule needs the ARM to fall on the tour's own local
-  // date). The four rungs asserted upcoming above are the whole panel.
+  // date). RE-DERIVED AGAIN 2026-08-31: the auto ladder is THREE rungs now that
+  // `confirmation` no longer arms, and the three asserted above (day_before as
+  // NEXT, morning_of, en_route) are the whole panel.
   const reminders = page
     .locator('section')
     .filter({ has: page.getByRole('heading', { name: 'Reminders' }) });
@@ -158,12 +162,18 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
     ),
   );
 
-  // Fire the confirmation rung → the panel now reads it SENT, and day_before is
-  // still upcoming (a future rung the tick left untouched).
-  await flow.tickTourReminders();
+  // Fire the earliest rung - the panel now reads it SENT, and morning_of is
+  // still upcoming (a later rung the tick left untouched). The tick rides the
+  // dueAt the SERVER armed (day_before is 19:30 ORG-local, which no host-local
+  // mirror can compute) rather than a bare wall-clock tick: since the pause was
+  // lifted the lane runs a live 30s worker, so a bare tick is no longer the only
+  // thing that can move a rung. At 19:30 D-1 the two later rungs (10:00 and
+  // 13:00 on tour day) are not due, so release supersession cannot retire the
+  // rung being asserted - the same margin the (a)+(b) case below derives.
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
   await flow.openTourReminders();
-  await flow.expectReminderRung('confirmation', 'sent');
-  await flow.expectReminderRung('day_before', 'upcoming');
+  await flow.expectReminderRung('day_before', 'sent');
+  await flow.expectReminderRung('morning_of', 'upcoming');
 });
 
 test('(a)+(b) tour reminder: future item on the tenant timeline → tick → leaves Upcoming, sends 1:1', async ({
@@ -201,8 +211,9 @@ test('(a)+(b) tour reminder: future item on the tenant timeline → tick → lea
   // SAFE AT ANY WALL CLOCK: this books via tourScheduleFullLadder() (14:00, two
   // days out), so at 19:30 D-1 the later rungs are morning_of 10:00 D and
   // en_route 13:00 D - neither is due yet, so release supersession cannot
-  // retire the rung being asserted. (confirmation IS due in the same batch, but
-  // it is EARLIER in the ladder, so supersession retires IT, not day_before.)
+  // retire the rung being asserted. day_before is now the EARLIEST rung in the
+  // ladder as well (confirmation stopped arming 2026-08-31), so nothing at all
+  // shares the batch with it.
   // HONEST ABOUT THE ZONE: timesFor builds its instants from HOST-local datetime
   // strings while 19:30 is ORG-local, so that ordering argument assumes host
   // zone == ORG_TIMEZONE. That assumption is PRE-EXISTING harness-wide (see the
@@ -221,42 +232,52 @@ test('(c) reschedule: tick a rung → panel states → reschedule cancels + re-a
   const flow = new Scenario(page, request);
   const { tenant } = await bookedSelfGuidedTour(flow, 'Rebooker');
 
-  // Fire the confirmation rung, then read the panel: confirmation SENT, day_before
-  // still upcoming.
-  await flow.tickTourReminders();
-  await flow.expectReminderTo1to1('confirmation', tenant);
+  // Fire the earliest rung, then read the panel: day_before SENT, morning_of
+  // still upcoming. The tick rides the SERVER's stored dueAt (19:30 org-local
+  // the evening before this D+2 tour), where nothing later is due yet, so
+  // release supersession cannot touch it.
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
+  await flow.expectReminderTo1to1('day_before', tenant);
   await flow.openTourReminders();
-  await flow.expectReminderRung('confirmation', 'sent');
-  await flow.expectReminderRung('day_before', 'upcoming');
+  await flow.expectReminderRung('day_before', 'sent');
+  await flow.expectReminderRung('morning_of', 'upcoming');
 
   // Reschedule to a new time → the pending ladder is CANCELED and a fresh one is
   // armed off the new time. The panel now shows an old canceled rung AND a fresh
-  // upcoming ladder whose confirmation is the new NEXT rung.
+  // upcoming ladder whose day_before is the new NEXT rung.
   //
-  // RE-DERIVED 2026-08-26 for the retimed ladder (this path drives no tick, so
-  // it needs no read-back - but its premises moved). The old day_before row was
-  // pending, so the reschedule cancels it: the `canceled` assertion below rides
-  // that row. The fresh ladder arms in full off now+72h - day_before's RAW is
-  // 19:30 the evening before that date, roughly 2.8 days out, so the
-  // booked-too-late rule (RAW minus 4h) cannot fire, and morning_of's rule needs
-  // the ARM instant to fall on the tour's own local date, which +72h never is.
-  // `next` is the earliest-dueAt UPCOMING row (routes/tourReminders.ts): the
-  // fresh confirmation's dueAt is the re-arm instant, i.e. now, which beats
-  // every other fresh rung, and the old confirmation is SENT rather than
-  // upcoming - so confirmation is still the NEXT rung.
+  // RE-DERIVED 2026-08-26 for the retimed ladder, and AGAIN 2026-08-31 when
+  // `confirmation` stopped arming. Both halves of the old derivation moved:
+  //  - WHICH ROW IS CANCELED. The proof used to fire confirmation and then
+  //    assert the old day_before canceled. Confirmation is gone, so the setup
+  //    tick now consumes day_before itself and the surviving PENDING old rungs
+  //    are morning_of and en_route - morning_of carries the `canceled`
+  //    assertion. (A rung that is already SENT is not cancelable, which is
+  //    exactly why the assertion had to move rather than be re-pointed.)
+  //  - WHICH ROW IS NEXT. `next` is the earliest-dueAt UPCOMING row
+  //    (routes/tourReminders.ts). With no arm-instant rung left, that is the
+  //    fresh day_before, and the OLD day_before is SENT rather than upcoming -
+  //    so the two rows sharing the label are told apart by state, which
+  //    expectReminderRung's filters do.
+  // The fresh ladder arms in full off now+72h: day_before's RAW is 19:30 the
+  // evening before that date, roughly 2.8 days out, so the booked-too-late rule
+  // (RAW minus 4h) cannot fire, and morning_of's rule needs the ARM instant to
+  // fall on the tour's own local date, which +72h never is.
   await flow.teamReschedulesTour(tourSchedule(72));
   await flow.openTourReminders();
-  await flow.expectReminderRung('day_before', 'canceled'); // the retired old rung
-  await flow.expectReminderRung('confirmation', 'next'); // the fresh armed ladder
+  await flow.expectReminderRung('morning_of', 'canceled'); // the retired old rung
+  await flow.expectReminderRung('day_before', 'next'); // the fresh armed ladder
 
-  // The re-armed confirmation fires on a tick. Since the flip, a rung's body
-  // carries its tour's TIME, so the fresh confirmation is textually DISTINCT from
-  // the one sent above - its arrival at all is the re-arm proof (a stronger one
-  // than the old "at least 2 identical copies": a mere re-label could not produce
-  // a body composed off the new time). expectReminderTo1to1 composes from the
-  // active tour, which teamReschedulesTour has already repointed.
-  await flow.tickTourReminders();
-  await flow.expectReminderTo1to1('confirmation', tenant);
+  // The re-armed day_before fires on a tick. Since the flip, a rung's body
+  // carries its tour's TIME, so the fresh rung is textually DISTINCT from the one
+  // sent above - its arrival at all is the re-arm proof (a stronger one than the
+  // old "at least 2 identical copies": a mere re-label could not produce a body
+  // composed off the new time). expectReminderTo1to1 composes from the active
+  // tour, which teamReschedulesTour has already repointed, and
+  // armedReminderDueAt selects on state === 'upcoming', so it reads the FRESH
+  // row's dueAt and not the sent one's.
+  await flow.tickTourReminders(justAfter(await flow.armedReminderDueAt('day_before')));
+  await flow.expectReminderTo1to1('day_before', tenant);
 });
 
 test('(d) suppression: an opted-out tenant → the Upcoming item is marked will-be-skipped → tick sends nothing', async ({

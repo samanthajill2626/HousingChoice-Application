@@ -10,6 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { _resetForTests } from '../src/jobs/jobs.js';
 import { composeIntroBody } from '../src/jobs/relayFanOut.js';
+
+// STANDALONE previews have NO owner, so Phase B routes them down the null-owner
+// path and composes the naked intro (spec 9.5). These two values re-verify
+// UNCHANGED across the owner-routing change - which is the byte-identity claim
+// proven a second way, through the real standalone route.
+const NAKED = { variant: 'naked' } as const;
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
 import type { PoolNumbersService } from '../src/services/poolNumbers.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -148,7 +154,7 @@ describe('POST /api/relay-groups/preview (standalone open preview)', () => {
     // Suppressed at send, so not a recipient - but still NAMED in the body,
     // because provisioning still puts them on the thread.
     expect(res.body.recipientCount).toBe(1);
-    expect(res.body.body).toBe(composeIntroBody(['Alice Adams', 'Otto Out']));
+    expect(res.body.body).toBe(composeIntroBody(NAKED, ['Alice Adams', 'Otto Out']));
   });
 
   it('suppresses a member whose per-phone STOP record lives on their 1:1 thread', async () => {
@@ -205,7 +211,7 @@ describe('POST /api/relay-groups/preview (standalone open preview)', () => {
       { name: 'Bob Brown', reachability: 'reachable' },
     ]);
     expect(res.body.recipientCount).toBe(2);
-    expect(res.body.body).toBe(composeIntroBody(['Alice Adams', 'Bob Brown']));
+    expect(res.body.body).toBe(composeIntroBody(NAKED, ['Alice Adams', 'Bob Brown']));
   });
 
   it('labels a bare-phone member by their last four, and never puts a phone in the body', async () => {

@@ -136,7 +136,7 @@ test('Team reply fans out to every member on the pool number (headline)', async 
   }
 });
 
-test('Roster: add by contact search + by raw phone, then remove', async ({ page }) => {
+test('Roster: add by contact search + by raw phone, then remove', async ({ page, request }) => {
   await devLogin(page);
   await page.goto(`${NEXT}/conversations/${CONV_ID}`);
   await expect(page.getByText(INBOX_LABEL)).toBeVisible();
@@ -154,23 +154,51 @@ test('Roster: add by contact search + by raw phone, then remove', async ({ page 
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(list.getByRole('listitem')).toHaveCount(3);
   await expect(list.getByText('Leon Abara')).toBeVisible();
-  // The join is ANNOUNCED in the thread (2026-07-14 visibility rule): an
-  // "Automated" bubble naming the new member appears via the SSE refetch. The
-  // announcement uses the member's FIRST name only (founder decision
-  // 2026-08-20), so this is "Leon", not "Leon Abara".
-  await expect(page.getByText('Leon joined this group chat', { exact: false })).toBeVisible({
-    timeout: 15_000,
-  });
+  // The join is ANNOUNCED in the thread - but since Phase B (spec 9.6, Cameron
+  // 2026-08-31) the ONE persisted row carries the NEW MEMBER's copy, which is
+  // the naked intro naming the post-add roster, NOT the group's "Hey, adding
+  // Leon to the group." line. That group line goes out to the existing members
+  // and is deliberately not shown here; it is asserted on Diana's outbox below.
+  // FIRST names only (founder decision 2026-08-20), so "Leon", not "Leon Abara".
+  await expect(
+    page.getByText(/You're now connected with Diana, Gloria, and Leon/),
+  ).toBeVisible({ timeout: 15_000 });
+  // The group half, on an EXISTING member's real outbox.
+  await expect
+    .poll(
+      async () =>
+        (await getOutboundTo(request, { to: DIANA_PHONE })).some(
+          (m) => (m.body ?? '') === 'Hey, adding Leon to the group.',
+        ),
+      { timeout: 15_000, message: 'the group-side join line never reached Diana' },
+    )
+    .toBe(true);
 
   // --- Add by RAW PHONE (normalize path; a non-seed number, no suggestions) ---
   await page.getByRole('button', { name: 'Add member' }).click();
   await page.getByRole('combobox', { name: 'Add member' }).fill('4045550199');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(list.getByRole('listitem')).toHaveCount(4);
-  // A phone-only member has no name — the join notice uses the neutral label.
-  await expect(
-    page.getByText('A new member joined this group chat', { exact: false }),
-  ).toBeVisible({ timeout: 15_000 });
+  // A phone-only member has no name - the group line uses the neutral label,
+  // lower-cased since Phase B because it now sits MID-sentence. THE ONLY
+  // nameless-joiner coverage in the suite: never delete it. It moved to the
+  // OUTBOX because the thread bubble is now the new member's naked intro, which
+  // names only the members it can name and so says nothing about the joiner.
+  await expect
+    .poll(
+      async () =>
+        (await getOutboundTo(request, { to: DIANA_PHONE })).some(
+          (m) => (m.body ?? '') === 'Hey, adding a new member to the group.',
+        ),
+      { timeout: 15_000, message: 'the nameless join line never reached Diana' },
+    )
+    .toBe(true);
+  // Two adds, so TWO naked-intro bubbles now - both name the same three known
+  // members (the joiner has no name to add to the list).
+  await expect(page.getByText(/You're now connected with Diana, Gloria, and Leon/)).toHaveCount(
+    2,
+    { timeout: 15_000 },
+  );
 
   // --- Remove a member (× → confirm) → roster shrinks ------------------------
   await page.getByRole('button', { name: 'Remove Leon Abara' }).click();

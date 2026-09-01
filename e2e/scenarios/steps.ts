@@ -286,8 +286,10 @@ function toDatetimeLocal(d: Date): string {
  * backend does (tourReminders.ts computeDueAt): the dashboard forms send the raw
  * datetime-local value and the app parses it with new Date() (host-local tz), so
  * parsing the same string here yields byte-identical dueAt ISO strings.
- * `confirmation` is not computed — its dueAt is the server's arm-time "now"
- * (tick with no `now` fires it immediately).
+ * `confirmation` is not computed here and is not what a spec rides: the ladder's
+ * EARLIEST live rung is `day_before`, whose dueAt only the server can compute
+ * (next paragraph), so specs read it back with
+ * `Scenario.armedReminderDueAt('day_before')` and tick `justAfter` it.
  *
  * `day_before` is deliberately NOT mirrored here (the 2026-08-26 retiming
  * INVERTED which rung can be): it now fires at 19:30 ORG-LOCAL
@@ -393,6 +395,28 @@ export function hoursFromNow(hours: number): string {
  * an OUTBOUND `from` - so no member number can be mistaken for a pool number.
  */
 const POOL_NUMBER_RE = /^\+1\d{3}019\d{4}$/;
+
+/** Which relay intro a group's OWNER routes to (Phase B spec 9.1). */
+export type RelayIntroVariant = 'naked' | 'tour' | 'placement';
+
+/**
+ * A copy-stable needle per variant: text common to BOTH tour forms (the
+ * today one says "at {time}", any other day "on {when}"), so a fixture whose
+ * tour could straddle midnight in the org zone still matches.
+ *
+ * WHY EVERY CALLER OF THE TWO HELPERS BELOW STILL PASSES 'naked': all of them
+ * open the group on a TIMELESS tour (teamCreatesTourFromInterest creates a
+ * 'requested' tour "no time yet", and every book happens AFTER the open), and
+ * spec 9.5 routes a tour with no scheduledAt to the naked intro. The tour
+ * variant is exercised by the spec that books FIRST - e2e/tests/relay-intro-
+ * variants.spec.ts. Book before opening in any new scenario and this argument
+ * is what you change.
+ */
+const INTRO_NEEDLE: Record<RelayIntroVariant, RegExp> = {
+  naked: /You're now connected with/,
+  tour: /Putting you in a group text with/,
+  placement: /Excited to have you move into/,
+};
 
 /** The tour a Scenario is driving. `tourId` is known from create; the group pair
  *  and the copy context (`scheduledAt`, `addressLine1`) fill in as the flow
@@ -1709,8 +1733,10 @@ export class Scenario {
   //     POOL number (see POOL_NUMBER_RE - the segment tracks the buy hint),
   //     member messages arrive masked as "Name: body".
   //   - The tick seam (POST /__dev/tour-reminders/tick) is GLOBAL — assertions
-  //     scope to THIS scenario's phones; the worker's 60s wall-clock poll may
+  //     scope to THIS scenario's phones; the worker's 30s wall-clock poll may
   //     also fire a due rung, so we assert ARRIVAL, never which trigger fired.
+  //     (30s is WORKER_POLL_INTERVAL_MS's default in app/src/lib/config.ts; the
+  //     lane never overrides it. This comment said 60s until 2026-08-31.)
   //   - Tours never create a placement or change tenant status (exit gate only
   //     records outcome/moveForward/convertible; tenant stays `searching`).
 
@@ -1830,7 +1856,7 @@ export class Scenario {
    * server-side ([tenant, unit's landlord]); the 201 response is captured to
    * record the pool number + groupThreadId for the group assertions.
    */
-  teamOpensTourGroup(): Promise<void> {
+  teamOpensTourGroup(variant: RelayIntroVariant = 'naked'): Promise<void> {
     const tour = this.requireActiveTour();
     return step('Team opens the masked relay group on the tour', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
@@ -1884,7 +1910,7 @@ export class Scenario {
       // Everything sent into a relay group is VISIBLE in its dashboard thread
       // (2026-07-14): the intro persists as an "Automated" bubble, appearing
       // via the SSE refetch once the intro job lands.
-      await expect(this.page.getByText(/You're now connected with/)).toBeVisible({
+      await expect(this.page.getByText(INTRO_NEEDLE[variant])).toBeVisible({
         timeout: 15_000,
       });
       await expect(this.page.getByText('Automated').first()).toBeVisible();
@@ -1919,14 +1945,22 @@ export class Scenario {
   }
 
   /** [App→each member, AUTO] The intro message naming everyone connected reached
-   *  EVERY member's fake thread FROM the pool number. */
-  expectGroupIntros(members: Contact[]): Promise<void> {
+   *  EVERY member's fake thread FROM the pool number.
+   *
+   *  Phase B routes the copy on the group's OWNER, so which intro that is now
+   *  depends on `variant`.
+   *
+   *  `members` is who the COPY names, which is not always the whole roster: the
+   *  naked intro lists everyone connected, while the tour and placement intros
+   *  name the tenant and the property contact only. Pass the people the chosen
+   *  variant actually names. */
+  expectGroupIntros(members: Contact[], variant: RelayIntroVariant = 'naked'): Promise<void> {
     const pool = this.requireActiveTourGroup().poolNumber;
-    return step('App sends the group intros (naming everyone connected)', async () => {
-      // FIRST names: the connection sentence has named people by first name
-      // since the founder decision of 2026-08-20 (a landlord came through as
-      // "First Last" beside a bare-first-name tenant). displayNameOf here would
-      // assert a full name the intro no longer contains.
+    return step(`App sends the group intros (${variant} variant)`, async () => {
+      // FIRST names: every variant names people by first name since the founder
+      // decision of 2026-08-20 (a landlord came through as "First Last" beside a
+      // bare-first-name tenant). displayNameOf here would assert a full name no
+      // intro contains.
       const names = members.map((m) => m.firstName);
       for (const member of members) {
         await expect
@@ -1939,7 +1973,7 @@ export class Scenario {
                   (m) =>
                     m.direction === 'outbound' &&
                     m.from === pool &&
-                    /You're now connected with/.test(m.body ?? '') &&
+                    INTRO_NEEDLE[variant].test(m.body ?? '') &&
                     names.every((n) => (m.body ?? '').includes(n)),
                 ) ?? false
               );
@@ -2030,11 +2064,107 @@ export class Scenario {
     return rung.dueAt;
   }
 
+  /** [App] Which rungs are still PENDING right now, read back from the reminders
+   *  API. Pairs with expectRungsRetiredPastTour: capture before a tick, assert
+   *  after it. Derived rather than hand-listed because which rungs a booking
+   *  arms depends on the wall clock (arm-time clamping can retire one). */
+  async upcomingReminderKinds(): Promise<ReminderKind[]> {
+    const tour = this.requireActiveTour();
+    const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const body = (await res.json()) as {
+      reminders: Array<{ kind: ReminderKind; state: string }>;
+    };
+    return body.reminders.filter((r) => r.state === 'upcoming').map((r) => r.kind);
+  }
+
+  /** [App] Phase B 6.1a: these rungs were RETIRED by the fire-time past-tour
+   *  gate - a rung whose own dueAt precedes the tour must not send once the tour
+   *  has started, because its copy assumes the tour has not happened yet.
+   *
+   *  Reads STATE from the API, never the panel. The panel assertion is not a
+   *  substitute: expectReminderRung(k,'upcoming') now EXCLUDES a Skipped row
+   *  (its locator filters `hasNotText: /Skipped/`), so it would FAIL here rather
+   *  than pass vacuously - but failing is all it would do. It cannot name the
+   *  reason, and the reason is the whole content of this assertion: a rung
+   *  skipped `contact_opted_out` and a rung skipped `tour_already_passed` are
+   *  indistinguishable to it. This helper pins `skipReason`, which is what makes
+   *  the gate's IDENTITY, not merely its effect, the thing under test.
+   *
+   *  An EMPTY list throws: an assertion with nothing to assert must fail loudly
+   *  rather than quietly prove nothing. */
+  expectRungsRetiredPastTour(kinds: ReminderKind[]): Promise<void> {
+    return this.expectRungsSkipped(
+      kinds,
+      'tour_already_passed',
+      'the tour had already happened',
+    );
+  }
+
+  /** [App] These rungs were retired by RELEASE SUPERSESSION: an earlier rung
+   *  still pending when a LATER one becomes releasable in the same batch is
+   *  stale copy ("your tour is tomorrow" must not land beside "your tour is
+   *  today"), so the poll claim-skips it `quiet_hours_superseded`.
+   *
+   *  Same contract as the past-tour verb above: spec 10 requires the converted
+   *  specs to ASSERT the retirement a clock-travel tick causes rather than be
+   *  surprised by it, and a comment saying it happens is not an assertion. */
+  expectRungsSuperseded(kinds: ReminderKind[]): Promise<void> {
+    return this.expectRungsSkipped(
+      kinds,
+      'quiet_hours_superseded',
+      'superseded by a later rung',
+    );
+  }
+
+  /** The shared body of the two retirement verbs above. Kept behind named verbs
+   *  rather than called directly: at a call site "expectRungsSuperseded" says
+   *  which MECHANISM the walk is asserting, which a bare reason string in an
+   *  argument list does not. */
+  private expectRungsSkipped(
+    kinds: ReminderKind[],
+    skipReason: string,
+    because: string,
+  ): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step(`App: rungs retired - ${because} (${kinds.join(', ')})`, async () => {
+      if (kinds.length === 0) {
+        throw new Error(`expectRungsSkipped(${skipReason}): no rungs to assert - the tick proved nothing`);
+      }
+      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const body = (await res.json()) as {
+        reminders: Array<{ kind: ReminderKind; state: string; skipReason?: string }>;
+      };
+      for (const kind of kinds) {
+        const rung = body.reminders.find((r) => r.kind === kind);
+        if (rung === undefined) {
+          throw new Error(
+            `expectRungsSkipped(${skipReason}): no '${kind}' rung on tour ${tour.tourId}`,
+          );
+        }
+        expect(rung.state, `'${kind}' state`).toBe('skipped');
+        expect(rung.skipReason, `'${kind}' skipReason`).toBe(skipReason);
+      }
+    });
+  }
+
   /**
-   * [App, AUTO — dev seam] One deterministic tour-reminder poll pass. Omitting
-   * `now` uses the server wall clock (fires the just-armed 'confirmation' rung);
-   * pass `justAfter(times.<rung>)` to fire a future rung. GLOBAL: fires every
-   * due row in the DB — callers assert arrival scoped to THEIR OWN phones only.
+   * [App, AUTO - dev seam] One deterministic tour-reminder poll pass.
+   *
+   * THE PRIMARY USE IS A FUTURE RUNG: pass an explicit `now` - either
+   * `justAfter(times.<rung>)` for a rung this host can mirror, or
+   * `justAfter(await armedReminderDueAt('<kind>'))` for one only the server can
+   * compute (day_before). Prefer the ladder's EARLIEST still-pending rung: a
+   * tick past a LATER rung's dueAt sweeps the earlier same-tour rungs into the
+   * same batch, where release supersession retires them unsent.
+   *
+   * Omitting `now` runs the pass on the server wall clock, which off a fresh
+   * booking fires only whatever the ladder already has due at the arm instant -
+   * do not reach for it to get "a reminder".
+   *
+   * GLOBAL: fires every due row in the DB - callers assert arrival scoped to
+   * THEIR OWN phones only.
    */
   tickTourReminders(nowIso?: string): Promise<void> {
     return step(`App: reminder poll ticks${nowIso !== undefined ? ` (now=${nowIso})` : ''}`, async () => {
@@ -2244,8 +2374,11 @@ export class Scenario {
     });
   }
 
-  /** [Team, MANUAL] Reschedule the tour to a new time — cancels the pending
-   *  ladder and RE-ARMS it off the new time (asserted by a fresh confirmation). */
+  /** [Team, MANUAL] Reschedule the tour to a new time - cancels the pending
+   *  ladder and RE-ARMS it off the new time. Prove the re-arm by firing a rung
+   *  of the FRESH ladder: its earliest live rung is `day_before`, so tick
+   *  `justAfter(await armedReminderDueAt('day_before'))` and assert the body -
+   *  it composes off the NEW time, so its arrival at all is the proof. */
   teamReschedulesTour(times: TourTimes): Promise<void> {
     const tour = this.requireActiveTour();
     return step(`Team reschedules the tour (${times.scheduledAtLocal})`, async () => {
@@ -3481,10 +3614,22 @@ export class Scenario {
    *   - 'sent'      → the row shows a "Sent · <when>" chip;
    *   - 'canceled'  → the row shows a "Canceled" chip (struck-through);
    *   - 'next'      → the row is the next-to-fire (aria-current="step" + a "Next" tag);
-   *   - 'upcoming'  → the row is armed and neither sent nor canceled.
+   *   - 'upcoming'  -> the row is armed: not sent, not canceled, not skipped.
    * Rows are scoped by the rung's staff label (REMINDER_KIND_LABELS); after a
    * reschedule a label can appear twice (an old canceled row + a fresh armed one),
    * so the state filter is what disambiguates.
+   *
+   * 'Skipped' is excluded from 'upcoming' because a RETIRED rung is not an armed
+   * one: the past-tour gate, an unreadable roster and (with the pause lifted) the
+   * lane's own 30s worker can all stamp a row skipped mid-spec, and without this
+   * filter every "still upcoming" assertion in the suite would pass on the rung's
+   * corpse. Phase B R12.
+   *
+   * That one filter is a REGEXP, not a string, and the case matters: a string
+   * `hasNotText` matches case-INSENSITIVELY, which would also drop the perfectly
+   * upcoming rung whose PREDICTION note reads "Will be skipped - contact opted
+   * out". The terminal chip is capital-S "Skipped - <reason>"; the prediction is
+   * lower-case. /Skipped/ keeps exactly the first one out.
    *
    * COLLISION PROFILE, changed 2026-08-26. `hasText` is a SUBSTRING match over
    * the WHOLE listitem, which carries the label, the state chip, the
@@ -3510,7 +3655,11 @@ export class Scenario {
       if (state === 'sent') row = rows.filter({ hasText: /Sent/ });
       else if (state === 'canceled') row = rows.filter({ hasText: 'Canceled' });
       else if (state === 'next') row = rows.filter({ hasText: 'Next' });
-      else row = rows.filter({ hasNotText: 'Sent' }).filter({ hasNotText: 'Canceled' });
+      else
+        row = rows
+          .filter({ hasNotText: 'Sent' })
+          .filter({ hasNotText: 'Canceled' })
+          .filter({ hasNotText: /Skipped/ });
       await expect(row.first()).toBeVisible({ timeout: 10_000 });
       if (state === 'next') await expect(row.first()).toHaveAttribute('aria-current', 'step');
     });
@@ -3593,8 +3742,10 @@ export class Scenario {
    *  explicit `names` object; the unit-level pin for that copy lives in
    *  app/test/relayApi.test.ts. The gap is tracked in
    *  docs/issues/tour-reminder-zero-primary-e2e-gap.md. No current spec asserts
-   *  that body - verified: tours.spec.ts asserts confirmation/day_before
-   *  in-group and en_route only on a self_guided 1:1. */
+   *  that body - RE-VERIFIED 2026-08-31 against the converted tours.spec.ts:
+   *  the two group-routed tours (landlord-led, pm_team) assert `day_before`
+   *  only, and the sole `en_route` assertion is on a SELF-GUIDED 1:1, which
+   *  composes the self-guided entry anyway. */
   private requireTourReminderContext(): TourReminderContext {
     const tour = this.requireActiveTour();
     if (tour.scheduledAt === undefined) {

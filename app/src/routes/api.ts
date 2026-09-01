@@ -389,11 +389,14 @@ export interface ApiRouterDeps {
    */
   unreadWalkLimit?: number;
   /**
-   * Test seam: the reminder kinds the tour-reminders read route treats as
-   * held back from automatic sending (founder decision 2026-08-20). Production
-   * leaves it undefined and takes MANUAL_ONLY_REMINDER_KINDS; the quiet-hours
-   * route suite passes an EMPTY set, because `paused` outranks quiet hours and
-   * would otherwise make that preview unobservable.
+   * Test seam: the reminder kinds the tour-reminders read route (and the
+   * contact timeline) treat as held back from automatic sending. Production
+   * leaves it undefined and takes MANUAL_ONLY_REMINDER_KINDS, which is EMPTY
+   * today (2026-08-31, Phase B) - so a suite that wants to observe the `paused`
+   * chip now passes a NON-empty set here. It is the only way to reach that
+   * behaviour, since production no longer exhibits it by default. (It used to
+   * be passed EMPTY, for the opposite reason: everything was paused and
+   * `paused` outranks quiet hours, which made that preview unobservable.)
    */
   tourReminderManualOnlyKinds?: ReadonlySet<ReminderKind>;
   /** The same seam for the placement-nudge ladder (held back since 2026-08-18).

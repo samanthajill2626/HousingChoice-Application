@@ -60,13 +60,73 @@ describe('MESSAGE_CATALOG', () => {
   // overrides argument. Pinned so that flipping the flag back without doing the
   // wiring trips a test instead of silently re-advertising a dead capability.
   it('the relay announcements do NOT claim to be operator-editable (nothing can override them)', () => {
-    expect(MESSAGE_CATALOG['relay.intro'].editable).toBe(false);
-    expect(MESSAGE_CATALOG['relay.member_added'].editable).toBe(false);
+    // Phase B (spec 9.2a) adds four more relay entries under the SAME rationale:
+    // there is still no store, no settingsToOverrides mapping and no overrides
+    // argument on the composers, so none of them may advertise editability.
+    for (const id of [
+      'relay.intro',
+      'relay.member_added',
+      'relay.intro_tour_today',
+      'relay.intro_tour',
+      'relay.intro_placement',
+      'relay.member_added_role',
+    ] as const) {
+      expect(MESSAGE_CATALOG[id].editable, `editable flag for ${id}`).toBe(false);
+    }
     // The guard that gives the flag its meaning: a non-editable entry ignores an
-    // override even when one IS handed to the resolver.
-    expect(
-      resolveMessage('relay.intro', { members: 'M.' }, { 'relay.intro': 'OVERRIDDEN' }),
-    ).toBe(MESSAGE_CATALOG['relay.intro'].default.replace('{members}', 'M.'));
+    // override even when one IS handed to the resolver. Re-targeted from
+    // {members} to {names} in Phase B - {members} was a whole computed sentence,
+    // {names} is the bare list (spec 9.2) - with the intent unchanged.
+    expect(resolveMessage('relay.intro', { names: 'M.' }, { 'relay.intro': 'OVERRIDDEN' })).toBe(
+      MESSAGE_CATALOG['relay.intro'].default.replace('{names}', 'M.'),
+    );
+  });
+
+  // Spec 9.2a's metadata table, pinned rather than left to the generic
+  // invariants above: {where} is declared LAST in every new entry (spec 9.3's
+  // belt-and-braces against the one value that is not brace-stripped), and the
+  // two tour variants split {time} / {when} rather than declaring both, which
+  // the no-dead-tokens rule above would reject.
+  it('the Phase B relay entries declare exactly the spec 9.2a vars, with {where} LAST', () => {
+    expect(MESSAGE_CATALOG['relay.intro'].vars).toEqual(['names']);
+    expect(MESSAGE_CATALOG['relay.intro_tour_today'].vars).toEqual([
+      'tenantFirstName',
+      'propertyContactFirstName',
+      'time',
+      'where',
+    ]);
+    expect(MESSAGE_CATALOG['relay.intro_tour'].vars).toEqual([
+      'tenantFirstName',
+      'propertyContactFirstName',
+      'when',
+      'where',
+    ]);
+    expect(MESSAGE_CATALOG['relay.intro_placement'].vars).toEqual([
+      'tenantFirstName',
+      'propertyContactFirstName',
+      'where',
+    ]);
+    // relay.member_added is the no-role fallback: ONE token, rewritten in Task
+    // 14 with the split (it declared ['joined','members'] before).
+    expect(MESSAGE_CATALOG['relay.member_added'].vars).toEqual(['name']);
+    expect(MESSAGE_CATALOG['relay.member_added'].default).toBe(
+      'Hey, adding {name} to the group.',
+    );
+    expect(MESSAGE_CATALOG['relay.member_added_role'].vars).toEqual(['name', 'role']);
+    for (const id of ['relay.intro_tour_today', 'relay.intro_tour', 'relay.intro_placement'] as const) {
+      const vars = MESSAGE_CATALOG[id].vars;
+      expect(vars[vars.length - 1], `{where} must be declared LAST in ${id}`).toBe('where');
+    }
+    // class/channel per the same table.
+    for (const id of [
+      'relay.intro_tour_today',
+      'relay.intro_tour',
+      'relay.intro_placement',
+      'relay.member_added_role',
+    ] as const) {
+      expect(MESSAGE_CATALOG[id].class, id).toBe('operational');
+      expect(MESSAGE_CATALOG[id].channel, id).toBe('sms');
+    }
   });
 
   it('every editable + requiresOptOut default keeps opt-out language (the A2P floor)', () => {
@@ -108,6 +168,18 @@ describe('MESSAGE_CATALOG', () => {
     // failing test behind it, not an accident.
     expect(MESSAGE_CATALOG['relay.intro'].default).not.toContain('Reply STOP');
     expect(MESSAGE_CATALOG['relay.member_added'].default).not.toContain('Reply STOP');
+    // Phase B (spec 9.4): STOP is omitted on the four new relay entries too.
+    // Sam's logged A2P decision for relay intros (changelog 1.2.1 #7) governs -
+    // the new member's first contact IS an intro. DECIDED, do not re-open.
+    for (const id of [
+      'relay.intro_tour_today',
+      'relay.intro_tour',
+      'relay.intro_placement',
+      'relay.member_added_role',
+    ] as const) {
+      expect(MESSAGE_CATALOG[id].default, `Reply STOP in ${id}`).not.toContain('Reply STOP');
+      expect(MESSAGE_CATALOG[id].default, `brand in ${id}`).not.toContain(SMS_BRAND_NAME);
+    }
     // FOUNDER DECISION 2026-08-20: the brand identity is now gone from the group
     // intro as well, on Sam's explicit instruction. relay.identity has no send
     // site, so the group intro now carries NEITHER identity NOR opt-out and a
@@ -116,8 +188,14 @@ describe('MESSAGE_CATALOG', () => {
     // the brand back is a deliberate act with a failing test behind it.
     expect(MESSAGE_CATALOG['relay.intro'].default).not.toContain(SMS_BRAND_NAME);
     // The housing-authority sentence went with it - updates come from the
-    // landlord, not from Sam.
+    // landlord, not from Sam. SCOPED TO relay.intro, deliberately: Phase B's
+    // relay.intro_placement reinstates such a sentence in a form that HONOURS
+    // that rationale (it attributes the updates to the property contact, not to
+    // Sam), which is why the 2026-08-20 removal does not reach it (spec 9.1).
     expect(MESSAGE_CATALOG['relay.intro'].default).not.toContain('housing authority');
+    expect(MESSAGE_CATALOG['relay.intro_placement'].default).toContain(
+      'will share updates as they receive them from the housing authority',
+    );
     // relay.identity still pins the filed brand + opt-out string, untouched.
     expect(MESSAGE_CATALOG['relay.identity'].default).toBe(RELAY_INTRO_IDENTITY);
   });

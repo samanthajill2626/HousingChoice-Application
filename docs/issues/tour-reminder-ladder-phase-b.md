@@ -3,10 +3,11 @@ id: tour-reminder-ladder-phase-b
 title: Phase B unpause ledger for the tour reminder ladder - the nine things owed before MANUAL_ONLY_REMINDER_KINDS is emptied
 type: improvement
 severity: med
-status: open
+status: resolved
 area: app/jobs
 created: 2026-08-26
-refs: app/src/jobs/tourReminders.ts, app/src/messages/tourCopy.ts, app/src/repos/tourRemindersRepo.ts, docs/superpowers/specs/2026-08-26-tour-reminder-ladder-design.md
+resolved: 2026-08-31
+refs: app/src/jobs/tourReminders.ts, app/src/messages/tourCopy.ts, app/src/repos/tourRemindersRepo.ts, docs/superpowers/specs/2026-08-26-tour-reminder-ladder-design.md, docs/superpowers/specs/2026-08-31-tour-reminder-ladder-phase-b-design.md, docs/superpowers/plans/2026-08-31-tour-reminder-ladder-phase-b.md
 ---
 
 **Problem.** The tour reminder ladder has been PAUSED since 2026-08-20 (founder
@@ -204,3 +205,50 @@ item 2 - not left to be silenced by it - so give it a real slot rather than
 leaving it in the tail. Items 4, 5 and 9 can land in any order but should each
 be closed or explicitly re-deferred in the Phase B handback rather than silently
 inherited a third time.
+
+**Resolution (2026-08-31).** Phase B ran as its own feature mission on
+`feat/tour-reminder-ladder-phase-b`; the pause is lifted and every item above is
+discharged or explicitly re-deferred. Design source for all nine dispositions:
+`docs/superpowers/specs/2026-08-31-tour-reminder-ladder-phase-b-design.md`
+(section 12 is the disposition table this list copies), built to
+`docs/superpowers/plans/2026-08-31-tour-reminder-ladder-phase-b.md`. Two items
+close WITHOUT code - read their lines, they are the ones a later reader will
+otherwise re-open.
+
+1. Retirement sweep - **BUILT**, Phase B spec section 4, plus a SECOND
+   population this ledger missed (rows for tours still in the future whose kind
+   no longer arms), and its own reason tokens per section 4.3 rather than
+   reusing `past_event`. Human-run ops script, section 4.4.
+2. Empty the manual-only set and stop arming `confirmation` - **BUILT WITH A
+   CORRECTION**, spec sections 3.1 and 5. The set IS emptied, and a separate
+   permanent `DISCONTINUED_REMINDER_KINDS` is the send-side guard, because an
+   empty set alone leaves in-flight rows sendable.
+3. Replacement immediate-send vehicle - **BUILT DIFFERENTLY**, spec section 10.
+   No dev seam was needed: the suites tick a future rung's stored dueAt instead.
+4. Quiet-hours exemption hook at BOTH sites - **BUILT**, spec section 6 (the
+   arm-time clamp and the fire-time backstop, plus the section 6.1a past-tour
+   gate the exemption makes necessary).
+5. The founder's open `en_route` question - **ANSWERED**: exempt, spec section
+   6. What she must be told about it is item 1 of the handback artifact below.
+6. In-flight rows fire under the OLD timings - **ACCEPTED, DOCUMENTED**, spec
+   section 4.5. Nothing re-arms them and nothing should.
+7. Unbounded names-read re-list - **BOUNDED**, spec section 7: one hour at both
+   unclaimed-return sites, mirroring the `roster_unavailable` twin.
+8. `confirmation` retired citing a rung that never armed - **ASSESSED, NOT
+   FIXED, DROPPED - not filed.** Spec section 12 carries the full assessment:
+   the arm-time half vanishes with item 2, the fire-time half survives but costs
+   a message only under simultaneous worker downtime, a landlord-led tour and a
+   live database read failure. Cameron's ruling: disaster-recovery only, drop
+   entirely, do not file. `supersededInBatch` stays as-is - deliberately.
+9. Failure-scope derivation reads catalog DEFAULTS only - **RE-DEFERRED**, spec
+   section 12. Still safe (no `tour.*` override can exist, and this branch adds
+   no override path), so the hazard is unchanged rather than closed. Its
+   `TODO(tour-reminder-ladder-phase-b)` marker on `reminderNamesUsed`
+   (`app/src/messages/tourCopy.ts`) is RE-POINTED at
+   [`tour-copy-where-token-declared-not-passed`](./tour-copy-where-token-declared-not-passed.md),
+   its open sibling of the same class, so the marker no longer points at a
+   closed ledger.
+
+Product questions Phase B raised for the founder rather than deciding are
+collected in
+`docs/superpowers/reviews/2026-08-31-tour-reminder-ladder-phase-b/founder-handback-items.md`.

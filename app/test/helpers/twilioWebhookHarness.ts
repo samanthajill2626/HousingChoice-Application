@@ -3932,9 +3932,11 @@ export interface HarnessOptions {
   unreadWalkLimit?: number;
   /**
    * The reminder kinds the tour-reminders read route treats as held back from
-   * automatic sending. Omit for the production hold-back
-   * (MANUAL_ONLY_REMINDER_KINDS, founder decision 2026-08-20); pass an EMPTY set
-   * to observe the quiet-hours / opt-out previews, which `paused` outranks.
+   * automatic sending. Omit for the production default
+   * (MANUAL_ONLY_REMINDER_KINDS), which is EMPTY today (2026-08-31, Phase B) -
+   * so pass a NON-empty set when a case needs to see the `paused` chip, which
+   * production no longer produces on its own. Nothing here reaches
+   * DISCONTINUED_REMINDER_KINDS; that set is permanent and not injectable.
    */
   tourReminderManualOnlyKinds?: ReadonlySet<ReminderKind>;
   /** As above, for the placement-nudge ladder (held back since 2026-08-18). */

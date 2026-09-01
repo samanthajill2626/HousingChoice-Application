@@ -482,7 +482,12 @@ test.describe('Roster changes during quiet hours', () => {
     await page.reload();
     await expect(roster.getByText(pm.name)).toBeVisible({ timeout: 30_000 });
     await expect(pendingList(page)).toHaveCount(0);
-    await expectSentTo(req, tenant.phone, 'joined this group chat');
-    await expectSentTo(req, pm.phone, 'joined this group chat');
+    // TWO DIFFERENT COPIES since Phase B (spec 9.4 / 9.6). The tenant is an
+    // EXISTING member, so they hear the group line - with the ROLE clause,
+    // because the PM sits on this property's roster as role 'pm'
+    // (rosterOnProperty above) and the group is tour-owned. The PM is the NEW
+    // member, so they get the naked intro as their first contact instead.
+    await expectSentTo(req, tenant.phone, `Hey, adding ${pm.firstName} to the group as the property manager.`);
+    await expectSentTo(req, pm.phone, "You're now connected with");
   });
 });

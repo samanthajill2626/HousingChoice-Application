@@ -27,8 +27,14 @@ plain catalog-default text swap and are tracked here so they are not lost.
    she needs to fold "Reply STOP to opt out." back into her draft before
    entering it there.
 
-2. **`relay.intro` and `relay.member_added` need tokens that don't exist yet,
-   and also dropped STOP language.** Her rewrites reference `{tenant first
+2. **DELIVERED 2026-08-31 by `feat/tour-reminder-ladder-phase-b`** - owner-routed
+   `relay.intro_tour_today` / `relay.intro_tour` / `relay.intro_placement`
+   with `{tenantFirstName}` / `{propertyContactFirstName}` / `{where}` /
+   `{when}` / `{time}`, and `relay.member_added_role` with `{name}` + `{role}`
+   from `UnitContact.role`; `{members}` replaced by `{names}`; STOP omitted per
+   the founder's A2P ruling. The paragraph below is the pre-delivery state,
+   kept for the record. *Original:* `relay.intro` and `relay.member_added` need
+   tokens that don't exist yet, and also dropped STOP language. Her rewrites reference `{tenant first
    name}`, `{property address without city, state, zip}`, `{landlord first
    name}`, and a role tag - none of which `composeIntroBody` /
    `composeMemberAddedBody` (`app/src/jobs/relayFanOut.ts`) thread today; each

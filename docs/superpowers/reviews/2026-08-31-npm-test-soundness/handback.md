@@ -125,3 +125,70 @@ container. The e2e gate (262 passed) is the live Playwright result.
 `feat/npm-test-soundness` (`W:\tmp\npm-test-soundness`), 0 behind main
 (`1af02926`), UNMERGED (human gate). No infra, no deploys, no post-merge ops.
 Worktree left at the final commit; cleanup only on your explicit go.**
+
+---
+
+# Addendum: planner-review fix wave (2026-09-01, same day)
+
+The planner's independent review (reports `code-review/planner-conformance.md`
+and `planner-adversarial.md`; five gates independently re-run green on
+`91c831d6`) returned 12 findings and no rejection. All adjudicated in
+`code-review/planner-fix-wave-adjudications.md` (committed as produced): 11
+accepted (2 reshaped), 1 partial, with two explicit declines - `maxAttempts`
+on the local client (runtime code outside the mission's one permitted runtime
+file, and it would change every local data-plane send) and a `cause` in
+`indexStatus` (fail-open by design; nothing surfaces to carry one).
+
+Landed as `6b4d712e` (code), `51dc753d` (docs), `2fdb0dd8` (record; full
+detail in `code-review/planner-fix-wave.md`):
+
+- **[1 HIGH]** the retried-tolerated `DeleteTable` conflict now WAITS - a new
+  exported `pollUntilTableGone` (backoff, 10s ceiling, `TableNotGoneError`
+  with the last read error as `cause`) runs on that path only, rethrowing the
+  original conflict with the observed status on exhaustion; the un-retried
+  path is byte-identical to main. Cases 23/24 pin both directions (red-first).
+- **[2 MED]** the verification hook now runs once per failed attempt
+  INCLUDING the final (a mutation landing on attempt 4 is no longer reported
+  failed); the endpoint gate stays ahead of it, so cases 11/12's
+  zero-extra-sends property holds. Case 10 updated; case 25 pins the
+  final-attempt recovery (red-first). This is a recorded, planner-directed
+  deviation from the plan's ratified "never on the final attempt" row.
+- **[3 MED]** both polls back off (base doubling, capped 8x; ~16 reads per
+  10s instead of ~100); ceilings unchanged.
+- **[4/6/7 HIGH+MED]** the three self-contradicting texts corrected:
+  `AGENTS.md` now says the explicit-key arm was in fact slightly FASTER
+  (189/165s vs 231/190s, tracking a declining neighbour); the TTL-legs
+  comment now matches our own probe (workers skip, globalSetup runs); the
+  900s ceiling is attributed to `1448b130`, not "the same diff".
+- **[5 HIGH]** the unverifiable SDK-retry claim NARROWED to the proven
+  history (the faults escaped to callers); the possible 3x nesting under the
+  SDK's transient retry (HTTP 5xx) is stated as UNKNOWN, the deadline
+  arithmetic carries it (~30s worst per attempt), `DEFAULT_DEADLINE_MS`
+  unchanged, and the anchor issue now instructs the next sighting to record
+  `$metadata.httpStatusCode` / `$metadata.attempts`.
+- **[8/9 MED]** the 31.5s "worst loaded" figure is now COMMITTED
+  (`measurements/s2-guard-cost.md` addendum quoting the four S0 per-file
+  lines), and the decoy deviation is marked in both places a reader lands
+  (the spec's "No traversal decoys" paragraph and the S3 record).
+- **[10/11/12 LOW]** the (c) diagnostic's unreachable loops removed (the
+  guard is the assertion); case 21 reshaped fully deterministic (exactly 2
+  sends); swallowed hook/poll errors now travel as `cause`; the three U+2713
+  in `plan-r3-reviewer-c.md` are ASCII.
+
+Gates re-run BARE on `2fdb0dd8` (quiet, scratch-free tree): gate 1 exit 0;
+gate 2 exit 0 (app `349 passed (349)` files, `6439 passed (6439)` tests - +3
+for the new acceptance cases - dashboard 2871, e2e 492, fake-twilio 240,
+fake-twilio-web 111; wall 309s; zero failing files); gate 3 exit 0
+(`smoke-dist: OK`); gate 5 exit 0 on the same six touched files. Gate 4 NOT
+re-run, per the planner's stated exemption: no file outside `app/test/**`,
+`app/src/lib/dynamoAdmin.ts` and `.md` documentation changed in this wave.
+The acceptance suite is now 25 cases.
+
+Open items carried forward unchanged, plus one: SDK attempt-nesting remains
+unverified (declined `maxAttempts` change) - the anchor issue tells the next
+sighting exactly which two fields settle it.
+
+**MERGE-READY @ the addendum commit (parent `2fdb0dd8`) on
+`feat/npm-test-soundness`, UNMERGED (human gate). Gates 1/2/3/5 green on
+`2fdb0dd8`; gate 4 green on `b4ba463a` and exempt for this wave. No infra, no
+post-merge ops. Cleanup only on your explicit go.**

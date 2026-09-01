@@ -1591,6 +1591,274 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 });
 
 // ============================================================================
+// The tour generation pointer - currentLadderId (tour-reminder-supersession S3)
+//
+// The tour carries the id of its CURRENT reminder ladder. Every route that arms
+// writes it; every route that ends a ladder ROTATES it to a fresh UUID no row
+// carries (spec D3 - never cleared, because an ABSENT pointer means
+// pre-migration, permanently and only).
+//
+// These cases assert the STORED tour row as well as the response body: the
+// tours repo's patch input is an index-signature type, so a misspelled pointer
+// key typechecks green (S1 report section 1a) and the store is the only honest
+// witness.
+// ============================================================================
+
+describe('currentLadderId - the tour generation pointer', () => {
+  // 10:00 EDT Jul 13. A fixed arm instant so the ladder shape never depends on
+  // the wall clock (same argument as the reminder side-effects describe above).
+  const PTR_NOW = '2026-07-13T14:00:00.000Z';
+  const FAR = '2026-07-20T18:00:00.000Z'; // 14:00 EDT Jul 20 - a clean ladder
+  const FARTHER = '2026-07-21T18:00:00.000Z';
+  const FARTHEST = '2026-07-22T18:00:00.000Z';
+
+  const rowsFor = (world: FakeWorld, tourId: string) =>
+    [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+
+  /** The one ladder id shared by the given rows. Throws when they disagree. */
+  const soleLadderId = (rows: { ladderId?: string }[]): string => {
+    const ids = new Set(rows.map((r) => r.ladderId));
+    expect(ids.size).toBe(1);
+    const only = [...ids][0];
+    expect(only).toEqual(expect.any(String));
+    return only as string;
+  };
+
+  const errorsMatching = (
+    capture: ReturnType<typeof makeWebhookHarness>['capture'],
+    fragment: string,
+  ) => capture.atLevel(50).filter((l) => String(l['msg'] ?? '').includes(fragment));
+
+  // ---- T3.1 CREATE ---------------------------------------------------------
+
+  it('CREATE: the 201 body AND the stored tour carry the armed ladder id', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    expect(res.status).toBe(201);
+    const tourId = res.body.tour.tourId as string;
+
+    const rows = rowsFor(world, tourId);
+    expect(rows.length).toBeGreaterThan(0);
+    const ladderId = soleLadderId(rows);
+
+    // The 201 is built from the POST-patch tour, not the pre-arm capture.
+    expect(res.body.tour.currentLadderId).toBe(ladderId);
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBe(ladderId);
+  });
+
+  it('CREATE (timeless): no ladder, so NO pointer is written', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'self_guided' });
+    expect(res.status).toBe(201);
+    const tourId = res.body.tour.tourId as string;
+
+    expect(world.tourRemindersMap.size).toBe(0);
+    // ABSENT, never an empty string: absence is the pre-migration shape.
+    expect(res.body.tour.currentLadderId).toBeUndefined();
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBeUndefined();
+  });
+
+  // ---- T3.2 / T3.5 re-arm --------------------------------------------------
+
+  it('RESCHEDULE: the pointer rotates and lands on the FRESH ladder, in body and store', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+    const firstLadder = soleLadderId(rowsFor(world, tourId));
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: FARTHER });
+    expect(res.status).toBe(200);
+
+    const live = rowsFor(world, tourId).filter((r) => r.canceledAt === undefined);
+    expect(live.length).toBeGreaterThan(0);
+    const secondLadder = soleLadderId(live);
+    expect(secondLadder).not.toBe(firstLadder);
+
+    expect(res.body.tour.currentLadderId).toBe(secondLadder);
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBe(secondLadder);
+  });
+
+  it('STATUS-ONLY REVIVAL: a canceled tour brought back re-points at the new ladder', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    const deadPointer = world.toursMap.get(tourId)?.currentLadderId;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
+    expect(res.status).toBe(200);
+
+    const live = rowsFor(world, tourId).filter((r) => r.canceledAt === undefined);
+    const revivedLadder = soleLadderId(live);
+    expect(revivedLadder).not.toBe(deadPointer);
+    expect(res.body.tour.currentLadderId).toBe(revivedLadder);
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBe(revivedLadder);
+  });
+
+  // ---- T3.4 terminal transitions ------------------------------------------
+
+  it.each(['canceled', 'toured', 'no_show', 'closed'] as const)(
+    'TERMINAL (%s): the pointer is PRESENT and matches no row',
+    async (status) => {
+      const { app, world } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+      const created = await authed(app)
+        .post('/api/tours')
+        .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+      const tourId = created.body.tour.tourId as string;
+      const armedLadder = soleLadderId(rowsFor(world, tourId));
+
+      const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status });
+      expect(res.status).toBe(200);
+
+      const stored = world.toursMap.get(tourId);
+      // PRESENT is the load-bearing half: a cleared pointer would be
+      // byte-identical to a never-migrated tour, and the pre-migration rules
+      // would re-adopt this dead tour's rows as current.
+      expect(typeof stored?.currentLadderId).toBe('string');
+      expect(stored?.currentLadderId).not.toBe(armedLadder);
+      // The rows are still there (S3 does not delete); none of them match.
+      const rows = rowsFor(world, tourId);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.some((r) => r.ladderId === stored?.currentLadderId)).toBe(false);
+      expect(res.body.tour.currentLadderId).toBe(stored?.currentLadderId);
+    },
+  );
+
+  // ---- T3.3 the compare-and-set --------------------------------------------
+
+  it('CONCURRENT RESCHEDULES: the surviving pointer names a ladder whose rows exist; the loser logs', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    const tourId = created.body.tour.tourId as string;
+
+    // Park request A INSIDE its arm (after its rotation has already landed in
+    // the store) so request B runs to completion underneath it. That is the
+    // interleaving spec 3.2 step 4 exists for: without the compare-and-set A's
+    // pointer write would land last and name a ladder B never knew about.
+    let releaseA: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let signalEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let parked = false;
+    const realCreate = world.tourRemindersRepo.create;
+    world.tourRemindersRepo.create = async (input) => {
+      if (!parked) {
+        parked = true;
+        signalEntered();
+        await gate;
+      }
+      return realCreate(input);
+    };
+
+    const pendingA = authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: FARTHER })
+      .then((r) => r);
+    await entered;
+
+    const resB = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHEST });
+    expect(resB.status).toBe(200);
+
+    releaseA();
+    const resA = await pendingA;
+    expect(resA.status).toBe(200);
+
+    const pointer = world.toursMap.get(tourId)?.currentLadderId;
+    expect(typeof pointer).toBe('string');
+    const live = rowsFor(world, tourId).filter((r) => r.canceledAt === undefined);
+    // Both generations' rows are in the store - A's are unpointed, and stay
+    // visible until a later sweep - but the pointer names a REAL one.
+    expect(new Set(live.map((r) => r.ladderId)).size).toBe(2);
+    expect(live.some((r) => r.ladderId === pointer)).toBe(true);
+    // B won, so the pointer is B's ladder, and A returns the STORED tour.
+    expect(pointer).toBe(resB.body.tour.currentLadderId);
+    expect(resA.body.tour.currentLadderId).toBe(pointer);
+
+    const lost = errorsMatching(capture, 'pointer write lost a concurrent reschedule');
+    expect(lost).toHaveLength(1);
+    expect(lost[0]?.['tourId']).toBe(tourId);
+  });
+
+  // ---- T3.6 interruption logging -------------------------------------------
+
+  it('RE-ARM FAILURE after the rotation is LOUD - the tour is left disarmed', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    const tourId = created.body.tour.tourId as string;
+    const armedLadder = soleLadderId(rowsFor(world, tourId));
+
+    world.tourRemindersRepo.create = async () => {
+      throw new Error('reminder store unavailable');
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHER });
+    // The handler's existing posture for a failing side effect is to throw
+    // (the patch write's own catch rethrows anything that is not a CCFE).
+    expect(res.status).toBe(500);
+
+    // The rotation already committed: a live scheduled tour pointing at nothing.
+    const stored = world.toursMap.get(tourId);
+    expect(typeof stored?.currentLadderId).toBe('string');
+    expect(stored?.currentLadderId).not.toBe(armedLadder);
+    expect(rowsFor(world, tourId).some((r) => r.ladderId === stored?.currentLadderId)).toBe(false);
+
+    const disarmed = errorsMatching(capture, 'arm failed after pointer rotation');
+    expect(disarmed).toHaveLength(1);
+    expect(disarmed[0]?.['tourId']).toBe(tourId);
+  });
+
+  it('CREATE-path pointer write failure is LOUD, and the 201 still lands', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    world.toursRepo.patch = async () => {
+      throw new Error('tour store unavailable');
+    };
+
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    expect(res.status).toBe(201);
+    const tourId = res.body.tour.tourId as string;
+
+    // Rows stamped with a ladder no tour points at. Refused from S5 on, so this
+    // is safe - but it must never be silent.
+    expect(rowsFor(world, tourId).length).toBeGreaterThan(0);
+    expect(res.body.tour.currentLadderId).toBeUndefined();
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBeUndefined();
+
+    const unpointed = errorsMatching(capture, 'pointer write failed after arming');
+    expect(unpointed).toHaveLength(1);
+    expect(unpointed[0]?.['tourId']).toBe(tourId);
+  });
+});
+
+// ============================================================================
 // GET /api/tours/:tourId/no-show-checkin-draft - templated copy for the MANUAL
 // no-show check-in send (the rung is no longer auto-armed)
 // ============================================================================

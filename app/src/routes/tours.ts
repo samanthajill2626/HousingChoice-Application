@@ -42,6 +42,7 @@
 //
 // Validation is a strict field allowlist (unknown fields → 400). Mirror of
 // units.ts idioms: error shapes, 404 codes, createXRouter(deps) factory.
+import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router, type Response } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -335,7 +336,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // datetime-local string would otherwise be parsed in the SERVER's timezone
     // by computeDueAt, and the byScheduledAt GSI compares range keys
     // lexicographically — mixed canonical/raw forms mis-bucket range queries.
-    const tour = await tours.create({
+    let tour = await tours.create({
       tenantId: b['tenantId'] as string,
       unitId: b['unitId'] as string,
       tourType: b['tourType'] as TourType,
@@ -347,11 +348,31 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Arm the reminder ladder (best-effort side effect) — only once a time exists.
     // Invariant: no reminder rows may ever exist for a 'requested' / time-less tour.
     if (scheduledAt !== undefined) {
-      await armTourReminders(tour, getNow(), {
+      const { ladderId } = await armTourReminders(tour, getNow(), {
         tourRemindersRepo: reminders,
         settingsRepo,
         logger: log,
       });
+      // Generation pointer (supersession spec 3.2, D3a): the ARMER stamps the
+      // rows, the CALLER points the tour at them. Order matters for the 201 -
+      // `tours.patch` returns ALL_NEW, and the response below is built from
+      // this value, not from the pre-arm capture above.
+      // ladderId is null exactly when the arm wrote no row; pointing a tour at
+      // a ladder that does not exist is the one thing the pointer must never do.
+      if (ladderId !== null) {
+        try {
+          tour = await tours.patch(tour.tourId, { currentLadderId: ladderId });
+        } catch (err) {
+          // The rows are stamped with a ladder no tour points at. From the
+          // refusal slice on, an unpointed row on a POINTERLESS tour is refused
+          // (it is NOT the pre-migration exemption, which needs a bare row too),
+          // so this is safe - but it silently disarms a live tour, so it is loud.
+          log.error(
+            { err, tourId: tour.tourId, ladderId },
+            'tour reminders: pointer write failed after arming - the new ladder is unpointed',
+          );
+        }
+      }
       // A reminder ladder now exists — nudge the contact timeline's pinned
       // "Upcoming" section to refetch live (scheduled-message-visibility Task 6).
       // ID-only, advisory payload; a requested/timeless create arms nothing so
@@ -1159,6 +1180,40 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       patch['convertible'] = newMoveForward === true;
     }
 
+    // Reminder side effects are keyed on the EFFECTIVE post-patch status -
+    // arming must never happen on a tour that is not live (e.g. PATCH
+    // {scheduledAt, status:'canceled'} must not text "Your tour is confirmed" at
+    // the whole group), and a terminal transition (toured / no_show / canceled /
+    // closed) must cancel the still-pending rungs (a tenant who showed up, or a
+    // tour flagged no-show, must never get a later "your tour is tomorrow"
+    // reminder).
+    //
+    // This derivation sits ABOVE the single patch write because the generation
+    // pointer's rotation RIDES that write (supersession spec 3.2 step 1) - a
+    // separate rotation would leave a window in which the new scheduledAt is
+    // stored against the OLD pointer, and costs a round trip for nothing.
+    const effectiveStatus = (patch['status'] ?? currentStatus) as TourStatus;
+    const armable = effectiveStatus === 'scheduled';
+    // Re-arm on a time change, or on an explicit move INTO 'scheduled' (a
+    // status-only revival from canceled/no_show uses the stored time - its
+    // rungs were canceled and must come back).
+    const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
+    // The four terminal statuses, named ONCE and used twice (rotation decision
+    // here, cancel branch below) so the two can never drift apart.
+    const terminal =
+      effectiveStatus === 'canceled' ||
+      effectiveStatus === 'closed' ||
+      effectiveStatus === 'toured' ||
+      effectiveStatus === 'no_show';
+    // Minted unconditionally so the compare-and-set below can name it without a
+    // non-null assertion; it only reaches the store when this patch ends the
+    // current ladder. On a re-arm it is a placeholder the arm's real ladderId
+    // replaces; on a terminal transition it is FINAL - the tour then points at a
+    // ladder no row carries, which is how "no live ladder" is expressed (D3:
+    // never by clearing, because an ABSENT pointer means pre-migration).
+    const rotation = randomUUID();
+    if ((armable && rearmTrigger) || terminal) patch['currentLadderId'] = rotation;
+
     let tour: TourItem;
     try {
       tour = await tours.patch(tourId, patch);
@@ -1170,36 +1225,54 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       throw err;
     }
 
-    // Reminder side effects after a successful patch, keyed on the EFFECTIVE
-    // post-patch status — arming must never happen on a tour that is not live
-    // (e.g. PATCH {scheduledAt, status:'canceled'} must not text "Your tour is
-    // confirmed" at the whole group), and a terminal transition (toured / no_show
-    // / canceled / closed) must cancel the still-pending rungs (a tenant who
-    // showed up, or a tour flagged no-show, must never get a later "your tour is
-    // tomorrow" reminder).
-    const effectiveStatus = (patch['status'] ?? currentStatus) as TourStatus;
-    const armable = effectiveStatus === 'scheduled';
-    // Re-arm on a time change, or on an explicit move INTO 'scheduled' (a
-    // status-only revival from canceled/no_show uses the stored time - its
-    // rungs were canceled and must come back).
-    const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
     // Whether the reminder ladder changed on this patch — drives the ONE
     // scheduled.updated emit below (arm/reschedule OR cancel, never both).
     let ladderChanged = false;
     if (armable && rearmTrigger) {
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
-      await armTourReminders(tour, getNow(), {
-        tourRemindersRepo: reminders,
-        settingsRepo,
-        logger: log,
-      });
+      let ladderId: string | null;
+      try {
+        ({ ladderId } = await armTourReminders(tour, getNow(), {
+          tourRemindersRepo: reminders,
+          settingsRepo,
+          logger: log,
+        }));
+      } catch (err) {
+        // The rotation already committed, so this leaves a LIVE scheduled tour
+        // whose pointer matches nothing: disarmed, not merely unsent. Nothing
+        // fires, but nothing repairs it either - only a later scheduledAt change
+        // or an explicit move into 'scheduled' re-arms (spec 3.2, interruption
+        // posture). Rethrow: the handler's posture for an unexpected failure is
+        // to throw (see the patch write's catch above).
+        log.error(
+          { err, tourId },
+          'tour reminders: arm failed after pointer rotation - tour is DISARMED until the next reschedule',
+        );
+        throw err;
+      }
+      if (ladderId !== null) {
+        // Spec 3.2 step 4: CONDITIONAL on the rotation still standing. Two
+        // concurrent reschedules can otherwise interleave so the pointer names a
+        // ladder the other request already retired - two 200s, a silently
+        // disarmed tour, no error.
+        const won = await tours.setLadderIdIf(tourId, rotation, ladderId);
+        if (won) {
+          // Fold the winning pointer into the response: `tour` is the pre-CAS
+          // patch return, so it still carries the placeholder rotation.
+          tour = { ...tour, currentLadderId: ladderId };
+        } else {
+          log.error(
+            { tourId, rotation, ladderId },
+            'tour reminders: pointer write lost a concurrent reschedule - this ladder is unpointed',
+          );
+          // Leave the WINNER's pointer and report it. This ladder's rows stay in
+          // the store, unpointed and refused, until the next sweep.
+          const fresh = await tours.get(tourId);
+          if (fresh !== undefined) tour = fresh;
+        }
+      }
       ladderChanged = true;
-    } else if (
-      effectiveStatus === 'canceled' ||
-      effectiveStatus === 'closed' ||
-      effectiveStatus === 'toured' ||
-      effectiveStatus === 'no_show'
-    ) {
+    } else if (terminal) {
       // Dead, completed, or no-show: nothing left to auto-remind, so cancel any
       // still-pending rungs. The no-show check-in is a MANUAL send from the tour
       // page now (not an auto-armed rung), so a no_show tour has nothing to

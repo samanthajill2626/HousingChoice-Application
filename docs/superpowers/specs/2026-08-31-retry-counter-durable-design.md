@@ -119,7 +119,10 @@ other the current one - and that difference is preserved, not normalised.
 **D8. Every exit reaches a terminal state, with no recipient left `queued`.**
 Three distinct situations need closing, and they are not one shared code path:
 the cap being reached with recipients still deferred; a pass beginning when the
-cap is already spent; and an enqueue failure.
+cap is already spent; and an enqueue failure. Precision note (recorded
+adjudication, 2026-09-01, not a design change): every exit EXCEPT the D12
+unknown-error `throw`, which is a FOURTH exit and is filed rather than fixed -
+so "every exit" here means every exit this branch closes.
 
 **D9. An enqueue failure closes immediately rather than throwing.** A redelivered
 envelope is suppressed by the job-execution marker (`jobId` is stable across

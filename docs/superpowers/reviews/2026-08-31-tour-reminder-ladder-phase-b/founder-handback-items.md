@@ -48,3 +48,17 @@ the spec.
    group, and for any joiner who is not on the property's roster - a caseworker,
    a family member, a second tenant. She only ever reviewed the role form
    (`... as the landlord.`). Confirm the bare form reads right to her.
+
+9. **The tour and placement intros are written TO THE TENANT by name, and every
+   roster member gets the identical text - the landlord included.** One body is
+   sent to the whole group, so the property contact receives "Hey Alicia!
+   Putting you in a group text with Marcus to tour 412 Oak St ... Looking
+   forward to you seeing the property and meeting Marcus!" - where Marcus IS the
+   reader, greeted as somebody else and named in the third person, twice. The
+   placement intro reads the same way. This never came up before because the old
+   naked intro was audience-neutral ("You're now connected with ..."), so no
+   copy in the product had an addressee until these two entries did. Her copy,
+   her call: keep it as written (a group text a navigator wrote, which everyone
+   is simply seeing), or supply a landlord-facing line and we will send each
+   member the one addressed to them - the send path already supports
+   per-recipient bodies, because the member-added split uses it.

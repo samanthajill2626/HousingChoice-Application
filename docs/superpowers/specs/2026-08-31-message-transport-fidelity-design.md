@@ -1,7 +1,8 @@
 # Message transport fidelity - design specification
 
-Status: v5 - four review rounds complete; awaiting human specification gate
+Status: v6 - independent v5 review adjudicated; awaiting human specification gate
 Date: 2026-08-31
+Revised: 2026-09-01
 Branch: `feat/message-transport-fidelity`
 Worktree: `W:\tmp\message-transport-fidelity`
 Base: `main` at `5ce9912f4df20af95ec7cd7c6c61e7ed726930ec`
@@ -17,10 +18,10 @@ The compact chip is:
 - `SMS` when requested and actual agree, or while SMS is requested and actual is
   not known yet.
 - `RCS` while RCS is requested and actual is not known yet.
-- `RCS -> SMS` when an RCS request falls back to SMS.
-- `RCS -> MMS` when an RCS request falls back to MMS.
-- `RCS -> Mixed` when a multi-recipient send has complete actual evidence and
-  different recipients used different transports.
+- `REQUESTED -> ACTUAL` for every unequal known SMS/MMS/RCS pair, including
+  `RCS -> SMS` and `RCS -> MMS` fallback observations.
+- `REQUESTED -> Mixed` when a multi-recipient send has complete actual evidence
+  and different recipients used different transports, for any requested value.
 - Actual only for inbound messages, because the application made no request.
 - `Unknown` for a new inbound carrier message whose provider payload does not
   identify the transport.
@@ -101,23 +102,65 @@ RCS sender is in a Messaging Service sender pool:
 
 <https://www.twilio.com/docs/rcs/send-an-rcs-message>
 
-The create response identifies message status, sender, recipient, media count,
-and SID, but does not expose a dedicated actual-transport property. Twilio's
-status callback contract does expose `ChannelPrefix`, described as the
-channel-specific prefix identifying the messaging channel associated with the
-message:
+The Message resource and callback contracts expose provider identifiers rather
+than one dedicated actual-transport property. The status callback includes a
+subset of standard fields such as `From` and `MessageSid`. Twilio documents
+`ChannelPrefix` only as an additional property for RCS, WhatsApp, and other
+messaging channels; it is not an SMS/MMS field and is not listed on the inbound
+webhook:
 
 <https://www.twilio.com/docs/messaging/api/message-resource#twilios-request-to-the-statuscallback-url>
+
+<https://www.twilio.com/docs/messaging/guides/webhook-request>
+
+Twilio separately documents two transport-bearing identifiers:
+
+- a successfully delivered RCS message has `From: rcs:<SenderId>` in outbound
+  status callbacks and fetched Message resources;
+- a Twilio Message SID starts `SM` for a text message and `MM` for a media
+  message.
+
+<https://www.twilio.com/docs/rcs/send-an-rcs-message>
+
+<https://help.twilio.com/articles/223134387>
+
+The inbound webhook also documents optional `ChannelMetadata`; its JSON `type`
+can explicitly identify `rcs` for a rich-channel message.
 
 Therefore:
 
 - requested transport comes from the provider adapter's transport intent;
-- actual transport comes from an explicit provider observation such as
-  `ChannelPrefix`;
+- actual transport comes from a provider-boundary normalizer over the documented
+  `From`, `MessageSid`, `ChannelPrefix`, `ChannelMetadata`, and known endpoint
+  facts described below;
 - a callback without transport evidence may still advance delivery status but
   does not invent actual transport;
-- a body, attachment list, `NumMedia`, SID prefix, or delivery status must not be
-  used alone to infer actual transport.
+- a body, attachment list, `NumMedia`, delivery status, conversation kind, or
+  legacy `MessageType` must not be used to infer actual transport.
+
+Normalization precedence is conservative:
+
+1. Explicit RCS evidence wins: `From` beginning `rcs:`, recognized
+   `ChannelMetadata.type: 'rcs'`, or an unambiguous RCS `ChannelPrefix` when it
+   does not conflict with `From`.
+2. On an inbound webhook routed to a known E.164 SMS/MMS number, `MM` identifies
+   MMS and `SM` identifies SMS. A recognized rich-channel payload is handled by
+   step 1 before SID inspection.
+3. On an outbound message whose requested transport is SMS or MMS, the provider
+   result/callback SID may immediately identify the actual SMS/MMS transport.
+4. On an RCS-requested message, `SM`/`MM` is used as fallback evidence only when
+   the same callback/resource also supplies a non-channel `From` sender. A SID
+   alone cannot distinguish an early RCS resource from fallback.
+5. Missing evidence leaves actual absent. Conflicting or unknown non-empty
+   evidence leaves actual absent and emits one safe structured warning.
+
+Twilio does not document whether automatic fallback retains the same Message SID
+or the exact complete callback shape for every SMS/MMS fallback. That uncertainty
+does not block the current SMS/MMS and Group MMS feature because RCS sending is
+out of scope. Before RCS is enabled, the controlled provider probe tracked in
+`docs/issues/rcs-fallback-transport-observation.md` must validate the adapter
+normalizer against real fallback callbacks and fetched resources. Until then,
+ambiguous RCS fallback evidence remains pending rather than guessed.
 
 ### 4.2 Native group rails
 
@@ -160,8 +203,8 @@ The app owns the canonical domain definition. The dashboard mirrors the API
 contract in its existing local API types because it cannot import from `app/`.
 Tests pin the two unions to the same values.
 
-Unknown is a presentation state, not a stored transport value. Unknown provider
-prefixes remain absent and produce a structured warning.
+Unknown is a presentation state, not a stored transport value. Unknown or
+conflicting provider evidence remains absent and produces a structured warning.
 
 ### 5.2 Message fields
 
@@ -176,8 +219,8 @@ actual_transport?: MessageTransport;
 
 Rules:
 
-- Every carrier message newly written by runtime, import, or seed code after
-  this feature has `transport_schema_version: 1`.
+- Every carrier message newly written by normal runtime code after this feature
+  has `transport_schema_version: 1`.
 - An adapter intent establishes outbound `requested_transport` before the provider
   send begins. A message row stores that value atomically when the row can be
   created: after a direct/group provider result supplies the required SID and
@@ -191,10 +234,11 @@ Rules:
 - `type` remains required and retains all existing content/modality behavior.
 - Calls and email do not receive carrier transport fields.
 
-Imported history written after this feature is version 1 but carries neither
-requested nor actual unless its source explicitly contains provider transport
-evidence. It consequently presents `Unknown`. Existing imported history is not
-rewritten and keeps its legacy `type` label.
+Imported history remains schema-absent and keeps the legacy label unless the
+import source carries explicit, provider-attributable transport evidence. Only a
+row with such evidence is written as version 1. This avoids changing identical
+historical provenance from `SMS` to `Unknown` merely because an import ran after
+deployment.
 
 ### 5.3 Per-recipient fields
 
@@ -229,8 +273,11 @@ multi-recipient legs, not provider evidence and not a routing instruction:
 The field is optional on single-recipient rows and source-time relay slots that
 have not yet been reconciled by a worker.
 
-The existing status, SID, error, sent timestamp, and delivered timestamp fields
-are unchanged.
+A preflight-created recipient slot starts with required delivery status `queued`.
+An `excluded` slot with `contact_opted_out` keeps the existing not-sent
+presentation. An `excluded` never-attempted member with no suppression code is
+omitted from delivery aggregation and expanded recipient rows. The existing SID,
+error, sent timestamp, and delivered timestamp fields are otherwise unchanged.
 
 ### 5.4 Compatibility discriminator
 
@@ -245,7 +292,20 @@ SMS or MMS claim.
 
 Late callbacks do not upgrade schema-absent rows. Repository transport writes
 are conditioned on `transport_schema_version = 1`, preserving the no-migration
-and keep-legacy decisions.
+and keep-legacy decisions. Delivery status, SID pointers, retries, and sends are
+not conditioned on that field.
+
+Every relay execution branches explicitly by source schema:
+
+- schema version 1 uses transport initialization, aggregation preflight, and
+  child-field transport result writes;
+- schema absent skips all transport-only preflight/writes and follows the exact
+  pre-feature fan-out/result path, including in-flight SQS jobs, continuations,
+  and later release of `queued_pending` holds.
+
+A schema-absent transport write is a recorded compatibility no-op, never a
+preflight failure. Only a real failure while updating a version-1 source may
+abort before sends.
 
 ## 6. Two-stage adapter contract
 
@@ -293,6 +353,14 @@ text-only sends and MMS for media sends. That policy is localized in the
 adapter, covered by contract tests, and is the future seam where an enabled RCS
 sender changes the requested transport. The console/fake adapter implements the
 same domain contract without importing Twilio vocabulary.
+
+For relay fan-out, the durable classification input is the attachment set the
+worker can actually forward, not the legacy `type` and not raw source
+`mediaUrls` that the worker does not replay. Stable adapter configuration such as
+media-store availability is also an input. If attachments cannot be freshly
+materialized at execution, the executable intent is text-only SMS; a different
+source-time intent is preserved and reported as classification drift while the
+existing body-only send continues.
 
 The group Conversations port has an equivalent intent and late-preparation
 contract. Its current Twilio implementation classifies and observes MMS because
@@ -342,6 +410,11 @@ worker resolves them against a current execution roster.
 For an inbound relay source, the source message records inbound actual evidence
 only.
 
+For a schema-absent relay source, every transport-specific step in the remaining
+section is bypassed. The worker resolves the current roster, checks suppression,
+sends, persists delivery results, creates SID pointers, and schedules
+continuations exactly as it does before this feature.
+
 Every relay fan-out execution resolves the current roster where it does today,
 so membership-at-execution and retry behavior remain unchanged. Before
 the first provider send of an execution, a transport preflight conditionally
@@ -351,7 +424,8 @@ team-authored or persisted-announcement source, a new slot copies the immutable
 source requested transport. For an inbound source, the adapter first classifies
 transport from durable source facts and the new slot stores that intent.
 Initializers succeed only when the member slot is absent; on a race, the job
-reads and preserves the existing slot and requested value.
+reads and preserves the existing slot and requested value. Every newly created
+slot has delivery status `queued`.
 
 The same preflight changes a previously `planned`, never-attempted slot to
 `excluded` when that member is no longer in the current execution roster. A
@@ -384,9 +458,13 @@ shows the outbound slots created by current and prior executions. Those slots ar
 progressive disclosure, not a frozen completeness set. Their aggregate never
 replaces or rewrites the inbound main chip.
 
-Relay announcements that persist a source message use the same intent,
-late-preparation, and child-field result contract. Non-persisted system sends
-remain outside message-chip scope.
+Each persisted relay announcement is itself a transport execution even though it
+runs in-process rather than through the fan-out worker. Its initial append seeds
+every roster slot with requested intent, delivery status `queued`, and aggregation
+state `planned`. The existing per-member loop changes a suppressed slot to
+`excluded`, changes a leg to `attempted` immediately before `adapter.sendMessage`,
+and applies the child-field result operation afterward. Non-persisted system
+sends remain outside message-chip scope.
 
 ### 7.3 Native groups
 
@@ -407,11 +485,13 @@ The receipt service must not derive transport from the channel message SID.
 
 ### 7.4 Other inbound messaging
 
-The Twilio webhook normalizer reads an explicit `ChannelPrefix` when present.
-Recognized SMS, MMS, and RCS prefixes become actual transport. Missing evidence
-leaves actual absent. Unknown non-empty prefixes leave actual absent and emit a
-structured warning containing safe identifiers and the unknown prefix, never
-message content or phone numbers.
+The Twilio webhook normalizer applies section 4.1's evidence precedence. Inbound
+RCS may be identified by recognized `ChannelMetadata`; ordinary inbound messages
+to known phone-number endpoints use the documented `SM`/`MM` Message SID
+semantics. Status callbacks normalize `From`, SID, and any non-conflicting RCS
+channel fields. Missing evidence leaves actual absent. Unknown or conflicting
+non-empty evidence leaves actual absent and emits a structured warning containing
+safe identifiers and enum/prefix values, never content or phone numbers.
 
 All inbound runtime branches, including matched 1:1, unmatched/unknown, relay,
 and native group, write schema version 1. Media handling continues to use the
@@ -466,10 +546,16 @@ Allowed actual transitions are:
 - `rcs` -> `sms` or `mms`, representing provider fallback observed after an
   earlier RCS observation.
 
+One stale ordering is expected rather than conflicting: when requested transport
+is RCS and stored actual is SMS or MMS, a later RCS observation is a superseded
+pre-fallback callback. It is an idempotent no-op logged at info/debug level, not a
+warning. The same transition on a non-RCS request remains a conflict.
+
 Every other conflicting transition is refused. The stored value is preserved
-and a structured warning records provider SID, message key or recipient key,
-current transport, and attempted transport. It never logs message content or a
-phone number.
+and a structured warning records provider SID, message key or a sanitized
+recipient identity, current transport, and attempted transport. Relay and
+announcement paths use the existing `logSafeMemberKey` representation and never
+log a raw `phone#<E164>` map key, message content, or phone number.
 
 ### 8.4 Independent evidence writes
 
@@ -512,8 +598,20 @@ completed.
 Add a send-result repository operation (conceptually
 `applyRecipientSendResult`) for relay fan-out and persisted announcement success
 and failure paths. It updates only status, SID, sent timestamp, error, and actual
-transport child fields under the existing forward-status and new actual-
-transport state machines; it never replaces the slot or requested transport.
+transport child fields; it never replaces the slot or requested transport.
+
+The result operation treats status and metadata independently:
+
+- an allowed forward status advances;
+- the same status is an idempotent status no-op but still writes eligible SID,
+  `sentAt`, error, and actual fields;
+- an already-more-advanced status never regresses, but eligible absent-only SID,
+  `sentAt`, and actual evidence may still land;
+- SID is absent-only, actual follows section 8.3, and transient error data cannot
+  overwrite a terminal delivery outcome.
+
+This explicitly covers the common Messaging Service provider result `accepted`,
+which maps to internal `queued` and is applied to a slot already seeded `queued`.
 Callback paths continue using child-field updates only.
 
 ## 9. Presentation contract
@@ -588,7 +686,9 @@ Expanded recipient rows are allowed for both outbound multi-recipient sources an
 inbound relay sources. They use their own requested/actual fields. A suppressed
 row keeps its existing suppression copy and renders requested transport only;
 the suppression state makes clear that no provider attempt occurred. Inbound
-relay slots appear progressively and are never used to decide the main chip.
+relay slots appear progressively and are never used to decide the main chip. An
+`excluded` row without `contact_opted_out` represents a removed never-attempted
+member and is omitted from both delivery aggregation and disclosure.
 
 ### 9.5 Copy and layout
 
@@ -619,16 +719,23 @@ write emits the event so an open thread updates live.
 
 ## 11. Fake provider and seed support
 
-The fake Twilio status-callback controls gain an optional provider channel field
-that produces the real webhook name `ChannelPrefix`. Existing fixtures without
-it remain valid and exercise unresolved actual transport.
+The fake Twilio status-callback controls gain documented `From` and `MessageSid`
+inputs. They may also carry RCS-only `ChannelPrefix`; inbound fixtures may carry
+documented `ChannelMetadata`. Existing fixtures without new evidence remain valid
+and exercise unresolved actual transport. The fake must not emit synthetic
+`ChannelPrefix=sms` or `ChannelPrefix=mms` payloads that Twilio does not document.
 
 This feature does not implement fake RCS sending; the existing RCS 501 seams
-remain. A synthetic status callback is sufficient to prove normalization and
-fallback persistence.
+remain. Provider-normalizer tests use documented payload shapes. Presenter and
+browser fixtures may directly author normalized RCS fallback domain values to
+prove the UI contract, but that is not represented as live Twilio fallback proof.
 
 Lean/full seeds and generated performance messages written after this feature
-carry schema version 1. Seed scenarios include:
+carry schema version 1 and explicit normalized actual transport because the seed
+is the hermetic fake provider. Ordinary inbound/outbound SMS rows therefore stay
+`SMS` rather than making the demo and lean worlds `Unknown`-dominated. The
+byte-stable lean world changes once as part of this feature and is then pinned by
+its existing tests. Seed scenarios include:
 
 - text-only native group message: legacy `type: 'sms'`, requested MMS, actual
   MMS, proving the chip ignores the misleading legacy field;
@@ -638,9 +745,10 @@ carry schema version 1. Seed scenarios include:
 - new inbound without evidence -> `Unknown`;
 - an explicit schema-absent legacy row -> legacy `SMS` or `MMS`.
 
-The importer writes schema version 1 and only maps transport evidence explicitly
-present in the import source. Its existing `type` selection remains for content
-compatibility but never becomes transport evidence.
+The importer writes schema-absent legacy rows unless the import source explicitly
+contains provider-attributable transport evidence. When evidence exists it may
+write version 1 and normalized actual transport. Its existing `type` selection
+remains for content compatibility but never becomes transport evidence.
 
 ## 12. Implementation surfaces
 
@@ -655,7 +763,8 @@ be silently omitted.
   non-replacing producer-result operation, append mapping, fake repository
   parity.
 - `app/src/adapters/messaging.ts`: durable transport-intent classification,
-  late send preparation, Twilio and console policy, callback-prefix normalizer.
+  late send preparation, Twilio and console policy, and documented
+  From/SID/channel-metadata normalizers.
 - `app/src/adapters/groupConversations.ts`: group intent, late post preparation,
   and Group MMS actual evidence.
 - `app/src/services/sendMessage.ts`: direct/broadcast/retry persistence.
@@ -685,7 +794,8 @@ be silently omitted.
 
 ### Fake and browser harness
 
-- fake Twilio status callback input/output for `ChannelPrefix`.
+- fake Twilio status/inbound callback input/output for documented `From`,
+  `MessageSid`, `ChannelMetadata`, and RCS-only `ChannelPrefix` evidence.
 - hermetic seed support for group MMS and RCS fallback presentation.
 - focused browser coverage on the real dashboard/API stack.
 - `app/src/routes/dev.ts` extraction-message fixture: version 1 fields and
@@ -694,6 +804,9 @@ be silently omitted.
 
 The plan must begin with a fresh codebase inventory because this list is a
 design-time map, not permission to assume no other writer or projection exists.
+The independent v5 review observed substantial `main` drift through `f27aabbf`;
+all plan citations and call sites must be refreshed against then-current `main`,
+not copied from this spec's original base.
 
 ## 13. Verification contract
 
@@ -705,11 +818,14 @@ Before full completion gates, add and run targeted tests for:
    all nine known requested/actual pairs, partial multi-recipient evidence,
    complete uniform evidence, mixed evidence, optimistic suppression, inbound
    relay leg disclosure, and suppression.
-2. Adapter intent and late preparation: current text, media, and Group MMS
-   policies; RCS-ready normalization; fresh per-leg media parameters; no service
-   or dashboard attachment-only inference.
-3. Webhook normalization: recognized case variants, missing prefix, unknown
-   prefix warning, and Group MMS envelope evidence.
+2. Adapter intent and late preparation: current text, effective forwardable relay
+   attachments, no-media-store body-only behavior, and Group MMS policies;
+   RCS-ready normalization; fresh per-leg media parameters; no service or
+   dashboard inference from legacy `type`.
+3. Webhook normalization: inbound `ChannelMetadata`, RCS `From`, E.164 fallback
+   `From` plus `SM`/`MM`, current SMS/MMS SID evidence, missing evidence,
+   conflicting evidence warning, and Group MMS envelope evidence. Tests must
+   prove `ChannelPrefix=sms|mms` is never required or fabricated.
 4. Direct, broadcast, retry, relay, announcement, native-group, inbound,
    import, seed, and dev-fixture writers.
 5. Repository actual state machine: absent, duplicate, RCS fallback, refused
@@ -717,7 +833,8 @@ Before full completion gates, add and run targeted tests for:
 6. DynamoDB Local concurrency: simultaneous status, SID, error, requested, and
    actual transport writes plus aggregation-state transitions on one recipient
    slot preserve every field; producer results never whole-slot replace seeded
-   intent.
+   intent. Include provider `accepted` mapped to an already-`queued` slot and
+   prove SID, `sentAt`, error, and actual still persist without status regression.
 7. API/projection and dashboard hook propagation.
 8. Transport-only callback updates emit the existing live refetch event.
 9. Relay behavior parity: all executions use membership-at-each-execution; the
@@ -726,6 +843,16 @@ Before full completion gates, add and run targeted tests for:
    attempt is excluded; continuations reuse the same slot and callback pointer;
    media is materialized per leg immediately before send; suppressed slots retain
    requested-only intent; and queued classification drift warns but still sends.
+10. Legacy relay compatibility: a schema-absent queued team source, inbound
+    source, continuation, and `queued_pending` hold released after deployment all
+    fan out through the pre-feature path with no transport writes or new abort.
+11. Preflight/disclosure: a dynamically created slot starts `queued`; a removed
+    never-attempted excluded slot is hidden; a suppressed excluded slot retains
+    the existing not-sent row; persisted announcements perform planned,
+    attempted, excluded, and result transitions.
+12. Import/seed/logging: evidence-free imports remain schema-absent, ordinary
+    seeds author normalized actual transport, and no warning logs raw
+    `phone#<E164>` member keys.
 
 ### 13.2 Browser proof
 
@@ -743,6 +870,9 @@ Hermetic Playwright coverage must prove at least:
 - a schema-absent message keeps its legacy label;
 - a version 1 inbound message without evidence displays `Unknown`;
 - the optimistic group bubble does not briefly claim SMS before refetch.
+
+The RCS fallback browser rows are normalized domain fixtures. They prove storage
+and presentation, not the still-unverified live Twilio fallback callback shape.
 
 Use the repository's hermetic e2e lane only. Do not test against the human's
 live dashboard ports.
@@ -770,8 +900,8 @@ at base `5ce9912f` and exited 0:
 
 ## 14. Failure and observability behavior
 
-- Unknown non-empty provider channel values produce a structured warning and no
-  transport write.
+- Unknown or conflicting non-empty provider evidence produces one structured
+  warning and no transport write.
 - Conflicting actual transitions produce a structured warning and preserve the
   stored value.
 - Missing channel evidence is expected and produces no warning by itself.
@@ -779,6 +909,8 @@ at base `5ce9912f` and exited 0:
   original requested value, and continues the existing send path.
 - An aggregation preflight failure aborts before provider sends and follows the
   current job retry/error path; it cannot expose a falsely complete subset.
+- Schema-absent sources bypass transport preflight entirely and cannot fail or
+  delay because of transport metadata.
 - Provider payload names remain at adapter/webhook boundaries.
 - Logs contain safe IDs, enum values, and error codes only; no bodies or phone
   numbers.
@@ -790,6 +922,8 @@ at base `5ce9912f` and exited 0:
 
 - Enabling or configuring RCS senders.
 - Implementing the RCS Content API or fake RCS engine.
+- Claiming production RCS fallback observation is verified before the controlled
+  callback/resource probe in `docs/issues/rcs-fallback-transport-observation.md`.
 - Replacing the native Group MMS rail.
 - Claiming that Twilio Bulk Messaging is a native handset reply-all group.
 - Migrating, backfilling, or fetching provider history for existing messages.
@@ -802,8 +936,9 @@ at base `5ce9912f` and exited 0:
 
 The mission is complete only when all of the following are true:
 
-1. No new carrier-message chip derives transport from `MessageType`, media, SID
-   prefix, or conversation kind.
+1. No new carrier-message chip derives transport from `MessageType`, media, or
+   conversation kind. Twilio-specific `From`, `SM`/`MM` SID, channel metadata,
+   and rail facts are normalized only at provider boundaries.
 2. Every new carrier runtime writer stamps schema version 1.
 3. Every newly persisted outbound message or leg slot stores adapter-owned
    requested transport, including a slot later suppressed before provider send;
@@ -826,3 +961,10 @@ The mission is complete only when all of the following are true:
 12. Outbound aggregation includes current-roster additions, excludes members
     removed before attempt, permanently retains attempted legs, and never calls a
     partial execution complete.
+13. Schema-absent relay sources preserve pre-feature send, retry, continuation,
+    status, and callback behavior without transport writes.
+14. Same-status provider results preserve status while still recording eligible
+    SID, timestamp, error, and actual evidence.
+15. Evidence-free imports retain legacy labels, ordinary seeds carry explicit
+    fake-provider evidence, and persisted announcements participate in transport
+    aggregation.

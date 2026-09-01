@@ -128,6 +128,11 @@ export interface RetrySchedule {
   attempts?: number;
   /** Delay before re-sending after failed attempt N. Default `N * 250` ms. */
   backoffMs?: (attempt: number) => number;
+  /**
+   * Wall-clock budget for the WHOLE retry, measured from just before attempt 1
+   * and checked before each re-send. Default 20_000 ms.
+   */
+  deadlineMs?: number;
 }
 
 /** Tuning for pollUntilTableActive; injectable for the same reason. */
@@ -137,10 +142,25 @@ export interface PollOptions {
 }
 
 const DEFAULT_ATTEMPTS = 4;
+// THE ATTEMPT BOUND IS NOT A BUDGET. The lock-timeout signature above costs the
+// caller ~10s of blocking per attempt, so four attempts plus linear backoff can
+// spend ~41.5s - and the hooks that reach here loop the whole 22-table manifest
+// inside a 60s hookTimeout, where the resulting failure reads "Hook timed out in
+// 60000ms" and names nothing. 20s is chosen so that ONE full lock-timeout retry
+// (~10s + backoff) still fits, several fast InternalFailure retries still fit,
+// and a 22-table loop cannot lose more than ~20s to any one contended table.
+const DEFAULT_DEADLINE_MS = 20_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
 // Argued against DynamoDB Local's own 10s per-table lock timeout: a table that
 // is still not ACTIVE after 10s locally is not going to become so inside the
 // same test hook.
+//
+// NOT a contradiction of db-update-gsis.ts's 900s timeout, which the same diff
+// introduced: that one waits on a GSI BACKFILL over a populated local table,
+// which legitimately takes minutes. This one waits only on a table THIS call
+// just created - empty, and (by the per-worktree or per-run-random key scheme
+// the access-key guard enforces) not being created concurrently by anyone else.
+// An empty table that is still not ACTIVE after 10s is stuck, not busy.
 const DEFAULT_POLL_CEILING_MS = 10_000;
 
 // URL.hostname yields the BRACKETED form for an IPv6 literal, so both spellings
@@ -199,6 +219,8 @@ async function retryLocalControlPlane(
   const attempts = opts.schedule?.attempts ?? DEFAULT_ATTEMPTS;
   // Linear: the container needs a moment, not an exponential one.
   const backoffMs = opts.schedule?.backoffMs ?? ((n: number): number => n * 250);
+  const deadlineMs = opts.schedule?.deadlineMs ?? DEFAULT_DEADLINE_MS;
+  const startedAt = Date.now();
   // Resolved LAZILY, and at most once: the hot path never touches the endpoint.
   let local: boolean | undefined;
 
@@ -209,6 +231,11 @@ async function retryLocalControlPlane(
     } catch (err) {
       if (!isRetryableContainerFault(err)) throw err;
       if (n >= attempts) throw err;
+      // The elapsed-time half of the bound. Read only here, in the catch, so a
+      // clean send never touches the clock. Checked BEFORE the re-send rather
+      // than after it, because the point is to stop spending, not to notice
+      // afterwards that we did.
+      if (Date.now() - startedAt >= deadlineMs) throw err;
       local ??= await isLocalDynamoEndpoint(client);
       if (!local) throw err;
       if (opts.verify) {
@@ -467,18 +494,35 @@ export async function deleteTableIfExists(
   physicalName: string,
   opts: { retry?: RetrySchedule } = {},
 ): Promise<void> {
+  // PER CALL, never module-level - the same rule and the same reason as
+  // ensureTable's flag above.
+  let retried = false;
   try {
     await sendWithRetry(
       client,
       () => client.send(new DeleteTableCommand({ TableName: physicalName })),
-      { schedule: opts.retry },
+      {
+        schedule: opts.retry,
+        onRetry: () => {
+          retried = true;
+        },
+      },
     );
   } catch (err) {
     if (err instanceof ResourceNotFoundException) return;
-    // A retried DeleteTable can meet a table that is already DELETING - which
-    // means attempt 1 landed and only its response was lost. Tolerated for the
-    // same reason absence is: the caller asked for the table to be gone.
-    if (err instanceof ResourceInUseException) return;
+    // ONLY when the conflict followed a RETRIED attempt. Then it can mean
+    // attempt 1 landed and only its response was lost, leaving the table
+    // DELETING - tolerated for the same reason absence is: the caller asked for
+    // the table to be gone, and it is going.
+    //
+    // An UN-retried conflict is a different animal: the table is in use by
+    // somebody else and this call did nothing. Swallowing it would tell the
+    // caller the table is gone when it is not - and the commonest caller is a
+    // delete-then-create hook, which would then run against the previous run's
+    // rows. Every un-retried caller (app/scripts/db-create.ts and ~50 suites)
+    // therefore keeps exactly the behaviour it had before the retry existed.
+    // Pinned by acceptance cases 4 (retried, tolerated) and 18 (not, thrown).
+    if (retried && err instanceof ResourceInUseException) return;
     throw err;
   }
 }

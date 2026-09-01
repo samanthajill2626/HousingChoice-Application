@@ -58,7 +58,18 @@ import { getTableSpec, type TableSpec } from '../src/lib/tables.js';
 
 // --- the stub client --------------------------------------------------------
 
-type Step = { ok: unknown } | { fail: unknown };
+/**
+ * One scripted answer. `delayMs` makes the send TAKE that long before it
+ * answers - the only way to script the two things a send counter cannot show:
+ * an ORDERING between two concurrent calls (case 20) and an ELAPSED-TIME
+ * budget (case 21).
+ */
+type Step = ({ ok: unknown } | { fail: unknown }) & { delayMs?: number };
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 interface StubEndpoint {
   protocol: string;
@@ -169,6 +180,7 @@ class StubClient {
     const queue = this.scripts.get(name);
     const step = (queue && queue.length > 0 ? queue.shift() : undefined) ?? this.defaults.get(name);
     if (!step) throw new Error(`stub client: no response configured for ${name}`);
+    if (step.delayMs !== undefined) await delay(step.delayMs);
     if ('fail' in step) throw step.fail;
     return step.ok;
   }
@@ -477,5 +489,104 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     expect((failure as TableNotActiveError).message).toContain('CREATING');
     expect((failure as TableNotActiveError).observedStatus).toBe('CREATING');
     expect(stub.count('DescribeTable')).toBeGreaterThan(0);
+  });
+
+  it('case 18: an UN-RETRIED ResourceInUseException on DeleteTable still throws', async () => {
+    // The counterpart to case 4, and the case that gives case 4 its meaning.
+    // deleteTableIfExists tolerates a conflict ONLY where it could mean "attempt
+    // 1 landed and we lost its response" - i.e. after a retry. On the very first
+    // attempt the table really is in use by somebody else, and swallowing that
+    // would hand the caller a table it believes is gone: the delete-then-create
+    // hooks (importApply.integration.test.ts and ~50 siblings) would then run
+    // against the previous run's rows instead of failing loudly.
+    const conflict = resourceInUse();
+    const stub = new StubClient().script('DeleteTable', [{ fail: conflict }]);
+
+    await expect(deleteTableIfExists(stub.asClient(), 'stub', { retry: FAST })).rejects.toBe(
+      conflict,
+    );
+    expect(stub.count('DeleteTable')).toBe(1);
+  });
+
+  it('case 19: a retried conflict on a table that never goes ACTIVE rethrows the CONFLICT', async () => {
+    // The ensureTable half of the exhaustion split. Case 17 pins what
+    // pollUntilTableActive throws on its own; this pins what the CALLER throws,
+    // which is deliberately not that. The conflict is the fact the operator
+    // needs (the table exists and is not ours to create), and the poll's
+    // observation is appended to it rather than replacing it - so a caller
+    // catching ResourceInUseException, as the delete-then-create hooks do,
+    // still sees the error it is written against.
+    const stub = new StubClient()
+      .script('CreateTable', [{ fail: internalFailure() }, { fail: resourceInUse() }])
+      .fallback('DescribeTable', { ok: tableDescription('CREATING') });
+
+    const failure = await ensureTable(stub.asClient(), NO_TTL, 'stub-c19', LIVE_ENV, {
+      retry: FAST,
+      poll: { intervalMs: 1, ceilingMs: 20 },
+    }).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+
+    expect(failure).toBeInstanceOf(ResourceInUseException);
+    expect(failure).not.toBeInstanceOf(TableNotActiveError);
+    // Both halves of the story: the conflict, and what the poll actually saw.
+    expect((failure as Error).message).toContain('stub-c19');
+    expect((failure as Error).message).toContain('CREATING');
+  });
+
+  it('case 20: a CONCURRENT plain conflict does not inherit the retried call flag', async () => {
+    // `retried` is per call, and only a stub can prove it. Two ensureTable calls
+    // overlap: A retries and then meets a conflict (so it must poll), while B
+    // meets a plainly pre-existing table with no retry at all (so it must not).
+    // B's single send is DELAYED past A's retry, so a module-level flag set by A
+    // would already be true when B's conflict is handled - and B would poll.
+    // Every sequential test in this file would still pass under that defect.
+    const retriedStub = new StubClient().script('CreateTable', [
+      { fail: internalFailure() },
+      { fail: resourceInUse() },
+    ]);
+    const plainStub = new StubClient().script('CreateTable', [
+      { fail: resourceInUse(), delayMs: 25 },
+    ]);
+
+    const [a, b] = await Promise.all([
+      ensureTable(retriedStub.asClient(), NO_TTL, 'stub-a', LIVE_ENV, {
+        retry: FAST,
+        poll: { intervalMs: 1, ceilingMs: 5_000 },
+      }),
+      ensureTable(plainStub.asClient(), NO_TTL, 'stub-b', LIVE_ENV, { retry: FAST }),
+    ]);
+
+    expect(a).toBe('exists');
+    expect(b).toBe('exists');
+    expect(retriedStub.count('CreateTable')).toBe(2);
+    expect(retriedStub.count('DescribeTable')).toBeGreaterThanOrEqual(1);
+    expect(plainStub.count('CreateTable')).toBe(1);
+    expect(plainStub.count('DescribeTable')).toBe(0);
+  });
+
+  it('case 21: the retry stops at its ELAPSED-TIME deadline, not just the attempt bound', async () => {
+    // The attempt bound alone is not a budget. The lock-timeout signature costs
+    // ~10s per attempt by the retry's own account, so four attempts can spend
+    // ~41.5s inside a 60s hook that loops the whole 22-table manifest - and the
+    // failure the caller then sees is "Hook timed out in 60000ms", which names
+    // nothing. Each attempt here takes ~30ms against a 50ms deadline, so the
+    // loop must stop early and rethrow the ORIGINAL container fault.
+    const stub = new StubClient().fallback('CreateTable', {
+      fail: internalFailure(),
+      delayMs: 30,
+    });
+
+    await expect(
+      ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, {
+        retry: { backoffMs: (): number => 0, deadlineMs: 50 },
+      }),
+    ).rejects.toMatchObject({ name: 'InternalFailure' });
+
+    // Fewer than the bound of 4, and more than one - the deadline must cut the
+    // loop short without turning the retry off.
+    expect(stub.count('CreateTable')).toBeLessThanOrEqual(3);
+    expect(stub.count('CreateTable')).toBeGreaterThanOrEqual(2);
   });
 });

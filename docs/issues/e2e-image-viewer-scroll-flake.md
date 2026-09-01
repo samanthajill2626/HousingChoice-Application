@@ -6,57 +6,91 @@ severity: med
 status: open
 area: e2e
 created: 2026-08-31
-refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:463
+refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:470, e2e/tests/dashboard-next/outbound-mms.spec.ts:630
 ---
 
-**Problem.** `outbound-mms.spec.ts:247` - "(a) attach + send an image: the fake
-records media AND the timeline renders it" - fails intermittently on the scroll
-assertion at line 463, which compares HARDCODED pixel offsets captured while the
-image-viewer dialog is open.
+## Symptom
 
-Observed 2026-08-31 on a full `npm run e2e` (1 failed / 258 passed):
+The first test in `outbound-mms.spec.ts` intermittently reaches the assertion
+historically reported at line 463, now at line 630 after diagnostic code was
+added, with different scroll offsets from the values captured immediately before
+the image viewer opens. Both known occurrences were in full-suite runs:
 
-```
-- Expected            + Received
-  appFrame: { top: 20 }   appFrame: { top: 0 }
-  timeline: { top: 509 }  timeline: { top: 421 }
-```
+| Date | Expected | Received | Full-run result |
+| --- | --- | --- | --- |
+| 2026-08-31 | AppFrame 20, Timeline 509 | AppFrame 0, Timeline 421 | 258 passed, 1 failed |
+| 2026-09-01 | Timeline 509 | Timeline 797 | 261 passed, 1 failed |
 
-The received scroll is LESS than expected on both axes, consistent with the
-measurement racing the viewer's scroll lock rather than with a layout change.
+The two failures moved in opposite directions. The newer failure added 288px to
+the Timeline offset; the older failure removed 88px from Timeline and reset
+AppFrame from 20 to 0. No single scroll-lock or bottom-repin explanation accounts
+for both observations without additional geometry evidence.
 
-**Attribution - this is NOT the tour-reminder-ladder branch.** The assertion was
-introduced by `4ca47f50` ("test: verify image viewer on desktop and mobile"),
-part of the `feat/mms-image-viewer` work that reached `main` shortly before.
-Evidence it is main's, gathered on `feat/tour-reminder-ladder` @85e78de8:
+## Verified evidence
 
-- that branch's diff against `outbound-mms.spec.ts` is EMPTY, and it touches no
-  viewer, modal, or scroll code;
-- its only `Timeline.module.css` change is purely additive (one new
-  `.scheduledBodyUnavailable` class used by scheduled cards);
-- the assertion compares hardcoded offsets, so a content-height change from
-  another branch would fail DETERMINISTICALLY - yet the same commit ran the full
-  suite green twice;
-- the spec passes 6/6 run in isolation.
+- The expected values are not hardcoded. The test arranges both scroll owners,
+  then captures their live `scrollTop` and `scrollLeft` values at lines 470-509.
+- The viewer is portaled outside the inert application background. There is no
+  viewer scroll-lock code writing these owners while the dialog is open.
+- A programmatic `scrollTop` write fires a `scroll` event in Chromium, so manually
+  dispatching another `scroll` event would not make a missing write observable.
+- The relevant viewer, Timeline, and test blobs were unchanged across the green
+  and red commits examined for the 2026-09-01 occurrence.
+- The file passed 6/6 in isolation after each reported failure. A fresh traced
+  main baseline on 2026-09-01 also passed 6/6. That narrows the problem to
+  full-suite state or timing; it does not excuse the failure.
+- The fresh traced baseline arranged Timeline at its maximum scroll offset
+  (`top=193`, `maximumTop=193`). This makes the newer `+288px` observation
+  compatible with bottom anchoring after 288px of content growth, but only a
+  failing run can prove that its maximum and content height grew together.
+- The full-run browser artifacts from both historical failures were overwritten
+  before they could be inspected. Their screenshots and paths are not evidence
+  that can still be recovered.
 
-**Do not treat this as a named flake to re-run past.** AGENTS.md's named-flake
-re-run list is deliberately EMPTY. This is filed so the next person who sees it
-has the attribution already done, not so it can be excused. Note also that
-pass-alone / fail-in-suite is the signature of cross-spec process state, so
-isolation passing is evidence about attribution, not proof of harmlessness.
+## Contract boundary
 
-**Suggested fix.** Stop asserting hardcoded pixel offsets. The intent is that
-opening the viewer does not move the underlying page, which is a RELATIVE
-property: capture scroll before opening and assert it is unchanged while open.
-That removes the dependency on seed content height and on whatever the layout
-happens to measure on a given run.
+The approved product contract is that the inert background cannot be scrolled by
+the user while the viewer is open, and that the exact captured offsets are
+restored when the viewer closes. The while-open assertion is stricter: it also
+requires background layout updates to leave the raw offsets unchanged for the
+entire open interval. A product update can legally change underlying geometry
+while the modal is open, so the source of any movement must be identified before
+deciding whether to change product code or narrow that assertion.
 
-If the absolute values are kept, the assertion needs to wait on the viewer's
-scroll lock having applied rather than measuring immediately after the dialog
-appears.
+## Open questions
 
-Collecting a trace is the decisive artifact here. Note the trap named in
-AGENTS.md: `retries: 0` with `trace: 'on-first-retry'` collects NOTHING, so a
-gate failure currently carries no network or timing data. Do NOT reach for
-`E2E_CHILD_LOG_DIR` - piping child stdout changes the very timings this symptom
-depends on.
+The missing evidence is the first event that changes either scroll owner and the
+geometry at that instant. Plausible sources include a delayed Timeline render, a
+cross-spec browser or service-worker actor, a periodic application refresh, or a
+layout resize that clamps or repins a scroll owner. Pan pointer leakage is lower
+probability because the viewer is portaled above an inert background, but it is
+still testable from the event sequence.
+
+## Diagnostic experiment
+
+Run the full suite with `E2E_TRACE=1` and a trace-gated page-side recorder in the
+failing test. The recorder must not alter product behavior. It records:
+
+- phase samples after scroll arrangement, viewer open, zoom, and every pan;
+- native `scroll` events for AppFrame and the Timeline stream;
+- relevant DOM mutations and resize notifications;
+- `scrollTop`, `scrollHeight`, `clientHeight`, maximum scroll, and bounding boxes
+  for both owners and the route root at every sample.
+
+Attach the recorder JSON before the while-open assertion and again after dismissal.
+If any run fails, copy the complete Playwright result directory and JSON report to
+a durable diagnostic directory before any rerun. Do not use `E2E_CHILD_LOG_DIR`:
+redirected child output changes timing for this symptom.
+
+## Fix decision after evidence
+
+- A pointer-driven owner scroll is a product isolation defect.
+- A background layout change with correct dismissal restoration means the
+  while-open assertion
+  over-specifies the contract; keep the dismissal assertion and replace the
+  while-open raw-offset assertion with proof that viewer gestures never target
+  the background owners.
+- A resize or mutation that should not occur during this test should be fixed or
+  explicitly awaited at its source.
+- Cross-spec state must be isolated at the originating actor rather than hidden by
+  retrying or polling the final offset.

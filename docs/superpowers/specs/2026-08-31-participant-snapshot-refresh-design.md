@@ -1,19 +1,50 @@
+### 3.1 One population this branch does not fix - and one that turned out not to exist
+
+**WITHDRAWN: the "merged stub" population never existed.** Rounds 1 (A1) and 3
+(T6) both asserted that a roster `contactId` can point at a stub staff later
+merged away, leaving rung 1 permanently missing. Round 4 (U1) withdrew it and
+the planner verified the withdrawal:
+
+- **There is no contact merge mechanism in the tree at all** - no merge route,
+  service, or repo method.
+- Triage is an IN-PLACE `PATCH /api/contacts/:contactId`
+  (`routes/contacts.ts:1391`). The stub keeps its `contactId` and GAINS a name.
+- `routes/api.ts:2029-2041` says only that "the SNAPSHOT goes stale" when a stub
+  is triaged - the snapshot, never the id.
+
+So the roster's `contactId` keeps pointing at the same contact, which now has a
+name, and **rung 1 resolves it correctly**. There is no recurring gap, no
+dangling-id population, and the branch is more complete than v3 and v4 claimed.
+Recorded at length so nobody re-derives the phantom a third time: it survived
+two review rounds and one planner acceptance before anyone checked whether the
+mechanism it named exists.
+
+This also retires round 1's A1 on its merits. The phone-resolution rung it
+motivated was already dropped for independent reasons (unbatchable; up to two
+round trips each; returns an arbitrary contact for duplicate phones), and those
+reasons still stand.
+
+**The one real uncovered population: bare-phone RELAY members.** Skipped at
+`routes/relayGroups.ts:470` (`if (!member.contactId) return member;`), with no
+phone resolver in this branch and no writer anywhere that refreshes them. They
+keep today's behavior exactly - nothing regresses - and S5 sizes them.
+
 # Participant name snapshots: resolve on read, display surfaces
 
 Branch: `feat/participant-snapshot-refresh`
 Worktree: `W:\tmp\participant-snapshot-refresh`
 Bundle: M1 (docs/issues/_CLUSTERS.md, re-derived 2026-08-31 @5ce9912f)
 Date: 2026-08-31
-Revision: **v4**, after design review rounds 1-3 and four rulings from Cameron
+Revision: **v5**, after design review rounds 1-4 and four rulings from Cameron
 (resolve-on-read; the three-rung chain; outbound content out; phase-b merges
 first - 2.4).
 Adjudications: `docs/superpowers/reviews/2026-08-31-participant-snapshot-refresh/design-review/`
-(`adjudications.md`, `-round2.md`, `-round3.md`).
+(`adjudications.md`, `-round2.md`, `-round3.md`, `-round4.md`).
 
 | sev | issue | disposition |
 |---|---|---|
 | high | today-shows-phone-instead-of-name | CLOSED |
-| high | group-roster-name-snapshot-never-refreshed | CLOSED for the operator-facing surfaces (titles, chips, cards, panels). NOT closed for the two group PUSH TITLES (2.3) or the two uncovered populations (3.1). Outbound-content half is OWNED BY ANOTHER BRANCH (2.2). The Resolution stamp names all four. |
+| high | group-roster-name-snapshot-never-refreshed | CLOSED for the operator-facing surfaces (titles, chips, cards, panels). NOT closed for the two group PUSH TITLES (2.3), the bare-phone relay members (3.1), or the close-group prompt cards at `PlacementDetail.tsx:370-375` / `TourDetail.tsx:453-455`, which 5.5 leaves unhydrated with no sibling roster fetch (round 4, U6). Outbound-content half is OWNED BY ANOTHER BRANCH (2.2). The Resolution stamp names all four. |
 | med | relay-stale-participant-phone | CLOSED as documented behavior, no code change (see 7) |
 | low | consolidate-contact-display-name-helpers | census CORRECTED, stays OPEN (see 8) |
 | low | today-contact-hydration-fan-out | measured, then resolved (see 9) |
@@ -109,35 +140,47 @@ branch's `:456-492`. A one-time textual merge, not ongoing contention.
 
 ### 2.4 MERGE ORDER: phase-b lands FIRST; this branch re-baselines against it
 
-**Cameron, 2026-08-31.** A build instruction, not a note.
+**Cameron, 2026-08-31.** A build instruction, not a note. It stands on its own;
+what follows is the corrected account of what re-baselining actually involves.
 
-There is one real collision and it is TRANSITIVE - through a file this branch
-correctly never edits (round 3, T5, second half):
+**WITHDRAWN: the preview-pin collision does not exist.** v4 claimed S3's
+`describeRoster` flip would fight phase-b's Task 14 re-baseline at
+`relayGroupPreview.test.ts:151,208`, `toursApi.test.ts:3989-3998,4096` and
+`placementsApi.test.ts:989,1007`, and built a field-by-field ritual and a
+handback stop-block around it. Round 4 (U4/U5) withdrew it and the planner
+verified the withdrawal - it is enforced by the TYPE:
 
-- S3 flips `describeRoster`'s precedence.
-- `services/rosterEdits.ts:514` builds the preview's RECIPIENT list from
-  `describeRoster`; `:439-441` states the split ("the owner path composes the
-  body from `resolveRoster` ... and the recipient list from `describeRoster`").
-- phase-b's Task 14 Step 6 RE-BASELINES exactly those pins:
-  `app/test/relayGroupPreview.test.ts:151,208`,
-  `app/test/toursApi.test.ts:3989-3998,4096`,
-  `app/test/placementsApi.test.ts:989,1007`.
+- `services/rosterEdits.ts:138` types the preview-open owner as
+  `Omit<RosterOwner, 'roster' | 'groupThreadId'>`. With no `groupThreadId`,
+  `resolveRoster` can NEVER take its `participants` branch on those paths.
+- It therefore always takes plan/default, where `memberFromContact`
+  (`lib/rosterResolution.ts:172-180`) already builds the name from the CONTACT.
+- S3 only reorders stored-vs-contact precedence, so on a path whose names are
+  already contact-derived it is a structural no-op.
 
-Both branches move the same expectations from different directions. The ruling:
+v4's trap warning was also wrong on its own terms (U5): those pins are separate
+`expect` statements whose expected values are composer CALLS at assert time, not
+literal strings in a shared fixture, and `rosterEdits.ts:425-441` is an
+interface declaration, not a fixture. There is no green-but-wrong whole-fixture
+rewrite to guard against. Both the ritual and the stop-block are deleted.
 
-1. **phase-b merges first.** This branch does not attempt to land ahead of it.
-2. At the single pre-handback `main` sync, those pins ALREADY carry phase-b's
-   owner-routed BODY expectations.
-3. This branch re-baselines **only the RECIPIENT-NAME half** of each pin.
-4. **THE TRAP: do not revert phase-b's body expectations while doing it.** Body
-   and recipient list are separate fields of the same fixture
-   (`rosterEdits.ts:425-441`), so a whole-fixture rewrite silently undoes
-   another branch's landed work WITH ALL TESTS GREEN - the re-baselined file is
-   self-consistent either way. Re-baseline field by field, then diff against
-   phase-b's merge commit to prove the body strings are byte-identical to what
-   it landed.
-5. **If phase-b has NOT merged at handback time, STOP and report a sequencing
-   block.** Do not re-baseline against a moving target or guess its strings.
+**What re-baselining DOES involve, verified:**
+
+1. **phase-b merges first.** This branch takes it at the single pre-handback
+   `main` sync.
+2. **Every `routes/relayGroups.ts` line number in this spec will be stale**
+   (round 4, U7). phase-b's landed `6328970e` inserts ~13 lines above this
+   branch's edit site, so `:456-492` and `:470` shift by roughly that much.
+   **Re-derive them after the sync by symbol name** (`GET /conversations/:id/members`,
+   `memberWithoutStoredName`) rather than trusting any number written here.
+3. **`app/test/relayApi.test.ts` is a genuine test co-edit** (round 4, U12):
+   `6328970e` touches it around `:1505`, which is where this branch's
+   members-route tests land. Expect a textual merge there; there is no semantic
+   interaction.
+4. If phase-b has NOT merged at handback time, say so in the handback and
+   report the branch as sequenced-behind-it. Do not block on it - with the
+   collision withdrawn there is nothing to re-baseline against except line
+   numbers.
 
 ### 2.3 Also out
 
@@ -473,21 +516,20 @@ Two reconciliations:
 
 **`GroupTextView.tsx:191-211`** reasons about served-vs-stored inequality and a
 first-open re-title flicker. v2 and v3 both said this branch makes its `changed`
-flag permanently false and the comment must be amended to say so. **That is now
-wrong twice over** (round 3, T8): 5.5 dropped header hydration entirely, so the
-premise is gone; and even with it, `changed` would NOT be permanently false,
-because header hydration keys on `contactId` while that panel resolves by
-PHONE - the two disagree exactly on 3.1's population 1.
+flag permanently false and required amending the comment to say so. **That
+requirement is withdrawn** (round 3 T8, round 4 U1): 5.5 dropped header
+hydration entirely, so the premise is gone, and the contactId-vs-phone
+divergence T8 offered as a second reason rested on the merged-stub population
+3.1 retires.
 
-So the amendment is NOT "the flicker no longer happens". The comment is left
-DESCRIBING WHAT STILL HAPPENS, with one added sentence: the convergence it
-documents is now also the seam that keeps 3.1's population 1 alive, because its
-write-back corrects `name` and never `contactId`.
+**No amendment is needed here.** The comment describes behavior that continues
+unchanged, because this branch does not touch that route or the header it
+titles from. Recorded explicitly per 5.4's rule that a slice with no stale
+comment says so rather than staying silent.
 
-COST NOTE: `api.ts:1993-2002` is a zero-read passthrough today, refetched on a
-debounce per SSE tick (`useGroupThread.ts:16`, `useRelayThread.ts:437`), and
-`GroupTextView.tsx:200-206` records a production symptom from latency on a
-sibling per-tick read. Hydration there is one batch over ONE roster.
+(v3's COST NOTE about hydrating `api.ts:1993-2002` is DELETED - 5.5 forbids
+that hydration and 4.2 marks the route NOT HYDRATED, so the note contradicted
+both. Round 4, U11.)
 
 ### S3 - `describeRoster` precedence flip (zero new reads)
 
@@ -501,12 +543,12 @@ sibling per-tick read. Hydration there is one batch over ONE roster.
 The contact is already read at `:511`. The `removed` guard at `:522` is
 unchanged.
 
-COMMENTS THIS SLICE MAKES STALE, amended in the same commit per 5.4:
-`services/rosterEdits.ts:425-426` ("may be backfilled from the contact and so
-differ from the body name") and `:437-441` (the body/recipient split rationale).
-S3 changes which names the RECIPIENT half carries, so both must say so. See 2.4
-- these are phase-b's file, so the amendment lands after its merge, alongside
-the pin re-baseline.
+COMMENTS THIS SLICE MAKES STALE: **none** (round 4, U9 + U4). v4 required
+amending `services/rosterEdits.ts:425-426` and `:437-441`, which was
+unreachable - 2.2 forbids touching that file - and is now also unnecessary: 2.4
+established that S3 is a structural no-op on the preview paths those comments
+describe, so they stay true. 5.4 requires a slice with no stale comment to say
+so explicitly rather than stay silent; this is that statement.
 
 `resolveRoster` (`:219-228`) itself is NOT changed (round 2, R8 - v2's table
 and text contradicted each other here). Its non-preview callers read phones and
@@ -524,12 +566,22 @@ Both already hold the contact, so both cost ZERO reads (round 2, R3):
   at `:980-982` and `:990`.
 
 **`maskedPartyLabel` adopts `contactShortName` ("First L.",
-`lib/voiceMasking.ts:46-53`), NOT `contactDisplayName`** (round 2, R16) - **and
-it takes NO rung 2** (round 3, T9). The stored roster name is a FULL name, so a
-rung-2 fallback would persist an unmasked "First Last" whenever the contact read
-failed and a masked "First L." whenever it succeeded: a privacy posture
-contingent on a read succeeding is not a posture. For this one label the chain
-is masked-contact-name, else nothing.
+`lib/voiceMasking.ts:46-53`), NOT `contactDisplayName`** (round 2, R16).
+
+Its rung 2 is **MASKED, not dropped** - v4 said "no rung 2" and that was a
+REGRESSION (round 4, U3). `maskedPartyLabel` (`webhooks/voice.ts:116-121`) is
+total by construction: `member.name` -> role -> `'the other party'`. Dropping
+rung 2 would send a bare-phone member - 3.1's real uncovered population, who
+has no contact and therefore no role - from their stored name straight to
+"the other party", in a PERSISTED `call_party_label`. That is a regression on
+exactly the people the spec says nothing regresses for.
+
+T9's underlying point still holds and is honoured a different way: a privacy
+posture cannot be contingent on a read succeeding. So rung 2 applies the SAME
+short-name transform to the stored string that `contactShortName` applies to a
+contact - "First Last" stored becomes "First L." rendered. Masked either way,
+and nobody loses a label they have today. The chain: masked contact name, else
+masked stored name, else the existing role / "the other party" rungs untouched.
 `webhooks/voice.ts:144-146` states that the stored `call_party_label`, the
 spoken whisper, thread rendering and the originate path all keep the MASKED
 posture, and this output is PERSISTED into the message record at `:993-1002`.
@@ -553,19 +605,19 @@ and `closed`. Report, counts only, never names:
 3. members whose stored name is MISSING while the contact has one;
 4. members whose stored name DIFFERS from the contact's;
 5. members whose `contactId` resolves to NOTHING (a dangling id);
-6. **members whose `contactId` resolves to a NAMELESS contact while a contact
-   matching that member's PHONE has a name.**
+6. members carrying NO `contactId` at all - the bare-phone population 3.1
+   names as the one this branch does not reach.
 
-**Metric 6 is the blocking correction from round 3 (T1) and it is the only one
-that sizes 3.1's population 1.** A merged-away stub is a REAL contact row
-(`services/groupMembers.ts:105-119`), so it is invisible to metric 5 (the id
-resolves) AND to metric 3 (that contact has no name either). Without metric 6,
-S5 ships a number that will be believed and is measuring the wrong population.
-Metric 6's phone lookup is the ONLY `findByPhone` in this branch, it runs in an
-offline script and never on a request path, and it is bounded by the walk.
+**The metric v4 called "metric 6" is DELETED** (round 4, U1/U2). It was added
+in round 3 to size a merged-stub population that does not exist (3.1), and
+round 4 showed that even for its imagined target it had no discriminating
+power: it would false-POSITIVE on the modeled shared-handset and phone-pointer
+states, and false-NEGATIVE arbitrarily via `contactsRepo.ts:1011-1016`, which
+returns the first GSI item for a duplicate phone in arbitrary order.
 
-Add a seventh for 3.1's population 2: bare-phone relay members carrying no
-contactId at all.
+Deleting it also removes the only `findByPhone` the spec had left anywhere.
+**This branch now contains no phone-keyed name resolution at all**, in request
+paths or offline scripts.
 
 **RUN IT TWICE** (round 3, T14): once at the branch's merge base, once at
 handback. Both numbers go in the handback, because "measured, then resolved"
@@ -667,12 +719,12 @@ Accessibility-first selectors per `e2e/support/selectors.md`.
 | Inbox read amplification | `getDisplaysByIds` projection; ids collected after filtering; test pins UNIQUE ID COUNT |
 | Thread-header route gains a read on a per-tick SSE path | ELIMINATED - the header is not hydrated (5.5); the thread views already fetch a resolved roster |
 | A degraded batch blanks names | short-map default; unresolved members keep stored names - today's behavior exactly |
-| Merge conflict in `routes/relayGroups.ts` | phase-b co-edits a different function (2.2); sequence at merge time |
-| A `group_text` roster whose panel is never opened stays stale | stated gap (3); S5 sizes it |
+| Merge conflict in `routes/relayGroups.ts` and `app/test/relayApi.test.ts` | phase-b merges FIRST (2.4); re-derive line numbers by SYMBOL after the sync - they shift ~13 lines |
 | A deliberately CLEARED name never disappears | stated limitation (3); deferred |
 | ONE push carries two name sources: a FRESH body sender (S4) and a STALE title (2.3) - a disagreement `main` does not have | ACCEPTED, not mitigated (round 3, T4). The only in-scope way to remove it is to drop S4's free flip, which buys consistency by keeping a known-wrong name. A fresh sender beside a stale title is strictly better than both stale. Restored to this table because v3 deleted the row rather than arguing it. |
 | Re-baselining silently reverts phase-b's landed body strings | field-by-field re-baseline plus a byte-diff against its merge commit (2.4 step 4) - all tests stay GREEN either way, so the test suite cannot catch this one |
-| The documented gap RECURS per rename rather than healing | stated (3.1); owner is M8; S5 metrics 6-7 size it before and after |
+| Bare-phone relay members are never refreshed | the one real uncovered population (3.1); no regression, and S5 sizes it before and after |
+| Rung 2 may serve a SOFT-DELETED contact's name | stated limitation (5.3), seeded by a write-back this branch does not own. Test pins the current behavior so a future change to that route is a visible diff, not a surprise (round 4, U10) |
 | Un-masking a persisted voice label | S4 pins `contactShortName`, takes no rung 2, and pins the stored `call_party_label` |
 | A padded name renders two ways inside one `group_text` thread | COSMETIC residue, accepted (round 3, T15): `routes/api.ts:2083` trims the outer join, `contactDisplayName` trims part-wise. Fixing it means editing that route's derivation, which 2.1 excludes. |
 

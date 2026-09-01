@@ -16,7 +16,12 @@
 // Self-skipping: when nothing answers at DYNAMODB_ENDPOINT the suite skips.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DeleteCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DeleteCommand,
+  GetCommand,
+  QueryCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb';
 import type {
   MessagingAdapter,
   SendMessageParams,
@@ -474,6 +479,148 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect((await rawReminder(send.reminderId))?.sentAt).toBe(NOW_GUARD);
       expect((await rawReminder(skip.reminderId))?.skippedAt).toBe(NOW_GUARD);
       expect((await rawReminder(kill.reminderId))?.canceledAt).toBe(NOW_GUARD);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Supersession S1 - deleteSupersededForTour (T1.5)
+  //
+  // D1: a superseded ladder's never-sent rungs are HARD-DELETED - pending,
+  // operator-canceled and skipped alike. Only sentAt survives. That is NOT
+  // cancelForTour's `pending` filter, which excludes canceled and skipped rows -
+  // exactly the rows this deletes. The only filter here is "no sentAt", and the
+  // ConditionExpression on the delete is what makes the race safe.
+  // ---------------------------------------------------------------------------
+  describe('deleteSupersededForTour', () => {
+    const SWEEP_NOW = '2026-09-25T12:00:00.000Z';
+
+    /** A tour carrying one row of every terminal shape, plus a pending one. */
+    const sweepWorld = async (label: string) => {
+      const tour = await tours.create({
+        tenantId: `contact-sweep-${label}`,
+        unitId: `unit-sweep-${label}`,
+        scheduledAt: '2026-09-30T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+      const mk = (kind: ReminderKind, dueAt: string) =>
+        tourReminders.create({ tourId: tour.tourId, kind, dueAt, ladderId: 'ladder-old' });
+
+      const pending = await mk('day_before', '2026-09-29T23:30:00.000Z');
+      const canceled = await mk('morning_of', '2026-09-30T11:00:00.000Z');
+      const skipped = await mk('en_route', '2026-09-30T14:00:00.000Z');
+      const sent = await mk('confirmation', '2026-09-20T13:00:00.000Z');
+
+      await tourReminders.cancel(canceled.reminderId, SWEEP_NOW);
+      await tourReminders.claimSkip(skipped.reminderId, SWEEP_NOW, 'tour_missing');
+      await tourReminders.claimSend(sent.reminderId, SWEEP_NOW, 'the body that went out');
+
+      return { tour, pending, canceled, skipped, sent };
+    };
+
+    it('deletes pending, operator-canceled AND skipped rows; keeps every SENT row', async () => {
+      const w = await sweepWorld('mixed');
+
+      await tourReminders.deleteSupersededForTour(w.tour.tourId);
+
+      expect(await rawReminder(w.pending.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.canceled.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.skipped.reminderId)).toBeUndefined();
+      // The history survives, body and all - a sent rung is a fact.
+      const kept = await rawReminder(w.sent.reminderId);
+      expect(kept?.sentAt).toBe(SWEEP_NOW);
+      expect(kept?.sentBody).toBe('the body that went out');
+
+      // And the tour's live view holds exactly the sent row.
+      expect(await tourReminders.listByTour(w.tour.tourId)).toHaveLength(1);
+    });
+
+    it('touches no OTHER tour and is idempotent on a second call', async () => {
+      const mine = await sweepWorld('mine');
+      const theirs = await sweepWorld('theirs');
+
+      await tourReminders.deleteSupersededForTour(mine.tour.tourId);
+      await tourReminders.deleteSupersededForTour(mine.tour.tourId);
+
+      expect(await tourReminders.listByTour(mine.tour.tourId)).toHaveLength(1);
+      expect(await tourReminders.listByTour(theirs.tour.tourId)).toHaveLength(4);
+    });
+
+    it('a row that gains sentAt BETWEEN the list and the delete SURVIVES', async () => {
+      const w = await sweepWorld('race');
+
+      // The real race, driven through the injectable client rather than a
+      // production seam: listByTour returns the plan, and the poll claims one of
+      // the listed rows before the sweep's delete reaches it. The delete's
+      // attribute_not_exists(sentAt) is what saves the send from being erased.
+      let raced = false;
+      const racingDoc = {
+        send: async (command: unknown) => {
+          const out = await (doc as DynamoDBDocumentClient).send(command as never);
+          if (command instanceof QueryCommand && !raced) {
+            raced = true;
+            await tourReminders.claimSend(w.pending.reminderId, SWEEP_NOW, 'raced body');
+          }
+          return out;
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const racingRepo = createTourRemindersRepo({ doc: racingDoc, env: testEnv, logger });
+
+      await racingRepo.deleteSupersededForTour(w.tour.tourId);
+
+      expect(raced).toBe(true);
+      const survivor = await rawReminder(w.pending.reminderId);
+      expect(survivor?.sentAt).toBe(SWEEP_NOW);
+      expect(survivor?.sentBody).toBe('raced body');
+      // One lost condition does not abort the batch - the other unsent rows went.
+      expect(await rawReminder(w.canceled.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.skipped.reminderId)).toBeUndefined();
+    });
+
+    it('an UNEXPECTED error on one row logs at error and does not abort the rest', async () => {
+      const w = await sweepWorld('boom');
+
+      const failingDoc = {
+        send: async (command: unknown) => {
+          if (
+            command instanceof DeleteCommand &&
+            (command.input.Key as { reminderId?: string } | undefined)?.reminderId ===
+              w.canceled.reminderId
+          ) {
+            throw new Error('throttled');
+          }
+          return (doc as DynamoDBDocumentClient).send(command as never);
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const failingRepo = createTourRemindersRepo({ doc: failingDoc, env: testEnv, logger });
+
+      const before = logCapture.lines.length;
+      await expect(
+        failingRepo.deleteSupersededForTour(w.tour.tourId),
+      ).resolves.toBeUndefined();
+
+      // The failure is LOUD (never silently vanished) but not fatal.
+      const errors = logCapture.lines
+        .slice(before)
+        .filter((l) => l['level'] === 50 && l['tourId'] === w.tour.tourId);
+      expect(errors).toHaveLength(1);
+
+      expect(await rawReminder(w.canceled.reminderId)).toBeDefined();
+      expect(await rawReminder(w.pending.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.skipped.reminderId)).toBeUndefined();
+      expect((await rawReminder(w.sent.reminderId))?.sentAt).toBe(SWEEP_NOW);
+    });
+
+    it('a tour with no rows at all is a no-op', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-sweep-empty',
+        unitId: 'unit-sweep-empty',
+        scheduledAt: '2026-10-05T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+
+      await expect(
+        tourReminders.deleteSupersededForTour(tour.tourId),
+      ).resolves.toBeUndefined();
     });
   });
 

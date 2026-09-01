@@ -3042,6 +3042,16 @@ export function createFakeWorld(): FakeWorld {
         }
       }
     },
+    async deleteSupersededForTour(tourId) {
+      // Mirror the real sweep (supersession D1): the ONLY filter is "never
+      // sent" - pending, operator-canceled and skipped rows all go, and every
+      // sentAt row stays. NOT cancelForTour's triple filter.
+      for (const r of [...tourRemindersMap.values()]) {
+        if (r.tourId === tourId && r.sentAt === undefined) {
+          tourRemindersMap.delete(r.reminderId);
+        }
+      }
+    },
   };
 
   // In-memory pending roster actions (contact-rosters Task 12/13): the durable

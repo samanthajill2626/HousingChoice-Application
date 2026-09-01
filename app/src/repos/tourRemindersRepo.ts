@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
-  GetCommand,
+  DeleteCommand,
   PutCommand,
   QueryCommand,
   type QueryCommandInput,
@@ -191,6 +191,24 @@ export interface TourRemindersRepo {
   uncancel(reminderId: string): Promise<boolean>;
   /** Cancel all pending (not yet sent, canceled, or skipped) reminders for this tour. */
   cancelForTour(tourId: string): Promise<void>;
+  /**
+   * HARD-DELETE every never-sent rung of this tour (supersession D1): pending,
+   * operator-canceled and skipped alike. Only rows carrying `sentAt` survive -
+   * a send is a fact and its history is never erased.
+   *
+   * This is deliberately NOT cancelForTour's filter. That one keeps canceled
+   * and skipped rows, which are exactly the rows a superseded ladder must stop
+   * showing: an operator who canceled a rung of a ladder that no longer exists
+   * is looking at debris, not at a decision.
+   *
+   * Each delete is CONDITIONAL on `attribute_not_exists(sentAt)`, so a rung the
+   * poll claims between the list and the delete keeps its send. A lost
+   * condition is a benign no-op; an unexpected per-row error is logged and the
+   * rest of the batch still runs. Never throws for either.
+   *
+   * Inherits listByTour's UNPAGINATED 1 MB read (spec R5, non-goal 5).
+   */
+  deleteSupersededForTour(tourId: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +490,46 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
         }
       }
       log.info({ tourId, canceled }, 'tour reminders canceled for tour');
+    },
+
+    async deleteSupersededForTour(tourId) {
+      const rows = await this.listByTour(tourId);
+      // THE ONLY FILTER IS "never sent". Deliberately not cancelForTour's
+      // triple: canceled and skipped rows are exactly what a superseded ladder
+      // must stop showing.
+      const unsent = rows.filter((r) => r.sentAt === undefined);
+      // Promise.allSettled so one lost conditional delete (the poll claimed
+      // sentAt between listByTour and now) does not abort the remaining rows.
+      const results = await Promise.allSettled(
+        unsent.map((r) =>
+          doc.send(
+            new DeleteCommand({
+              TableName: table,
+              Key: { reminderId: r.reminderId },
+              // The race guard: a rung that GAINED sentAt since the list is a
+              // real send and must survive - deleting it would erase history
+              // for a message the tenant already has.
+              ConditionExpression: 'attribute_not_exists(#sentAt)',
+              ExpressionAttributeNames: { '#sentAt': 'sentAt' },
+            }),
+          ),
+        ),
+      );
+      // Per-row races are benign debug; anything else is logged at error and
+      // the batch continues (it is NOT rethrown - a partially swept tour still
+      // beats an aborted sweep, and the pointer rotation already refuses what
+      // is left).
+      let deleted = 0;
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          deleted++;
+        } else if (result.reason instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId }, 'tour reminder sweep: row was sent since the list - keeping');
+        } else {
+          log.error({ err: result.reason, tourId }, 'tour reminder sweep: unexpected error on row');
+        }
+      }
+      log.info({ tourId, deleted }, 'superseded tour reminders deleted');
     },
   };
 }

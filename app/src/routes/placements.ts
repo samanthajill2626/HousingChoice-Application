@@ -50,7 +50,6 @@ import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repo
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
-import { cancelTourReminders } from '../jobs/tourReminders.js';
 import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
 import {
   createStatusTransitionService,
@@ -638,7 +637,8 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
 
   // POST /api/placements/from-tour — the Post-Tour & Application conversion.
   // Creates the placement from a CONVERTIBLE tour (exit gate said move forward),
-  // finalizes the tour (closed + convertedPlacementId + reminders canceled) and
+  // finalizes the tour (closed + convertedPlacementId + a ROTATED reminder-ladder
+  // pointer, in one write), sweeps the tour's unsent reminder rungs away and
   // re-parents the tour's masked relay thread to the placement. QUIET: no
   // announcement message is sent (founder 2026-07-02). PII: log ids only.
   router.post('/from-tour', async (req: AuthedRequest, res) => {
@@ -691,11 +691,26 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     //
     // Ordering (each pre-finalize failure RELEASES the claim so a retry is clean):
     //   1. Guards above (404s, convertible, fast-path 409).
-    //   2. claimConversion(sentinel)                — CCFE → 409 (race loser).
-    //   3. cancelTourReminders                      — fail → release + rethrow.
-    //   4. placements.create                        — fail → release + rethrow.
-    //   5. finalize patch (replace sentinel w/ id)  — fail → release + LOUD log.
-    //   6. best-effort tail (rebind/audit/…)        — never fails the 201.
+    //   2. claimConversion(sentinel)                - CCFE -> 409 (race loser).
+    //   3. placements.create                        - fail -> release + rethrow.
+    //   4. finalize patch: sentinel -> real id,     - fail -> release + LOUD log.
+    //      status closed, ROTATED currentLadderId
+    //      (ONE write, see below).
+    //   5. deleteSupersededForTour                  - best-effort, never fails the 201.
+    //   6. best-effort tail (rebind/audit/...)      - never fails the 201.
+    //
+    // NOTHING retires this tour's reminders BEFORE the finalize (supersession
+    // spec 3.2). A failed create or a failed finalize releases the claim and
+    // leaves the tour scheduled and RETRYABLE by design, so any pre-finalize
+    // disarm would have to be reversible - and neither of the two available ones
+    // is: deleting a rung is final, and a claim-skip stamps skippedAt, which is
+    // terminal (tourRemindersRepo), so releasing the claim could not bring the
+    // ladder back. The reversible disarm is the claim the tour is already
+    // carrying: while the `pending:` sentinel is stored, the poll DEFERS every
+    // rung of this tour unclaimed (jobs/tourReminders.ts), so nothing fires
+    // mid-conversion and nothing is stamped. AT the finalize the conversion is
+    // real and there is nothing left to reverse, so the pointer rotation rides
+    // that one write (step 4) and the sweep follows it (step 5).
     const sentinel = `pending:${randomUUID()}`;
     try {
       await tours.claimConversion(tour.tourId, sentinel);
@@ -706,17 +721,6 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
         return;
       }
       throw err; // Express 5 forwards async throws to the error handler (500).
-    }
-
-    // The tour is now CLAIMED (convertedPlacementId = sentinel). Cancel reminders
-    // BEFORE creating/finalizing: canceling reminders on a still-unconverted tour
-    // is benign retry residue, but a live reminder firing on a CONVERTED tour
-    // would not be — so cancel must precede finalize. Fail → release + rethrow.
-    try {
-      await cancelTourReminders(tour.tourId, { tourRemindersRepo: reminders, logger: log });
-    } catch (err) {
-      await tours.releaseConversionClaim(tour.tourId, sentinel);
-      throw err;
     }
 
     // Create the placement at the ladder's first rung, carrying the tour
@@ -754,8 +758,21 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     // LOUDLY with the orphan placementId. ACCEPTED RESIDUE: a retry after a
     // finalize-failure creates a SECOND placement; the orphan is findable via its
     // fromTourId + this loud log.
+    //
+    // The finalize ALSO ROTATES the reminder-ladder pointer (supersession spec
+    // 3.2), in this same write and never as a second one: a separate rotation
+    // reopens a window in which the tour is converted but still points at a live
+    // ladder, and adds a rotation-failure branch nothing covers. After it, every
+    // rung of the old ladder is refused by the poll and by Send now - which is
+    // what makes the sweep below merely best-effort. Minted above the try so the
+    // failure logs can name the value that did not land.
+    const rotatedLadderId = randomUUID();
     try {
-      await tours.patch(tour.tourId, { status: 'closed', convertedPlacementId: created.placementId });
+      await tours.patch(tour.tourId, {
+        status: 'closed',
+        convertedPlacementId: created.placementId,
+        currentLadderId: rotatedLadderId,
+      });
     } catch (err) {
       try {
         await tours.releaseConversionClaim(tour.tourId, sentinel);
@@ -766,10 +783,37 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
         );
       }
       log.error(
-        { err, tourId: tour.tourId, orphanPlacementId: created.placementId },
+        { err, tourId: tour.tourId, orphanPlacementId: created.placementId, rotatedLadderId },
         'convert: FINALIZE FAILED after placement created — ORPHAN placement (findable via fromTourId)',
       );
       throw err;
+    }
+
+    // RETIRE THE TOUR'S LADDER (supersession spec 3.2 / acceptance 7). The
+    // finalize above rotated currentLadderId, so the unsent rungs are already
+    // unreachable; this sweep is what stops them being SHOWN as promises the
+    // tour can no longer keep. It hard-deletes the unsent rows only - anything
+    // with a sentAt keeps its history.
+    //
+    // Best-effort by design (T8.4): the conversion is persisted and must not be
+    // rolled back for a failed sweep, and the rotation is the backstop for
+    // whatever the sweep misses. deleteSupersededForTour does not throw (it logs
+    // per row and continues) - the try/catch is this tail's posture, not a claim
+    // about that contract.
+    //
+    // T8.5, ACCEPTED: this route emits no `scheduled.updated` (only tour and
+    // placement events, below), so the contact and group Upcoming buckets stay
+    // stale until their next refetch. That is parity with the cancel path this
+    // replaced, not a regression introduced here - the difference is that the
+    // stale rows are now DELETED rather than canceled, so the refetch drops them
+    // entirely instead of re-rendering them as canceled.
+    try {
+      await reminders.deleteSupersededForTour(tour.tourId);
+    } catch (err) {
+      log.error(
+        { err, tourId: tour.tourId, placementId: created.placementId, rotatedLadderId },
+        'convert: superseded tour reminder sweep failed (best-effort) - the rotated pointer keeps the rows harmless',
+      );
     }
 
     // Re-parent the masked relay thread (metadata-only; pool + members preserved).

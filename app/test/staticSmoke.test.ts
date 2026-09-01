@@ -56,25 +56,47 @@ const FIXTURE_ASSET_BODY = "export const marker = 'static-smoke-fixture-asset-bo
 // Fixture index.html, constrained in BOTH directions:
 //   MUST contain '<div id="root">' - the SPA-fallback and traversal cases
 //     assert the served body IS the shell;
-//   MUST NOT contain '"version"', '"private"' or 'root:' - with no decoy files
-//     the traversal probes assert against whatever the SPA fallback returns,
-//     which IS this file, so any of those three would fail those assertions for
-//     a reason with nothing to do with traversal.
+//   MUST NOT contain '"version"', '"private"' or 'root:' - the traversal probes
+//     assert those three are absent from every response, and a 200 there is
+//     normally this very file, so any of them here would fail those assertions
+//     for a reason with nothing to do with traversal.
 const FIXTURE_INDEX_HTML =
   `<!doctype html><html lang="en"><head><title>${FIXTURE_MARKER}</title></head>` +
   '<body><div id="root"></div></body></html>';
 
+// Decoy exfiltration targets, written INSIDE the temp root at the depths the
+// traversal probes resolve to. Carries both leak markers the probes assert on
+// ('"version"' and '"private"'), and nothing else - it is never a real package.
+const DECOY_PACKAGE_JSON = '{"name":"static-smoke-decoy","version":"0.0.0","private":true}';
+
+// The fixture is a THREE-level tree, not a bare dist:
+//
+//   <root>/package.json          <- two levels up from dist: the depth
+//                                   '/../../package.json' and
+//                                   '/assets/../../../package.json' resolve to
+//   <root>/site/package.json     <- one level up from dist
+//   <root>/site/dist/            <- DASHBOARD_DIST_DIR
+//       index.html, assets/app-fixture.js
+//
+// Everything this file writes lives under <root>, which afterAll removes.
+let root: string | undefined;
 let distDir: string;
 
 beforeAll(() => {
-  distDir = mkdtempSync(path.join(os.tmpdir(), 'hc-static-smoke-'));
-  writeFileSync(path.join(distDir, 'index.html'), FIXTURE_INDEX_HTML);
+  root = mkdtempSync(path.join(os.tmpdir(), 'hc-static-smoke-'));
+  distDir = path.join(root, 'site', 'dist');
   mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+  writeFileSync(path.join(distDir, 'index.html'), FIXTURE_INDEX_HTML);
   writeFileSync(path.join(distDir, 'assets', 'app-fixture.js'), FIXTURE_ASSET_BODY);
+  writeFileSync(path.join(root, 'package.json'), DECOY_PACKAGE_JSON);
+  writeFileSync(path.join(root, 'site', 'package.json'), DECOY_PACKAGE_JSON);
 });
 
 afterAll(() => {
-  rmSync(distDir, { recursive: true, force: true });
+  // Guarded: a beforeAll that threw before mkdtempSync returned leaves `root`
+  // undefined, and rmSync(undefined) would replace that failure with a
+  // TypeError from the teardown.
+  if (root) rmSync(root, { recursive: true, force: true });
 });
 
 /** Built per test, AFTER the fixture exists (the old shape built it in the
@@ -187,25 +209,27 @@ describe('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
 
   it('serves the browser-hardening headers on the SPA fallback (and / and assets)', async () => {
     const app = fixtureApp();
-    for (const path of ['/', '/some/client/route']) {
-      const res = await request(app).get(path).set('x-origin-verify', SECRET);
-      expect(res.status, path).toBe(200);
-      expect(res.headers['x-frame-options'], path).toBe('DENY');
-      expect(res.headers['referrer-policy'], path).toBe('strict-origin-when-cross-origin');
-      expect(res.headers['x-content-type-options'], path).toBe('nosniff');
+    // `route`, not `path`: this file imports node:path, and a loop variable of
+    // that name shadows it for the whole block.
+    for (const route of ['/', '/some/client/route']) {
+      const res = await request(app).get(route).set('x-origin-verify', SECRET);
+      expect(res.status, route).toBe(200);
+      expect(res.headers['x-frame-options'], route).toBe('DENY');
+      expect(res.headers['referrer-policy'], route).toBe('strict-origin-when-cross-origin');
+      expect(res.headers['x-content-type-options'], route).toBe('nosniff');
       const csp = res.headers['content-security-policy'];
-      expect(csp, path).toContain("default-src 'self'");
-      expect(csp, path).toContain("script-src 'self'");
+      expect(csp, route).toContain("default-src 'self'");
+      expect(csp, route).toContain("script-src 'self'");
       // The ONE documented allowance: React inline style={} attributes.
-      expect(csp, path).toContain("style-src 'self' 'unsafe-inline'");
+      expect(csp, route).toContain("style-src 'self' 'unsafe-inline'");
       // blob: = local object URLs (URL.createObjectURL) for the MMS composer's
       // pre-send image preview chip (dashboard Timeline) - in-memory,
       // document-created content, no network fetch.
-      expect(csp, path).toContain("img-src 'self' data: blob:");
-      expect(csp, path).toContain("connect-src 'self'");
-      expect(csp, path).toContain("frame-ancestors 'none'");
+      expect(csp, route).toContain("img-src 'self' data: blob:");
+      expect(csp, route).toContain("connect-src 'self'");
+      expect(csp, route).toContain("frame-ancestors 'none'");
       // No media store configured -> no bucket origin leaks into the CSP.
-      expect(csp, path).not.toContain('amazonaws.com');
+      expect(csp, route).not.toContain('amazonaws.com');
     }
   });
 
@@ -213,16 +237,42 @@ describe('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
     // What these pin is OUR COMPOSITION, not the library's internals: given
     // this app's particular stack of static serving, SPA fallback and reserved
     // namespaces, no encoded '..' yields anything but the SPA shell or a 4xx.
-    // A future static-serving change could lose that property, which is why
-    // the probes are worth keeping even though nothing is reachable.
     //
-    // There are deliberately NO decoy files, at any depth. send (installed
-    // 1.2.1) decodes the request path and rejects any normalized '..' segment
-    // with UP_PATH_REGEXP BEFORE it touches the filesystem, so no decoy could
-    // ever be read - one would only make these probes look sharper than they
-    // are. The body assertions instead check that the response is this
-    // fixture's SPA shell: the fixture index.html deliberately carries none of
-    // the three leak markers below.
+    // THE DECOYS ARE WHAT MAKE THAT FALSIFIABLE. The fixture writes a
+    // package.json carrying both leak markers below at exactly the depths these
+    // probes resolve to, all INSIDE the mkdtemp root (nothing is ever written
+    // outside it). Under a resolver that decoded the path itself, four of the
+    // six land on <root>/package.json:
+    //
+    //   /%2e%2e%2f%2e%2e%2fpackage.json          -> dist/../../package.json
+    //   /..%2f..%2fpackage.json                  -> dist/../../package.json
+    //   /..%5c..%5cpackage.json                  -> dist/..\..\package.json
+    //   /assets/%2e%2e%2f%2e%2e%2f%2e%2e%2f...   -> dist/assets/../../../package.json
+    //
+    // The other two cannot be given a target here, for different reasons, and
+    // both are kept:
+    //   /%2e%2e/%2e%2e/package.json - the HTTP CLIENT never sends it. A URL
+    //     parser decodes %2e and collapses the resulting '..' segments, so this
+    //     one arrives as plain '/package.json' (measured 2026-09-01: supertest
+    //     hands express req.path = '/package.json'). It therefore probes the
+    //     no-such-file path, not traversal - worth keeping only because a raw
+    //     socket or a less normalising client would not do that.
+    //   /%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd - resolves OUTSIDE the root, so
+    //     planting its target would mean writing outside the temp tree. It stays
+    //     a pure SHAPE probe on 'root:'.
+    //
+    // <root>/site/package.json covers the remaining in-root depth (one level
+    // above dist), for a future probe or a differently-rooted dist.
+    //
+    // Today none of the decoys is ever read: send (installed 1.2.1 when this
+    // was written, 2026-09-01 - an observation about the pinned version, not an
+    // invariant; see the S3 record) decodes the request path and rejects any
+    // normalized '..' segment with UP_PATH_REGEXP before touching the
+    // filesystem. Their job is to make a FUTURE leaky static layer OBSERVABLE.
+    // That was proven, not assumed: a review reproduction on 2026-09-01 drove a
+    // hand-rolled resolver with these exact probes and this exact assertion
+    // block, and it leaked 4 of the 6 only when a target file existed at the
+    // probed depth - 0 of 6 against the old target-less fixture.
     const app = fixtureApp();
     for (const probe of [
       '/%2e%2e%2f%2e%2e%2fpackage.json',

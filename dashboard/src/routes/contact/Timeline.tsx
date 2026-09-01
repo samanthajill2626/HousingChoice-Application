@@ -574,6 +574,7 @@ function recipientSummaryName(
   messageAtMs: number | undefined,
   nowMs: number | undefined,
   media: boolean,
+  includeRecipientTransport: boolean,
 ): string {
   const spoken = speakDeliveryText(headline);
   const anonymous = rows.every((r) => r.name.match === 'unidentified' && !r.name.phoneKeyed);
@@ -584,7 +585,7 @@ function recipientSummaryName(
     const legReason = leg?.isFailure === true
       ? deliveryReason(row.slot.errorCode, { media })
       : undefined;
-    const transport = presentRecipientTransport(row.slot);
+    const transport = includeRecipientTransport ? presentRecipientTransport(row.slot) : null;
     const details = [leg === null ? null : chipText(leg, legReason), transport].filter(
       (detail): detail is string => detail !== null,
     );
@@ -941,6 +942,7 @@ function MessageBubble({
           messageAtMs,
           bubbleNowMs,
           isMms,
+          msg.transport_schema_version === 1,
         )
       : undefined;
   // Multi-party attribution: who authored this message ("Team" or a member's
@@ -961,6 +963,7 @@ function MessageBubble({
           messageAtMs,
           bubbleNowMs,
           isMms,
+          msg.transport_schema_version === 1,
         )
       : undefined;
 

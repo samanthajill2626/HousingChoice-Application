@@ -415,7 +415,7 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     expect(screen.queryByRole('list', { name: LIST_NAME })).not.toBeInTheDocument();
   });
 
-  it('revealed, an INBOUND relay source bubble still renders no list', () => {
+  it('revealed, an INBOUND relay source bubble discloses its available outbound leg', () => {
     const msg: TimelineItem = {
       ...RELAY_OUT,
       id: 'r-in',
@@ -431,7 +431,11 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     };
     renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
     reveal('is the unit available?');
-    expect(screen.queryByRole('list', { name: LIST_NAME })).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByRole('listitem', {
+        name: 'Lars Landlord - Delivered',
+      }),
+    ).toBeInTheDocument();
   });
 
   it('collapses the list again when a ROW is clicked - the rows do not stopPropagation', () => {

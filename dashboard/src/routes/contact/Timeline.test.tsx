@@ -1360,6 +1360,10 @@ describe('Timeline relay-group annotations', () => {
   it('keeps legacy Relay recipient delivery copy free of an unresolved transport claim', () => {
     renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
 
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toHaveAccessibleName(
+      'delivered 1 of 2, 1 not confirmed. Keisha Kane: Delivered. Lars Landlord: Sent, not confirmed.',
+    );
+
     fireEvent.click(screen.getByText('Team reply to the group'));
 
     const list = screen.getByRole('list', { name: 'Delivery by recipient' });
@@ -1387,6 +1391,10 @@ describe('Timeline relay-group annotations', () => {
       rosterKind: 'group_text',
     });
 
+    expect(screen.getByText('Delivered 1/1')).toHaveAccessibleName(
+      'Delivered 1 of 1. Keisha Kane: Delivered.',
+    );
+
     fireEvent.click(screen.getByText('legacy Group MMS recipient'));
 
     const list = screen.getByRole('list', { name: 'Delivery by recipient' });
@@ -1409,6 +1417,10 @@ describe('Timeline relay-group annotations', () => {
     };
 
     renderTimeline({ items: [unresolved], relayRoster: ROSTER });
+
+    expect(screen.getByText('Delivered 1/1')).toHaveAccessibleName(
+      'Delivered 1 of 1. Keisha Kane: Delivered, Unknown.',
+    );
 
     fireEvent.click(screen.getByText('version-1 unresolved recipient'));
 

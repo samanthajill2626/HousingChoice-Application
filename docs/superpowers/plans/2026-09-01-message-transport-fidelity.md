@@ -1287,7 +1287,8 @@ Use table-driven tests for these outcomes:
 | v1 outbound requested SMS/MMS/RCS, actual absent | requested uppercase |
 | v1 outbound requested equals actual | one uppercase value |
 | v1 outbound request differs from actual | `REQUESTED -> ACTUAL` |
-| v1 outbound request absent, actual present/absent | `Unknown` |
+| v1 outbound request absent, actual present | actual uppercase |
+| v1 outbound request absent, actual absent | `Unknown` |
 
 Then cover recipient aggregation:
 

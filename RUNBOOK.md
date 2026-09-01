@@ -284,6 +284,27 @@ Per environment, in this order, and take **dev all the way through before starti
 
 **Every repair leaves a spare copy behind.** The media bucket is versioned and carries NO lifecycle rule, so an in-place type rewrite retains the previous object version: the old bytes stay recoverable, at the cost of one extra full copy of every repaired object. Priced for this population and only for this one - prod held 11 media-bearing messages on 2026-08-18 (the media pointer backfill above) and dev is similar, so expect a run measured in seconds and a handful of retained versions.
 
+### One-time: retire tour reminders armed during the 2026-08 pause (2026-08-31): NO schema change, ONE sweep, SWEEP FIRST
+
+**Feature branch `feat/tour-reminder-ladder-phase-b` - owed ONCE on dev AND prod; nothing else is owed (no Terraform, no secrets, no SSM). This is a one-time cleanup of a bounded population, not a recurring job.** Tour reminders were paused on 2026-08-20 (manual-only): a paused rung is left PENDING rather than retired, so "Send now" keeps working - which means every rung armed during the pause is still sitting in the ladder, due, waiting. This branch lifts the pause, so those rows have to be retired before anyone looks at a panel that still promises to send them. The sweep retires TWO populations, and a row in both takes the first one's token:
+
+- **`tour_already_passed`** - a pending rung whose OWN dueAt precedes a tour that has already happened. Its copy assumes the tour is still ahead ("your tour is tomorrow"), so it must never go out. The one rung that is NOT swept is `no_show_checkin`, whose dueAt deliberately follows the tour - the exemption is derived from the row's own data, not from a name in a list.
+- **`kind_retired`** - every pending `confirmation`. That kind is discontinued, and the kind list governs ARMING only, so a confirmation armed for a tour still in the future survives the removal. Sweeping these is panel hygiene: left alone they sit in the ladder forever reading "no longer sent" against a tour that has not happened yet.
+
+Per environment, in this order, and take **dev all the way through before starting prod**:
+
+1. **Dry run:** `npx tsx app/scripts/retire-paused-tour-reminders.ts --dry-run`. There is deliberately no npm script, matching every other backfill here. It scans and reports counts per token and writes NOTHING. It needs `TABLE_PREFIX` (and `DYNAMODB_ENDPOINT` if you are not pointing at the default) plus the `housingchoice` AWS profile for the TARGET environment - the same ambient-environment convention as the backfills above. No Twilio credentials, no S3, no network beyond DynamoDB.
+2. **Read the report before applying.** `scanned` is the whole reminder table; `tourAlreadyPassed` and `kindRetired` are what would be stamped; `skipped` is everything already terminal or still legitimately pending. The report logs counts, tourIds and reminderIds only - never a name, a phone or a message body.
+3. **Apply:** the same command WITHOUT `--dry-run`. Every write is CONDITIONAL on the row still being pending, so a rung the running app sends, cancels or skips mid-run keeps the app's outcome and is counted under `skippedOnCondition` instead of being overwritten.
+4. **Re-running is safe and expected.** Terminal rows are never touched, so a second pass reports zero stamped and zero conditional losses. Run it again after the deploy if anything was in flight during the first pass.
+5. **Deploy the app image built from this `main`** (`npm run deploy:dev`, then the promote for prod).
+
+**SWEEP FIRST is the PREFERENCE, not a deadline - and that is the point.** The reason a deadline used to exist is that lifting the pause without the sweep would let the next poll tick send the whole backlog at once. Two runtime guards ship in the same deploy and remove it: `DISCONTINUED_REMINDER_KINDS` stops a `confirmation` sending by any path, permanently, and the fire-time past-tour gate in `app/src/jobs/tourReminders.ts` claim-skips any rung whose own dueAt precedes a tour that has already started. So a deploy that lands before the sweep sends nothing wrong - the sweep is cleanup of a condition the runtime also enforces, which is exactly what makes the order a preference. Sweeping first is still preferred because it means the panel is honest from the first moment the new dashboard is live rather than a poll tick later.
+
+**Between a sweep and the deploy, the chips degrade cleanly.** Swept rows carry `tour_already_passed` / `kind_retired` while the RUNNING dashboard bundle has no labels for them, so `RemindersPanel` falls back to a bare "Skipped" chip with no reason. That resolves itself at the deploy. Recorded here so it is not diagnosed as a bug.
+
+**No agent runs this against dev or prod.** It is a data mutation on a real environment; the human runs it. An agent may run it only against a hermetic local lane. The founder's LOCAL imported dataset takes the same dry-run-first sequence; disposable e2e lanes bootstrap their own tables and need nothing.
+
 ### Unit photos: direct-upload CORS (apply BEFORE the upload path works)
 
 **Infra change - `feat/unit-photos` MERGED to main (@05aba86). DEV: CORS APPLIED 2026-07-16 (upload path live on dev). PROD: rides the M1.11 cutover (still to apply).**

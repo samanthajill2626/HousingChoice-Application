@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MESSAGE_TRANSPORTS,
   REMINDER_SKIP_REASON_LABELS,
   sendNowErrorMessage,
   suggestionResolutionErrorMessage,
 } from './types.js';
+
+describe('MESSAGE_TRANSPORTS', () => {
+  it('mirrors the complete authenticated message transport contract', () => {
+    expect(MESSAGE_TRANSPORTS).toEqual(['sms', 'mms', 'rcs']);
+  });
+});
 
 // The complete accept/dismiss error vocabulary the suggestion-resolution routes
 // can return today (app/src/services/suggestionResolution.ts +

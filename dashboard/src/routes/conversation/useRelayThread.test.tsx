@@ -53,6 +53,40 @@ describe('toTimelineMessage - import provenance', () => {
   });
 });
 
+describe('toTimelineMessage - transport facts', () => {
+  it('copies versioned message and recipient transport facts unchanged', () => {
+    const message = {
+      conversationId: 'c1',
+      tsMsgId: '2026-09-01T10:00:00.000Z#SM1',
+      provider_sid: 'SM1',
+      provider_ts: '2026-09-01T10:00:00.000Z',
+      created_at: '2026-09-01T10:00:00.000Z',
+      direction: 'outbound',
+      author: 'teammate',
+      type: 'sms',
+      delivery_status: 'sent',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      delivery_recipients: {
+        'contact-1': {
+          status: 'sent',
+          requestedTransport: 'rcs',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    } as Message;
+
+    expect(toTimelineMessage(message)).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      delivery_recipients: message.delivery_recipients,
+    });
+  });
+});
+
 describe('toTimelineMessage - masked relay calls', () => {
   it('maps safe call metadata instead of dropping the call or forwarding media', () => {
     const call = {
@@ -155,8 +189,9 @@ async function flushDebounce(): Promise<void> {
 }
 
 function Probe({ conversationId = 'c1' }: { conversationId?: string }): React.JSX.Element {
-  const { status, items, hasOlder, loadingOlder, loadOlder, olderPagesLoaded } =
-    useRelayThread(conversationId);
+  const thread = useRelayThread(conversationId);
+  latestThread = thread;
+  const { status, items, hasOlder, loadingOlder, loadOlder, olderPagesLoaded } = thread;
   return (
     <div>
       <span data-testid="status">{status}</span>
@@ -171,10 +206,58 @@ function Probe({ conversationId = 'c1' }: { conversationId?: string }): React.JS
   );
 }
 
+let latestThread: ReturnType<typeof useRelayThread> | null = null;
+
 beforeEach(() => {
   getConversationMessages.mockReset();
   getConversationScheduled.mockReset().mockResolvedValue({ scheduled: [] });
   lastHandlers = {};
+  latestThread = null;
+});
+
+describe('useRelayThread transport state', () => {
+  it('keeps optimistic carrier rows transport-free until server refetch', async () => {
+    getConversationMessages.mockResolvedValue([]);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    let tempId = '';
+    act(() => {
+      tempId = latestThread!.addOptimistic('c1', 'pending');
+    });
+    expect(latestThread!.items[0]).toMatchObject({ optimistic: true });
+    expect(latestThread!.items[0]).not.toHaveProperty('requested_transport');
+
+    act(() => {
+      latestThread!.resolveOptimistic(tempId, {
+        conversationId: 'c1',
+        providerSid: 'SM1',
+        tsMsgId: 'm1',
+        status: 'sent',
+      });
+    });
+    expect(latestThread!.items[0]).toMatchObject({ optimistic: true, id: 'm1' });
+
+    getConversationMessages.mockResolvedValueOnce([{
+      ...message(1),
+      tsMsgId: 'm1',
+      body: 'pending',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+    }]);
+    await act(async () => {
+      lastHandlers.onMessagePersisted?.({ conversationId: 'c1' });
+      await flushDebounce();
+    });
+    await waitFor(() => expect(latestThread!.items).toHaveLength(1));
+    expect(latestThread!.items[0]).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+    });
+    expect(latestThread!.items[0]).not.toHaveProperty('optimistic');
+  });
 });
 
 describe('useRelayThread paging', () => {

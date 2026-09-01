@@ -78,6 +78,7 @@ import {
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import type { PlacementStage } from '../lib/statusModel.js';
+import type { MessageTransport } from '../lib/messageTransport.js';
 import { LISTING_STATUS_LABELS } from '../lib/statusModel.js';
 import {
   resolveUsableGroup,
@@ -155,6 +156,9 @@ interface TimelineMessage extends TimelineBase {
   direction: MessageDirection;
   author: MessageAuthor;
   type: 'sms' | 'mms' | 'email';
+  transport_schema_version?: 1;
+  requested_transport?: MessageTransport;
+  actual_transport?: MessageTransport;
   body?: string;
   media_attachments?: MediaAttachment[];
   delivery_status: DeliveryStatus;
@@ -417,6 +421,15 @@ function toTimelineMessage(
     direction: m.direction,
     author: m.author,
     type,
+    ...(!isEmail && m.transport_schema_version !== undefined && {
+      transport_schema_version: m.transport_schema_version,
+    }),
+    ...(!isEmail && m.requested_transport !== undefined && {
+      requested_transport: m.requested_transport,
+    }),
+    ...(!isEmail && m.actual_transport !== undefined && {
+      actual_transport: m.actual_transport,
+    }),
     ...(m.body !== undefined && { body: m.body }),
     ...(media.length > 0 && { media_attachments: media }),
     delivery_status: m.delivery_status,

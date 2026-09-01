@@ -277,6 +277,66 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(msg.body).toHaveLength(500);
   });
 
+  it('projects versioned transport facts without deriving them for legacy rows', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'SM-transport',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'sent',
+      transportSchemaVersion: 1,
+      requestedTransport: 'rcs',
+      actualTransport: 'sms',
+      deliveryRecipients: {
+        'contact-recipient': {
+          status: 'sent',
+          requestedTransport: 'rcs',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'SM-unresolved',
+      providerTs: '2026-06-16T11:00:00.000Z',
+      type: 'mms',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      transportSchemaVersion: 1,
+    });
+    await seedMessage('conv-a', '2026-06-16T12:00:00.000Z', 'SM-legacy');
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline?kinds=message');
+    expect(res.status).toBe(200);
+    const versioned = res.body.items.find((item: { id: string }) => item.id.includes('SM-transport'));
+    expect(versioned).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      delivery_recipients: {
+        'contact-recipient': {
+          requestedTransport: 'rcs',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+    const unresolved = res.body.items.find((item: { id: string }) => item.id.includes('SM-unresolved'));
+    expect(unresolved).toMatchObject({ transport_schema_version: 1, type: 'mms' });
+    expect(unresolved).not.toHaveProperty('requested_transport');
+    expect(unresolved).not.toHaveProperty('actual_transport');
+    const legacy = res.body.items.find((item: { id: string }) => item.id.includes('SM-legacy'));
+    expect(legacy).not.toHaveProperty('transport_schema_version');
+    expect(legacy).not.toHaveProperty('requested_transport');
+    expect(legacy).not.toHaveProperty('actual_transport');
+  });
+
   it('emits retry_of on a retry message so the client can collapse the superseded bubble', async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);

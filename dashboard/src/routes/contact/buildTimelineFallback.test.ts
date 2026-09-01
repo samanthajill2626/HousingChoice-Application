@@ -187,6 +187,42 @@ describe('buildTimelineFallback', () => {
     });
   });
 
+  it('copies versioned message and recipient transport facts without inference', () => {
+    const conversations = [convOf({ conversationId: 'c-relay', type: 'relay_group' })];
+    const messagesByConvId = new Map<string, Message[]>([
+      ['c-relay', [msgOf({
+        conversationId: 'c-relay',
+        tsMsgId: 'transport',
+        type: 'sms',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
+        actual_transport: 'sms',
+        delivery_recipients: {
+          'c-bob': {
+            status: 'sent',
+            requestedTransport: 'rcs',
+            actualTransport: 'mms',
+            transportAggregationState: 'attempted',
+          },
+        },
+      })]],
+    ]);
+
+    expect(buildTimelineFallback(conversations, messagesByConvId)[0]).toMatchObject({
+      type: 'sms',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      delivery_recipients: {
+        'c-bob': {
+          requestedTransport: 'rcs',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+  });
+
   it('tolerates a conversation with no messages in the map', () => {
     const conversations = [convOf({ conversationId: 'c1' }), convOf({ conversationId: 'c2' })];
     const messagesByConvId = new Map<string, Message[]>([

@@ -1845,6 +1845,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const bottomGapRef = useRef(0);
   const prevCountRef = useRef(0); // item count at the last layout pass
   const prevKeyRef = useRef(resetScrollKey); // conversation identity last seen
+  // Whether the block was mounted at the last layout pass. Its appearance and
+  // its disappearance both invalidate the cached anchor - see the layout effect.
+  // Seeded with the MOUNT value so the first pass, which opens the thread on the
+  // newest message, is never treated as a change.
+  const prevHasBlockRef = useRef(upcoming !== undefined && upcoming.length > 0);
   const [hasNewBelow, setHasNewBelow] = useState(false);
   // The block's own height changes without any item-count change (a body
   // wrapping to a second line), and the anchor depends on it. A ResizeObserver
@@ -1941,6 +1946,20 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   useLayoutEffect(() => {
     const el = streamRef.current;
     if (!el) return;
+    // THE BLOCK APPEARED OR VANISHED under the operator (review round m2). Both
+    // the cached anchor and `bottomGapRef` were derived with the OLD block
+    // present, and a reschedule/terminal/convert emptying the bucket is this
+    // feature's commonest event. A stale `below` then restores a gap the content
+    // no longer warrants: the next growth scrolls the operator UP, away from the
+    // newest message, and clears the pill on the same line - the one situation
+    // the pill exists for. Re-derive from the DOM, which has already committed
+    // the mount/unmount. Keyed on the BOOLEAN, never on the `upcoming` array:
+    // GroupTextView passes a fresh `[]` literal every render.
+    if (prevHasBlockRef.current !== hasUpcomingBlock) {
+      prevHasBlockRef.current = hasUpcomingBlock;
+      anchorRef.current = currentAnchor(el);
+      bottomGapRef.current = el.scrollHeight - el.scrollTop;
+    }
     const count = clusters.reduce((n, c) => n + c.items.length, 0);
     const merged = paging?.olderPagesLoaded ?? 0;
     const prepended = merged !== seenOlderPagesRef.current;
@@ -1994,7 +2013,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     // `blockResizeTick` is here rather than in an effect of its own: the
     // prepend-anchor re-baseline above and the pill decision below both live in
     // THIS pass, and a standalone re-pin effect would bypass them.
-  }, [clusters, resetScrollKey, paging?.olderPagesLoaded, blockResizeTick]);
+    //
+    // `hasUpcomingBlock` is here so the UNMOUNT gets a pass at all: the observer
+    // effect only disconnects, nothing ticks `blockResizeTick`, and an item-count
+    // change is not required for the block to vanish.
+  }, [clusters, resetScrollKey, paging?.olderPagesLoaded, blockResizeTick, hasUpcomingBlock]);
 
   // Clear a stale anchor once the load settles. Runs after paint, so the layout
   // effect above has already had its chance to consume it.

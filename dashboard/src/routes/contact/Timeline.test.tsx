@@ -1646,6 +1646,38 @@ describe('Timeline stick-to-bottom', () => {
     expect(pill()).not.toBeInTheDocument();
   });
 
+  it('re-derives the anchor when the block VANISHES under the operator', () => {
+    // A reschedule/terminal/convert empties the bucket - this feature's
+    // commonest event - and the block unmounts while the operator is standing
+    // on it. Without the re-derive the cached `below` anchor and the bottom gap
+    // measured WITH the block survive, and the next message scrolls them up and
+    // away from it (review round m2).
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+    const el = stream();
+    makeScrollable(el, 500);
+    const rects = modelRects(el, 200);
+    el.scrollTop = 350; // sentinel bottom -50: down ON the block
+    fireEvent.scroll(el); // anchor 'below', bottomGap 150
+
+    // The bucket empties: the block unmounts, the content shrinks by its height
+    // and the browser clamps scrollTop to the new bottom.
+    setProp(el, 'scrollHeight', 300);
+    rects.setBlockHeight(0);
+    el.scrollTop = 200;
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', []));
+
+    // Now a message lands.
+    setProp(el, 'scrollHeight', 400);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', []));
+
+    // With no block, `below` is unreachable by construction: the operator was at
+    // the newest message and stays pinned to it. Restoring the stale 150px gap
+    // would have written 250 - 50px short of the bottom - and cleared the pill
+    // on the way past.
+    expect(el.scrollTop).toBe(300);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
   it('re-pins when the BLOCK changes height, with no change to the item count', () => {
     // The global ResizeObserver stub in src/test/setup.ts never fires its
     // callback, so a test that relied on it would pass vacuously. Install a

@@ -535,3 +535,82 @@ unknown-error path, which fails against a design that claims at the continuation
 point. Two watch items added so a later refactor cannot quietly undo the
 placement, since "move the claim next to where it is used" is exactly the tidy a
 reviewer would suggest.
+
+---
+
+# Scalar-check pass - the linchpin failed
+
+Report: `spec-r5-scalar-check.md`. Five findings; the one I flagged as
+load-bearing is the one that failed, and it failed hard.
+
+**The claim I asked to have verified rather than assumed: FALSE.** A post-throw
+SQS redelivery does NOT carry a fresh `jobId`. Verified myself:
+
+- `buildEnvelope` mints `jobId: randomUUID()` once at ENQUEUE (jobs.ts:188);
+  the envelope travels in the SQS body.
+- `dispatchJob` uses a complete envelope VERBATIM (jobs.ts:262) - the nearby
+  `randomUUID()` serves only the synthesized envelope-less path - and its
+  docblock says "the new jobRunId + **the stable jobId**" (jobs.ts:286).
+- `putJobExecutionMarker` is a conditional PUT with **no TTL**
+  (messagesRepo.ts:2630-2649).
+
+So a redelivery is suppressed at the marker and the handler returns having done
+nothing.
+
+## Two consequences
+
+**1. The claim must go BEFORE the marker.** After it, `fanout_attempt` freezes
+at 1 forever - the frozen-counter bug, reintroduced. The cost, a true duplicate
+consuming a rung, is cheap: a duplicate cannot double-send regardless, because
+the per-recipient terminal-status skip is what prevents that, not the counter.
+
+**2. "Throw and let the redelivery reach the cap" is DEAD, so the enqueue
+failure must close IMMEDIATELY.** This reverses round 1's B5 adjudication.
+
+B5's argument - an immediate close discards retries the durable counter just
+made reachable - was sound reasoning from a premise nobody checked: that
+redelivery does work. It does not. With redelivery suppressed, an immediate
+close is the ONLY path to a terminal state, which is exactly what the anchor
+issue proposed and what `a755c6f8` did for voice.
+
+Worth naming: round 1 REPLACED a correct mechanism (immediate close) with an
+incorrect one (throw-and-redeliver) on a well-argued finding, and it took four
+more rounds plus a direct question from Cameron to get back. The finding was
+right that the two rules conflicted; the resolution picked the wrong survivor.
+**A finding can be correct in its critique and wrong in its remedy, and the
+remedy is the reviewer's least-verified claim.**
+
+## A live bug on main, filed
+
+`docs/issues/throw-for-redelivery-defeated-by-job-marker.md`, severity high.
+
+Both fan-outs throw on an unrecognised send error specifically to force a
+redelivery, with a comment asserting "a fresh jobId via the visibility timeout"
+(broadcastFanOut.ts:456-459, relayFanOut.ts:531-535). The comment is false and
+`retrySend.ts:122-128` states the truth. On main today that throw retries
+nothing: it burns receive count to the DLQ while the broadcast row stays
+`sending` - the anchor issue's own symptom, reached by a third door.
+
+NOT fixed here. The remedy requires deciding what an unrecognised per-recipient
+error should do, and any fix must preserve the marker's actual purpose (never
+text someone twice). That is a behavior change with its own blast radius.
+
+## Remaining findings
+
+R5-2 accepted: tests 3, 5 and 7a asserted the redelivery behavior finding 1
+disproves and would have passed vacuously - the exact failure mode where a green
+suite proves nothing. Rewritten to assert immediate closure, plus a new 7a
+pinning claim-before-marker by construction.
+
+R5-3 accepted: the close is deferred one backoff interval and a redelivery
+consumes a rung. Both acceptable and now stated.
+
+R5-4, R5-5 accepted (precision). Q1, Q3, Q4, Q5 all verified sound: top-of-pass
+coverage holds within a delivery, `ADD`/`UPDATED_NEW` are correct with in-repo
+precedent at conversationsRepo.ts:1814 and :1631, the send count matches main,
+and no stale map references survive.
+
+On the deferred mission: Sec 2.1's framing confirmed right. One real trade
+noted - the parent-map seeding problem the scalar removes here lands on the
+lineage mission's two-level `retry_lineage`, and the in-repo answer exists at
+conversationsRepo.ts:2189-2214. Added to Sec 9's issue update.

@@ -195,31 +195,74 @@ defineJobHandler(JOB, async (raw) => {
 });
 ```
 
-**Claiming at the continuation point covers only the enqueue failure.** Each
-loop also carries an earlier `throw` for an unrecognised send error
+**Claiming at the continuation point would cover only the enqueue failure.**
+Each loop also carries an earlier `throw` for an unrecognised send error
 (broadcastFanOut.ts:459, relayFanOut.ts:535) that never reaches the continuation
-block at all. On that path the count never advances: redeliveries re-run, hit
-the same error, throw again, and the counter sits still. The cap is never
-reached, the close never runs, and only `maxReceiveCount` stops the looping -
-after which the DLQ holds the envelope while the broadcast row is still
-`sending` and its recipients still `queued`. **The same "stuck forever" symptom
-this branch exists to remove, through a different door.**
+block at all.
 
-Claiming immediately after the duplicate-delivery marker fixes that: **every**
-exit from the handler - unknown send error, enqueue failure, crash, timeout -
-happens after the count advanced. A redelivery walks the counter toward the cap,
-and the cap branch runs the close. The invariant is answered for the whole
-handler rather than one branch of it.
+Claiming at the top means **every** exit from the handler - unknown send error,
+enqueue failure, crash, timeout - happens after the count advanced. The counter
+records what was actually attempted rather than what was successfully scheduled,
+which is what makes it a truthful record of the work done.
 
-The claim sits AFTER the marker deliberately: a true duplicate delivery of the
-same `jobId` returns early and must not consume a pass. A redelivery after a
-throw carries a FRESH `jobId` (the visibility timeout), so it is not suppressed
-and does claim - which is what makes the ladder advance.
+**The claim sits BEFORE the marker, and this is forced.** The obvious ordering -
+marker first, so a duplicate cannot consume a pass - does not work here, because
+**`jobId` is STABLE across redeliveries**:
 
-**On enqueue failure the handler simply THROWS** - no catch, no early close.
-Both remaining sites are consumer-side, so SQS redelivers, the count has already
-advanced, and the cap is reached in due course. A transient blip costs a
-redelivery, not a recipient.
+- `buildEnvelope` mints `jobId: randomUUID()` ONCE, at enqueue (jobs.ts:188),
+  and the envelope travels in the SQS message body.
+- `dispatchJob` uses a complete envelope VERBATIM (jobs.ts:262); the fresh
+  `randomUUID()` nearby is only for the synthesized envelope-less path. Its own
+  docblock says "the new jobRunId + **the stable jobId**" (jobs.ts:286).
+- `putJobExecutionMarker` is a conditional PUT with **no TTL**
+  (messagesRepo.ts:2630-2649), so the suppression is permanent.
+
+A redelivery therefore hits the marker, gets `false`, and returns. With the
+claim after the marker, `fanout_attempt` would freeze at 1 forever - **the exact
+frozen-counter bug this branch exists to remove.**
+
+Claiming before the marker costs a rung to a true duplicate. That is the right
+trade: a duplicate cannot double-send anyway (the per-recipient terminal-status
+skip is what prevents that, not the counter), whereas a frozen counter defeats
+the entire design.
+
+### 3.4a Enqueue failure closes IMMEDIATELY
+
+The same fact overturns the other half. An earlier revision had the handler
+simply THROW on enqueue failure and rely on SQS redelivering into the cap. **A
+redelivery does no work** - it is suppressed at the marker. Nothing comes back.
+
+So on enqueue failure the handler runs the **close branch immediately** - which
+is what the anchor issue proposed ("wrap each re-enqueue and, on failure, run
+the cap/close branch immediately") and what `a755c6f8` did for the voice legs.
+
+```
+try {
+  await enqueue(JOB, { ...payload, attempt: claim.attempt }, { runAt: backoff });
+} catch (err) {
+  log.error(...);
+  await close();      // the ONLY path to terminal - nothing will redeliver
+  return;
+}
+```
+
+Round 1's objection to this (that an immediate close discards retries the
+durable counter made reachable) was sound reasoning from a false premise: those
+retries are not reachable, because redelivery is a no-op. The durable counter
+still earns its place - it makes the cap reachable across the LEGITIMATE
+continuations, each of which is a new enqueue with a fresh `jobId` - but it
+cannot rescue a failed enqueue on its own.
+
+**Pre-existing bug, discovered here and FILED, not fixed.** Both fan-outs throw
+deliberately on an unrecognised send error, commented "let the job FAIL so SQS
+redelivers the whole envelope (the marker is per-jobId; the redelivery is a
+fresh jobId via the visibility timeout)" - broadcastFanOut.ts:456-459,
+relayFanOut.ts:531-535. **That comment is false**, and `retrySend.ts:122-128`
+states the truth. On `main` today that throw is a no-op that burns receive count
+to the DLQ while the row stays `sending`. It is the anchor issue's symptom
+through a third door, it predates this branch, and fixing it means deciding what
+an unknown per-recipient error should DO - a behavior change with its own blast
+radius. Sec 9 files it.
 
 ### 3.5 Cap semantics
 
@@ -443,26 +486,28 @@ message-catalog rule does not apply (its own comment at :606 says so).
    against any design that puts the counter in the slot.**
 2. **Claim is atomic** - concurrent claims on one key yield distinct numbers;
    exactly one reaches the cap boundary.
-3. **Cap reachable with a dead queue** - `enqueue` stubbed to always throw. The
-   handler throws, the envelope redelivers, the durable count advances each
-   pass, and the cap branch runs: the broadcast finalizes with no recipient left
-   `queued`; relay marks every deferred recipient `failed`. **This is the
-   regression test for the anchor bug and must fail on `main`.**
-4. **The broadcast leaves "Sending"** on that path - asserted on the row, not a
-   log line.
-5. **A frozen envelope still terminates** - replaying an identical envelope
-   repeatedly advances the durable count to the cap.
+3. **A dead queue reaches a terminal state in ONE pass** - `enqueue` stubbed to
+   always throw. The close runs immediately (Sec 3.4a): the broadcast finalizes
+   with no recipient left `queued` and stops showing "Sending"; relay marks
+   every deferred recipient `failed`. **This is the regression test for the
+   anchor bug and must fail on `main`.** It must NOT be written as "throw, then
+   redeliver, then reach the cap" - redelivery is suppressed by the marker, so
+   such a test would pass vacuously while proving nothing.
+4. **The broadcast row leaves "Sending"** on that path - asserted on the row,
+   not a log line.
+5. **The claim advances across legitimate continuations** - a successful
+   continuation chain walks `fanout_attempt` 1, 2, 3 and closes at the cap.
 6. **Total send count is unchanged from `main`** on both ladders (Sec 3.5).
 7. **Claim against a pre-branch item** - an item with no `fanout_attempt`
    attribute claims successfully at 1 (`ADD` creates it), with no seeding step.
-7a. **An UNKNOWN send error also reaches the cap** - the regression test for the
-   gap the top-of-pass placement closes (Sec 3.4). Stub the send to throw an
-   unrecognised error; the handler throws, redeliveries advance the count, and
-   the cap branch closes the broadcast. **Fails against a design that claims at
-   the continuation point**, where that throw never reaches the claim.
-7b. **A true duplicate delivery does not consume a pass** - re-delivering the
-   SAME `jobId` returns at the execution marker and leaves `fanout_attempt`
-   untouched.
+7a. **The claim precedes the execution marker** - pinned by construction, since
+   the ordering is forced by `jobId` stability (Sec 3.4) and would otherwise be
+   an inviting "tidy". Assert that a redelivered envelope carrying the SAME
+   `jobId` still advances `fanout_attempt`, even though the handler returns at
+   the marker.
+7b. **A duplicate delivery still cannot double-send** - the per-recipient
+   terminal-status skip, not the counter, is what guarantees this. Assert no
+   second provider send for an already-`sent` recipient.
 8. **Rail** - a create whose participants have no binding yet resolves without
    repair and without a `rail_failed`; a create with a real per-member failure
    still repairs; 50386/50437 during repair is not a refusal; the adopt path is
@@ -518,8 +563,14 @@ message-catalog rule does not apply (its own comment at :606 says so).
 infra change, no env var, no schema migration - the new attribute is optional
 and self-seeding (Sec 3.2).
 
-Two non-infra obligations, both owed at handback rather than after merge:
+Three non-infra obligations, all owed at handback rather than after merge:
 
+0. **`throw-for-redelivery-defeated-by-job-marker` is filed** (done - severity
+   high). Discovered while verifying whether a post-throw redelivery could
+   advance the counter. It cannot, and both fan-outs rely on it doing so. This
+   branch does not fix it: the remedy requires deciding what an unrecognised
+   per-recipient send error should DO, which is a behavior change with its own
+   blast radius. Sec 3.4a records how this branch works around it.
 1. **The provider-status audit's out-of-region findings are filed as an issue**
    (Sec 5).
 2. **`relay-30003-retry-lineage` is updated** - and it must carry the DESIGN

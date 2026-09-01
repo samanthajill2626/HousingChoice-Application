@@ -422,3 +422,70 @@ finalizes; do not touch the inline rail path or the backoff); the rest was cut.
 
 A rewrite is new unreviewed material, so round 4 runs on it - the last permitted
 round, and the stop rule applies: if it changes no decision, the design is done.
+
+---
+
+# Spec round 4 - adjudications (final round)
+
+Report: `spec-r4-reviewer-a.md`, 12 findings, 4 blocking. **All 12 accepted.**
+The rescope itself broke two things, which is exactly what round 4 was for.
+
+Verified before acting:
+
+- **R4-1** - my `if_not_exists` seed in the same update as the `ADD` is the ONE
+  shape this repo documents as rejected (overlapping document paths), stated in
+  both files being edited. Replaced with a lazy cold-path seed: try the `ADD`,
+  and only on the parent-absent failure seed and retry. Two writes on first
+  claim, one thereafter.
+- **R4-4** - and the creation-site seed I proposed instead would have sent the
+  builder into `twilio.ts` (`deliveryRecipients: {}`), the file the rescope had
+  just fenced entirely. The lazy seed removes the need for ANY creation-site
+  edit, closing R4-1 and R4-4 together.
+- **R4-2** - "inline path UNCHANGED" was not expressible: `ensureGroupRail` has
+  no caller identity and the rules are shared code. Now an explicit opt-in flag
+  on `GroupRailRequest` that only the job and import callers pass, and the test
+  pins it by construction rather than by the untestable phrase "byte-identical"
+  (R4-12).
+- **R4-3** - VERIFIED and serious. `deliveryReason` has four call sites, not
+  one: `Timeline.tsx:582`, `:849`, `:1045`, `:1390`. The `:1045` per-recipient
+  row sits directly beneath the rollup, and the file's own comment at
+  :1035-1042 states the invariant my partial fix would break: "One `isMms` feeds
+  the rollup, this row and the accessible name, so the three cannot disagree."
+- **R4-6** - VERIFIED, and it corrected a false premise of mine. The
+  30005/30006 arm (twilio.ts:2633) and the 21610 arm (:2691) each carry a
+  `group_text` guard; **the 30003 arm carries none**, so native group text DOES
+  get a retry. My widening of the copy fix to every leg `presentRelayDelivery`
+  renders was wrong. Scoped to relay legs only.
+
+**The scope decision this round produced.** R4-3 meant a coherent chip fix spans
+`Timeline.tsx`, which `_CLUSTERS.md` assigns to T-DELIVERY-CHIPS. Put to
+Cameron. He established that T-DELIVERY-CHIPS is **Tier 2** - unscheduled
+backlog, not the ordered queue - and no live worktree touches `Timeline.tsx` or
+`deliveryStatus.ts` (verified across all ten). **Ruling: touch it.** A partial
+fix that makes two adjacent surfaces contradict each other is worse than none.
+
+Remaining accepted findings, all folded in: the cap literal is now named as
+`MAX_* - 1` with a test asserting the send count equals `main`'s (R4-5); Sec 9's
+obligation now carries the deferred mission's four hard-won traps and the copy
+debt this branch creates (R4-7); Sec 2.1 no longer claims the lineage inherits a
+reusable counter, only the pattern (R4-8); the broadcast dead-queue e2e is
+dropped for lack of an injection seam and covered at integration level where
+`enqueue` is stubbable, with the relay copy fix taking the e2e slot (R4-9); the
+item-size budget is answered with a measurement the builder must record, and a
+fallback if the margin is thin (R4-10); the `recordRailFailure` citation is
+corrected (R4-11).
+
+## Loop status: CONVERGED
+
+Round 4 was the hard cap. Its findings were **corrections and one scope ruling**
+- no finding overturned a design decision made in round 3. The four-round arc:
+
+| round | blocking | in the PREVIOUS round's fixes | decisions moved |
+|---|---|---|---|
+| 1 | 7 | - | 4 |
+| 2 | 5 | 3 of 5 | 5 |
+| 3 | 6 | 6 of 6 | scope split |
+| 4 | 4 | 2 of 4 | 1 (Cameron's Timeline ruling) |
+
+The design is done. What broke the self-inflicted cycle was not another round of
+fixes - it was removing the scope that was generating them.

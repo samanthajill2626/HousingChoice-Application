@@ -335,6 +335,82 @@ describe('RemindersPanel', () => {
     expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
   });
 
+  // SUPERSEDED (supersession spec 3.3): the rung belongs to a ladder the tour
+  // has already replaced. Every send path refuses it - the poll claim-skips it
+  // and Send now answers 409 - so the panel must neither promise a fire time
+  // nor offer the click. Distinct chip from "No longer sent": that one says the
+  // KIND is retired, this one says THIS generation is.
+  it('renders a superseded rung as "Replaced", never a fire time and with no Send now', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          // Past due: the fall-through would chip "sending shortly" forever on
+          // a rung nothing will ever claim.
+          dueAt: '2000-01-01T00:00:00Z',
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Replaced')).toBeInTheDocument());
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    expect(screen.queryByText('No longer sent')).not.toBeInTheDocument();
+    // The rung will never send, so it is never "overdue" either.
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument();
+    // The note underneath carries the why, without repeating the lead.
+    expect(screen.getByText(/Replaced . /)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
+    // No Send now (the server refuses it 409 superseded); Cancel stays, because
+    // a superseded rung the sweep missed is still a row an operator may remove.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel the/ })).toBeInTheDocument();
+  });
+
+  // The retired half of the same story: once the poll has claim-skipped a rung
+  // for a conversion claim that never finished, the chip has to say WHICH
+  // failure it was - a reason-less "Skipped" sends the operator hunting.
+  it('names conversion_stalled on a skipped rung instead of a bare "Skipped"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'morning_of',
+          state: 'skipped',
+          skippedAt: '2026-09-01T12:00:00Z',
+          skipReason: 'conversion_stalled',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByText(/^Skipped - .+/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/conversion/i)).toBeInTheDocument();
+    expect(screen.queryByText('Skipped')).not.toBeInTheDocument();
+  });
+
+  // The same for a rung retired because its ladder was replaced.
+  it('names superseded on a skipped rung instead of a bare "Skipped"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'morning_of',
+          state: 'skipped',
+          skippedAt: '2026-09-01T12:00:00Z',
+          skipReason: 'superseded',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText(/^Skipped - .+/)).toBeInTheDocument());
+    expect(screen.queryByText('Skipped')).not.toBeInTheDocument();
+  });
+
   // OVERDUE (Phase B spec 8). The server derives it - the panel never compares
   // clocks itself - and it exists because `state` is computed from terminal
   // markers alone, so a rung stuck behind any pre-claim deferral reads
@@ -563,6 +639,39 @@ describe('nextReminderRefetchDelay (pure)', () => {
           // A PAUSED rung is NOT skipped: a human can still send it, so the
           // panel keeps re-checking for that flip.
           { state: 'upcoming', dueAt: '2026-07-10T18:00:00Z', suppression: { reason: 'paused' } },
+        ],
+        NOW,
+      ),
+    ).toBe(32_000);
+  });
+
+  // A SUPERSEDED rung never flips either: the poll claim-skips it the moment it
+  // is picked up and Send now refuses it, so anchoring the 20s overdue
+  // re-check on one is the same unbounded poll the discontinued case above
+  // closed. It reaches the panel on a rung the sweep missed, which is exactly
+  // the row that sits past-due indefinitely.
+  it('ignores a superseded rung entirely, and lets a live rung behind it anchor', () => {
+    expect(
+      nextReminderRefetchDelay(
+        [
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'superseded' },
+          },
+        ],
+        NOW,
+      ),
+    ).toBeNull();
+    expect(
+      nextReminderRefetchDelay(
+        [
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'superseded' },
+          },
+          { state: 'upcoming', dueAt: '2026-07-10T12:00:30Z' },
         ],
         NOW,
       ),

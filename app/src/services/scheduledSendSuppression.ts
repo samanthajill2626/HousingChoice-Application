@@ -6,9 +6,15 @@
 // HARDER reason wins, and a discontinued rung is not something a harder reason
 // should override - and the evaluator is never built at all for a group-routed
 // tour, which is exactly where a retired kind would then read "sending shortly".
+//
+// `superseded` (supersession 2026-09-01) follows that precedent EXACTLY, and
+// for the same three reasons: it is terminal, it is CALLER knowledge (the rung's
+// ladderId against its tour's currentLadderId - lib/ladderPointer.ts, which this
+// clock-free module has no tour to compare), and the same three callers
+// short-circuit ahead of the evaluator on it. Nothing below produces it.
 export type ScheduledSuppressionReason =
   | 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage'
-  | 'quiet_hours' | 'paused' | 'discontinued';
+  | 'quiet_hours' | 'paused' | 'discontinued' | 'superseded';
 export interface ScheduledSuppression { reason: ScheduledSuppressionReason; }
 
 /** kill-switch is off only on an explicit `false` (mirrors sendMessage's `=== false`). */

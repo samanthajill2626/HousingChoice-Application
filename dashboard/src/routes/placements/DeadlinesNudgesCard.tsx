@@ -76,6 +76,11 @@ const NUDGE_SUPPRESSION_LABELS: Readonly<Record<ScheduledSuppressionReason, stri
   // placement surface has a retired kind. Kept identical to the tour copy so it
   // reads correctly on the day one does.
   discontinued: 'turned off',
+  // COMPILE COMPLETENESS ONLY, same as `discontinued` above (supersession
+  // 2026-09-01). `superseded` belongs to the TOUR ladder's generation pointer;
+  // placement nudges have no such pointer and no writer emits it. Entry kept
+  // identical to the tour copy; no chip branch below, deliberately.
+  superseded: "the tour's reminders were set up again",
 };
 
 /** A compact state chip for a single nudge rung (mirrors RemindersPanel's StateChip). */
@@ -107,6 +112,8 @@ function StateChip({ nudge }: { nudge: PlacementNudgeView }): React.JSX.Element 
   // widening a surface the spec narrowed on purpose. The single sanctioned
   // exception is the LABEL entry above, which the exhaustive Record needs to
   // compile. The day a nudge kind IS retired, add the branch with the writer.
+  // `superseded` (2026-09-01) is excluded on the identical argument and by the
+  // identical exception - a label entry, no branch.
   //
   // Held back from automatic sending (manual-only hold-back): armed and
   // sendable, but nothing is going to fire it - so it must not chip a fire time

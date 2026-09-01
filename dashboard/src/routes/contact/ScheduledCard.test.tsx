@@ -72,6 +72,35 @@ describe('ScheduledCard', () => {
     expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
   });
 
+  // Superseded (supersession 2026-09-01): the tour's ladder was replaced, so
+  // this card describes a send that will never happen - the poll claim-skips
+  // the rung and Send now answers 409. Same equality-then-fallthrough shape as
+  // `discontinued`, and it must not borrow that wording: the KIND still sends,
+  // this generation of it does not.
+  it('renders a superseded rung as "Replaced", never a fire time', () => {
+    render(<ScheduledCard item={{ ...BASE, suppression: { reason: 'superseded' } }} now={NOW} />);
+    expect(screen.getByText('Replaced')).toBeInTheDocument();
+    expect(screen.queryByText(/sends in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    expect(screen.queryByText('No longer sent')).not.toBeInTheDocument();
+    // suppressionNote joins with an EM dash; the label does not repeat the lead.
+    expect(screen.getByText(/Replaced . /)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Will wait/)).not.toBeInTheDocument();
+  });
+
+  it('a superseded rung already PAST its fire time does not say "sending shortly"', () => {
+    render(
+      <ScheduledCard
+        item={{ ...BASE, at: '2026-06-18T09:00:00Z', suppression: { reason: 'superseded' } }}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByText('Replaced')).toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+  });
+
   it('a paused rung already PAST its fire time does not say "sending shortly"', () => {
     render(
       <ScheduledCard

@@ -64,6 +64,11 @@ const MAX_ANCHOR_MS = 6 * 3_600_000;
  * contacts, settings and the whole ladder. A `paused` rung is deliberately NOT
  * skipped - a human can still send it, and the panel should notice when they do.
  *
+ * A SUPERSEDED rung (2026-09-01) is skipped on the same argument, and it is the
+ * likelier of the two to sit here past-due: the poll only meets a rung at its
+ * dueAt, so between the reschedule and the fire time nothing retires it, and a
+ * rung the sweep missed can stay upcoming-and-overdue indefinitely.
+ *
  * Shared with the placement-nudge card (usePlacementNudges), hence the
  * structural `suppression` shape rather than a view-specific type.
  *
@@ -83,6 +88,7 @@ export function nextReminderRefetchDelay(
   for (const r of reminders) {
     if (r.state !== 'upcoming') continue;
     if (r.suppression?.reason === 'discontinued') continue;
+    if (r.suppression?.reason === 'superseded') continue;
     const t = new Date(r.dueAt).getTime();
     if (Number.isNaN(t)) continue;
     if (earliest === null || t < earliest) earliest = t;
@@ -135,6 +141,15 @@ function StateChip({
   // A rung that will never send is never "overdue".
   if (rung.suppression?.reason === 'discontinued') {
     return <span className={`${styles.chip} ${styles.paused}`}>No longer sent</span>;
+  }
+  // TERMINAL for a different cause (supersession 2026-09-01): the KIND still
+  // sends, but this rung belongs to a ladder the tour has already replaced, so
+  // the poll claim-skips it and Send now answers 409 superseded. Its own word,
+  // never "No longer sent" (which says the kind was retired) and never
+  // "Paused" (which invites the refused click). ABOVE `overdue` for the reason
+  // written above: a rung that will never send is never "overdue".
+  if (rung.suppression?.reason === 'superseded') {
+    return <span className={`${styles.chip} ${styles.paused}`}>Replaced</span>;
   }
   // OVERDUE (spec 8): the server says this rung's send time has passed and it
   // still has not sent. It REPLACES the fire-time promise below rather than
@@ -393,8 +408,15 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                       to stop inviting the click - "Paused" would invite exactly
                       that refused click - and this is the other half of it.
                       Cancel/Restore below stay: a discontinued rung is still a
-                      pending row an operator may want off the ladder. */}
-                  {rung.state === 'upcoming' && rung.suppression?.reason !== 'discontinued' ? (
+                      pending row an operator may want off the ladder.
+                      NOT rendered for a SUPERSEDED rung either (2026-09-01),
+                      for the identical reason: the server refuses it 409
+                      superseded, permanently, because its ladder no longer
+                      exists. The current ladder's own rungs still offer the
+                      button, which is where a send can actually be made. */}
+                  {rung.state === 'upcoming' &&
+                  rung.suppression?.reason !== 'discontinued' &&
+                  rung.suppression?.reason !== 'superseded' ? (
                     <button
                       type="button"
                       className={styles.action}
@@ -447,12 +469,16 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   // stops reading as a warning at all. `discontinued` joins them
                   // on the same argument: it is a settled decision, not a
                   // problem to act on, and it recurs on every tour that still
-                  // has a pause-era rung.
+                  // has a pause-era rung. `superseded` is muted on exactly that
+                  // argument: it reports the consequence of a change the
+                  // operator themselves made (a reschedule, a conversion), and
+                  // every stale rung of a rescheduled tour carries the line.
                   <p
                     className={
                       rung.suppression?.reason === 'quiet_hours' ||
                       rung.suppression?.reason === 'paused' ||
-                      rung.suppression?.reason === 'discontinued'
+                      rung.suppression?.reason === 'discontinued' ||
+                      rung.suppression?.reason === 'superseded'
                         ? styles.suppressionMuted
                         : styles.suppression
                     }

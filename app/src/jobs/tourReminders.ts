@@ -824,6 +824,14 @@ export async function runDueTourReminders(
  * `'tour_already_passed'` is written by BOTH the sweep and the fire-time gate
  * above - which is the point: the sweep is cleanup of a condition the runtime
  * also enforces, not the only thing enforcing it.
+ *
+ * The supersession pair (2026-09-01) is a FOURTH category: POLL-ONLY.
+ * `'superseded'` (the rung's ladderId does not match its tour's
+ * currentLadderId) and `'conversion_stalled'` (a `pending:` conversion claim
+ * outlived CONVERSION_CLAIM_GRACE_MS) are both stamped HERE and nowhere else -
+ * not at arm time (neither condition can exist on a row the armer is writing)
+ * and not by the sweep script. forceSendReminder REFUSES on the first of them
+ * rather than passing it here, because a human action never retires a rung.
  */
 async function claimSkipRow(
   row: TourReminderItem,

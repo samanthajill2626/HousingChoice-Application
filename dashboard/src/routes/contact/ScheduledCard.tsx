@@ -34,6 +34,11 @@ const SUPPRESSION_COPY: Readonly<
   // a person. suppressionNote leads it "No longer sent", hence a label that
   // does not repeat the phrase: "No longer sent - turned off".
   discontinued: 'turned off',
+  // TERMINAL for a different reason (supersession 2026-09-01): the KIND still
+  // sends, but this card's rung belongs to a ladder the tour has replaced.
+  // suppressionNote leads it "Replaced", so the label carries only the cause:
+  // "Replaced - the tour's reminders were set up again".
+  superseded: "the tour's reminders were set up again",
 };
 
 /** The fire-time line: while the send is still in the future, "sends <relative> -
@@ -62,6 +67,13 @@ function scheduledLabel(
   // ABOVE `paused`: a discontinued rung is not waiting for a person either, and
   // "Paused" would invite a Send now the server refuses with kind_retired.
   if (item.suppression?.reason === 'discontinued') return 'No longer sent';
+  // ABOVE `paused` for the same argument, and above the fire-time fall-through
+  // for a sharper one: a superseded rung is the LONGEST-lived promise this card
+  // can tell. The poll only meets it at dueAt, so between the reschedule and
+  // the fire time nothing retires it, and the card would read "sends in 6 days"
+  // for a message from a schedule that no longer exists. Kept distinct from
+  // "No longer sent" (that says the KIND is retired) - see suppressionLead.
+  if (item.suppression?.reason === 'superseded') return 'Replaced';
   if (item.suppression?.reason === 'paused') return 'Paused';
   return fireTimeLabel(item.at, now, timezone);
 }
@@ -122,10 +134,14 @@ export function ScheduledCard({
         // related reason: it is a settled decision, not something to act on,
         // and it recurs on every pause-era rung - an always-amber timeline
         // stops reading as a warning (the RemindersPanel twin argues the same).
+        // `superseded` joins them on exactly that argument: the operator
+        // already made the change that replaced this rung, so the card is
+        // reporting a consequence of their own action, not a problem.
         <p
           className={
             item.suppression?.reason === 'quiet_hours' ||
-            item.suppression?.reason === 'discontinued'
+            item.suppression?.reason === 'discontinued' ||
+            item.suppression?.reason === 'superseded'
               ? styles.scheduledSkipMuted
               : styles.scheduledSkip
           }

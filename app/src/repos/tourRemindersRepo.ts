@@ -89,7 +89,23 @@ export type ReminderSkipReason =
   /** Phase B (ledger item 7): name resolution kept THROWING for more than
    *  ROSTER_UNAVAILABLE_GRACE_MS past dueAt - the bounded twin of
    *  roster_unavailable, decided at both unclaimed-return sites. */
-  | 'names_unavailable';
+  | 'names_unavailable'
+  /** SUPERSESSION (2026-09-01): this rung's `ladderId` does not match its
+   *  tour's `currentLadderId` - a later arm replaced the whole ladder, so this
+   *  rung's copy belongs to a schedule that no longer exists. Distinct from
+   *  `quiet_hours_superseded`, which is one rung of the CURRENT ladder losing
+   *  its slot to a later rung of the same ladder. Poll-only: the human path
+   *  refuses with the same token rather than retiring the rung. Pre-migration
+   *  pairs (no pointer, no ladderId) are EXEMPT and never stamped this. */
+  | 'superseded'
+  /** SUPERSESSION (2026-09-01): the tour carries a placement-conversion claim
+   *  (`pending:` sentinel) that never resolved. Inside the grace window the
+   *  poll DEFERS such a rung unclaimed; past CONVERSION_CLAIM_GRACE_MS from its
+   *  dueAt it is retired VISIBLY with this token - the bounded-wait twin of
+   *  roster_unavailable, for the same reason (a rung that re-lists forever is
+   *  never sent and never says so). NOT `superseded`: the ladder is intact and
+   *  the operator's remedy is to finish or clear the conversion. */
+  | 'conversion_stalled';
 
 export interface TourReminderItem {
   /** PK */

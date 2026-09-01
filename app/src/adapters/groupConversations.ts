@@ -34,6 +34,17 @@ import { normalizeTwilioTransportEvidence } from './twilioMessageTransport.js';
 // Port
 // ---------------------------------------------------------------------------
 
+/**
+ * Provider-boundary observation for an inbound native group envelope.
+ *
+ * The active Twilio Conversations classic rail is Group MMS. Keep that fact
+ * with the Conversations adapter so webhook filing does not become a second
+ * authority over the rail.
+ */
+export function nativeGroupInboundActualTransport(): MessageTransport {
+  return 'mms';
+}
+
 /** A Conversation (the rail) as the app cares about it. */
 export interface GroupConversationRef {
   /** CHxx. */

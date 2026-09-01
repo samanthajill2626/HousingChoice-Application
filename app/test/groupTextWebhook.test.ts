@@ -4,8 +4,9 @@
 // These tests drive the REAL router (real signature, real keyword seam, real
 // identity derivation) against the in-memory world, so what they pin is the
 // actual filing decision - not a mock of it.
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import * as groupConversations from '../src/adapters/groupConversations.js';
 import { conversationIdForGroup, contactIdForPhone } from '../src/lib/import/ids.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import { GROUP_RAILED_INBOUND_LAST_AT_ID } from '../src/repos/settingsRepo.js';
@@ -30,6 +31,8 @@ const MEMBER_B = '+15550100002';
 const MEMBER_C = '+15550100003';
 const GROUP_ROSTER = [SENDER, MEMBER_B, MEMBER_C];
 const GROUP_ID = conversationIdForGroup(GROUP_ROSTER);
+
+afterEach(() => vi.restoreAllMocks());
 
 /** Inbound params carrying a two-other-recipient group envelope. */
 function groupParams(overrides: Record<string, string> = {}): Record<string, string> {
@@ -73,6 +76,23 @@ function withLaggingPhoneIndex(world: FakeWorld, lagged: string[]): { on: boolea
 // T3.2 - branch placement
 // ---------------------------------------------------------------------------
 describe('group detection: branch placement (T3.2)', () => {
+  it('records inbound transport from the adapter-owned native Group MMS authority', async () => {
+    const nativeGroupAuthority = vi
+      .spyOn(groupConversations, 'nativeGroupInboundActualTransport')
+      .mockReturnValue('rcs');
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(res.status).toBe(200);
+    expect(nativeGroupAuthority).toHaveBeenCalledTimes(1);
+    expect(world.messages[0]).toMatchObject({
+      transport_schema_version: 1,
+      actual_transport: 'rcs',
+    });
+  });
+
   /**
    * INVARIANT 13.2. An envelope-less inbound must take the 1:1 path with a
    * BYTE-IDENTICAL repo-call sequence: the group branch's only cost on that

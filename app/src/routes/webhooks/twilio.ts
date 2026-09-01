@@ -16,6 +16,7 @@ import {
   mapTwilioStatus,
   type MessagingAdapter,
 } from '../../adapters/messaging.js';
+import { nativeGroupInboundActualTransport } from '../../adapters/groupConversations.js';
 import {
   normalizeTwilioTransportEvidence,
   type NormalizedTransportEvidence,
@@ -1738,7 +1739,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       author,
       deliveryStatus: 'delivered',
       transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
-      actualTransport: 'mms',
+      actualTransport: nativeGroupInboundActualTransport(),
       relaySenderKey: senderKey,
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),

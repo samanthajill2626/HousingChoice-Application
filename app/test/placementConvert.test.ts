@@ -288,6 +288,59 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect((res.body.tour as Record<string, unknown>)['currentLadderId']).toBe(rotated);
   });
 
+  it('CONCURRENT REVIVAL: the post-finalize sweep is SKIPPED when another writer owns the ladder', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+
+    const tourId = 'tour-convert-owned';
+    const ids = await seedArmedConvertibleTour(world, tourId, tenantId, unitId);
+
+    // A concurrent reschedule lands between the finalize and the sweep: it
+    // rotates the pointer to its OWN ladder and arms it. The sweep is
+    // generation-BLIND, so without the ownership guard (spec 3.2 step 2, review
+    // round B1) it deletes the winner's live rungs on its way past.
+    const REVIVAL_LADDER = 'ladder-concurrent-revival';
+    const revived: string[] = [];
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates) => {
+      const out = await realPatch(id, updates);
+      if ('convertedPlacementId' in updates && revived.length === 0) {
+        const t = world.toursMap.get(id)!;
+        t.currentLadderId = REVIVAL_LADDER;
+        world.toursMap.set(id, t);
+        for (const kind of ['morning_of', 'en_route'] as const) {
+          const row = await world.tourRemindersRepo.create({
+            tourId: id,
+            kind,
+            dueAt: MORNING_OF_DUE,
+            ladderId: REVIVAL_LADDER,
+          });
+          revived.push(row.reminderId);
+        }
+      }
+      return out;
+    };
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    // The 201 STANDS: the conversion is persisted and is never rolled back for a
+    // sweep decision.
+    expect(res.status).toBe(201);
+
+    // Nothing was swept - not the winner's fresh rows, and not this ladder's
+    // either (the whole sweep is abandoned, by identity).
+    expect(revived).toHaveLength(2);
+    for (const id of revived) expect(world.tourRemindersMap.has(id)).toBe(true);
+    expect(world.tourRemindersMap.has(ids.morningOfId)).toBe(true);
+    expect(world.tourRemindersMap.has(ids.enRouteId)).toBe(true);
+    expect(world.toursMap.get(tourId)!.currentLadderId).toBe(REVIVAL_LADDER);
+
+    const owned = capture
+      .atLevel(50)
+      .filter((l) => String(l['msg'] ?? '').includes('a concurrent writer owns this ladder'));
+    expect(owned).toHaveLength(1);
+    expect(owned[0]?.['tourId']).toBe(tourId);
+  });
+
   it('no groupThreadId on the tour → 201 with no group_thread and no rebind', async () => {
     const { app, world } = makeWebhookHarness();
     const { tenantId, unitId } = seedTenantAndUnit(world);

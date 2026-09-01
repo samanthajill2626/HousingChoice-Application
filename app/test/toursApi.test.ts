@@ -1910,6 +1910,74 @@ describe('currentLadderId - the tour generation pointer', () => {
     expect(lost[0]?.['tourId']).toBe(tourId);
   });
 
+  it('CONCURRENT RESCHEDULES: the LOSER never sweeps the winner\'s freshly armed ladder', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    const tourId = created.body.tour.tourId as string;
+
+    // Park request A between its ROTATION (which rides the patch write, spec 3.2
+    // step 1) and its SWEEP - the exact gap review round B1's interleaving needs:
+    // A patches, B runs to completion underneath it, and A's generation-blind
+    // sweep then deletes B's freshly armed rows. Parking inside
+    // deleteSupersededForTour instead would park A PAST the ownership read, which
+    // is the residual window spec 3.2 names and ACCEPTS - not the defect.
+    let releaseA: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let signalEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let parked = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates) => {
+      const out = await realPatch(id, updates);
+      if (!parked) {
+        parked = true;
+        signalEntered();
+        await gate;
+      }
+      return out;
+    };
+
+    const pendingA = authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: FARTHER })
+      .then((r) => r);
+    await entered;
+
+    const resB = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHEST });
+    expect(resB.status).toBe(200);
+    const winnerLadder = resB.body.tour.currentLadderId as string;
+    const winnerRows = rowsFor(world, tourId).map((r) => r.reminderId);
+    expect(winnerRows.length).toBeGreaterThan(0);
+
+    releaseA();
+    const resA = await pendingA;
+    expect(resA.status).toBe(200);
+
+    // The winner's rows are all still there, BY IDENTITY - a count would be
+    // satisfied by A having armed a replacement generation of the same size.
+    for (const id of winnerRows) expect(world.tourRemindersMap.has(id)).toBe(true);
+    const live = rowsFor(world, tourId);
+    expect(new Set(live.map((r) => r.ladderId))).toEqual(new Set([winnerLadder]));
+
+    // The pointer names the winner, and the loser reports the winner's state.
+    expect(world.toursMap.get(tourId)?.currentLadderId).toBe(winnerLadder);
+    expect(resA.body.tour.currentLadderId).toBe(winnerLadder);
+
+    // The loser logs at error, and it is the OWNERSHIP line - it abandoned the
+    // whole re-arm, so it never reached the compare-and-set.
+    const owned = errorsMatching(capture, 'a concurrent reschedule owns this ladder');
+    expect(owned).toHaveLength(1);
+    expect(owned[0]?.['tourId']).toBe(tourId);
+    expect(errorsMatching(capture, 'pointer write lost a concurrent reschedule')).toHaveLength(0);
+  });
+
   // ---- T3.6 interruption logging -------------------------------------------
 
   it('RE-ARM FAILURE after the rotation is LOUD - the tour is left disarmed', async () => {
@@ -1939,6 +2007,35 @@ describe('currentLadderId - the tour generation pointer', () => {
     expect(rowsFor(world, tourId)).toHaveLength(0);
 
     const disarmed = errorsMatching(capture, 'arm failed after pointer rotation');
+    expect(disarmed).toHaveLength(1);
+    expect(disarmed[0]?.['tourId']).toBe(tourId);
+  });
+
+  it('SWEEP FAILURE after the rotation is LOUD too - the same disarmed end state', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => PTR_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: FAR });
+    const tourId = created.body.tour.tourId as string;
+    const armedLadder = soleLadderId(rowsFor(world, tourId));
+
+    // The sweep swallows its own per-row failures, so anything escaping it is the
+    // LIST read failing. Same posture as the arm below it: rethrow - but the
+    // rotation has already committed, so spec 3.2's interruption posture wants
+    // the tourId logged at error before it goes (conformance F1).
+    world.tourRemindersRepo.deleteSupersededForTour = async () => {
+      throw new Error('reminder store unavailable');
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: FARTHER });
+    expect(res.status).toBe(500);
+
+    const stored = world.toursMap.get(tourId);
+    expect(typeof stored?.currentLadderId).toBe('string');
+    expect(stored?.currentLadderId).not.toBe(armedLadder);
+
+    const disarmed = errorsMatching(capture, 'sweep failed after pointer rotation');
     expect(disarmed).toHaveLength(1);
     expect(disarmed[0]?.['tourId']).toBe(tourId);
   });

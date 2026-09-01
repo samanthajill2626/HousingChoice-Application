@@ -1225,61 +1225,96 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // scheduled.updated emit below (arm/reschedule OR retire, never both).
     let ladderChanged = false;
     if (armable && rearmTrigger) {
-      // Spec 3.2 step 2, and the ORDER is the contract: the rotation above rode
-      // the patch write (step 1), so by the time this runs the old generation is
-      // already refused by every send and preview path - the sweep is what stops
-      // it being SHOWN, not what stops it firing. It must therefore run BEFORE
-      // the arm: sweeping after would delete the ladder we just armed, since the
-      // only filter is "never sent" (tourRemindersRepo.deleteSupersededForTour).
+      // OWNERSHIP GUARD (spec 3.2 step 2, review round B1). The sweep is
+      // generation-BLIND - its only filter is "never sent" - so a request that
+      // has already lost the pointer to a concurrent reschedule would delete the
+      // WINNER's freshly armed rows on its way past: a tour pointing at a ladder
+      // with zero rows, two 200s, and only the loser's log. Re-read the tour and
+      // abandon the whole re-arm (sweep AND arm) unless our own step-1 rotation
+      // still stands; the winner's ladder is live and correct, so there is
+      // nothing left for this request to do but report it.
       //
-      // No try/catch: the sweep swallows its own per-row failures and never
-      // throws for them, so anything that DOES escape is the list read failing -
-      // an unexpected store failure, which is exactly what this handler already
-      // throws on (the patch write above, the arm below). Silence here would
-      // leave the operator a 200 and a panel still showing the dead ladder.
-      await reminders.deleteSupersededForTour(tourId);
-      let ladderId: string | null;
-      try {
-        ({ ladderId } = await armTourReminders(tour, getNow(), {
-          tourRemindersRepo: reminders,
-          settingsRepo,
-          logger: log,
-        }));
-      } catch (err) {
-        // The rotation already committed, so this leaves a LIVE scheduled tour
-        // whose pointer matches nothing: disarmed, not merely unsent. Nothing
-        // fires, but nothing repairs it either - only a later scheduledAt change
-        // or an explicit move into 'scheduled' re-arms (spec 3.2, interruption
-        // posture). Rethrow: the handler's posture for an unexpected failure is
-        // to throw (see the patch write's catch above).
+      // The residual window - a full competing request landing between this read
+      // and the sweep below - is named and ACCEPTED in spec 3.2: it fires
+      // nothing, one side logs at error, and the next reschedule repairs it.
+      const owner = await tours.get(tourId);
+      if (owner?.currentLadderId !== rotation) {
         log.error(
-          { err, tourId },
-          'tour reminders: arm failed after pointer rotation - tour is DISARMED until the next reschedule',
+          { tourId, rotation, storedLadderId: owner?.currentLadderId },
+          'tour reminders: a concurrent reschedule owns this ladder - skipping the sweep and the arm',
         );
-        throw err;
-      }
-      if (ladderId !== null) {
-        // Spec 3.2 step 4: CONDITIONAL on the rotation still standing. Two
-        // concurrent reschedules can otherwise interleave so the pointer names a
-        // ladder the other request already retired - two 200s, a silently
-        // disarmed tour, no error.
-        const won = await tours.setLadderIdIf(tourId, rotation, ladderId);
-        if (won) {
-          // Fold the winning pointer into the response: `tour` is the pre-CAS
-          // patch return, so it still carries the placeholder rotation.
-          tour = { ...tour, currentLadderId: ladderId };
-        } else {
+        // Report the WINNER's stored state; `tour` is our own patch return and
+        // still carries the rotation placeholder we just abandoned.
+        if (owner !== undefined) tour = owner;
+      } else {
+        // Spec 3.2 step 2, and the ORDER is the contract: the rotation above rode
+        // the patch write (step 1), so by the time this runs the old generation is
+        // already refused by every send and preview path - the sweep is what stops
+        // it being SHOWN, not what stops it firing. It must therefore run BEFORE
+        // the arm: sweeping after would delete the ladder we just armed, since the
+        // only filter is "never sent" (tourRemindersRepo.deleteSupersededForTour).
+        //
+        // The catch RETHROWS: the sweep swallows its own per-row failures and
+        // never throws for them, so anything that DOES escape is the list read
+        // failing - an unexpected store failure, which is exactly what this
+        // handler already throws on (the patch write above, the arm below).
+        // Silence here would leave the operator a 200 and a panel still showing
+        // the dead ladder. But the rotation has already committed, so the throw
+        // exits with a live `scheduled` tour whose pointer matches nothing -
+        // spec 3.2's interruption posture demands that be logged at error with
+        // the tourId (conformance F1), exactly as the arm branch below does.
+        try {
+          await reminders.deleteSupersededForTour(tourId);
+        } catch (err) {
           log.error(
-            { tourId, rotation, ladderId },
-            'tour reminders: pointer write lost a concurrent reschedule - this ladder is unpointed',
+            { err, tourId },
+            'tour reminders: sweep failed after pointer rotation - tour is DISARMED until the next reschedule',
           );
-          // Leave the WINNER's pointer and report it. This ladder's rows stay in
-          // the store, unpointed and refused, until the next sweep.
-          const fresh = await tours.get(tourId);
-          if (fresh !== undefined) tour = fresh;
+          throw err;
         }
+        let ladderId: string | null;
+        try {
+          ({ ladderId } = await armTourReminders(tour, getNow(), {
+            tourRemindersRepo: reminders,
+            settingsRepo,
+            logger: log,
+          }));
+        } catch (err) {
+          // The rotation already committed, so this leaves a LIVE scheduled tour
+          // whose pointer matches nothing: disarmed, not merely unsent. Nothing
+          // fires, but nothing repairs it either - only a later scheduledAt change
+          // or an explicit move into 'scheduled' re-arms (spec 3.2, interruption
+          // posture). Rethrow: the handler's posture for an unexpected failure is
+          // to throw (see the patch write's catch above).
+          log.error(
+            { err, tourId },
+            'tour reminders: arm failed after pointer rotation - tour is DISARMED until the next reschedule',
+          );
+          throw err;
+        }
+        if (ladderId !== null) {
+          // Spec 3.2 step 4: CONDITIONAL on the rotation still standing. Two
+          // concurrent reschedules can otherwise interleave so the pointer names a
+          // ladder the other request already retired - two 200s, a silently
+          // disarmed tour, no error.
+          const won = await tours.setLadderIdIf(tourId, rotation, ladderId);
+          if (won) {
+            // Fold the winning pointer into the response: `tour` is the pre-CAS
+            // patch return, so it still carries the placeholder rotation.
+            tour = { ...tour, currentLadderId: ladderId };
+          } else {
+            log.error(
+              { tourId, rotation, ladderId },
+              'tour reminders: pointer write lost a concurrent reschedule - this ladder is unpointed',
+            );
+            // Leave the WINNER's pointer and report it. This ladder's rows stay in
+            // the store, unpointed and refused, until the next sweep.
+            const fresh = await tours.get(tourId);
+            if (fresh !== undefined) tour = fresh;
+          }
+        }
+        ladderChanged = true;
       }
-      ladderChanged = true;
     } else if (terminal) {
       // Dead, completed, or no-show: nothing left to auto-remind, so DELETE the
       // never-sent rungs. The no-show check-in is a MANUAL send from the tour

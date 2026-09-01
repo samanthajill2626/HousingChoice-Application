@@ -1694,6 +1694,12 @@ export type ForceSendRefusal =
   /** Phase B: the rung's KIND is discontinued (confirmation), so no path may
    *  send it - the human path least of all. Permanent - never a retry. */
   | 'kind_retired'
+  /** Supersession (2026-09-01): the rung's ladderId does not match its tour's
+   *  currentLadderId, so it belongs to a reminder schedule the tour has already
+   *  replaced. Permanent - never a retry; the CURRENT ladder's rungs are where
+   *  a send can still be made. Shares the token with the poll's claim-skip (the
+   *  poll retires such a rung; the human path only refuses it). */
+  | 'superseded'
   | ReminderResolutionFailure;
 
 export type ForceSendResult =
@@ -1760,6 +1766,46 @@ export async function forceSendReminder(
     return { outcome: 'refused', reason: 'kind_retired' };
   }
 
+  // THE TOUR, read ONCE for this whole request (supersession decision O4) and
+  // handed to resolveReminderTarget below, which takes a pre-fetched tour -
+  // so the pointer refusal costs no extra read. CONTAINED here for exactly the
+  // reason the blanket below is: this read used to happen INSIDE target
+  // resolution, under that catch, and moving it up must not turn a tours-table
+  // outage into a 500 the route cannot render. Same cause-agnostic copy.
+  let tour: TourItem | undefined;
+  try {
+    tour = await deps.toursRepo.get(tourId);
+  } catch (err) {
+    log.warn(
+      { err, reminderId, tourId, kind: row.kind },
+      'tour reminder force-send: tour read failed - row left pending',
+    );
+    return { outcome: 'refused', reason: 'names_unavailable' };
+  }
+  if (tour === undefined) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'tour_missing' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'tour_missing' };
+  }
+  // SUPERSEDED (spec 3.3): this rung belongs to a ladder the tour has replaced,
+  // so the send paths refuse it and this is the one the operator can actually
+  // press. Placed immediately AFTER kind_retired, keeping that refusal's
+  // "first among the reasoned refusals" argument intact: both are permanent and
+  // never a retry, but a retired KIND is the more absolute of the two, and it
+  // costs no reads at all to say so. Above every gate below for the same reason
+  // kind_retired is: names_unavailable and tour_already_passed invite a retry,
+  // and this one never will. A REFUSAL, never a claim-skip - a human action
+  // does not retire a rung.
+  if (isSupersededRung(row, tour)) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'superseded' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'superseded' };
+  }
+
   // CONTAINED (spec 6.3b): target resolution does FOUR bare reads - the tour
   // (:851), the group conversation, the tenant contact (:872) and the 1:1
   // conversation lookup. Uncontained, any of them escapes the route unwrapped
@@ -1782,7 +1828,7 @@ export async function forceSendReminder(
   // the return is inlined.
   let target: ReminderTarget;
   try {
-    target = await resolveReminderTarget(row, deps, log);
+    target = await resolveReminderTarget(row, deps, log, tour);
   } catch (err) {
     log.warn(
       { err, reminderId, tourId, kind: row.kind },

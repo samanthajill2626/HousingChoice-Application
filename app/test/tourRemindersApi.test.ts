@@ -1383,6 +1383,65 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(cross.body).toEqual({ error: 'reminder_not_found' });
     expect(spy.sent).toHaveLength(0);
   });
+
+  // -------------------------------------------------------------------------
+  // SUPERSESSION (spec 3.3, decision O4). forceSendReminder is a SEPARATE entry
+  // point and inherits nothing from the poll's gate, so without this the panel
+  // has a live button that force-sends a rung from a schedule that no longer
+  // exists.
+  // -------------------------------------------------------------------------
+  it('409s superseded on a rung whose ladder the tour has replaced, and leaves it pending', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '6' });
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-new' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('superseded');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+    // A refusal never retires a rung - the poll's claim-skip is what does that.
+    expect(world.tourRemindersMap.get(reminderId)?.sentAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.skippedAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.canceledAt).toBeUndefined();
+  });
+
+  it('ANTI-VACUITY: the CURRENT generation of the same pair still sends', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '7' });
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-current';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-current' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reminder.state).toBe('sent');
+    expect(spy.sent).toHaveLength(1);
+  });
+
+  it('kind_retired still outranks superseded - the refusal that costs no reads stays first', async () => {
+    // Both are permanent, but they send the operator to different places, and
+    // the discontinued-kind refusal is deliberately the first thing this
+    // function says (its comment argues why). Adding a pointer check must not
+    // quietly reorder that.
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '8' });
+    world.tourRemindersMap.get(reminderId)!.kind = 'confirmation';
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-new' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('kind_retired');
+    expect(spy.sent).toHaveLength(0);
+  });
+
 });
 
 // ===========================================================================

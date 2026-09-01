@@ -5510,5 +5510,44 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(after?.sentAt).toBe(pollAt);
       expect(after?.skipReason).toBeUndefined();
     });
+
+    // -------------------------------------------------------------------------
+    // T5.5's containment half. The hoisted tour read (O4) moved one of target
+    // resolution's four bare reads ABOVE the blanket catch spec 6.3b requires,
+    // so it has to carry the same containment - and the same cause-agnostic
+    // copy - on its own. Driven at the JOB level: the ROUTE reads the tour
+    // before it calls the job at all, so this cell is unreachable through HTTP.
+    // -------------------------------------------------------------------------
+    it('force-send: a THROWING tour read refuses names_unavailable instead of escaping', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'throw', '+15550280007');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T18:00:00.000Z',
+      });
+      const boomTours = {
+        ...tours,
+        get: async () => {
+          throw new Error('tours unavailable');
+        },
+      };
+
+      const result = await forceSendReminder(
+        row.reminderId,
+        tour.tourId,
+        '2026-12-09T18:01:00.000Z',
+        true,
+        { ...rig.deps, toursRepo: boomTours },
+      );
+
+      expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
   });
 });

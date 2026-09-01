@@ -380,16 +380,14 @@ describe('built dashboard identity tags (diagnostic: PASS or SKIP, never FAIL)',
       ctx.skip('no built dashboard; run `npm run build -w dashboard`');
     }
     const html = readFileSync(BUILT_INDEX, 'utf8');
-    // Compare ONLY the five conditions: a build also injects hashed asset tags
-    // and, under e2e, an x-app-commit meta.
+    // THE GUARD IS THE ASSERTION. identityHolds is the conjunction of all five
+    // conditions and ctx.skip THROWS, so re-asserting them below the guard
+    // would be unreachable by construction - and the one thing this case must
+    // never do is FAIL, because a gitignored artifact decides whether it can
+    // hold. Compare ONLY the five: a build also injects hashed asset tags and,
+    // under e2e, an x-app-commit meta.
     if (!identityHolds(html)) {
       ctx.skip(STALE_OR_BROKEN_DIST_NOTE);
-    }
-    for (const needle of IDENTITY_PRESENT) {
-      expect(html, needle).toContain(needle);
-    }
-    for (const needle of IDENTITY_ABSENT) {
-      expect(html, needle).not.toContain(needle);
     }
   });
 });

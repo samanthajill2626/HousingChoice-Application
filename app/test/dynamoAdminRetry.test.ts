@@ -41,6 +41,7 @@ import {
   DynamoDBClient,
   InternalServerError,
   ResourceInUseException,
+  ResourceNotFoundException,
   UpdateTableCommand,
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb';
@@ -238,6 +239,14 @@ function resourceInUse(): ResourceInUseException {
   });
 }
 
+/** What DescribeTable answers once the table really is gone. A REAL SDK class. */
+function resourceNotFound(): ResourceNotFoundException {
+  return new ResourceNotFoundException({
+    $metadata: {},
+    message: 'Requested resource not found: Table: stub not found',
+  });
+}
+
 // --- shared fixtures --------------------------------------------------------
 
 /** No backoff: this file must not spend ~4-5s in real setTimeout. */
@@ -304,15 +313,21 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
   });
 
   it('case 4: DeleteTable retries, then tolerates ResourceInUseException (DELETING landed)', async () => {
-    const stub = new StubClient().script('DeleteTable', [
-      { fail: internalFailure() },
-      { fail: resourceInUse() },
-    ]);
+    // The delete already completed by the time the conflict is handled, so the
+    // wait costs exactly ONE read. Case 23 is the same tolerance over a table
+    // that is still DELETING for two reads first.
+    const stub = new StubClient()
+      .script('DeleteTable', [{ fail: internalFailure() }, { fail: resourceInUse() }])
+      .script('DescribeTable', [{ fail: resourceNotFound() }]);
 
     await expect(
-      deleteTableIfExists(stub.asClient(), 'stub', { retry: FAST }),
+      deleteTableIfExists(stub.asClient(), 'stub', {
+        retry: FAST,
+        poll: { intervalMs: 1, ceilingMs: 5_000 },
+      }),
     ).resolves.toBeUndefined();
     expect(stub.count('DeleteTable')).toBe(2);
+    expect(stub.count('DescribeTable')).toBe(1);
   });
 
   it('case 5: UpdateTimeToLive re-reads status between attempts before re-sending', async () => {
@@ -390,7 +405,11 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     ]);
   });
 
-  it('case 10: the bound is 4 sends and the hook runs 3 times, never on the final attempt', async () => {
+  it('case 10: the bound is 4 sends and the hook runs 4 times, including the final attempt', async () => {
+    // The attempt bound stops RE-SENDS, not the "did it land?" read. The final
+    // failed attempt is exactly as likely to have been ACCEPTED as any other -
+    // the same argument the deadline makes in case 22 - so it gets its read
+    // too, and the interleave therefore ENDS on a DescribeTimeToLive.
     const stub = new StubClient().fallback('UpdateTimeToLive', { fail: internalFailure() });
 
     await expect(
@@ -406,6 +425,7 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
       'UpdateTimeToLive',
       'DescribeTimeToLive',
       'UpdateTimeToLive',
+      'DescribeTimeToLive',
     ]);
   });
 
@@ -609,28 +629,34 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     // failure the caller then sees is "Hook timed out in 60000ms", which names
     // nothing.
     //
-    // THE DEADLINE, NOT THE TIMER, IS THE BINDING CONSTRAINT HERE, by a wide
-    // margin - an earlier version of this case slept 30ms against a 50ms
-    // deadline, and 20ms of timer accuracy on a saturated worker is exactly the
-    // load-sensitive false red this mission exists to remove. The attempt bound
-    // is lifted to 12, well above what a 200ms deadline permits at 20ms a send:
-    //   lower bound (>= 2): attempt 1 finishes at ~20ms against a 200ms budget,
-    //     so ~180ms of slack has to be lost before it can fail;
-    //   upper bound (< 12): this is what proves the deadline fired AT ALL -
-    //     with no deadline the loop runs the full 12 sends.
+    // SCRIPTED TO BE DETERMINISTIC IN BOTH DIRECTIONS, so the count is an
+    // EQUALITY rather than a ratio. The deadline is read only in the catch,
+    // never during a send:
+    //   it cannot fire early - send 1 completes at ~5ms, which is nowhere near
+    //     the 2000ms budget no matter how loaded the worker is;
+    //   it cannot fail to fire - send 2 alone takes 2500ms, so elapsed is
+    //     >= 2505 > 2000 when its catch runs, on any machine.
+    // The attempt bound is lifted to 12 so it can never be the thing that
+    // stopped the loop: remove the deadline and this stub answers 12 sends.
     const fault = internalFailure();
-    const stub = new StubClient().fallback('CreateTable', { fail: fault, delayMs: 20 });
+    const stub = new StubClient()
+      .script('CreateTable', [
+        { fail: fault, delayMs: 5 },
+        { fail: fault, delayMs: 2_500 },
+      ])
+      // Fast and DIFFERENT: a third send would both break the count below and
+      // reject with an error that is not `fault`.
+      .fallback('CreateTable', { fail: internalFailure() });
 
     // The ORIGINAL container fault, by identity - not a deadline error of the
     // retry's own invention.
     await expect(
       ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, {
-        retry: { attempts: 12, backoffMs: (): number => 0, deadlineMs: 200 },
+        retry: { attempts: 12, backoffMs: (): number => 0, deadlineMs: 2_000 },
       }),
     ).rejects.toBe(fault);
 
-    expect(stub.count('CreateTable')).toBeGreaterThanOrEqual(2);
-    expect(stub.count('CreateTable')).toBeLessThan(12);
+    expect(stub.count('CreateTable')).toBe(2);
   });
 
   it('case 22: an EXPIRED deadline still asks the hook whether the mutation landed', async () => {
@@ -662,5 +688,81 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     ).resolves.toBe('created');
     expect(stub.count('UpdateTimeToLive')).toBe(1);
     expect(stub.count('DescribeTimeToLive')).toBe(2);
+  });
+
+  it('case 23: a retried DeleteTable conflict WAITS for the table to actually be gone', async () => {
+    // The mirror of case 2, and the reason it has to exist: the commonest
+    // caller of deleteTableIfExists is a delete-then-create hook
+    // (importApply.integration.test.ts and ~50 siblings), which re-creates the
+    // SAME name on the next line. Tolerating a retried conflict without
+    // waiting hands that caller a name that is still DELETING, and the create
+    // that follows draws its own conflict.
+    const stub = new StubClient()
+      .script('DeleteTable', [{ fail: internalFailure() }, { fail: resourceInUse() }])
+      .script('DescribeTable', [
+        { ok: tableDescription('DELETING') },
+        { ok: tableDescription('DELETING') },
+        { fail: resourceNotFound() },
+      ]);
+
+    await expect(
+      deleteTableIfExists(stub.asClient(), 'stub', {
+        retry: FAST,
+        poll: { intervalMs: 1, ceilingMs: 5_000 },
+      }),
+    ).resolves.toBeUndefined();
+    expect(stub.count('DeleteTable')).toBe(2);
+    // ResourceNotFoundException from DescribeTable is the ONLY proof of gone.
+    expect(stub.count('DescribeTable')).toBe(3);
+  });
+
+  it('case 24: a retried conflict on a table that never goes rethrows the CONFLICT', async () => {
+    // The delete half of the exhaustion split, matching case 19 exactly: the
+    // caller sees the ORIGINAL ResourceInUseException instance with the poll's
+    // observation appended, never a poll error of the helper's own invention.
+    const conflict = resourceInUse();
+    const stub = new StubClient()
+      .script('DeleteTable', [{ fail: internalFailure() }, { fail: conflict }])
+      .fallback('DescribeTable', { ok: tableDescription('DELETING') });
+
+    const failure = await deleteTableIfExists(stub.asClient(), 'stub-c24', {
+      retry: FAST,
+      poll: { intervalMs: 1, ceilingMs: 20 },
+    }).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+
+    expect(failure).toBe(conflict);
+    expect(failure).toBeInstanceOf(ResourceInUseException);
+    expect((failure as Error).message).toContain('stub-c24');
+    expect((failure as Error).message).toContain('DELETING');
+  });
+
+  it('case 25: a mutation that lands on the FINAL attempt is reported as success', async () => {
+    // The blind spot the attempt bound had, and the exact mirror of case 22's
+    // deadline argument: attempt 4 is the last one, but the server is no less
+    // likely to have ACCEPTED it and lost only the response. Reading the bound
+    // first would report a TTL that IS enabled as a failure - the one outcome
+    // this module exists to remove.
+    //
+    // Five DescribeTimeToLive answers: the pre-send guard, then one hook read
+    // per failed attempt, the LAST of which sees the enable that landed.
+    const stub = new StubClient()
+      .fallback('UpdateTimeToLive', { fail: internalFailure() })
+      .script('DescribeTimeToLive', [
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'ENABLED' } } },
+      ]);
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, { retry: FAST }),
+    ).resolves.toBe('created');
+    // Four sends: the bound was still honoured, it just did not pre-empt the read.
+    expect(stub.count('UpdateTimeToLive')).toBe(4);
+    expect(stub.count('DescribeTimeToLive')).toBe(5);
   });
 });

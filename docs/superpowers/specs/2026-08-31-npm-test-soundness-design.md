@@ -4,10 +4,11 @@
 - Branch: `feat/npm-test-soundness`
 - Worktree: `W:\tmp\npm-test-soundness`
 - Bundle: M7 of `docs/issues/_CLUSTERS.md` (re-derived 2026-08-31 @ `5ce9912f`)
-- Revision: **v4**, after adversarial rounds 1 (two independent reviewers),
-  2 and 3 (one continued reviewer). Adjudications:
+- Revision: **v5, TERMINAL** - four adversarial rounds (round 1 with two
+  independent reviewers, 2-4 with one continued). Round 4 changed no
+  decision. 83 findings, 83 accepted, 0 rejected. Adjudications:
   `docs/superpowers/reviews/2026-08-31-npm-test-soundness/design-review/adjudications.md`,
-  `adjudications-r2.md`, `adjudications-r3.md`.
+  `adjudications-r2.md`, `adjudications-r3.md`, `adjudications-r4.md`.
 
 ## The class
 
@@ -146,13 +147,22 @@ new false red while fixing an old one is this mission's own failure mode.
 Use a bounded `DescribeTable` poll, fully specified so no reader has to
 guess: **100ms interval, 10s ceiling**, and on exhaustion **rethrow the
 original `ResourceInUseException` with the observed table status appended**.
-10s is chosen against the caller's 60s hook budget and against DynamoDB
-Local's own 10s per-table lock timeout - a table that is still not ACTIVE
-after 10s locally is not going to become so inside the same hook.
+10s is chosen against DynamoDB Local's own 10s per-table lock timeout - a
+table that is still not ACTIVE after 10s locally is not going to become so
+inside the same hook. Note the 60s hook budget is per CALLER, not per call:
+`importApply` (`:75-77`), `groupConvert` (`:122-124`) and `globalSetup`
+(`:117`, ~23 tables) all call `ensureTable` in loops, so the ceiling is
+argued from the container's own timeout rather than from a budget that
+several callers divide.
 
 The poll's own `DescribeTable` calls are NOT retried. They are reads under
 the reads-are-not-covered rule, and a read that fails here simply counts as
 "not ACTIVE yet" and is polled again until the ceiling.
+
+**Retry bounds** (specified in v2, lost when v3 rewrote this section, and
+restored here): **at most 4 attempts, linear backoff of `attempt * 250ms`**
+- the same shape as the existing helper. A retry loop that can outlive a
+test budget trades one false red for another.
 
 **Pre-existing, and deliberately not fixed here:**
 `db-create.ts:64` and `:76` call `waitUntilTableNotExists({ maxWaitTime: 60 })`
@@ -193,6 +203,23 @@ never itself retried.** v3 left this undefined, which nested a retried read
 inside a retried mutation - the very objection this spec used to exclude
 the SDK waiter, with exhaustion semantics nobody could state.
 
+**Its RETURN contract, which three revisions left unstated** (a builder
+could satisfy every sentence above and still invert fail-closed into
+fail-open):
+
+| hook outcome | helper does |
+|---|---|
+| returns `true` - the mutation already landed | return success, no re-send |
+| returns `false` | re-send, subject to the attempt bound |
+| throws | rethrow the ORIGINAL error, no re-send |
+| no hook supplied | re-send, subject to the attempt bound |
+
+Note `dynamoAdmin.ts:128-131`'s `DescribeTimeToLive` is TWO call sites
+under this design, not one, and the two rules that meet there do not
+conflict: the **pre-send guard** is covered by the retry like any other
+send in `enableTtlIfNeeded`, while the **hook invocation** that re-reads
+status between attempts is not retried.
+
 ### The local-endpoint gate, specified concretely
 
 The retry ACTIVATES only when the client's resolved endpoint is a localhost
@@ -211,6 +238,17 @@ The predicate lives in `dynamoAdmin.ts` rather than being imported from
 `app/scripts/db-create.ts`, because `lib` importing from `scripts` inverts
 the repo's dependency direction. It is not a copy: `isLocalEndpoint` takes
 a URL string, this one takes a resolved endpoint object.
+
+**What this changes for `ensureGsis`, stated because v3 dropped it.**
+`ensureGsis` itself (`db-update-gsis.ts:200-242`) is UNGATED today - the
+localhost guard is on the CLI entry point (`:261-270`), not the function,
+so a test calling `ensureGsis` directly gets the retry regardless of
+endpoint. Moving it onto the shared helper puts it behind the endpoint
+gate for the first time. That is intended and is a tightening, not a
+loosening; the CLI path is unaffected because it already refuses non-local
+endpoints, and the integration suites that call `ensureGsis` run against
+DynamoDB Local. Acceptance case 8 therefore uses a LOCAL endpoint, and
+that is the point of the case rather than an incidental detail.
 
 ### Acceptance - this item MUST be able to fail
 
@@ -246,14 +284,22 @@ Cases:
    `send` called exactly once.** This is the case that stops the gate
    shipping inert;
 6. no endpoint provider at all -> same as (5);
-7. `[::1]` and `127.0.0.1` -> treated as local (pins the v2 omission);
-8. **`ensureGsis` still retries after the refactor** - a stub whose
-   `UpdateTable` throws `InternalFailure` then succeeds. Without this the
-   mission could silently disarm the only retry that exists today while
-   adding one that never fires. A second case pins that `ensureGsis` keeps
-   its FAIL-OPEN behaviour: a stub whose `DescribeTable` also throws must
-   still reach a re-send, proving the swallow inside `indexStatus` survived
-   the move to a fail-closed helper.
+7. `[::1]` and `127.0.0.1` -> treated as local. This pins the PREDICATE,
+   not the integration - cases 1-4 are what prove the retry actually fires
+   on a local client - and it is the positive half of the gate proof that
+   cases 5 and 6 are the negative half of;
+8. **`ensureGsis` still retries after the refactor**, on a LOCAL endpoint -
+   a stub whose `UpdateTable` throws `InternalFailure` then succeeds.
+   Without this the mission could silently disarm the only retry that
+   exists today while adding one that never fires;
+9. **`ensureGsis` still fails OPEN** - a stub whose `DescribeTable` also
+   throws must still reach a re-send, proving the swallow inside
+   `indexStatus` survived the move to a fail-closed helper;
+10. **poll exhaustion** - a stub whose `CreateTable` throws
+    `InternalFailure` then `ResourceInUseException`, and whose
+    `DescribeTable` never reports ACTIVE, throws at the 10s ceiling
+    carrying the observed status. Specifying an exhaustion path without an
+    acceptance case is the gap that produced case 5 in the first place.
 
 ## Item 1B - groupCrossCheck: measure, do not pre-rewrite
 
@@ -476,34 +522,44 @@ this with `mkdtemp`.
 A coverage GAIN: today all of those silently skip on any checkout where
 nobody built the dashboard - including this worktree.
 
-**Fixture contents are specified.** The fixture `index.html` must carry
-`HousingChoice` and `<div id="root">`, because assertions at `:41`, `:108`,
-`:165` and `:85` depend on them.
+**Fixture contents are specified, positively and negatively.** The fixture
+`index.html` must carry `HousingChoice` and `<div id="root">`, because
+assertions at `:41`, `:108`, `:165` and `:85` depend on them.
+
+It must ALSO NOT contain the strings `"version"`, `"private"` or `root:`.
+That constraint was cosmetic while a decoy existed; dropping the decoy made
+it load-bearing, because the traversal probes now assert against whatever
+the SPA fallback returns - which IS this fixture's `index.html`. A fixture
+carrying any of those three would fail the traversal assertions for a
+reason that has nothing to do with traversal.
 
 **No traversal decoys. The whole decoy idea is dropped, and this is the
 third revision it has broken in.** v1 planted one decoy one level up, v2
 planted two at depths the probes do not reach, and v3 mandated verifying
 reachability - all three were solving a problem that does not exist.
 
-`send`'s `UP_PATH_REGEXP` (`node_modules/send/index.js:61`, tested at
-`:431`) matches any normalized path containing a `..` segment with either
-separator, and answers **403 before joining the root**. Express decodes
-`%2e%2e%2f` to `../` first, so every probe at `:148-154` - including the
-`/assets/`-prefixed one and the backslash variant - is rejected without
-ever touching the filesystem. **There is no depth at which a decoy could
-be read**, so no decoy can make those assertions less vacuous.
+`send` decodes the request path and then tests it with `UP_PATH_REGEXP`
+(`node_modules/send/index.js:61`, tested at `:431`), which matches any
+normalized path containing a `..` segment with either separator. The
+request never reaches the filesystem. **There is no depth at which a decoy
+could be read**, so no decoy could have made those assertions less vacuous.
 
-The probes are therefore carried over UNCHANGED onto the fixture. What
-they assert is that the rejection holds; the mechanism that delivers it is
-`send`'s, not ours, and it is worth pinning precisely because a future
-static-serving change could lose it.
+The probes are therefore carried over UNCHANGED onto the fixture, and they
+are worth keeping: what they pin is OUR COMPOSITION - that no encoded `..`
+yields anything but the SPA shell or a 4xx, given this app's particular
+stack of static serving, SPA fallback and reserved namespaces. That is a
+property of how we wired it, not of `send`'s internals, and a future
+static-serving change could lose it. (Note the observable is usually the
+200 SPA fallthrough rather than a bare 403, which is why the existing
+assertion accepts `[200, 400, 403, 404]` and then checks the BODY.)
 
 **What the fixture DOES need is a positive control**, which the file lacks
-today: a real asset written into the fixture dist and fetched
-successfully. Without it, a `distDir` pointed somewhere wrong is
-indistinguishable from a correct one - `GET /` would still pass off the
-SPA fallback, and every "no leak" assertion would pass because nothing is
-being served at all.
+today: a real asset written into the fixture dist, fetched, and **asserted
+on its BODY, not its status**. A status check alone passes vacuously -
+`express.static` misses fall through to a 200 SPA shell, so "200 OK" is
+exactly what the regression this control exists to catch would also
+return. Without a body assertion, a `distDir` pointed somewhere wrong is
+indistinguishable from a correct one.
 
 ### (b) The PWA identity contract -> tracked source. NEVER skips.
 
@@ -582,6 +638,17 @@ the file is gitignored, so nothing is at risk.
 2. `docs/issues/` closures: Resolution stamps on all three files, written
    against measured evidence. **The anchor closes only if its measurements
    support it**; if the class survives it stays open with the new numbers.
+
+   **Expected outcome, said in advance so nobody is surprised by it: the
+   anchor most likely stays OPEN.** Item 1A has no recorded sighting to
+   cure, and item 1D forbids a mixed contended/quiet pair from closing the
+   issue. The two mediums should close cleanly. That is a legitimate
+   result - the anchor's own reopen condition ("fails a DynamoDB suite that
+   mints its own throwaway prefix, on an otherwise-idle box, twice") is a
+   trigger, not a countdown, so "no sighting this run" was never going to
+   close it. What this mission can deliver is a harder-to-break harness and
+   dated numbers; declaring the anchor closed without a sighting to point
+   at would be the same unfalsifiable claim the issue's history is full of.
 3. **Two NEW Tier-2 issue files**, from `docs/issues/_TEMPLATE.md`:
    - `globalSetup` re-enables TTL on the shared `hc-local-` tables every
      run, defeating `DYNAMO_DISABLE_TTL` for those suites;

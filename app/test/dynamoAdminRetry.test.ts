@@ -1,0 +1,468 @@
+// Acceptance suite for the DynamoDB Local control-plane retry in
+// src/lib/dynamoAdmin.ts (mission M7 "npm test soundness", spec item 1A).
+//
+// NO CONTAINER, NO NETWORK. Every case drives a stub client whose `send` is
+// scripted per command type, per call. That is deliberate: the retry it proves
+// only fires against a LOCAL endpoint under a transient container fault, which
+// is exactly the condition a real DynamoDB Local cannot be asked to produce on
+// demand. Without this file the whole item could ship inert behind five green
+// gates - cases 11 and 12 are what make "the retry did not fire" observable.
+//
+// Two conventions worth knowing before reading a case:
+//
+//  - the retry discriminates by `err.name`, while ensureTable /
+//    deleteTableIfExists discriminate by `instanceof`. So the stub throws REAL
+//    ResourceInUseException / ResourceNotFoundException / InternalServerError
+//    instances. `InternalFailure` has NO class anywhere in the SDK, so it is
+//    synthesised as an Error carrying that name - which is all the retry reads.
+//  - the verification hook re-reads the SAME command type as the pre-send
+//    guard (DescribeTimeToLive), so a per-command send counter cannot tell a
+//    hook call from a send. Cases 5-10 therefore assert the ORDERED send log,
+//    in which a hook read is identified by its POSITION (it falls between two
+//    mutation sends). That is strictly more informative than two counters.
+import {
+  CreateTableCommand,
+  DeleteTableCommand,
+  DescribeTableCommand,
+  DescribeTimeToLiveCommand,
+  DynamoDBClient,
+  InternalServerError,
+  ResourceInUseException,
+  UpdateTableCommand,
+  UpdateTimeToLiveCommand,
+} from '@aws-sdk/client-dynamodb';
+import { describe, expect, it } from 'vitest';
+import { ensureGsis } from '../scripts/db-update-gsis.js';
+import { tableName } from '../src/lib/config.js';
+import {
+  deleteTableIfExists,
+  ensureTable,
+  isLocalDynamoEndpoint,
+  pollUntilTableActive,
+  TableNotActiveError,
+} from '../src/lib/dynamoAdmin.js';
+import { getTableSpec, type TableSpec } from '../src/lib/tables.js';
+
+// --- the stub client --------------------------------------------------------
+
+type Step = { ok: unknown } | { fail: unknown };
+
+interface StubEndpoint {
+  protocol: string;
+  hostname: string;
+  port?: number;
+  path: string;
+}
+
+type CommandName =
+  | 'CreateTable'
+  | 'DeleteTable'
+  | 'DescribeTable'
+  | 'DescribeTimeToLive'
+  | 'UpdateTable'
+  | 'UpdateTimeToLive';
+
+/** instanceof, not constructor.name - a bundler may rename the class. */
+function commandName(command: unknown): CommandName {
+  if (command instanceof CreateTableCommand) return 'CreateTable';
+  if (command instanceof DeleteTableCommand) return 'DeleteTable';
+  if (command instanceof DescribeTableCommand) return 'DescribeTable';
+  if (command instanceof DescribeTimeToLiveCommand) return 'DescribeTimeToLive';
+  if (command instanceof UpdateTableCommand) return 'UpdateTable';
+  if (command instanceof UpdateTimeToLiveCommand) return 'UpdateTimeToLive';
+  throw new Error(`stub client: unscripted command ${String(command)}`);
+}
+
+function tableDescription(
+  status: string,
+  indexes: Array<{ IndexName: string; IndexStatus: string }> = [],
+): unknown {
+  return { Table: { TableName: 'stub', TableStatus: status, GlobalSecondaryIndexes: indexes } };
+}
+
+const LOCAL_ENDPOINT: StubEndpoint = {
+  protocol: 'http:',
+  hostname: 'localhost',
+  port: 8000,
+  path: '/',
+};
+
+class StubClient {
+  /** Every command this client was asked to send, in order. */
+  readonly sent: CommandName[] = [];
+
+  config: { endpoint?: () => Promise<StubEndpoint> } = {
+    endpoint: async () => LOCAL_ENDPOINT,
+  };
+
+  private readonly scripts = new Map<CommandName, Step[]>();
+
+  private readonly defaults = new Map<CommandName, Step>([
+    ['CreateTable', { ok: {} }],
+    ['DeleteTable', { ok: {} }],
+    ['UpdateTable', { ok: {} }],
+    ['UpdateTimeToLive', { ok: {} }],
+    ['DescribeTimeToLive', { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } }],
+    ['DescribeTable', { ok: tableDescription('ACTIVE') }],
+  ]);
+
+  /** An ordered script for one command type; consumed before the default. */
+  script(command: CommandName, steps: Step[]): this {
+    this.scripts.set(command, [...steps]);
+    return this;
+  }
+
+  /** What this command answers once its script (if any) runs out. */
+  fallback(command: CommandName, step: Step): this {
+    this.defaults.set(command, step);
+    return this;
+  }
+
+  endpointHostname(hostname: string): this {
+    this.config.endpoint = async () => ({ ...LOCAL_ENDPOINT, hostname });
+    return this;
+  }
+
+  noEndpoint(): this {
+    this.config = {};
+    return this;
+  }
+
+  throwingEndpoint(): this {
+    this.config.endpoint = async () => {
+      throw new Error('endpoint provider blew up');
+    };
+    return this;
+  }
+
+  count(command: CommandName): number {
+    return this.sent.filter((name) => name === command).length;
+  }
+
+  /** The TTL conversation alone: mutation sends interleaved with hook re-reads. */
+  ttlLog(): CommandName[] {
+    return this.sent.filter(
+      (name) => name === 'DescribeTimeToLive' || name === 'UpdateTimeToLive',
+    );
+  }
+
+  asClient(): DynamoDBClient {
+    return this as unknown as DynamoDBClient;
+  }
+
+  async send(command: unknown): Promise<unknown> {
+    const name = commandName(command);
+    this.sent.push(name);
+    const queue = this.scripts.get(name);
+    const step = (queue && queue.length > 0 ? queue.shift() : undefined) ?? this.defaults.get(name);
+    if (!step) throw new Error(`stub client: no response configured for ${name}`);
+    if ('fail' in step) throw step.fail;
+    return step.ok;
+  }
+}
+
+// --- error factories --------------------------------------------------------
+
+/**
+ * DynamoDB Local's own wording. There is NO InternalFailure class in the AWS
+ * SDK (verified against @aws-sdk/client-dynamodb 3.1070.0), so the only thing
+ * a caller can match on is the name - which is what the retry matches on.
+ */
+function internalFailure(): Error {
+  return Object.assign(
+    new Error('The request processing has failed because of an unknown error, exception or failure.'),
+    { name: 'InternalFailure' },
+  );
+}
+
+/** The container's per-table tryLock(10s) expiring. A REAL SDK class. */
+function lockTimeout(): InternalServerError {
+  return new InternalServerError({
+    $metadata: {},
+    message: 'This action timed out because it took too long waiting for a lock',
+  });
+}
+
+function resourceInUse(): ResourceInUseException {
+  return new ResourceInUseException({
+    $metadata: {},
+    message: 'Table already exists: stub',
+  });
+}
+
+// --- shared fixtures --------------------------------------------------------
+
+/** No backoff: this file must not spend ~4-5s in real setTimeout. */
+const FAST = { backoffMs: (): number => 0 };
+const NO_TTL = getTableSpec('contacts'); // no ttlAttribute
+const TTL_SPEC = getTableSpec('messages'); // ttlAttribute: expires_at, zero GSIs
+const LIVE_ENV = {}; // DYNAMO_DISABLE_TTL unset, so the TTL path is reachable
+
+const ONE_GSI_SPEC: TableSpec = {
+  baseName: 'stubgsi',
+  hashKey: { name: 'id', type: 'S' },
+  gsis: [{ indexName: 'byThing', hashKey: { name: 'thing', type: 'S' } }],
+};
+const ONE_GSI_TABLE = tableName(ONE_GSI_SPEC.baseName, LIVE_ENV);
+const INDEX_ACTIVE = tableDescription('ACTIVE', [
+  { IndexName: 'byThing', IndexStatus: 'ACTIVE' },
+]);
+const INDEX_ABSENT = tableDescription('ACTIVE');
+const silent = (): void => undefined;
+
+// ----------------------------------------------------------------------------
+
+describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () => {
+  it('case 1: CreateTable retries a transient InternalFailure twice and then succeeds', async () => {
+    const stub = new StubClient().script('CreateTable', [
+      { fail: internalFailure() },
+      { fail: internalFailure() },
+      { ok: {} },
+    ]);
+
+    await expect(
+      ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, { retry: FAST }),
+    ).resolves.toBe('created');
+    expect(stub.count('CreateTable')).toBe(3);
+  });
+
+  it('case 2: an accepted-but-unanswered CreateTable polls until the table is ACTIVE', async () => {
+    const stub = new StubClient()
+      .script('CreateTable', [{ fail: internalFailure() }, { fail: resourceInUse() }])
+      .script('DescribeTable', [
+        { ok: tableDescription('CREATING') },
+        { ok: tableDescription('CREATING') },
+        { ok: tableDescription('ACTIVE') },
+      ]);
+
+    await expect(
+      ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, {
+        retry: FAST,
+        poll: { intervalMs: 1, ceilingMs: 5_000 },
+      }),
+    ).resolves.toBe('exists');
+    expect(stub.count('CreateTable')).toBe(2);
+    expect(stub.count('DescribeTable')).toBe(3);
+  });
+
+  it('case 3: a plainly pre-existing table returns exists with ZERO DescribeTable calls', async () => {
+    const stub = new StubClient().script('CreateTable', [{ fail: resourceInUse() }]);
+
+    await expect(
+      ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, { retry: FAST }),
+    ).resolves.toBe('exists');
+    expect(stub.count('CreateTable')).toBe(1);
+    expect(stub.count('DescribeTable')).toBe(0);
+  });
+
+  it('case 4: DeleteTable retries, then tolerates ResourceInUseException (DELETING landed)', async () => {
+    const stub = new StubClient().script('DeleteTable', [
+      { fail: internalFailure() },
+      { fail: resourceInUse() },
+    ]);
+
+    await expect(
+      deleteTableIfExists(stub.asClient(), 'stub', { retry: FAST }),
+    ).resolves.toBeUndefined();
+    expect(stub.count('DeleteTable')).toBe(2);
+  });
+
+  it('case 5: UpdateTimeToLive re-reads status between attempts before re-sending', async () => {
+    const stub = new StubClient().script('UpdateTimeToLive', [
+      { fail: internalFailure() },
+      { ok: {} },
+    ]);
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, { retry: FAST }),
+    ).resolves.toBe('created');
+    expect(stub.ttlLog()).toEqual([
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+    ]);
+  });
+
+  it('case 6: a re-read reporting ENABLED ends the retry with NO re-send', async () => {
+    const stub = new StubClient()
+      .script('UpdateTimeToLive', [{ fail: internalFailure() }])
+      .script('DescribeTimeToLive', [
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'ENABLED' } } },
+      ]);
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, { retry: FAST }),
+    ).resolves.toBe('created');
+    expect(stub.count('UpdateTimeToLive')).toBe(1);
+    expect(stub.ttlLog()).toEqual([
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+      'DescribeTimeToLive',
+    ]);
+  });
+
+  it('case 7: a re-read that THROWS rethrows the ORIGINAL error and does not re-send', async () => {
+    const stub = new StubClient()
+      .script('UpdateTimeToLive', [{ fail: internalFailure() }])
+      .script('DescribeTimeToLive', [
+        { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+        { fail: new Error('the verification read itself failed') },
+      ]);
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, { retry: FAST }),
+    ).rejects.toMatchObject({ name: 'InternalFailure' });
+    expect(stub.count('UpdateTimeToLive')).toBe(1);
+  });
+
+  it('case 8: the InternalServerError lock-timeout signature is retried identically', async () => {
+    const stub = new StubClient().script('CreateTable', [{ fail: lockTimeout() }, { ok: {} }]);
+
+    await expect(
+      ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, { retry: FAST }),
+    ).resolves.toBe('created');
+    expect(stub.count('CreateTable')).toBe(2);
+  });
+
+  it('case 9: the PRE-SEND DescribeTimeToLive guard is itself retried', async () => {
+    const stub = new StubClient().script('DescribeTimeToLive', [
+      { fail: internalFailure() },
+      { ok: { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } } },
+    ]);
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, { retry: FAST }),
+    ).resolves.toBe('created');
+    expect(stub.ttlLog()).toEqual([
+      'DescribeTimeToLive',
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+    ]);
+  });
+
+  it('case 10: the bound is 4 sends and the hook runs 3 times, never on the final attempt', async () => {
+    const stub = new StubClient().fallback('UpdateTimeToLive', { fail: internalFailure() });
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, { retry: FAST }),
+    ).rejects.toMatchObject({ name: 'InternalFailure' });
+    expect(stub.count('UpdateTimeToLive')).toBe(4);
+    expect(stub.ttlLog()).toEqual([
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+      'DescribeTimeToLive',
+      'UpdateTimeToLive',
+    ]);
+  });
+
+  it('case 11: a NON-LOCAL endpoint gets today behaviour - one send, error propagates', async () => {
+    const stub = new StubClient()
+      .endpointHostname('dynamodb.us-east-1.amazonaws.com')
+      .script('CreateTable', [{ fail: internalFailure() }, { ok: {} }]);
+
+    await expect(
+      ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, { retry: FAST }),
+    ).rejects.toMatchObject({ name: 'InternalFailure' });
+    expect(stub.count('CreateTable')).toBe(1);
+  });
+
+  it('case 12: NO endpoint provider fails closed the same way', async () => {
+    const stub = new StubClient()
+      .noEndpoint()
+      .script('CreateTable', [{ fail: internalFailure() }, { ok: {} }]);
+
+    await expect(
+      ensureTable(stub.asClient(), NO_TTL, 'stub', LIVE_ENV, { retry: FAST }),
+    ).rejects.toMatchObject({ name: 'InternalFailure' });
+    expect(stub.count('CreateTable')).toBe(1);
+  });
+
+  it('case 13: the predicate reads a REAL DynamoDBClient config.endpoint correctly', async () => {
+    const local = new DynamoDBClient({ region: 'us-east-1', endpoint: 'http://localhost:8000' });
+    const remote = new DynamoDBClient({ region: 'us-east-1' });
+    try {
+      await expect(isLocalDynamoEndpoint(local)).resolves.toBe(true);
+      await expect(isLocalDynamoEndpoint(remote)).resolves.toBe(false);
+    } finally {
+      local.destroy();
+      remote.destroy();
+    }
+  });
+
+  it('case 14: localhost, 127.0.0.1, ::1 and [::1] are local; everything else is not', async () => {
+    for (const hostname of ['localhost', '127.0.0.1', '::1', '[::1]']) {
+      const stub = new StubClient().endpointHostname(hostname);
+      await expect(isLocalDynamoEndpoint(stub.asClient())).resolves.toBe(true);
+    }
+    for (const hostname of ['dynamodb.us-east-1.amazonaws.com', '10.0.0.5', 'localhost.evil.com']) {
+      const stub = new StubClient().endpointHostname(hostname);
+      await expect(isLocalDynamoEndpoint(stub.asClient())).resolves.toBe(false);
+    }
+    await expect(isLocalDynamoEndpoint(new StubClient().noEndpoint().asClient())).resolves.toBe(
+      false,
+    );
+    await expect(
+      isLocalDynamoEndpoint(new StubClient().throwingEndpoint().asClient()),
+    ).resolves.toBe(false);
+  });
+
+  it('case 15: ensureGsis still retries UpdateTable after the move to the shared helper', async () => {
+    const stub = new StubClient()
+      .script('UpdateTable', [{ fail: internalFailure() }, { ok: {} }])
+      // 1st read: liveIndexNames (index absent). 2nd: the verification re-read,
+      // still absent, so attempt 1 did NOT land and a re-send is required.
+      .script('DescribeTable', [{ ok: INDEX_ABSENT }, { ok: INDEX_ABSENT }])
+      .fallback('DescribeTable', { ok: INDEX_ACTIVE });
+
+    const result = await ensureGsis(stub.asClient(), [ONE_GSI_SPEC], LIVE_ENV, silent, {
+      retry: FAST,
+    });
+
+    expect(stub.count('UpdateTable')).toBe(2);
+    expect(result.added).toEqual([`${ONE_GSI_TABLE}.byThing`]);
+  });
+
+  it('case 16: ensureGsis stays FAIL-OPEN when its verification read throws', async () => {
+    const stub = new StubClient()
+      .script('UpdateTable', [{ fail: internalFailure() }, { ok: {} }])
+      // The verification read THROWS. indexStatus swallows it and answers
+      // `undefined`, so the hook returns false and the re-send happens - the
+      // caller-side tolerance survived the move to a fail-closed helper.
+      .script('DescribeTable', [
+        { ok: INDEX_ABSENT },
+        { fail: new Error('describe failed mid-retry') },
+      ])
+      .fallback('DescribeTable', { ok: INDEX_ACTIVE });
+
+    const result = await ensureGsis(stub.asClient(), [ONE_GSI_SPEC], LIVE_ENV, silent, {
+      retry: FAST,
+    });
+
+    expect(stub.count('UpdateTable')).toBe(2);
+    expect(result.added).toEqual([`${ONE_GSI_TABLE}.byThing`]);
+  });
+
+  it('case 17: the ACTIVE poll throws its OWN error at the ceiling, naming table and status', async () => {
+    const stub = new StubClient().fallback('DescribeTable', { ok: tableDescription('CREATING') });
+
+    const failure = await pollUntilTableActive(stub.asClient(), 'stub-table', {
+      intervalMs: 1,
+      ceilingMs: 25,
+    }).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+
+    expect(failure).toBeInstanceOf(TableNotActiveError);
+    expect((failure as TableNotActiveError).message).toContain('stub-table');
+    expect((failure as TableNotActiveError).message).toContain('CREATING');
+    expect((failure as TableNotActiveError).observedStatus).toBe('CREATING');
+    expect(stub.count('DescribeTable')).toBeGreaterThan(0);
+  });
+});

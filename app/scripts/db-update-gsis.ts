@@ -32,7 +32,11 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDynamoClient } from '../src/lib/dynamo.js';
-import { gsiInput } from '../src/lib/dynamoAdmin.js';
+import {
+  gsiInput,
+  sendWithRetryVerified,
+  type RetrySchedule,
+} from '../src/lib/dynamoAdmin.js';
 import { TABLES, type GsiSpec, type TableSpec } from '../src/lib/tables.js';
 import { isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from './db-create.js';
 
@@ -52,38 +56,17 @@ export function gsiAttributeDefinitions(gsi: GsiSpec): AttributeDefinition[] {
 }
 
 /**
- * Send an UpdateTable, retrying DynamoDB Local's `InternalFailure`.
+ * The status of ONE index on a live table, or `undefined` when it is absent -
+ * and also `undefined` when the read itself failed.
  *
- * LOCAL-ONLY HAZARD, not an API contract issue. Under concurrent load the
- * DynamoDB Local container answers UpdateTable with:
- *
- *   InternalFailure: The request processing has failed because of an unknown
- *   error, exception or failure.
- *
- * It is the container buckling, not a rejected request - the same call succeeds
- * moments later, and running the suite alone is green. The AWS SDK's default
- * retry policy does NOT cover this code, so it escapes to the caller and fails
- * whatever gate is running. That is suite B of
- * docs/issues/npm-test-dynamodb-local-contention.md, and it is one of the two
- * reasons `npm test` could not be trusted.
- *
- * THE RETRY MUST RE-READ, and an earlier version of this comment claimed a
- * re-read that its own code path never performed. `ensureGsis` reads
- * `liveIndexNames` ONCE PER TABLE, above the `for (const gsi of missing)` loop -
- * so a bare re-send inside the loop asks for an index that may already exist.
- *
- * That is exactly the case the retry exists for: the server ACCEPTS attempt 1
- * and only its RESPONSE fails. Attempt 2 then hits an index already being
- * created and throws `ResourceInUseException: Attempt to change a resource which
- * is still in use: Index is being created` - which is not retryable, so a run
- * whose GSI was created successfully failed anyway, blaming a resource conflict.
- * Reproduced against the container by an adversarial review, 2026-08-23.
- *
- * So on a retryable error we DescribeTable first: if the index is now CREATING
- * or ACTIVE, attempt 1 landed and there is nothing left to do. Only a genuinely
- * absent index is re-sent. Against real AWS this code is never reached
- * (hard-gated to a localhost endpoint), so the retry cannot mask a production
- * fault.
+ * THE SWALLOW IS DELIBERATE AND IT IS THE CALLER'S TOLERANCE, NOT THE
+ * HELPER'S. `sendWithRetryVerified` (src/lib/dynamoAdmin.ts) fails CLOSED when
+ * a verification hook throws - one contract for every caller. This function is
+ * the inside of THIS caller's hook, which is the right layer for a tolerance:
+ * a describe that itself fails tells us nothing about whether the UpdateTable
+ * landed, and for a GSI create the safe answer is to re-send (an index that
+ * really does exist draws ResourceInUseException, which surfaces loudly),
+ * whereas for a TTL enable it is not. Do not move this catch into the helper.
  */
 async function indexStatus(
   client: DynamoDBClient,
@@ -97,32 +80,6 @@ async function indexStatus(
   } catch {
     // A describe that itself fails tells us nothing; fall through to the retry.
     return undefined;
-  }
-}
-
-async function sendWithInternalFailureRetry(
-  client: DynamoDBClient,
-  physicalName: string,
-  indexName: string,
-  build: () => UpdateTableCommand,
-  attempts = 4,
-): Promise<void> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      await client.send(build());
-      return;
-    } catch (err) {
-      const name = (err as { name?: string }).name ?? '';
-      const retryable = name === 'InternalFailure' || name === 'InternalServerError';
-      if (!retryable || attempt >= attempts) throw err;
-      // Did attempt N actually land? A failed RESPONSE does not mean a failed
-      // REQUEST, and re-sending a create for an index that now exists throws
-      // ResourceInUseException - turning a success into a misleading failure.
-      const status = await indexStatus(client, physicalName, indexName);
-      if (status === 'CREATING' || status === 'ACTIVE') return;
-      // Linear backoff: the container needs a moment, not an exponential one.
-      await new Promise((resolve) => setTimeout(resolve, attempt * 250));
-    }
   }
 }
 
@@ -196,12 +153,21 @@ async function liveIndexNames(
  * an index that already exists is never touched, and nothing is ever dropped
  * (an EXTRA live index the spec no longer declares is left alone - removing it
  * is a destructive decision this script deliberately does not make).
+ *
+ * NOTE the UpdateTable retry now lives in src/lib/dynamoAdmin.ts and carries
+ * that helper's LOCAL-ENDPOINT gate. This function used to be ungated (only
+ * the CLI entry point below checks the endpoint), so a caller invoking it
+ * directly against a non-local endpoint got the retry regardless; it no longer
+ * does. That is a tightening, and it changes nothing for either real caller -
+ * the CLI already refuses a non-local endpoint, and the integration suite runs
+ * against DynamoDB Local.
  */
 export async function ensureGsis(
   client: DynamoDBClient,
   specs: readonly TableSpec[] = TABLES,
   env: NodeJS.ProcessEnv = process.env,
   log: (message: string) => void = console.log,
+  opts: { retry?: RetrySchedule } = {},
 ): Promise<EnsureGsisResult> {
   const result: EnsureGsisResult = { added: [], unchanged: [], missingTables: [] };
 
@@ -224,12 +190,25 @@ export async function ensureGsis(
     // ONE create per UpdateTable call, and the new INDEX (not just the table)
     // must finish before the next create is accepted.
     for (const gsi of missing) {
-      await sendWithInternalFailureRetry(client, physicalName, gsi.indexName, () =>
-        new UpdateTableCommand({
-          TableName: physicalName,
-          AttributeDefinitions: gsiAttributeDefinitions(gsi),
-          GlobalSecondaryIndexUpdates: [{ Create: gsiInput(gsi) }],
-        }),
+      // Did attempt N actually land? `ensureGsis` reads `liveIndexNames` ONCE
+      // PER TABLE, above this loop, so a bare re-send would ask for an index
+      // that may already exist and draw a (non-retryable) ResourceInUseException
+      // - failing a run whose GSI was in fact created. Hence the re-read.
+      await sendWithRetryVerified(
+        client,
+        () =>
+          client.send(
+            new UpdateTableCommand({
+              TableName: physicalName,
+              AttributeDefinitions: gsiAttributeDefinitions(gsi),
+              GlobalSecondaryIndexUpdates: [{ Create: gsiInput(gsi) }],
+            }),
+          ),
+        async () => {
+          const status = await indexStatus(client, physicalName, gsi.indexName);
+          return status === 'CREATING' || status === 'ACTIVE';
+        },
+        { schedule: opts.retry },
       );
       await waitUntilTableExists({ client, maxWaitTime: 120 }, { TableName: physicalName });
       await waitUntilIndexActive(client, physicalName, gsi.indexName);

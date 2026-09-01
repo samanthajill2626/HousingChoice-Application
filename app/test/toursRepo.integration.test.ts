@@ -8,7 +8,7 @@
 // Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -529,5 +529,41 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     // attribute_exists(tourId) is the guard that stops UpdateItem conjuring an
     // attribute-only stub for a tour that does not exist.
     expect(await rawTour('tour-ghost-ladder')).toBeUndefined();
+  });
+
+  // The OPT-IN consistent read (review round NEW-5). DynamoDB's default GetItem
+  // is eventually consistent, which is exactly what broke fix-wave 1's
+  // ownership guard: a read issued one line after the write that it checks is
+  // NOT guaranteed to see it. The flag is opt-in (the contactsRepo idiom) so
+  // only the caller that must not be stale pays for it, and it is asserted on
+  // the COMMAND INPUT: a strongly consistent store cannot tell the two apart,
+  // so the only observable fact here is the request we send.
+  it('get carries ConsistentRead ONLY when the caller opts in', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-consistent',
+      unitId: 'unit-consistent',
+      scheduledAt: '2026-11-05T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+    const seen: (boolean | undefined)[] = [];
+    const spyingDoc = {
+      send: async (command: unknown) => {
+        if (command instanceof GetCommand) {
+          seen.push((command.input as { ConsistentRead?: boolean }).ConsistentRead);
+        }
+        return (doc as DynamoDBDocumentClient).send(command as never);
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const spyingRepo = createToursRepo({ doc: spyingDoc, env: testEnv, logger });
+
+    expect((await spyingRepo.get(tour.tourId))?.tourId).toBe(tour.tourId);
+    expect((await spyingRepo.get(tour.tourId, { consistentRead: true }))?.tourId).toBe(tour.tourId);
+    expect((await spyingRepo.get(tour.tourId, {}))?.tourId).toBe(tour.tourId);
+
+    // Absent by default (never `false` - the key is omitted entirely), present
+    // and true on the opt-in, absent again for an options object that does not
+    // ask for it.
+    expect(seen).toEqual([undefined, true, undefined]);
   });
 });

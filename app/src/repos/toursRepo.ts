@@ -145,8 +145,18 @@ export type PatchTourInput = Partial<
 export interface ToursRepo {
   /** Create a tour (generates tourId); returns the stored item. */
   create(input: CreateTourInput): Promise<TourItem>;
-  /** Get a tour by id; undefined when not found. */
-  get(tourId: string): Promise<TourItem | undefined>;
+  /**
+   * Get a tour by id; undefined when not found.
+   *
+   * EVENTUALLY CONSISTENT by default, like every other GetItem in this repo.
+   * Pass `{ consistentRead: true }` when the caller must observe a write it
+   * itself just issued - DynamoDB's default read is documented as possibly not
+   * reflecting a recently completed write, and a handler that reads its own
+   * patch back one line later is not guaranteed to see it (review round NEW-1,
+   * reproduced with no concurrency at all). Opt-IN rather than always-on, the
+   * `contactsRepo` idiom, so only the caller that needs it pays for it.
+   */
+  get(tourId: string, opts?: { consistentRead?: boolean }): Promise<TourItem | undefined>;
   /** All tours for a tenant via the byTenant GSI. */
   listByTenant(tenantId: string): Promise<TourItem[]>;
   /** All tours for a unit via the byUnit GSI. */
@@ -296,8 +306,17 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       return item;
     },
 
-    async get(tourId) {
-      const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { tourId } }));
+    async get(tourId, opts) {
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { tourId },
+          // OMITTED unless asked for (never written as `false`), the
+          // contactsRepo spread idiom - so the default request is byte-for-byte
+          // what it has always been.
+          ...(opts?.consistentRead === true && { ConsistentRead: true }),
+        }),
+      );
       return Item as TourItem | undefined;
     },
 

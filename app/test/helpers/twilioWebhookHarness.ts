@@ -2821,6 +2821,11 @@ export function createFakeWorld(): FakeWorld {
       return { ...item };
     },
     async get(tourId) {
+      // The `{ consistentRead }` option is deliberately not a parameter here:
+      // this map IS strongly consistent, so there is no weaker read to opt out
+      // of and no behaviour for a flag to select. A caller passing it gets the
+      // same answer, which is the honest mirror of the real repo's stronger
+      // half (review round NEW-5).
       const t = toursMap.get(tourId);
       return t ? { ...t } : undefined;
     },

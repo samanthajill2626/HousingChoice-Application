@@ -605,9 +605,28 @@ export interface DeliveryReasonOptions {
  * This is STAFF-FACING dashboard copy, so it lives here beside
  * ERROR_CODE_REASONS rather than in the app's message catalog (which is the
  * single source for automated MEMBER-facing copy).
+ *
+ * `transient_cap` and `enqueue_failed` are the two closes the fan-out ladders
+ * write when a multi-recipient send can no longer advance: the pass cap is spent
+ * with legs still deferred, or the continuation could not be scheduled at all
+ * (app/src/jobs/broadcastFanOut.ts and relayFanOut.ts). They are kept DISTINCT
+ * on purpose - reusing the cap's wording for a scheduling failure would tell an
+ * operator retries ran when none did.
+ *
+ * `enqueue_failed` deliberately does NOT name a cause. The same close also fires
+ * from the hop-count and no-adapter guards in jobs.ts, so "the queue is down"
+ * would be a guess an operator would then act on.
+ *
+ * Unlike `contact_opted_out`, neither gets a per-position escape hatch:
+ * `presentLegDelivery` intercepts the opted-out code alone, so these two are
+ * written into recipient SLOTS and one sentence has to serve a broadcast's
+ * results badge, the relay rollup, the accessible-name recital and a single
+ * member's row.
  */
 const INTERNAL_CODE_REASONS: Record<string, string> = {
   contact_opted_out: 'Everyone here has opted out - nothing was sent',
+  transient_cap: 'Sending gave up after repeated carrier deferrals',
+  enqueue_failed: 'Sending could not be scheduled',
 };
 
 /**

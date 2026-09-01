@@ -1440,6 +1440,13 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   // entry in DeadlinesNudgesCard's suppression labels.
   conversion_stalled:
     'That tour is stuck part-way through becoming a placement, so nothing was sent.',
+  // Supersession (2026-09-01, review round M1) and NOT permanent: the tour is
+  // mid-conversion, so this rung's fate is still undecided - the finalize is
+  // about to delete it, and a conversion that fails releases its claim and
+  // leaves it sendable. So the copy says WAIT rather than "nothing can change
+  // this", and this code is deliberately absent from the permanent list.
+  conversion_in_progress:
+    'That tour is being turned into a placement right now, so nothing was sent - try again once that finishes.',
   // Post-claim race (the gate flipped mid-send): the row IS consumed but nothing
   // went out, so these must read as errors, not successes.
   contact_no_consent: 'No SMS consent on file - record consent before sending this by hand.',

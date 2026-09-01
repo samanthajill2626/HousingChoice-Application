@@ -1818,6 +1818,59 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(spy.sent).toHaveLength(1);
   });
 
+  // -------------------------------------------------------------------------
+  // THE CONVERSION CLAIM (spec 3.3, review round M1). The poll DEFERS every
+  // rung of a tour carrying a `pending:` sentinel; without the same check here
+  // Send now composes and fires one - "your tour is tomorrow" for a tour that
+  // is becoming a placement, and unbounded on a conversion that crashed between
+  // the claim and the finalize (the sentinel has no TTL).
+  // -------------------------------------------------------------------------
+  it('409s conversion_in_progress while a placement conversion holds the claim', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '9' });
+    await world.toursRepo.claimConversion(tourId, 'pending:conv-sendnow-1');
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('conversion_in_progress');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+    // Neither path stamps: the poll defers, the human path refuses, and a
+    // released claim has to leave the rung sendable.
+    expect(world.tourRemindersMap.get(reminderId)?.sentAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.skippedAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.canceledAt).toBeUndefined();
+  });
+
+  it('a FINALIZED tour is not a claim in flight - the prefix is the predicate', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '10' });
+    await world.toursRepo.patch(tourId, { convertedPlacementId: 'placement-real-1' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(spy.sent).toHaveLength(1);
+  });
+
+  it('superseded outranks the conversion claim - a mismatched rung is refused either way', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '11' });
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-new' });
+    await world.toursRepo.claimConversion(tourId, 'pending:conv-sendnow-2');
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('superseded');
+    expect(spy.sent).toHaveLength(0);
+  });
+
   it('kind_retired still outranks superseded - the refusal that costs no reads stays first', async () => {
     // Both are permanent, but they send the operator to different places, and
     // the discontinued-kind refusal is deliberately the first thing this

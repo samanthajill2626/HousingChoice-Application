@@ -1704,6 +1704,14 @@ export type ForceSendRefusal =
    *  a send can still be made. Shares the token with the poll's claim-skip (the
    *  poll retires such a rung; the human path only refuses it). */
   | 'superseded'
+  /** Supersession (2026-09-01, review round M1): the tour is carrying a
+   *  `pending:` placement-conversion sentinel, so its fate is undecided - the
+   *  finalize is about to delete this rung, and a failed conversion will
+   *  release the claim and leave it sendable. RETRYABLE once the conversion
+   *  resolves, which is why it is not in the dashboard's PERMANENT_REFUSALS.
+   *  The poll DEFERS the same rung; neither path stamps it (a human action
+   *  never retires a rung, and skippedAt could not be undone by a release). */
+  | 'conversion_in_progress'
   | ReminderResolutionFailure;
 
 export type ForceSendResult =
@@ -1808,6 +1816,28 @@ export async function forceSendReminder(
       'tour reminder force-send refused (pre-claim) - row left pending',
     );
     return { outcome: 'refused', reason: 'superseded' };
+  }
+  // CONVERSION CLAIM IN FLIGHT (spec 3.3, review round M1). processReminderRow
+  // defers every rung of a tour carrying this sentinel; this entry point
+  // inherits nothing from it, so without this check Send now composes and fires
+  // a rung for a tour that is becoming a placement - and on a conversion that
+  // crashed between the claim and the finalize the sentinel has no TTL, so the
+  // window is unbounded rather than the milliseconds of the happy path.
+  //
+  // BELOW the pointer check on purpose: a rung whose ladder the tour already
+  // replaced is refused `superseded` whatever any claim is doing, and that is
+  // the truer answer - the claim will pass, the mismatch will not. The PREFIX
+  // is the predicate, exactly as in the poll: the finalize replaces the
+  // sentinel with a real placementId in this same field.
+  if (
+    typeof tour.convertedPlacementId === 'string' &&
+    tour.convertedPlacementId.startsWith('pending:')
+  ) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'conversion_in_progress' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'conversion_in_progress' };
   }
 
   // CONTAINED (spec 6.3b): target resolution does FOUR bare reads - the tour

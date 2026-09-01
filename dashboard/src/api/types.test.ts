@@ -161,6 +161,19 @@ describe('SEND_NOW_ERROR_COPY', () => {
       );
     }
   });
+
+  // RETRYABLE, and deliberately NOT in the list above (supersession review round
+  // M1): the tour is mid-conversion, so the rung's fate is undecided - the
+  // finalize is about to delete it, and a failed conversion releases the claim
+  // and leaves it sendable. The generic fallback would still be wrong, though:
+  // "please try again" says nothing about WHY, and the operator would press it
+  // again immediately. So it needs its own sentence AND its own advice.
+  it('gives the retryable conversion refusal its own sentence, not the generic one', () => {
+    const copy = sendNowErrorMessage('conversion_in_progress');
+    expect(copy).not.toBe("Couldn't send that just now - please try again.");
+    expect(copy).not.toBe(sendNowErrorMessage('conversion_stalled'));
+    expect(copy.length).toBeGreaterThan(0);
+  });
 });
 
 // The suppression vocabulary the app can send on an UPCOMING rung/card. Listed

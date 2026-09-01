@@ -20,6 +20,19 @@
 //    hook call from a send. Cases 5-10 therefore assert the ORDERED send log,
 //    in which a hook read is identified by its POSITION (it falls between two
 //    mutation sends). That is strictly more informative than two counters.
+//
+// hc:dynamo-lane none
+//
+// Declared for the creates-tables guard in
+// app/test/setup/dynamoAccessKeyGuard.test.ts. This file's source names
+// ensureTable and CreateTableCommand, which is the guard's cue that a suite
+// creates container tables under fixed names - but every one of those names is
+// handed to a stub client, so no DynamoDB Local database is ever opened and no
+// container table is ever created. Case 13 does construct two REAL
+// DynamoDBClients straight from the SDK to pin the endpoint predicate, and
+// never sends through either; that is the SDK constructor, not
+// src/lib/dynamo.js's factory, so the marker's rot-proof check (a `none` suite
+// must not import the container-reaching factory) holds.
 import {
   CreateTableCommand,
   DeleteTableCommand,

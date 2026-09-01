@@ -299,19 +299,22 @@ export function isTerminalDeliveryFailure(errorCode: string | undefined): boolea
 }
 
 /**
- * The sender label for group/relay push bodies: roster name -> contact display
- * name -> formatted phone -> the raw From (spec 3.4 fallback chain). All three
- * inputs are already in scope at every persist point, so a push adds NO repo
- * lookup to the hot path. Pure, no I/O, no logging.
+ * The sender label for group/relay push bodies: contact display name ->
+ * roster name -> formatted phone -> the raw From. Contact-first since
+ * 2026-09-01 (the roster name is a creation-time snapshot). All three inputs
+ * are already in scope at every persist point, so a push adds NO repo lookup to
+ * the hot path. Pure, no I/O, no logging.
  */
 function pushSenderLabel(
   rosterName: string | undefined,
   senderContact: ContactItem | undefined,
   from: string,
 ): string {
+  const live = contactDisplayName(senderContact);
+  if (live !== undefined) return live;
   const roster = typeof rosterName === 'string' ? rosterName.trim() : '';
   if (roster.length > 0) return roster;
-  return contactDisplayName(senderContact) ?? formatPhoneForDisplay(from) ?? from;
+  return formatPhoneForDisplay(from) ?? from;
 }
 
 /**

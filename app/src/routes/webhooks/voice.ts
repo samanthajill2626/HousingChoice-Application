@@ -82,6 +82,7 @@ import {
   contactShortName,
   maskedCallerLabel,
   roleWordForContact,
+  shortNameFromFull,
   UNKNOWN_CALLER_LABEL,
 } from '../../lib/voiceMasking.js';
 import type { AuditRepo } from '../../repos/auditRepo.js';
@@ -107,14 +108,18 @@ function asParams(body: unknown): WebhookParams {
 }
 
 /**
- * A neutral, masked party label for a participant: the resolved display name
- * when one is known, else the role ("Tenant"/"Landlord"), else the generic
- * "the other party". NEVER the raw phone (PII, doc §9). `name` is the
- * roster-cached display name (resolved at member-add time); `role` comes from
- * the reviewed contact type (honesty rule — only tenant/landlord claim a role).
+ * A neutral, masked party label for a participant: the CONTACT's masked name
+ * ("First L.", lib/voiceMasking) when the contact is readable, else the stored
+ * roster name put through the same mask, else the role ("Tenant"/"Landlord"),
+ * else the generic "the other party". NEVER the raw phone (PII, doc section 9),
+ * and never an unmasked full name: this label is PERSISTED as call_party_label
+ * AND spoken to the callee as the whisper's caller name. Contact-first since
+ * 2026-09-01 (the roster name is a creation-time snapshot). `role` comes from
+ * the reviewed contact type (honesty rule - only tenant/landlord claim a role).
  */
 function maskedPartyLabel(member: ConversationParticipant | undefined, contact: ContactItem | undefined): string {
-  if (member?.name !== undefined && member.name.length > 0) return member.name;
+  const masked = contactShortName(contact) ?? shortNameFromFull(member?.name);
+  if (masked !== undefined) return masked;
   if (contact?.type === 'tenant') return 'Tenant';
   if (contact?.type === 'landlord') return 'Landlord';
   return 'the other party';
@@ -123,8 +128,9 @@ function maskedPartyLabel(member: ConversationParticipant | undefined, contact: 
 /**
  * The MASKED caller/contact label + the honesty-rule role/author/conversation-
  * type mapping now live in lib/voiceMasking.ts (shared with the OUTBOUND
- * originate path) — imported above. `maskedPartyLabel` below stays local (it
- * labels a roster MEMBER by its cached display name, a relay-only concern).
+ * originate path) - imported above. `maskedPartyLabel` above stays local: it
+ * labels a relay ROSTER MEMBER, resolving the live contact first and masking
+ * the stored roster name only as the fallback rung (a relay-only concern).
  */
 
 /**

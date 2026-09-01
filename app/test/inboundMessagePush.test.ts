@@ -525,4 +525,33 @@ describe('inbound message push - native group text', () => {
       conversationId: GROUP_ID,
     });
   });
+
+  it('RED: the body prefix prefers the CONTACT name over a stale roster name', async () => {
+    const { app } = makeWebhookHarness({ world });
+
+    // The webhook MINTS the group thread on the first inbound - there is no
+    // conversation to age before one arrives. Post once to create it, then age
+    // the SENDER's roster row (a creation-time snapshot) and give that member a
+    // contact whose CURRENT name differs.
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    const thread = world.conversations.get(GROUP_ID)!;
+    thread.participants = (thread.participants ?? []).map((p) =>
+      p.phone === SENDER ? { ...p, contactId: 'c-ana', name: 'Old Ana' } : p,
+    );
+    world.contacts.push({
+      contactId: 'c-ana',
+      type: 'tenant',
+      phone: SENDER,
+      firstName: 'Ana',
+      lastName: 'Reyes',
+    });
+
+    // A DISTINCT sid: a redelivery of the first one dedupes and pushes nothing.
+    await signedTwilioPost(app, SMS_PATH, groupParams({ MessageSid: 'MMgroup0002' }));
+
+    // The TITLE is out of scope (spec section 3) - assert only the body prefix.
+    expect(world.pushBroadcasts).toHaveLength(2);
+    const second = world.pushBroadcasts[1]!.notification.payload as unknown as MessagePushPayload;
+    expect(second.body).toBe('Ana Reyes: hello, looking for a 2 bed');
+  });
 });

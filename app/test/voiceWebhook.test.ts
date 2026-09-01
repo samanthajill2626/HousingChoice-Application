@@ -121,6 +121,42 @@ describe('inbound masked voice — the bridge (M1.9a)', () => {
     expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(1);
   });
 
+  it('RED: call_party_label prefers the CONTACT (masked) over the stored roster name', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({
+      contactId: 'c-bob',
+      type: 'landlord',
+      phone: BOB,
+      firstName: 'Robert',
+      lastName: 'Renamed',
+    });
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+
+    const call = world.messages.find((m) => m.type === 'call')!;
+    expect(call.call_party_label).toBe('Robert R.');
+  });
+
+  it('RED: a stored full name with no contact is masked in the persisted label AND the spoken whisper', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, {
+      participants: [
+        { contactId: '', phone: ALICE, name: 'Alice Anderson' },
+        { contactId: '', phone: BOB, name: 'Bob Builder' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+
+    const call = world.messages.find((m) => m.type === 'call')!;
+    expect(call.call_party_label).toBe('Bob B.');
+    // The whisper URL carries the CALLER's label - what the callee hears.
+    expect(res.text).toContain(`callerLabel=${encodeURIComponent('Alice A.')}`);
+  });
+
   it('emits message.persisted once for the new call entry (live timeline)', async () => {
     const world = createFakeWorld();
     seedRelay(world);

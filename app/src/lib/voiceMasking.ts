@@ -52,6 +52,20 @@ export function contactShortName(contact: ContactItem | undefined): string | und
   return `${first} ${last.charAt(0)}.`;
 }
 
+/**
+ * The same "First L." mask applied to an already-joined name string (a stored
+ * roster snapshot). A persisted or spoken masked label must never carry a
+ * full surname, whichever rung supplied it.
+ */
+export function shortNameFromFull(full: string | undefined): string | undefined {
+  if (typeof full !== 'string') return undefined;
+  const parts = full.trim().split(/\s+/).filter((p) => p.length > 0);
+  const first = parts[0];
+  if (first === undefined) return undefined;
+  const last = parts.length > 1 ? parts[parts.length - 1] : undefined;
+  return last === undefined ? first : `${first} ${last.charAt(0)}.`;
+}
+
 /** The masked ROLE word for the contact's reviewed type, else undefined. */
 export function roleWordForContact(contact: ContactItem | undefined): string | undefined {
   if (contact?.type === 'tenant') return 'Tenant';

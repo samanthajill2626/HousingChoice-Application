@@ -7,7 +7,11 @@
 //   - Inbound messages have no meaningful delivery state — callers render this for
 //     OUTBOUND only. A row with no stored status (seed/legacy) shows NO chip
 //     (returns null) rather than a misleading "Sending…".
-import type { DeliveryStatus } from '../../api/index.js';
+import type { DeliveryStatus, RelayRecipientDelivery } from '../../api/index.js';
+import {
+  includedRecipientEntries,
+  isRecipientExcludedFromPresentation,
+} from '../../lib/messageTransport.js';
 
 export type DeliveryTone = 'neutral' | 'info' | 'success' | 'danger';
 
@@ -149,6 +153,7 @@ export interface RelayDeliverySlot {
   errorCode?: string;
   sentAt?: string;
   deliveredAt?: string;
+  transportAggregationState?: RelayRecipientDelivery['transportAggregationState'];
 }
 
 /** Parse an ISO clock string off the wire, or undefined when it is absent or
@@ -244,6 +249,7 @@ export function isStaleLeg(
   messageAtMs: number | undefined,
   nowMs: number | undefined,
 ): boolean {
+  if (isRecipientExcludedFromPresentation(slot)) return false;
   if (nowMs === undefined) return false;
   return isQuietSince(stalenessClockMs(slot, messageAtMs), nowMs);
 }
@@ -325,6 +331,7 @@ export function canEverGoStale(
   messageAtMs: number | undefined,
   nowMs: number | undefined,
 ): boolean {
+  if (isRecipientExcludedFromPresentation(slot)) return false;
   if (nowMs === undefined) return false;
   const clock = stalenessClockMs(slot, messageAtMs);
   if (clock === undefined || !Number.isFinite(clock)) return false;
@@ -397,7 +404,8 @@ export function presentRelayDelivery(
   // while the identical relay leg was excluded. `contact_opted_out` is written by
   // us, never by a carrier, so the code by itself is an unambiguous statement
   // that this leg was never really sent.
-  const fanned = slots.filter((s) => s.errorCode !== 'contact_opted_out');
+  const included = includedRecipientEntries(slots).map(([, slot]) => slot);
+  const fanned = included.filter((s) => s.errorCode !== 'contact_opted_out');
   if (fanned.length === 0) return null;
   const delivered = fanned.filter((s) => s.status === 'delivered').length;
   const failed = fanned.filter(
@@ -529,6 +537,7 @@ export function presentLegDelivery(
       isFailure: false,
     };
   }
+  if (isRecipientExcludedFromPresentation(slot)) return null;
   if (isStaleLeg(slot, messageAtMs, nowMs)) {
     return slot.status === 'queued' ? STALE_QUEUED_PRESENTATION : STALE_SENT_PRESENTATION;
   }

@@ -108,17 +108,25 @@ function asParams(body: unknown): WebhookParams {
 }
 
 /**
- * A neutral, masked party label for a participant: the CONTACT's masked name
- * ("First L.", lib/voiceMasking) when the contact is readable, else the stored
- * roster name put through the same mask, else the role ("Tenant"/"Landlord"),
- * else the generic "the other party". NEVER the raw phone (PII, doc section 9),
- * and never an unmasked full name: this label is PERSISTED as call_party_label
- * AND spoken to the callee as the whisper's caller name. Contact-first since
- * 2026-09-01 (the roster name is a creation-time snapshot). `role` comes from
- * the reviewed contact type (honesty rule - only tenant/landlord claim a role).
+ * A neutral, masked party label for a participant: the NON-DELETED CONTACT's
+ * masked name ("First L.", lib/voiceMasking) when the contact is readable, else
+ * the stored roster name put through the same mask, else the role
+ * ("Tenant"/"Landlord"), else the generic "the other party". NEVER the raw phone
+ * (PII, doc section 9), and never an unmasked full name: this label is PERSISTED
+ * as call_party_label AND spoken to the callee as the whisper's caller name.
+ * Contact-first since 2026-09-01 (the roster name is a creation-time snapshot).
+ * `role` comes from the reviewed contact type (honesty rule - only
+ * tenant/landlord claim a role).
+ *
+ * The isDeleted guard is the same rung lib/participantNames.ts withLiveNames
+ * enforces: a soft-deleted contact supplies NO name. getById returns deleted
+ * rows unchanged, so the refusal has to happen here. It guards the NAME rung
+ * only - the role rungs below never checked deletion and still do not.
  */
 function maskedPartyLabel(member: ConversationParticipant | undefined, contact: ContactItem | undefined): string {
-  const masked = contactShortName(contact) ?? shortNameFromFull(member?.name);
+  const masked =
+    (contact !== undefined && !isDeleted(contact) ? contactShortName(contact) : undefined) ??
+    shortNameFromFull(member?.name);
   if (masked !== undefined) return masked;
   if (contact?.type === 'tenant') return 'Tenant';
   if (contact?.type === 'landlord') return 'Landlord';

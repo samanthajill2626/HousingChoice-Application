@@ -554,4 +554,33 @@ describe('inbound message push - native group text', () => {
     const second = world.pushBroadcasts[1]!.notification.payload as unknown as MessagePushPayload;
     expect(second.body).toBe('Ana Reyes: hello, looking for a 2 bed');
   });
+
+  it('RED: a soft-deleted contact supplies no name - the body prefix falls back to the stored roster name', async () => {
+    const { app } = makeWebhookHarness({ world });
+
+    // Same two-post shape as the test above, with the contact SOFT-DELETED.
+    // findByPhone/getById both return deleted rows on purpose (routing keeps
+    // resolving them), so the label itself has to refuse the name: a deleted
+    // contact supplies NO name and the stored snapshot stands.
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    const thread = world.conversations.get(GROUP_ID)!;
+    thread.participants = (thread.participants ?? []).map((p) =>
+      p.phone === SENDER ? { ...p, contactId: 'c-ana', name: 'Old Ana' } : p,
+    );
+    world.contacts.push({
+      contactId: 'c-ana',
+      type: 'tenant',
+      phone: SENDER,
+      firstName: 'Ana',
+      lastName: 'Reyes',
+      deleted_at: '2026-01-01T00:00:00.000Z',
+    });
+
+    // A DISTINCT sid: a redelivery of the first one dedupes and pushes nothing.
+    await signedTwilioPost(app, SMS_PATH, groupParams({ MessageSid: 'MMgroup0003' }));
+
+    expect(world.pushBroadcasts).toHaveLength(2);
+    const second = world.pushBroadcasts[1]!.notification.payload as unknown as MessagePushPayload;
+    expect(second.body).toBe('Old Ana: hello, looking for a 2 bed');
+  });
 });

@@ -109,8 +109,16 @@ export function relayMemberLabels(
 /**
  * The relay-group thread label - the EXACT precedence chain the inbox
  * row uses (member labels -> operator placement_tag -> formatted pool
- * number -> "Relay group"), extracted from routes/inbox.ts relayRowFor
- * so the push title and the inbox row cannot drift.
+ * number -> "Relay group"), extracted from routes/inbox.ts relayRowFor.
+ *
+ * WHAT IT PROMISES: one PRECEDENCE, not one result. It renders whatever roster
+ * the caller hands it and reads no contact. Since 2026-09-01 a caller that
+ * wants LIVE names hydrates the roster first (lib/participantNames -
+ * routes/inbox.ts relayRowFor does), while the push-title call sites in
+ * routes/webhooks/twilio.ts pass the STORED snapshot by decision (no awaited
+ * read on the webhook ack path; spec "Out": push titles accepted stale). So a
+ * renamed member can read one way in the push title and another in the inbox
+ * row it opens - same chain, different input, deliberately.
  *
  * The FIRST rung is per-member (relayMemberLabels): each participant renders
  * their name, else their own formatted phone, so a MIXED roster reads

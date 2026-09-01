@@ -38,7 +38,12 @@ import {
   type BroadcastRecipient,
   type BroadcastsRepo,
 } from '../../repos/broadcastsRepo.js';
-import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
+import {
+  createContactsRepo,
+  isDeleted,
+  type ContactItem,
+  type ContactsRepo,
+} from '../../repos/contactsRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../../repos/extractionRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../../repos/settingsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo, TERMINAL_STAGES } from '../../repos/placementsRepo.js';
@@ -299,18 +304,26 @@ export function isTerminalDeliveryFailure(errorCode: string | undefined): boolea
 }
 
 /**
- * The sender label for group/relay push bodies: contact display name ->
- * roster name -> formatted phone -> the raw From. Contact-first since
+ * The sender label for group/relay push bodies: NON-DELETED contact display
+ * name -> roster name -> formatted phone -> the raw From. Contact-first since
  * 2026-09-01 (the roster name is a creation-time snapshot). All three inputs
  * are already in scope at every persist point, so a push adds NO repo lookup to
  * the hot path. Pure, no I/O, no logging.
+ *
+ * The isDeleted guard is the same rung lib/participantNames.ts withLiveNames
+ * enforces: a soft-deleted contact supplies NO name. Neither reader upstream
+ * filters one out - findByPhone deliberately returns deleted rows so inbound
+ * routing still resolves them - so the refusal has to happen here.
  */
 function pushSenderLabel(
   rosterName: string | undefined,
   senderContact: ContactItem | undefined,
   from: string,
 ): string {
-  const live = contactDisplayName(senderContact);
+  const live =
+    senderContact !== undefined && !isDeleted(senderContact)
+      ? contactDisplayName(senderContact)
+      : undefined;
   if (live !== undefined) return live;
   const roster = typeof rosterName === 'string' ? rosterName.trim() : '';
   if (roster.length > 0) return roster;

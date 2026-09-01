@@ -139,6 +139,33 @@ describe('inbound masked voice — the bridge (M1.9a)', () => {
     expect(call.call_party_label).toBe('Robert R.');
   });
 
+  it('RED: a soft-deleted contact supplies no name - the masked label falls back to the masked stored roster name', async () => {
+    const world = createFakeWorld();
+    // getById returns soft-deleted rows unchanged, so the label itself has to
+    // refuse the name: a deleted contact supplies NO name and the stored roster
+    // snapshot stands - still masked, never a full surname.
+    world.contacts.push({
+      contactId: 'c-bob',
+      type: 'landlord',
+      phone: BOB,
+      firstName: 'Robert',
+      lastName: 'Renamed',
+      deleted_at: '2026-01-01T00:00:00.000Z',
+    });
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob Builder' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+
+    const call = world.messages.find((m) => m.type === 'call')!;
+    expect(call.call_party_label).toBe('Bob B.');
+  });
+
   it('RED: a stored full name with no contact is masked in the persisted label AND the spoken whisper', async () => {
     const world = createFakeWorld();
     seedRelay(world, {

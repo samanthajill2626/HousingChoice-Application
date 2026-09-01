@@ -31,12 +31,17 @@
 // CONDITIONAL on exactly the state the planner decided from, so a concurrent
 // runtime write cannot be double-applied and re-running is always safe.
 //
-// Targets DYNAMODB_ENDPOINT (default DynamoDB Local) and resolves the physical
-// table via lib/config.tableName (respects TABLE_PREFIX) - the same posture as
-// the backfill-*.ts scripts, deliberately: no local-only guard, this is an ops
-// script the human runs against dev and prod per the RUNBOOK with the target
-// environment set on purpose. NO AGENT RUNS THIS AGAINST A REAL ENVIRONMENT;
-// an agent may run it only against a hermetic local lane.
+// TARGET: DYNAMODB_ENDPOINT SET = that endpoint (DynamoDB Local in the dev
+// loop); DYNAMODB_ENDPOINT UNSET = THE REAL AWS ACCOUNT the ambient
+// credentials select (lib/dynamo.ts). Do not read "unset" as "local" - the
+// backfill-*.ts headers say "default DynamoDB Local" and that is the wrong
+// way round for the one script the human points at prod. The physical table
+// comes from lib/config.tableName (respects TABLE_PREFIX). Same posture as the
+// backfills otherwise: no local-only guard, this is an ops script the human
+// runs against dev and prod per the RUNBOOK with the target environment set
+// on purpose, and the run LOGS its resolved endpoint and table first so a
+// wrong shell is visible before the first write. NO AGENT RUNS THIS AGAINST A
+// REAL ENVIRONMENT; an agent may run it only against a hermetic local lane.
 //
 // FAILURE HANDLING, in one place. A row the sweep cannot PLAN (a malformed row)
 // is stepped over and counted `failed` - one bad row must not kill the run - but
@@ -165,6 +170,13 @@ async function scanAndRetire(
   const table = tableName('tourReminders', env);
   const dryRun = opts.dryRun === true;
   const now = opts.now ?? new Date().toISOString();
+  // The resolved TARGET, before the first read: an unset endpoint is the real
+  // AWS account, and a wrong TABLE_PREFIX is the aborting-write class the
+  // RUNBOOK describes. Both are cheaper to spot here than mid-apply.
+  logger.info(
+    { table, endpoint: env.DYNAMODB_ENDPOINT ?? '(unset - AWS via ambient credentials)', dryRun },
+    'retire-paused-tour-reminders - target resolved',
+  );
   const toursRepo = createToursRepo({ doc, env });
 
   // A whole ladder shares one tourId, so without this cache the sweep would

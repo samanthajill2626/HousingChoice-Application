@@ -45,7 +45,8 @@ import styles from './RemindersPanel.module.css';
 
 // dueAt-anchored refetch tuning. FIRE_BUFFER: the worker stamps the rung just
 // after dueAt, so aim slightly past it. OVERDUE_POLL: while a rung is past due
-// but still shows upcoming (the worker's poll runs every 60s), re-check on this
+// but still shows upcoming (the worker's poll runs every 30s by default -
+// WORKER_POLL_INTERVAL_MS), re-check on this
 // interval. MAX_ANCHOR: clamp far-future timers (setTimeout overflows past
 // ~24.8 days; a few no-op re-anchors per day cost nothing).
 const FIRE_BUFFER_MS = 2_000;

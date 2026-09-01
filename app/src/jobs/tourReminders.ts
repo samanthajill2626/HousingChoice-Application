@@ -257,7 +257,11 @@ export const LADDER_ORDER: ReminderKind[] = [
  * `no_show_checkin` was never here because it was never auto-armed at all (see
  * REMINDER_KINDS) - it has always been manual.
  *
- * TO PAUSE AGAIN: add kinds here. Nothing else has to change.
+ * TO PAUSE AGAIN: add kinds here. Nothing else has to change for the poll, the
+ * tour panel, or the contact timeline - the three surfaces that read this set.
+ * ONE scheduled surface does not and never did: routes/relayGroups.ts's group
+ * scheduled view carries no paused chip (it reads DISCONTINUED_REMINDER_KINDS
+ * only), so a re-pause would show there as a plain upcoming rung.
  *
  * A kind that must NEVER send belongs in DISCONTINUED_REMINDER_KINDS below, not
  * here. The two are deliberately separate: "paused" means a human decides WHEN,

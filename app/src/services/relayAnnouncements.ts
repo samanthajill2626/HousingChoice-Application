@@ -21,9 +21,10 @@
 // PII (doc §9): logs conversationId/memberKey/counts only — never a phone,
 // name, or the body.
 import { randomUUID } from 'node:crypto';
-import type { MessagingAdapter } from '../adapters/messaging.js';
+import type { CarrierMessageSender, MessagingAdapter } from '../adapters/messaging.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import type { ContactsRepo } from '../repos/contactsRepo.js';
 import type {
   ConversationParticipant,
@@ -33,6 +34,8 @@ import {
   relayMemberKey,
   type MessagesRepo,
   type RelayRecipientDelivery,
+  type RecipientSendResultPatch,
+  type TransportMutationOutcome,
 } from '../repos/messagesRepo.js';
 import { SendRefusedError } from './sendMessage.js';
 
@@ -100,7 +103,7 @@ export interface RelayAnnouncementDeps {
   conversationsRepo: ConversationsRepo;
   messagesRepo: MessagesRepo;
   contactsRepo: ContactsRepo;
-  adapter: MessagingAdapter;
+  adapter: MessagingAdapter & CarrierMessageSender;
   /** Shared A2P pacing bucket — one token per real outbound SMS. */
   tokenBucket?: { acquire(n: number): Promise<void> };
   /** Live-update bus (defaults to the appEvents singleton). */
@@ -187,10 +190,18 @@ export async function sendRelayAnnouncement(
   // rollup chip counts up as legs land.
   let tsMsgId: string | undefined;
   const providerTs = new Date().toISOString();
+  const transportIntent = persist
+    ? deps.adapter.classifyMessageTransport({ hasForwardableMedia: false })
+    : undefined;
   if (persist) {
+    if (transportIntent === undefined) throw new Error('relayAnnouncement: missing transport intent');
     const deliveryRecipients: Record<string, RelayRecipientDelivery> = {};
     for (const member of roster) {
-      deliveryRecipients[relayMemberKey(member)] = { status: 'queued' };
+      deliveryRecipients[relayMemberKey(member)] = {
+        status: 'queued',
+        requestedTransport: transportIntent.requestedTransport,
+        transportAggregationState: 'planned',
+      };
     }
     const providerSid = `system-${randomUUID()}`;
     const appended = await deps.messagesRepo.append({
@@ -201,6 +212,8 @@ export async function sendRelayAnnouncement(
       direction: 'outbound',
       author: 'system',
       deliveryStatus: 'queued',
+      transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+      requestedTransport: transportIntent.requestedTransport,
       relaySenderKey: SYSTEM_SENDER_KEY,
       deliveryRecipients,
       body,
@@ -237,7 +250,14 @@ export async function sendRelayAnnouncement(
       // is caught below and skips this member WITHOUT sending (fail CLOSED).
       if (await isMemberSuppressed(deps.contactsRepo, deps.conversationsRepo, member)) {
         if (persist && tsMsgId !== undefined) {
-          await markSlot(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
+          await setAnnouncementAggregationState(
+            deps.messagesRepo,
+            conversationId,
+            tsMsgId,
+            memberKey,
+            'excluded',
+          );
+          await applyAnnouncementResult(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
             status: 'failed',
             errorCode: 'contact_opted_out',
           });
@@ -252,11 +272,28 @@ export async function sendRelayAnnouncement(
       // A2P pacing: one token per real outbound SMS (shared combined-rate
       // bucket — same meter as the relay fan-out legs).
       await deps.tokenBucket?.acquire(1);
-      const result = await deps.adapter.sendMessage({
+      const params = {
         to: member.phone,
         from: poolNumber,
         body,
-      });
+      };
+      const prepared =
+        persist && transportIntent !== undefined
+          ? deps.adapter.prepareMessageSend(transportIntent, params)
+          : undefined;
+      if (persist && tsMsgId !== undefined) {
+        await setAnnouncementAggregationState(
+          deps.messagesRepo,
+          conversationId,
+          tsMsgId,
+          memberKey,
+          'attempted',
+        );
+      }
+      const result =
+        prepared === undefined
+          ? await deps.adapter.sendMessage(params)
+          : await deps.adapter.sendPreparedMessage(prepared);
       sentCount += 1;
 
       if (!persist) {
@@ -279,10 +316,13 @@ export async function sendRelayAnnouncement(
       }
 
       if (persist && tsMsgId !== undefined) {
-        await markSlot(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
+        await applyAnnouncementResult(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
           status: result.status === 'queued' ? 'queued' : 'sent',
           sid: result.providerSid,
           sentAt: result.providerTs,
+          ...(result.actualTransport !== undefined && {
+            actualTransport: result.actualTransport,
+          }),
         });
         // relaysid pointer → the per-recipient delivery callback finds this
         // slot, so the announcement's rollup chip finalizes like a team send.
@@ -297,7 +337,7 @@ export async function sendRelayAnnouncement(
       // slot goes terminal-failed so the thread shows the honest outcome.
       if (persist && tsMsgId !== undefined) {
         try {
-          await markSlot(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
+          await applyAnnouncementResult(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
             status: 'failed',
             errorCode: err instanceof SendRefusedError ? err.code : (errorCodeOf(err) ?? 'send_failed'),
           });
@@ -322,15 +362,39 @@ export async function sendRelayAnnouncement(
   return { ...(tsMsgId !== undefined && { tsMsgId }), sentCount };
 }
 
-/** Persist one recipient's delivery slot on the announcement row. */
-async function markSlot(
+async function setAnnouncementAggregationState(
   messages: MessagesRepo,
   conversationId: string,
   tsMsgId: string,
   memberKey: string,
-  delivery: RelayRecipientDelivery,
+  next: NonNullable<RelayRecipientDelivery['transportAggregationState']>,
 ): Promise<void> {
-  await messages.setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery);
+  const outcome = await messages.setRecipientTransportAggregationState(
+    conversationId,
+    tsMsgId,
+    memberKey,
+    next,
+  );
+  if (outcome === 'updated' || outcome === 'idempotent') return;
+  throw new Error(`relayAnnouncement: v1 aggregation update failed: ${outcome}`);
+}
+
+async function applyAnnouncementResult(
+  messages: MessagesRepo,
+  conversationId: string,
+  tsMsgId: string,
+  memberKey: string,
+  patch: RecipientSendResultPatch,
+): Promise<void> {
+  const outcome: TransportMutationOutcome = await messages.applyRecipientSendResult(
+    conversationId,
+    tsMsgId,
+    memberKey,
+    patch,
+  );
+  if (outcome === 'missing' || outcome === 'legacy_noop') {
+    throw new Error(`relayAnnouncement: v1 recipient result failed: ${outcome}`);
+  }
 }
 
 /** Best-effort provider error-code extraction (Twilio attaches `code`). */

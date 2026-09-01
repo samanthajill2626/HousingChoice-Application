@@ -22,6 +22,259 @@ function deps(world: ReturnType<typeof createFakeWorld>) {
   };
 }
 
+async function openTransportGroup(
+  world: ReturnType<typeof createFakeWorld>,
+  members = [
+    { phone: ALICE, contactId: 'c-a', name: 'Alice' },
+    { phone: BOB, contactId: 'c-b', name: 'Bob' },
+  ],
+) {
+  return world.conversationsRepo.createRelayGroup({
+    poolNumber: '+15550100070',
+    members,
+  });
+}
+
+function persistedAnnouncement(
+  world: ReturnType<typeof createFakeWorld>,
+  conversationId: string,
+) {
+  return world.messages.find(
+    (message) =>
+      message.conversationId === conversationId && message.relay_sender_key === 'system',
+  );
+}
+
+describe('sendRelayAnnouncement - persisted transport execution', () => {
+  it('classifies once and stores requested SMS on the source and every planned slot', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world);
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const sendPrepared = world.adapter.sendPreparedMessage.bind(world.adapter);
+    let slotsAtFirstSend:
+      | {
+          alice: Record<string, unknown> | undefined;
+          bob: Record<string, unknown> | undefined;
+        }
+      | undefined;
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      if (slotsAtFirstSend === undefined) {
+        const slots = persistedAnnouncement(world, conv.conversationId)?.delivery_recipients;
+        slotsAtFirstSend = {
+          alice: slots?.['c-a'] === undefined ? undefined : { ...slots['c-a'] },
+          bob: slots?.['c-b'] === undefined ? undefined : { ...slots['c-b'] },
+        };
+      }
+      return sendPrepared(prepared);
+    });
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Tour tomorrow.',
+      kind: 'tour.day_before',
+    });
+
+    const message = persistedAnnouncement(world, conv.conversationId);
+    expect(classify).toHaveBeenCalledOnce();
+    expect(classify).toHaveBeenCalledWith({ hasForwardableMedia: false });
+    expect(message).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+    });
+    expect(message?.actual_transport).toBeUndefined();
+    expect(slotsAtFirstSend).toEqual({
+      alice: {
+        status: 'queued',
+        requestedTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+      bob: {
+        status: 'queued',
+        requestedTransport: 'sms',
+        transportAggregationState: 'planned',
+      },
+    });
+    expect(message?.delivery_recipients).toMatchObject({
+      'c-a': {
+        status: 'queued',
+        requestedTransport: 'sms',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+      'c-b': {
+        status: 'queued',
+        requestedTransport: 'sms',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+    });
+  });
+
+  it('excludes a suppressed slot before provider handling and preserves safe suppression details', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({
+      contactId: 'contact-b',
+      type: 'tenant',
+      phone: BOB,
+      sms_opt_out: true,
+    });
+    const conv = await openTransportGroup(world, [
+      { phone: BOB, contactId: '', name: 'Bob' },
+      { phone: ALICE, contactId: 'c-a', name: 'Alice' },
+    ]);
+    const capture = createLogCapture();
+    const order: string[] = [];
+    const setState = world.messagesRepo.setRecipientTransportAggregationState.bind(
+      world.messagesRepo,
+    );
+    vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState').mockImplementation(
+      async (...args) => {
+        order.push(`${args[3]}:${args[2]}`);
+        return setState(...args);
+      },
+    );
+    const sendPrepared = world.adapter.sendPreparedMessage.bind(world.adapter);
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      order.push(`send:${prepared.params.to}`);
+      return sendPrepared(prepared);
+    });
+
+    await sendRelayAnnouncement(
+      { ...deps(world), logger: createLogger({ destination: capture.stream }) },
+      {
+        conversationId: conv.conversationId,
+        body: 'Welcome to the group.',
+        kind: 'relay.intro',
+      },
+    );
+
+    const message = persistedAnnouncement(world, conv.conversationId);
+    expect(order.indexOf(`excluded:phone#${BOB}`)).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(`excluded:phone#${BOB}`)).toBeLessThan(order.indexOf(`send:${ALICE}`));
+    expect(world.sent.map((send) => send.to)).toEqual([ALICE]);
+    expect(message?.delivery_recipients?.[`phone#${BOB}`]).toEqual({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+    });
+    expect(message?.delivery_recipients?.['c-a']).toMatchObject({
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
+      transportAggregationState: 'attempted',
+    });
+    expect(JSON.stringify(capture.lines)).not.toContain(BOB);
+    expect(JSON.stringify(capture.lines)).not.toContain(`phone#${BOB}`);
+    expect(capture.lines.some((line) => line['memberKey'] === 'phone-only-member')).toBe(true);
+  });
+
+  it('marks a provider-bound leg attempted immediately before the prepared send', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world, [
+      { phone: ALICE, contactId: 'c-a', name: 'Alice' },
+    ]);
+    const sendPrepared = world.adapter.sendPreparedMessage.bind(world.adapter);
+    let observedAttempted = false;
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      observedAttempted =
+        persistedAnnouncement(world, conv.conversationId)?.delivery_recipients?.['c-a']
+          ?.transportAggregationState === 'attempted';
+      return sendPrepared(prepared);
+    });
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Welcome to the group.',
+      kind: 'relay.intro',
+    });
+
+    expect(observedAttempted).toBe(true);
+  });
+
+  it('applies queued results without replacing first send or concurrent child fields', async () => {
+    const world = createFakeWorld();
+    const duplicate = { phone: ALICE, contactId: 'c-a', name: 'Alice' };
+    const conv = await openTransportGroup(world, [duplicate, duplicate]);
+    const providerTimes = ['2026-09-01T12:00:00.000Z', '2026-09-01T12:01:00.000Z'];
+    let providerCall = 0;
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => ({
+      providerSid: `SMduplicate-${providerCall + 1}`,
+      providerTs: providerTimes[providerCall++]!,
+      status: 'queued',
+      actualTransport: prepared.requestedTransport,
+    }));
+    const setState = world.messagesRepo.setRecipientTransportAggregationState.bind(
+      world.messagesRepo,
+    );
+    let attemptCall = 0;
+    vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState').mockImplementation(
+      async (...args) => {
+        const outcome = await setState(...args);
+        if (args[3] === 'attempted' && ++attemptCall === 1) {
+          persistedAnnouncement(world, conv.conversationId)!.delivery_recipients!['c-a']!.errorCode =
+            '30003';
+        }
+        return outcome;
+      },
+    );
+    const applyResult = world.messagesRepo.applyRecipientSendResult.bind(world.messagesRepo);
+    let resultCall = 0;
+    vi.spyOn(world.messagesRepo, 'applyRecipientSendResult').mockImplementation(async (...args) => {
+      const outcome = await applyResult(...args);
+      if (++resultCall === 1) {
+        persistedAnnouncement(world, conv.conversationId)!.delivery_recipients![
+          'c-a'
+        ]!.deliveredAt = '2026-09-01T12:00:30.000Z';
+      }
+      return outcome;
+    });
+
+    const result = await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Welcome to the group.',
+      kind: 'relay.intro',
+    });
+
+    expect(result?.sentCount).toBe(2);
+    expect(world.messagesRepo.applyRecipientSendResult).toHaveBeenCalledTimes(2);
+    expect(persistedAnnouncement(world, conv.conversationId)?.delivery_recipients?.['c-a']).toEqual({
+      status: 'queued',
+      sid: 'SMduplicate-1',
+      sentAt: providerTimes[0],
+      deliveredAt: '2026-09-01T12:00:30.000Z',
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
+      transportAggregationState: 'attempted',
+    });
+  });
+
+  it('keeps persist:false on the legacy legs-only path without transport state', async () => {
+    const world = createFakeWorld();
+    const conv = await openTransportGroup(world);
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const prepare = vi.spyOn(world.adapter, 'prepareMessageSend');
+    const sendPrepared = vi.spyOn(world.adapter, 'sendPreparedMessage');
+    const setState = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+    const applyResult = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
+
+    const result = await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Welcome to the group.',
+      kind: 'relay.intro',
+      persist: false,
+    });
+
+    expect(result).toEqual({ sentCount: 2 });
+    expect(persistedAnnouncement(world, conv.conversationId)).toBeUndefined();
+    expect(classify).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(sendPrepared).not.toHaveBeenCalled();
+    expect(setState).not.toHaveBeenCalled();
+    expect(applyResult).not.toHaveBeenCalled();
+    expect(world.systemSidMarkers.size).toBe(2);
+  });
+});
+
 describe('sendRelayAnnouncement - system-SID markers on persist:false legs', () => {
   // WHY (log-hygiene spec section 5): legs-only mode (the dev intro replay's
   // only originator) writes NO delivery slot and NO relaysid pointer, so every

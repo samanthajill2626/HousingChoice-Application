@@ -100,15 +100,14 @@ function StateChip({ nudge }: { nudge: PlacementNudgeView }): React.JSX.Element 
       </span>
     );
   }
-  // UNREACHABLE TODAY, and deliberately present: `discontinued` is a TOUR-ladder
-  // reason and no placement-nudge writer emits it (spec 3.1a scopes the feature
-  // to tours). It sits here because the fallthrough below is a fire-time
-  // PROMISE, and the day a nudge kind is retired the missing branch would be a
-  // silent lie rather than a compile error - the union widening cannot see an
-  // equality test. ABOVE `paused`, matching the tour chip's order.
-  if (nudge.suppression?.reason === 'discontinued') {
-    return <span className={`${styles.chip} ${styles.paused}`}>No longer sent</span>;
-  }
+  // NO `discontinued` BRANCH HERE, deliberately (Phase B spec 3.1a, and the
+  // round-1 review that reverted the one that briefly existed). The placement
+  // card is an EXCLUDED surface: `discontinued` is a TOUR-ladder reason and no
+  // placement-nudge writer emits it, so a chip branch here is unreachable code
+  // widening a surface the spec narrowed on purpose. The single sanctioned
+  // exception is the LABEL entry above, which the exhaustive Record needs to
+  // compile. The day a nudge kind IS retired, add the branch with the writer.
+  //
   // Held back from automatic sending (manual-only hold-back): armed and
   // sendable, but nothing is going to fire it - so it must not chip a fire time
   // it will not honour. Same rule as the tour reminder chip.

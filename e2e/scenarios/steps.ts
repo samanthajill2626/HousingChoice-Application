@@ -2082,9 +2082,14 @@ export class Scenario {
    *  gate - a rung whose own dueAt precedes the tour must not send once the tour
    *  has started, because its copy assumes the tour has not happened yet.
    *
-   *  Reads STATE from the API, never the panel: expectReminderRung(k,'upcoming')
-   *  resolves 'upcoming' as "not Sent and not Canceled", so it cannot tell a
-   *  pending rung from a Skipped one and would pass either way here.
+   *  Reads STATE from the API, never the panel. The panel assertion is not a
+   *  substitute: expectReminderRung(k,'upcoming') now EXCLUDES a Skipped row
+   *  (its locator filters `hasNotText: /Skipped/`), so it would FAIL here rather
+   *  than pass vacuously - but failing is all it would do. It cannot name the
+   *  reason, and the reason is the whole content of this assertion: a rung
+   *  skipped `contact_opted_out` and a rung skipped `tour_already_passed` are
+   *  indistinguishable to it. This helper pins `skipReason`, which is what makes
+   *  the gate's IDENTITY, not merely its effect, the thing under test.
    *
    *  An EMPTY list throws: an assertion with nothing to assert must fail loudly
    *  rather than quietly prove nothing. */
@@ -2106,6 +2111,38 @@ export class Scenario {
         }
         expect(rung.state, `'${kind}' state`).toBe('skipped');
         expect(rung.skipReason, `'${kind}' skipReason`).toBe('tour_already_passed');
+      }
+    });
+  }
+
+  /** [App] These rungs were retired by RELEASE SUPERSESSION: an earlier rung
+   *  still pending when a LATER one becomes releasable in the same batch is
+   *  stale copy ("your tour is tomorrow" must not land beside "your tour is
+   *  today"), so the poll claim-skips it `quiet_hours_superseded`.
+   *
+   *  Same contract and same reasoning as expectRungsRetiredPastTour above,
+   *  including the empty-list throw: a clock-travel tick that sweeps a pending
+   *  rung into its batch causes a retirement, and spec 10 requires the converted
+   *  specs to ASSERT that retirement rather than be surprised by it. A comment
+   *  saying it happens is not an assertion. */
+  expectRungsSuperseded(kinds: ReminderKind[]): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step(`App: rungs retired - superseded by a later rung (${kinds.join(', ')})`, async () => {
+      if (kinds.length === 0) {
+        throw new Error('expectRungsSuperseded: no rungs to assert - the tick proved nothing');
+      }
+      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const body = (await res.json()) as {
+        reminders: Array<{ kind: ReminderKind; state: string; skipReason?: string }>;
+      };
+      for (const kind of kinds) {
+        const rung = body.reminders.find((r) => r.kind === kind);
+        if (rung === undefined) {
+          throw new Error(`expectRungsSuperseded: no '${kind}' rung on tour ${tour.tourId}`);
+        }
+        expect(rung.state, `'${kind}' state`).toBe('skipped');
+        expect(rung.skipReason, `'${kind}' skipReason`).toBe('quiet_hours_superseded');
       }
     });
   }

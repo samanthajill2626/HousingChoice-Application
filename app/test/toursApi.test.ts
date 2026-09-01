@@ -3506,8 +3506,22 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     _resetForTests();
   });
 
-  async function createTour(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
-    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+  /** A tour whose scheduledAt is FAR FUTURE, for the preview cases that want the
+   *  TOUR intro variant. The resolver treats an already-STARTED tour exactly as
+   *  a timeless one and composes the NAKED intro instead ("please let us know
+   *  when you're on the way" is not a sentence to send after the tour has run),
+   *  and BASE_CREATE_BODY's 2026-07-15 is judged against the real wall clock -
+   *  so a tour-variant assertion built on it is a fixture that silently rots
+   *  into asserting the wrong variant. */
+  const FUTURE_TOUR_AT = '2099-01-10T10:00:00.000Z';
+
+  async function createTour(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+    over: Record<string, unknown> = {},
+  ): Promise<string> {
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, ...over });
     expect(created.status).toBe(201);
     return created.body.tour.tourId as string;
   }
@@ -4065,7 +4079,7 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
   it('preview-open returns the SERVER-composed intro body the fan-out will send', async () => {
     const { app } = makeWebhookHarness({ world });
     await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, { scheduledAt: FUTURE_TOUR_AT });
 
     const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
 
@@ -4098,6 +4112,26 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(res.body.recipientCount).toBe(2);
     expect(res.body.deferred).toBe(false);
     expect(res.body.quietEndsAt).toBeUndefined();
+  });
+
+  it('preview-open on a tour that ALREADY HAPPENED shows the NAKED intro, not the tour copy', async () => {
+    // Review round 1, B-MF1, through the REAL route. tourOpenGuard refuses only
+    // canceled/closed tours, so a tour whose outcome has not been recorded yet
+    // is still `scheduled` and this endpoint has no time guard of its own - the
+    // resolver is the only thing standing between a past tour and "please let us
+    // know when you're on the way" landing on the tenant AND the landlord.
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app, { scheduledAt: '2020-01-10T10:00:00.000Z' });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.body).not.toContain('to tour ');
+    expect(res.body.body).not.toContain('on the way');
+    // Degraded to the naked intro, which names the roster - not a blank clause
+    // and not a 500 (spec 9.5).
+    expect(res.body.body).toContain("You're now connected with Tina and Pat");
   });
 
   it('preview-open carries duplicateOf when a live group already holds exactly this roster', async () => {
@@ -4170,7 +4204,7 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
   it('preview-open marks an opted-out member and excludes them from recipientCount', async () => {
     const { app } = makeWebhookHarness({ world });
     await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, { scheduledAt: FUTURE_TOUR_AT });
     await world.toursRepo.setRoster(
       tourId,
       [{ contactId: 'contact-tenant-1' }, { contactId: 'c-pm' }, { contactId: 'c-optout' }],

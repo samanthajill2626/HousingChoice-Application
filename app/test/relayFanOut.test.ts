@@ -683,6 +683,15 @@ describe('relay.fanOut (M1.7)', () => {
     // Nobody on the roster matches the key, so EVERY leg is the group body -
     // and the neutral label is lower-cased for Sam's mid-sentence wording.
     expect(world.sent[0]!.body).toBe('Hey, adding a new member to the group.');
+
+    // ...and the PERSISTED row follows the legs (review round 1, B-N1). Spec
+    // 9.6 persists the new member's copy because it is the one worth seeing in
+    // the thread - but when no member matched the key, NOBODY received it, so
+    // persisting it would leave a bubble and an inbox preview quoting a message
+    // that was never sent to anyone.
+    const rows = world.messages.filter((m) => m.conversationId === 'conv-relay-1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.body).toBe('Hey, adding a new member to the group.');
   });
 });
 
@@ -1138,6 +1147,42 @@ describe('resolveRelayComposeInputs (spec 9.3) - owner routing, and it NEVER thr
       fakeDeps({ nowIso: '2026-09-08T02:00:00.000Z' }),
     );
     expect(inputs.variant).toBe('tour');
+  });
+
+  // THE PAST-TOUR GATE (review round 1, B-MF1). Both tour entries close "Please
+  // let us know when you're on the way", so their copy ASSUMES the tour has not
+  // happened - the same assumption the ladder's fire-time gate
+  // (retiredByTourStart) exists to protect. Two ordinary paths reach a past
+  // tour here: an operator opening the group from a tour whose outcome is not
+  // recorded yet, and a quiet-hours deferral that straddles the tour start (the
+  // route defers the open to quiet-end, and the job composes THEN).
+  it('a tour that has ALREADY STARTED is naked, exactly as an absent time is', async () => {
+    // 16:00 New York, an hour after the 15:00 tour - still the SAME local day,
+    // which is the case the "is it today" test alone cannot catch.
+    const sameDayAfter = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({ nowIso: '2026-09-08T20:00:00.000Z' }),
+    );
+    expect(sameDayAfter.variant).toBe('naked');
+    expect(sameDayAfter.time).toBeUndefined();
+    // ...and a day later, which would otherwise render the DATED variant.
+    const dayAfter = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({ nowIso: '2026-09-09T13:00:00.000Z' }),
+    );
+    expect(dayAfter.variant).toBe('naked');
+    expect(dayAfter.when).toBeUndefined();
+    // Spec 9.5's degrade, not a bare naked: the names it did resolve survive.
+    expect(dayAfter.tenantFirstName).toBe('Alicia');
+  });
+
+  it('the past-tour boundary is STRICT: a tour at exactly nowIso still resolves the tour variant', async () => {
+    const inputs = await resolveRelayComposeInputs(
+      { type: 'tour', id: 'tour-1' },
+      fakeDeps({ nowIso: TOUR_AT }),
+    );
+    expect(inputs.variant).toBe('tour_today');
+    expect(inputs.time).toBe('3:00 PM');
   });
 
   it('a placement owner resolves the placement variant (no time tokens at all)', async () => {

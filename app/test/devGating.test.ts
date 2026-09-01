@@ -517,9 +517,18 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   }
 
   /** Seed tenant + 1:1 conversation, then arm a tour VIA THE ROUTE with the
-   *  injected clock. The ladder still ARMS a confirmation rung (dueAt =
-   *  FIXED_NOW) and it is still DISCONTINUED, so the earliest rung any tick can
-   *  actually fire is day_before at DAY_BEFORE_DUE. */
+   *  injected clock, and SEED a pending `confirmation` rung due at FIXED_NOW
+   *  directly through the repo.
+   *
+   *  The direct seed is load-bearing, not scenery (review round 1, A-M1). Since
+   *  2026-08-31 `REMINDER_KINDS` no longer contains `confirmation`, so arming
+   *  through POST /api/tours writes no such row - which would make every
+   *  "the tick is a no-op BECAUSE the kind is discontinued" claim below vacuous:
+   *  nothing would be due at FIXED_NOW at all. Seeding one reproduces the real
+   *  pause-era population (rows armed before the kind was retired, which the
+   *  one-time sweep exists to clean up) so the discontinued filter is genuinely
+   *  the thing being exercised. The earliest rung a tick can actually FIRE is
+   *  still day_before at DAY_BEFORE_DUE. */
   async function armTourViaRoute(app: Express, world: FakeWorld): Promise<string> {
     world.contacts.push({
       contactId: 'contact-tick-tenant',
@@ -547,22 +556,35 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
         tourType: 'self_guided',
       });
     expect(created.status).toBe(201);
-    return created.body.tour.tourId as string;
+    const tourId = created.body.tour.tourId as string;
+    await world.tourRemindersRepo.create({ tourId, kind: 'confirmation', dueAt: FIXED_NOW });
+    return tourId;
   }
 
   it('fires the due rows at the supplied now — and only those, exactly once', async () => {
     const { app, world } = buildTickHarness();
-    await armTourViaRoute(app, world);
+    const tourId = await armTourViaRoute(app, world);
 
-    // At FIXED_NOW the only DUE row is the confirmation rung (dueAt =
-    // FIXED_NOW), and that kind is discontinued - so a tick here is a real
-    // no-op. The tick route runs PRODUCTION semantics since 2026-08-31 (the
-    // dev-only manualOnlyKinds override is gone), which is exactly what makes
-    // this assertion meaningful: nothing is being switched off for the test.
+    // At FIXED_NOW the only DUE row is the seeded confirmation rung (armTourVia
+    // Route puts one there on purpose), and that kind is DISCONTINUED - so a
+    // tick here is a real no-op for a reason, not because the ladder happens to
+    // be empty. The tick route runs PRODUCTION semantics since 2026-08-31 (the
+    // dev-only manualOnlyKinds override is gone), which is what makes this
+    // assertion meaningful: nothing is being switched off for the test.
     const res = await request(app).post('/__dev/tour-reminders/tick').send({ now: FIXED_NOW });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, now: FIXED_NOW });
     expect(world.sent).toHaveLength(0);
+    // ANTI-VACUITY: the row really was due and really was left alone. Held back,
+    // NOT claim-skipped - the poll has no in-app writer for kind_retired (only
+    // the one-time sweep stamps it), which is what keeps the panel honest
+    // through its own read of the same set.
+    const confirmRow = (await world.tourRemindersRepo.listByTour(tourId)).find(
+      (r) => r.kind === 'confirmation',
+    );
+    expect(confirmRow?.dueAt).toBe(FIXED_NOW);
+    expect(confirmRow?.sentAt).toBeUndefined();
+    expect(confirmRow?.skippedAt).toBeUndefined();
 
     // A later tick fires the earliest LIVE rung once.
     const res2 = await request(app)
@@ -595,9 +617,9 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
 
     // The day_before row (dueAt @ DAY_BEFORE_DUE, carrying .000 ms) fired
     // against the normalized now - proof the ms-less input collapsed. It is the
-    // ONLY body: the confirmation rung is due in the same catch-up window but
-    // never enters the batch at all (discontinued kinds are filtered out of the
-    // poll's due rows), so nothing else could have sent here.
+    // ONLY body, and that is a second live assertion: the seeded confirmation
+    // rung is due inside the SAME catch-up window and never enters the batch at
+    // all, because discontinued kinds are filtered out of the poll's due rows.
     expect(world.sent.map((s) => s.body)).toEqual([DAY_BEFORE_BODY]);
     expect(Date.parse(DAY_BEFORE_DUE)).toBeLessThan(Date.parse(res.body.now as string));
   });

@@ -37,6 +37,10 @@
 // environment set on purpose. NO AGENT RUNS THIS AGAINST A REAL ENVIRONMENT;
 // an agent may run it only against a hermetic local lane.
 //
+// A row the sweep cannot decide is STEPPED OVER and counted `failed`, never
+// allowed to abort the run; and if the run aborts anyway, a PARTIAL report (the
+// counters as of the abort) is logged before the error and the exit code is 1.
+//
 // PII: logs COUNTS, tourIds and reminderIds only. Never a name, phone or body.
 //
 // Run (from repo root, tsx): `tsx app/scripts/retire-paused-tour-reminders.ts`
@@ -82,12 +86,15 @@ export interface ReminderRetirementResult {
   skipped: number;
   /** Writes whose condition failed because the row moved under the run. */
   skippedOnCondition: { tour_already_passed: number; kind_retired: number };
+  /** Rows whose OWN processing threw and were stepped over. Non-zero means the
+   *  table holds rows this sweep could not decide - re-run after investigating
+   *  the logged reminderIds; nothing about them was written. */
+  failed: number;
   /** Distinct tours read (the cache's saving is scanned - toursRead). */
   toursRead: number;
 }
 
-export async function retirePausedTourReminders(
-  opts: {
+export type RetirePausedTourRemindersOpts = {
     dryRun?: boolean;
     doc?: DynamoDBDocumentClient;
     env?: NodeJS.ProcessEnv;
@@ -96,22 +103,56 @@ export async function retirePausedTourReminders(
     /** Bound the Scan page size. An ops knob for a large table (and what makes
      *  the paging loop exercisable); unset means the service default. */
     scanLimit?: number;
-  } = {},
+};
+
+/**
+ * The sweep. Wraps the scan/retire loop so an ABORT still reports what landed:
+ * the counters accumulate into a value this function owns, and the catch logs
+ * them as a PARTIAL report before re-throwing (the same shape
+ * backfill-media-content-types.ts uses, and what the RUNBOOK promises). Without
+ * it an operator whose prod run dies at row 400 of 900 learns neither how many
+ * rows were stamped nor with which tokens - and the RUNBOOK's "read the report
+ * before applying" and its skippedOnCondition promise both evaporate on the one
+ * run where they matter. Every write is idempotent, so a re-run repairs the
+ * data; the report is what tells the operator whether it needs to.
+ */
+export async function retirePausedTourReminders(
+  opts: RetirePausedTourRemindersOpts = {},
 ): Promise<ReminderRetirementResult> {
-  const doc = opts.doc ?? getDocumentClient();
-  const env = opts.env ?? process.env;
-  const table = tableName('tourReminders', env);
-  const dryRun = opts.dryRun === true;
-  const now = opts.now ?? new Date().toISOString();
-  const toursRepo = createToursRepo({ doc, env });
   const result: ReminderRetirementResult = {
     scanned: 0,
     tourAlreadyPassed: 0,
     kindRetired: 0,
     skipped: 0,
     skippedOnCondition: { tour_already_passed: 0, kind_retired: 0 },
+    failed: 0,
     toursRead: 0,
   };
+  try {
+    await scanAndRetire(opts, result);
+  } catch (err) {
+    // PII-identical to the success report: counts, tourIds and reminderIds only.
+    logger.error(
+      { ...result, dryRun: opts.dryRun === true },
+      'retire-paused-tour-reminders - PARTIAL result: the run ABORTED and these counters cover only what completed before the failure. Every write is idempotent, so re-running after the fix is safe - see the error below.',
+    );
+    throw err;
+  }
+  return result;
+}
+
+/** The scan/retire loop. Accumulates into the CALLER's `result` so a throw does
+ *  not take the counters with it (see the wrapper above). */
+async function scanAndRetire(
+  opts: RetirePausedTourRemindersOpts,
+  result: ReminderRetirementResult,
+): Promise<void> {
+  const doc = opts.doc ?? getDocumentClient();
+  const env = opts.env ?? process.env;
+  const table = tableName('tourReminders', env);
+  const dryRun = opts.dryRun === true;
+  const now = opts.now ?? new Date().toISOString();
+  const toursRepo = createToursRepo({ doc, env });
 
   // A whole ladder shares one tourId, so without this cache the sweep would
   // re-read the same tour up to four times per tour. `undefined` is CACHED
@@ -165,34 +206,48 @@ export async function retirePausedTourReminders(
     );
     for (const raw of (page.Items ?? []) as TourReminderItem[]) {
       result.scanned += 1;
-      const tour = await tourFor(raw.tourId);
-      const action = planReminderRetirement(raw, tour?.scheduledAt, now);
-      if (action === 'skip') {
-        result.skipped += 1;
-        continue;
-      }
-      if (dryRun) {
-        if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
-        else result.kindRetired += 1;
-        continue;
-      }
+      // ONE ROW MUST NEVER ABORT THE SWEEP. There is deliberately no
+      // FilterExpression, so every row in the table reaches tourFor() unvalidated
+      // - and a row with a missing or empty tourId marshals to an EMPTY Key (the
+      // document client is removeUndefinedValues) which DynamoDB rejects with a
+      // ValidationException. A whole prod run dying on one malformed row is a
+      // strictly worse outcome than stepping over it: nothing is written for a
+      // failed row, so `failed` is a re-run list, not a data loss.
       try {
-        await retire(raw.reminderId, action);
-        if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
-        else result.kindRetired += 1;
+        const tour = await tourFor(raw.tourId);
+        const action = planReminderRetirement(raw, tour?.scheduledAt, now);
+        if (action === 'skip') {
+          result.skipped += 1;
+          continue;
+        }
+        if (dryRun) {
+          if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
+          else result.kindRetired += 1;
+          continue;
+        }
+        try {
+          await retire(raw.reminderId, action);
+          if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;
+          else result.kindRetired += 1;
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+          result.skippedOnCondition[action] += 1;
+          logger.info(
+            { reminderId: raw.reminderId, tourId: raw.tourId, action },
+            'retire-paused-tour-reminders - row moved under the run; skipped',
+          );
+        }
       } catch (err) {
-        if (!(err instanceof ConditionalCheckFailedException)) throw err;
-        result.skippedOnCondition[action] += 1;
-        logger.info(
-          { reminderId: raw.reminderId, tourId: raw.tourId, action },
-          'retire-paused-tour-reminders - row moved under the run; skipped',
+        result.failed += 1;
+        // PII: the two ids and the error. Never a name, phone or body.
+        logger.error(
+          { err, reminderId: raw.reminderId, tourId: raw.tourId },
+          'retire-paused-tour-reminders - row FAILED; stepped over and counted',
         );
       }
     }
     exclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (exclusiveStartKey !== undefined);
-
-  return result;
 }
 
 const invokedDirectly =
@@ -209,7 +264,9 @@ if (invokedDirectly) {
       );
     })
     .catch((err: unknown) => {
-      logger.error({ err }, 'retire-paused-tour-reminders - FAILED');
+      // The PARTIAL counters were logged on the line ABOVE this one, by the
+      // wrapper - read that before re-running.
+      logger.error({ err }, 'retire-paused-tour-reminders - FAILED (see the PARTIAL report above)');
       process.exitCode = 1;
     });
 }

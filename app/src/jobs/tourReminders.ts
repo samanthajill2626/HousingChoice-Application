@@ -177,11 +177,21 @@ export function retiredByTourStart(
   if (typeof scheduledAt !== 'string') return false;
   const start = Date.parse(scheduledAt);
   if (!Number.isFinite(start)) return false;
-  // Canonicalize before comparing: a stored '...T15:00:00Z' would otherwise
-  // sort BEFORE '...T14:00:00.000Z' and decide the gate by lexicographic
-  // accident rather than by time.
+  // BOTH sides are compared as INSTANTS, not as text. A stored '...T15:00:00Z'
+  // sorts BEFORE '...T14:00:00.000Z', and a dueAt written with a UTC offset
+  // ('...T11:00:00-05:00' is 16:00Z) sorts by its printed hour - so string
+  // order decides either operand by lexicographic accident rather than by time.
+  // Every dueAt computeDueAt writes is canonical, but the sweep
+  // (scripts/retire-paused-tour-reminders.ts) scans the WHOLE table, so a
+  // hand-seeded or imported row reaches here too. An unparseable dueAt yields
+  // no honest answer -> false, matching the unparseable-scheduledAt rule above.
+  const due = Date.parse(row.dueAt);
+  if (!Number.isFinite(due)) return false;
+  // `now` stays a string compare against the canonical form: it is produced by
+  // the runtime (new Date().toISOString() or the dev tick's normalized echo),
+  // never read out of a stored row.
   const startIso = new Date(start).toISOString();
-  return row.dueAt < startIso && now >= startIso;
+  return due < start && now >= startIso;
 }
 
 /**
@@ -720,7 +730,15 @@ export async function runDueTourReminders(
   const dueRows = allDueRows.filter((r) => !blocked(r));
   const heldBack = allDueRows.length - dueRows.length;
   if (heldBack > 0) {
-    const heldBackManualOnly = allDueRows.filter((r) => manualOnly.has(r.kind)).length;
+    // A kind in BOTH sets is counted ONCE, under discontinued: the two counters
+    // exist to tell two OPPOSITE actions apart (a queue a human has to work
+    // through vs rows the sweep has not reached), and a discontinued kind has
+    // no queue - nothing can send it, by hand or otherwise. Unreachable while
+    // MANUAL_ONLY_REMINDER_KINDS is empty; the mechanism is kept alive for a
+    // re-pause, which is exactly when the overlap becomes possible.
+    const heldBackManualOnly = allDueRows.filter(
+      (r) => manualOnly.has(r.kind) && !DISCONTINUED_REMINDER_KINDS.has(r.kind),
+    ).length;
     const heldBackDiscontinued = allDueRows.filter((r) =>
       DISCONTINUED_REMINDER_KINDS.has(r.kind),
     ).length;

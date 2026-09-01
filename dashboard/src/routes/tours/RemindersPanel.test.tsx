@@ -299,6 +299,23 @@ describe('RemindersPanel', () => {
     expect(screen.getByText(/No longer sent . turned off/)).toBeInTheDocument();
     expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Will wait/i)).not.toBeInTheDocument();
+    // ...and NO "Send now" (review round 1, B-S1). The chip changed to stop
+    // inviting a click the server can only refuse (409 kind_retired, permanently
+    // and by design); the affordance has to follow it. Cancel/Restore stay: a
+    // discontinued rung is still a pending row an operator may want off the
+    // ladder.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel the/ })).toBeInTheDocument();
+  });
+
+  it('ANTI-VACUITY for the above: a plain upcoming rung DOES offer Send now', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-1', kind: 'confirmation', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Send the/ })).toBeInTheDocument(),
+    );
   });
 
   it('a discontinued rung still in the FUTURE does not promise "sends in Nh" either', async () => {
@@ -510,6 +527,46 @@ describe('nextReminderRefetchDelay (pure)', () => {
     expect(
       nextReminderRefetchDelay([{ state: 'upcoming', dueAt: '2026-08-01T12:00:00Z' }], NOW),
     ).toBe(6 * 3_600_000);
+  });
+
+  // Review round 1, B-S2. The 20s overdue re-check assumes the worker will flip
+  // the rung within a tick or two. A DISCONTINUED rung never flips, so a tab
+  // left open on a tour with a pause-era confirmation would hammer
+  // GET /api/tours/:id/reminders every 20 seconds forever - a route that reads
+  // the tour, the unit, two contacts, settings and the whole ladder per request.
+  it('ignores a discontinued rung entirely - it will never flip, so there is nothing to wait for', () => {
+    expect(
+      nextReminderRefetchDelay(
+        [
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'discontinued' },
+          },
+        ],
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it('a discontinued rung does not shadow a LIVE one behind it', () => {
+    expect(
+      nextReminderRefetchDelay(
+        [
+          // Earliest, and permanently stuck - it must not win the anchor.
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'discontinued' },
+          },
+          { state: 'upcoming', dueAt: '2026-07-10T12:00:30Z' },
+          // A PAUSED rung is NOT skipped: a human can still send it, so the
+          // panel keeps re-checking for that flip.
+          { state: 'upcoming', dueAt: '2026-07-10T18:00:00Z', suppression: { reason: 'paused' } },
+        ],
+        NOW,
+      ),
+    ).toBe(32_000);
   });
 });
 

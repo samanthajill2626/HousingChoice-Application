@@ -772,6 +772,46 @@ describe('GET /api/tours/:tourId/reminders', () => {
       expect(byId.get('rem-live-1')?.suppression).toBeUndefined();
     });
 
+    it('is NEVER handed `next`: the panel must not highlight the row it labels "No longer sent"', async () => {
+      // Review round 1, B-MF2. A pause-era confirmation's dueAt is the BOOKING
+      // instant, so it is ALWAYS the earliest rung on the ladder, and it stays
+      // `upcoming` until the sweep runs. `next` drives the panel's "Next" tag
+      // and its aria-current="step", so without this exclusion the panel points
+      // a navigator at the one row the same response chips "No longer sent".
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'disc-next', '+15550600044');
+      seedReminder(world, {
+        reminderId: 'rem-disc-next',
+        tourId,
+        kind: 'confirmation',
+        dueAt: isoHoursFromNow(-72),
+      });
+      seedReminder(world, {
+        reminderId: 'rem-live-next',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(24),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const { reminders, next } = res.body as {
+        reminders: { reminderId: string; state: string; suppression?: { reason: string } }[];
+        next?: { reminderId: string; kind: string };
+      };
+
+      // ANTI-VACUITY: the excluded rung really is still upcoming and really is
+      // still the earliest - the exclusion is the point, not a side effect of
+      // the fixture having gone terminal.
+      expect(reminders[0]?.reminderId).toBe('rem-disc-next');
+      expect(reminders[0]?.state).toBe('upcoming');
+      expect(reminders[0]?.suppression).toEqual({ reason: 'discontinued' });
+
+      expect(next?.reminderId).toBe('rem-live-next');
+      expect(next?.kind).toBe('day_before');
+    });
+
     it('chips a GROUP-routed tour too, where suppressionOf is never built (spec 3.1a)', async () => {
       // The case the shared evaluator would lose. `suppressionOf` is only built
       // for self_guided tours with an upcoming rung, so a landlord_led panel has

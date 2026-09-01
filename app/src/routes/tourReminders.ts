@@ -668,7 +668,15 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       .sort((a, b) => (a.dueAt < b.dueAt ? -1 : a.dueAt > b.dueAt ? 1 : 0));
     flushComposeFailTally(tally, log, 'tour_reminders_list');
 
-    const next = reminderViews.find((v) => v.state === 'upcoming');
+    // `next` drives the panel's "Next" tag and its aria-current="step", so a
+    // DISCONTINUED rung must be excluded even though it is still `upcoming`: a
+    // pause-era confirmation's dueAt is the BOOKING instant, which makes it the
+    // earliest rung on every ladder it sits on, and it stays pending until the
+    // one-time sweep reaches it. Without this the panel would point a navigator
+    // at the one row the same response chips "No longer sent".
+    const next = reminderViews.find(
+      (v) => v.state === 'upcoming' && v.suppression?.reason !== 'discontinued',
+    );
 
     log.info(
       {

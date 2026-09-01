@@ -264,6 +264,11 @@ test('self-guided: windows 1:1 (no group) → booked → 1:1 reminders → ID ga
   // is stale copy) - so this tick produces exactly one text, the one asserted.
   await flow.tickTourReminders(justAfter(times.enRoute));
   await flow.expectReminderTo1to1('en_route', tenant);
+  // ...and the retirement the sentence above describes is ASSERTED, not merely
+  // documented (spec 10): a converted clock-travel tick has to prove the
+  // same-tour retirement it causes, or a regression that SENT morning_of here
+  // would still leave every assertion in this walk green.
+  await flow.expectRungsSuperseded(['morning_of']);
 
   // The tenant tours via the code; Team logs the outcome.
   await flow.teamMarksToured();

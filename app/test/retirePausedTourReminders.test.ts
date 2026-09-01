@@ -7,7 +7,7 @@
 // untested, because the human runs it once against prod and never again.
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -285,6 +285,38 @@ describe.skipIf(!reachable)('retirePausedTourReminders against DynamoDB Local', 
     // The other planned row still landed - one lost race does not abort the run.
     expect((await w.row(w.pastMorningOf.reminderId, w.pastTour.tourId))?.skipReason).toBe(
       'tour_already_passed',
+    );
+  }, 120_000);
+
+  it('one CORRUPT row is counted `failed` and does not abort the rest of the run', async () => {
+    // Review round 1, B-S5. There is deliberately no FilterExpression, so EVERY
+    // row in the table reaches tourFor(). A row with no tourId marshals to an
+    // EMPTY Key (the client is removeUndefinedValues) and DynamoDB answers
+    // ValidationException - which used to escape the paging loop and kill the
+    // whole sweep, discarding every counter with it on the one run that matters.
+    const w = await seedWorld();
+    await doc.send(
+      new PutCommand({
+        TableName: tableName('tourReminders', w.env),
+        Item: {
+          reminderId: `rem-corrupt-${randomUUID().slice(0, 8)}`,
+          kind: 'day_before',
+          dueAt: '2026-08-30T11:00:00.000Z',
+        },
+      }),
+    );
+
+    const result = await retirePausedTourReminders({ doc, env: w.env, now: NOW });
+
+    expect(result.failed).toBe(1);
+    expect(result.scanned).toBe(6);
+    // Every healthy row still got the outcome it planned.
+    expect(result).toMatchObject({ tourAlreadyPassed: 1, kindRetired: 1, skipped: 3 });
+    expect((await w.row(w.pastMorningOf.reminderId, w.pastTour.tourId))?.skipReason).toBe(
+      'tour_already_passed',
+    );
+    expect((await w.row(w.futureConfirm.reminderId, w.futureTour.tourId))?.skipReason).toBe(
+      'kind_retired',
     );
   }, 120_000);
 

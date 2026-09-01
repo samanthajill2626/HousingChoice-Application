@@ -55,14 +55,27 @@ const MAX_ANCHOR_MS = 6 * 3_600_000;
 /**
  * How long until the panel should refetch on its own, or null when nothing is
  * pending (no upcoming rung → no timer). Pure — tested in isolation.
+ *
+ * A DISCONTINUED rung is not pending in the sense this timer means. The 20s
+ * overdue re-check exists because the worker will flip a past-due rung within a
+ * tick or two; a discontinued rung never flips by any path, so anchoring on one
+ * is an unbounded 20s poll of a route that reads the tour, the unit, two
+ * contacts, settings and the whole ladder. A `paused` rung is deliberately NOT
+ * skipped - a human can still send it, and the panel should notice when they do.
+ *
+ * Shared with the placement-nudge card (usePlacementNudges), hence the
+ * structural `suppression` shape rather than a view-specific type.
  */
 export function nextReminderRefetchDelay(
-  reminders: Pick<TourReminderView, 'state' | 'dueAt'>[],
+  reminders: (Pick<TourReminderView, 'state' | 'dueAt'> & {
+    suppression?: { reason: string };
+  })[],
   now: number,
 ): number | null {
   let earliest: number | null = null;
   for (const r of reminders) {
     if (r.state !== 'upcoming') continue;
+    if (r.suppression?.reason === 'discontinued') continue;
     const t = new Date(r.dueAt).getTime();
     if (Number.isNaN(t)) continue;
     if (earliest === null || t < earliest) earliest = t;
@@ -366,8 +379,15 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                       morning_of to "4 hours before" turns the older bare form
                       into "Send 4 hours before reminder now". Both aria
                       sentences below carry it, uniformly for every kind, and
-                      e2e/support/selectors.md pins the send-now pattern. */}
-                  {rung.state === 'upcoming' ? (
+                      e2e/support/selectors.md pins the send-now pattern.
+                      NOT rendered for a DISCONTINUED rung: the server refuses it
+                      permanently (409 kind_retired), so the button could only
+                      ever produce an error toast. The chip above already changed
+                      to stop inviting the click - "Paused" would invite exactly
+                      that refused click - and this is the other half of it.
+                      Cancel/Restore below stay: a discontinued rung is still a
+                      pending row an operator may want off the ladder. */}
+                  {rung.state === 'upcoming' && rung.suppression?.reason !== 'discontinued' ? (
                     <button
                       type="button"
                       className={styles.action}

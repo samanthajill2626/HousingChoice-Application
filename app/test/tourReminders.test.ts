@@ -194,6 +194,23 @@ describe('retiredByTourStart - the ONE past-tour predicate (poll gate, force-sen
       retiredByTourStart({ dueAt: '2026-08-01T14:00:00.000Z' }, '2026-08-01T15:00:00Z', '2026-08-01T15:00:01.000Z'),
     ).toBe(true);
   });
+
+  // Review round 1, A-S5: the ROW's dueAt got no such treatment, and the sweep
+  // scans EVERY row in the table - including hand-seeded and imported ones that
+  // computeDueAt never wrote.
+  it('normalizes the ROW dueAt too: an offset-bearing dueAt is not judged by string order', () => {
+    // '2026-08-01T11:00:00-05:00' IS 16:00Z - an hour AFTER the tour, i.e. a
+    // no_show_checkin shape the predicate must exempt. Compared as raw text it
+    // sorts before '2026-08-01T15:00:00.000Z' ('11' < '15'), and the gate would
+    // retire the one rung an operator needs after a no-show.
+    expect(
+      retiredByTourStart({ dueAt: '2026-08-01T11:00:00-05:00' }, T, '2026-08-01T17:00:00.000Z'),
+    ).toBe(false);
+  });
+
+  it('false: an unparseable dueAt - no honest gate decision can be derived from it', () => {
+    expect(retiredByTourStart({ dueAt: 'not-a-date' }, T, '2026-08-01T16:00:00.000Z')).toBe(false);
+  });
 });
 
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
@@ -3753,6 +3770,49 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(after?.skippedAt).toBeUndefined();
       expect(after?.skipReason).toBeUndefined();
       expect(after?.canceledAt).toBeUndefined();
+    });
+
+    it('the held-back LOG counts a kind in BOTH sets once, not twice', async () => {
+      // Review round 1, B-N4. MANUAL_ONLY_REMINDER_KINDS is empty today so the
+      // two counters cannot overlap in production - but the whole point of
+      // keeping the mechanism alive is that a kind CAN be re-paused, and
+      // `confirmation` is the kind its docblock names. The counters exist to
+      // tell two opposite actions apart (a queue a human must work through vs
+      // rows the sweep has not reached), so a row in both sets must be reported
+      // under the one that is true of it.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-disc-n4',
+        phone: '+15550240009',
+        convId: 'conv-disc-n4',
+        now: SEEDED_AT,
+      });
+      await seedForceTour({
+        tenantId: 'contact-disc-n4',
+        unitId: 'unit-disc-n4',
+        kind: 'confirmation',
+      });
+
+      const before = logCapture.lines.length;
+      await runDueTourReminders(POLL_AFTER_DUE, {
+        ...deps,
+        manualOnlyKinds: new Set<ReminderKind>(['confirmation']),
+      });
+
+      const held = logCapture.lines
+        .slice(before)
+        .find((l) => l['msg'] === 'tour reminder poll: rungs left pending (no automatic send)');
+      expect(held).toBeDefined();
+      // At least this suite's own row (earlier cases in this file leave their
+      // discontinued rows pending too, deliberately - so this is >=, and the
+      // RECONCILIATION below is the real assertion).
+      expect(held?.['heldBackDiscontinued'] as number).toBeGreaterThanOrEqual(1);
+      expect(held?.['heldBackManualOnly']).toBe(0);
+      expect(
+        (held?.['heldBackManualOnly'] as number) + (held?.['heldBackDiscontinued'] as number),
+      ).toBe(held?.['heldBack']);
     });
 
     it('forceSendReminder REFUSES kind_retired for a discontinued kind, and the row is untouched', async () => {

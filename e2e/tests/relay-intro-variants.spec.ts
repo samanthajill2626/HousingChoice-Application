@@ -21,6 +21,12 @@
 //      bubble carrying the NEW MEMBER's (spec 9.6's named, dated exception to
 //      the 2026-07-14 everything-is-visible rule).
 //
+//   3. OPEN a relay on a PLACEMENT (spec 14's second walk) -> the move-in intro,
+//      previewed and then delivered to EVERY member of the server's own roster,
+//      from the group's masked pool number. The placement variant is the one
+//      with no clock in it at all, so this walk is the control for the tour
+//      walk's time-dependent copy.
+//
 // DETERMINISM: the tour is booked +48h, so it is never "today" in the org zone
 // and the copy is always the dated variant - no straddling midnight, and no
 // assertion here depends on the wall clock.
@@ -131,18 +137,49 @@ async function createBookedTour(
   return ((await res.json()) as { tour: { tourId: string } }).tour.tourId;
 }
 
-/** Open the relay through the REAL route, completing the connect handshake when
- *  a fresh pair has no reusable number. Returns the conversation id. */
-async function openRelay(request: APIRequestContext, tourId: string): Promise<string> {
-  const res = await request.post(`${NEXT}/api/tours/${tourId}/relay`, { data: {} });
+/** A placement on `unitId` for `tenantId`, at the ladder's first rung. A
+ *  placement carries NO time of its own, which is exactly why its intro variant
+ *  is clock-free - unlike the tour walk above, nothing here can straddle a
+ *  boundary. */
+async function createPlacement(
+  request: APIRequestContext,
+  data: { tenantId: string; unitId: string },
+): Promise<string> {
+  const res = await request.post(`${NEXT}/api/placements`, { data });
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { placement: { placementId: string } }).placement.placementId;
+}
+
+/** Open the relay through the REAL route (`<ownerPath>/relay`), completing the
+ *  connect handshake when a fresh pair has no reusable number. Returns the
+ *  conversation id AND the masked pool number the legs must be sent FROM. */
+async function openRelay(
+  request: APIRequestContext,
+  ownerPath: string,
+): Promise<{ conversationId: string; poolNumber: string }> {
+  const res = await request.post(`${NEXT}${ownerPath}/relay`, { data: {} });
   expect(res.ok(), await res.text()).toBeTruthy();
   const { conversation } = (await res.json()) as {
-    conversation: { conversationId: string; status?: string };
+    conversation: { conversationId: string; status?: string; pool_number?: string };
   };
   if (conversation.status === 'connecting') {
-    await driveConnectingGroupToOpen(request, conversation.conversationId);
+    const opened = await driveConnectingGroupToOpen(request, conversation.conversationId);
+    return { conversationId: opened.conversationId, poolNumber: opened.pool_number };
   }
-  return conversation.conversationId;
+  return {
+    conversationId: conversation.conversationId,
+    poolNumber: conversation.pool_number ?? '',
+  };
+}
+
+/** Every member of the OPENED group, read back through the real roster route -
+ *  so "every member" is the server's own answer, never a list this spec
+ *  assembled and could quietly under-count. */
+async function rosterPhones(request: APIRequestContext, ownerPath: string): Promise<string[]> {
+  const res = await request.get(`${NEXT}${ownerPath}/roster`);
+  expect(res.ok(), await res.text()).toBeTruthy();
+  const { members } = (await res.json()) as { members: { phone?: string }[] };
+  return members.map((m) => m.phone).filter((p): p is string => typeof p === 'string' && p.length > 0);
 }
 
 /** Poll the fake until an OUTBOUND body EXACTLY equal to `body` reached `phone`.
@@ -156,6 +193,29 @@ async function expectExactSentTo(
     .poll(
       async () => (await getOutboundTo(request, { to: phone })).map((m) => m.body ?? ''),
       { timeout: 30_000, message: `nothing exactly equal to the expected copy reached ${phone}` },
+    )
+    .toContain(body);
+}
+
+/** As above, but also pinning the SENDER: the leg has to come from the group's
+ *  masked pool number, not the business number, or the member cannot reply into
+ *  the group at all. */
+async function expectExactSentFromPool(
+  request: APIRequestContext,
+  phone: string,
+  body: string,
+  poolNumber: string,
+): Promise<void> {
+  await expect
+    .poll(
+      async () =>
+        (await getOutboundTo(request, { to: phone }))
+          .filter((m) => m.from === poolNumber)
+          .map((m) => m.body ?? ''),
+      {
+        timeout: 30_000,
+        message: `nothing exactly equal to the expected copy reached ${phone} from ${poolNumber}`,
+      },
     )
     .toContain(body);
 }
@@ -194,7 +254,7 @@ test.describe('Relay intro variants + the member_added split', () => {
     expect(introBody).not.toContain(pm.firstName);
 
     // --- 2. Opening SENDS exactly what the preview showed (spec 9.0) --------
-    const conversationId = await openRelay(req, tourId);
+    const { conversationId } = await openRelay(req, `/api/tours/${tourId}`);
     await expectExactSentTo(req, tenant.phone, introBody);
     await expectExactSentTo(req, owner.phone, introBody);
 
@@ -250,5 +310,62 @@ test.describe('Relay intro variants + the member_added split', () => {
     // The group-side copy is deliberately NOT shown in the thread: two rows
     // would mean two bubbles and two rollup chips for one event.
     await expect(page.getByText(groupBody, { exact: false })).toHaveCount(0);
+  });
+
+  // The PLACEMENT half of spec 14's requirement, mirroring the tour walk above.
+  // The API-level pins (placementsApi.test.ts preview-open + relayFanOut.test.ts
+  // "a placement owner resolves the placement variant") already prove the
+  // resolver picks this variant; what only an e2e can prove is the LEG-ARRIVAL
+  // half - that the copy the operator previewed is the copy that reaches every
+  // member's phone, from the group's own masked number.
+  //
+  // Simpler than the tour walk by construction: a placement carries no time, so
+  // there is one variant and no clock to straddle.
+  test('a PLACEMENT opens with Sam move-in intro, previewed and delivered to every member', async ({
+    page,
+  }) => {
+    test.slow(); // build-a-world plus a real relay provision.
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+
+    const owner = await createContact(req, 'landlord', `Pown${stamp}`);
+    const { unitId, line1 } = await createAvailableUnit(req, owner.contactId);
+    const tenant = await createContact(req, 'tenant', `Pten${stamp}`);
+    const placementId = await createPlacement(req, { tenantId: tenant.contactId, unitId });
+    const ownerPath = `/api/placements/${placementId}`;
+
+    // --- 1. The PREVIEW is the placement variant ----------------------------
+    const previewRes = await req.get(`${NEXT}${ownerPath}/roster/preview-open`);
+    expect(previewRes.ok(), await previewRes.text()).toBeTruthy();
+    const introBody = ((await previewRes.json()) as { body: string }).body;
+    // Resolved copy, not a catalog echo: the tenant's greeting, the STREET the
+    // resolver read off the property, and the property contact who will share
+    // updates. A naked intro carries none of these, so nothing here can pass
+    // vacuously - and none of the tour copy may appear.
+    expect(introBody.startsWith(`Hey ${tenant.firstName}!`), introBody).toBeTruthy();
+    expect(introBody).toContain(`Excited to have you move into ${line1}`);
+    expect(introBody).toContain(`${owner.firstName} will share updates`);
+    expect(introBody).not.toContain('to tour ');
+    expect(introBody).not.toContain('on the way');
+
+    // --- 2. Opening sends THAT body to EVERY member, from the POOL number ---
+    const { conversationId, poolNumber } = await openRelay(req, ownerPath);
+    expect(poolNumber, 'an opened relay group is assigned a masked pool number').not.toBe('');
+
+    // The roster is read back from the server AFTER the open, so this asserts
+    // over the members the fan-out actually addressed rather than over a list
+    // this spec guessed at.
+    const phones = await rosterPhones(req, ownerPath);
+    expect(phones.sort()).toEqual([owner.phone, tenant.phone].sort());
+    for (const phone of phones) {
+      await expectExactSentFromPool(req, phone, introBody, poolNumber);
+    }
+
+    // --- 3. ...and the dashboard thread shows the same one bubble -----------
+    await page.goto(`${NEXT}/conversations/${conversationId}`);
+    await expect(
+      page.getByText(`Excited to have you move into ${line1}`, { exact: false }),
+    ).toBeVisible({ timeout: 20_000 });
   });
 });

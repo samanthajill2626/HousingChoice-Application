@@ -166,9 +166,17 @@ export interface TourRemindersRepo {
   /**
    * Restore ONE canceled rung to pending (operator un-cancel). Conditional on
    * canceledAt existing AND no sentAt/skippedAt — restoring a sent or
-   * never-canceled rung is a benign false. A restored PAST-DUE rung fires on
-   * the next poll tick (the panel shows "sending shortly" — deliberate: an
-   * un-canceled confirmation means "send it after all").
+   * never-canceled rung is a benign false.
+   *
+   * A restored PAST-DUE rung fires on the next poll tick ONLY if it clears two
+   * Phase B gates, and the "Restore" button is offered on rows that clear
+   * neither - so do not read this as a promise. (1) Its KIND must not be in
+   * DISCONTINUED_REMINDER_KINDS: a `confirmation` can never fire by any path,
+   * poll or Send now (jobs/tourReminders.ts). (2) The tour must not have
+   * STARTED: a rung whose own dueAt precedes a tour already under way is
+   * claim-skipped `tour_already_passed` instead of sent (retiredByTourStart).
+   * A restored rung that clears both does fire, and the panel's "sending
+   * shortly" is then honest.
    */
   uncancel(reminderId: string): Promise<boolean>;
   /** Cancel all pending (not yet sent, canceled, or skipped) reminders for this tour. */

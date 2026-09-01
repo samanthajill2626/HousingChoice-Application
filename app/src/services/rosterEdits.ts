@@ -22,8 +22,14 @@
 //      composeMemberAddedGroupBody) - never resolveMessage directly, or a
 //      template edit would drift preview from send. Phase B (spec 9.0) extends
 //      that to the OWNER ROUTING: the same resolver picks the variant here and
-//      in the job, so the preview cannot show a different intro than the one
-//      that goes out. INPUT IS THE OWNER ONLY: the roster is resolved
+//      in the job, so the preview and the send are built from the same ENTRY
+//      SET - resolved at SEND time. Not the same STRING: the resolver is
+//      clock-dependent (org-local midnight, "is it today", the tour start), so
+//      any gap between preview and send can flip the variant, and two such gaps
+//      are ordinary - a quiet-hours deferral of the open, and a `connecting`
+//      group waiting on relay.numberReady. That is the right behaviour, not a
+//      defect to close: threading the preview's clock into the job would pin a
+//      variant that has genuinely gone stale. INPUT IS THE OWNER ONLY: the roster is resolved
 //      server-side, so a client list can never disagree with what provision
 //      resolves.
 //
@@ -566,10 +572,17 @@ export async function buildOpenPreview(
   const duplicateOf =
     findDuplicate === undefined ? undefined : await findDuplicate(new Set(seenPhones));
 
-  // Spec 9.0: the preview shows the SAME variant the job would send. Anything
-  // else breaks 9.5's escape hatch and, worse, an operator who tweaks a
-  // previewed naked intro pins the wrong variant permanently (precedence rule 1
-  // stores what they EDITED). Never throws - degrades to the naked intro.
+  // Spec 9.0: the preview resolves from the SAME entry set as the job, through
+  // this one resolver. Anything else breaks 9.5's escape hatch and, worse, an
+  // operator who tweaks a previewed naked intro pins the wrong variant
+  // permanently (precedence rule 1 stores what they EDITED).
+  //
+  // The variant is resolved at SEND time, though, and the resolver reads a
+  // clock - so a preview and a deferred send that straddle org-local midnight
+  // or the tour start legitimately differ (preview at 23:00 for a 09:00 tour
+  // tomorrow shows the dated form; the quiet-end send at 08:00 emits the today
+  // form). Deliberate: pinning the preview's instant would send copy that has
+  // gone stale. Never throws - degrades to the naked intro.
   const inputs = await resolveRelayComposeInputs(
     { type: owner.type, id: owner.id },
     composeDepsOf(deps, quiet),

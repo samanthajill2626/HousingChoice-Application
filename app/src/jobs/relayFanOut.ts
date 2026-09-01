@@ -345,6 +345,10 @@ function resolveMemberRole(
  * intro. getOrgSettings already answers with defaults when no row exists, so a
  * throw here is a genuine read failure, not an unconfigured org. The placement
  * variant reads no settings at all.
+ *
+ * A tour that has ALREADY STARTED is treated exactly as a tour with no time at
+ * all - naked. See the tour branch below for why; the short version is that
+ * "let us know when you're on the way" is not a sentence to send after the tour.
  */
 export async function resolveRelayComposeInputs(
   owner: RelayOwner,
@@ -354,6 +358,7 @@ export async function resolveRelayComposeInputs(
 ): Promise<RelayComposeInputs> {
   const log = deps.logger ?? defaultLogger;
   if (owner.type === null) return { variant: 'naked' };
+  const nowIso = deps.nowIso ?? new Date().toISOString();
 
   let tenantId: string;
   let unitId: string;
@@ -367,7 +372,22 @@ export async function resolveRelayComposeInputs(
       unitId = tour.unitId;
       // OPTIONAL on TourItem: a 'requested' tour has no time at all, which
       // spec 9.5 routes to the naked intro (there is no {when} to render).
+      //
+      // A tour that has ALREADY STARTED is dropped here and takes exactly the
+      // same route, because both tour entries end "Please let us know when
+      // you're on the way" - copy that assumes the tour has not happened. This
+      // is the third writer of tour-time copy and the same staleness class the
+      // ladder's fire-time gate (retiredByTourStart) exists for; the two
+      // reachable paths are an operator opening the group from a tour whose
+      // outcome is not recorded yet, and a quiet-hours deferral that straddles
+      // the tour start (routes/tours.ts defers the open to quiet-end, and this
+      // composes THEN). STRICTLY before: at the start instant the tour is
+      // beginning, not past, and the copy still reads correctly. An unparseable
+      // scheduledAt is NOT dropped here - Number.isFinite is false, so it falls
+      // through to the formatter's own try/catch, which already degrades it.
       scheduledAt = tour.scheduledAt;
+      const startedAt = Date.parse(scheduledAt ?? '');
+      if (Number.isFinite(startedAt) && startedAt < Date.parse(nowIso)) scheduledAt = undefined;
     } else {
       const placement = await deps.placementsRepo?.getById(owner.id);
       if (!placement) return { variant: 'naked' };
@@ -440,7 +460,6 @@ export async function resolveRelayComposeInputs(
   }
 
   try {
-    const nowIso = deps.nowIso ?? new Date().toISOString();
     const time = formatLocalTime(scheduledAt, timezone);
     if (localDateOf(nowIso, timezone) === localDateOf(scheduledAt, timezone)) {
       return { variant: 'tour_today', ...named, time };
@@ -1059,7 +1078,13 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         // ONE row, and the persisted body is the NEW MEMBER's (spec 9.6,
         // Cameron 2026-08-31): one bubble, one rollup chip, and of the two
         // copies the new member's is the one worth seeing in the thread.
-        body: newMemberBody,
+        //
+        // EXCEPT in the raced remove the docblock above anticipates: with the
+        // joiner already off the roster, `added` is undefined and bodyFor
+        // matches nobody, so EVERY leg is the group body. Persisting the new
+        // member's copy there would leave a bubble - and an inbox preview -
+        // quoting a message no recipient received.
+        body: added !== undefined ? newMemberBody : groupBody,
         kind: 'relay.member_added',
         bodyFor: (m) =>
           relayMemberKey(m) === payload.addedMemberKey ? newMemberBody : groupBody,

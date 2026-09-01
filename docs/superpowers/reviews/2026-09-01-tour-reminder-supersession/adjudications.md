@@ -276,3 +276,89 @@ other part was called executable. R4-1 is now resolved with a mechanism the
 reviewer did not see, which is the one thing this process cannot self-certify.
 That residual goes to the human's spec gate as an open item, not silently into
 the build.
+
+---
+
+# Round 5 - fresh cold reviewer (founder-requested, past the cap)
+
+11 findings, 1 BLOCKING, verdict "BUILDABLE: no". ACCEPT 11, REJECT 0. A
+DIFFERENT model, dispatched cold - spec and repo only, no prior reports, and
+instructed not to read rounds 1-4 until its own findings were written. It found
+a blocking defect that four rounds of a continued reviewer had missed, which is
+the argument for cold independence over accumulated context.
+
+**R5-1 - a cleared pointer is indistinguishable from a never-migrated one.
+ACCEPT, BLOCKING.** Verified at `toursRepo.ts:333`: `patch` maps an explicit
+null to REMOVE. So "terminal transition cleared the pointer" and "this tour
+predates the feature" are the same bytes, and 3.5's pre-migration rule then
+re-adopts a terminal tour's legacy rows as CURRENT - a legacy sweep-miss on a
+canceled tour would still SEND, and EARLIER legacy rows flip back to current the
+moment the pointer clears. Fixed by never removing the pointer: terminal
+transitions ROTATE it to a fresh unmatched UUID. Absence now means pre-migration
+and nothing else.
+
+**R5-2 - acceptances 5 and 15 contradicted each other. ACCEPT.** One said the
+Upcoming buckets render a superseded rung as suppressed, the other said they
+return nothing for a superseded ladder. Both were written about "a superseded
+rung" without distinguishing the sweep-MISS case from the swept case. Split into
+two named fixtures.
+
+**R5-3 - 3.6 converted one scroll writer out of five. ACCEPT.** Verified: the
+conversation-switch reset at `Timeline.tsx:1890` and the post-send pin at
+`:1976` both do `scrollTop = scrollHeight`, so every thread would OPEN scrolled
+onto the Upcoming block - acceptance 12 failing on open, before any growth
+happens. The pill-clear at `:1853` was also unspecified. All five writers are
+now enumerated with their individual dispositions.
+
+**R5-4 - concurrent reschedules can interleave to a pointer at a swept ladder.
+ACCEPT.** 3.2's interruption posture covered a single request failing, not two
+succeeding in the wrong order: two 200s, a silently disarmed tour, no error. The
+step-4 pointer write is now conditional on the rotation value from step 1.
+
+**R5-5 - "REVERSIBLY" overclaimed on the conversion path. ACCEPT, redesigned.**
+A rung claim-skipped `superseded` inside the cleared window can never come back,
+because `skippedAt` is terminal (`tourRemindersRepo.ts:361`) - so restoring the
+pointer does not restore the ladder, and the token would then be a lie on a
+pointer-matched ladder. The pointer dance is dropped from the conversion path
+entirely: the tour already carries a reversible in-flight marker (the conversion
+claim), and the poll now DEFERS - leaves unclaimed, stamps nothing - for a tour
+with a claim in flight. Bounded, because the claim either finalizes or is
+released.
+
+**R5-6 - `lib/seed/live.ts` arms through the real armer but writes no pointer.
+ACCEPT.** Every demo-world ladder would be born refused. Seeds promoted from a
+footnote to a named surface in section 4.
+
+**R5-7 - the copy-surface count was wrong in BOTH directions. ACCEPT.** Three
+exhaustive maps break the build, not two (the placement-nudge card and
+`ScheduledCard`'s `SUPPRESSION_COPY` were unnamed), and the pair I called
+"typecheck-forced" is forced only if the hand-mirrored dashboard union is
+updated too - an app-side-only addition compiles green and renders the raw
+snake_case token to staff.
+
+**R5-8 - the tour CREATE path was absent from 3.2** and its 201 carries the same
+stale-pointer defect the spec fixes for PATCH. ACCEPT.
+
+**R5-9 - "the next PATCH re-arms it" is false. ACCEPT.** Verified at
+`tours.ts:1181-1189`: only a `scheduledAt` change or an explicit move into
+`scheduled` re-arms.
+
+**R5-10 - `earlier[]`'s "newest first" had no sort key. ACCEPT** - `ladderId` is
+a UUID by D3's own argument and `createdAt` ties within one arm call. Now
+`sentAt ?? dueAt` descending, `reminderId` tie-break.
+
+**R5-11 - `below` was unreachable for a block shorter than the 48px slack.
+ACCEPT** - it is now defined by DIRECTION rather than by slack.
+
+## Where this leaves the process
+
+Five rounds, 80 findings, 76 accepted, 0 rejected outright. Rounds 2, 3, 4 and 5
+each found a defect introduced by the previous round's fix. Round 5's blocker
+was a REPRESENTATION defect - null-means-remove - that no amount of continuing
+the same reviewer was going to surface, because that reviewer had already
+accepted the pointer model as given.
+
+The lesson to carry: the four-round cap is about diminishing returns from ONE
+reviewer's accumulated context, not about a document being finished. A fresh
+cold pass at the end is cheap and, here, caught the most consequential defect of
+the five rounds.

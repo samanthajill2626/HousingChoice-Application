@@ -299,6 +299,100 @@ describe('relay.fanOut (M1.7)', () => {
     expect(source.delivery_recipients?.['c-removed']?.transportAggregationState).toBe('excluded');
   });
 
+  it('keeps a current continuation-omitted recipient planned while sending only the continuation roster', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'continuation roster', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+        'c-carol': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((sent) => sent.to)).toEqual([BOB]);
+    expect(source.delivery_recipients?.['c-carol']).toMatchObject({
+      status: 'queued',
+      requestedTransport: 'sms',
+      transportAggregationState: 'planned',
+    });
+  });
+
+  it('keeps a suppressed excluded continuation slot out of provider handling', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'suppressed continuation', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          requestedTransport: 'sms',
+          transportAggregationState: 'excluded',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+    });
+  });
+
+  it('reopens a never-attempted non-suppressed excluded member who has rejoined', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'rejoined member', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'excluded',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((sent) => sent.to)).toEqual([BOB]);
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'queued',
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
+      transportAggregationState: 'attempted',
+    });
+  });
+
   it('preserves first callback pointers while a v1 continuation adds actual evidence and clears transient error', async () => {
     seedRelay(world);
     const source = seedVersionedSource(world, 'retry', 'c-alice', {

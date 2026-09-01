@@ -594,7 +594,8 @@ async function runRelayFanOutExecution(
     );
   }
 
-  let recipients = roster.filter((member) => relayMemberKey(member) !== payload.senderKey);
+  const currentRoster = roster.filter((member) => relayMemberKey(member) !== payload.senderKey);
+  let recipients = currentRoster;
   if (payload.recipientKeys !== undefined) {
     const allowed = new Set(payload.recipientKeys);
     recipients = recipients.filter((member) => allowed.has(relayMemberKey(member)));
@@ -606,6 +607,7 @@ async function runRelayFanOutExecution(
       source,
       payload,
       recipients,
+      currentRoster,
       transport.intent,
       messages,
     );
@@ -840,10 +842,11 @@ async function preflightVersionedRecipients(
   source: MessageItem,
   payload: RelayFanOutPayload,
   recipients: ConversationParticipant[],
+  currentRoster: ConversationParticipant[],
   intent: MessageTransportIntent,
   messages: MessagesRepo,
 ): Promise<MessageItem> {
-  const eligibleKeys = new Set(recipients.map((member) => relayMemberKey(member)));
+  const currentRosterKeys = new Set(currentRoster.map((member) => relayMemberKey(member)));
   const requestedTransport = source.requested_transport ?? intent.requestedTransport;
   for (const member of recipients) {
     const key = relayMemberKey(member);
@@ -869,10 +872,7 @@ async function preflightVersionedRecipients(
     const key = relayMemberKey(member);
     const slot = current.delivery_recipients?.[key];
     if (!slot) throw new Error('relayFanOut: v1 preflight recipient slot missing');
-    if (
-      slot.transportAggregationState === undefined ||
-      slot.transportAggregationState === 'excluded'
-    ) {
+    if (slot.transportAggregationState === undefined || canReopenExcludedSlot(slot)) {
       await setVersionedAggregationState(
         messages,
         payload,
@@ -886,7 +886,7 @@ async function preflightVersionedRecipients(
   current = await readVersionedSource(messages, payload);
   for (const [key, slot] of Object.entries(current.delivery_recipients ?? {})) {
     if (
-      !eligibleKeys.has(key) &&
+      !currentRosterKeys.has(key) &&
       (slot.transportAggregationState === undefined ||
         slot.transportAggregationState === 'planned') &&
       (slot.transportAggregationState === 'planned' ||
@@ -904,6 +904,17 @@ async function preflightVersionedRecipients(
     }
   }
   return readVersionedSource(messages, payload);
+}
+
+function canReopenExcludedSlot(slot: RelayRecipientDelivery): boolean {
+  return (
+    slot.transportAggregationState === 'excluded' &&
+    slot.status !== 'failed' &&
+    slot.errorCode !== 'contact_opted_out' &&
+    slot.sid === undefined &&
+    slot.sentAt === undefined &&
+    slot.actualTransport === undefined
+  );
 }
 
 async function readVersionedSource(

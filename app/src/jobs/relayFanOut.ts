@@ -846,13 +846,21 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         if (isTerminal(snapshot.delivery_recipients?.[key]?.status)) continue;
         await markRecipient(repo, payload, key, { status: 'failed', errorCode: code });
       }
+      // D10: the ONE operator line names the number the close was DECIDED on,
+      // which is the DURABLE counter, never the envelope's. `capped` carries the
+      // unchanged stored count (close B: 3 beside a first-pass envelope's 1),
+      // `claimed` the number this pass took. The envelope value stays alongside,
+      // renamed, for correlation only - the two must not be confusable.
+      const fanoutAttempt =
+        claim !== undefined && claim.outcome !== 'missing' ? claim.attempt : undefined;
       log.error(
         {
           conversationId: payload.relayConversationId,
           tsMsgId: payload.sourceTsMsgId,
           deferred: memberKeys.length,
           closeCode: code,
-          attempt: payload.attempt,
+          fanoutAttempt,
+          envelopeAttempt: payload.attempt,
           ...(cause !== undefined && { err: cause }),
         },
         'relayFanOut: fan-out closed - remaining recipients marked failed',

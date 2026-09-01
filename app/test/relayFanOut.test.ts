@@ -636,6 +636,9 @@ describe('relay.fanOut (M1.7)', () => {
     ).toBe(true);
     expect(outbound.delayed).toHaveLength(0); // no FOURTH continuation
     expect(closeLines(capture)).toHaveLength(1);
+    // D10: the operator line reports the DURABLE counter the close decided on -
+    // here the cap itself, reached by driving the real ladder.
+    expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
     // D7: pass count and delays are exactly main's - three attempts at the
     // deferred recipient, 5s then 10s (relay passes the CURRENT pass number).
     expect(send.mock.calls.filter(([params]) => params.to === BOB)).toHaveLength(3);
@@ -674,6 +677,11 @@ describe('relay.fanOut (M1.7)', () => {
     expect(stored.delivery_recipients?.['c-carol']?.status).toBe('failed');
     expect(stored.delivery_recipients?.['c-carol']?.errorCode).toBe('transient_cap');
     expect(closeLines(capture)).toHaveLength(1);
+    // D10: this is the line an operator reads to answer "why did it give up".
+    // It must carry the STORED count that refused the claim (3), not the
+    // first-pass envelope's advisory 1 - the two are kept distinguishable.
+    expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
+    expect(closeLines(capture)[0]!['envelopeAttempt']).toBe(1);
     expect(outbound.delayed).toHaveLength(0);
     // A capped claim consumes nothing: the counter is UNCHANGED.
     expect(stored.fanout_attempt).toBe(3);

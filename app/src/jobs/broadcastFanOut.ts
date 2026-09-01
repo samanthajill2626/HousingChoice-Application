@@ -276,12 +276,20 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           await repo.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
         );
       }
+      // D10: the ONE operator line names the number the close was DECIDED on,
+      // which is the DURABLE counter, never the envelope's. `capped` carries the
+      // unchanged stored count (close B: 3 beside a first-pass envelope's 1),
+      // `claimed` the number this pass took. The envelope value stays alongside,
+      // renamed, for correlation only - the two must not be confusable.
+      const fanoutAttempt =
+        claim !== undefined && claim.outcome !== 'missing' ? claim.attempt : undefined;
       log.error(
         {
           broadcastId: payload.broadcastId,
           deferred: recipientKeys.length,
           closeCode: code,
-          attempt: payload.attempt,
+          fanoutAttempt,
+          envelopeAttempt: payload.attempt,
           ...(cause !== undefined && { err: cause }),
         },
         'broadcastFanOut: fan-out closed - remaining recipients marked failed',
@@ -560,7 +568,10 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     );
 
     // Transient continuation: re-enqueue the remaining recipients with backoff,
-    // capped. Beyond the cap → mark those failed (no silent black hole).
+    // capped. The cap closes AT the last rung, not beyond it: close A fires on
+    // `claim.attempt >= MAX_BROADCAST_ATTEMPTS`, so the pass that spends the
+    // final rung is the one that marks the still-deferred recipients failed
+    // (no silent black hole, and no fourth pass exists to do it later).
     if (transientRemaining.length > 0) {
       if (claim?.outcome !== 'claimed') {
         // Unreachable by construction: a key reaches transientRemaining only

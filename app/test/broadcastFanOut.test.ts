@@ -459,6 +459,9 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.status).not.toBe('sending');
     expect(outbound.delayed).toHaveLength(0); // no FOURTH continuation
     expect(closeLines(capture)).toHaveLength(1);
+    // D10: the operator line reports the DURABLE counter the close decided on -
+    // here the cap itself, reached by driving the real ladder.
+    expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
     // D7: pass count and delays are exactly main's - 3 sends, 10s then 20s.
     expect(send).toHaveBeenCalledTimes(3);
     expect(delaysObserved).toEqual([10, 20]);
@@ -491,6 +494,11 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.status).toBe('failed');
     expect(bcast.status).not.toBe('sending');
     expect(closeLines(capture)).toHaveLength(1);
+    // D10: this is the line an operator reads to answer "why did it give up".
+    // It must carry the STORED count that refused the claim (3), not the
+    // first-pass envelope's advisory 1 - the two are kept distinguishable.
+    expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
+    expect(closeLines(capture)[0]!['envelopeAttempt']).toBe(1);
     // A capped claim consumes nothing: the counter is UNCHANGED.
     expect(bcast.fanout_attempt).toBe(3);
     expect(outbound.delayed).toHaveLength(0);

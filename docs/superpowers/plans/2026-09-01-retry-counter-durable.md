@@ -3,222 +3,318 @@
 Spec: `docs/superpowers/specs/2026-08-31-retry-counter-durable-design.md`
 Branch `feat/retry-counter-durable`, worktree `W:\tmp\retry-counter-durable`.
 
-Decision IDs (D1..D23) refer to the spec. Where this plan states a line number
-it is from `main@5ce9912f`; **verify the anchor by reading, not by trusting the
-number.** Several defects in this design's history came from a mechanism
-credited by name without tracing it from the call site in question.
+D1..D23 refer to spec decisions. Line numbers are from `main@5ce9912f` and are
+**anchors to verify by reading, never facts to trust** - several defects in this
+design's history came from a mechanism credited by name without tracing it from
+the call site in question.
 
-TDD throughout: each slice writes its failing test first, and slices 1-4 must
-each have a test that **fails on `main`** where the spec says so.
+TDD per slice. Where a test is marked **RED-ON-MAIN**, confirm it actually fails
+on the merge base before building the fix; a test that passes on `main` proves
+nothing and will be trusted forever.
+
+---
+
+## Slice 0 - types and every implementation of the interface
+
+Adding a method to a repo interface breaks typecheck until EVERY implementation
+has it, and the hand-written test fake's semantics silently decide whether later
+tests mean anything.
+
+1. Declare the attribute on both item types, beside the 1:1 ladder's existing
+   `retry_attempt` so the two ladders are visibly siblings:
+   - `BroadcastItem.fanout_attempt?: number` (`repos/broadcastsRepo.ts`)
+   - `MessageItem.fanout_attempt?: number` (`repos/messagesRepo.ts`)
+2. Add `claimFanoutPass` to both interfaces (signature in slice 1).
+3. **Implement it in every implementation.** Enumerate them by grepping for the
+   interface name before writing code; as of `main` they are:
+   - `createBroadcastsRepo` / `createMessagesRepo` (the real ones);
+   - the hand-written fake at `app/test/helpers/twilioWebhookHarness.ts:2663`
+     (`const broadcastsRepo: BroadcastsRepo = {...}`) and any messages-repo fake
+     in the same harness.
+
+   **The fake must model the real semantics**: increment-and-return, refuse at
+   `cap`, distinguish missing. A fake that always returns `claimed` makes every
+   cap test in slices 2 and 3 pass vacuously.
+4. Add a test-only way to SET the counter (or have the fake expose its map) -
+   close B and the rewritten cap test both need to start from a capped item
+   (slice 2d).
+
+**Gate:** `npm run typecheck` is green before moving on.
 
 ---
 
 ## Slice 1 - the claim primitive
 
-**Files:** `app/src/repos/broadcastsRepo.ts`, `app/src/repos/messagesRepo.ts`.
-
-Add to each repo:
+**Files:** `repos/broadcastsRepo.ts`, `repos/messagesRepo.ts`.
 
 ```ts
-claimFanoutPass(<pk args>, cap: number): Promise<
+claimFanoutPass(<key>, cap: number): Promise<
   | { outcome: 'claimed'; attempt: number }
   | { outcome: 'capped';  attempt: number }
   | { outcome: 'missing' }
 >
 ```
 
+**Keys - state them exactly** (D3):
+
+- broadcasts: `broadcastId`.
+- messages: **`conversationId` + `tsMsgId`** - the SOURCE MESSAGE, not the
+  conversation. Keying a relay counter on `relayConversationId` alone would give
+  an entire group ONE three-pass budget for its lifetime.
+
+Implementation:
+
 - `UpdateExpression: 'ADD fanout_attempt :one'`, `:one = 1`.
-- `ConditionExpression`: the item exists AND
+- `ConditionExpression`: item exists AND
   `(attribute_not_exists(fanout_attempt) OR fanout_attempt < :cap)`.
-- `ReturnValues: 'UPDATED_NEW'` -> `{ fanout_attempt: N }`; return N as
-  `attempt`. **Do not re-read the item to learn the result** - that reintroduces
-  the race the atomic ADD removes (D5).
-- On `ConditionalCheckFailedException`: a **`ConsistentRead: true`** GetItem
-  disambiguates `capped` (item present) from `missing` (absent). An eventually
-  consistent read here can report `missing` for an item that exists and skip a
-  close.
+- `ReturnValues: 'UPDATED_NEW'` -> `{ fanout_attempt: N }`. **Do not re-read to
+  learn the result** (D5).
+- On `ConditionalCheckFailedException`, disambiguate `capped` from `missing`
+  with a **`ConsistentRead: true`** get. `messagesRepo` has no single-item
+  getter - add one or use a consistent `GetCommand` directly; do not reuse a
+  query helper that reads eventually-consistently.
 
-`fanout_attempt` is a **top-level scalar** (D2, D3). ADD creates it from absent,
-so there is no seeding step and no creation-site edit (D4).
+ADD creates the attribute from absent, so there is no seeding step (D4).
 
-**Tests (spec 7.1, 7.2, 7.8):**
-- claim on an item with no attribute returns `claimed`/1;
-- claim at `cap - 1` returns `claimed`; at `cap` returns `capped`;
-- claim on a missing item returns `missing`;
-- **concurrent claims yield distinct numbers** (fire N in parallel, assert the
-  set of returned attempts has no duplicates);
+**Tests - these are DynamoDB Local INTEGRATION tests**, in the integration
+suites, not unit tests against the fake. The atomicity property does not exist
+in the fake, so a unit test of it passes vacuously.
+
+- claim on an item with no attribute -> `claimed`/1;
+- at `cap - 1` -> `claimed`; at `cap` -> `capped`; missing item -> `missing`;
+- **concurrent claims yield distinct numbers** (fire N in parallel; assert no
+  duplicates in the returned set) - spec 7.2;
 - **the counter survives a status write**: claim, then `setRecipient` /
-  `setRecipientDelivery` on the same item, then re-read - `fanout_attempt` is
-  intact. **This test fails against a slot-resident counter (D2).**
+  `setRecipientDelivery`, re-read, counter intact. **RED-ON-MAIN against any
+  slot-resident counter** (D2, spec 7.1).
 
 ---
 
 ## Slice 2 - broadcastFanOut
 
-**File:** `app/src/jobs/broadcastFanOut.ts`.
+**File:** `jobs/broadcastFanOut.ts`.
 
-### 2a. Insert the claim
+### 2a. The claim
 
 Anchor: **immediately after the recipient-set derivation** (`const keys = ...`,
-~:250-256) and **immediately before the send loop** (`for (const contactKey of
-keys)`, ~:263).
+~:250-256), **before the send loop** (~:263). Below every early return by
+construction.
 
-That position is below every existing early return by construction, which is
-what satisfies D6's "a job that attempts no send consumes no pass" without
-enumerating guards. It also hands close B the exact `keys` this pass would have
-attempted.
+**Claim only when this pass will actually attempt a send** (D6):
 
 ```ts
-const claim = await broadcasts.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
-if (claim.outcome === 'missing') { log.warn(...); return; }
-if (claim.outcome === 'capped')  { await closeBroadcast(keys, 'transient_cap'); return; }
+const pending = keys.filter((k) => !isTerminal(broadcast.recipients?.[k]?.status));
+if (pending.length === 0) { /* nothing to do - fall through to finalize */ }
+else {
+  const claim = await broadcasts.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
+  if (claim.outcome === 'missing') { log.warn(...); return; }
+  if (claim.outcome === 'capped')  { await closeBroadcast(pending, 'transient_cap'); return; }
+}
 ```
 
-### 2b. Rework the continuation block (~:478-513)
+The `pending` guard is what delivers D6. Without it a pass whose recipients are
+ALL already terminal - reachable via a continuation that raced - consumes a rung
+while sending nothing.
 
-`claim.attempt` is the current pass number (identical to today's
-`payload.attempt ?? 1`). Keep `const nextAttempt = claim.attempt + 1`.
+### 2b. The continuation block (~:478-513)
+
+`claim.attempt` is the current pass number (= today's `payload.attempt ?? 1`).
+Keep `const nextAttempt = claim.attempt + 1`.
 
 | use | today | after |
 |---|---|---|
-| cap test | `if (nextAttempt > MAX_BROADCAST_ATTEMPTS)` | **deleted** - replaced by the close-A trigger below |
+| cap test | `if (nextAttempt > MAX_BROADCAST_ATTEMPTS)` | **deleted** - close A trigger below |
 | backoff | `broadcastBackoffMs(nextAttempt)` | **unchanged** |
 | enqueued payload | `attempt: nextAttempt` | **unchanged** (advisory) |
 
 ```ts
 if (transientRemaining.length > 0) {
-  if (claim.attempt >= MAX_BROADCAST_ATTEMPTS) {      // close A
+  if (claim.attempt >= MAX_BROADCAST_ATTEMPTS) {          // close A
     await closeBroadcast(transientRemaining, 'transient_cap');
     return;
   }
   try {
     await enqueue(BROADCAST_SEND_JOB, {...}, { runAt: ...broadcastBackoffMs(nextAttempt) });
-  } catch (err) {                                      // close C (D9)
-    log.error({ err, broadcastId: payload.broadcastId }, 'broadcastFanOut: continuation enqueue failed - closing');
+  } catch (err) {                                          // close C (D9)
     await closeBroadcast(transientRemaining, 'enqueue_failed');
     return;
   }
   return;   // KEEP - main:509 "A continuation is still pending - do NOT finalize yet"
 }
-await finalize(...);   // unchanged trailing call
+await finalize(...);
 ```
 
-**All three `return`s are load-bearing.** Dropping the last one finalizes the
-broadcast as Sent on pass 1 with a continuation in flight - a false success that
-behaves normally afterwards and so hides from most tests (spec 7.6).
+All three `return`s are load-bearing; dropping the last finalizes the broadcast
+as Sent on pass 1 with a continuation in flight.
 
-### 2c. `closeBroadcast(recipientKeys, code)`
+### 2c. `closeBroadcast`
 
-Extract from the existing cap-branch body (~:481-495): for each key,
-`recordRecipient(..., { status: 'failed', errorCode: code })`, `bumpStats({
-failed: 1, queued: -1 })`, `emitBroadcastProgress`, then `finalize(...)` once
-after the loop. Skip keys already terminal.
+**Define it INSIDE the handler closure**, after the lazily-initialised repos are
+narrowed. A module-level helper needs 7-8 arguments, and a closure declared
+above the `??=` initialisation loses TS's narrowing on the `let` bindings and
+fails gate 1.
 
-**Tests (spec 7.3, 7.4, 7.5, 7.6, 7.7):**
-- `enqueue` made to throw -> broadcast finalized, no recipient `queued`, row not
-  `sending`. **Must fail on `main`.** Seam: `enqueue` is a module import from
-  `./jobs.js`, NOT a dep on the handler's deps bag - use `vi.mock`. Confirm the
-  mock actually intercepts before trusting a green run.
-- close A, close B and close C each leave the same terminal shape; **close B
-  driven on a first-pass envelope (no `recipientKeys`)**.
-- send count and `runAt` values per pass identical to `main`.
+Body, lifted from the existing cap branch (~:481-495): per key
+`recordRecipient({ status: 'failed', errorCode: code })`, `bumpStats({ failed:
+1, queued: -1 })`, `emitBroadcastProgress`, skipping keys already terminal; then
+`finalize(...)` once. **Keep the existing operator `log.error`**, parameterised
+by the reason - closes A, B and C must each leave a log line.
+
+### 2d. The existing cap test WILL GO RED - rewrite it, do not weaken it
+
+`app/test/broadcastFanOut.test.ts:383-400` drives the cap by putting
+`attempt: 3` in the ENVELOPE. Once the counter is durable that envelope field is
+advisory, the claim returns 1, and the test's cap expectation fails.
+
+**It is the only test pinning the cap-close shape.** Rewrite it to reach the cap
+the real way - drive three passes, or seed `fanout_attempt` at the cap via slice
+0's test hook - and keep every existing assertion (`failed`, `transient_cap`,
+stats, terminal status). Do not delete it, do not relax it.
+
+The seeded-at-cap variant IS the close-B test (spec 7.4): close B has no
+production trigger once close A exists, so it must be constructed directly.
+
+**Tests (spec 7.3-7.8):**
+- **RED-ON-MAIN:** with enqueueing broken, the broadcast finalizes, no recipient
+  left `queued`, row no longer `sending`.
+  **Seam: `configureOutboundQueue` with an adapter whose `enqueue` throws** -
+  NOT `vi.mock('./jobs.js')`, which fights the harness both fan-outs and both
+  test files already use.
+- closes A, B and C each leave the same terminal shape - enumerated as: every
+  recipient terminal, stats reconciled (`queued` 0), row finalized, one log line.
+- **backoff delays asserted as LITERAL milliseconds** (pass 1->2 = 10s,
+  2->3 = 20s), read off the `runAt` passed to the throwing/capturing adapter.
+  **Do not assert `broadcastBackoffMs(n)`** - that re-derives from the function
+  under test and passes against a shifted ladder, which is exactly what D7/D11
+  exist to prevent.
 - a pass that enqueues successfully leaves the broadcast `sending`.
-- a same-`jobId` redelivery claims nothing; an early return claims nothing.
+- a same-`jobId` redelivery claims nothing; an all-terminal pass claims nothing.
 
 ---
 
 ## Slice 3 - relayFanOut
 
-**File:** `app/src/jobs/relayFanOut.ts`. Same shape as slice 2, three differences.
+**File:** `jobs/relayFanOut.ts`. Same shape as slice 2; four differences.
 
-### 3a. Claim anchor
+**3a. Anchor** - immediately after the recipient derivation (`let recipients =
+roster.filter(...)` + the `recipientKeys` narrowing, ~:434-438). Same `pending`
+guard against already-terminal slots.
 
-**Immediately after the recipient derivation** (`let recipients = roster.filter(
-...)` plus the `recipientKeys` narrowing, ~:434-438), before the send loop.
+**3b. Counter key** - `conversationId` + `sourceTsMsgId` (slice 1).
 
-Close B marks the derived `recipients` mapped through `relayMemberKey`. **Not
-the message row's `delivery_recipients`** - on a relay inbound source message
-that map is seeded EMPTY, so a row-derived set marks nothing and a test built on
-a team-send fixture passes vacuously (spec 7.4).
-
-### 3b. Backoff argument differs from broadcast - preserve it
+**3c. Backoff differs and is preserved** (D7, D11):
 
 | use | today | after |
 |---|---|---|
 | cap test | `if (nextAttempt > MAX_FANOUT_ATTEMPTS)` | deleted |
-| backoff | `fanOutBackoffMs(payload.attempt ?? 1)` | `fanOutBackoffMs(claim.attempt)` - **same value** |
-| enqueued payload | `attempt: nextAttempt` | unchanged |
+| backoff | `fanOutBackoffMs(payload.attempt ?? 1)` | `fanOutBackoffMs(claim.attempt)` - same value |
+| payload | `attempt: nextAttempt` | unchanged |
 
-Broadcast waits the NEXT step, relay waits the CURRENT one. **Do not normalise
-them** (D7, D11). A single "claim.attempt" form for both halves broadcast's
-delay.
+Broadcast waits the NEXT step, relay the CURRENT one. **Do not normalise.**
+Assert literal delays: relay pass 1->2 = 5s, 2->3 = 10s.
 
-### 3c. `closeRelay(memberKeys, code)`
+**3d. `closeRelay(memberKeys, code)`** - `markRecipient({ status: 'failed',
+errorCode: code })` per non-terminal key, plus the existing `log.error`.
+**No `finalize()`, no `bumpStats`, no progress emit, no `sending` status** -
+none exist in this file. One helper per file; slice 2's assertion list does NOT
+transfer wholesale.
 
-`markRecipient(..., { status: 'failed', errorCode: code })` per key, skipping
-terminal slots. **No `finalize()`, no `bumpStats`, no progress emit** - none
-exist in this file. One helper per file; do not force a shared one.
+**Third enqueuer:** `services/relayQueuedMessages.ts:93` also enqueues
+`RELAY_FANOUT_JOB`, with no `recipientKeys` and no `attempt`. It releases
+`queued_pending` messages that have never been fanned out, so their counter is
+absent and they claim at 1. **Confirm that by reading before relying on it**; if
+a flushed message can already carry a counter, it inherits an exhausted budget.
 
-**Tests:** the slice-2 list, plus **close B on a relay INBOUND source message**
-(the empty-`delivery_recipients` shape).
+**Tests:** slice 2's list adapted (no finalize/stats assertions), plus close B
+on a **relay INBOUND source message** whose `delivery_recipients` is seeded
+EMPTY - the shape where a row-derived recipient set marks nothing and a
+team-send fixture would pass vacuously (spec 7.4). Include the RED-ON-MAIN
+enqueue-failure test here too.
 
 ---
 
 ## Slice 4 - group rail propagation ladder
 
-**Files:** `app/src/services/groupRail.ts` + three callers.
+**Files:** `services/groupRail.ts` + three callers.
 
-### 4a. Opt-in flag
+**4a. Deps and flag.**
+- Add `sleep?: (ms: number) => Promise<void>` to `GroupRailServiceDeps`,
+  defaulting to a real timer - matching the eight existing `sleep?:` injection
+  points in this repo (`lib/tokenBucket.ts`, `services/mediaMirror.ts`,
+  `services/groupIdentityFingerprint.ts`, `lib/import/convertGroups.ts`, ...).
+  **Without it slice 4's tests cannot be written as specified** and would add
+  2s of real sleeping per case.
+- Add a named optional boolean to `GroupRailRequest` (pick the name in the
+  build; it is a public-ish shape, so name it for what it does, e.g.
+  `awaitBindingPropagation`).
 
-Add an optional boolean to `GroupRailRequest` (default off/absent). Pass it from
-`jobs/groupRail.ts:59`, `lib/import/convertGroups.ts:598`,
-`app/scripts/rail-verify.ts:198`. **Do not touch either `groupSend` call site**
-(:381, `healRail` :425) - D16.
+**4b. Callers.** Pass the flag from `jobs/groupRail.ts:59`,
+`app/scripts/rail-verify.ts:198`, and the import path - note
+`convertGroups.ts:598` is a pass-through wrapper (`ensureRail`); the request
+object is built at **~:429**, which is where the flag belongs. **Do not touch
+`groupSend.ts:381` or `healRail` :425** (D16).
 
-### 4b. The ladder
+**4c. The ladder.** Given a re-read function and the current `missing` set,
+re-read up to 2 more times at 500ms then 1500ms, stopping when `missing` empties.
 
-A small helper: given a re-read function and the current `missing` set, re-read
-up to **2** more times at **500ms** then **1500ms**, stopping as soon as
-`missing` is empty.
+Apply at both points that can conclude damage (D14), each gated on the flag AND
+on `!wasAdopted`:
 
-Apply at **both** points that can conclude damage (D14):
-
-1. the validation read after create - note the post-create participant list
-   arrives INSIDE the adapter's return, so this is a NEW `fetchParticipants`
-   call, not an existing one;
+1. the validation read after create - the post-create list arrives INSIDE the
+   adapter's return, so this is a NEW `fetchParticipants` call;
 2. the existing post-repair `fetchParticipants` (~:538).
 
-**Gate both on the flag AND on the rail having been created in this call** (the
-existing `wasAdopted` distinction). The post-repair read is shared with the
-adopt path, which must ladder on neither read (D17).
+**4d. The ladder MUST sit inside the enclosing try/catch.** A throwing
+`fetchParticipants` outside one escapes `ensureGroupRail` and leaks the
+`rail_creating` claim for its ~5-minute expiry - the precise failure D16 used to
+reject changing the `groupSend` paths. Verify the placement lands inside the
+existing handler, or wrap it.
 
-Nothing else changes: the re-read stays authoritative, completeness is still not
-derived from the create's failures (D15), and no 50386/50437 handling is added
-(D18).
+**4e. State the coupling.** The ladder REASSIGNS `participants`, which also
+feeds the author-verification block (~:578-584) and the stored participant map
+(~:619-625). That is intended - the author block's own comment says the
+propagation issue applies to the projected address too - but it is a behavior
+change beyond "the map is now complete", and its test must assert the author
+path still behaves.
 
-**Tests (spec 7.9):** the four lettered cases - propagation resolves without
-repair; a genuinely unbound member still repairs; the post-repair read ladders;
-the adopt path ladders on neither. Plus: both `groupSend` callers pass no flag,
-and with the flag absent neither read ladders.
+Nothing else changes: the re-read stays authoritative (D15), no 50386/50437
+handling (D18).
+
+**Tests (spec 7.9):** propagation resolves without repair; a genuinely unbound
+member still repairs; the post-repair read ladders; **the adopt path ladders on
+neither read**; both `groupSend` callers pass no flag AND with the flag absent
+neither read ladders (assert the flag path, not just `wasAdopted`); the author
+block still behaves.
+
+**Fixture warning:** the headline case only means something if
+`createConversationWithParticipants` is made to return the SHORT participant
+list on the first read and the full one after. A fixture that returns the full
+list immediately passes against no ladder at all.
 
 ---
 
-## Slice 5 - dashboard copy
+## Slice 5 - dashboard copy. **5b runs BEFORE slices 2-3 ship.**
 
-**Files:** `dashboard/src/routes/contact/deliveryStatus.ts`,
-`dashboard/src/routes/contact/Timeline.tsx`.
+`enqueue_failed` is introduced by slice 2. Until 5b registers it, it prints as
+`Delivery failed (error enqueue_failed)` - the exact D22 defect. 5b is a
+prerequisite, not an independent slice.
 
-### 5a. Relay 30003 override (D19-D21)
+**5b (first). Internal codes.** Register `transient_cap` and `enqueue_failed` in
+`INTERNAL_CODE_REASONS` with plain operator copy and **no `(error <code>)`
+tail**. Copy must read correctly BOTH as an aggregate summary and on one
+recipient's row - unlike `contact_opted_out`, these get no per-position
+interception. `DeliveryBadge.tsx:31` is where a broadcast's codes surface, so
+this changes that badge.
 
-Add a relay-scoped override consulted before `ERROR_CODE_REASONS`, selected the
-way the existing `media` option already selects `MMS_ERROR_CODE_REASONS`.
-`presentLegDelivery` already receives `rosterKind`; `presentRelayDelivery` gains
-it from its caller.
+**5a. Relay 30003 override** (D19-D21). A relay-scoped map consulted the way
+`media` already selects `MMS_ERROR_CODE_REASONS`. `presentLegDelivery` already
+takes `rosterKind`; `presentRelayDelivery` gains it from its caller.
 
-Relay legs get `Phone unreachable` with no retry promise. **Native group text is
-excluded** (D20) - its retry is real.
+**The override KEEPS the `(error 30003)` tail** - it is a real carrier code an
+operator can look up; only the retry promise is removed. (This differs from 5b's
+codes, which are ours and get no tail.)
 
-The six `deliveryReason` call sites and what each gets:
+Six call sites:
 
 | site | change |
 |---|---|
@@ -227,51 +323,57 @@ The six `deliveryReason` call sites and what each gets:
 | `Timeline.tsx:1045` (per-recipient row) | override when relay |
 | `Timeline.tsx:849` (1:1 bubble) | none |
 | `Timeline.tsx:1390` (EmailCard) | none |
-| `DeliveryBadge.tsx:31` (broadcast badge) | none for 30003; see 5b |
+| `DeliveryBadge.tsx:31` (broadcast badge) | none for 30003 |
 
 `rosterKind` **DEFAULTS to `'relay'`** (~Timeline.tsx:796), so the group-text
-exclusion holds only because one site opts out. Pin it explicitly in the test.
+exclusion holds only because one site opts out - pin it explicitly.
 
-The live 30003 string contains an EM DASH; leave the 1:1 entry byte-identical.
+**ASCII gate:** the live 30003 string contains an EM DASH. Leave the 1:1 entry
+byte-identical; **do not copy that character into any new line** - added lines
+are ASCII-only.
 
-### 5b. Internal code copy (D22, D23)
-
-Register both `transient_cap` and `enqueue_failed` in `INTERNAL_CODE_REASONS`
-with plain operator copy and **no `(error <code>)` tail** - that map exists
-precisely to stop app-invented codes printing as carrier error numbers.
-
-Copy must read correctly BOTH as an aggregate summary and on one recipient's
-row; unlike `contact_opted_out`, these get no per-position interception.
-`DeliveryBadge.tsx:31` is where a broadcast's codes surface, so this DOES change
-that badge.
-
-**Tests (spec 7.10, 7.11):** relay 30003 copy at all three relay positions;
-group-text pinned explicitly; 1:1, email and badge 30003 unchanged; both
-internal codes render as prose in all three positions.
+**Tests (spec 7.10, 7.11):** relay 30003 copy at all three relay positions with
+the tail intact; group-text pinned by passing `rosterKind: 'group_text'`
+explicitly; 1:1, email and badge unchanged; both internal codes render as prose
+in all three positions with no tail.
 
 ---
 
-## Slice 6 - the provider-status sweep
+## Slice 6 - the provider-status sweep (AFTER 2 and 3)
 
-Read-only audit (spec Sec 9). Enumerate every `app/src` site branching on a
-provider status string; record `file:line` and whether the unenumerated default
-is terminal. Fix in-region findings; file the rest as one issue. The
-unknown-error `throw` is the named in-region exception - filed, not fixed (D12).
+Read-only audit (spec Sec 9). Its in-region fixes land in the two files slices 2
+and 3 rewrite, so it is not independent of them.
+
+Enumerate every `app/src` site branching on a provider status string; record
+`file:line` and whether the unenumerated default is terminal. Fix in-region;
+file the rest as one issue. The unknown-error `throw` is the named in-region
+exception - filed, not fixed (D12).
+
+**While in those two regions, correct the two false comments**
+(`broadcastFanOut.ts:456-458`, `relayFanOut.ts:532-534`) that claim a redelivery
+gets a fresh `jobId`. `jobs.ts:189` proves otherwise, `retrySend.ts:122-128`
+states it correctly, and they sit inside edited code. Comment-only.
 
 Output: `docs/superpowers/reviews/2026-08-31-retry-counter-durable/provider-status-sweep.md`.
 A nil result is still committed.
 
 ---
 
-## Slice 7 - e2e + issue closure
+## Slice 7 - e2e + closure
 
-- E2E: a relay leg that failed 30003 shows no retry promise. **Arm it with
+- E2E: a relay leg that failed 30003 shows no retry promise. **Arm with
   `setDeliveryOutcome` (fake-twilio), not seed data** - no seed profile carries
   a `delivery_recipients` map, so a seeded fixture asserts against an empty list
   and passes while proving nothing.
-- Stamp Resolutions on `retry-counter-in-envelope-makes-caps-unreachable` and
-  `rail-binding-propagation-retry` (partial - name the two uncovered callers).
-- File the follow-ups: adopt-path exposure, refusal log noise.
+- Stamp Resolutions:
+  - `retry-counter-in-envelope-makes-caps-unreachable` - **note that its third
+    named site, `retrySend.ts:74`, needed no change**: already handled at
+    `twilio.ts:~2727-2731`. Do not imply it was fixed here.
+  - `rail-binding-propagation-retry` - **partial**; name the two uncovered
+    `groupSend` callers.
+- File follow-ups: adopt-path exposure (D17), refusal log noise (D18), and
+  whether `closeRelay` should also drive the hub message's own
+  `delivery_status` to terminal (verify first - the rollup may already mask it).
 - Amend `_CLUSTERS.md` M5.
 - `npm run issues`.
 
@@ -294,5 +396,9 @@ Confirm no orphaned listener on the lane's ports before each e2e run.
 
 ## Ordering
 
-1 -> 2 -> 3 in order (2 and 3 both depend on 1; 3 reuses 2's shape). 4 and 5 are
-independent of 1-3 and of each other. 6 any time. 7 last.
+**0 -> 1 -> 5b -> 2 -> 3 -> 6 -> 7.** Slice 4 is genuinely independent and may
+run any time after 0.
+
+Stopping points: after any slice the branch typechecks and every stated
+guarantee holds. The one ordering trap is 5b before 2 - shipping
+`enqueue_failed` without its copy prints a raw token at an operator.

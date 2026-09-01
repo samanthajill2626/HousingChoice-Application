@@ -979,3 +979,93 @@ round's two were both in prose written to fix the previous round's two. The
 remaining risk is no longer "is this design right" but "will a builder execute
 it as written" - which is what the implementation plan and its own adversarial
 review exist to catch, with the code itself as the final check.
+
+---
+
+# Plan round 1 - two reviewers, 38 findings, 2 blocking
+
+Reports: `plan-r1-reviewer-a.md` (20), `plan-r1-reviewer-b.md` (19). Both had
+the plan, the spec and the repo.
+
+**The altitude is finally right.** These are seams, fixtures, signatures and
+ordering - things a design document cannot answer and a plan must. Eight
+findings appeared independently in both reports, which settles them.
+
+## Blocking
+
+- **A1 - a repo-interface method with no implementation list.** Adding
+  `claimFanoutPass` breaks typecheck until every implementation has it, and the
+  hand-written fake at `app/test/helpers/twilioWebhookHarness.ts:2663` silently
+  decides whether every later cap test means anything: a fake that always
+  returns `claimed` makes them all pass vacuously. Now slice 0, with the fake
+  required to model real semantics and a test hook to seed the counter.
+- **A2 - the rail ladder sat outside every try/catch.** A throwing re-read would
+  escape `ensureGroupRail` and leak the `rail_creating` claim for ~5 minutes -
+  **the exact failure D16 cites when rejecting the `groupSend` variants.** My
+  own rejection criterion, violated by my own fix. Now an explicit placement
+  requirement.
+
+## The most valuable non-blocking finding
+
+**A5 - an EXISTING test goes red and the plan said nothing.**
+`app/test/broadcastFanOut.test.ts:383-400` reaches the cap by putting
+`attempt: 3` in the ENVELOPE. The moment the counter is durable that field is
+advisory, the claim returns 1, and the test fails - and it is **the only test
+pinning the cap-close shape**. A builder with no instruction would "fix" it by
+weakening it, deleting the coverage that matters most while the suite went
+green. The plan now says: rewrite it to reach the cap the real way, keep every
+assertion, and its seeded-at-cap variant becomes the close-B test.
+
+## Convergent (both reviewers, accepted without argument)
+
+- The `vi.mock('./jobs.js')` seam is wrong; `configureOutboundQueue` with a
+  throwing adapter is the seam the harness already uses (verified:
+  `outboundQueue` is module state set by that function, jobs.ts:118-124).
+- The ladder's 500ms/1500ms need a `sleep` dep - there are eight `sleep?:`
+  injection precedents in this repo. Without one the tests cannot be written as
+  described and would really sleep.
+- "Nothing else changes" in the rail slice is false: the ladder reassigns
+  `participants`, which feeds the author-verification block (:578-584) and the
+  stored map (:619-625). Intended - that block's own comment cites this very
+  issue - but it must be deliberate and asserted.
+- Close B has no production trigger once close A exists, so its test must
+  construct the capped state directly.
+- The claim anchor did not deliver D6: an all-terminal pass consumed a rung
+  while sending nothing. Fixed with a `pending` guard.
+- A backoff test written as `expect(delay).toBe(broadcastBackoffMs(n))`
+  re-derives from the function under test and passes against a shifted ladder -
+  **vacuous, and it is the one test protecting D11.** Now literal milliseconds
+  (broadcast 10s/20s, relay 5s/10s).
+- Slice 6 is not independent; its in-region fixes land in files slices 2-3
+  rewrite.
+- The relay 30003 tail was ambiguous - two readings, two rendered strings. Now
+  explicit: the relay override KEEPS `(error 30003)` (a real carrier code an
+  operator can look up); 5b's app-invented codes get NO tail.
+
+## Other accepted
+
+Slice 5b is a PREREQUISITE of 2-3, not independent: shipping `enqueue_failed`
+before its copy prints a raw token at an operator (A6). The relay counter's key
+was never stated - it must be the SOURCE MESSAGE, since keying on
+`relayConversationId` gives a whole group one three-pass budget forever (A9).
+`closeBroadcast(keys, code)` cannot have that signature - module-level needs 7-8
+args and a closure above the `??=` init loses TS narrowing, failing gate 1 (B8);
+it moves inside the handler. Slice 3's "the slice-2 list" does not transfer -
+relay has no finalize, no `sending`, no `bumpStats` (B9). "The same terminal
+shape" is now enumerated, so a test cannot pass against a branch that forgot
+`finalize()` (B10). `convertGroups.ts:598` is a pass-through wrapper; the
+request is built at ~:429 (B6). `relayQueuedMessages.ts:93` is an unenumerated
+third relay enqueuer (B12) - flagged with an instruction to verify rather than
+assume. The cap branch's operator `log.error` was being dropped (A15). Slice 1's
+tests are DynamoDB Local integration tests, since atomicity does not exist in
+the fake (A4). The em-dash ASCII trap (A17). And slice 7 must not imply the
+anchor issue's third site was fixed here - it needed no change (A18).
+
+Also folded in from A19, cheap and in-region: the two comments in the fan-outs
+asserting a redelivery gets a fresh `jobId` are false and sit inside edited
+code. Comment-only correction in slice 6.
+
+## Status
+
+Plan rewritten. Ordering changed materially (0 -> 1 -> 5b -> 2 -> 3 -> 6 -> 7,
+with 4 free after 0), so a re-review is warranted before dispatch.

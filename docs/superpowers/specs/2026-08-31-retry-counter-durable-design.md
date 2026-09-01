@@ -185,32 +185,41 @@ defineJobHandler(JOB, async (raw) => {
     if (!await messages.putJobExecutionMarker(jobId, ...)) return;   // duplicate
   } else { log.warn(...); }
 
-  // existing NOTHING-TO-DO guards, unchanged and STILL ABOVE the claim:
-  //   broadcastFanOut - broadcast row missing / not sending
-  //   relayFanOut     - source message missing, conversation missing/closed,
-  //                     no recipients, empty body-and-media, sender unresolved
-  //   (five early returns in relayFanOut; none of them attempts a send)
-  ...
+  // ... every existing early return, unchanged ...
+  // ... then the existing RECIPIENT-SET DERIVATION, unchanged ...
 
   const claim = await repo.claimFanoutPass(key, CAP);   // <-- HERE
   if (claim.outcome === 'missing') { log; return; }
-  if (claim.outcome === 'capped')  { await closeB(); return; }
+  if (claim.outcome === 'capped')  { await closeB(recipientSet); return; }
 
   ... the send loop, which may throw ...
   ... close A / the continuation enqueue / close C (Sec 3.5) ...
 });
 ```
 
-**Below the marker, but below the nothing-to-do guards too.** Those guards
-return without attempting any send; claiming above them would burn a rung on a
-job that did nothing - the same defect as claiming above the marker, one level
-down. The claim goes immediately before the first line that can cause a provider
-send.
+**The position is defined by ONE anchor, not by a list of guards.** The claim
+goes **immediately after the recipient-set derivation and immediately before the
+send loop**:
 
-**Close B needs the row, which the guards have already loaded.** Both handlers
-read their entity in those guards (the broadcast row; the source message and
-conversation), so close B has what it needs without an extra read. That is
-another reason the claim sits below them rather than at the top of the handler.
+| file | derivation | claim goes right after |
+|---|---|---|
+| `broadcastFanOut` | `const keys = ...` (:250-256, from `broadcast.recipients`) | `keys` |
+| `relayFanOut` | `let recipients = roster.filter(...)` + the `recipientKeys` narrowing (:434-438) | `recipients` |
+
+Two properties follow, and both matter:
+
+- **It is below every existing early return by construction** - the derivation
+  sits below all of them in both files. A job that returns without attempting a
+  send never burns a rung. (Do not enumerate the guards here; anchoring to the
+  derivation is what makes this correct without an exhaustive list.)
+- **Close B gets the EXACT set this pass would have attempted**, which is the
+  only correct set to mark.
+
+**Close B must NOT fall back to "non-terminal recipients on the row".** For a
+relay inbound source message, `delivery_recipients` is seeded EMPTY, so that
+fallback marks nothing and any test written against a team-send fixture passes
+vacuously. `relayFanOut` derives its recipients from the ROSTER, not from the
+message row. Using the derived set is what makes close B work on both paths.
 
 **AFTER the marker.** The ladder advances on CONTINUATIONS, and every
 continuation is a fresh `enqueue()` - `buildEnvelope` mints a new
@@ -265,9 +274,29 @@ this pass is the LAST allowed one and recipients still remain:
 ```
 if (transientRemaining.length > 0) {
   if (claim.attempt >= CAP) { await closeA(transientRemaining); return; }
-  await enqueue(... nextAttempt ... backoff as above ...);   // may throw -> close C
+  try {
+    await enqueue(... nextAttempt ... backoff as above ...);
+  } catch (err) {
+    log.error(...);
+    await closeC(transientRemaining);   // marks + finalizes
+    return;                             // NOT a re-throw, NOT a fall-through
+  }
+  return;        // <-- KEEP THIS. A continuation is pending; do NOT finalize.
 }
+// unchanged: no recipients remain -> finalize()
 ```
+
+**Three `return`s, and every one of them is load-bearing:**
+
+- after close A - otherwise control reaches the trailing `finalize()` a second
+  time;
+- after close C - same, and close C already finalized;
+- **after a SUCCESSFUL enqueue** - this one exists in `main` today
+  (broadcastFanOut.ts:509, "A continuation is still pending - do NOT finalize
+  yet"). Dropping it while restructuring the block finalizes the broadcast as
+  **Sent on pass 1 with a continuation still in flight** - a false success that
+  no test in Sec 7 would catch, because the continuation then arrives and
+  behaves normally.
 
 Without this the ladder still terminates - the next pass's claim returns
 `capped` and close B fires - but it wastes a job round-trip and defers the
@@ -298,13 +327,18 @@ success, worse than the hang.
 | **B. Pre-send cap** (NEW) | `claimFanoutPass` returns `capped` | see below | `transient_cap` |
 | **C. Enqueue failure** (NEW) | `enqueue` threw | `transientRemaining` | `enqueue_failed` |
 
-**Close B's recipient set is NOT simply `payload.recipientKeys`** - that field is
-ABSENT on a first-pass envelope, where the job derives the full audience itself.
-Close B marks: `payload.recipientKeys` when present, otherwise **every recipient
-on the loaded row still in a non-terminal state**. Both cases read the row the
-nothing-to-do guards already loaded (Sec 3.4). A close that marked nothing on a
-first-pass envelope would leave the exact stuck row this branch exists to
-prevent.
+**Close B marks the DERIVED recipient set** (Sec 3.4) - the same `keys` /
+`recipients` the pass would have sent to. Not `payload.recipientKeys`, which is
+absent on a first-pass envelope; and not "non-terminal recipients on the row",
+which is EMPTY for a relay inbound source message whose `delivery_recipients`
+map is seeded empty.
+
+**Close B is a backstop, not a routine path.** Close A prevents enqueueing a
+continuation that would immediately cap, and a duplicate delivery returns at the
+marker (Sec 3.4), so in normal operation close B does not fire. It exists for a
+stale or pre-deploy envelope arriving when the counter is already at cap, and
+for a concurrent-pass race. Test 7a constructs that state directly rather than
+trying to reach it through the ladder.
 
 **The helper differs per file - do not force one shape.** `broadcastFanOut`
 marks recipients, bumps stats, emits progress and calls `finalize()`.
@@ -369,12 +403,30 @@ so using it would mean threading it forward to defeat a guarantee the file
 deliberately keeps. The ladder fixes the timing false-alarm without touching the
 authority model.
 
-**The ladder applies to BOTH read-backs, and the second one is where the
-measured damage happened.** `ensureGroupRail` reads participants twice: once
-after create, and once after repair - and it is that POST-REPAIR read whose
-short result produces the 2 false `rail_failed` records the issue cites as its
-evidence. A ladder on the create read alone would leave the headline symptom
-intact. Both get it, with the same bounds.
+**Exactly which reads ladder, stated once.** `ensureGroupRail` does NOT
+"read participants twice" in its own body: on the create path the participant
+list comes back INSIDE the adapter call
+(`createConversationWithParticipants` returns them), so the validation ladder is
+a NEW `fetchParticipants` call this branch adds. The post-repair
+`fetchParticipants` (groupRail.ts:538) already exists.
+
+Both ladder, and **both are gated on the rail having been CREATED in this call**
+(the existing `wasAdopted` distinction):
+
+| read | today | with the ladder |
+|---|---|---|
+| validation, after create | participants come from the adapter's return | up to 2 extra `fetchParticipants`, 500ms / 1500ms, before concluding the map is short |
+| after repair (:538) | one `fetchParticipants`, authoritative | same ladder before concluding `rail_failed` |
+| **adopt path (either read)** | unchanged | **no ladder** (Sec 4.4) |
+
+The post-repair read is shared code, so the gate is required: without it the
+adopt path would ladder too, contradicting Sec 4.4.
+
+**Why both, not just the first.** The create ladder resolves most cases before
+repair is ever entered, which is what removes the 81 warnings and the 178
+refusals. But the 2 false `rail_failed` records are written after the
+POST-REPAIR read, so a create-only ladder would leave that outcome reachable in
+the slower tail. Laddering both closes the whole reported symptom.
 
 **50386/50437 handling is deliberately NOT added.** An earlier draft called for
 treating those refusals as success-pending-re-read. Tracing it: repair failures
@@ -402,8 +454,8 @@ code.
 
 The two `groupSend` paths are reached from the send route (api.ts:1361), so a
 delay ladder there would sit inside a staff HTTP request. They keep today's
-behavior exactly: with the flag absent, the ladder, the 50386/50437 handling and
-the re-read scoping are all skipped.
+behavior exactly: with the flag absent, neither read ladders and the outcome is
+computed exactly as today.
 
 **This means the defect remains live on the inline paths**, and the issue is
 closed only for the three that opt in. Sec 8 records that honestly rather than
@@ -554,24 +606,38 @@ A sweep that finds nothing is a valid result and is still written down.
    no recipient left `queued`, stats reconciled, row finalized. **B is the
    discriminating case**: against a design reusing the nested cap branch, B
    marks nothing and finalizes as SENT with recipients queued.
-7a. **Close B on a FIRST-PASS envelope** - one with no `recipientKeys` - still
-   marks every non-terminal recipient. This is the case where "mark
-   `payload.recipientKeys`" marks nothing at all (Sec 3.6).
+7a. **Close B marks the derived set on BOTH shapes** - construct the capped
+   state directly (close B is a backstop, not reachable through the ladder).
+   Two cases, and each kills a different wrong implementation:
+   (a) a first-pass envelope with no `recipientKeys` - kills "mark
+   `payload.recipientKeys`", which marks nothing;
+   (b) **a RELAY INBOUND source message**, whose `delivery_recipients` is seeded
+   empty - kills "mark non-terminal recipients on the row", which also marks
+   nothing. A team-send fixture would pass against both wrong versions, so this
+   case must use an inbound relay source.
+7b. **The successful-enqueue `return` survives** - after a pass that enqueues a
+   continuation, the broadcast is NOT finalized and remains `sending`. Pins
+   broadcastFanOut.ts:509 against a restructuring that drops it (Sec 3.5).
 8. **A duplicate delivery claims nothing and sends nothing** - same `jobId`
    returns at the marker; `fanout_attempt` unchanged. This is what makes
    claim-after-marker safe.
 9. **A pre-branch item claims at 1** - no `fanout_attempt` attribute, no seeding
    step.
-10. **Both internal codes render as prose in BOTH positions** - rollup and
-    per-recipient row, with no `(error <code>)` tail.
-11. **Rail** - a fresh create whose bindings have not propagated resolves via
-    the ladder without repair and without `rail_failed`; a member genuinely
-    unbound after the ladder still repairs; **the POST-REPAIR read also ladders**
-    (the case that produced the 2 false `rail_failed` records); the
-    authoritative re-read still decides the outcome; the adopt path is unchanged.
+10. **Both internal codes render as prose in all THREE positions** - the relay
+    rollup, the per-recipient row, and the **broadcast badge**
+    (`DeliveryBadge.tsx:31`, the only place a broadcast's `transient_cap` or
+    `enqueue_failed` surfaces) - each with no `(error <code>)` tail.
+11. **Rail** - four cases, matching Sec 4.2's table exactly:
+    (a) a fresh create whose bindings have not propagated resolves via the
+    VALIDATION ladder without entering repair and without `rail_failed`;
+    (b) a member genuinely unbound after that ladder still enters repair;
+    (c) the POST-REPAIR read also ladders on a created-in-this-call rail - the
+    case that produced the 2 false `rail_failed` records;
+    (d) **the ADOPT path ladders on neither read**, so the shared post-repair
+    code must be gated on `wasAdopted` and not on reaching that line.
 12. **The two `groupSend` callers are unaffected** - pinned by construction:
-    assert they pass no ladder flag and that with the flag absent the ladder and
-    the 50386/50437 handling are skipped.
+    assert they pass no ladder flag, and that with the flag absent neither read
+    ladders and the outcome is computed exactly as today.
 13. **Chip copy** - a relay 30003 leg renders `Phone unreachable` at all three
     relay sites; the 1:1 bubble and the EmailCard are unchanged. **Pin the
     native-group-text site explicitly**, passing `rosterKind: 'group_text'`

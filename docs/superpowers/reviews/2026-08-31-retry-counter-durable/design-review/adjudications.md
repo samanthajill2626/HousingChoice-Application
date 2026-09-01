@@ -907,3 +907,75 @@ INSTRUCTIONS are what still break.** Every blocking finding in this round was
 about the codebase is false". That is a materially different and later-stage
 failure mode than rounds 1-7, and it is the one a plan review is designed to
 catch.
+
+---
+
+# Final pass - the arithmetic is confirmed; two more instruction defects
+
+Report: `spec-r9-final.md`. 12 findings, all accepted. Two blocking, both
+introduced by the previous round's fixes - the established pattern.
+
+**The thing I most needed verified came back CORRECT.** The reviewer traced both
+files rung by rung and confirmed Sec 3.5's table reproduces `main`'s pass count
+(3) and `main`'s delays (broadcast 10s/20s, relay 5s/10s) exactly, with close A
+firing on the same pass. That was the claim I could not check by reading, and it
+is the one the whole cap rewrite rests on.
+
+## The two blocking
+
+- **My snippet dropped `return` after a successful enqueue.** It exists in
+  `main` at broadcastFanOut.ts:509 with the comment "A continuation is still
+  pending - do NOT finalize yet". Without it, control falls into the trailing
+  `finalize()` and the broadcast is marked **Sent on pass 1 while its
+  continuation is still in flight**. No test in Sec 7 would catch it: the
+  continuation then arrives and behaves normally. Now three explicit `return`s
+  with a note on why each is load-bearing, plus test 7b.
+- **Close B's fallback set is EMPTY on a relay inbound source message.**
+  `delivery_recipients` is seeded empty there, and `relayFanOut` derives its
+  recipients from the ROSTER (:434-438), not from the message row. So "mark
+  every non-terminal recipient on the row" marks nothing - and a test written
+  against a team-send fixture passes vacuously. Close B now marks the DERIVED
+  set, and test 7a requires an inbound relay source specifically.
+
+## The structural fix: anchor, do not enumerate
+
+Findings 6 and 7 caught me inventing guards for the THIRD time - a
+broadcastFanOut "not sending" guard that does not exist, a relayFanOut "no
+recipients" and "sender unresolved" that do not exist, and an omitted
+pool-number guard.
+
+So the spec stopped enumerating them. The claim's position is now defined by ONE
+anchor - immediately after the recipient-set derivation
+(broadcastFanOut.ts:250-256, relayFanOut.ts:434-438), immediately before the
+send loop - which is below every early return BY CONSTRUCTION and hands close B
+the exact set the pass would have attempted. **An instruction that cannot be got
+wrong beats a list I keep getting wrong.**
+
+## Other accepted
+
+Sec 4 contradicted itself three ways on which read-back ladders, and my
+"`ensureGroupRail` reads participants twice" was FALSE - the post-create list
+comes back inside the adapter call, so the validation ladder is a NEW
+`fetchParticipants`. Sec 4.2 is now a three-row table (validation read,
+post-repair read, adopt path) with the `wasAdopted` gate stated, because the
+post-repair read is shared code and would otherwise ladder the adopt path that
+Sec 4.4 excludes. Test 11 became four lettered cases matching it.
+
+50386/50437 survived in two places after I removed it from a third (Sec 4.3 and
+test 12) - removed. Close C had no try/catch, no return, and double-finalized -
+specified. Close B's reachability justification was refuted by my own Sec 3.4,
+so it is now described honestly as a backstop for stale envelopes and races,
+constructed directly in its test. Sec 5.1/5.2/test 10 disagreed on how many
+positions the internal codes render in - three, including the broadcast badge.
+And the "create-only ladder leaves the symptom intact" claim was overstated;
+softened to what is true - the create ladder resolves most cases before repair,
+the post-repair ladder closes the slower tail.
+
+## Status
+
+Nine passes. The evidence base has been stable for three rounds (~25 citations
+re-verified true); every defect since has been an INSTRUCTION defect, and this
+round's two were both in prose written to fix the previous round's two. The
+remaining risk is no longer "is this design right" but "will a builder execute
+it as written" - which is what the implementation plan and its own adversarial
+review exist to catch, with the code itself as the final check.

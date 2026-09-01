@@ -4,7 +4,6 @@
 // it rather than re-implementing the split.
 //
 // Pure function, no I/O, no logging.
-import type { ContactItem } from '../repos/contactsRepo.js';
 
 /** Parsed components of a conforming "First Last - N Bed" string. */
 export interface ParsedContactName {
@@ -47,27 +46,35 @@ export function parseContactName(raw: string): ParsedContactName | undefined {
   };
 }
 
-// contactDisplayName - the trimmed "First Last" join for push copy.
+// contactDisplayName - THE trimmed "First Last" join for any surface that
+// holds a contact, or the display projection of one.
 //
-// SCOPE GUARD: five PRIVATE copies of this derivation already exist
-// (routes/contacts.ts, routes/units.ts, lib/rosterResolution.ts,
-// services/groupMembers.ts, services/inboundEmail.ts). This export is
-// consumed by PUSH-COPY sites only - the inbound-message pushes, and (since
-// 2026-08-25, log-hygiene spec section 7) the voice pre-ring / missed-call /
-// voicemail pushes via pushCallerIdentity in routes/webhooks/voice.ts;
-// consolidating the older copies is tracked in
-// docs/issues/consolidate-contact-display-name-helpers.md - do not
-// re-point them here as a drive-by.
+// Accepts the MINIMAL shape both contact reads satisfy - a whole ContactItem
+// (getById / getManyByIds) and the ContactDisplayItem projection
+// (getDisplayById / getDisplaysByIds) - so a label-only batch read never has to
+// widen to a whole-item read just to name someone. `contactId` is here only as
+// the anchor that keeps TypeScript's weak-type check honest (the same trick as
+// routes/units.ts displayNameOfContact); the name comes from the two optional
+// fields.
 //
-// `firstName`/`lastName` are NOT declared fields on ContactItem - they ride
-// its index signature, so both reads are defensive: a non-string value must
-// never reach `.trim()`.
+// Consumers include the inbound-message and voice pushes and the participant
+// name resolver in lib/participantNames.ts. Private copies of this derivation
+// still exist in routes/inbox.ts and routes/today.ts and DIFFER from this one
+// on purpose (an extra `contact.name` rung; outer-vs-part trimming); see
+// docs/issues/consolidate-contact-display-name-helpers.md before re-pointing
+// any of them.
+//
+// `firstName`/`lastName` are NOT declared string fields - they ride an index
+// signature or are typed `unknown` - so both reads are defensive: a non-string
+// value must never reach `.trim()`.
 
 /** Trimmed first/last join, or undefined when the contact has no name. */
-export function contactDisplayName(contact: ContactItem | undefined): string | undefined {
+export function contactDisplayName(
+  contact: { contactId: string; firstName?: unknown; lastName?: unknown } | undefined,
+): string | undefined {
   if (contact === undefined) return undefined;
-  const first = typeof contact['firstName'] === 'string' ? contact['firstName'].trim() : '';
-  const last = typeof contact['lastName'] === 'string' ? contact['lastName'].trim() : '';
+  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
   const joined = [first, last].filter((p) => p.length > 0).join(' ');
   return joined.length > 0 ? joined : undefined;
 }

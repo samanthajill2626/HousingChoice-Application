@@ -885,6 +885,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       res.status(400).json({ error: 'inbound fixtures cannot request a transport' });
       return;
     }
+    if (direction === 'outbound' && declaration.kind === 'versioned' && declaration.requested === undefined) {
+      res.status(400).json({ error: 'versioned outbound fixtures must request a transport' });
+      return;
+    }
     const item: MessageItem = withSeedTransport({
       conversationId,
       tsMsgId: `${createdAt}#${providerSid}`,

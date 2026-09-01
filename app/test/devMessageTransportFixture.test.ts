@@ -60,6 +60,7 @@ describe('dev message transport fixture', () => {
 
   it.each([
     { direction: 'inbound', transport: { mode: 'versioned', requested: 'sms' } },
+    { direction: 'outbound', transport: { mode: 'versioned' } },
     { direction: 'outbound', transport: { mode: 'versioned', actual: 'email' } },
     { direction: 'outbound', transport: { mode: 'legacy', actual: 'sms' } },
   ])('rejects invalid transport fixture %j', async (invalid) => {

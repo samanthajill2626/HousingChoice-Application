@@ -22,7 +22,7 @@ const CAST_INBOUND_SMS_IDS = [
   'msg-cast-srch-relay-004', 'msg-cast-srch-relay-005', 'msg-cast-toury-002',
   'msg-cast-toury-004', 'msg-cast-toury-relay-002', 'msg-cast-toury-relay-003',
   'msg-cast-nsign-002', 'msg-cast-nsign-005', 'msg-cast-nsign-006', 'msg-cast-park-003',
-  'msg-cast-milu-002', 'msg-cast-milu-003',
+  'msg-cast-milu-002',
 ] as const;
 const CAST_OUTBOUND_SMS_IDS = [
   'msg-cast-intake-002', 'msg-cast-intake-004', 'msg-cast-intake-006', 'msg-cast-norta-001',
@@ -32,7 +32,7 @@ const CAST_OUTBOUND_SMS_IDS = [
   'msg-cast-nsign-004', 'msg-cast-park-001', 'msg-cast-park-002', 'msg-cast-milu-001',
   'msg-cast-milu-004', 'msg-cast-milu-005',
 ] as const;
-const CAST_INBOUND_MMS_IDS = ['msg-cast-grp-a-001', 'msg-cast-grp-a-003', 'msg-cast-grp-b-001'] as const;
+const CAST_INBOUND_MMS_IDS = ['msg-cast-grp-a-001', 'msg-cast-grp-a-003', 'msg-cast-grp-b-001', 'msg-cast-milu-003'] as const;
 const CAST_OUTBOUND_MMS_IDS = ['msg-cast-grp-a-002', 'msg-cast-grp-b-002'] as const;
 
 const CAST_TRANSPORT_DECLARATIONS: Readonly<Record<string, SeedCarrierTransport>> = Object.freeze({

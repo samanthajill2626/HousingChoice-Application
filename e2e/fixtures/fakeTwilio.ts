@@ -36,6 +36,14 @@ const ORIGIN_SECRET = process.env.CF_ORIGIN_SECRET ?? 'dev-placeholder-not-a-sec
  *  that actually applies here. */
 export const APP_NUMBER = process.env.BUSINESS_PHONE_NUMBER ?? '+15550009999';
 
+type InboundChannelPrefix = 'rcs';
+
+/** Direct webhooks may model only documented RCS evidence, never fabricated SMS/MMS. */
+export function validateInboundChannelPrefix(value: unknown): InboundChannelPrefix | undefined {
+  if (value === undefined || value === 'rcs') return value;
+  throw new TypeError('direct inbound ChannelPrefix must be rcs when present');
+}
+
 /** Sign X-Twilio-Signature exactly as Twilio does (matches signer.ts): URL, then
  *  each POST param key+value sorted by key, HMAC-SHA1 with the auth token, base64. */
 function signTwilio(url: string, params: Record<string, string>): string {
@@ -58,10 +66,11 @@ export async function postInboundSms(
     body: string;
     messageSid: string;
     to?: string;
-    channelPrefix?: string;
+    channelPrefix?: InboundChannelPrefix;
     channelMetadata?: Record<string, unknown> | string;
   },
 ): Promise<{ status: number; body: string }> {
+  const channelPrefix = validateInboundChannelPrefix(input.channelPrefix);
   const params: Record<string, string> = {
     MessageSid: input.messageSid,
     From: input.from,
@@ -70,7 +79,7 @@ export async function postInboundSms(
     SmsStatus: 'received',
     ApiVersion: '2010-04-01',
     NumMedia: '0',
-    ...(input.channelPrefix !== undefined && { ChannelPrefix: input.channelPrefix }),
+    ...(channelPrefix !== undefined && { ChannelPrefix: channelPrefix }),
     ...(input.channelMetadata !== undefined && {
       ChannelMetadata: typeof input.channelMetadata === 'string'
         ? input.channelMetadata

@@ -20,6 +20,12 @@ export interface DeliveryProfile {
   /** For kind==='fail': 'failed' | 'undelivered' (default 'failed') + an ErrorCode. */
   failState?: 'failed' | 'undelivered';
   errorCode?: string;
+  transportEvidence?: {
+    from?: string;
+    to?: string;
+    channelPrefix?: string;
+    channelMetadata?: Record<string, unknown> | string;
+  };
 }
 
 export interface Persona {

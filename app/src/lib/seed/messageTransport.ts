@@ -40,6 +40,9 @@ export function withSeedTransport<T extends SeedMessage>(
   if (message.direction === 'inbound' && declaration.requested !== undefined) {
     throw new TypeError('inbound seed messages cannot request a transport');
   }
+  if (message.direction === 'outbound' && declaration.requested === undefined) {
+    throw new TypeError('versioned outbound seed messages must request a transport');
+  }
   if (declaration.requested !== undefined) assertTransport(declaration.requested, 'requested transport');
   if (declaration.actual !== undefined) assertTransport(declaration.actual, 'actual transport');
 

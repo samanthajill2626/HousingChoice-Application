@@ -8,7 +8,7 @@ Issues closed: `relay-30003-retry-lineage` (med),
 Issues filed by this mission: `relay-member-key-collapses-two-phones-one-contact`,
 plus the inbound-display gap named in Sec 2.
 
-Revision 5 (final), after adversarial review round 1 (two reviewers, 44 findings),
+Revision 6 (approved), after adversarial review round 1 (two reviewers, 44 findings),
 rounds 2 and 3 (13 each) and round 4, which changed no decision - the terminal
 round. Adjudications are at
 `docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/spec-r1-adjudications.md`
@@ -231,8 +231,20 @@ automatic delivery retries as an explicit exemption because the ladder puts the
 last attempt about seven minutes after the original send. That decision does not
 need reopening, and this design does not reopen it.
 
-**D7. The fence is POSITIVE.** Claim only when the source row is PRESENT, carries
-a `relay_sender_key`, and that key is not the system value. A negative test fails
+**D7. The fence is POSITIVE, and the read behind it is CONSISTENT.** Claim only
+when the source row is PRESENT, carries a `relay_sender_key`, and that key is not
+the system value.
+
+The source read the handler already performs (`twilio.ts:2449`) is a plain
+`GetCommand` with no `ConsistentRead` (`messagesRepo.ts:2960-2965`), so a
+partition lag can report a row absent that exists - and a fail-closed fence turns
+that into a permanently lost retry. **The claim path re-reads the source
+CONSISTENTLY** rather than reusing that value. Scoped to the claim path
+deliberately: `:2449` runs on every relay status callback and only needs
+`requestedTransport`, so making IT consistent would double a hot-path read to fix
+a rare one. After this, an absent source row means the row is genuinely absent -
+a real anomaly, correctly alarmed as one, rather than a lag misreported as a
+carrier failure. A negative test fails
 open: `source` is `MessageItem | undefined` at `twilio.ts:2449` and the handler
 already tolerates undefined, so a transient read miss on an announcement's source
 row would pass "must not be system" and claim a retry against a tour-reminder
@@ -670,6 +682,21 @@ of them into an alarm. Alarming a tour-reminder rung from a mission whose scope
 fences that file out is exactly the unrequested blast radius this design exists to
 avoid. The attempt-aware ERROR applies to fan-out and team legs only.
 
+**Every relay delivery-failure log line carries WHY no retry is running.** The
+existing line is one structured object (`twilio.ts:2501-2510`, `event:
+'delivery_failed'`, `relay: true`); it gains a `retryClaim` field naming the
+outcome of the claim decision - `claimed`, `cap_exhausted`, `gate_refused`,
+`fenced_announcement`, `to_missing`, `to_malformed`, or `source_unreadable`.
+
+This is what makes the alarm self-describing, and it is the difference between an
+operator diagnosing a carrier problem and diagnosing ours. An ERROR reading
+`source_unreadable` is an internal fault and says so; one reading `cap_exhausted`
+is a genuine unreachable handset. Without the field both render as the same
+"relay leg undelivered, 30003" and the internal fault is the one that gets
+misattributed - it is rarer, so it is the one nobody expects. The
+`source_unreadable` case additionally takes its own message string rather than the
+shared carrier-shaped one.
+
 **The terminal ERROR is emitted by whoever observes the terminal state.** Gate
 refusal (D9), enqueue failure (D14) and the transient cap (D10) generate no
 further callback, so the webhook handler that owns the severity decision never
@@ -686,7 +713,8 @@ sends. The rewritten comment names that exception and points at
 `group-text-30003-leg-retry-promise-unverified` rather than implying the set is
 correct everywhere.
 
-**This raises alarm volume and needs the founder's sign-off at the spec gate.** A
+**APPROVED by the founder, 2026-09-02**, together with the `retryClaim` cause
+field above, which he asked for on being shown the misattribution risk. A
 terminally undelivered relay FAN-OUT OR TEAM leg begins reaching
 `hc-<env>-error-logs` and the Recent Errors panel, where today it is silent.
 Announcement legs and 21610 opt-outs are excluded. The set being approved is
@@ -760,7 +788,11 @@ Test intentions. The plan owns seams and mechanics.
 18. A LEGACY original produces a legacy retry row and slot, and its send does not
     take the versioned path. Every relay source written before 2026-09-02 is
     legacy, so this is the ordinary case for an old message, not an edge one.
-19. The ticker TERMINATES: a resolved retry stops arming it. Asserting that
+19. Every decline path stamps its own `retryClaim` value on the failure log, and
+    an unreadable source takes its own message rather than the carrier-shaped one.
+    Assert the FIELD, not the string: an alarm's diagnosability is the whole point
+    of it, and a message-only assertion passes on a line that names no cause.
+20. The ticker TERMINATES: a resolved retry stops arming it. Asserting that
     `unconfirmed` eventually appears is not the same test, and the four
     non-terminations already recorded in `hasTickableLeg`'s docblock are why this
     one is stated separately.
@@ -814,13 +846,16 @@ recoverable: D8 gates on the slot's state rather than on this callback's
 transition, so a redelivered callback reads terminal/30003 and claims. That choice
 is what keeps the two windows from compounding.
 
-**One unreadable source row costs both the retry and the truth about it.** D7's
-fence is fail-closed, so a transient read miss on the source (`twilio.ts:2449`)
-declines the claim permanently - no later callback re-opens it - and D23 then logs
-that leg ERROR. The alarm is correct in kind (the leg IS a dead end) but wrong in
-cause: it will read as a carrier failure when it was our read. Accepted as the
-price of a fence that cannot fail open onto the tour-reminder ladder, and recorded
-so the next person diagnosing such an alarm starts in the right place.
+**An unreadable source row still costs the retry, but no longer lies about it.**
+D7's fence is fail-closed, so a source the claim path cannot read declines the
+claim permanently - no later callback re-opens it. Two things now bound that. The
+claim path's read is CONSISTENT (D7), so a partition lag no longer produces a
+false absence; and the ERROR carries `retryClaim: 'source_unreadable'` with its
+own message (D23), so it is diagnosable as an internal fault rather than
+misattributed to the carrier. What remains is the genuine case - a pointer
+resolving to a row that truly is not there - which is a real anomaly and should
+alarm. The fence stays fail-closed: one that could fail open onto the
+tour-reminder ladder is the worse trade.
 
 **A delivered outbound MMS retry shows its attachments in two bubbles.** D13
 suppresses the media-POINTER rows, so the gallery index is correct, but each

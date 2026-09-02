@@ -3,6 +3,12 @@
 export { Button, type ButtonProps, type ButtonVariant, type ButtonSize } from './Button.js';
 export { Spinner, type SpinnerProps } from './Spinner.js';
 export {
+  LinkifiedText,
+  tokenizeLinkifiedText,
+  type LinkifiedTextProps,
+  type LinkifiedToken,
+} from './LinkifiedText.js';
+export {
   StatusBadge,
   ContactStatusBadge,
   contactStatusTone,

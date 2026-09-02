@@ -1,6 +1,6 @@
 # Clickable links in communications - design specification
 
-Status: v2 - DRAFT after adversarial review round 1
+Status: v2 - READY for human review after adversarial review round 2
 Date: 2026-09-02
 Revised: 2026-09-02
 Branch: `feat/comms-clickable-links`

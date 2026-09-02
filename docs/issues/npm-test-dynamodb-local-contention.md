@@ -3,13 +3,56 @@ id: npm-test-dynamodb-local-contention
 title: npm test is not reliably green - four integration suites fail nondeterministically under shared DynamoDB Local contention
 type: bug
 severity: high
-status: open
+status: resolved
 area: app/test-infra
 created: 2026-08-05
-updated: 2026-08-21
+updated: 2026-09-02
+resolved: 2026-09-02
 reopened: 2026-08-21
 refs: app/test/groupCrossCheck.test.ts, app/test/unreadIndexRepo.integration.test.ts:561, app/test/seedProfile.integration.test.ts:122, app/test/seedLive.test.ts, app/src/lib/dynamoAdmin.ts, app/scripts/db-update-gsis.ts, app/vitest.config.ts
 ---
+
+**Update (2026-09-01, npm-test-soundness mission - the work below shipped; see the 2026-09-02 closure at the top of the reopen section).**
+The unprotected control-plane surface named below is closed: every mutating
+send in `app/src/lib/dynamoAdmin.ts` now retries `InternalFailure` /
+`InternalServerError` behind a fail-closed local-endpoint gate, with a
+verification hook for non-idempotent sends (a failed RESPONSE is not a failed
+REQUEST), a per-send 20s deadline, and a 25-case no-container acceptance
+suite (`app/test/dynamoAdminRetry.test.ts`); `db-update-gsis.ts`'s existing
+retry moved onto the same helper, and cases 15/16 prove the move did not
+disarm it. The issue itself is NOT closed: no sighting of suite B's signature
+occurred during the mission (3 contended baseline runs at `5ce9912f`: 580/
+452/463s, and 3 quiet post-fix runs at `b4ba463a`: 238/223/254s - all EXIT 0,
+zero failing files), so there is nothing to point at as cured, and the
+mission's evidence protocol forbids closing on a contended-vs-quiet pair.
+The reopen condition at the bottom stands unchanged.
+
+Suite A's remaining remedy ("make the ordering/window assertions robust to
+latency") is STRUCK - narrowly. Ten consecutive solo runs of
+`groupCrossCheck.test.ts` at `5ce9912f` (13.4-22.9s, runs 1-7 beside one
+live e2e suite) and six full runs across both arms produced 0 failures in
+all 26 cases, including both failing cases recorded below (`a filing for a
+DIFFERENT author...`, `a would-be alarm whose classic filing DID land...`)
+and the redelivery case the TTL fix was diagnosed on. The strike covers
+exactly that evidence: one afternoon, one machine, e2e-class load, no vitest
+neighbour for a whole run, no degraded container - and the loaded arm
+straddles the retry change by construction (baseline pre-change, post-fix
+runs post-change). Records:
+`docs/superpowers/reviews/2026-08-31-npm-test-soundness/measurements/`.
+
+The clean-key "first diagnostic" below is SUPERSEDED - see the rewritten
+block, and `AGENTS.md`. Also recorded there, pre-existing and out of that
+mission's scope: `db-create.ts:64`/`:76` call
+`waitUntilTableNotExists({maxWaitTime:60})` after every delete on the
+`npm test` teardown path (flat-20s second tick); the mission's gating means
+only a RETRIED delete can newly reach that waiter's slow path, and teardown
+timing showed no regression in six measured runs.
+
+WHAT THE NEXT SIGHTING MUST RECORD: `err.$metadata.httpStatusCode` and
+`err.$metadata.attempts`. No sighting in this issue's history captured either,
+so it is still unknown whether the SDK's own transient retry (5xx, 3 attempts
+by default) had already fired underneath ours - which is the difference between
+a helper attempt costing ~10s and ~30s. Two fields settle it for free.
 
 **REOPENED 2026-08-21, same day, by a run that contradicts the close below.**
 
@@ -97,13 +140,17 @@ does not mention it - so an agent who hits this has no sanctioned re-run and
 will either mis-blame their own change or re-run informally. That is exactly
 what happened on `fix/test-suite-hardening` ("green on the SECOND run").
 
-**First diagnostic for anyone who hits this:** re-run under a clean key.
-
-```
-cd app && AWS_ACCESS_KEY_ID=hccleanrun001 npx vitest run
-```
-
-If that is green, the failure is database residue, not your change.
+**First diagnostic for anyone who hits this - REWRITTEN 2026-09-01; the
+clean-key recipe that stood here is superseded.** Under per-file keys,
+exporting `AWS_ACCESS_KEY_ID` collapses ALL test files onto one database
+(`accessKeyForTestFile`, `app/test/setup/dynamoAccessKey.ts:120` - the
+explicit key wins for EVERY file), which is the OLD one-database regime this
+issue's own fix removed, not a clean database; it also stands down 2
+`dynamoAccessKeyGuard` assertions. Residue no longer accumulates to beat:
+`globalSetup` sweeps it on the way in. Instead: (1) re-run the failing FILE
+alone, more than once (`cd app; npx vitest run test/<file>`); (2) run the
+full suite at the branch's merge base; (3) compare failing FILES, not cases,
+and report both runs.
 
 ---
 
@@ -390,6 +437,50 @@ which is exactly why the load rig was needed to test the fix at all.
   days old - the warning fired and nobody acted on it.
 - Reopen if a full `npm test` fails a DynamoDB suite that mints its own
   throwaway prefix, on an otherwise-idle box, twice.
+
+---
+
+## CLOSED 2026-09-02, with a MECHANICAL reopen trigger
+
+**Reopen on ANY `[dynamoAdmin]` line in real suite output.** That is the
+whole trigger. It replaces the prose one above, which is kept for history.
+
+Why this can be an alarm now and could not be before: since 2026-09-01 the
+control-plane retry announces itself (`app/src/lib/dynamoAdmin.ts` - one
+warn per re-send naming the command, table, fault and attempt; one on entry
+to each bounded poll naming its budget), and
+`app/test/dynamoAdminRetry.test.ts` stubs `console.warn` for exactly this
+reason - **every fault that suite provokes is deliberate, so a line escaping
+into a real run cannot have come from a test faking one.** Measured on the
+first instrumented run: 31 lines, all from the stub suite, ZERO from real
+suites. Both final gate runs: zero.
+
+So one line is one real container fault, and it arrives pre-diagnosed. When
+you see one: capture the run's `err.$metadata.httpStatusCode` and
+`$metadata.attempts` before anything else - that settles the open
+SDK-nesting question recorded in
+[`dynamo-local-control-plane-fault-shape-unverified`](./dynamo-local-control-plane-fault-shape-unverified.md)
+for free, and it is only capturable while a sighting is in hand.
+
+**Why closed rather than left open on a timer.** Nothing here names work any
+more: the retry shipped, suite A's latency remedy was struck on 13 green
+runs, and the misleading clean-key recipe is superseded in all three files
+that carried it. What is left is a WATCH, and a watch with an automatic
+alarm does not need an open ticket - it needs the alarm wired, which it now
+is.
+
+A dated close was considered and rejected on this issue's own evidence. It
+was closed once before, on 2026-08-21, and reopened the SAME DAY by a run
+that contradicted the close - so "closed" here has to mean something
+sharper than a countdown. And a countdown is exactly what misled the
+2026-09-01 mission's intake, which began from a belief that this file
+carried a 7-day soak clause; it never did, anywhere. Dates in this registry
+rot quietly (the `aiRunsRepo` TTL fuse dated 2026-11-04 is still sitting
+below, known and undefused). Triggers do not.
+
+The two genuinely unverified questions this mission could not settle moved
+OUT rather than keeping this file open as a parking space - see the issue
+linked above.
 
 <!--
   MERGED 2026-08-21. Four separately filed issues, one root cause and one cost.

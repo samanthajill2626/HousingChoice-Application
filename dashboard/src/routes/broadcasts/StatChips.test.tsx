@@ -118,6 +118,39 @@ describe('DeliveryBadge', () => {
     expect(screen.getByText(/Phone unreachable/i)).toBeInTheDocument();
   });
 
+  // Slice 5a. The badge calls the shared deliveryReason with NO options, so it
+  // has no product input and the relay 30003 override cannot reach it - which is
+  // what makes "none for 30003" free at this site rather than something to guard.
+  // It must stay free: a broadcast recipient's 30003 IS retried, so the promise
+  // is true here. The assertion is the substring the override removes; the test
+  // above only proves the sentence STARTS the same way, which both copies do.
+  it('keeps the retry promise on a broadcast recipient 30003 - the override is relay-scoped', () => {
+    const { container } = render(<DeliveryBadge status="failed" errorCode="30003" />);
+    expect(container.textContent ?? '').toContain('will retry');
+    expect(container.textContent ?? '').toContain('(error 30003)');
+  });
+
+  // POSITION 4 of the four surfaces the fan-out close codes reach
+  // (DeliveryBadge.tsx:31). This badge calls the shared deliveryReason with NO
+  // options, so the internal map DOES reach it - which is why one string per code
+  // has to read as a broadcast results summary as well as on a member's row. A
+  // capped broadcast writes the code onto every recipient still queued, so this
+  // badge is what an operator reads on the results table.
+  it('renders the two fan-out close codes as prose, never as an error number', () => {
+    const { rerender, container } = render(
+      <DeliveryBadge status="failed" errorCode="transient_cap" />,
+    );
+    expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText(/Sending gave up after repeated carrier deferrals/)).toBeInTheDocument();
+    expect(container.textContent ?? '').not.toContain('(error ');
+    expect(container.textContent ?? '').not.toContain('transient_cap');
+
+    rerender(<DeliveryBadge status="failed" errorCode="enqueue_failed" />);
+    expect(screen.getByText(/Sending could not be scheduled/)).toBeInTheDocument();
+    expect(container.textContent ?? '').not.toContain('(error ');
+    expect(container.textContent ?? '').not.toContain('enqueue_failed');
+  });
+
   it('shows just the Failed label when no error code is supplied', () => {
     render(<DeliveryBadge status="failed" />);
     expect(screen.getByText('Failed')).toBeInTheDocument();

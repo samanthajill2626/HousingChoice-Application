@@ -37,7 +37,12 @@ import {
 } from '../repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
-import { createMessagesRepo, type MessageItem } from '../repos/messagesRepo.js';
+import {
+  createMessagesRepo,
+  type DeliveryStatus,
+  type MessageItem,
+  type RelayRecipientDelivery,
+} from '../repos/messagesRepo.js';
 import { createSettingsRepo } from '../repos/settingsRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
 import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
@@ -78,6 +83,12 @@ import {
   type GroupSendStalenessService,
 } from '../services/groupSendStaleness.js';
 import { joinViSentences, type ChannelRoles } from '../services/voiceTranscripts.js';
+import {
+  MESSAGE_TRANSPORTS,
+  type MessageTransport,
+  type TransportAggregationState,
+} from '../lib/messageTransport.js';
+import { withSeedTransport, type SeedCarrierTransport } from '../lib/seed/messageTransport.js';
 
 /** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
  *  and ENQUEUES the real relay.intro job per well-formed one — so it needs only
@@ -802,18 +813,20 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // POST /__dev/extraction/message-fixture - plant ONE message on a conversation
   // with an ARBITRARY created_at, so an e2e can put real transcript content
   // outside the extraction age window (jobs/extraction.ts filters on created_at).
-  // Body: { conversationId, body, createdAt, direction? }. Same triple-gate /
+  // Body: { conversationId, body, createdAt, direction?, providerSid?,
+  // relaySenderKey?, transport? }. Same triple-gate /
   // hermetic-LOCAL-only construction as the seams above (the dev router only
   // mounts behind lib/devRoutes.ts, structurally absent in every deployed env);
   // json() is scoped to this route.
   //
-  // A direct doc-client write ON PURPOSE: MessagesRepo has no put(), and append()
+  // A direct doc-client write ON PURPOSE for the arbitrary-createdAt path:
+  // MessagesRepo has no put(), and append()
   // hard-stamps created_at: now (messagesRepo.ts:1713) with no caller-supplied
   // path anywhere. Widening a production write path for a test-only need is the
   // worse trade. Reuses the router-scoped `doc` so an injected deps.doc is
-  // honoured. NOTE: unlike append() this writes NO `sid#` pointer item, so the
-  // planted row is invisible to getByProviderSid - no delivery callback can find
-  // it. That is fine here: the extraction window reads by conversation.
+  // honoured. A caller-supplied providerSid explicitly selects append() instead,
+  // creating the real `sid#` pointer needed by signed callback e2e coverage; that
+  // path does not preserve arbitrary created_at and is only for current messages.
   // PII: ids ONLY - NEVER the planted body.
   router.post('/__dev/extraction/message-fixture', json(), async (req, res) => {
     const reqBody = (req.body ?? {}) as {
@@ -821,6 +834,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       body?: unknown;
       createdAt?: unknown;
       direction?: unknown;
+      providerSid?: unknown;
+      relaySenderKey?: unknown;
+      transport?: unknown;
     };
     const conversationId = typeof reqBody.conversationId === 'string' ? reqBody.conversationId : '';
     const messageBody = typeof reqBody.body === 'string' ? reqBody.body : '';
@@ -832,11 +848,184 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       return;
     }
     const direction: 'inbound' | 'outbound' = reqBody.direction === 'outbound' ? 'outbound' : 'inbound';
-    const providerSid = `dev-${randomUUID()}`;
+    if (
+      reqBody.providerSid !== undefined &&
+      (typeof reqBody.providerSid !== 'string' || !/^(?:SM|MM)[0-9a-f]{32}$/iu.test(reqBody.providerSid))
+    ) {
+      res.status(400).json({ error: 'providerSid must be a realistic SM/MM SID' });
+      return;
+    }
+    if (
+      reqBody.relaySenderKey !== undefined &&
+      (typeof reqBody.relaySenderKey !== 'string' || reqBody.relaySenderKey.length === 0)
+    ) {
+      res.status(400).json({ error: 'relaySenderKey must be a non-empty string' });
+      return;
+    }
+    const providerSid = reqBody.providerSid ?? `dev-${randomUUID()}`;
     // tsMsgId keeps the repo's `<ts>#<msgId>` sort-key shape, so the planted row
     // sorts by its aged timestamp in listByConversation too - not just in the
     // created_at filter.
-    const item: MessageItem = {
+    let declaration: SeedCarrierTransport;
+    let deliveryRecipients: Record<string, RelayRecipientDelivery> | undefined;
+    const rawTransport = reqBody.transport;
+    if (rawTransport === undefined) {
+      declaration = { kind: 'versioned', actual: 'sms' };
+    } else if (typeof rawTransport !== 'object' || rawTransport === null) {
+      res.status(400).json({ error: 'transport must be an object' });
+      return;
+    } else {
+      const transport = rawTransport as {
+        mode?: unknown;
+        requested?: unknown;
+        actual?: unknown;
+        recipients?: unknown;
+      };
+      if (transport.mode === 'legacy') {
+        if (
+          transport.requested !== undefined ||
+          transport.actual !== undefined ||
+          transport.recipients !== undefined
+        ) {
+          res.status(400).json({ error: 'legacy transport cannot carry transport facts' });
+          return;
+        }
+        declaration = { kind: 'legacy' };
+      } else if (transport.mode === 'versioned') {
+        const valid = (value: unknown): value is MessageTransport =>
+          value === undefined || MESSAGE_TRANSPORTS.includes(value as MessageTransport);
+        if (!valid(transport.requested) || !valid(transport.actual)) {
+          res.status(400).json({ error: 'invalid requested or actual transport' });
+          return;
+        }
+        let recipientTransportFacts: Extract<SeedCarrierTransport, { kind: 'versioned' }>['recipients'];
+        if (transport.recipients !== undefined) {
+          if (
+            transport.recipients === null ||
+            typeof transport.recipients !== 'object' ||
+            Array.isArray(transport.recipients)
+          ) {
+            res.status(400).json({ error: 'transport.recipients must be an object' });
+            return;
+          }
+          const statuses: readonly DeliveryStatus[] = [
+            'queued_pending',
+            'queued',
+            'sent',
+            'delivered',
+            'undelivered',
+            'failed',
+          ];
+          const aggregationStates: readonly TransportAggregationState[] = [
+            'planned',
+            'attempted',
+            'excluded',
+          ];
+          deliveryRecipients = {};
+          recipientTransportFacts = {};
+          for (const [memberKey, rawRecipient] of Object.entries(
+            transport.recipients as Record<string, unknown>,
+          )) {
+            if (
+              memberKey.length === 0 ||
+              rawRecipient === null ||
+              typeof rawRecipient !== 'object' ||
+              Array.isArray(rawRecipient)
+            ) {
+              res.status(400).json({ error: 'each transport recipient must be an object' });
+              return;
+            }
+            const recipient = rawRecipient as {
+              status?: unknown;
+              errorCode?: unknown;
+              requested?: unknown;
+              actual?: unknown;
+              aggregationState?: unknown;
+            };
+            if (
+              !statuses.includes(recipient.status as DeliveryStatus) ||
+              !valid(recipient.requested) ||
+              !valid(recipient.actual) ||
+              (recipient.errorCode !== undefined && typeof recipient.errorCode !== 'string') ||
+              (recipient.aggregationState !== undefined &&
+                !aggregationStates.includes(recipient.aggregationState as TransportAggregationState))
+            ) {
+              res.status(400).json({ error: 'invalid recipient delivery or transport fact' });
+              return;
+            }
+            deliveryRecipients[memberKey] = {
+              status: recipient.status as DeliveryStatus,
+              ...(recipient.errorCode !== undefined && { errorCode: recipient.errorCode }),
+            };
+            recipientTransportFacts[memberKey] = {
+              ...(recipient.requested !== undefined && {
+                requestedTransport: recipient.requested,
+              }),
+              ...(recipient.actual !== undefined && { actualTransport: recipient.actual }),
+              ...(recipient.aggregationState !== undefined && {
+                transportAggregationState: recipient.aggregationState as TransportAggregationState,
+              }),
+            };
+          }
+        }
+        declaration = {
+          kind: 'versioned',
+          ...(transport.requested !== undefined && { requested: transport.requested }),
+          ...(transport.actual !== undefined && { actual: transport.actual }),
+          ...(recipientTransportFacts !== undefined && { recipients: recipientTransportFacts }),
+        };
+      } else {
+        res.status(400).json({ error: 'transport.mode must be legacy or versioned' });
+        return;
+      }
+    }
+    if (direction === 'inbound' && declaration.kind === 'versioned' && declaration.requested !== undefined) {
+      res.status(400).json({ error: 'inbound fixtures cannot request a transport' });
+      return;
+    }
+    if (direction === 'outbound' && declaration.kind === 'versioned' && declaration.requested === undefined) {
+      res.status(400).json({ error: 'versioned outbound fixtures must request a transport' });
+      return;
+    }
+    if (reqBody.providerSid !== undefined) {
+      const { messages } = transcriptFixtureRepos();
+      const appended = await messages.append({
+        conversationId,
+        providerSid,
+        providerTs: createdAt,
+        type: 'sms',
+        direction,
+        author: direction === 'inbound' ? 'tenant' : 'teammate',
+        body: messageBody,
+        deliveryStatus: 'delivered',
+        ...(declaration.kind === 'versioned' && {
+          transportSchemaVersion: 1,
+          ...(declaration.requested !== undefined && {
+            requestedTransport: declaration.requested,
+          }),
+          ...(declaration.actual !== undefined && { actualTransport: declaration.actual }),
+        }),
+        ...(reqBody.relaySenderKey !== undefined && { relaySenderKey: reqBody.relaySenderKey }),
+        ...(deliveryRecipients !== undefined && {
+          deliveryRecipients: Object.fromEntries(
+            Object.entries(deliveryRecipients).map(([memberKey, recipient]) => [
+              memberKey,
+              {
+                ...recipient,
+                ...(declaration.kind === 'versioned' && declaration.recipients?.[memberKey]),
+              },
+            ]),
+          ),
+        }),
+      });
+      log.info(
+        { conversationId, tsMsgId: appended.tsMsgId, direction, createdAt, callbackAddressable: true },
+        'dev extraction message-fixture planted',
+      );
+      res.status(200).json({ tsMsgId: appended.tsMsgId });
+      return;
+    }
+    const item: MessageItem = withSeedTransport({
       conversationId,
       tsMsgId: `${createdAt}#${providerSid}`,
       type: 'sms',
@@ -846,8 +1035,17 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       provider_sid: providerSid,
       provider_ts: createdAt,
       delivery_status: 'delivered',
+      ...(reqBody.relaySenderKey !== undefined && { relay_sender_key: reqBody.relaySenderKey }),
+      ...(deliveryRecipients !== undefined && {
+        delivery_recipients: Object.fromEntries(
+          Object.entries(deliveryRecipients).map(([memberKey, recipient]) => [
+            memberKey,
+            { ...recipient },
+          ]),
+        ),
+      }),
       created_at: createdAt,
-    };
+    }, declaration) as MessageItem;
     await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
     log.info(
       { conversationId, tsMsgId: item.tsMsgId, direction, createdAt },

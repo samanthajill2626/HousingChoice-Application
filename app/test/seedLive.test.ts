@@ -153,6 +153,11 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
   // ---------------------------------------------------------------------------
   // Today tour assertions
   // ---------------------------------------------------------------------------
+  it('adds no synthetic carrier rows of its own', async () => {
+    const { Items } = await doc.send(new ScanCommand({ TableName: `${prefix}messages` }));
+    expect(Items ?? []).toHaveLength(0);
+  });
+
   describe('TOUR-A (today, self-guided)', () => {
     it('scheduledAt is on FIXED_NOW\'s UTC date at 14:00', () => {
       const expectedYmd = FIXED_NOW_ISO.slice(0, 10);
@@ -451,6 +456,57 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       for (const id of liveIds) {
         expect(leanIds.has(id), `live ID '${id}' must not collide with lean/matrix/cast`).toBe(false);
       }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Ladder pointer (tour-reminder supersession, S4/T4.1): the demo world must
+  // arm ladders that are LIVE, not born refused (spec acceptance 17). Every
+  // armed rung carries the generation ladderId the armer minted, and its tour
+  // must POINT at that generation - otherwise the poll refuses the whole demo
+  // world as superseded and every seeded ladder reads as history.
+  // ---------------------------------------------------------------------------
+  describe('ladder pointer - every seeded live rung is on its tour CURRENT ladder', () => {
+    it('every reminder row ladderId equals its tour currentLadderId', async () => {
+      const { Items: reminderItems } = await doc.send(new ScanCommand({
+        TableName: `${prefix}tourReminders`,
+      }));
+      const { Items: tourItems } = await doc.send(new ScanCommand({
+        TableName: `${prefix}tours`,
+      }));
+      const pointerByTour = new Map(
+        (tourItems ?? []).map((t) => [t['tourId'] as string, t['currentLadderId']]),
+      );
+      const rows = reminderItems ?? [];
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        const tourId = row['tourId'] as string;
+        expect(
+          row['ladderId'],
+          `reminder ${row['reminderId']} must carry a ladderId`,
+        ).toEqual(expect.any(String));
+        expect(
+          row['ladderId'],
+          `reminder ${row['reminderId']} must match tour ${tourId} currentLadderId`,
+        ).toBe(pointerByTour.get(tourId));
+      }
+    });
+
+    it('all three live tours carry a pointer and no two share a ladder', async () => {
+      const ids = [LIVE_IDS.tourToday, LIVE_IDS.tourTomorrow, LIVE_IDS.tourUpcoming];
+      const pointers: string[] = [];
+      for (const tourId of ids) {
+        const { Item } = await doc.send(new GetCommand({
+          TableName: `${prefix}tours`,
+          Key: { tourId },
+        }));
+        expect(Item, `tour ${tourId} must exist`).toBeDefined();
+        // All three live tours are 'scheduled' - none is terminal - so each one
+        // points at the ladder it just armed.
+        expect(Item!['currentLadderId'], `tour ${tourId} pointer`).toEqual(expect.any(String));
+        pointers.push(Item!['currentLadderId'] as string);
+      }
+      expect(new Set(pointers).size).toBe(3);
     });
   });
 

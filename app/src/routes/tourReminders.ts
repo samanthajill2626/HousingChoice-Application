@@ -72,6 +72,7 @@ import {
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
 import { isQuietTime } from '../lib/quietHours.js';
+import { isSupersededRung } from '../lib/ladderPointer.js';
 import {
   flushComposeFailTally,
   newComposeFailTally,
@@ -80,7 +81,11 @@ import {
 } from '../lib/composeFailTally.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import {
+  createMessagingAdapter,
+  type CarrierMessageSender,
+  type MessagingAdapter,
+} from '../adapters/messaging.js';
 import { createSendMessageService, type SendMessageService } from '../services/sendMessage.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 
@@ -129,7 +134,7 @@ export interface TourRemindersRouterDeps {
   /** 1:1 route: the shared send service (force-sends use automated: false). */
   sendMessageService?: SendMessageService;
   /** GROUP route: per-member provider sends via sendRelayAnnouncement. */
-  adapter?: MessagingAdapter;
+  adapter?: MessagingAdapter & CarrierMessageSender;
   /** GROUP route: persists the rung as a system announcement in the thread. */
   messagesRepo?: MessagesRepo;
   /** Records WHO clicked Send now (`reminder_force_sent` on `tours#<id>`). */
@@ -159,6 +164,26 @@ export interface TourReminderView {
    *  not sent. Composes with `suppression`, which says WHY. */
   overdue?: boolean;
 }
+
+/**
+ * One rung of a ladder this tour has ALREADY REPLACED (supersession spec 3.4).
+ *
+ * Identical to `TourReminderView` except that `body` is OPTIONAL, and that is
+ * the whole point of the separate type. `bodyFor` recomposes LIVE for any row
+ * without a `sentAt`+`sentBody` pair - which for a superseded generation means
+ * composing against the tour's CURRENT scheduledAt, i.e. printing a sentence
+ * about a schedule that never existed. So this projection never calls it: the
+ * body is the claim-time SNAPSHOT or nothing at all, and "nothing at all" is
+ * expressed by ABSENCE rather than by `''`. The empty string already means
+ * something else on `TourReminderView` ("we could not compose it right now",
+ * which the panel answers with "Preview unavailable"), and an earlier rung is
+ * not a failed compose - there is simply no honest text to show.
+ *
+ * Everything else rides across unchanged, `suppression` included: a PENDING
+ * survivor (a sweep miss) carries `{ reason: 'superseded' }` so the disclosure
+ * can say why it will never fire.
+ */
+export type TourReminderEarlierView = Omit<TourReminderView, 'body'> & { body?: string };
 
 /** canceledAt wins over sentAt (a row is only canceled while unsent, but be safe);
  *  skippedAt is terminal like both, ranked after them (the claims are mutually
@@ -390,15 +415,54 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       ? await reminders.cancel(reminderId, new Date().toISOString())
       : await reminders.uncancel(reminderId);
 
+    // THE EMIT COMES FIRST (S7 T7.8), above the re-read rather than below it.
+    // Order is behaviour here: the write is what the live surfaces care about,
+    // and the re-read below can now legitimately come back EMPTY - the
+    // supersession sweep DELETES a replaced generation's unsent rows, so an
+    // operator's cancel can land between another request's list and its delete.
+    // Announcing only when we can still describe the row would drop the event
+    // for a mutation that really happened and leave the panel plus both
+    // Upcoming buckets stale until their next refetch. Still strictly
+    // conditional on `won`: a lost claim mutated nothing and must announce
+    // nothing.
+    //
+    // Same live-surface nudge the poll's claim emits: the Reminders panel and
+    // the timelines' Upcoming buckets refetch (1:1 + group both key off it).
+    if (won) events.emit('scheduled.updated', { contactId: tour.tenantId });
+
     // Re-read for the HONEST post-write state (also what a lost race reports:
     // e.g. the poll sent the rung between our list and the conditional write).
-    const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId)!;
+    //
+    // This used to be a `.find(...)!` and `after` is consumed unconditionally
+    // below (stateOf, viewOf, after.kind), so a vanished row was a TypeError
+    // 500 - the least useful answer to "that rung is gone". 404 is the honest
+    // one, and it is the SAME code the existence gate above returns: from the
+    // caller's side the row was not there, whether it went missing before the
+    // request or during it. The panel's refetch then shows the real ladder.
+    const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId);
+    if (after === undefined) {
+      log.info(
+        { tourId, reminderId, wanted: canceled ? 'cancel' : 'restore', won },
+        'tour reminder cancel/restore: the row was deleted before the post-write re-read',
+      );
+      res.status(404).json({ error: 'reminder_not_found' });
+      return;
+    }
     // Composing inputs for the echoed view, read AFTER the conditional write so
     // they add nothing to the list->write window the poll can race into. This
     // single-row response carries no timezone field of its own - the panel
     // reuses the zone from its list state.
     const window = await readQuietHoursWindow(settings, log);
     const { address, names, ...readFlags } = await composeInputsOf(tour);
+    // NO LIVE RECOMPOSE for a rung of a replaced generation (spec 3.4, review
+    // round m1). `bodyFor` composes against the tour's CURRENT scheduledAt for
+    // any row without a sentAt+sentBody pair, which on a superseded rung is a
+    // sentence about a schedule that never existed - exactly the lie
+    // TourReminderEarlierView exists to prevent, and the disclosure's Cancel
+    // button reaches this echo on an earlier rung. Snapshot or nothing.
+    const afterBody = isSupersededRung(after, tour)
+      ? (after.sentBody ?? '')
+      : bodyFor(after, tour, window.timezone, address, names, readFlags);
     if (!won) {
       log.info(
         { tourId, reminderId, wanted: canceled ? 'cancel' : 'restore', state: stateOf(after) },
@@ -406,21 +470,16 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       );
       res.status(409).json({
         error: canceled ? 'reminder_not_cancelable' : 'reminder_not_restorable',
-        reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names, readFlags)),
+        reminder: viewOf(after, afterBody),
       });
       return;
     }
 
-    // Same live-surface nudge the poll's claim emits: the Reminders panel and
-    // the timelines' Upcoming buckets refetch (1:1 + group both key off it).
-    events.emit('scheduled.updated', { contactId: tour.tenantId });
     log.info(
       { tourId, reminderId, kind: after.kind, canceled },
       canceled ? 'tour reminder canceled via api' : 'tour reminder restored via api',
     );
-    res.json({
-      reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names, readFlags)),
-    });
+    res.json({ reminder: viewOf(after, afterBody) });
   });
 
   // POST /:tourId/reminders/:reminderId/send-now - "Send now" (quiet-hours spec
@@ -459,12 +518,32 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     );
 
     // Re-read for the HONEST post-write state (the send may have raced the poll).
-    const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId)!;
+    // 404 rather than the old `.find(...)!` TypeError 500, exactly as on the
+    // PATCH path above. There is no emit to preserve here: the send's own
+    // `scheduled.updated` is emitted INSIDE forceSendReminder, before this
+    // handler regains control. WARN, not info, and for a reason the PATCH does
+    // not have - when `result.outcome === 'sent'` the text is already out and
+    // this return skips the `reminder_force_sent` audit append below, so the
+    // only trace of who sent it is this line.
+    const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId);
+    if (after === undefined) {
+      log.warn(
+        { tourId, reminderId, actor, outcome: result.outcome },
+        'tour reminder send-now: the row was deleted before the post-write re-read',
+      );
+      res.status(404).json({ error: 'reminder_not_found' });
+      return;
+    }
     // Composing inputs for the echoed view (same no-timezone note as PATCH). A
     // rung the force-send just claimed renders its SNAPSHOT, not a recompose.
     const window = await readQuietHoursWindow(settings, log);
     const { address, names, ...readFlags } = await composeInputsOf(tour);
-    const afterBody = bodyFor(after, tour, window.timezone, address, names, readFlags);
+    // Snapshot or nothing for a superseded rung, exactly as on the PATCH echo
+    // above (review round m1): the 409 `superseded` refusal returns this same
+    // view, and recomposing it would print a schedule this generation never had.
+    const afterBody = isSupersededRung(after, tour)
+      ? (after.sentBody ?? '')
+      : bodyFor(after, tour, window.timezone, address, names, readFlags);
 
     if (result.outcome === 'sent') {
       await audit.append(`tours#${tourId}`, 'reminder_force_sent', {
@@ -498,6 +577,23 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
 
     const rows = await reminders.listByTour(tourId);
 
+    // THE READ PARTITION (spec 3.4, S7 T7.1). One pass with the SHARED
+    // predicate: a row of the tour's current generation stays in `reminders[]`
+    // - which keeps its meaning, its shape and its exclusive claim on `next` -
+    // and every survivor of a replaced generation moves to `earlier[]`. The
+    // predicate is the same function the poll and the other two preview
+    // surfaces call, so a row cannot be current here and superseded there.
+    //
+    // A wholly PRE-MIGRATION tour (no pointer attribute, no stamped rows) has
+    // every row CURRENT by the predicate's own exemption, so `earlier` is
+    // absent and the response is byte-identical to today's (acceptance 12).
+    const currentRows: TourReminderItem[] = [];
+    const earlierRows: TourReminderItem[] = [];
+    for (const row of rows) {
+      if (isSupersededRung(row, tour)) earlierRows.push(row);
+      else currentRows.push(row);
+    }
+
     // The composing inputs, read ONCE per request and ABOVE the suppression
     // guard below: EVERY response needs the zone (a landlord_led tour and all
     // four viewOf responses used to read settings zero times), and every rung of
@@ -517,7 +613,12 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // whatever this estimate produced, so counting one here buys a contact read
     // and a conversation read per GET for an answer nothing reads. No
     // correctness change: the chip is decided OUTSIDE the evaluator either way.
-    const hasUpcoming = rows.some(
+    // Reads `currentRows`, not `rows`: an EARLIER rung never renders an
+    // estimate (its projection annotates `superseded` and stops), so counting
+    // one here would buy a contact read and a conversation read per GET for an
+    // answer nothing reads - the identical argument the discontinued filter
+    // beside it already makes.
+    const hasUpcoming = currentRows.some(
       (r) => stateOf(r) === 'upcoming' && !DISCONTINUED_REMINDER_KINDS.has(r.kind),
     );
     let suppressionOf:
@@ -616,7 +717,19 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // hoisting a variable out of a branch to share it is how the two builders
     // would start disagreeing. viewOf computes a third for the same reason.
     const listNowIso = new Date().toISOString();
-    const reminderViews: TourReminderView[] = rows
+    // CONVERSION IN FLIGHT (review round NEW-3). A tour-level fact, so it is
+    // read once rather than per row: while `convertedPlacementId` carries the
+    // `pending:` sentinel the poll DEFERS every rung of this tour and Send now
+    // answers 409 conversion_in_progress. Without this the panel rendered such a
+    // rung as `upcoming` with a live fire-time estimate and an ENABLED Send-now
+    // button whose only possible answer was that 409 - the surface promising
+    // what the send path refuses, which is the exact lie this feature exists to
+    // end (lib/ladderPointer.ts). The PREFIX is the predicate: the finalize
+    // replaces the sentinel with a real placementId in the same field.
+    const conversionInProgress =
+      typeof tour.convertedPlacementId === 'string' &&
+      tour.convertedPlacementId.startsWith('pending:');
+    const reminderViews: TourReminderView[] = currentRows
       .map((row) => {
         const state = stateOf(row);
         // The manual-only hold-back is a property of the KIND, so it is known
@@ -639,20 +752,55 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
         // never send. Nor does it belong IN the shared ordering: that ladder's
         // rationale is that a harder reason wins, and "we no longer send this
         // at all" is not a suppression anything should override.
+        //
+        // SUPERSEDED is checked FIRST OF ALL (spec 3.3, S6). Since S7 the
+        // partition above means no row REACHING this map can be superseded, so
+        // this arm and the matching `next` exclusion below are both
+        // unreachable in production - and they stay. They are two lines and one
+        // pure call, and they are what makes "the panel never promises a
+        // superseded rung" true of this projection ITSELF rather than true only
+        // as a consequence of the partition standing where it stands. The rest
+        // of this paragraph is the original argument, which is still the reason
+        // supersession outranks `discontinued` in the EARLIER projection too.
+        // The tour is
+        // already in hand from the 404 gate above, so this costs no read. It
+        // outranks even `discontinued` because it is a fact about THIS row's
+        // storage rather than about its kind: a rung of a replaced ladder is
+        // one both send paths already refuse, and `listDue` only picks a row up
+        // at `dueAt <= now`, so without the check the panel would promise
+        // "sends in 6 days" right up to the moment the poll retired it. The
+        // comparison is the SHARED one (lib/ladderPointer.ts) - the poll and
+        // the other two preview surfaces call the same function, which is the
+        // only way four sites can be made unable to disagree about one row.
+        const superseded = isSupersededRung(row, tour);
         const discontinued = DISCONTINUED_REMINDER_KINDS.has(row.kind);
         const paused = manualOnlyKinds.has(row.kind);
         const suppression =
           state !== 'upcoming'
             ? undefined
-            : discontinued
-              ? ({ reason: 'discontinued' } as const)
-              : suppressionOf !== undefined
-                ? // en_route is exempt from quiet hours at BOTH runtime sites
-                  // (spec 6), so the estimate must not promise a wait here.
-                  suppressionOf(row.dueAt, paused, row.kind === 'en_route')
-                : paused
-                  ? ({ reason: 'paused' } as const)
-                  : undefined;
+            : superseded
+              ? ({ reason: 'superseded' } as const)
+              : discontinued
+                ? ({ reason: 'discontinued' } as const)
+                : // BELOW both TERMINAL reasons above and ABOVE the evaluator.
+                  // Below, because this one is TEMPORARY - the claim resolves -
+                  // and the module's ladder rationale is that the harder reason
+                  // wins; a chip reading "Converting" over a rung whose ladder
+                  // was replaced, or whose kind will never send again, would
+                  // flip to the permanent truth minutes later. Above the
+                  // evaluator, because a claim in flight is what actually gates
+                  // the next tick: the poll defers this rung unclaimed whatever
+                  // the recipient's state, so an opt-out or quiet-hours estimate
+                  // here would describe a send that is not being attempted.
+                  conversionInProgress
+                  ? ({ reason: 'conversion_in_progress' } as const)
+                  : suppressionOf !== undefined
+                  ? // en_route is exempt from quiet hours at BOTH runtime sites
+                    // (spec 6), so the estimate must not promise a wait here.
+                    suppressionOf(row.dueAt, paused, row.kind === 'en_route')
+                  : paused
+                    ? ({ reason: 'paused' } as const)
+                    : undefined;
         // Spec 8: an ADDITIVE boolean, never a fifth `state` value - two
         // predicates on this route test 'upcoming' by equality, and an
         // 'overdue' state would drop overdue rungs out of the very places that
@@ -677,20 +825,90 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       .sort((a, b) => (a.dueAt < b.dueAt ? -1 : a.dueAt > b.dueAt ? 1 : 0));
     flushComposeFailTally(tally, log, 'tour_reminders_list');
 
+    // THE EARLIER PROJECTION (S7 T7.6/T7.7). Deliberately its OWN tiny mapper
+    // rather than a reuse of the one above, for one reason: it must not call
+    // `bodyFor`. That composer recomposes live for any row without a
+    // sentAt+sentBody pair, and a superseded generation recomposed against the
+    // tour's CURRENT scheduledAt is a sentence about a schedule that never
+    // existed. Here the body is the SNAPSHOT or it is absent - see
+    // TourReminderEarlierView for why absence and not `''`.
+    //
+    // Two more differences worth naming, both of them omissions:
+    //   - NO `overdue`. It is a promise-shaped word ("this should have gone
+    //     out"), and nothing will ever send an earlier rung. The panel's chip
+    //     ladder already ranks `superseded` above `overdue` for exactly that
+    //     reason; leaving the flag off means the two cannot disagree.
+    //   - NO recipient-state estimate. `suppressionOf` is never consulted: the
+    //     one true thing to say about a pending survivor is that its ladder was
+    //     replaced, and an opt-out or a quiet-hours wait would both be claims
+    //     about a send that is not going to be attempted.
+    const earlierViews: TourReminderEarlierView[] = earlierRows
+      .map((row) => {
+        const state = stateOf(row);
+        const view: TourReminderEarlierView = {
+          reminderId: row.reminderId,
+          kind: row.kind,
+          dueAt: row.dueAt,
+          state,
+          ...(typeof row.sentBody === 'string' && { body: row.sentBody }),
+          ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
+          ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
+          ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
+          ...(row.skipReason !== undefined && { skipReason: row.skipReason }),
+          // `suppression` stays an UPCOMING-only annotation here exactly as it
+          // is above: a sent/canceled/skipped row already says what became of
+          // it, and supersession must not become the one reason that leaks
+          // onto history.
+          ...(state === 'upcoming' && { suppression: { reason: 'superseded' as const } }),
+        };
+        return view;
+      })
+      // DESCENDING by `sentAt ?? dueAt` - newest first, because this list is
+      // read as history and the interesting rung is the one that just stopped
+      // being current. `sentAt` takes precedence because a rung's SEND time is
+      // when it actually happened; an unsent survivor has only its due time to
+      // be placed by. Neither `ladderId` (a UUID - no order at all) nor
+      // `createdAt` (every rung of one arm call shares an instant) can order
+      // this list. `reminderId` breaks the remaining ties ASCENDING, so the
+      // order is total and the same on every request.
+      .sort((a, b) => {
+        const ak = a.sentAt ?? a.dueAt;
+        const bk = b.sentAt ?? b.dueAt;
+        if (ak !== bk) return ak < bk ? 1 : -1;
+        return a.reminderId < b.reminderId ? -1 : a.reminderId > b.reminderId ? 1 : 0;
+      });
+
     // `next` drives the panel's "Next" tag and its aria-current="step", so a
     // DISCONTINUED rung must be excluded even though it is still `upcoming`: a
     // pause-era confirmation's dueAt is the BOOKING instant, which makes it the
     // earliest rung on every ladder it sits on, and it stays pending until the
     // one-time sweep reaches it. Without this the panel would point a navigator
     // at the one row the same response chips "No longer sent".
+    //
+    // SUPERSEDED is excluded for the same reason and by the same shape (S6
+    // T6.1): a rung of a replaced ladder is still `upcoming`, and a rescheduled
+    // tour's OLD day_before is routinely the earliest row on the response - so
+    // without this the panel would tag "Next" on the one row it also chips
+    // "Replaced". Both exclusions read the ANNOTATION rather than recomputing
+    // their predicate, so a rung can only lose `next` for a reason the same
+    // response shows the operator. S7 makes this moot for supersession by
+    // partitioning such rows into `earlier[]`; the exclusion stays regardless,
+    // because `next` must never depend on a sibling task having run.
     const next = reminderViews.find(
-      (v) => v.state === 'upcoming' && v.suppression?.reason !== 'discontinued',
+      (v) =>
+        v.state === 'upcoming' &&
+        v.suppression?.reason !== 'discontinued' &&
+        v.suppression?.reason !== 'superseded',
     );
 
     log.info(
       {
         tourId,
         count: reminderViews.length,
+        // Read the two counts TOGETHER: a tour whose whole ladder moved to
+        // `earlier` reports count: 0, which on its own reads like a tour that
+        // was never armed.
+        earlierCount: earlierViews.length,
         hasNext: next !== undefined,
         suppressed: reminderViews.some((v) => v.suppression !== undefined),
         // Read `suppressed` WITH this: when the estimate read failed, a false
@@ -705,10 +923,15 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // outside the org's zone never reads a chip that contradicts the text. Only
     // this LIST response carries it - the single-row PATCH / send-now payloads
     // reuse the zone the panel is already holding.
+    // `earlier` is OMITTED when empty rather than sent as `[]`, matching
+    // `next`'s idiom on this same response: the overwhelmingly common tour has
+    // exactly one generation, and a wholly pre-migration tour must read to a
+    // client byte-for-byte as it did before this feature (acceptance 12).
     res.json({
       reminders: reminderViews,
       timezone: window.timezone,
       ...(next !== undefined && { next }),
+      ...(earlierViews.length > 0 && { earlier: earlierViews }),
     });
   });
 

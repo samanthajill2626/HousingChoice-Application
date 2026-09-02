@@ -22,6 +22,7 @@ import {
   GroupConversationsAuthorRejectedError,
   GroupConversationsUnavailableError,
   type GroupConversationRef,
+  type GroupMessageSender,
   type GroupConversationsPort,
   type GroupParticipantRef,
 } from '../src/adapters/groupConversations.js';
@@ -111,7 +112,7 @@ function makeFakes(
     smsSendingEnabled?: boolean;
     businessPhoneNumber?: string | undefined;
     rail?: GroupRailEnsurer;
-    port?: Partial<GroupConversationsPort>;
+    port?: Partial<GroupConversationsPort & GroupMessageSender>;
     /** 1:1 threads the number-scoped suppression seam reads (T3.5). A SECONDARY
      *  number carries its opt-out here, never on the contact flag. */
     oneToOneThreads?: ConversationItem[];
@@ -168,7 +169,17 @@ function makeFakes(
     touched: [] as Fakes['touched'],
   };
 
-  const port: GroupConversationsPort = {
+  const postGroupMessage =
+    overrides.port?.postGroupMessage ??
+    (async (input: Fakes['posted'][number]) => {
+      fakes.posted.push(input);
+      return {
+        messageSid: 'IMposted1',
+        dateCreated: '2026-08-11T13:00:00.500Z',
+        actualTransport: 'mms' as const,
+      };
+    });
+  const port: GroupConversationsPort & GroupMessageSender = {
     createConversationWithParticipants: async () => {
       throw new Error('groupSend must never create a rail directly - it goes through ensureGroupRail');
     },
@@ -186,12 +197,21 @@ function makeFakes(
     removeParticipant: async () => {
       throw new Error('groupSend must never detach a participant directly - that is ensureGroupRail');
     },
-    postGroupMessage: async (input) => {
-      fakes.posted.push(input);
-      return { messageSid: 'IMposted1', dateCreated: '2026-08-11T13:00:00.500Z' };
-    },
+    classifyGroupMessageTransport: () => ({ requestedTransport: 'mms' }),
+    prepareGroupMessagePost: (intent, input) => ({
+      requestedTransport: intent.requestedTransport,
+      input,
+    }),
+    postPreparedGroupMessage: async (prepared) => postGroupMessage(prepared.input),
+    postGroupMessage,
     ...overrides.port,
   };
+  // Keep the compatibility wrapper overrides used by the legacy failure matrix
+  // effective while the service itself is required to use the prepared-post
+  // contract. A test may still override postPreparedGroupMessage explicitly.
+  if (overrides.port?.postPreparedGroupMessage === undefined) {
+    port.postPreparedGroupMessage = async (prepared) => port.postGroupMessage(prepared.input);
+  }
 
   const events = createEventBus();
   for (const name of ['message.persisted', 'conversation.updated'] as AppEventName[]) {
@@ -278,6 +298,73 @@ describe('groupSend - the happy path', () => {
     });
   });
 
+  it('persists adapter-owned Group MMS facts without changing the legacy text type', async () => {
+    const f = makeFakes();
+    await f.send({ conversationId: 'group-1', body: 'text only' });
+
+    expect(f.appended[0]).toMatchObject({
+      type: 'sms',
+      transportSchemaVersion: 1,
+      requestedTransport: 'mms',
+      actualTransport: 'mms',
+      deliveryRecipients: {
+        'phone#+16175550111': {
+          status: 'queued',
+          requestedTransport: 'mms',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+        'phone#+16175550222': {
+          status: 'queued',
+          requestedTransport: 'mms',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+  });
+
+  it('persists the group adapter intent and result instead of inferring transport from type', async () => {
+    const f = makeFakes({
+      port: {
+        classifyGroupMessageTransport: () => ({ requestedTransport: 'rcs' }),
+        prepareGroupMessagePost: (intent, input) => ({
+          requestedTransport: intent.requestedTransport,
+          input,
+        }),
+        postPreparedGroupMessage: async (prepared) => {
+          f.posted.push(prepared.input);
+          return {
+            messageSid: 'IMfutureRail',
+            dateCreated: '2026-08-11T13:00:00.500Z',
+            actualTransport: 'sms',
+          };
+        },
+      },
+    });
+    await f.send({ conversationId: 'group-1', body: 'future rail' });
+
+    expect(f.appended[0]).toMatchObject({
+      type: 'sms',
+      requestedTransport: 'rcs',
+      actualTransport: 'sms',
+    });
+    expect(f.appended[0]?.deliveryRecipients).toEqual({
+      'phone#+16175550111': {
+        status: 'queued',
+        requestedTransport: 'rcs',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+      'phone#+16175550222': {
+        status: 'queued',
+        requestedTransport: 'rcs',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+    });
+  });
+
   it('seeds a queued slot per member, keyed PHONE-scoped so two numbers of one contact stay two slots', async () => {
     const twoNumbersOneContact = [
       member('+16175550111', 'contact-ann', 'Ann'),
@@ -293,8 +380,18 @@ describe('groupSend - the happy path', () => {
     await f.send({ conversationId: 'group-1', body: 'hi' });
 
     expect(f.appended[0]?.deliveryRecipients).toEqual({
-      'phone#+16175550111': { status: 'queued' },
-      'phone#+16175550999': { status: 'queued' },
+      'phone#+16175550111': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
+      'phone#+16175550999': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
     });
   });
 
@@ -502,8 +599,18 @@ describe('groupSend - seeding a KNOWN-suppressed member terminal (L3)', () => {
     await f.send({ conversationId: 'group-1', body: 'hi' });
 
     expect(f.appended[0]?.deliveryRecipients).toEqual({
-      'phone#+16175550111': { status: 'queued' },
-      'phone#+16175550222': { status: 'undelivered', errorCode: 'contact_opted_out' },
+      'phone#+16175550111': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
+      'phone#+16175550222': {
+        status: 'undelivered',
+        errorCode: 'contact_opted_out',
+        requestedTransport: 'mms',
+        transportAggregationState: 'excluded',
+      },
     });
   });
 
@@ -511,8 +618,18 @@ describe('groupSend - seeding a KNOWN-suppressed member terminal (L3)', () => {
     const f = makeFakes();
     await f.send({ conversationId: 'group-1', body: 'hi' });
     expect(f.appended[0]?.deliveryRecipients).toEqual({
-      'phone#+16175550111': { status: 'queued' },
-      'phone#+16175550222': { status: 'queued' },
+      'phone#+16175550111': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
+      'phone#+16175550222': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
     });
     expect(f.appended[0]?.deliveryStatus).toBe('queued');
   });
@@ -550,6 +667,8 @@ describe('groupSend - seeding a KNOWN-suppressed member terminal (L3)', () => {
     expect(f.appended[0]?.deliveryRecipients?.['phone#+16175550999']).toEqual({
       status: 'undelivered',
       errorCode: 'contact_opted_out',
+      requestedTransport: 'mms',
+      transportAggregationState: 'excluded',
     });
   });
 
@@ -566,8 +685,18 @@ describe('groupSend - seeding a KNOWN-suppressed member terminal (L3)', () => {
     const out = await f.send({ conversationId: 'group-1', body: 'hi' });
     expect(out.providerSid).toBe('IMposted1');
     expect(f.appended[0]?.deliveryRecipients).toEqual({
-      'phone#+16175550111': { status: 'queued' },
-      'phone#+16175550222': { status: 'queued' },
+      'phone#+16175550111': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
+      'phone#+16175550222': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
     });
   });
 

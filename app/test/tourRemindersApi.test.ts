@@ -13,7 +13,7 @@
 // fakes (no DynamoDB, no network); reminders/tours/contacts/conversations are
 // seeded directly on the world fakes.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
 import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import {
@@ -97,9 +97,19 @@ function seedReminder(
     kind: ReminderKind;
     dueAt: string;
     sentAt?: string;
+    /** The claim-time body snapshot. Only a row that HAS one renders a body in
+     *  `earlier[]` (S7 T7.7) - nothing on that path recomposes. */
+    sentBody?: string;
     canceledAt?: string;
     skippedAt?: string;
     skipReason?: TourReminderItem['skipReason'];
+    /** The generation this rung was armed by (supersession S1). OMITTED by
+     *  default, which - paired with a tour that has no `currentLadderId` - is
+     *  the PRE-MIGRATION exemption every legacy case in this file relies on. */
+    ladderId?: string;
+    /** Overridable so an ordering case can prove the sort is NOT `createdAt`
+     *  (S7 T7.2); every other case shares the one fixed stamp. */
+    createdAt?: string;
   },
 ): void {
   const item: TourReminderItem = {
@@ -108,8 +118,10 @@ function seedReminder(
     kind: input.kind,
     dueAt: input.dueAt,
     _reminderPartition: 'reminders',
-    createdAt: '2026-07-13T00:00:00.000Z',
+    createdAt: input.createdAt ?? '2026-07-13T00:00:00.000Z',
+    ...(input.ladderId !== undefined && { ladderId: input.ladderId }),
     ...(input.sentAt !== undefined && { sentAt: input.sentAt }),
+    ...(input.sentBody !== undefined && { sentBody: input.sentBody }),
     ...(input.canceledAt !== undefined && { canceledAt: input.canceledAt }),
     ...(input.skippedAt !== undefined && { skippedAt: input.skippedAt }),
     ...(input.skipReason !== undefined && { skipReason: input.skipReason }),
@@ -953,6 +965,369 @@ describe('GET /api/tours/:tourId/reminders', () => {
     });
   });
 
+  // SUPERSEDED rungs (spec 3.3, S6 T6.1). The FIRST of the three preview
+  // surfaces. `listDue` only picks a row up at `dueAt <= now`, so a rung whose
+  // ladder the tour has replaced would go on promising "sends in 6 days" until
+  // it came due - not until the next tick - while both send paths (the poll and
+  // Send now) already refuse it. The check runs AHEAD of `discontinued` for the
+  // same reason `discontinued` runs ahead of the evaluator: it is a fact about
+  // stored state that no recipient-side reason should override.
+  // CONVERSION IN FLIGHT (review round NEW-3). The panel is the surface an
+  // operator actually clicks Send now from, and during a claim it was rendering
+  // the rung as `upcoming` with a live fire-time estimate and an ENABLED button
+  // whose only possible answer was 409 conversion_in_progress.
+  it('renders a claim-in-flight rung SUPPRESSED conversion_in_progress rather than as a promise', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const tourId = await seedQuietTour(world, 'cip-1', '+15550600061');
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-cip' });
+    seedReminder(world, {
+      reminderId: 'rem-cip',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(6),
+      ladderId: 'ladder-cip',
+    });
+    // The reversible disarm the conversion route holds while it creates the
+    // placement. The PREFIX is the predicate, not string-ness.
+    await world.toursRepo.claimConversion(tourId, 'pending:cip-claim');
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const { reminders } = res.body as {
+      reminders: { reminderId: string; state: string; suppression?: { reason: string } }[];
+    };
+    // ANTI-VACUITY: still upcoming and still on the CURRENT ladder - the
+    // annotation is the point, not the fixture having gone terminal or stale.
+    expect(reminders.map((r) => r.reminderId)).toEqual(['rem-cip']);
+    expect(reminders[0]?.state).toBe('upcoming');
+    expect(reminders[0]?.suppression).toEqual({ reason: 'conversion_in_progress' });
+  });
+
+  it('a FINALIZED tour is not a claim - its rungs keep their promise', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const tourId = await seedQuietTour(world, 'cip-2', '+15550600062');
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-cip2' });
+    seedReminder(world, {
+      reminderId: 'rem-cip-final',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(6),
+      ladderId: 'ladder-cip2',
+    });
+    // The finalize writes a REAL placementId to the same field; a bare
+    // is-a-string test would suppress every converted tour's rungs forever.
+    await world.toursRepo.patch(tourId, { convertedPlacementId: 'placement-cip-real' });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    expect(res.body.reminders[0]?.suppression).toBeUndefined();
+  });
+
+  it('SUPERSEDED outranks a claim in flight on the panel too', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const tourId = await seedQuietTour(world, 'cip-3', '+15550600063');
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-cip3-new' });
+    seedReminder(world, {
+      reminderId: 'rem-cip-old',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(6),
+      ladderId: 'ladder-cip3-old',
+    });
+    await world.toursRepo.claimConversion(tourId, 'pending:cip3-claim');
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    // A mismatched rung belongs to a replaced ladder whether or not a claim is
+    // in flight, and `superseded` is the PERMANENT half of that pair - the same
+    // precedence the Send-now refusal already uses.
+    expect(res.body.earlier?.[0]?.suppression).toEqual({ reason: 'superseded' });
+  });
+
+  describe('superseded rungs', () => {
+    // S7 RE-POINT: the annotation is unchanged, but the rung carrying it now
+    // lives in `earlier[]` - the partition (T7.1) moved it out of `reminders[]`
+    // and the suppression travelled with it. `next` is still the assertion that
+    // matters, and it is now true by CONSTRUCTION (it is derived from
+    // `reminders[]` alone) rather than by an exclusion; the exclusion stays in
+    // the route anyway, so this case still pins both halves.
+    it('puts a pointer-mismatched pending rung in `earlier[]` as `superseded`, and never hands it `next`', async () => {
+      const { app, world } = makeWebhookHarness();
+      // Quiet hours OFF: the current-generation rung below asserts NO
+      // suppression, and the default window would chip it at some hours.
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'sup-1', '+15550600051');
+      await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-panel-new' });
+      seedReminder(world, {
+        reminderId: 'rem-sup-old',
+        tourId,
+        kind: 'day_before',
+        // EARLIEST on the ladder, so it is what `next` would pick today - the
+        // panel would tag "Next" on the one row the same response calls
+        // Replaced.
+        dueAt: isoHoursFromNow(6),
+        ladderId: 'ladder-panel-old',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-sup-current',
+        tourId,
+        kind: 'morning_of',
+        dueAt: isoHoursFromNow(24),
+        ladderId: 'ladder-panel-new',
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const { reminders, earlier, next } = res.body as {
+        reminders: { reminderId: string; state: string; suppression?: { reason: string } }[];
+        earlier?: { reminderId: string; state: string; suppression?: { reason: string } }[];
+        next?: { reminderId: string };
+      };
+      // ANTI-VACUITY: the chipped rung really is still upcoming - the
+      // annotation is the point, not the fixture having gone terminal.
+      expect(earlier?.map((r) => r.reminderId)).toEqual(['rem-sup-old']);
+      expect(earlier?.[0]?.state).toBe('upcoming');
+      expect(earlier?.[0]?.suppression).toEqual({ reason: 'superseded' });
+      // The current generation beside it is left promising its send, alone in
+      // `reminders[]`.
+      expect(reminders.map((r) => r.reminderId)).toEqual(['rem-sup-current']);
+      expect(reminders[0]?.suppression).toBeUndefined();
+      expect(next?.reminderId).toBe('rem-sup-current');
+    });
+
+    it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed', async () => {
+      // Acceptance 12. Without the exemption a literal build chips every rung
+      // armed before this feature, on every tour, on its first read.
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'sup-2', '+15550600052');
+      seedReminder(world, {
+        reminderId: 'rem-legacy-1',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(6),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const { reminders, next } = res.body as {
+        reminders: { reminderId: string; suppression?: { reason: string } }[];
+        next?: { reminderId: string };
+      };
+      expect(reminders[0]?.suppression).toBeUndefined();
+      expect(next?.reminderId).toBe('rem-legacy-1');
+      // S7 T7.1, acceptance 12: a wholly pre-migration tour partitions to
+      // ALL-CURRENT, so the key is absent rather than an empty array. The
+      // panel of such a tour must render exactly as it does on `main`.
+      expect(res.body.earlier).toBeUndefined();
+    });
+
+    it('a SENT rung of a replaced ladder carries no suppression (state wins, as everywhere else)', async () => {
+      // `suppression` is an `upcoming`-only annotation on this projection, and
+      // supersession must not become the one reason that leaks onto history.
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'sup-3', '+15550600053');
+      await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-panel-new-3' });
+      seedReminder(world, {
+        reminderId: 'rem-sup-sent',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(-48),
+        sentAt: isoHoursFromNow(-47),
+        ladderId: 'ladder-panel-old-3',
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      // S7 RE-POINT: it is an EARLIER rung now (its ladder was replaced), and
+      // the "suppression is upcoming-only" rule travels with it - the earlier
+      // projection annotates a pending survivor and leaves history alone.
+      const sent = (
+        res.body.earlier as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'sent');
+      expect(sent?.suppression).toBeUndefined();
+      expect(res.body.reminders).toEqual([]);
+    });
+  });
+
+  // ==========================================================================
+  // `earlier[]` - THE READ PARTITION (supersession spec 3.4, S7).
+  //
+  // `reminders[]` keeps its meaning: the CURRENT ladder, and it alone feeds
+  // `next`. Every other surviving row - a sweep miss, a sent rung of a replaced
+  // generation - moves to `earlier[]`, which the panel renders behind a
+  // collapsed disclosure. The partition uses the SAME shared predicate the poll
+  // and the three preview surfaces use, so a row cannot be current here and
+  // superseded there.
+  // ==========================================================================
+  describe('earlier[] - the read partition (S7)', () => {
+    it('orders by (sentAt ?? dueAt) DESC with reminderId as the tie-break', async () => {
+      // The fixture is built to FAIL under the two orderings a reader would
+      // otherwise reach for:
+      //   - dueAt ASC (what `reminders[]` uses) or dueAt DESC: `rem-e-c` is the
+      //     OLDEST by dueAt and the SECOND-NEWEST by sentAt, so any dueAt-only
+      //     sort puts it last instead of third.
+      //   - createdAt (either direction): the four stamps below are strictly
+      //     decreasing in id order, so createdAt DESC yields a-b-c-d and
+      //     createdAt ASC yields d-c-b-a - neither is the expected answer.
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'earlier-sort', '+15550600061');
+      await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sort-new' });
+      const old = 'ladder-sort-old';
+      seedReminder(world, {
+        reminderId: 'rem-e-a',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(-10),
+        sentAt: isoHoursFromNow(-9),
+        ladderId: old,
+        createdAt: '2026-07-13T00:00:04.000Z',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-e-b',
+        tourId,
+        kind: 'morning_of',
+        dueAt: isoHoursFromNow(-2),
+        ladderId: old,
+        createdAt: '2026-07-13T00:00:03.000Z',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-e-c',
+        tourId,
+        kind: 'confirmation',
+        dueAt: isoHoursFromNow(-30),
+        sentAt: isoHoursFromNow(-3),
+        ladderId: old,
+        createdAt: '2026-07-13T00:00:02.000Z',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-e-d',
+        tourId,
+        kind: 'en_route',
+        // Byte-identical dueAt to rem-e-b and no sentAt either: the tie-break
+        // is the ONLY thing that can order this pair.
+        dueAt: isoHoursFromNow(-2),
+        ladderId: old,
+        createdAt: '2026-07-13T00:00:01.000Z',
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const earlier = res.body.earlier as { reminderId: string }[];
+      expect(earlier.map((r) => r.reminderId)).toEqual([
+        'rem-e-b',
+        'rem-e-d',
+        'rem-e-c',
+        'rem-e-a',
+      ]);
+    });
+
+    it('renders a body ONLY from the sentBody snapshot - never a live recompose', async () => {
+      // T7.7 / acceptance 11. A superseded generation composes against the
+      // tour's CURRENT time, so recomposing one would print a promise about a
+      // schedule that no longer exists. `body` is therefore ABSENT (not '') on
+      // a row with no snapshot - the panel renders no paragraph at all, which
+      // is a different answer from the current ladder's "Preview unavailable".
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'earlier-body', '+15550600062');
+      await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-body-new' });
+      seedReminder(world, {
+        reminderId: 'rem-e-snap',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(-20),
+        sentAt: isoHoursFromNow(-19),
+        sentBody: 'Your tour is tomorrow at 10:00 AM.',
+        ladderId: 'ladder-body-old',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-e-bare',
+        tourId,
+        kind: 'morning_of',
+        // SENT but pre-snapshot (the legacy row shape), so there is nothing
+        // honest to show.
+        dueAt: isoHoursFromNow(-18),
+        sentAt: isoHoursFromNow(-17),
+        ladderId: 'ladder-body-old',
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const byId = new Map(
+        (res.body.earlier as { reminderId: string; body?: string }[]).map((r) => [r.reminderId, r]),
+      );
+      expect(byId.get('rem-e-snap')?.body).toBe('Your tour is tomorrow at 10:00 AM.');
+      expect(byId.get('rem-e-bare')).toBeDefined();
+      expect(byId.get('rem-e-bare')).not.toHaveProperty('body');
+    });
+
+    it('carries state, stamps and skipReason across, and annotates only the PENDING survivor', async () => {
+      const { app, world } = makeWebhookHarness();
+      world.settings.quietHoursEnabled = false;
+      const tourId = await seedQuietTour(world, 'earlier-states', '+15550600063');
+      await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-states-new' });
+      const old = 'ladder-states-old';
+      seedReminder(world, {
+        reminderId: 'rem-e-pending',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(6),
+        ladderId: old,
+      });
+      seedReminder(world, {
+        reminderId: 'rem-e-canceled',
+        tourId,
+        kind: 'morning_of',
+        dueAt: isoHoursFromNow(5),
+        canceledAt: isoHoursFromNow(-1),
+        ladderId: old,
+      });
+      seedReminder(world, {
+        reminderId: 'rem-e-skipped',
+        tourId,
+        kind: 'en_route',
+        dueAt: isoHoursFromNow(4),
+        skippedAt: isoHoursFromNow(-1),
+        skipReason: 'superseded',
+        ladderId: old,
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const byId = new Map(
+        (
+          res.body.earlier as {
+            reminderId: string;
+            state: string;
+            canceledAt?: string;
+            skippedAt?: string;
+            skipReason?: string;
+            suppression?: { reason: string };
+          }[]
+        ).map((r) => [r.reminderId, r]),
+      );
+      expect(byId.get('rem-e-pending')?.state).toBe('upcoming');
+      // The ONE annotation the disclosure renders: a sweep miss the operator
+      // may still want to cancel.
+      expect(byId.get('rem-e-pending')?.suppression).toEqual({ reason: 'superseded' });
+      expect(byId.get('rem-e-canceled')?.state).toBe('canceled');
+      expect(typeof byId.get('rem-e-canceled')?.canceledAt).toBe('string');
+      expect(byId.get('rem-e-canceled')?.suppression).toBeUndefined();
+      expect(byId.get('rem-e-skipped')?.state).toBe('skipped');
+      expect(byId.get('rem-e-skipped')?.skipReason).toBe('superseded');
+      expect(byId.get('rem-e-skipped')?.suppression).toBeUndefined();
+      // The current ladder is EMPTY - the shape acceptance 10 is about.
+      expect(res.body.reminders).toEqual([]);
+      expect(res.body.next).toBeUndefined();
+    });
+  });
+
   it('returns 404 for an unknown tour id', async () => {
     const { app } = makeWebhookHarness();
     const res = await authed(app).get('/api/tours/no-such-tour/reminders');
@@ -1134,6 +1509,28 @@ describe('PATCH /api/tours/:tourId/reminders/:reminderId', () => {
     ).toEqual(['rem-cancelable']);
   });
 
+  // The disclosure's Cancel button hits this path on an EARLIER rung, so the
+  // echoed view has to obey the same rule earlier[] does (review round m1):
+  // `bodyFor` recomposes live for any row without a sentAt+sentBody pair, and
+  // for a superseded generation that means printing a sentence about a schedule
+  // that never existed. The list GET is careful; the single-row echoes were not.
+  it('the PATCH echo of a SUPERSEDED rung never recomposes its body', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+    world.tourRemindersMap.get('rem-cancelable')!.ladderId = 'ladder-echo-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-echo-new' });
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reminder.state).toBe('canceled');
+    // This rung never sent, so it has no snapshot and there is no honest text at
+    // all - empty, never a freshly composed sentence.
+    expect(res.body.reminder.body).toBe('');
+  });
+
   it('409s a cancel that lost to the send (honest state in the body)', async () => {
     const { app, world } = makeWebhookHarness();
     const tourId = await seedTourWithRung(world);
@@ -1186,6 +1583,74 @@ describe('PATCH /api/tours/:tourId/reminders/:reminderId', () => {
       .send({ canceled: true });
     expect(cross.status).toBe(404);
     expect(cross.body).toEqual({ error: 'reminder_not_found' });
+  });
+
+  // S7 T7.8 / acceptance 9. The post-write re-read used to be a `.find(...)!`,
+  // which makes a vanished row a TypeError 500 - the row is consumed
+  // unconditionally three lines later. Post-S8/S9 the vanishing is REAL: the
+  // sweep DELETES a superseded generation's unsent rows, so an operator's
+  // cancel can genuinely land between a list and a delete.
+  it('404s a PATCH whose row vanished between the write and the re-read - and still emits scheduled.updated', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+    world.emitted.length = 0;
+    // Drive the exact interleaving: the conditional write WINS, then the row
+    // disappears before the route can re-read it.
+    const realCancel = world.tourRemindersRepo.cancel.bind(world.tourRemindersRepo);
+    vi.spyOn(world.tourRemindersRepo, 'cancel').mockImplementation(
+      async (reminderId: string, canceledAt: string) => {
+        const won = await realCancel(reminderId, canceledAt);
+        world.tourRemindersMap.delete(reminderId);
+        return won;
+      },
+    );
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'reminder_not_found' });
+    // THE HALF THAT IS EASY TO LOSE: the write WON, so every live surface has
+    // to hear about it. Placing the 404 above the emit would leave the panel
+    // and both Upcoming buckets stale until their next refetch, for a cancel
+    // that really did land.
+    expect(
+      world.emitted.some(
+        (e) =>
+          e.event === 'scheduled.updated' &&
+          (e.payload as { contactId?: string }).contactId === 'contact-cancel-1',
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT emit when the write itself lost and the row then vanished', async () => {
+    // The counterweight to the case above: a hoisted, unconditional emit would
+    // pass that test and announce a mutation that never happened. Here the
+    // cancel loses to a send that already claimed the rung, so there is
+    // nothing to announce - and the row is gone, so the 409's honest-state
+    // echo has nothing to echo either. 404 wins over 409: we cannot describe
+    // a row we cannot read.
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+    await world.tourRemindersRepo.claimSend('rem-cancelable', '2026-07-19T10:00:05.000Z');
+    world.emitted.length = 0;
+    const realCancel = world.tourRemindersRepo.cancel.bind(world.tourRemindersRepo);
+    vi.spyOn(world.tourRemindersRepo, 'cancel').mockImplementation(
+      async (reminderId: string, canceledAt: string) => {
+        const won = await realCancel(reminderId, canceledAt);
+        world.tourRemindersMap.delete(reminderId);
+        return won;
+      },
+    );
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'reminder_not_found' });
+    expect(world.emitted.some((e) => e.event === 'scheduled.updated')).toBe(false);
   });
 });
 
@@ -1289,6 +1754,33 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     });
   });
 
+  // S7 T7.8, the send-now half. Same `.find(...)!` shape, same fix, one
+  // difference: there is no emit to preserve here - the send's own
+  // `scheduled.updated` is emitted INSIDE forceSendReminder, before this route
+  // ever re-reads.
+  it('404s a send-now whose row vanished between the claim and the re-read', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '9' });
+    const realClaim = world.tourRemindersRepo.claimSend.bind(world.tourRemindersRepo);
+    vi.spyOn(world.tourRemindersRepo, 'claimSend').mockImplementation(
+      async (id: string, claimedAt: string, sentBody?: string) => {
+        const won = await realClaim(id, claimedAt, sentBody);
+        world.tourRemindersMap.delete(id);
+        return won;
+      },
+    );
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'reminder_not_found' });
+    // ANTI-VACUITY: the send really did happen - this is the 404 on the ECHO,
+    // not a refusal. A build that 404'd before the force-send would pass the
+    // status assertion and fail this one.
+    expect(spy.sent).toHaveLength(1);
+  });
+
   it('409s reminder_not_pending with the honest current view when the rung already fired', async () => {
     const spy = makeSendSpy();
     const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
@@ -1383,6 +1875,121 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(cross.body).toEqual({ error: 'reminder_not_found' });
     expect(spy.sent).toHaveLength(0);
   });
+
+  // -------------------------------------------------------------------------
+  // SUPERSESSION (spec 3.3, decision O4). forceSendReminder is a SEPARATE entry
+  // point and inherits nothing from the poll's gate, so without this the panel
+  // has a live button that force-sends a rung from a schedule that no longer
+  // exists.
+  // -------------------------------------------------------------------------
+  it('409s superseded on a rung whose ladder the tour has replaced, and leaves it pending', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '6' });
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-new' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('superseded');
+    expect(res.body.reminder.state).toBe('upcoming');
+    // The 409 echoes the same view, so it obeys the same no-recompose rule
+    // (review round m1): a superseded rung renders its snapshot or nothing.
+    expect(res.body.reminder.body).toBe('');
+    expect(spy.sent).toHaveLength(0);
+    // A refusal never retires a rung - the poll's claim-skip is what does that.
+    expect(world.tourRemindersMap.get(reminderId)?.sentAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.skippedAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.canceledAt).toBeUndefined();
+  });
+
+  it('ANTI-VACUITY: the CURRENT generation of the same pair still sends', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '7' });
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-current';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-current' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reminder.state).toBe('sent');
+    expect(spy.sent).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // THE CONVERSION CLAIM (spec 3.3, review round M1). The poll DEFERS every
+  // rung of a tour carrying a `pending:` sentinel; without the same check here
+  // Send now composes and fires one - "your tour is tomorrow" for a tour that
+  // is becoming a placement, and unbounded on a conversion that crashed between
+  // the claim and the finalize (the sentinel has no TTL).
+  // -------------------------------------------------------------------------
+  it('409s conversion_in_progress while a placement conversion holds the claim', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '9' });
+    await world.toursRepo.claimConversion(tourId, 'pending:conv-sendnow-1');
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('conversion_in_progress');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+    // Neither path stamps: the poll defers, the human path refuses, and a
+    // released claim has to leave the rung sendable.
+    expect(world.tourRemindersMap.get(reminderId)?.sentAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.skippedAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(reminderId)?.canceledAt).toBeUndefined();
+  });
+
+  it('a FINALIZED tour is not a claim in flight - the prefix is the predicate', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '10' });
+    await world.toursRepo.patch(tourId, { convertedPlacementId: 'placement-real-1' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(spy.sent).toHaveLength(1);
+  });
+
+  it('superseded outranks the conversion claim - a mismatched rung is refused either way', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '11' });
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-new' });
+    await world.toursRepo.claimConversion(tourId, 'pending:conv-sendnow-2');
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('superseded');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('kind_retired still outranks superseded - the refusal that costs no reads stays first', async () => {
+    // Both are permanent, but they send the operator to different places, and
+    // the discontinued-kind refusal is deliberately the first thing this
+    // function says (its comment argues why). Adding a pointer check must not
+    // quietly reorder that.
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '8' });
+    world.tourRemindersMap.get(reminderId)!.kind = 'confirmation';
+    world.tourRemindersMap.get(reminderId)!.ladderId = 'ladder-sendnow-old';
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-sendnow-new' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('kind_retired');
+    expect(spy.sent).toHaveLength(0);
+  });
+
 });
 
 // ===========================================================================

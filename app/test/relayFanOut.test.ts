@@ -5,12 +5,12 @@
 // intro naming every member. Driven through the real jobs envelope machinery
 // (enqueue → InMemoryScheduler/InProcessOutboundQueue → dispatchJob) so the
 // jobId-marker idempotency guard is exercised for real.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
-import type { SendMessageParams } from '../src/adapters/messaging.js';
+import type { PreparedMessageSend, SendMessageParams } from '../src/adapters/messaging.js';
 import {
   _resetForTests,
   configureJobsLogger,
@@ -40,8 +40,10 @@ import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
-import { createLogCapture } from './helpers/logCapture.js';
+import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
+import { TRANSPORT_SCHEMA_VERSION } from '../src/lib/messageTransport.js';
+import { flushQueuedMessages } from '../src/services/relayQueuedMessages.js';
 
 const POOL = '+15550109000';
 const ALICE = '+15550100001';
@@ -86,9 +88,98 @@ function seedSource(world: FakeWorld, body: string, senderKey: string): MessageI
     delivery_status: 'delivered',
     created_at: providerTs,
     relay_sender_key: senderKey,
+    // Production seeds the parent map EMPTY on an inbound relay source
+    // (routes/webhooks/twilio.ts) so the fan-out's child-only
+    // setRecipientDelivery has something to write into. The harness fake
+    // tolerates an absent map; the real repo would reject the child SET.
+    delivery_recipients: {},
   };
   world.messages.push(item);
   return item;
+}
+
+function seedVersionedSource(
+  world: FakeWorld,
+  body: string,
+  senderKey: string,
+  overrides: Partial<MessageItem> = {},
+): MessageItem {
+  const source = seedSource(world, body, senderKey);
+  source.transport_schema_version = TRANSPORT_SCHEMA_VERSION;
+  source.requested_transport = 'sms';
+  source.delivery_recipients = {};
+  Object.assign(source, overrides);
+  return source;
+}
+
+/**
+ * Seed a TEAM-authored source message: outbound, the team sentinel as sender
+ * key, and one 'queued' slot per roster member - the shape routes/api.ts
+ * persists before it enqueues the fan-out.
+ */
+function seedTeamSource(world: FakeWorld, body: string, memberKeys: string[]): MessageItem {
+  const providerTs = new Date().toISOString();
+  const tsMsgId = buildTsMsgId(providerTs, 'team-src-cap');
+  const slots: NonNullable<MessageItem['delivery_recipients']> = {};
+  for (const key of memberKeys) {
+    slots[key] = {
+      status: 'queued',
+      requestedTransport: 'sms',
+      transportAggregationState: 'planned',
+    };
+  }
+  const item: MessageItem = {
+    conversationId: 'conv-relay-1',
+    tsMsgId,
+    type: 'sms',
+    direction: 'outbound',
+    author: 'teammate',
+    body,
+    provider_sid: 'team-src-cap',
+    provider_ts: providerTs,
+    delivery_status: 'queued',
+    created_at: providerTs,
+    transport_schema_version: TRANSPORT_SCHEMA_VERSION,
+    requested_transport: 'sms',
+    relay_sender_key: TEAM_SENDER_KEY,
+    delivery_recipients: slots,
+  };
+  world.messages.push(item);
+  return item;
+}
+
+/** Recipient states the fan-out treats as terminal (relayFanOut isTerminal). */
+const TERMINAL_STATUSES = new Set(['sent', 'delivered', 'failed']);
+
+/**
+ * The single operator ERROR line every close writes (M5 D8): the cap reached
+ * mid-ladder, a pass beginning with the ladder already spent, and a failed
+ * continuation enqueue all land on one message, parameterised by closeCode.
+ * Matched by message so an unrelated error line cannot inflate the count.
+ */
+function closeLines(capture: LogCapture): Record<string, unknown>[] {
+  return capture
+    .atLevel(50)
+    .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('fan-out closed'));
+}
+
+/**
+ * Send stubs as vi.fn COUNTERS. These tests replace the messaging adapter
+ * wholesale, so `world.sent` (appended inside the harness adapter) never fills
+ * for a deferring recipient - the stub's own call count is the honest one.
+ */
+/** A send stub that must never run - calling it fails the test loudly. */
+function neverSends() {
+  return vi.fn(async (): Promise<never> => {
+    throw new Error('sendMessage must not be called on this pass');
+  });
+}
+
+/** A send stub that always rate-limits (429 = transient -> continuation). */
+function alwaysRateLimits() {
+  return vi.fn(async (): Promise<never> => {
+    throw Object.assign(new Error('rate limited'), { code: 429 });
+  });
 }
 
 describe('relay.fanOut (M1.7)', () => {
@@ -114,7 +205,7 @@ describe('relay.fanOut (M1.7)', () => {
     // through the SQS path (outbound adapter), NOT EventBridge. In tests the
     // InProcess adapter dispatches immediate jobs in-process and RECORDS delayed
     // ones in `delayed[]` for assertions (no real sleep).
-    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob, logger });
     configureOutboundQueue(outbound);
   });
 
@@ -151,6 +242,327 @@ describe('relay.fanOut (M1.7)', () => {
 
     // A relaysid pointer was written per recipient (delivery-callback routing).
     expect(world.relaySidPointers.size).toBe(2);
+  });
+
+  it('keeps the schema-absent path mechanically free of transport hooks for a continuation', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'legacy continuation', 'c-alice');
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const prepare = vi.spyOn(world.adapter, 'prepareMessageSend');
+    const initialize = vi.spyOn(world.messagesRepo, 'initializeRecipientDelivery');
+    const aggregate = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+    const apply = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-carol'],
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((sent) => sent.to)).toEqual([CAROL]);
+    expect(source.delivery_recipients?.['c-carol']?.sid).toMatch(/^SMfake-out-/);
+    expect(classify).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(aggregate).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('preflights every filtered eligible v1 slot before provider call zero', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'versioned', 'c-alice');
+    const sourceRead = vi.spyOn(world.messagesRepo, 'listByConversation');
+    const initialize = vi.spyOn(world.messagesRepo, 'initializeRecipientDelivery');
+    const legacyWrite = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+    const snapshots: Array<Record<string, unknown>> = [];
+    const originalSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+    vi.spyOn(world.adapter, 'sendPreparedMessage').mockImplementation(async (prepared) => {
+      snapshots.push(structuredClone(source.delivery_recipients ?? {}));
+      return originalSend(prepared);
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      recipientKeys: ['c-bob', 'c-carol'],
+    });
+    await outbound.settle();
+
+    expect(source.delivery_recipients?.['c-alice']).toBeUndefined();
+    expect(sourceRead.mock.invocationCallOrder[0]).toBeLessThan(
+      initialize.mock.invocationCallOrder[0]!,
+    );
+    expect(legacyWrite).not.toHaveBeenCalled();
+    expect(Object.keys(snapshots[0] ?? {}).sort()).toEqual(['c-bob', 'c-carol']);
+    expect(snapshots[0]).toMatchObject({
+      'c-bob': { requestedTransport: 'sms' },
+      'c-carol': { requestedTransport: 'sms', transportAggregationState: 'planned' },
+    });
+    expect(source.delivery_recipients).toMatchObject({
+      'c-bob': {
+        status: 'queued',
+        requestedTransport: 'sms',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+      'c-carol': {
+        status: 'queued',
+        requestedTransport: 'sms',
+        actualTransport: 'sms',
+        transportAggregationState: 'attempted',
+      },
+    });
+  });
+
+  it('aborts a v1 execution before provider call zero when preflight cannot initialize a slot', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'preflight failure', 'c-alice');
+    const initialize = vi
+      .spyOn(world.messagesRepo, 'initializeRecipientDelivery')
+      .mockResolvedValue('missing');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+    expect(world.sent).toHaveLength(0);
+    expect(initialize).toHaveBeenCalled();
+  });
+
+  it('reconciles stale planned slots, preserves attempted slots, and excludes suppression', async () => {
+    const conversation = seedRelay(world);
+    conversation.participants = conversation.participants?.slice(0, 2);
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+    const source = seedVersionedSource(world, 'states', 'c-alice', {
+      delivery_recipients: {
+        'c-alice': { status: 'queued', requestedTransport: 'sms' },
+        'c-bob': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+        'c-carol': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        'c-removed': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    expect(source.delivery_recipients?.['c-alice']?.transportAggregationState).toBe('excluded');
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+    });
+    expect(source.delivery_recipients?.['c-bob']?.actualTransport).toBeUndefined();
+    expect(source.delivery_recipients?.['c-carol']?.transportAggregationState).toBe('attempted');
+    expect(source.delivery_recipients?.['c-removed']?.transportAggregationState).toBe('excluded');
+  });
+
+  it('keeps a current continuation-omitted recipient planned while sending only the continuation roster', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'continuation roster', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+        'c-carol': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'planned',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((sent) => sent.to)).toEqual([BOB]);
+    expect(source.delivery_recipients?.['c-carol']).toMatchObject({
+      status: 'queued',
+      requestedTransport: 'sms',
+      transportAggregationState: 'planned',
+    });
+  });
+
+  it('keeps a suppressed excluded continuation slot out of provider handling', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'suppressed continuation', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          requestedTransport: 'sms',
+          transportAggregationState: 'excluded',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+    });
+  });
+
+  it('reopens a never-attempted non-suppressed excluded member who has rejoined', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'rejoined member', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'queued',
+          requestedTransport: 'sms',
+          transportAggregationState: 'excluded',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((sent) => sent.to)).toEqual([BOB]);
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'queued',
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
+      transportAggregationState: 'attempted',
+    });
+  });
+
+  it('preserves first callback pointers while a v1 continuation adds actual evidence and clears transient error', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'retry', 'c-alice', {
+      delivery_recipients: {
+        'c-bob': {
+          status: 'queued',
+          sid: 'SMfirst',
+          sentAt: '2026-08-31T12:00:00.000Z',
+          errorCode: '30022',
+          requestedTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+      attempt: 2,
+      recipientKeys: ['c-bob'],
+    });
+    await outbound.settle();
+
+    expect(source.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'queued',
+      sid: 'SMfirst',
+      sentAt: '2026-08-31T12:00:00.000Z',
+      requestedTransport: 'sms',
+      actualTransport: 'sms',
+      transportAggregationState: 'attempted',
+    });
+    expect(source.delivery_recipients?.['c-bob']?.errorCode).toBeUndefined();
+    expect(world.relaySidPointers.size).toBe(1);
+  });
+
+  it('keeps a schema-absent queued_pending release on the exact legacy path', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'held legacy', TEAM_SENDER_KEY);
+    source.direction = 'outbound';
+    source.delivery_status = 'queued_pending';
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const apply = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
+
+    await flushQueuedMessages('conv-relay-1', {
+      messagesRepo: world.messagesRepo,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(3);
+    expect(source.delivery_status).toBe('queued');
+    expect(classify).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('preserves a durable mms request when unavailable media storage reclassifies execution to sms', async () => {
+    seedRelay(world);
+    const source = seedVersionedSource(world, 'media fallback', 'c-alice', {
+      type: 'mms',
+      requested_transport: 'mms',
+      media_attachments: [{ s3Key: 'uploads/unavailable-key', contentType: 'image/png' }],
+      delivery_recipients: {
+        'c-bob': { status: 'queued', requestedTransport: 'mms' },
+        'c-carol': { status: 'queued', requestedTransport: 'mms' },
+      },
+    });
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(2);
+    expect(world.sent.every((sent) => sent.mediaUrls === undefined)).toBe(true);
+    expect(source.requested_transport).toBe('mms');
+    expect(source.delivery_recipients).toMatchObject({
+      'c-bob': { requestedTransport: 'mms', actualTransport: 'sms' },
+      'c-carol': { requestedTransport: 'mms', actualTransport: 'sms' },
+    });
+    expect(
+      capture.lines.filter(
+        (line) =>
+          line['msg'] ===
+          'relayFanOut: persisted transport intent differs from execution classification',
+      ),
+    ).toHaveLength(1);
   });
 
   it('does NOT fan out when the group closed after the message was enqueued (status gate, AF-2)', async () => {
@@ -434,11 +846,15 @@ describe('relay.fanOut (M1.7)', () => {
     });
     await outbound.settle();
     expect(world.sent).toHaveLength(2);
+    expect(world.messages.find((m) => m.tsMsgId === source.tsMsgId)!.fanout_attempt).toBe(1);
 
     // Re-dispatch the SAME envelope (SQS at-least-once redelivery): the jobId
     // marker suppresses it — no further sends.
     await dispatchJob(JSON.parse(JSON.stringify(envelope)));
     expect(world.sent).toHaveLength(2);
+    // D6: the duplicate returned ABOVE the claim, so it consumed no rung. A
+    // claim placed any earlier would burn the ladder on redeliveries alone.
+    expect(world.messages.find((m) => m.tsMsgId === source.tsMsgId)!.fanout_attempt).toBe(1);
   });
 
   it('per-recipient idempotency: a continuation skips recipients already terminal', async () => {
@@ -503,6 +919,248 @@ describe('relay.fanOut (M1.7)', () => {
     expect(payload.attempt).toBe(2);
     // fanOutBackoffMs(attempt 1) = 5s → DelaySeconds 5 (exact, no 60s floor).
     expect(outbound.delayed[0]!.delaySeconds).toBe(5);
+    // M5: pass 1 claimed rung 1 on the DURABLE source message. The envelope's
+    // `attempt` is advisory from here on - this is the number the cap reads.
+    expect(world.messages.find((m) => m.tsMsgId === source.tsMsgId)!.fanout_attempt).toBe(1);
+  });
+
+  // --- M5: the three closes. The relay terminal shape is narrower than the
+  // broadcast one - there is no finalize, no stats and no hub-status rollup on
+  // this path - so it is exactly: every derived member slot terminal, one
+  // operator ERROR line, and no continuation left behind (D8).
+  it('close A: 429 capped at MAX_FANOUT_ATTEMPTS (ladder driven for real) -> deferred recipient marked failed', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedTeamSource(world, 'Open house Saturday', ['c-alice', 'c-bob']);
+    // Alice succeeds on pass 1 and is terminal from then on; Bob rate-limits on
+    // every pass, so he is the one recipient the ladder carries to the cap.
+    const send = vi.fn(async (prepared: PreparedMessageSend) => {
+      if (prepared.params.to === BOB) {
+        throw Object.assign(new Error('rate limited'), { code: 429 });
+      }
+      return {
+        providerSid: `SMok-${prepared.params.to}`,
+        status: 'sent' as const,
+        providerTs: new Date().toISOString(),
+        actualTransport: 'sms' as const,
+      };
+    });
+    world.adapter.sendPreparedMessage = send;
+
+    // Drive the ladder the way PRODUCTION reaches the cap - three passes, each
+    // deferring - instead of injecting attempt=3 in the envelope, which the
+    // durable counter has made advisory.
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: TEAM_SENDER_KEY,
+      senderNameOverride: TEAM_SENDER_LABEL,
+    });
+    await outbound.settle();
+
+    // deliverDelayed drains TRANSITIVELY and empties delayed[], so one call
+    // would run passes 2 AND 3 together and erase both delays. Shift one
+    // continuation at a time and dispatch it, recording the rung's delay first.
+    const delaysObserved: number[] = [];
+    for (let pass = 2; pass <= 3; pass += 1) {
+      const item = outbound.delayed.shift();
+      expect(item).toBeDefined();
+      delaysObserved.push(item!.delaySeconds);
+      await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)));
+    }
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
+    expect(stored.delivery_recipients?.['c-bob']?.errorCode).toBe('transient_cap');
+    // Alice's pass-1 send stands: a close never rewrites an already-terminal
+    // slot. Every slot on the row is terminal - nothing left queued (D8).
+    expect(stored.delivery_recipients?.['c-alice']?.status).toBe('sent');
+    expect(
+      Object.values(stored.delivery_recipients ?? {}).every((d) => TERMINAL_STATUSES.has(d.status)),
+    ).toBe(true);
+    expect(outbound.delayed).toHaveLength(0); // no FOURTH continuation
+    expect(closeLines(capture)).toHaveLength(1);
+    // D10: the operator line reports the DURABLE counter the close decided on -
+    // here the cap itself, reached by driving the real ladder.
+    expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
+    // D7: pass count and delays are exactly main's - three attempts at the
+    // deferred recipient, 5s then 10s (relay passes the CURRENT pass number).
+    expect(send.mock.calls.filter(([prepared]) => prepared.params.to === BOB)).toHaveLength(3);
+    expect(delaysObserved).toEqual([5, 10]);
+    // The cap was reached on the DURABLE counter, not on the envelope.
+    expect(stored.fanout_attempt).toBe(3);
+  });
+
+  it('close B: a pass beginning with the ladder already spent closes an INBOUND source, sending nothing', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'hi', 'c-alice');
+    // Spec 7.4's vacuous-pass trap: an inbound source carries an EMPTY
+    // delivery_recipients map, so every slot the close writes has to come from
+    // the ROSTER. A close driven off the row would mark nothing and still pass.
+    expect(Object.keys(source.delivery_recipients ?? {})).toHaveLength(0);
+    // Seed the STORED item at MAX_FANOUT_ATTEMPTS (world.messages holds the
+    // items themselves). A FIRST-pass envelope - no attempt, no recipientKeys -
+    // so only the durable counter can refuse the claim.
+    source.fanout_attempt = 3;
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(send).not.toHaveBeenCalled();
+    // Every roster-derived recipient (the sender excluded) is terminal.
+    expect(Object.keys(stored.delivery_recipients ?? {}).sort()).toEqual(['c-bob', 'c-carol']);
+    expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
+    expect(stored.delivery_recipients?.['c-bob']?.errorCode).toBe('transient_cap');
+    expect(stored.delivery_recipients?.['c-carol']?.status).toBe('failed');
+    expect(stored.delivery_recipients?.['c-carol']?.errorCode).toBe('transient_cap');
+    expect(closeLines(capture)).toHaveLength(1);
+    // D10: this is the line an operator reads to answer "why did it give up".
+    // It must carry the STORED count that refused the claim (3), not the
+    // first-pass envelope's advisory 1 - the two are kept distinguishable.
+    expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
+    expect(closeLines(capture)[0]!['envelopeAttempt']).toBe(1);
+    expect(outbound.delayed).toHaveLength(0);
+    // A capped claim consumes nothing: the counter is UNCHANGED.
+    expect(stored.fanout_attempt).toBe(3);
+  });
+
+  it('close C: a continuation the queue REFUSES closes the fan-out instead of leaving a recipient queued', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedSource(world, 'hi', 'c-alice');
+    const send = alwaysRateLimits();
+    world.adapter.sendMessage = send;
+
+    // DELAY-SELECTIVE: this file starts every job through the SAME adapter with
+    // delaySeconds 0, so an unconditional thrower would kill the test's own
+    // entry enqueue and the handler would never run.
+    configureOutboundQueue({
+      async enqueue(envelope, opts) {
+        if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+        return outbound.enqueue(envelope, opts);
+      },
+    });
+
+    // PASS 1 deliberately: runDeferred catches a handler throw (so settle()
+    // resolves and the assertions are reachable); deliverDelayed does not.
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    // The anchor bug: without the close the recipient stays 'queued' forever -
+    // the continuation never lands and a redelivery is suppressed at the marker.
+    expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
+    // Its OWN code (D10): retries never ran here, so it is not the cap's code.
+    expect(stored.delivery_recipients?.['c-bob']?.errorCode).toBe('enqueue_failed');
+    expect(closeLines(capture)).toHaveLength(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(outbound.delayed).toHaveLength(0);
+    // The pass WAS claimed and spent before the queue refused the next rung.
+    expect(stored.fanout_attempt).toBe(1);
+  });
+
+  it('the claim reports `missing` (source deleted between the handler read and the claim) -> warn, NOTHING sent, NO slot written, NO close', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedSource(world, 'hi', 'c-alice');
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    // The RACE, and an override is the only way to model it: the handler re-reads
+    // the source message near the top and claims further down, so `missing` means
+    // a delete landed in that window. The fake's own claim scans the live message
+    // array, which still holds the seeded row, so it could never answer `missing`.
+    world.messagesRepo.claimFanoutPass = async () => ({ outcome: 'missing' });
+
+    // A local queue carrying the CAPTURING logger: runDeferred swallows a handler
+    // throw and logs it at ERROR, so with this wiring the empty error-level
+    // assertion below is a real "returned cleanly" check.
+    const queue = new InProcessOutboundQueueAdapter({
+      dispatch: dispatchJob,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    configureOutboundQueue(queue);
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await queue.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(send).not.toHaveBeenCalled();
+    // NOTHING written: no delivery slot, no rung consumed, no relaysid pointer.
+    // `missing` has nothing to close (D8's close would write slots onto a row
+    // that no longer exists), so the handler logs and returns - no close line,
+    // and no ERROR of any kind.
+    expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
+    expect(stored.fanout_attempt).toBeUndefined();
+    expect(closeLines(capture)).toHaveLength(0);
+    expect(capture.atLevel(50)).toHaveLength(0);
+    expect(queue.delayed).toHaveLength(0);
+    // The ONE operator line the arm does write, at WARN.
+    expect(
+      capture
+        .atLevel(40)
+        .filter((l) => String(l['msg']).includes('vanished before the pass claim')),
+    ).toHaveLength(1);
+  });
+
+  it('a pass whose recipients are ALL already terminal claims no rung and enqueues nothing', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const source = seedSource(world, 'hi', 'c-alice');
+    // A continuation that raced: the only recipient is already terminal.
+    await world.messagesRepo.setRecipientDelivery('conv-relay-1', source.tsMsgId, 'c-bob', {
+      status: 'sent',
+      sid: 'SMprev',
+    });
+    const send = neverSends();
+    world.adapter.sendMessage = send;
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(send).not.toHaveBeenCalled();
+    // D6: a pass that attempts no send consumes no rung - the attribute is
+    // still ABSENT, so a later real pass still gets the full ladder.
+    expect(stored.fanout_attempt).toBeUndefined();
+    // There is no early return for an empty pending set: the handler simply
+    // falls off the end. Nothing enqueued, nothing closed.
+    expect(outbound.delayed).toHaveLength(0);
+    expect(closeLines(capture)).toHaveLength(0);
   });
 
   it('SendRefusedError (opt-out/breaker): marks that recipient failed and continues with others', async () => {
@@ -612,6 +1270,8 @@ describe('relay.fanOut (M1.7)', () => {
     expect(row.delivery_recipients?.['c-bob']).toEqual({
       status: 'failed',
       errorCode: 'contact_opted_out',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
     });
     expect(row.delivery_recipients?.['c-alice']?.status).toBe('queued'); // fake adapter returns 'queued'
   });
@@ -862,7 +1522,7 @@ describe('relay catalog entries (spec 9.2a)', () => {
         where: '412 Oak St',
       }),
     ).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. " +
         'Looking forward to you seeing the property and meeting Marcus! Please let us know ' +
         "when you're on the way.",
     );
@@ -874,7 +1534,7 @@ describe('relay catalog entries (spec 9.2a)', () => {
         where: '412 Oak St',
       }),
     ).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 " +
         'at 3:00 PM. Looking forward to you seeing the property and meeting Marcus! Please ' +
         "let us know when you're on the way.",
     );
@@ -885,7 +1545,7 @@ describe('relay catalog entries (spec 9.2a)', () => {
         where: '412 Oak St',
       }),
     ).toBe(
-      'Hey Alicia! Excited to have you move into 412 Oak St. Please use this group text for ' +
+      "Hey Alicia! It's Sam. Excited to have you move into 412 Oak St. Please use this group text for " +
         'all future communication and Marcus will share updates as they receive them from ' +
         'the housing authority. This can be a long process so if you have any questions feel ' +
         'free to ask in here! We are committed to the process and are excited to have you ' +
@@ -934,6 +1594,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
     body: string,
     senderKey: string,
     media: { s3Key: string; contentType: string }[],
+    overrides: Partial<MessageItem> = {},
   ): MessageItem {
     const providerTs = new Date().toISOString();
     const tsMsgId = buildTsMsgId(providerTs, 'SMrelay-mms-1');
@@ -950,6 +1611,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
       created_at: providerTs,
       relay_sender_key: senderKey,
       media_attachments: media,
+      ...overrides,
     };
     world.messages.push(item);
     return item;
@@ -1047,6 +1709,37 @@ describe('relay.fanOut media (outbound MMS)', () => {
     expect(url1).toContain('uploads/shared-key');
     // ...but are DISTINCT presigns (per-leg, not one batched URL reused).
     expect(url0).not.toBe(url1);
+  });
+
+  it('uses fresh URLs with the persisted v1 request and records adapter actual evidence', async () => {
+    seedRelay(world);
+    const source = seedMediaSource(
+      'versioned media',
+      'c-alice',
+      [{ s3Key: 'uploads/versioned-key', contentType: 'image/png' }],
+      {
+        transport_schema_version: TRANSPORT_SCHEMA_VERSION,
+        requested_transport: 'mms',
+        delivery_recipients: {
+          'c-bob': { status: 'queued', requestedTransport: 'mms' },
+          'c-carol': { status: 'queued', requestedTransport: 'mms' },
+        },
+      },
+    );
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(2);
+    expect(world.sent[0]?.mediaUrls?.[0]).not.toBe(world.sent[1]?.mediaUrls?.[0]);
+    expect(source.delivery_recipients).toMatchObject({
+      'c-bob': { requestedTransport: 'mms', actualTransport: 'mms' },
+      'c-carol': { requestedTransport: 'mms', actualTransport: 'mms' },
+    });
   });
 });
 
@@ -1359,7 +2052,7 @@ describe('composeIntroBody (spec 9.1) - entry selection from the resolved varian
 
   it('routes each variant to its founder entry', () => {
     expect(composeIntroBody(TOUR_INPUTS, ['Alicia Reyes', 'Marcus Webb'])).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 " +
         'at 3:00 PM. Looking forward to you seeing the property and meeting Marcus! Please ' +
         "let us know when you're on the way.",
     );
@@ -1368,7 +2061,7 @@ describe('composeIntroBody (spec 9.1) - entry selection from the resolved varian
         'Alicia Reyes',
       ]),
     ).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. " +
         'Looking forward to you seeing the property and meeting Marcus! Please let us know ' +
         "when you're on the way.",
     );
@@ -1391,7 +2084,7 @@ describe('composeIntroBody (spec 9.1) - entry selection from the resolved varian
   // fallback (messages/tourCopy.ts) is the one used.
   it('a variant with NO tenant name greets "Hey there!" and does not throw', () => {
     const body = composeIntroBody({ ...TOUR_INPUTS, tenantFirstName: undefined }, []);
-    expect(body).toContain('Hey there! Putting you in a group text with Marcus');
+    expect(body).toContain("Hey there! It's Sam. Putting you in a group text with Marcus");
   });
 
   // The composer is the LAST line of 9.5's defence: the resolver already
@@ -1533,7 +2226,7 @@ describe('relay.intro / relay.memberAdded on an OWNED group', () => {
     await outbound.settle();
 
     const expected =
-      'Hey Tina! Putting you in a group text with Larry to tour 77 Peachtree St on ' +
+      "Hey Tina! It's Sam. Putting you in a group text with Larry to tour 77 Peachtree St on " +
       'Tue, Sep 8 at 3:00 PM. Looking forward to you seeing the property and meeting ' +
       "Larry! Please let us know when you're on the way.";
     expect(world.sent.map((s) => s.to).sort()).toEqual([TENANT, LANDLORD].sort());

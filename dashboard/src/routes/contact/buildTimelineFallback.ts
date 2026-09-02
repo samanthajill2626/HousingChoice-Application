@@ -70,6 +70,11 @@ export function buildTimelineFallback(
         direction: m.direction,
         author: m.author,
         type: m.type === 'mms' ? 'mms' : 'sms',
+        ...(m.transport_schema_version !== undefined && {
+          transport_schema_version: m.transport_schema_version,
+        }),
+        ...(m.requested_transport !== undefined && { requested_transport: m.requested_transport }),
+        ...(m.actual_transport !== undefined && { actual_transport: m.actual_transport }),
         delivery_status: m.delivery_status,
         // The participant phone is the EXTERNAL party. Inbound: they're the
         // sender (fromPhone); outbound: they're the recipient (toPhone). The

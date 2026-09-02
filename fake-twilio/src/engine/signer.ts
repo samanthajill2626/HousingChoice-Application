@@ -21,6 +21,18 @@ export interface BuildInboundSmsInput {
   otherRecipients?: string[];
   /** Defaults to `indexed`. */
   otherRecipientsShape?: OtherRecipientsShape;
+  channelPrefix?: string;
+  channelMetadata?: Record<string, unknown> | string;
+}
+
+function serializeChannelMetadata(value: Record<string, unknown> | string): string {
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function assertRcsChannelPrefix(value: string | undefined): void {
+  if (value !== undefined && value !== 'rcs') {
+    throw new TypeError('ChannelPrefix must be rcs when explicitly supplied');
+  }
 }
 
 /** Infer a Twilio-style MediaContentType from a media URL's file extension (FIX 7). */
@@ -45,6 +57,7 @@ function inferMediaContentType(url: string): string {
 
 /** Build the application/x-www-form-urlencoded params Twilio sends for inbound SMS/MMS. */
 export function buildInboundSmsParams(input: BuildInboundSmsInput): WebhookParams {
+  assertRcsChannelPrefix(input.channelPrefix);
   const params: WebhookParams = {
     MessageSid: input.messageSid,
     From: input.from,
@@ -60,6 +73,10 @@ export function buildInboundSmsParams(input: BuildInboundSmsInput): WebhookParam
     params[`MediaContentType${i}`] = inferMediaContentType(url);
   });
   if (input.optOutType !== undefined) params['OptOutType'] = input.optOutType;
+  if (input.channelPrefix !== undefined) params['ChannelPrefix'] = input.channelPrefix;
+  if (input.channelMetadata !== undefined) {
+    params['ChannelMetadata'] = serializeChannelMetadata(input.channelMetadata);
+  }
   // The carrier-group ENVELOPE. Undocumented by Twilio and proven only by the
   // live spike, so both observed layouts are producible: the app's parser is
   // gap-tolerant and reads BOTH, and a spec must be able to exercise each.
@@ -183,16 +200,27 @@ export interface BuildStatusInput {
   messageSid: string;
   status: 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
   errorCode?: string;
+  from?: string;
+  to?: string;
+  channelPrefix?: string;
+  channelMetadata?: Record<string, unknown> | string;
 }
 
 /** Build the params Twilio sends for a delivery status callback. */
 export function buildStatusParams(input: BuildStatusInput): WebhookParams {
+  assertRcsChannelPrefix(input.channelPrefix);
   const params: WebhookParams = {
     MessageSid: input.messageSid,
     MessageStatus: input.status,
     ApiVersion: '2010-04-01',
   };
   if (input.errorCode !== undefined) params['ErrorCode'] = input.errorCode;
+  if (input.from !== undefined) params['From'] = input.from;
+  if (input.to !== undefined) params['To'] = input.to;
+  if (input.channelPrefix !== undefined) params['ChannelPrefix'] = input.channelPrefix;
+  if (input.channelMetadata !== undefined) {
+    params['ChannelMetadata'] = serializeChannelMetadata(input.channelMetadata);
+  }
   return params;
 }
 

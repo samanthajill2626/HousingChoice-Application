@@ -16,6 +16,7 @@
 // (re-)enqueues this seam. It is idempotent by contract, which is what closes
 // the create-then-crash-before-enqueue window.
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 // A raw Twilio SDK failure is an AxiosError carrying the request config - the
 // Authorization header and the whole roster in `data`. Every catch in this file
@@ -119,6 +120,21 @@ export interface GroupRailRequest {
   conversationId: string;
   /** The roster the rail must contain. */
   members: ConversationParticipant[];
+  /**
+   * Wait out Twilio's ASYNC binding propagation before concluding a freshly
+   * created rail is short of its roster (rail-binding-propagation-retry).
+   *
+   * OPT-IN PER CALLER, never inferred. The background job, the migration and the
+   * operator verify script set it: they are batch paths with no human waiting on
+   * the call, and the migration is where the harm was measured. The two
+   * `groupSend` paths deliberately do NOT - they run inside a staff HTTP request
+   * and every variant that made them wait either leaked the `rail_creating`
+   * claim or required editing fenced repo code. The defect stays live there.
+   *
+   * Ignored on an ADOPTED rail: its read-back is the only source of roster truth
+   * we have, so widening the wait there needs its own evidence.
+   */
+  awaitBindingPropagation?: boolean;
 }
 
 export interface GroupRailResult {
@@ -218,7 +234,22 @@ export interface GroupRailServiceDeps {
   /** Owner-token minter (seam so a test can pin the token). */
   newToken?: () => string;
   claimExpiryMs?: number;
+  /**
+   * Injectable sleep, defaulting to a real timer. The binding-propagation ladder
+   * is the only waiter; a test injects a recorder so the rungs are asserted
+   * without spending the wall clock.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/**
+ * The binding-propagation ladder: how long to wait before each re-read of a
+ * freshly created rail's participants, and therefore how many re-reads there
+ * are. Two rungs, ~2s total, sized against the 2026-08-13 migration where a
+ * second read seconds later showed every rail fully bound. Tunable: these are
+ * the numbers, not a contract.
+ */
+const BINDING_PROPAGATION_DELAYS_MS = [500, 1500];
 
 /** MBxx -> member key (`phone#<E164>`), the map late receipts are joined on. */
 function buildParticipantMap(participants: GroupParticipantRef[]): Record<string, string> {
@@ -281,15 +312,44 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
   const now = deps.now ?? ((): Date => new Date());
   const newToken = deps.newToken ?? ((): string => randomUUID());
   const claimExpiryMs = deps.claimExpiryMs ?? RAIL_CLAIM_EXPIRY_MS;
+  const sleep = deps.sleep ?? ((ms: number): Promise<void> => delay(ms));
 
   function businessNumber(): string | undefined {
     if (deps.businessNumber !== undefined) return deps.businessNumber;
     return (config ?? loadConfig()).businessPhoneNumber;
   }
 
+  /**
+   * Re-read the rail's participants until the roster is covered or the rungs run
+   * out, and RETURN the list - the caller assigns. It must not assign the
+   * caller's `participants` itself: that variable is `GroupParticipantRef[] |
+   * undefined` and is used unguarded below, so a closure that writes to it drops
+   * the narrowing the `??=` read established and the typecheck gate fails.
+   *
+   * A throw is NOT caught here. A failed re-read is a failed read, and the
+   * callers record it as a rail failure - continuing with the previously-read
+   * list would substitute stale data for an authoritative read, which is exactly
+   * what the authority model forbids (D15).
+   */
+  async function reReadUntilBound(
+    conversationSid: string,
+    members: ConversationParticipant[],
+    current: GroupParticipantRef[],
+  ): Promise<GroupParticipantRef[]> {
+    let participants = current;
+    for (const waitMs of BINDING_PROPAGATION_DELAYS_MS) {
+      if (missingFromMap(members, buildParticipantMap(participants)).length === 0) break;
+      await sleep(waitMs);
+      participants = await port.fetchParticipants(conversationSid);
+    }
+    return participants;
+  }
+
   return {
     async ensureGroupRail(request) {
       const { conversationId } = request;
+      /** Opt-in, per caller (D16). The adopt path is excluded separately (D17). */
+      const awaitBinding = request.awaitBindingPropagation === true;
       const thread = await conversations.getById(conversationId);
       if (thread === undefined) {
         return { status: 'failed', reason: `conversation ${conversationId} does not exist` };
@@ -506,6 +566,36 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
       let participantMap = buildParticipantMap(participants);
       let missing = missingFromMap(members, participantMap);
 
+      // WAIT OUT THE BINDING WINDOW BEFORE CONCLUDING DAMAGE (D13/D14). Twilio
+      // populates a participant's messaging binding ASYNCHRONOUSLY and
+      // `buildParticipantMap` drops any participant that has no bound address
+      // yet, so a rail read milliseconds after its own create reads short of a
+      // roster it will cover a second later. On the 2026-08-13 migration that
+      // turned 132 healthy rails into 81 incomplete-roster warnings, 178
+      // "participant already exists" refusals, and 2 recorded rail failures.
+      //
+      // THIS REGION IS INSIDE NO try. A throwing re-read here would escape
+      // `ensureGroupRail` entirely and strand the `rail_creating` claim for its
+      // full expiry - the precise failure that kept the `groupSend` paths out of
+      // this change - so it gets its own handler, mirroring the participant-read
+      // failure path above. A failed re-read is a FAILED READ: never a reason to
+      // continue with the stale list (D15).
+      if (missing.length > 0 && awaitBinding && !wasAdopted) {
+        try {
+          participants = await reReadUntilBound(ref.conversationSid, members, participants);
+          participantMap = buildParticipantMap(participants);
+          missing = missingFromMap(members, participantMap);
+        } catch (err) {
+          const reason = railFailureReason(err);
+          log.warn(
+            { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
+            'group rail participant re-read failed - the thread stays inbound-only',
+          );
+          await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);
+          return { status: 'failed', reason };
+        }
+      }
+
       // REPAIR, DO NOT RE-FAIL. The individual-add fallback can attach 8 of 9
       // when one add throws (a 429 or a 5xx). Before `addParticipants` existed
       // that thread was stranded PERMANENTLY: every retry adopted the same
@@ -538,6 +628,17 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
           participants = await port.fetchParticipants(ref.conversationSid);
           participantMap = buildParticipantMap(participants);
           missing = missingFromMap(members, participantMap);
+          // AND THE POST-REPAIR READ LADDERS TOO (D14). The two false
+          // `rail_failed` records of the 2026-08-13 migration were written after
+          // THIS read, so laddering only the validation read above would leave
+          // the headline symptom reachable: an add that succeeded still leaves a
+          // participant unbound for a moment. Already inside the repair's own
+          // try, so a throwing re-read lands in the catch below.
+          if (missing.length > 0 && awaitBinding && !wasAdopted) {
+            participants = await reReadUntilBound(ref.conversationSid, members, participants);
+            participantMap = buildParticipantMap(participants);
+            missing = missingFromMap(members, participantMap);
+          }
         } catch (err) {
           const reason = railFailureReason(err);
           log.warn(

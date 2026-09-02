@@ -121,6 +121,96 @@ describe('Timeline', () => {
     expect(screen.getByText(/SMS - \(404\) 010-0007 - 9:14a/)).toBeInTheDocument();
   });
 
+  it.each([
+    {
+      label: 'pending RCS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-pending',
+        tsMsgId: 'transport-pending',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
+      } as TimelineItem,
+      expected: 'RCS',
+    },
+    {
+      label: 'SMS agreement',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-agreement',
+        tsMsgId: 'transport-agreement',
+        transport_schema_version: 1,
+        requested_transport: 'sms',
+        actual_transport: 'sms',
+      } as TimelineItem,
+      expected: 'SMS',
+    },
+    {
+      label: 'RCS fallback',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-fallback',
+        tsMsgId: 'transport-fallback',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
+        actual_transport: 'sms',
+      } as TimelineItem,
+      expected: 'RCS -> SMS',
+    },
+    {
+      label: 'unresolved inbound',
+      item: {
+        ...MESSAGE_IN,
+        id: 'transport-unknown',
+        tsMsgId: 'transport-unknown',
+        transport_schema_version: 1,
+      } as TimelineItem,
+      expected: 'Unknown',
+    },
+    {
+      label: 'legacy SMS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-legacy',
+        tsMsgId: 'transport-legacy',
+      } as TimelineItem,
+      expected: 'SMS',
+    },
+    {
+      label: 'text-only native Group MMS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-group-mms',
+        tsMsgId: 'transport-group-mms',
+        type: 'sms',
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
+      } as TimelineItem,
+      expected: 'MMS',
+    },
+  ])('renders $label from the normalized transport contract', ({ item, expected }) => {
+    renderTimeline({ items: [item] });
+    expect(screen.getByText(new RegExp(`^${expected} -`))).toBeInTheDocument();
+  });
+
+  it('shows no transport for an optimistic direct message even when local fields claim one', () => {
+    const optimistic: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'transport-optimistic',
+      tsMsgId: 'transport-optimistic',
+      body: 'optimistic transport stays hidden',
+      optimistic: true,
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+    };
+    renderTimeline({ items: [optimistic] });
+    const bubble = screen.getByText('optimistic transport stays hidden').closest('[class*="bubble"]');
+    expect(bubble).not.toBeNull();
+    expect(within(bubble as HTMLElement).queryByText(/RCS|SMS/)).not.toBeInTheDocument();
+  });
+
   it('renders a cluster label (day - time) for the first message', () => {
     renderTimeline({ items: [MESSAGE_IN] });
     expect(screen.getByText(/Mon Jun 8 - 9:14a/)).toBeInTheDocument();
@@ -1267,6 +1357,268 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.queryByText('delivered 0/2')).not.toBeInTheDocument();
   });
 
+  it('keeps legacy Relay recipient delivery copy free of an unresolved transport claim', () => {
+    renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
+
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toHaveAccessibleName(
+      'delivered 1 of 2, 1 not confirmed. Keisha Kane: Delivered. Lars Landlord: Sent, not confirmed.',
+    );
+
+    fireEvent.click(screen.getByText('Team reply to the group'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered' }),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/Unknown/)).not.toBeInTheDocument();
+  });
+
+  it('keeps legacy Group MMS recipient delivery copy free of an unresolved transport claim', () => {
+    const legacyGroupMms: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'legacy-group-mms-recipient',
+      tsMsgId: 'legacy-group-mms-recipient',
+      body: 'legacy Group MMS recipient',
+      type: 'mms',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+      },
+    };
+
+    renderTimeline({
+      items: [legacyGroupMms],
+      relayRoster: ROSTER,
+      rosterKind: 'group_text',
+    });
+
+    expect(screen.getByText('Delivered 1/1')).toHaveAccessibleName(
+      'Delivered 1 of 1. Keisha Kane: Delivered.',
+    );
+
+    fireEvent.click(screen.getByText('legacy Group MMS recipient'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered' }),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/Unknown/)).not.toBeInTheDocument();
+  });
+
+  it('keeps Unknown on version-1 recipient slots with no transport facts', () => {
+    const unresolved: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'version-1-unresolved-recipient',
+      tsMsgId: 'version-1-unresolved-recipient',
+      body: 'version-1 unresolved recipient',
+      transport_schema_version: 1,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+      },
+    };
+
+    renderTimeline({ items: [unresolved], relayRoster: ROSTER });
+
+    expect(screen.getByText('Delivered 1/1')).toHaveAccessibleName(
+      'Delivered 1 of 1. Keisha Kane: Delivered, Unknown.',
+    );
+
+    fireEvent.click(screen.getByText('version-1 unresolved recipient'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - Unknown' }),
+    ).toBeInTheDocument();
+  });
+
+  it('renders complete and incomplete relay transport aggregates without changing delivery state', () => {
+    const complete: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'relay-transport-complete',
+      tsMsgId: 'relay-transport-complete',
+      body: 'complete transport aggregate',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'rcs',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+    const incomplete: TimelineItem = {
+      ...complete,
+      id: 'relay-transport-incomplete',
+      tsMsgId: 'relay-transport-incomplete',
+      body: 'incomplete transport aggregate',
+      delivery_recipients: {
+        c1: complete.delivery_recipients!.c1!,
+        c2: {
+          status: 'sent',
+          requestedTransport: 'rcs',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({ items: [complete, incomplete], relayRoster: ROSTER });
+    expect(screen.getByText(/^RCS -> Mixed -/)).toBeInTheDocument();
+    expect(screen.getByText(/^RCS - 9:20a$/)).toBeInTheDocument();
+    expect(screen.getByText('Delivered 2/2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('complete transport aggregate'));
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - RCS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Lars Landlord - Delivered - RCS -> SMS' }),
+    ).toBeInTheDocument();
+  });
+
+  it('discloses inbound relay legs while filtering removed members and preserving suppressed and state-absent rows', () => {
+    const roster = [
+      ...ROSTER,
+      { contactId: 'c3', phone: '+14045550113', name: 'Opted Out' },
+      { contactId: 'c4', phone: '+14045550114', name: 'State Absent' },
+    ];
+    const inbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'relay-inbound-transport',
+      tsMsgId: 'relay-inbound-transport',
+      body: 'inbound relay transport',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'queued',
+          requestedTransport: 'rcs',
+          transportAggregationState: 'excluded',
+        },
+        c3: {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          requestedTransport: 'sms',
+          transportAggregationState: 'excluded',
+        },
+        c4: {
+          status: 'delivered',
+          requestedTransport: 'sms',
+          actualTransport: 'sms',
+        },
+      },
+    };
+
+    renderTimeline({ items: [inbound], relayRoster: roster });
+    expect(screen.getByText(/^SMS -/)).toBeInTheDocument();
+    expect(screen.getByText(/1 member opted out/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('inbound relay transport'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3);
+    expect(within(list).queryByText('Lars Landlord')).not.toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - RCS -> SMS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Opted Out - Not sent - opted out - SMS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'State Absent - Delivered - SMS' }),
+    ).toBeInTheDocument();
+  });
+
+  it('exposes inbound relay leg facts before interaction without changing the source transport', () => {
+    const inbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'relay-inbound-collapsed-accessibility',
+      tsMsgId: 'relay-inbound-collapsed-accessibility',
+      body: 'inbound relay accessibility',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          deliveredAt: '2026-06-08T09:25:00',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'sms',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({ items: [inbound], relayRoster: ROSTER });
+
+    expect(screen.getByText(/^SMS - \(404\) 010-0007 - 9:14a$/)).toBeInTheDocument();
+    expect(screen.queryByText(/^RCS -> SMS -/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Delivery by recipient' })).not.toBeInTheDocument();
+
+    const disclosure = screen.getByRole('group', { name: /Delivery by recipient/ });
+    const expectedName =
+      'Delivery by recipient. Keisha Kane: Delivered, RCS -> SMS, 9:25a. ' +
+      'Lars Landlord: Delivered, SMS.';
+    expect(disclosure).toHaveAccessibleName(expectedName);
+    const accessibleName = disclosure.getAttribute('aria-label');
+    expect(accessibleName?.split('9:25a')).toHaveLength(2);
+    expect(accessibleName).not.toContain('9:14a');
+
+    fireEvent.click(screen.getByText('inbound relay accessibility'));
+
+    expect(screen.queryByRole('group', { name: expectedName })).not.toBeInTheDocument();
+    expect(screen.getByRole('list', { name: 'Delivery by recipient' })).toBeInTheDocument();
+  });
+
+  it('does not add the inbound Relay accessibility owner to a native group message', () => {
+    const nativeGroupInbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'native-group-inbound-accessibility',
+      tsMsgId: 'native-group-inbound-accessibility',
+      transport_schema_version: 1,
+      actual_transport: 'mms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'mms',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({
+      items: [nativeGroupInbound],
+      relayRoster: ROSTER,
+      rosterKind: 'group_text',
+    });
+
+    expect(screen.queryByRole('group', { name: /Delivery by recipient/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/^MMS -/)).toBeInTheDocument();
+  });
+
   it('attributes an inbound relay bubble to the sending member', () => {
     const inbound: TimelineItem = {
       kind: 'message',
@@ -1373,8 +1725,21 @@ describe('Timeline - closed-group provenance badge (relay number lifecycle)', ()
 });
 
 describe('Timeline stick-to-bottom', () => {
-  // jsdom does no layout, so drive the scroll geometry ourselves: mock
-  // scrollHeight/clientHeight and back scrollTop with a real read/write value.
+  // jsdom does no layout, so drive the scroll geometry ourselves. TWO halves,
+  // because the anchor is no longer read off the scroller alone:
+  //
+  //  1. `makeScrollable` mocks scrollHeight/clientHeight and backs scrollTop
+  //     with a real read/write slot (unchanged).
+  //  2. `modelRects` mocks getBoundingClientRect. jsdom answers every element
+  //     with an all-zero rect, which would make every delta 0 and every anchor
+  //     'sentinel' - the tests would pass vacuously. The model: the scroller's
+  //     box is [0, clientHeight], and the zero-height sentinel sits
+  //     `blockHeight` px above the END of the scroll content, so its bottom
+  //     edge is `scrollHeight - blockHeight - scrollTop`.
+  //
+  // blockHeight 0 = no Upcoming block. The first five cases pass no `upcoming`
+  // prop and are therefore the NO-BLOCK regression net: they must behave
+  // exactly as they did before the anchor existed.
   function setProp(el: HTMLElement, name: string, value: number): void {
     Object.defineProperty(el, name, { configurable: true, value });
   }
@@ -1390,7 +1755,60 @@ describe('Timeline stick-to-bottom', () => {
       },
     });
   }
-  const wrap = (items: TimelineItem[], key = 'c1'): React.JSX.Element => (
+  let restoreRects: (() => void) | null = null;
+  afterEach(() => {
+    restoreRects?.();
+    restoreRects = null;
+  });
+  function modelRects(el: HTMLElement, blockHeight = 0): { setBlockHeight: (px: number) => void } {
+    let block = blockHeight;
+    const rect = (top: number, bottom: number): DOMRect =>
+      ({
+        top,
+        bottom,
+        left: 0,
+        right: 0,
+        width: 0,
+        height: bottom - top,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const spy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function mocked(this: HTMLElement): DOMRect {
+        if (this === el) return rect(0, el.clientHeight);
+        if (this.getAttribute('data-testid') === 'stream-sentinel') {
+          const bottom = el.scrollHeight - block - el.scrollTop;
+          return rect(bottom, bottom);
+        }
+        return rect(0, 0);
+      });
+    restoreRects = () => {
+      spy.mockRestore();
+    };
+    return {
+      setBlockHeight: (px: number) => {
+        block = px;
+      },
+    };
+  }
+  const BLOCK_ITEM: TimelineScheduled = {
+    kind: 'scheduled',
+    id: 'sched-anchor-1',
+    at: '2999-01-01T10:00:00Z',
+    conversationId: 'c1',
+    source: 'tour_reminder',
+    reminderKind: 'day_before',
+    body: 'Reminder: your tour is tomorrow.',
+    refType: 'tour',
+    refId: 'tour-9',
+  };
+  const wrap = (
+    items: TimelineItem[],
+    key = 'c1',
+    upcoming?: TimelineScheduled[],
+  ): React.JSX.Element => (
     <MemoryRouter>
       <Timeline
         status="ready"
@@ -1400,31 +1818,39 @@ describe('Timeline stick-to-bottom', () => {
         canSend={false}
         onSend={vi.fn()}
         resetScrollKey={key}
+        {...(upcoming !== undefined && { upcoming })}
       />
     </MemoryRouter>
   );
   // The scroll container is `.stream`; exclude the `.streamWrap` positioning parent.
   const stream = (): HTMLElement =>
     document.querySelector('[class*="stream"]:not([class*="Wrap"])') as HTMLElement;
+  const pill = (): HTMLElement | null =>
+    screen.queryByRole('button', { name: /jump to the newest/i });
 
   it('pins to the bottom when a new item arrives while the operator is at the bottom', () => {
     const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
     const el = stream();
     makeScrollable(el, 500);
-    el.scrollTop = 400; // 500 - 400 - 100 = 0 → at bottom
+    modelRects(el);
+    el.scrollTop = 400; // sentinel bottom 500 - 400 = 100 = the fold -> 'sentinel'
     fireEvent.scroll(el);
 
     setProp(el, 'scrollHeight', 700); // a new item grew the content
     rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
 
-    expect(el.scrollTop).toBe(700); // re-pinned to the new bottom
+    // The pin targets the SENTINEL, so it lands on the exact bottom edge
+    // (700 - 100). The old write was `scrollTop = scrollHeight`, which only ever
+    // read as 700 because jsdom does not clamp scrollTop the way a browser does.
+    expect(el.scrollTop).toBe(600);
   });
 
   it('does NOT yank to the bottom when the operator has scrolled up to read history', () => {
     const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
     const el = stream();
     makeScrollable(el, 500);
-    el.scrollTop = 40; // 500 - 40 - 100 = 360 → NOT at bottom
+    modelRects(el);
+    el.scrollTop = 40; // sentinel bottom 460, fold 100 -> 360 below -> anchor null
     fireEvent.scroll(el);
 
     setProp(el, 'scrollHeight', 700);
@@ -1437,46 +1863,234 @@ describe('Timeline stick-to-bottom', () => {
     const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
     const el = stream();
     makeScrollable(el, 500);
+    modelRects(el);
     el.scrollTop = 40; // scrolled up reading history
     fireEvent.scroll(el);
-    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
+    expect(pill()).not.toBeInTheDocument();
 
     setProp(el, 'scrollHeight', 700); // a new item lands below
     rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
 
-    const pill = screen.getByRole('button', { name: /jump to the newest/i });
-    expect(pill).toBeInTheDocument();
+    const shown = screen.getByRole('button', { name: /jump to the newest/i });
+    expect(shown).toBeInTheDocument();
 
-    fireEvent.click(pill);
-    expect(el.scrollTop).toBe(700); // jumped to the newest
-    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
+    fireEvent.click(shown);
+    expect(el.scrollTop).toBe(600); // jumped to the newest (the sentinel's edge)
+    expect(pill()).not.toBeInTheDocument();
   });
 
   it('does NOT show the pill when the new item arrives while already at the bottom', () => {
     const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
     const el = stream();
     makeScrollable(el, 500);
+    modelRects(el);
     el.scrollTop = 400; // at bottom
     fireEvent.scroll(el);
 
     setProp(el, 'scrollHeight', 700);
     rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
 
-    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
+    expect(pill()).not.toBeInTheDocument();
   });
 
   it('switching conversations jumps to the bottom with no carried-over pill', () => {
     const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1'));
     const el = stream();
     makeScrollable(el, 500);
+    modelRects(el);
     el.scrollTop = 40; // scrolled up in conversation c1
     fireEvent.scroll(el);
 
     setProp(el, 'scrollHeight', 900);
     rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c2')); // a DIFFERENT conversation
 
-    expect(el.scrollTop).toBe(900); // opened on the newest item
-    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
+    expect(el.scrollTop).toBe(800); // opened on the newest item (900 - 100)
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  // --- With an Upcoming block rendered BELOW the sentinel -------------------
+
+  it('opens and pins on the newest MESSAGE, not on the Upcoming block', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+    const el = stream();
+    makeScrollable(el, 500);
+    modelRects(el, 200); // a 200px Upcoming block below the sentinel
+    el.scrollTop = 200; // sentinel bottom 500 - 200 - 200 = 100 = the fold
+    fireEvent.scroll(el);
+
+    setProp(el, 'scrollHeight', 700);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', [BLOCK_ITEM]));
+
+    // 700 - 200 - 100: the sentinel is back at the fold with the block below it.
+    // The scroller's TRUE bottom is 600 - landing there would open on the block.
+    expect(el.scrollTop).toBe(400);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  it('leaves an operator standing ON the block where they are, with no pill', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+    const el = stream();
+    makeScrollable(el, 500);
+    modelRects(el, 200);
+    el.scrollTop = 400; // the TRUE bottom: the block fills the fold
+    fireEvent.scroll(el); // sentinel bottom -100 -> ABOVE the fold -> 'below'
+
+    setProp(el, 'scrollHeight', 700); // a message lands ABOVE the block
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', [BLOCK_ITEM]));
+
+    // Distance from the scroller's TRUE bottom is preserved (500 - 400 = 100),
+    // so the block does not move under the operator's eye. Re-pinning to the
+    // sentinel would have written 400; not scrolling at all would leave 400 too,
+    // and both would slide the block by the new message's height.
+    expect(el.scrollTop).toBe(600);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  it('reads a block SHORTER than the 48px band as below - direction, not slack', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+    const el = stream();
+    makeScrollable(el, 500);
+    modelRects(el, 20); // a 20px block: the sentinel is only 20px above the fold
+    el.scrollTop = 400; // the true bottom
+    fireEvent.scroll(el); // delta -20: inside the slack, but ABOVE the fold
+
+    setProp(el, 'scrollHeight', 700);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', [BLOCK_ITEM]));
+
+    // 'below' -> gap preserved. A slack-based reading would have called this
+    // 'sentinel' and re-pinned to 580, sliding the block out from under them.
+    expect(el.scrollTop).toBe(600);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  it('pills an operator scrolled ABOVE the sentinel; the pill lands on the newest message', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+    const el = stream();
+    makeScrollable(el, 500);
+    modelRects(el, 200);
+    el.scrollTop = 40; // sentinel bottom 260, fold 100 -> anchor null
+    fireEvent.scroll(el);
+
+    setProp(el, 'scrollHeight', 700);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', [BLOCK_ITEM]));
+
+    const shown = screen.getByRole('button', { name: /jump to the newest/i });
+    fireEvent.click(shown);
+
+    // 700 - 200 - 100 = the sentinel at the fold. The scroller's true bottom is
+    // 600, which would have delivered them to the block instead.
+    expect(el.scrollTop).toBe(400);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  it('switching conversations with a block lands on the sentinel, not the true bottom', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+    const el = stream();
+    makeScrollable(el, 500);
+    modelRects(el, 200);
+    el.scrollTop = 40;
+    fireEvent.scroll(el);
+
+    setProp(el, 'scrollHeight', 900);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c2', [BLOCK_ITEM]));
+
+    expect(el.scrollTop).toBe(600); // 900 - 200 - 100, not the true bottom 800
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  it('opens pinned when the messages and the block arrive in the SAME commit', () => {
+    // TourConversation delivers both at once, and the block mounts BELOW the
+    // sentinel - it adds content beneath the fold, it does not move the reader.
+    // Re-deriving the anchor on that flip read the not-yet-pinned scrollTop 0,
+    // called it `null`, and the same effect run then saw `grew`: pill on open,
+    // no pin, acceptance 13 broken (live QA, lane 1). Only the UNMOUNT flip may
+    // re-derive. The harness can only install geometry after a first render, so
+    // the arriving commit is the second one - which is the mechanism anyway.
+    const { rerender } = render(wrap([MESSAGE_IN], 'c1', []));
+    const el = stream();
+    makeScrollable(el, 500);
+    modelRects(el, 200);
+    el.scrollTop = 0; // never scrolled: the pin has not run against real geometry
+
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', [BLOCK_ITEM]));
+
+    // 500 - 200 - 100: the sentinel at the fold, i.e. the newest MESSAGE, with
+    // the block just below it. Leaving scrollTop at 0 would strand the operator
+    // 400px up with a pill they never asked for.
+    expect(el.scrollTop).toBe(200);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  it('re-derives the anchor when the block VANISHES under the operator', () => {
+    // A reschedule/terminal/convert empties the bucket - this feature's
+    // commonest event - and the block unmounts while the operator is standing
+    // on it. Without the re-derive the cached `below` anchor and the bottom gap
+    // measured WITH the block survive, and the next message scrolls them up and
+    // away from it (review round m2).
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+    const el = stream();
+    makeScrollable(el, 500);
+    const rects = modelRects(el, 200);
+    el.scrollTop = 350; // sentinel bottom -50: down ON the block
+    fireEvent.scroll(el); // anchor 'below', bottomGap 150
+
+    // The bucket empties: the block unmounts, the content shrinks by its height
+    // and the browser clamps scrollTop to the new bottom.
+    setProp(el, 'scrollHeight', 300);
+    rects.setBlockHeight(0);
+    el.scrollTop = 200;
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', []));
+
+    // Now a message lands.
+    setProp(el, 'scrollHeight', 400);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', []));
+
+    // With no block, `below` is unreachable by construction: the operator was at
+    // the newest message and stays pinned to it. Restoring the stale 150px gap
+    // would have written 250 - 50px short of the bottom - and cleared the pill
+    // on the way past.
+    expect(el.scrollTop).toBe(300);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
+  it('re-pins when the BLOCK changes height, with no change to the item count', () => {
+    // The global ResizeObserver stub in src/test/setup.ts never fires its
+    // callback, so a test that relied on it would pass vacuously. Install a
+    // recording fake and drive it - and assert it actually FIRED.
+    const callbacks: ResizeObserverCallback[] = [];
+    class FakeResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        callbacks.push(cb);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    try {
+      render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1', [BLOCK_ITEM]));
+      const el = stream();
+      makeScrollable(el, 500);
+      const rects = modelRects(el, 100);
+      el.scrollTop = 300; // sentinel bottom 500 - 100 - 300 = 100 = the fold
+      fireEvent.scroll(el);
+      expect(callbacks.length).toBeGreaterThan(0); // the block IS observed
+
+      // The card's body stops wrapping: the block shrinks 100 -> 40 and the
+      // browser clamps scrollTop to the new bottom. The item COUNT never
+      // changes, so nothing but the observer can see this.
+      setProp(el, 'scrollHeight', 440);
+      rects.setBlockHeight(40);
+      el.scrollTop = 340; // 440 - 100, the clamp
+      act(() => {
+        for (const cb of callbacks) cb([], {} as unknown as ResizeObserver);
+      });
+
+      expect(el.scrollTop).toBe(300); // 440 - 40 - 100: the sentinel, re-pinned
+      expect(pill()).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -1489,8 +2103,21 @@ describe('Timeline load-older control', () => {
     Object.defineProperty(el, name, { configurable: true, value });
   }
 
+  let undoRects: (() => void) | null = null;
+  afterEach(() => {
+    undoRects?.();
+    undoRects = null;
+  });
+
   /** Back scrollHeight/clientHeight with fixed values and scrollTop with a real
-   *  read/write slot, so the layout effect's arithmetic is observable. */
+   *  read/write slot, so the layout effect's arithmetic is observable.
+   *
+   *  Also models getBoundingClientRect, which the scroll ANCHOR reads: jsdom
+   *  answers every element with an all-zero rect, so without this the sentinel
+   *  and the scroller would always sit on top of each other and every case here
+   *  would read as "on the newest message" and pass (or fail) vacuously. No
+   *  Upcoming block in this describe, so the sentinel is the end of the
+   *  content: its bottom edge is `scrollHeight - scrollTop`. */
   function stubScroll(el: HTMLElement, scrollHeight: number, clientHeight = 100): void {
     setNum(el, 'scrollHeight', scrollHeight);
     setNum(el, 'clientHeight', clientHeight);
@@ -1502,6 +2129,30 @@ describe('Timeline load-older control', () => {
         top = v;
       },
     });
+    const rect = (bottom: number): DOMRect =>
+      ({
+        top: 0,
+        bottom,
+        left: 0,
+        right: 0,
+        width: 0,
+        height: bottom,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const spy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function mocked(this: HTMLElement): DOMRect {
+        if (this === el) return rect(el.clientHeight);
+        if (this.getAttribute('data-testid') === 'stream-sentinel') {
+          return rect(el.scrollHeight - el.scrollTop);
+        }
+        return rect(0);
+      });
+    undoRects = () => {
+      spy.mockRestore();
+    };
   }
 
   /** The SCROLL CONTAINER, excluding the .streamWrap positioning parent. */

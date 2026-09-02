@@ -266,6 +266,16 @@ describe('isStaleLeg / canEverGoStale - the S3 eligibility table', () => {
     expect(canEverGoStale({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
     expect(isStaleLeg({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
   });
+
+  it('never stales or arms a timer for an excluded recipient with no suppression code', () => {
+    const removed = {
+      status: 'sent',
+      sentAt: QUIET,
+      transportAggregationState: 'excluded',
+    } satisfies RelayDeliverySlot;
+    expect(isStaleLeg(removed, L0, NOW)).toBe(false);
+    expect(canEverGoStale(removed, L0, NOW)).toBe(false);
+  });
 });
 
 describe('presentRelayDelivery', () => {
@@ -339,6 +349,75 @@ describe('presentRelayDelivery', () => {
       tone: 'danger',
       isFailure: true,
       reason: "Attachment didn't get through, texts may still work (error 30005)",
+    });
+  });
+
+  // POSITION 1 of the four surfaces the fan-out close codes reach
+  // (deliveryStatus.ts:416 - the relay/broadcast rollup). A capped fan-out marks
+  // EVERY still-queued leg with the same code in one pass, so the rollup dedupes
+  // to a single sentence, and that sentence has to work as an AGGREGATE - these
+  // codes get no per-position interception the way contact_opted_out does.
+  it('summarises a capped fan-out in operator prose, with no carrier-code tail', () => {
+    expect(
+      presentRelayDelivery([
+        { status: 'delivered' },
+        { status: 'failed', errorCode: 'transient_cap' },
+        { status: 'failed', errorCode: 'transient_cap' },
+      ]),
+    ).toEqual({
+      label: 'delivered 1/3 - 2 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Sending gave up after repeated carrier deferrals',
+    });
+  });
+
+  // D10: never scheduled is NOT retries exhausted, and the rollup is where an
+  // operator reads which one happened.
+  it('summarises a never-scheduled fan-out distinctly from a capped one', () => {
+    const presented = presentRelayDelivery([
+      { status: 'failed', errorCode: 'enqueue_failed' },
+      { status: 'failed', errorCode: 'enqueue_failed' },
+    ]);
+    expect(presented).toEqual({
+      label: 'delivered 0/2 - 2 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Sending could not be scheduled',
+    });
+    expect(presented?.reason).not.toContain('(error ');
+    expect(presented?.reason).not.toContain('enqueue_failed');
+  });
+
+  // POSITION 1 of the three relay surfaces slice 5a changes
+  // (deliveryStatus.ts:416). The rollup forwards the WHOLE options bag to
+  // deliveryReason, and RelayDeliveryOptions extends DeliveryReasonOptions, so
+  // the product flag reaches the reason map with no signature change here.
+  it('drops the retry promise from a RELAY rollup, keeping the carrier code', () => {
+    const presented = presentRelayDelivery(
+      [{ status: 'delivered' }, { status: 'undelivered', errorCode: '30003' }],
+      { relay: true },
+    );
+    expect(presented).toEqual({
+      label: 'delivered 1/2 - 1 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Phone unreachable (error 30003)',
+    });
+    expect(presented?.reason).not.toMatch(/retry/i);
+  });
+
+  // D20, at the rollup. The identical slot map WITHOUT the relay flag is a
+  // native group text, whose 30003 retry is real, and it must read exactly as it
+  // does on main - em dash and all.
+  it('keeps the retry promise on a native group-text rollup', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'undelivered', errorCode: '30003' }]),
+    ).toEqual({
+      label: 'delivered 1/2 - 1 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: `Phone unreachable ${EM_DASH} will retry (error 30003)`,
     });
   });
 
@@ -545,7 +624,42 @@ describe('presentRelayDelivery', () => {
       }),
     ).toEqual({ label: 'delivered 1/2', tone: 'neutral', isFailure: false });
   });
+
+  it('removes excluded-without-code recipients from every rollup count', () => {
+    expect(
+      presentRelayDelivery([
+        { status: 'delivered' },
+        {
+          status: 'failed',
+          transportAggregationState: 'excluded',
+        },
+      ]),
+    ).toEqual({ label: 'Delivered 1/1', tone: 'success', isFailure: false });
+    expect(
+      presentRelayDelivery([
+        {
+          status: 'queued',
+          transportAggregationState: 'excluded',
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('keeps a source-time state-absent queued slot in the delivery denominator', () => {
+    expect(presentRelayDelivery([{ status: 'queued' }])).toEqual({
+      label: 'delivered 0/1',
+      tone: 'neutral',
+      isFailure: false,
+    });
+  });
 });
+
+/** The separator in the SHIPPED 1:1 30003 entry: one U+2014 EM DASH with an
+ *  ASCII space on each side. Spelled as an escape so every line this slice added
+ *  stays ASCII (AGENTS.md) and so the character is never copied into new copy -
+ *  the relay override below uses a plain hyphen, like every newer string in the
+ *  presenter module. */
+const EM_DASH = String.fromCharCode(0x2014);
 
 describe('deliveryReason', () => {
   it('maps known Twilio error codes to human reasons AND always surfaces the code number', () => {
@@ -598,6 +712,66 @@ describe('deliveryReason', () => {
     );
   });
 
+  // D19. No relay retry exists: the status webhook returns on the relay-pointer
+  // branch BEFORE the 1:1 retry enqueue, and this branch adds no relay retry. So
+  // "will retry" on a relay leg is a promise the product cannot keep, in both
+  // worlds. The override drops the promise and KEEPS the carrier code - 30003 is
+  // a real number an operator can look up - and the `(error <code>)` tail comes
+  // from the shared template, so there is no second copy of the string to drift.
+  it('drops the retry promise on a RELAY leg while keeping the carrier code', () => {
+    const relay = deliveryReason('30003', { relay: true }) as string;
+    expect(relay).toBe('Phone unreachable (error 30003)');
+    expect(relay).not.toMatch(/retry/i);
+  });
+
+  // D20. Native group text is deliberately NOT included - its 30003 arm carries
+  // no group_text guard, so a group-text leg reaches the retry enqueue exactly as
+  // a 1:1 does and the promise is TRUE there. The shipped 1:1 entry carries a
+  // U+2014 em dash; written as an escape so this source line stays ASCII
+  // (AGENTS.md), and NOT copied into any new string.
+  it('keeps the retry promise everywhere else - 1:1 and native group text', () => {
+    const base = `Phone unreachable ${EM_DASH} will retry (error 30003)`;
+    expect(deliveryReason('30003')).toBe(base);
+    expect(deliveryReason('30003', { relay: false })).toBe(base);
+  });
+
+  // THE ORDER, pinned before either map can grow: media FIRST, relay SECOND,
+  // base LAST. The two override maps are disjoint today (media holds 30005/30006,
+  // relay holds 30003), so nothing observable depends on the order - which is
+  // exactly why it has to be a test rather than a comment. Consulted the other
+  // way round, a relay map that ever gained a 30005 would silently invert the
+  // prod-2026-08-24 MMS hedge on the surface whose own comment
+  // (Timeline.tsx:1037-1042) calls that contradiction the thing it exists to
+  // prevent.
+  it('lets the MEDIA hedge win over the relay override on an attachment leg', () => {
+    expect(deliveryReason('30005', { media: true, relay: true })).toBe(
+      "Attachment didn't get through, texts may still work (error 30005)",
+    );
+    expect(deliveryReason('30006', { media: true, relay: true })).toBe(
+      "Attachment didn't get through, texts may still work (error 30006)",
+    );
+  });
+
+  it('falls through the media map to the relay override for a 30003 attachment leg', () => {
+    // The other half of the order: the media map holds no 30003, so a relay MMS
+    // leg misses it and lands on the relay copy - never on the base "will retry".
+    expect(deliveryReason('30003', { media: true, relay: true })).toBe(
+      'Phone unreachable (error 30003)',
+    );
+  });
+
+  it('leaves every OTHER code alone on a relay leg', () => {
+    expect(deliveryReason('30005', { relay: true })).toBe('Number is invalid (error 30005)');
+    expect(deliveryReason('30006', { relay: true })).toBe('That number is a landline (error 30006)');
+    expect(deliveryReason('30007', { relay: true })).toBe('Carrier filtered the message (error 30007)');
+    expect(deliveryReason('21610', { relay: true })).toBe('Recipient has opted out (STOP) (error 21610)');
+    expect(deliveryReason('99999', { relay: true })).toBe('Delivery failed (error 99999)');
+    // The internal map still early-returns ahead of both override maps.
+    expect(deliveryReason('transient_cap', { relay: true })).toBe(
+      'Sending gave up after repeated carrier deferrals',
+    );
+  });
+
   it('returns undefined when there is no code', () => {
     expect(deliveryReason(undefined)).toBeUndefined();
     expect(deliveryReason('')).toBeUndefined();
@@ -618,6 +792,42 @@ describe('deliveryReason', () => {
     expect(reason).not.toMatch(/error/i);
   });
 
+  // D22/D23. The two codes the fan-out ladders write when they close a stuck
+  // send: `transient_cap` when the pass cap is spent with legs still deferred,
+  // `enqueue_failed` when the continuation could not be scheduled at all. Both
+  // are OURS - no carrier emits them and no operator can look them up - so
+  // unmapped they printed as `Delivery failed (error transient_cap)`, dressing an
+  // app token as a carrier error number. Registered here AHEAD of the code that
+  // emits them, so the raw token is never reachable in the product.
+  //
+  // ONE string per code has to serve every position. contact_opted_out is
+  // intercepted per-position by presentLegDelivery; these two are not, so the
+  // same sentence renders as a broadcast's results badge AND beside one member's
+  // name on a revealed recipient row.
+  it('renders the two fan-out close codes as operator prose, never as an error number', () => {
+    expect(deliveryReason('transient_cap')).toBe('Sending gave up after repeated carrier deferrals');
+    expect(deliveryReason('enqueue_failed')).toBe('Sending could not be scheduled');
+    for (const code of ['transient_cap', 'enqueue_failed']) {
+      const reason = deliveryReason(code) as string;
+      expect(reason).not.toContain('(error ');
+      expect(reason).not.toContain(code);
+    }
+    // D10. Reusing one code for both would tell an operator retries ran when
+    // none did, so the two sentences must not converge.
+    expect(deliveryReason('transient_cap')).not.toBe(deliveryReason('enqueue_failed'));
+  });
+
+  // INTERNAL_CODE_REASONS is consulted first and early-returns, so these two are
+  // immune to the media override by construction. A ladder closes an attachment
+  // leg exactly as it closes a text one - the reason is ours, not the carrier's -
+  // and the hedged MMS copy would be a false reading of what happened.
+  it('reads the close codes identically on an attachment leg', () => {
+    expect(deliveryReason('transient_cap', { media: true })).toBe(
+      'Sending gave up after repeated carrier deferrals',
+    );
+    expect(deliveryReason('enqueue_failed', { media: true })).toBe('Sending could not be scheduled');
+  });
+
   // Adversarial 30. Both reason maps are bare object literals, so a code that
   // happens to name an Object.prototype member resolves off the PROTOTYPE. The
   // internal map's early return then hands the caller a FUNCTION where the type
@@ -629,6 +839,10 @@ describe('deliveryReason', () => {
       const reason = deliveryReason(code);
       expect(typeof reason).toBe('string');
       expect(reason).toBe(`Delivery failed (error ${code})`);
+      // The relay map is a bare object literal too, so it joins the sweep: read
+      // with `map[code]` it would hand a relay leg a FUNCTION where the signature
+      // promises a string.
+      expect(deliveryReason(code, { relay: true })).toBe(`Delivery failed (error ${code})`);
     }
   });
 });
@@ -791,6 +1005,36 @@ describe('presentLegDelivery - one recipient row', () => {
   it('labels an opted-out RELAY leg as not sent - the app itself declined to send', () => {
     expect(
       presentLegDelivery({ status: 'failed', errorCode: 'contact_opted_out' }, 'relay', MSG_AT, NOW),
+    ).toEqual({ label: 'Not sent - opted out', tone: 'neutral', isFailure: false });
+  });
+
+  it('hides an excluded-without-code row before it can present delivery or staleness', () => {
+    expect(
+      presentLegDelivery(
+        {
+          status: 'sent',
+          sentAt: QUIET,
+          transportAggregationState: 'excluded',
+        },
+        'relay',
+        MSG_AT,
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps opted-out copy even when transport aggregation excludes the slot', () => {
+    expect(
+      presentLegDelivery(
+        {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          transportAggregationState: 'excluded',
+        },
+        'relay',
+        MSG_AT,
+        NOW,
+      ),
     ).toEqual({ label: 'Not sent - opted out', tone: 'neutral', isFailure: false });
   });
 

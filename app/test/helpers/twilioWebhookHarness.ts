@@ -15,6 +15,7 @@ import { RangeNotSatisfiableError } from '../../src/adapters/mediaStore.js';
 import type { Semaphore } from '../../src/lib/semaphore.js';
 import {
   MediaFetchHttpError,
+  type CarrierMessageSender,
   type InitiateCallParams,
   type MessagingAdapter,
   type SendMessageParams,
@@ -23,6 +24,11 @@ import {
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig, type AppConfig } from '../../src/lib/config.js';
 import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
 import { createLogger } from '../../src/lib/logger.js';
+import {
+  decideActualTransportWrite,
+  decideTransportAggregationWrite,
+  TRANSPORT_SCHEMA_VERSION,
+} from '../../src/lib/messageTransport.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import {
   emailRefId,
@@ -85,6 +91,7 @@ import {
   allowedPriorCallStatuses,
   allowedPriorStatuses,
   buildTsMsgId,
+  isSuccessfulDeliveryStatus,
   mediaAttachmentsOf,
   mediaPointerSk,
   type MediaPointer,
@@ -325,7 +332,7 @@ export interface FakeWorld {
   >;
   /** Set by a test to force the fake inline createViTranscript to throw (fallback path). */
   viCreateError?: Error;
-  adapter: MessagingAdapter;
+  adapter: MessagingAdapter & CarrierMessageSender;
   mediaStore: MediaStore;
   /** In-memory tours (Tours feature), keyed by tourId. */
   toursMap: Map<string, TourItem>;
@@ -1075,6 +1082,15 @@ export function createFakeWorld(): FakeWorld {
         provider_ts: message.providerTs,
         delivery_status: message.deliveryStatus,
         ...(message.errorCode !== undefined && { error_code: message.errorCode }),
+        ...(message.transportSchemaVersion !== undefined && {
+          transport_schema_version: message.transportSchemaVersion,
+        }),
+        ...(message.requestedTransport !== undefined && {
+          requested_transport: message.requestedTransport,
+        }),
+        ...(message.actualTransport !== undefined && {
+          actual_transport: message.actualTransport,
+        }),
         created_at: new Date().toISOString(),
         // Relay group (M1.7): preserve the inbound relay annotations.
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
@@ -1334,6 +1350,156 @@ export function createFakeWorld(): FakeWorld {
     },
 
     // --- Relay groups (M1.7) ---
+    async setMessageActualTransport(conversationId, tsMsgId, observed) {
+      const item = messages.find(
+        (message) => message.conversationId === conversationId && message.tsMsgId === tsMsgId,
+      );
+      if (!item) return 'missing';
+      if (item.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const decision = decideActualTransportWrite(
+        item.actual_transport,
+        observed,
+        item.requested_transport,
+      );
+      if (decision.kind === 'write') {
+        item.actual_transport = decision.transport;
+        return 'updated';
+      }
+      if (decision.kind === 'idempotent') return 'idempotent';
+      if (decision.kind === 'stale-rcs-observation') return 'stale';
+      return 'conflict';
+    },
+    async initializeRecipientDelivery(conversationId, tsMsgId, memberKey, slot) {
+      const item = messages.find(
+        (message) => message.conversationId === conversationId && message.tsMsgId === tsMsgId,
+      );
+      if (!item) return 'missing';
+      if (item.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      if (item.delivery_recipients?.[memberKey] !== undefined) return 'existing';
+      if (item.delivery_recipients === undefined) return 'missing';
+      item.delivery_recipients[memberKey] = { ...slot };
+      return 'created';
+    },
+    async setRecipientTransportAggregationState(conversationId, tsMsgId, memberKey, next) {
+      const item = messages.find(
+        (message) => message.conversationId === conversationId && message.tsMsgId === tsMsgId,
+      );
+      if (!item) return 'missing';
+      if (item.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const slot = item.delivery_recipients?.[memberKey];
+      if (!slot) return 'missing';
+      const decision = decideTransportAggregationWrite(
+        slot.transportAggregationState,
+        next,
+        slot.actualTransport,
+      );
+      if (decision.kind === 'write') {
+        slot.transportAggregationState = decision.state;
+        return 'updated';
+      }
+      return decision.kind === 'idempotent' ? 'idempotent' : 'conflict';
+    },
+    async setRecipientActualTransport(conversationId, tsMsgId, memberKey, observed) {
+      const item = messages.find(
+        (message) => message.conversationId === conversationId && message.tsMsgId === tsMsgId,
+      );
+      if (!item) return 'missing';
+      if (item.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const slot = item.delivery_recipients?.[memberKey];
+      if (!slot) return 'missing';
+      const decision = decideActualTransportWrite(
+        slot.actualTransport,
+        observed,
+        slot.requestedTransport,
+      );
+      if (decision.kind === 'write') {
+        slot.actualTransport = decision.transport;
+        return 'updated';
+      }
+      if (decision.kind === 'idempotent') return 'idempotent';
+      if (decision.kind === 'stale-rcs-observation') return 'stale';
+      return 'conflict';
+    },
+    async applyRecipientSendResult(conversationId, tsMsgId, memberKey, patch) {
+      const item = messages.find(
+        (message) => message.conversationId === conversationId && message.tsMsgId === tsMsgId,
+      );
+      if (!item) return 'missing';
+      if (item.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const slot = item.delivery_recipients?.[memberKey];
+      if (!slot) return 'missing';
+      const statusAdvances = allowedPriorStatuses(patch.status).includes(slot.status);
+      const statusSame = patch.status === slot.status;
+      const statusStale = !statusAdvances && !statusSame;
+      let updated = false;
+      if (statusAdvances) {
+        slot.status = patch.status;
+        updated = true;
+      }
+      if (patch.sid !== undefined && slot.sid === undefined) {
+        slot.sid = patch.sid;
+        updated = true;
+      }
+      if (patch.sentAt !== undefined && slot.sentAt === undefined) {
+        slot.sentAt = patch.sentAt;
+        updated = true;
+      }
+      let actualOutcome: 'idempotent' | 'stale' | 'conflict' | undefined;
+      if (patch.actualTransport !== undefined) {
+        const decision = decideActualTransportWrite(
+          slot.actualTransport,
+          patch.actualTransport,
+          slot.requestedTransport,
+        );
+        if (decision.kind === 'write') {
+          slot.actualTransport = decision.transport;
+          updated = true;
+        } else if (decision.kind === 'stale-rcs-observation') {
+          actualOutcome = 'stale';
+        } else if (decision.kind === 'conflict') {
+          actualOutcome = 'conflict';
+        } else {
+          actualOutcome = 'idempotent';
+        }
+      }
+      const terminalCurrent =
+        slot.status === 'delivered' || slot.status === 'undelivered' || slot.status === 'failed';
+      if ((statusAdvances || statusSame) && !(terminalCurrent && statusStale)) {
+        if (
+          patch.errorCode === undefined &&
+          isSuccessfulDeliveryStatus(patch.status) &&
+          slot.errorCode !== undefined
+        ) {
+          delete slot.errorCode;
+          updated = true;
+        } else if (patch.errorCode !== undefined && slot.errorCode !== patch.errorCode) {
+          if (!(terminalCurrent && statusSame && slot.errorCode !== undefined)) {
+            slot.errorCode = patch.errorCode;
+            updated = true;
+          }
+        }
+      }
+      if (updated) return 'updated';
+      if (actualOutcome === 'conflict') return 'conflict';
+      if (actualOutcome === 'stale' || statusStale) return 'stale';
+      return 'idempotent';
+    },
+    async claimFanoutPass(conversationId, tsMsgId, cap) {
+      // Models the REAL semantics, not a rubber stamp: a fake that always
+      // returned `claimed` would make every cap test in the fan-out suites pass
+      // vacuously. Increment-and-return, refuse at cap with the UNCHANGED count,
+      // and return `missing` (never a throw) for an absent item - the real repo
+      // disambiguates its ConditionalCheckFailed the same way.
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item) return { outcome: 'missing' };
+      const current = typeof item.fanout_attempt === 'number' ? item.fanout_attempt : 0;
+      if (current >= cap) return { outcome: 'capped', attempt: current };
+      const next = current + 1;
+      // Stored by reference (the array holds the items themselves), so this is
+      // the same top-level attribute a test can seed or assert on.
+      item.fanout_attempt = next;
+      return { outcome: 'claimed', attempt: next };
+    },
     async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       if (!item) throw new Error(`setRecipientDelivery: no message ${conversationId}/${tsMsgId}`);
@@ -2739,6 +2905,26 @@ export function createFakeWorld(): FakeWorld {
       b.recipients = { ...b.recipients, [contactKey]: recipient };
       return true;
     },
+    async claimFanoutPass(broadcastId, cap) {
+      // Models the REAL semantics (increment-and-return, refuse at cap with the
+      // UNCHANGED count); a fake that always claimed would make every cap test
+      // pass vacuously.
+      //
+      // TWO deliberate departures from the neighbouring methods:
+      // 1. It reads and writes the MAP ENTRY, never a getById result - getById
+      //    returns a shallow COPY, so a claim built on one would silently ignore
+      //    a test that seeded `world.broadcasts.get(id)!.fanout_attempt`.
+      // 2. A missing broadcast RETURNS `missing` instead of throwing the
+      //    synthesized ConditionalCheckFailedException the other mutators throw
+      //    - otherwise the missing branch could never be exercised here.
+      const b = broadcasts.get(broadcastId);
+      if (!b) return { outcome: 'missing' };
+      const current = typeof b.fanout_attempt === 'number' ? b.fanout_attempt : 0;
+      if (current >= cap) return { outcome: 'capped', attempt: current };
+      const next = current + 1;
+      b.fanout_attempt = next;
+      return { outcome: 'claimed', attempt: next };
+    },
     async bumpStats(broadcastId, delta) {
       const b = broadcasts.get(broadcastId);
       if (!b) throw conditionalCheckFailed(`bumpStats: no broadcast ${broadcastId}`);
@@ -2821,6 +3007,11 @@ export function createFakeWorld(): FakeWorld {
       return { ...item };
     },
     async get(tourId) {
+      // The `{ consistentRead }` option is deliberately not a parameter here:
+      // this map IS strongly consistent, so there is no weaker read to opt out
+      // of and no behaviour for a flag to select. A caller passing it gets the
+      // same answer, which is the honest mirror of the real repo's stronger
+      // half (review round NEW-5).
       const t = toursMap.get(tourId);
       return t ? { ...t } : undefined;
     },
@@ -2887,16 +3078,36 @@ export function createFakeWorld(): FakeWorld {
         });
       }
       t.convertedPlacementId = value;
+      // The claim STAMP rides the same write (review round NEW-2) - the poll's
+      // grace window measures from it, never from updatedAt.
+      t.conversionClaimedAt = new Date().toISOString();
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },
     async releaseConversionClaim(tourId, value) {
-      // Best-effort conditional REMOVE: only while our sentinel still holds.
+      // Best-effort conditional REMOVE: only while our sentinel still holds, and
+      // BOTH halves go - a stamp that outlived its sentinel would hand the next
+      // claim on this tour a stranger's clock.
       const t = toursMap.get(tourId);
       if (!t || t.convertedPlacementId !== value) return;
       delete t.convertedPlacementId;
+      delete t.conversionClaimedAt;
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
+    },
+    async setLadderIdIf(tourId, expected, next) {
+      // REAL compare semantics, or the route-level interleaving test asserts
+      // nothing. Like claimConversion above, the check-and-set is synchronous
+      // within this async tick (no internal await between them), so two
+      // concurrent callers can never both win. A stored value that differs -
+      // including ABSENT, which never equals a string - LOSES and writes
+      // nothing; the winner's rotation must survive intact.
+      const t = toursMap.get(tourId);
+      if (!t || t.currentLadderId !== expected) return false;
+      t.currentLadderId = next;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+      return true;
     },
     async setRoster(tourId, roster, expectedVersion) {
       // Mirror the conditional write: MATERIALIZE only when no plan exists AND
@@ -2947,6 +3158,12 @@ export function createFakeWorld(): FakeWorld {
           skippedAt: input.skipped.at,
           skipReason: input.skipped.reason,
         }),
+        // GENERATION POINTER (supersession S1): same scar, one field over -
+        // TourReminderItem has NO index signature, so an optional ladderId is
+        // not enforced on this hand-built literal and dropping it would
+        // typecheck green while making every route-level suite see rows that
+        // belong to no ladder. Mirrors the real repo's conditional spread.
+        ...(input.ladderId !== undefined && { ladderId: input.ladderId }),
         createdAt: now,
       };
       tourRemindersMap.set(item.reminderId, { ...item });
@@ -3008,18 +3225,25 @@ export function createFakeWorld(): FakeWorld {
       tourRemindersMap.set(reminderId, r);
       return true;
     },
-    async cancelForTour(tourId) {
-      const now = new Date().toISOString();
-      for (const r of tourRemindersMap.values()) {
-        if (
-          r.tourId === tourId &&
-          r.sentAt === undefined &&
-          r.canceledAt === undefined &&
-          r.skippedAt === undefined
-        ) {
-          r.canceledAt = now;
-          tourRemindersMap.set(r.reminderId, r);
-        }
+    async deleteSupersededForTour(tourId, expectedPointer) {
+      // Mirror the real sweep (supersession D1 + review rounds B1/R2-1/NEW-1):
+      // the filters are "never sent" - pending, operator-canceled and skipped
+      // rows all go, and every sentAt row stays (NOT the removed tour-wide
+      // cancel's triple filter, which kept canceled and skipped rows in place) -
+      // AND "not the caller's own generation".
+      //
+      // The real repo rides every delete on a TransactWriteItems whose
+      // ConditionCheck reads the TOUR's currentLadderId, so a writer that
+      // rotates the pointer mid-sweep invalidates every remaining delete. Here
+      // that is a synchronous re-check per row (this fake has no transactions
+      // and needs none - it is strongly consistent by construction), and a
+      // mismatch STOPS the sweep exactly as a canceled pointer check does.
+      const candidates = [...tourRemindersMap.values()].filter(
+        (r) => r.tourId === tourId && r.sentAt === undefined && r.ladderId !== expectedPointer,
+      );
+      for (const r of candidates) {
+        if (toursMap.get(tourId)?.currentLadderId !== expectedPointer) return;
+        tourRemindersMap.delete(r.reminderId);
       }
     },
   };
@@ -3461,13 +3685,31 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
-  const adapter: MessagingAdapter = {
+  const adapter: MessagingAdapter & CarrierMessageSender = {
+    classifyMessageTransport(facts) {
+      return Object.freeze({
+        requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms',
+      });
+    },
+    prepareMessageSend(intent, params) {
+      return Object.freeze({ requestedTransport: intent.requestedTransport, params });
+    },
+    async sendPreparedMessage(prepared): Promise<SendMessageResult> {
+      sent.push(prepared.params);
+      return {
+        providerSid: `SMfake-out-${++sidCounter}`,
+        status: 'queued',
+        providerTs: new Date().toISOString(),
+        actualTransport: prepared.requestedTransport,
+      };
+    },
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
       return {
         providerSid: `SMfake-out-${++sidCounter}`,
         status: 'queued',
         providerTs: new Date().toISOString(),
+        actualTransport: (params.mediaUrls?.length ?? 0) > 0 ? 'mms' : 'sms',
       };
     },
     async getMediaStream(mediaUrl) {

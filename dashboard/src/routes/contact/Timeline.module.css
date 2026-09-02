@@ -151,8 +151,13 @@
  * but in the stacked (<=860px) shell .comms is bounded and NOT a scroller, so a
  * grown composer just overflowed its bottom edge — Send and the reply note ended
  * up off-screen with nothing to scroll to them. A smaller floor still keeps the
- * newest exchange in view (the stream scrolls internally), and .upcoming yields
- * alongside it, so the composer never has to be the thing that gives. */
+ * newest exchange in view (the stream scrolls internally), so the composer never
+ * has to be the thing that gives.
+ *
+ * .upcoming used to shrink alongside this floor and no longer can: it is INSIDE
+ * .stream now, so it takes no slice of the column at all - it is content the
+ * stream scrolls, and the scroll anchor keeps it below the fold at rest. That
+ * removed the phone override this comment used to lean on. */
 @media (max-width: 767.98px) {
   .stream {
     min-height: 4rem;
@@ -637,33 +642,31 @@ a.pill:focus-visible {
   font-style: italic;
 }
 
-/* --- Upcoming (pinned scheduled-message section) -------------------------- */
-/* Pinned BETWEEN the scrollable stream and the composer: not-yet-sent scheduled
- * messages. Distinct dashed/muted treatment so it never reads as sent history. */
+/* --- Upcoming (scheduled-message section, INSIDE the stream) -------------- */
+/* The LAST child of the scrolling stream, below the newest message: not-yet-sent
+ * scheduled messages. Distinct dashed/muted treatment so it never reads as sent
+ * history.
+ *
+ * It has NO max-height, no overflow-y and no flex override on purpose. A capped
+ * block with its own scrollbar inside the stream's scrollbar is a nested
+ * scroller; and it no longer competes with the stream and the composer for a
+ * phone-sized column, because it is now part of what the stream scrolls. Its
+ * automatic minimum size (min-height: auto on a flex item) is what keeps it from
+ * being squeezed - do not add an explicit min-height, which would disable that.
+ * Timeline.tsx's scroll anchor is what keeps it below the fold at rest. */
 
 .upcoming {
-  flex: none;
   border-top: 1px dashed var(--c-border-strong);
   background: var(--c-surface-2);
+  /* Full-bleed inside .stream's var(--sp-3) inline padding, so the dashed rule
+   * and the surface tint still reach the pane's edges exactly as they did when
+   * this was a sibling of .streamWrap rather than a child of the scroller. The
+   * matching inline padding below puts the content back where it was. */
+  margin-inline: calc(-1 * var(--sp-3));
   padding: var(--sp-2) var(--sp-3);
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
-  max-height: 12rem;
-  overflow-y: auto;
-}
-
-/* Phone: this secondary panel yields BEFORE the composer and the stream do. At
- * `flex: none` it held a fixed 12rem out of a ~400px column, which (with the
- * stream at its floor) left the reply box overflowing the bottom of the pane.
- * It already scrolls internally, so shrinking it costs only scroll position —
- * where squeezing the composer costs you the box you're typing in. */
-@media (max-width: 767.98px) {
-  .upcoming {
-    flex: 0 1 auto;
-    min-height: 2.5rem;
-    max-height: 7rem;
-  }
 }
 
 .upcomingHead {

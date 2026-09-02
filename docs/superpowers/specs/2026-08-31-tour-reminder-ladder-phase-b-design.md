@@ -1,3 +1,14 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-01).** This document
+> describes how this work was *designed/planned at the time of writing*. Phase B shipped to
+> `main`, was swept and deployed on dev and prod, and its branch + worktree were deleted
+> during worktree cleanup. **This file is NOT current documentation, and the live code may
+> have drifted from it.** Phase A's spec, which this names as its predecessor, is frozen too -
+> both are history, so read the CODE for current behaviour. A third effort, tour-reminder
+> supersession cleanup, is IN FLIGHT on this same seam and will move these files again. The
+> mission's review record is preserved at
+> `docs/superpowers/reviews/2026-08-31-tour-reminder-ladder-phase-b/`.
+
 # Tour reminder ladder Phase B + relay group templates - design
 
 Date: 2026-08-31

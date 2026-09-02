@@ -437,8 +437,9 @@ export interface PreviewBodyMember {
   memberKey: string;
 }
 
-/** One row the confirm dialog lists, with the DISPLAY name (which may be
- *  backfilled from the contact and so differ from the body name). */
+/** One row the confirm dialog lists, with the DISPLAY name - the contact's
+ *  current name when readable, else the stored roster name - so it may differ
+ *  from the body name. */
 export interface PreviewRecipientRow {
   name?: string;
   memberKey: string;
@@ -452,8 +453,8 @@ export interface PreviewRecipientRow {
 /**
  * The two lists a caller resolves; see spec 6.1. They are separate because the
  * owner path composes the body from `resolveRoster` (stored names) and the
- * recipient list from `describeRoster` (backfilled names) - one field cannot
- * carry both.
+ * recipient list from `describeRoster` (contact-first names, stored name as
+ * the fallback) - one field cannot carry both.
  */
 export interface OpenPreviewParts {
   bodyMembers: PreviewBodyMember[];

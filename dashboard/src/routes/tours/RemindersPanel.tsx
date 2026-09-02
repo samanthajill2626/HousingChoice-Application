@@ -36,6 +36,7 @@ import {
   REMINDER_KIND_LABELS,
   REMINDER_SKIP_REASON_LABELS,
   REMINDER_SUPPRESSION_LABELS,
+  type TourReminderEarlierView,
   type TourReminderView,
   type TourUpdatedEvent,
 } from '../../api/index.js';
@@ -64,6 +65,19 @@ const MAX_ANCHOR_MS = 6 * 3_600_000;
  * contacts, settings and the whole ladder. A `paused` rung is deliberately NOT
  * skipped - a human can still send it, and the panel should notice when they do.
  *
+ * A SUPERSEDED rung (2026-09-01) is skipped on the same argument, and it is the
+ * likelier of the two to sit here past-due: the poll only meets a rung at its
+ * dueAt, so between the reschedule and the fire time nothing retires it, and a
+ * rung the sweep missed can stay upcoming-and-overdue indefinitely.
+ *
+ * A CONVERSION_IN_PROGRESS rung is deliberately NOT skipped (review round
+ * NEW-3), for the same reason `paused` is not: the state RESOLVES. The claim
+ * lives for milliseconds on the happy path, and when it clears the rung either
+ * fires or is swept - both of which the panel should notice. Skipping it here
+ * would leave the operator looking at "Converting" long after the conversion
+ * landed. Anchoring on it costs the 20s overdue re-check at worst, and the
+ * grace window bounds even a crashed claim.
+ *
  * Shared with the placement-nudge card (usePlacementNudges), hence the
  * structural `suppression` shape rather than a view-specific type.
  *
@@ -83,6 +97,7 @@ export function nextReminderRefetchDelay(
   for (const r of reminders) {
     if (r.state !== 'upcoming') continue;
     if (r.suppression?.reason === 'discontinued') continue;
+    if (r.suppression?.reason === 'superseded') continue;
     const t = new Date(r.dueAt).getTime();
     if (Number.isNaN(t)) continue;
     if (earliest === null || t < earliest) earliest = t;
@@ -102,7 +117,11 @@ function StateChip({
   rung,
   timezone,
 }: {
-  rung: TourReminderView;
+  // Typed on the EARLIER view rather than on TourReminderView so the one chip
+  // ladder serves both lists: the earlier view is the wider of the two (`body`
+  // optional, everything else identical), so a current rung is assignable to
+  // it. The chip reads no body, so there is nothing to lose.
+  rung: TourReminderEarlierView;
   timezone?: string;
 }): React.JSX.Element {
   if (rung.state === 'sent') {
@@ -135,6 +154,26 @@ function StateChip({
   // A rung that will never send is never "overdue".
   if (rung.suppression?.reason === 'discontinued') {
     return <span className={`${styles.chip} ${styles.paused}`}>No longer sent</span>;
+  }
+  // TERMINAL for a different cause (supersession 2026-09-01): the KIND still
+  // sends, but this rung belongs to a ladder the tour has already replaced, so
+  // the poll claim-skips it and Send now answers 409 superseded. Its own word,
+  // never "No longer sent" (which says the kind was retired) and never
+  // "Paused" (which invites the refused click). ABOVE `overdue` for the reason
+  // written above: a rung that will never send is never "overdue".
+  if (rung.suppression?.reason === 'superseded') {
+    return <span className={`${styles.chip} ${styles.paused}`}>Replaced</span>;
+  }
+  // TEMPORARY, and the only one of these three that is (review round NEW-3):
+  // the tour is mid-conversion to a placement, so the poll defers this rung
+  // unclaimed and Send now answers 409 conversion_in_progress - but the claim
+  // resolves. ABOVE `overdue` for the reason the two above give (a rung nothing
+  // is attempting is not "overdue"), and its own word rather than "Replaced" or
+  // "No longer sent", both of which would declare the rung dead just before it
+  // came back. TONE: `upcoming`, not the muted `paused` tone the two permanent
+  // chips take - this is an in-progress state, and it should not look retired.
+  if (rung.suppression?.reason === 'conversion_in_progress') {
+    return <span className={`${styles.chip} ${styles.upcoming}`}>Converting</span>;
   }
   // OVERDUE (spec 8): the server says this rung's send time has passed and it
   // still has not sent. It REPLACES the fire-time promise below rather than
@@ -174,6 +213,12 @@ function StateChip({
  *  the effect body). */
 interface Committed {
   reminders: TourReminderView[];
+  /** Survivors of ladders this tour has replaced (supersession spec 3.4).
+   *  Lives HERE beside `reminders` rather than in its own state slot on
+   *  purpose: the two describe one response, so a refetch that clears one must
+   *  clear the other, and holding them in one object makes that structural
+   *  rather than a thing to remember. */
+  earlier: TourReminderEarlierView[];
   nextId: string | undefined;
   error: string | null;
   /** Which tourId this state describes. */
@@ -191,6 +236,7 @@ interface Committed {
 export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Element {
   const [state, setState] = useState<Committed>({
     reminders: [],
+    earlier: [],
     nextId: undefined,
     error: null,
     forId: tourId,
@@ -214,6 +260,9 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
         if (controller.signal.aborted) return;
         setState({
           reminders: page.reminders,
+          // OMITTED by the server on the common single-generation tour, and on
+          // every wholly pre-migration one.
+          earlier: page.earlier ?? [],
           nextId: page.next?.reminderId,
           error: null,
           forId: tourId,
@@ -227,6 +276,10 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
         }
         setState({
           reminders: [],
+          // Cleared WITH the ladder: an error banner over a stale disclosure
+          // would show rows from a tour whose ladder the panel just said it
+          // could not read.
+          earlier: [],
           nextId: undefined,
           error: err instanceof ApiError ? err.message : 'Failed to load reminders',
           forId: tourId,
@@ -284,7 +337,10 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
     message: string;
   } | null>(null);
   const onToggleCanceled = useCallback(
-    (rung: TourReminderView) => {
+    // A Pick, not the whole view: the disclosure's Cancel (spec 3.4's one
+    // allowlisted earlier action) hands it a TourReminderEarlierView, and
+    // these two fields are all this handler has ever read.
+    (rung: Pick<TourReminderView, 'reminderId' | 'state'>) => {
       if (busyId !== null) return;
       setBusyId(rung.reminderId);
       setActionError(null);
@@ -331,7 +387,7 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
 
   // Committed state is for a previous tourId (or nothing landed yet) -> loading.
   const loading = state.forId !== tourId || !state.loaded;
-  const { reminders, nextId, error } = state;
+  const { reminders, earlier, nextId, error } = state;
 
   return (
     <Card title="Reminders">
@@ -393,8 +449,24 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                       to stop inviting the click - "Paused" would invite exactly
                       that refused click - and this is the other half of it.
                       Cancel/Restore below stay: a discontinued rung is still a
-                      pending row an operator may want off the ladder. */}
-                  {rung.state === 'upcoming' && rung.suppression?.reason !== 'discontinued' ? (
+                      pending row an operator may want off the ladder.
+                      NOT rendered for a SUPERSEDED rung either (2026-09-01),
+                      for the identical reason: the server refuses it 409
+                      superseded, permanently, because its ladder no longer
+                      exists. The current ladder's own rungs still offer the
+                      button, which is where a send can actually be made.
+                      NOT rendered during a CONVERSION either (review round
+                      NEW-3), and this is the one TEMPORARY member of the set:
+                      the server refuses with 409 conversion_in_progress while
+                      the tour's `pending:` claim stands, so the button's only
+                      possible answer right now is that refusal. It comes BACK
+                      on its own when the claim resolves and the rung survives -
+                      which is why the chip above says "Converting" rather than
+                      retiring the row. */}
+                  {rung.state === 'upcoming' &&
+                  rung.suppression?.reason !== 'discontinued' &&
+                  rung.suppression?.reason !== 'superseded' &&
+                  rung.suppression?.reason !== 'conversion_in_progress' ? (
                     <button
                       type="button"
                       className={styles.action}
@@ -447,12 +519,16 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   // stops reading as a warning at all. `discontinued` joins them
                   // on the same argument: it is a settled decision, not a
                   // problem to act on, and it recurs on every tour that still
-                  // has a pause-era rung.
+                  // has a pause-era rung. `superseded` is muted on exactly that
+                  // argument: it reports the consequence of a change the
+                  // operator themselves made (a reschedule, a conversion), and
+                  // every stale rung of a rescheduled tour carries the line.
                   <p
                     className={
                       rung.suppression?.reason === 'quiet_hours' ||
                       rung.suppression?.reason === 'paused' ||
-                      rung.suppression?.reason === 'discontinued'
+                      rung.suppression?.reason === 'discontinued' ||
+                      rung.suppression?.reason === 'superseded'
                         ? styles.suppressionMuted
                         : styles.suppression
                     }
@@ -470,6 +546,104 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
           })}
         </ul>
       )}
+      {/* EARLIER REMINDERS (supersession spec 3.4) - a SECOND CHILD of the
+          Card, deliberately OUTSIDE the ternary above. A terminal or converted
+          tour has an EMPTY current ladder and a full history, so a disclosure
+          written inside that chain would be invisible on precisely the tour
+          with the most to show; here "No reminders armed." and the disclosure
+          render together, which is the honest pair.
+
+          A raw <details>/<summary>: this dashboard has no shared disclosure
+          component, and the four existing sites (Timeline's transcript and
+          email blocks, UnmatchedRow, AiRunDetail) all do exactly this. Closed
+          by default because <details> has no `open` - decision D2 puts this
+          list out of the default view, and the native element gives us the
+          keyboard and screen-reader behaviour for free.
+
+          Gated on loading/error so it follows the ladder: a stale disclosure
+          under a loading or errored panel would be the one part of the card
+          still claiming to describe this tour. */}
+      {!loading && error === null && earlier.length > 0 ? (
+        <details className={styles.earlier}>
+          <summary className={styles.earlierToggle}>Earlier reminders ({earlier.length})</summary>
+          <ul className={`${styles.rows} ${styles.earlierRows}`}>
+            {earlier.map((rung) => {
+              const kindLabel = REMINDER_KIND_LABELS[rung.kind] ?? rung.kind;
+              const suppression =
+                rung.suppression !== undefined
+                  ? suppressionNote(
+                      rung.suppression.reason,
+                      REMINDER_SUPPRESSION_LABELS[rung.suppression.reason] ??
+                        rung.suppression.reason,
+                    )
+                  : undefined;
+              return (
+                <li key={rung.reminderId} className={styles.row}>
+                  <div className={styles.rowHead}>
+                    <span
+                      className={`${styles.kind} ${rung.state === 'canceled' ? styles.struck : ''}`}
+                    >
+                      {kindLabel}
+                    </span>
+                    <StateChip rung={rung} timezone={state.timezone} />
+                    {/* THE ACTION ALLOWLIST, BY STATE (spec 3.4's table) -
+                        written out here rather than inherited from the ladder
+                        above, which keys off `state` alone and would therefore
+                        offer Send now on this unsent rung (the server refuses
+                        it 409 superseded) and Restore on a canceled one, which
+                        would resurrect a rung into a ladder that no longer
+                        exists. sent / canceled / skipped get NOTHING.
+
+                        Cancel on a sweep miss is the operator's remedy of last
+                        resort. It cannot beat a rung the poll already
+                        claim-skipped - the repo's cancel requires
+                        attribute_not_exists(skippedAt) - and the refetch then
+                        reports the honest state, which is the right answer.
+
+                        "the earlier" is load-bearing, not decoration: the
+                        ladder's own Cancel interpolates the same kind label,
+                        so a bare reuse would give two buttons ONE accessible
+                        name - the strict-mode collision the comment above
+                        records and e2e/support/selectors.md pins. */}
+                    {rung.state === 'upcoming' ? (
+                      <button
+                        type="button"
+                        className={styles.action}
+                        disabled={busyId !== null}
+                        aria-label={`Cancel the earlier ${kindLabel} reminder`}
+                        onClick={() => onToggleCanceled(rung)}
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+                  {/* NO BODY, NOT "Preview unavailable" (spec 3.4, T7.7). The
+                      server sends a body here only when the row carries the
+                      claim-time snapshot; absence means there is nothing
+                      honest to show, which is a different thing from the
+                      ladder's empty-string "we could not compose it right
+                      now". Borrowing that sentence would send a navigator
+                      hunting for an outage that is not happening. */}
+                  {rung.body !== undefined && rung.body !== '' ? (
+                    <p
+                      className={`${styles.body} ${rung.state === 'canceled' ? styles.struck : ''}`}
+                    >
+                      {rung.body}
+                    </p>
+                  ) : null}
+                  {suppression !== undefined ? (
+                    // Always the muted tone here: every note in this list is
+                    // `Replaced`, which reports the consequence of a change the
+                    // operator themselves made. Amber would make a history
+                    // drawer read as a list of problems.
+                    <p className={styles.suppressionMuted}>{suppression}</p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      ) : null}
     </Card>
   );
 }

@@ -389,14 +389,14 @@ const SILENT_CASES: TickerCase[] = [
       }),
   },
   {
-    title: 'an INBOUND bubble carrying a map is not an outbound send',
+    title: 'a generic INBOUND bubble without a Relay sender key has no rendered recipient state to age',
     build: (t0) =>
       outboundAt(
         t0,
         {
           c1: { status: 'sent', sentAt: new Date(t0).toISOString() },
         },
-        { direction: 'inbound' },
+        { direction: 'inbound', relay_sender_key: undefined },
       ),
   },
   {
@@ -413,6 +413,38 @@ describe('Timeline staleness ticker - termination table', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it('ARMS and TERMINATES for an INBOUND Relay source: its collapsed recipient summary and revealed row both update when the live outbound leg becomes stale', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [
+        outboundAt(
+          t0,
+          {
+            c1: { status: 'sent', sentAt: new Date(t0).toISOString() },
+          },
+          { direction: 'inbound' },
+        ),
+      ],
+    });
+    expect(
+      screen.getByRole('group', { name: /Delivery by recipient\. Keisha Kane: Sent,/ }),
+    ).toBeInTheDocument();
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+
+    expect(
+      screen.getByRole('group', { name: /Delivery by recipient\. Keisha Kane: Sent, not confirmed,/ }),
+    ).toBeInTheDocument();
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
+    reveal();
+    expect(within(screen.getByRole('list', { name: LIST_NAME })).getByText('Sent - not confirmed')).toBeInTheDocument();
   });
 
   it.each(ARMING_CASES)(

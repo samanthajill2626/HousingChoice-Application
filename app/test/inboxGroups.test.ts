@@ -35,10 +35,12 @@ interface GroupSeed {
 interface Calls {
   groupLimits: (number | undefined)[];
   groupCursors: (string | undefined)[];
+  /** One entry per getDisplaysByIds batch: proof the page reads names ONCE. */
+  displayBatches: string[][];
 }
 
 function makeDeps(seed: GroupSeed): { deps: InboxRouterDeps; calls: Calls } {
-  const calls: Calls = { groupLimits: [], groupCursors: [] };
+  const calls: Calls = { groupLimits: [], groupCursors: [], displayBatches: [] };
   const groups = [...(seed.groups ?? [])].sort((a, b) =>
     a.last_activity_at < b.last_activity_at ? 1 : -1,
   );
@@ -113,6 +115,20 @@ function makeDeps(seed: GroupSeed): { deps: InboxRouterDeps; calls: Calls } {
       // partition is provably empty in this suite.
       async listByType(type: string, opts = {}) {
         return listByTypeFromContacts((seed.contacts ?? []) as never, type, opts);
+      },
+      // The display projection the read boundary batches over (M1). Records the
+      // id set of every call so a test can prove ONE batch per page, not one
+      // read per member.
+      async getDisplaysByIds(contactIds: string[]) {
+        calls.displayBatches.push([...contactIds]);
+        return new Map(
+          (seed.contacts ?? [])
+            .filter((c) => contactIds.includes(c.contactId))
+            .map(
+              (c) =>
+                [c.contactId, { contactId: c.contactId, firstName: c.name, phone: c.phone }] as const,
+            ),
+        );
       },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
@@ -449,5 +465,99 @@ describe('aggregateInbox - filter=groups', () => {
     await expect(
       aggregateInbox({ filter: 'all', limit: 25, cursor: groupCursor }, deps),
     ).rejects.toBeInstanceOf(InboxBadRequestError);
+  });
+});
+
+// M1: `participants[].name` is a write-time snapshot nothing refreshes, so a
+// renamed contact kept its old title forever. The row builders now take a names
+// map resolved at the boundary - ONE batch for the page, never a read per
+// member - and hand the unchanged label functions a fresher roster.
+describe('roster names resolve on read (M1)', () => {
+  it('titles group rows from the CONTACT names, one batch per page', async () => {
+    const { deps, calls } = makeDeps({
+      groups: [
+        groupConv({
+          conversationId: 'gt-1',
+          last_activity_at: '2026-06-17T10:00:00.000Z',
+          participants: [
+            { contactId: 'c-ann', phone: '+14045550111', name: 'Ann Tenant' },
+            { contactId: 'c-marcus', phone: '+14045550112' },
+          ],
+        }),
+        groupConv({ conversationId: 'gt-2', last_activity_at: '2026-06-17T09:00:00.000Z' }),
+      ],
+      contacts: [
+        { contactId: 'c-ann', phone: '+14045550111', name: 'Annika' },
+        { contactId: 'c-marcus', phone: '+14045550112', name: 'Marc' },
+      ],
+    });
+    const page = await aggregateInbox({ filter: 'groups', limit: 25 }, deps);
+    expect(page.rows.map((r) => r.name)).toEqual(['With Annika & Marc', 'With Annika & Marc']);
+    expect(calls.displayBatches).toHaveLength(1);
+    expect(new Set(calls.displayBatches[0])).toEqual(new Set(['c-ann', 'c-marcus']));
+  });
+
+  it('titles a relay row from the contact name', async () => {
+    const { deps } = makeDeps({
+      relay: [
+        {
+          conversationId: 'relay-1',
+          status: 'open',
+          type: 'relay_group',
+          pool_number: '+15550160001',
+          participants: [{ contactId: 'c-ann', phone: '+14045550111', name: 'Ann Tenant' }],
+          last_activity_at: '2026-06-17T22:00:00.000Z',
+          created_at: '2026-06-17T22:00:00.000Z',
+          ai_mode: 'manual',
+        } as ConversationItem,
+      ],
+      contacts: [{ contactId: 'c-ann', phone: '+14045550111', name: 'Annika' }],
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    const row = page.rows.find((r) => r.conversationId === 'relay-1');
+    expect(row?.name).toBe('With Annika');
+  });
+
+  // R2-1, ACCEPTED BY DESIGN and pinned here so it can never happen silently.
+  // relayThreadLabel's tag rung only ever beat RAW DIGITS: member labels win
+  // whenever ANY member is named (groupTitle.ts's carve-out), so an operator's
+  // placement_tag was always a fallback for a roster nobody could name.
+  // Resolving names on read widens "named" from the stored snapshot to the
+  // contact record, which is the whole point of M1 - so a tagged group whose
+  // members store no name but DO resolve to named contacts now titles by those
+  // names, exactly as a freshly created group would. The push title still shows
+  // the tag (it passes the stored snapshot by decision), so this is a visible
+  // inbox-vs-push divergence, declared rather than accidental.
+  it('PIN: a tagged, snapshot-nameless roster titles by the CONTACT names once hydrated (tag only ever beat raw digits)', async () => {
+    const { deps } = makeDeps({
+      relay: [
+        {
+          conversationId: 'relay-tagged',
+          status: 'open',
+          type: 'relay_group',
+          pool_number: '+15550160001',
+          // The operator's label rides the index signature under this exact key.
+          placement_tag: 'Maple St - Dana',
+          // A post-migration roster: contactIds, but not one stored name.
+          participants: [
+            { contactId: 'c-ana', phone: '+14045550121' },
+            { contactId: 'c-ben', phone: '+14045550122' },
+          ],
+          last_activity_at: '2026-06-17T22:00:00.000Z',
+          created_at: '2026-06-17T22:00:00.000Z',
+          ai_mode: 'manual',
+        } as ConversationItem,
+      ],
+      contacts: [
+        { contactId: 'c-ana', phone: '+14045550121', name: 'Ana Reyes' },
+        { contactId: 'c-ben', phone: '+14045550122', name: 'Ben Ortiz' },
+      ],
+    });
+
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    const row = page.rows.find((r) => r.conversationId === 'relay-tagged');
+    // Whole names, not first names: the relay chain does not shorten.
+    expect(row?.name).toBe('With Ana Reyes & Ben Ortiz');
+    expect(row?.name).not.toBe('Maple St - Dana');
   });
 });

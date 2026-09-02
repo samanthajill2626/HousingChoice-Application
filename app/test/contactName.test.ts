@@ -6,7 +6,7 @@ import {
   parseContactName,
   type ParsedContactName,
 } from '../src/lib/contactName.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { ContactDisplayItem, ContactItem } from '../src/repos/contactsRepo.js';
 
 describe('parseContactName — conforming strings', () => {
   const cases: [string, ParsedContactName][] = [
@@ -108,5 +108,12 @@ describe('contactDisplayName', () => {
   });
   it('returns undefined for an undefined contact', () => {
     expect(contactDisplayName(undefined)).toBeUndefined();
+  });
+});
+
+describe('contactDisplayName accepts the display projection', () => {
+  it('joins trimmed parts from a ContactDisplayItem', () => {
+    const item: ContactDisplayItem = { contactId: 'c', firstName: ' Ada ', lastName: 'Lovelace ' };
+    expect(contactDisplayName(item)).toBe('Ada Lovelace');
   });
 });

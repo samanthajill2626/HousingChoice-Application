@@ -18,8 +18,10 @@ The bulk of this work reached `main` **indirectly**: it was merged into
 names the branch without ever having merged it directly. The merge base is
 `e3a97e77`, which is exactly the tip the handback below calls MERGE-READY.
 
-**The branch is NOT fully merged.** Three commits made after that point are still
-only on the branch as of 2026-08-27:
+**RESOLVED 2026-09-01: the branch is now fully merged and retired.** For a
+while it was not, and the shape is worth keeping because it is easy to
+misread. Three commits made after `e3a97e77` stayed branch-only until
+2026-08-31:
 
 | commit | what |
 |---|---|
@@ -27,15 +29,27 @@ only on the branch as of 2026-08-27:
 | `9c18a3e7` | `fix(dashboard)`: essence-match PDF at all three render sites |
 | `474c3aa4` | `docs(issues)`: file four findings from the retroactive review |
 
-Two are real fixes carrying tests; the third files
+Two were real fixes carrying tests; the third filed
 `backfill-scan-pulls-message-bodies`,
 `inbound-media-content-type-index-mismatch`,
 `media-mirror-reverts-backfilled-types` and
-`outbound-email-attachment-filename-unsanitized`. The branch and its worktree
-were therefore LEFT IN PLACE - only these records were harvested.
+`outbound-email-attachment-filename-unsanitized` - **all four now present and
+open in `docs/issues/`,** verified before this branch was retired. A cleanup
+pass on 2026-08-27 refused to delete the branch for exactly this reason and
+harvested only the records; the retroactive review then finished, the human
+merged, and the branch retired on 2026-09-01 with nothing stranded.
 
-Also outstanding, and human-run: the content-type **backfill** (dev then prod,
-after each deploy, `--dry-run` first).
+**The lesson that outlives it:** a merge commit that NAMES a branch does not
+mean the branch is merged. `main`'s history contained
+"Merge branch 'feat/media-content-type-fidelity'" the whole time, because the
+branch had been merged into `feat/mms-image-viewer` at `5b2d3a37` as an
+authorized prerequisite and rode in from there. Only
+`git merge-base --is-ancestor` plus a 0-ahead count settles it.
+
+**Nothing is outstanding.** The content-type **backfill has been RUN in every
+environment** (operator-confirmed 2026-09-01), so historical inbound media is
+repaired, not just newly-arriving media. `RUNBOOK.md` keeps the procedure as the
+record of how it was done and for any future dataset.
 
 ## Why this record is worth keeping
 

@@ -25,12 +25,25 @@
 import twilio from 'twilio';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import type { MessageTransport } from '../lib/messageTransport.js';
 import { createRedirectingHttpClient } from './twilioHttpClient.js';
 import { SmsSendingDisabledError } from './messaging.js';
+import { normalizeTwilioTransportEvidence } from './twilioMessageTransport.js';
 
 // ---------------------------------------------------------------------------
 // Port
 // ---------------------------------------------------------------------------
+
+/**
+ * Provider-boundary observation for an inbound native group envelope.
+ *
+ * The active Twilio Conversations classic rail is Group MMS. Keep that fact
+ * with the Conversations adapter so webhook filing does not become a second
+ * authority over the rail.
+ */
+export function nativeGroupInboundActualTransport(): MessageTransport {
+  return 'mms';
+}
 
 /** A Conversation (the rail) as the app cares about it. */
 export interface GroupConversationRef {
@@ -91,6 +104,27 @@ export interface PostGroupMessageResult {
   index?: number;
   /** ISO 8601. */
   dateCreated: string;
+  /** The carrier transport established by the provider rail. */
+  actualTransport?: MessageTransport;
+}
+
+export interface GroupMessageTransportIntent {
+  requestedTransport: MessageTransport;
+}
+
+export interface PreparedGroupMessagePost extends GroupMessageTransportIntent {
+  input: PostGroupMessageInput;
+}
+
+export interface GroupMessageSender {
+  classifyGroupMessageTransport(): GroupMessageTransportIntent;
+  prepareGroupMessagePost(
+    intent: GroupMessageTransportIntent,
+    input: PostGroupMessageInput,
+  ): PreparedGroupMessagePost;
+  postPreparedGroupMessage(
+    prepared: PreparedGroupMessagePost,
+  ): Promise<PostGroupMessageResult>;
 }
 
 /**
@@ -238,6 +272,7 @@ interface ConversationMessageInstanceLike {
   sid: string;
   index?: number | null;
   dateCreated?: Date | null;
+  channelMessageSid?: string | null;
 }
 
 interface ParticipantContextLike {
@@ -397,7 +432,7 @@ export interface TwilioGroupConversationsDriverDeps {
   logger?: Logger;
 }
 
-export class TwilioGroupConversationsDriver implements GroupConversationsPort {
+export class TwilioGroupConversationsDriver implements GroupConversationsPort, GroupMessageSender {
   private readonly client: TwilioConversationsClientLike;
   /**
    * The resolved rail scope - an explicit Conversations Service when one is
@@ -672,7 +707,26 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
     );
   }
 
+  classifyGroupMessageTransport(): GroupMessageTransportIntent {
+    return Object.freeze({ requestedTransport: 'mms' });
+  }
+
+  prepareGroupMessagePost(
+    intent: GroupMessageTransportIntent,
+    input: PostGroupMessageInput,
+  ): PreparedGroupMessagePost {
+    return Object.freeze({ requestedTransport: intent.requestedTransport, input });
+  }
+
   async postGroupMessage(input: PostGroupMessageInput): Promise<PostGroupMessageResult> {
+    const intent = this.classifyGroupMessageTransport();
+    return this.postPreparedGroupMessage(this.prepareGroupMessagePost(intent, input));
+  }
+
+  async postPreparedGroupMessage(
+    prepared: PreparedGroupMessagePost,
+  ): Promise<PostGroupMessageResult> {
+    const { input } = prepared;
     // A2P kill switch (spec invariant 13.7), enforced INSIDE the adapter so no
     // direct-adapter caller can bypass it. Same error class the existing
     // kill-switch consumers already catch (adapters/messaging.ts).
@@ -749,10 +803,38 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
       },
       'group conversation message posted',
     );
+    const channelEvidence = normalizeTwilioTransportEvidence({
+      direction: 'outbound',
+      requestedTransport: 'mms',
+      ...(typeof message.channelMessageSid === 'string' && {
+        messageSid: message.channelMessageSid,
+      }),
+      authenticatedProviderTraffic: true,
+    });
+    if (
+      channelEvidence.kind === 'conflict' ||
+      (channelEvidence.kind === 'observed' && channelEvidence.transport !== 'mms')
+    ) {
+      this.log.warn(
+        {
+          event: 'group_message_transport_evidence_conflict',
+          providerSid: message.sid,
+          ...(typeof message.channelMessageSid === 'string' && {
+            channelMessageSid: message.channelMessageSid,
+          }),
+          ...(channelEvidence.kind === 'observed'
+            ? { observedTransport: channelEvidence.transport }
+            : { evidenceSource: channelEvidence.source, ...channelEvidence.safeFacts }),
+          authoritativeTransport: 'mms',
+        },
+        'group message result conflicted with the authoritative Group MMS rail',
+      );
+    }
     return {
       messageSid: message.sid,
       ...(typeof message.index === 'number' && { index: message.index }),
       dateCreated,
+      actualTransport: 'mms',
     };
   }
 
@@ -792,7 +874,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
  * A typed refusal is the honest signal, and every caller already has to handle
  * "no rail".
  */
-export class ConsoleGroupConversationsDriver implements GroupConversationsPort {
+export class ConsoleGroupConversationsDriver implements GroupConversationsPort, GroupMessageSender {
   private readonly log: Logger;
 
   constructor(deps: { logger?: Logger } = {}) {
@@ -823,7 +905,25 @@ export class ConsoleGroupConversationsDriver implements GroupConversationsPort {
     throw this.unavailable('group rail lookup');
   }
 
-  async postGroupMessage(_input: PostGroupMessageInput): Promise<PostGroupMessageResult> {
+  classifyGroupMessageTransport(): GroupMessageTransportIntent {
+    return Object.freeze({ requestedTransport: 'mms' });
+  }
+
+  prepareGroupMessagePost(
+    intent: GroupMessageTransportIntent,
+    input: PostGroupMessageInput,
+  ): PreparedGroupMessagePost {
+    return Object.freeze({ requestedTransport: intent.requestedTransport, input });
+  }
+
+  async postGroupMessage(input: PostGroupMessageInput): Promise<PostGroupMessageResult> {
+    const intent = this.classifyGroupMessageTransport();
+    return this.postPreparedGroupMessage(this.prepareGroupMessagePost(intent, input));
+  }
+
+  async postPreparedGroupMessage(
+    _prepared: PreparedGroupMessagePost,
+  ): Promise<PostGroupMessageResult> {
     throw this.unavailable('group message post');
   }
 
@@ -872,7 +972,7 @@ export interface CreateGroupConversationsAdapterDeps {
 
 export function createGroupConversationsAdapter(
   deps: CreateGroupConversationsAdapterDeps = {},
-): GroupConversationsPort {
+): GroupConversationsPort & GroupMessageSender {
   const config = deps.config ?? loadConfig();
   if (config.messagingDriver === 'console') {
     return new ConsoleGroupConversationsDriver({ ...(deps.logger !== undefined && { logger: deps.logger }) });

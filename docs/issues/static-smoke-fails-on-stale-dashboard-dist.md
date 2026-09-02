@@ -3,10 +3,12 @@ id: static-smoke-fails-on-stale-dashboard-dist
 title: staticSmoke skips on an ABSENT dashboard/dist but fails on a STALE one, blaming manifest paths instead of the build
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/test-infra
 refs: app/test/staticSmoke.test.ts:19, app/test/staticSmoke.test.ts:28, dashboard/index.html:11
 created: 2026-08-25
+resolved: 2026-09-01
+updated: 2026-09-01
 ---
 
 **Problem.** `staticSmoke.test.ts` asserts the BUILT dashboard's `index.html`
@@ -61,3 +63,21 @@ Clearing it by hand today: `npm run build -w dashboard`.
 Worth noting the guard's existing instinct is right - self-skipping on a
 gitignored build artifact is the correct pattern, matching the DynamoDB Local
 suites. This is a gap in the predicate, not in the approach.
+
+**Resolution (2026-09-01).** Fixed structurally on the npm-test-soundness
+mission (`a9b7124d` plus the review fix waves; records:
+`docs/superpowers/reviews/2026-08-31-npm-test-soundness/s3-static-smoke.md`) -
+and NOT by the mtime predicate suggested above, which git defeats: git does
+not preserve mtimes, so a fresh clone, a new worktree, or a routine main sync
+would rewrite the tracked file's mtime and silently flip a genuine failure
+into a skip. Instead the file was split by what each assertion proves:
+app-serving behaviour runs against a temp fixture this file writes and never
+skips; the five PWA identity conditions are asserted against the TRACKED
+`dashboard/index.html` and never skip; and the check against the built
+`dashboard/dist` is a diagnostic that can only PASS or SKIP - a stale or
+broken dist now skips with a message naming both causes (most likely stale ->
+rebuild; a fresh build still failing -> the BUILD is dropping the identity
+tags) instead of failing on manifest paths. All three branches were observed
+live, under the default reporter. The coverage this gives up - nothing can
+FAIL on the built dist any more - is tracked in
+[`built-dashboard-identity-tags-unasserted`](./built-dashboard-identity-tags-unasserted.md).

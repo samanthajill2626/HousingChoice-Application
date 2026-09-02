@@ -311,6 +311,104 @@ describe('TwilioGroupConversationsDriver.addParticipants', () => {
 });
 
 describe('TwilioGroupConversationsDriver.postGroupMessage', () => {
+  it('classifies and preserves a frozen serializable Group MMS intent before posting', async () => {
+    const f = fakeConversationsClient();
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+    const intent = driver.classifyGroupMessageTransport();
+    const input = {
+      conversationSid: 'CHrail1',
+      author: '+14045550000',
+      body: 'on my way',
+    };
+
+    expect(intent).toEqual({ requestedTransport: 'mms' });
+    expect(Object.isFrozen(intent)).toBe(true);
+    expect(Object.getPrototypeOf(intent)).toBe(Object.prototype);
+    expect(JSON.parse(JSON.stringify(intent))).toEqual({ requestedTransport: 'mms' });
+
+    const prepared = driver.prepareGroupMessagePost(intent, input);
+    expect(prepared).toEqual({ requestedTransport: 'mms', input });
+    expect(f.messageCreate).not.toHaveBeenCalled();
+
+    await expect(driver.postPreparedGroupMessage(prepared)).resolves.toEqual({
+      messageSid: 'IMposted',
+      index: 3,
+      dateCreated: '2026-08-11T13:06:45.433Z',
+      actualTransport: 'mms',
+    });
+    expect(f.messageCreate).toHaveBeenCalledWith({ author: '+14045550000', body: 'on my way' });
+  });
+
+  it('treats ChannelMessageSid only as corroborating or conflicting evidence', async () => {
+    const corroborating = fakeConversationsClient({
+      messageCreate: vi.fn().mockResolvedValue({
+        sid: 'IMcorroborating',
+        channelMessageSid: `MM${'d'.repeat(32)}`,
+        dateCreated: new Date('2026-08-11T13:06:45.433Z'),
+      }),
+    });
+    const corroboratingLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const corroboratingDriver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: corroborating.client as never,
+      logger: corroboratingLogger as never,
+    });
+
+    const corroboratingResult = await corroboratingDriver.postGroupMessage({
+      conversationSid: 'CHrail1',
+      author: '+14045550000',
+      body: 'hello',
+    });
+    expect(corroboratingResult.actualTransport).toBe('mms');
+    expect(corroboratingLogger.warn).not.toHaveBeenCalled();
+
+    const conflicting = fakeConversationsClient({
+      messageCreate: vi.fn().mockResolvedValue({
+        sid: 'IMconflicting',
+        channelMessageSid: `SM${'e'.repeat(32)}`,
+        dateCreated: new Date('2026-08-11T13:06:45.433Z'),
+      }),
+    });
+    const conflictingLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const conflictingDriver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: conflicting.client as never,
+      logger: conflictingLogger as never,
+    });
+
+    const conflictingResult = await conflictingDriver.postGroupMessage({
+      conversationSid: 'CHrail1',
+      author: '+14045550000',
+      body: 'hello',
+    });
+    expect(conflictingResult.actualTransport).toBe('mms');
+    expect(conflictingLogger.warn).toHaveBeenCalledTimes(1);
+    expect(conflictingLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'group_message_transport_evidence_conflict',
+        providerSid: 'IMconflicting',
+        channelMessageSid: `SM${'e'.repeat(32)}`,
+        observedTransport: 'sms',
+        authoritativeTransport: 'mms',
+      }),
+      expect.any(String),
+    );
+  });
+
   it('authors as the business number and NEVER sets X-Twilio-Webhook-Enabled', async () => {
     const f = fakeConversationsClient();
     const driver = new TwilioGroupConversationsDriver({
@@ -329,6 +427,7 @@ describe('TwilioGroupConversationsDriver.postGroupMessage', () => {
       messageSid: 'IMposted',
       index: 3,
       dateCreated: '2026-08-11T13:06:45.433Z',
+      actualTransport: 'mms',
     });
     const params = f.messageCreate.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(params['author']).toBe('+14045550000');

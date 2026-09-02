@@ -43,6 +43,7 @@ interface Fakes {
   createdOneToOnes: string[];
   /** SSE events this service emitted (the UI-refresh push, fix wave 5 L2). */
   emitted: { event: AppEventName; payload: unknown }[];
+  actualTransportWrites: { memberKey: string; observed: string }[];
   /** `onPark` fires INSIDE parkGroupReceipt - models the append committing
    *  mid-park. Held in its own object because makeFakes returns a SPREAD copy,
    *  so a field set on the result would never reach the closure. */
@@ -110,6 +111,7 @@ function makeFakes(
     audits: [] as Fakes['audits'],
     createdOneToOnes: [] as string[],
     emitted: [] as Fakes['emitted'],
+    actualTransportWrites: [] as Fakes['actualTransportWrites'],
     hooks,
     capture,
   };
@@ -170,6 +172,18 @@ function makeFakes(
         if (!item || !slot || slot.sid !== undefined) return false;
         item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: { ...slot, sid } };
         return true;
+      },
+      setRecipientActualTransport: async (conversationId, tsMsgId, memberKey, observed) => {
+        fakes.actualTransportWrites.push({ memberKey, observed });
+        const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+        if (!item) return 'missing';
+        if (item.transport_schema_version !== 1) return 'legacy_noop';
+        const slot = item.delivery_recipients?.[memberKey];
+        if (!slot) return 'missing';
+        if (slot.actualTransport === observed) return 'idempotent';
+        if (slot.actualTransport !== undefined && slot.actualTransport !== 'rcs') return 'conflict';
+        slot.actualTransport = observed;
+        return 'updated';
       },
       parkGroupReceipt: async (receipt, opts) => {
         hooks.onPark?.();
@@ -399,6 +413,128 @@ describe('the SSE push that makes the rollup live', () => {
     await f.service.applyReceipt({ messageSid: 'IMnosuch', participantSid: 'MBann', status: 'delivered' });
 
     expect(f.emitted).toEqual([]);
+  });
+
+  it('emits once when authoritative group transport changes but delivery status is a no-op', async () => {
+    const f = makeFakes({
+      message: outboundGroupMessage({
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
+        delivery_status: 'delivered',
+        delivery_recipients: {
+          [ANN_KEY]: {
+            status: 'delivered',
+            requestedTransport: 'mms',
+            transportAggregationState: 'attempted',
+          },
+        },
+      }),
+    });
+
+    const out = await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBann',
+      status: 'delivered',
+      channelMessageSid: `MM${'a'.repeat(32)}`,
+    });
+
+    expect(out).toEqual({ outcome: 'applied', memberKey: ANN_KEY });
+    expect(slot(f, ANN_KEY)?.actualTransport).toBe('mms');
+    expect(slot(f, ANN_KEY)?.sid).toBe(`MM${'a'.repeat(32)}`);
+    expect(f.emitted).toHaveLength(1);
+  });
+
+  it('emits nothing when delivery status and authoritative transport both no-op', async () => {
+    const f = makeFakes({
+      message: outboundGroupMessage({
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
+        delivery_status: 'delivered',
+        delivery_recipients: {
+          [ANN_KEY]: {
+            status: 'delivered',
+            requestedTransport: 'mms',
+            actualTransport: 'mms',
+            transportAggregationState: 'attempted',
+          },
+        },
+      }),
+    });
+
+    const out = await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBann',
+      status: 'delivered',
+      channelMessageSid: `MM${'b'.repeat(32)}`,
+    });
+
+    expect(out).toEqual({ outcome: 'duplicate', memberKey: ANN_KEY });
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('does not originate actual transport from a receipt channel SID', async () => {
+    const f = makeFakes({
+      message: outboundGroupMessage({
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        delivery_recipients: {
+          [ANN_KEY]: {
+            status: 'queued',
+            requestedTransport: 'mms',
+            transportAggregationState: 'attempted',
+          },
+        },
+      }),
+    });
+
+    await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBann',
+      status: 'delivered',
+      channelMessageSid: `MM${'c'.repeat(32)}`,
+    });
+
+    expect(slot(f, ANN_KEY)?.actualTransport).toBeUndefined();
+    expect(f.actualTransportWrites).toEqual([]);
+  });
+
+  it('logs safe conflicting channel evidence without overwriting authoritative MMS', async () => {
+    const f = makeFakes({
+      message: outboundGroupMessage({
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
+        delivery_status: 'delivered',
+        delivery_recipients: {
+          [ANN_KEY]: {
+            status: 'delivered',
+            requestedTransport: 'mms',
+            actualTransport: 'mms',
+            transportAggregationState: 'attempted',
+          },
+        },
+      }),
+    });
+    const conflictingSid = `SM${'d'.repeat(32)}`;
+
+    await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBann',
+      status: 'delivered',
+      channelMessageSid: conflictingSid,
+    });
+
+    expect(slot(f, ANN_KEY)?.actualTransport).toBe('mms');
+    const warning = f.capture.lines.find((line) => line['event'] === 'group_receipt_transport_evidence_conflict');
+    expect(warning).toMatchObject({
+      evidenceSource: 'message-sid',
+      observedTransport: 'sms',
+      authoritativeTransport: 'mms',
+    });
+    expect(warning).not.toHaveProperty('channelMessageSid');
+    expect(JSON.stringify(warning)).not.toContain(conflictingSid);
   });
 
   it('emits when a PARKED receipt finally drains - the late path pushes too', async () => {

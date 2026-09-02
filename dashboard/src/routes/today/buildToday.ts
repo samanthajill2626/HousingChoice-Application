@@ -103,7 +103,12 @@ function formatPhone(phone: string): string {
 function conversationWho(conv: ConversationSummary): string {
   // participant_phone is optional (email-only threads carry none); `?? ''` keeps
   // phone-row behavior identical and yields '' when there is no phone to format.
-  return conv.participant_display_name ?? formatPhone(conv.participant_phone ?? '');
+  // The stored name must be NON-EMPTY to win: a blank snapshot would otherwise
+  // render an empty row where the phone is still known (M1).
+  const stored = conv.participant_display_name;
+  return typeof stored === 'string' && stored.length > 0
+    ? stored
+    : formatPhone(conv.participant_phone ?? '');
 }
 
 /** The external participant's contact id (match by phone, else the first

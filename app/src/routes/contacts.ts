@@ -25,6 +25,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { groupThreadLabel, relayMemberLabels } from '../lib/groupTitle.js';
+import { resolveRosterNames, withLiveNames } from '../lib/participantNames.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import {
   LANDLORD_STATUS_LABELS,
@@ -1185,45 +1186,56 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // D9: include CONNECTING groups too (a connect-when-ready group this contact is
     // rostered on has no pool number yet, but should still show on their card). The
     // poolNumber field is guarded below, so a connecting row simply omits it.
+    // Read all three partitions first, THEN filter to this contact's groups,
+    // THEN resolve names in ONE batch - never a batch per partition. The stored
+    // `participants[].name` is a write-time snapshot nothing refreshes, so the
+    // labels below run over a roster re-named from the contacts themselves.
+    const mine: { status: 'open' | 'connecting' | 'closed'; conv: ConversationItem }[] = [];
     for (const status of ['open', 'connecting', 'closed'] as const) {
       const { items, truncated } = await conversations.listRelayGroups(status);
       if (truncated) {
-        // No silent truncation — the partition walk hit its page budget, so
+        // No silent truncation - the partition walk hit its page budget, so
         // groups with older last-activity were never considered.
         log.warn(
           { contactId, status },
-          'contact relay-groups: partition walk hit the page budget — older groups not considered',
+          'contact relay-groups: partition walk hit the page budget - older groups not considered',
         );
       }
       for (const conv of items) {
-        const roster = conv.participants ?? [];
-        if (!roster.some(isSelf)) continue;
-        // Staff chrome: each OTHER member renders their name, else their own
-        // formatted phone, so the contact card stops silently dropping a
-        // nameless person from a list the navigator is trying to act on.
-        const others = relayMemberLabels(roster.filter((p) => !isSelf(p)));
-        const tag =
-          typeof conv['placement_tag'] === 'string' && conv['placement_tag'].length > 0
-            ? conv['placement_tag']
-            : '';
-        // The tag carve-out, mirroring relayThreadLabel: an operator's
-        // deliberate label beats a list of raw digits. The client computes its
-        // own precedence over this DTO, so the only way to hand it the tag is to
-        // send no member labels at all.
-        const otherMemberNames =
-          others.anyNamed || tag.length === 0 ? others.labels : [];
-        groups.push({
-          conversationId: conv.conversationId,
-          status,
-          ...(typeof conv.pool_number === 'string' &&
-            conv.pool_number.length > 0 && { poolNumber: conv.pool_number }),
-          memberCount: roster.length,
-          lastActivityAt: conv.last_activity_at,
-          owner: getOwner(conv),
-          ...(tag.length > 0 && { tag }),
-          otherMemberNames,
-        });
+        if ((conv.participants ?? []).some(isSelf)) mine.push({ status, conv });
       }
+    }
+    const names = await resolveRosterNames(
+      mine.map((m) => m.conv),
+      contacts,
+      log,
+    );
+    for (const { status, conv } of mine) {
+      const roster = withLiveNames(conv.participants, names);
+      // Staff chrome: each OTHER member renders their name, else their own
+      // formatted phone, so the contact card stops silently dropping a
+      // nameless person from a list the navigator is trying to act on.
+      const others = relayMemberLabels(roster.filter((p) => !isSelf(p)));
+      const tag =
+        typeof conv['placement_tag'] === 'string' && conv['placement_tag'].length > 0
+          ? conv['placement_tag']
+          : '';
+      // The tag carve-out, mirroring relayThreadLabel: an operator's
+      // deliberate label beats a list of raw digits. The client computes its
+      // own precedence over this DTO, so the only way to hand it the tag is to
+      // send no member labels at all.
+      const otherMemberNames = others.anyNamed || tag.length === 0 ? others.labels : [];
+      groups.push({
+        conversationId: conv.conversationId,
+        status,
+        ...(typeof conv.pool_number === 'string' &&
+          conv.pool_number.length > 0 && { poolNumber: conv.pool_number }),
+        memberCount: roster.length,
+        lastActivityAt: conv.last_activity_at,
+        owner: getOwner(conv),
+        ...(tag.length > 0 && { tag }),
+        otherMemberNames,
+      });
     }
     // Newest activity first across BOTH partitions (each partition read is
     // already ordered; the merge is not).
@@ -1276,9 +1288,13 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     }
 
     const groups: GroupThreadRow[] = [];
-    for (const conv of items) {
-      const roster = conv.participants ?? [];
-      if (!roster.some(isSelf)) continue;
+    // Filter to this contact's threads FIRST, then resolve every remaining
+    // member's name in ONE batch - the stored roster name is a write-time
+    // snapshot, and the title below must not disagree with the contact record.
+    const mine = items.filter((conv) => (conv.participants ?? []).some(isSelf));
+    const names = await resolveRosterNames(mine, contacts, log);
+    for (const conv of mine) {
+      const roster = withLiveNames(conv.participants, names);
       const others = roster.filter((p) => !isSelf(p));
       groups.push({
         conversationId: conv.conversationId,

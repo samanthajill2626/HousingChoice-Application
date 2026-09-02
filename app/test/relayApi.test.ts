@@ -3,8 +3,9 @@
 // poolNumbers service (no Twilio, no real number), with the jobs machinery
 // wired so the intro enqueue resolves. Authed via the real sealed session
 // cookie next to the origin secret (every /api route is behind requireAuth).
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { Readable } from 'node:stream';
 import request from 'supertest';
 import {
   InMemorySchedulerAdapter,
@@ -424,7 +425,7 @@ describe('relay-group API (M1.7)', () => {
     ]);
   });
 
-  it('GET roster drops the creation-time name when the current contact is unnamed', async () => {
+  it('GET roster keeps the creation-time name when the current contact is unnamed (M1 ruling 2026-08-31)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     world.contacts.push({
@@ -444,14 +445,14 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
 
     expect(roster.status).toBe(200);
-    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+    // Contact name -> stored name -> (client renders the phone). An unnamed
+    // contact no longer erases a name the operator had a moment ago.
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }]);
   });
 
-  it('GET roster falls back to the roster phone, not a stale name, when contact lookup fails', async () => {
-    const originalGetById = world.contactsRepo.getById.bind(world.contactsRepo);
-    world.contactsRepo.getById = async (contactId) => {
-      if (contactId === 'c-alice') throw new Error('injected contact lookup failure');
-      return originalGetById(contactId);
+  it('GET roster keeps the stored name when the contact read fails (M1 ruling 2026-08-31)', async () => {
+    world.contactsRepo.getDisplaysByIds = async () => {
+      throw new Error('injected contact lookup failure');
     };
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
@@ -466,7 +467,37 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
 
     expect(roster.status).toBe(200);
-    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }]);
+  });
+
+  it('RED: GET roster resolves in ONE batch over the unique contact ids; no per-member getById', async () => {
+    const CAROL_LOCAL = '+15550100003';
+    const POOL_LOCAL = '+15550300996';
+    const { app } = authedHarness(world, makeFakePoolNumbers());
+    world.contacts.push({ contactId: 'c-live', type: 'tenant', status: 'active', phone: ALICE, firstName: 'Alicia', lastName: 'Live' });
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: POOL_LOCAL,
+      members: [
+        { contactId: 'c-live', phone: ALICE, name: 'Old Alice' },
+        { contactId: 'c-missing', phone: BOB, name: 'Stored Bob' },
+        { contactId: '', phone: CAROL_LOCAL },
+      ],
+    });
+    const batches: string[][] = [];
+    const real = world.contactsRepo.getDisplaysByIds.bind(world.contactsRepo);
+    world.contactsRepo.getDisplaysByIds = async (ids) => { batches.push([...ids]); return real(ids); };
+    const getByIdSpy = vi.spyOn(world.contactsRepo, 'getById');
+
+    const res = await request(app).get(`/api/conversations/${conversation.conversationId}/members`).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.members).toEqual([
+      { contactId: 'c-live', phone: ALICE, name: 'Alicia Live' },
+      { contactId: 'c-missing', phone: BOB, name: 'Stored Bob' },
+      { contactId: '', phone: CAROL_LOCAL },
+    ]);
+    expect(batches).toHaveLength(1);
+    expect(new Set(batches[0])).toEqual(new Set(['c-live', 'c-missing']));
+    expect(getByIdSpy).not.toHaveBeenCalled();
   });
 
   it('refuses member-add on a CONNECTING group (D11): 409 group_connecting, roster unchanged (burn invariant protected)', async () => {
@@ -981,6 +1012,12 @@ describe('relay-group API (M1.7)', () => {
   it('FIX 2: POST a message to a relay group stores ONCE + fans out to ALL members FROM the pool (no send to participant_phone)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
+    const appendedInputs: Array<Parameters<typeof world.messagesRepo.append>[0]> = [];
+    const originalAppend = world.messagesRepo.append.bind(world.messagesRepo);
+    vi.spyOn(world.messagesRepo, 'append').mockImplementation(async (input) => {
+      appendedInputs.push(structuredClone(input));
+      return originalAppend(input);
+    });
     const created = await request(app)
       .post('/api/relay-groups')
       .set('x-origin-verify', SECRET)
@@ -1010,6 +1047,26 @@ describe('relay-group API (M1.7)', () => {
     expect(teamRows).toHaveLength(1);
     expect(teamRows[0]!.direction).toBe('outbound');
     expect(teamRows[0]!.author).toBe('teammate');
+    expect(teamRows[0]).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+      delivery_recipients: {
+        'phone#+15550100001': { status: 'queued', requestedTransport: 'sms' },
+        'phone#+15550100002': { status: 'queued', requestedTransport: 'sms' },
+      },
+    });
+    expect(
+      Object.values(teamRows[0]!.delivery_recipients ?? {}).every(
+        (slot) => slot.transportAggregationState === 'attempted',
+      ),
+    ).toBe(true);
+    const sourceAppend = appendedInputs.find((input) => input.relaySenderKey === 'team');
+    expect(sourceAppend).toBeDefined();
+    expect(
+      Object.values(sourceAppend?.deliveryRecipients ?? {}).every(
+        (slot) => slot.transportAggregationState === undefined,
+      ),
+    ).toBe(true);
 
     // Fanned out to BOTH members FROM the pool number — never participant_phone.
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
@@ -1017,6 +1074,105 @@ describe('relay-group API (M1.7)', () => {
     expect(world.sent.some((s) => s.to === poolNumber)).toBe(false);
     // Neutral team label prefix (the SMS-facing brand — spec §5), NEVER a phone.
     expect(world.sent.every((s) => s.body === 'HousingChoice: Showing is at 4pm')).toBe(true);
+  });
+
+  it('classifies relay source intent from durable attachments and stable media availability', async () => {
+    const pool = makeFakePoolNumbers();
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }] });
+    const id = created.body.conversation.conversationId as string;
+    world.sent.length = 0;
+    await world.mediaStore.put(
+      'uploads/deadbeef',
+      Readable.from([Buffer.from('image')]),
+      'image/png',
+    );
+
+    const res = await request(app)
+      .post(`/api/conversations/${id}/messages`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body: 'photo', attachmentKeys: ['uploads/deadbeef'] });
+
+    expect(res.status).toBe(201);
+    expect(classify).toHaveBeenCalledWith({ hasForwardableMedia: true });
+    const source = world.messages.find(
+      (message) => message.conversationId === id && message.relay_sender_key === 'team',
+    );
+    expect(source).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'mms',
+    });
+    expect(
+      Object.values(source?.delivery_recipients ?? {}).every(
+        (slot) => slot.requestedTransport === 'mms',
+      ),
+    ).toBe(true);
+  });
+
+  it('persists connecting relay intent before the queued_pending hold', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+
+    const res = await request(app)
+      .post(`/api/conversations/${connecting.conversationId}/messages`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body: 'hold this' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('queued_pending');
+    const source = world.messages.find((message) => message.tsMsgId === res.body.tsMsgId);
+    expect(source).toMatchObject({
+      delivery_status: 'queued_pending',
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+    });
+    expect(
+      Object.values(source?.delivery_recipients ?? {}).every(
+        (slot) =>
+          slot.requestedTransport === 'sms' && slot.transportAggregationState === undefined,
+      ),
+    ).toBe(true);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('classifies a body-only relay source as sms when media storage is unavailable', async () => {
+    const pool = makeFakePoolNumbers();
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const { app } = makeWebhookHarness({
+      world,
+      poolNumbersService: pool,
+      withoutMediaStore: true,
+    });
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    world.sent.length = 0;
+
+    const res = await request(app)
+      .post(`/api/conversations/${created.body.conversation.conversationId}/messages`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body: 'text only' });
+
+    expect(res.status).toBe(201);
+    expect(classify).toHaveBeenCalledWith({ hasForwardableMedia: false });
+    const source = world.messages.find((message) => message.tsMsgId === res.body.tsMsgId);
+    expect(source).toMatchObject({ transport_schema_version: 1, requested_transport: 'sms' });
   });
 
   // Member added to an EXISTING group (2026-07-14): announced to the whole
@@ -1451,14 +1607,26 @@ describe('relay-group API (M1.7)', () => {
       const conversationId = created.body.conversation.conversationId as string;
       await world.conversationsRepo.rebindOwner(conversationId, { type: 'tour', id: tour.tourId });
       await world.toursRepo.patch(tour.tourId, { groupThreadId: conversationId });
-      await armTourReminders(tour, '2026-08-01T10:00:00.000Z', {
+      const { ladderId } = await armTourReminders(tour, '2026-08-01T10:00:00.000Z', {
         tourRemindersRepo: world.tourRemindersRepo,
         // Not a quiet-hours case: the window is stubbed OFF so the ladder's
         // dueAts stay exactly the raw offsets this bucket asserts on.
         settingsRepo: quietOffSettingsRepo(),
         logger,
       });
-      return { tour, conversationId };
+      // POINT THE TOUR AT WHAT WAS JUST ARMED, exactly as routes/tours.ts does
+      // after its own arm (S3). This helper arms for REAL against a tour it
+      // builds by hand, so without the pointer write its rows are STAMPED on a
+      // POINTERLESS tour - the interrupted-pointer-write cell - and every rung
+      // in this bucket reads `superseded` instead of upcoming.
+      if (ladderId !== null) {
+        await world.toursRepo.patch(tour.tourId, { currentLadderId: ladderId });
+      }
+      // `ladderId` is returned so a case adding a row BY HAND can stamp it into
+      // the same generation. An unstamped row on a pointed tour is the
+      // interrupted-pointer-write cell, which reads `superseded` - correct, but
+      // not what a case about some OTHER annotation means to test.
+      return { tour, conversationId, ladderId };
     }
 
     it('returns the group-routed upcoming rungs (dueAt order, resolved bodies); sent rungs drop out', async () => {
@@ -1526,16 +1694,22 @@ describe('relay-group API (M1.7)', () => {
       // time, never the group send itself, and the placement-nudge twin owns
       // the rest of that gap.
       const { app } = authedHarness(world, makeFakePoolNumbers());
-      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      const { tour, conversationId, ladderId } = await seedTourGroup(app, 'landlord_led');
       // A PAUSE-ERA row, written directly: arming stopped 2026-08-31 (Phase B),
       // so `armTourReminders` above no longer produces one - and this surface
       // exists precisely for the rows that were armed BEFORE it stopped and are
       // still sitting pending until the sweep reaches them. dueAt is the old
       // arm instant, which is what those rows actually carry.
+      //
+      // STAMPED WITH THE CURRENT GENERATION (S6): the pointer check runs ahead
+      // of the kind check, so an unstamped row on this pointed tour would read
+      // `superseded` and this case would prove the wrong annotation. Its own
+      // subject is the KIND, so it is pinned to the live ladder deliberately.
       await world.tourRemindersRepo.create({
         tourId: tour.tourId,
         kind: 'confirmation',
         dueAt: '2026-08-01T10:00:00.000Z',
+        ...(ladderId !== null && { ladderId }),
       });
 
       const res = await request(app)
@@ -1555,6 +1729,138 @@ describe('relay-group API (M1.7)', () => {
           scheduled.find((s) => s.reminderKind === kind)?.suppression,
           kind,
         ).toBeUndefined();
+      }
+    });
+
+    // SUPERSEDED rungs (spec 3.3, S6 T6.3) - the SECOND exception this bucket
+    // makes to "no suppression annotations here". Same argument as the first:
+    // it costs no recipient IO, and this bucket renders through the same
+    // ScheduledCard as the contact timeline, so without it a rescheduled tour's
+    // old rungs would keep promising "sends in Nh" in the relay thread while
+    // both other surfaces called them Replaced.
+    it('a rung of a REPLACED ladder carries the superseded suppression; the current generation carries none', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // The tour was rescheduled: a newer arm won the pointer, and one rung of
+      // the previous generation survived the sweep. LIVE kinds throughout - a
+      // discontinued kind is checked ahead of the pointer and would make this
+      // pass for the wrong reason.
+      const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
+      const stale = rows.find((r) => r.kind === 'day_before')!;
+      world.tourRemindersMap.get(stale.reminderId)!.ladderId = 'ladder-group-old';
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled.find((s) => s.reminderKind === 'day_before')?.suppression).toEqual({
+        reason: 'superseded',
+      });
+      // ANTI-VACUITY: the rungs the pointer still names promise their sends.
+      for (const kind of ['morning_of', 'en_route']) {
+        expect(scheduled.find((s) => s.reminderKind === kind)?.suppression, kind).toBeUndefined();
+      }
+    });
+
+    it('FIXTURE B (acceptance 5): a CLEANLY swept generation never reaches this bucket - the rows are gone', async () => {
+      // The other side of the A/B split the test above proves: Fixture A is a
+      // sweep MISS rendered suppressed; here the sweep WORKED, so the bucket
+      // holds only the current generation because the old rows no longer exist.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
+      const stale = rows.find((r) => r.kind === 'day_before')!;
+      world.tourRemindersMap.get(stale.reminderId)!.ladderId = 'ladder-group-swept';
+      const pointer = world.toursMap.get(tour.tourId)!.currentLadderId!;
+      await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, pointer);
+
+      // DELETED, not filtered.
+      const remaining = await world.tourRemindersRepo.listByTour(tour.tourId);
+      expect(remaining.find((r) => r.kind === 'day_before')).toBeUndefined();
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled.find((s) => s.reminderKind === 'day_before')).toBeUndefined();
+      // ANTI-VACUITY: the surviving generation still promises its sends.
+      for (const kind of ['morning_of', 'en_route']) {
+        expect(scheduled.find((s) => s.reminderKind === kind)?.suppression, kind).toBeUndefined();
+      }
+    });
+
+    // THE THIRD exception, on the same argument again (review round NEW-3). The
+    // owner tour is mid-conversion, so the poll defers every one of these rungs
+    // and Send now refuses them - and this bucket would otherwise promise
+    // "sends in Nh" for all three inside the relay thread itself.
+    it('every rung carries conversion_in_progress while the tour holds a pending claim', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // The reversible disarm the conversion route holds across its create.
+      await world.toursRepo.claimConversion(tour.tourId, 'pending:relay-cip');
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled).toHaveLength(3);
+      for (const item of scheduled) {
+        expect(item.suppression, item.reminderKind).toEqual({
+          reason: 'conversion_in_progress',
+        });
+      }
+
+      // ANTI-VACUITY: releasing the claim gives every promise back. Nothing was
+      // stamped, which is the whole point of a REVERSIBLE disarm.
+      await world.toursRepo.releaseConversionClaim(tour.tourId, 'pending:relay-cip');
+      const after = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      for (const item of after.body.scheduled as Array<{ suppression?: unknown }>) {
+        expect(item.suppression).toBeUndefined();
+      }
+    });
+
+    it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed in this bucket', async () => {
+      // Acceptance 12. The helper above points its tour, so this case builds
+      // the pre-migration shape deliberately: pointer cleared, rows unstamped.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      const stored = world.toursMap.get(tour.tourId)!;
+      delete stored.currentLadderId;
+      for (const row of await world.tourRemindersRepo.listByTour(tour.tourId)) {
+        delete world.tourRemindersMap.get(row.reminderId)!.ladderId;
+      }
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled).toHaveLength(3);
+      for (const item of scheduled) {
+        expect(item.suppression, item.reminderKind).toBeUndefined();
       }
     });
 

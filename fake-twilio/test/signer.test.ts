@@ -70,6 +70,55 @@ describe('signTwilioWebhook', () => {
     expect(ok['ErrorCode']).toBeUndefined();
   });
 
+  it('carries only explicitly declared transport evidence through signed callback shapes', () => {
+    const metadata = { type: 'rcs', sender: 'business-agent' };
+    const inbound = buildInboundSmsParams({
+      messageSid: `SM${'1'.repeat(32)}`,
+      from: 'rcs:agent',
+      to: '+15550009999',
+      channelPrefix: 'rcs',
+      channelMetadata: metadata,
+    });
+    expect(inbound).toMatchObject({
+      ChannelPrefix: 'rcs',
+      ChannelMetadata: JSON.stringify(metadata),
+    });
+
+    const status = buildStatusParams({
+      messageSid: `MM${'2'.repeat(32)}`,
+      status: 'delivered',
+      from: '+15550009999',
+      to: '+15550100001',
+      channelMetadata: JSON.stringify(metadata),
+    });
+    expect(status).toMatchObject({
+      From: '+15550009999',
+      To: '+15550100001',
+      ChannelMetadata: JSON.stringify(metadata),
+    });
+    expect(status['ChannelPrefix']).toBeUndefined();
+  });
+
+  it('does not fabricate SMS or MMS ChannelPrefix fields', () => {
+    expect(buildInboundSmsParams({
+      messageSid: `SM${'3'.repeat(32)}`,
+      from: '+15550100001',
+      to: '+15550009999',
+    })['ChannelPrefix']).toBeUndefined();
+    expect(buildStatusParams({
+      messageSid: `MM${'4'.repeat(32)}`,
+      status: 'sent',
+      from: '+15550009999',
+      to: '+15550100001',
+    })['ChannelPrefix']).toBeUndefined();
+    expect(() => buildInboundSmsParams({
+      messageSid: `SM${'5'.repeat(32)}`,
+      from: '+15550100001',
+      to: '+15550009999',
+      channelPrefix: 'sms',
+    })).toThrow(/ChannelPrefix/);
+  });
+
   // --- carrier-group envelope (group-texting spec 5.1) ---
 
   it('encodes the INDEXED OtherRecipients envelope', () => {

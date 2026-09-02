@@ -12,14 +12,20 @@
 //   relative to `now`, which after the booked-too-late rules is reachable only
 //   for en_route and for clamped rungs. See the rule list in the loop.
 //
-// cancelTourReminders — marks all pending (unsent) rows as canceled.
+// Retirement of a whole ladder is NOT here: a reschedule or a terminal tour
+//   status rotates the tour's currentLadderId and calls
+//   tourRemindersRepo.deleteSupersededForTour, which HARD-DELETES every
+//   never-sent rung (supersession spec 3.2). There is no tour-wide cancel any
+//   more - `cancel` is the per-rung operator action and the only writer of
+//   canceledAt.
 //
 // runDueTourReminders — stateless poll: queries listDue(now), then for each
 //   row: CLAIMS it (claimSend) BEFORE sending. Only sends when the claim
 //   succeeds — two concurrent poll ticks over the same row both see it in
 //   listDue but only the first to claim wins. A row canceled between listDue
-//   and the claim also loses (cancelForTour sets canceledAt; the claim
-//   condition requires attribute_not_exists(canceledAt)). This closes both
+//   and the claim also loses (the operator cancel sets canceledAt; the claim
+//   condition requires attribute_not_exists(canceledAt)), and a row DELETED
+//   between the two loses on attribute_exists(reminderId). This closes both
 //   the double-send window and the cancel-then-poll race in one atomic step,
 //   mirroring the missedCallAutoText putJobExecutionMarker pattern.
 //   Designed to be called by a setInterval in worker.ts.
@@ -35,7 +41,8 @@
 // canceledAt rows. Both conditions together = exactly-once delivery.
 //
 // PII (doc §9): NEVER log a phone number. Log only reminderId/tourId/tenantId/kind.
-import type { MessagingAdapter } from '../adapters/messaging.js';
+import { randomUUID } from 'node:crypto';
+import type { CarrierMessageSender, MessagingAdapter } from '../adapters/messaging.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -53,6 +60,7 @@ import {
 } from '../repos/tourRemindersRepo.js';
 import { type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import type { UnitItem, UnitsRepo } from '../repos/unitsRepo.js';
+import { isSupersededRung } from '../lib/ladderPointer.js';
 import { isOnRoster, resolveRoster, rosterWaitExpired } from '../lib/rosterResolution.js';
 import {
   SendRefusedError,
@@ -306,6 +314,66 @@ export const DISCONTINUED_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<Re
 ]);
 
 /**
+ * How long the poll DEFERS a rung whose tour carries an unresolved
+ * placement-conversion claim before retiring it (supersession spec 3.3).
+ *
+ * A conversion normally holds its `pending:` sentinel for milliseconds, and
+ * while it does, the rung's fate is genuinely undecided - the finalize is about
+ * to sweep it. But a crashed conversion leaves that sentinel with no TTL and no
+ * recovery route, so an unbounded deferral is the perpetual-"sending shortly"
+ * lie in a new costume. Bounded exactly like the roster and names waits
+ * (ROSTER_UNAVAILABLE_GRACE_MS, lib/rosterResolution.ts), and one hour is long
+ * enough that a slow write or a redeploy never trips it.
+ */
+export const CONVERSION_CLAIM_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Has this rung waited longer than the grace window for a conversion claim to
+ * resolve?
+ *
+ * Measured from `max(dueAt, tour.conversionClaimedAt)`, and NOT from either
+ * operand alone.
+ *
+ * Not `dueAt` alone (review round M2): the predicate is then already true at
+ * t=0 for any rung more than an hour past its own due time, which is a ROUTINE
+ * state rather than an outage - a quiet-hours-deferred rung, a rung waiting out
+ * a roster/names grace, or any worker downtime longer than an hour. A perfectly
+ * healthy conversion would retire such a rung `conversion_stalled` on its very
+ * first tick - terminally, since skippedAt cannot be undone, and blamed on
+ * something that did not happen if the conversion later failed and released its
+ * claim.
+ *
+ * And not `tour.updatedAt` (review round NEW-2), which was the first fix and is
+ * now only the defensive FALLBACK. It is a last-touched-by-anything stamp: every
+ * patch, setRoster, claimGroupThread and pointer rotation moves it forward, so
+ * on a tour edited more than once an hour a STALLED claim never expires and the
+ * unbounded deferral - the perpetual-"sending shortly" lie this bound exists to
+ * prevent - is back in a new costume. `claimConversion` therefore writes a
+ * dedicated `conversionClaimedAt` beside the sentinel and
+ * `releaseConversionClaim` REMOVES it with the sentinel.
+ *
+ * A fresh claim therefore always gets the full window; a later tour EDIT no
+ * longer extends it at all; and a crashed claim still expires an hour after it
+ * was written, whatever else happens to the tour. Unparseable or absent stamps
+ * answer false - "keep waiting" is the safer half of this decision, the same
+ * call rosterWaitExpired makes.
+ */
+function conversionClaimExpired(
+  dueAt: string,
+  tour: Pick<TourItem, 'conversionClaimedAt' | 'updatedAt'>,
+  nowIso: string,
+): boolean {
+  const due = Date.parse(dueAt);
+  // The fallback covers a claim written BEFORE the stamp existed - an in-flight
+  // conversion across the deploy - and nothing else.
+  const claimStamp = tour.conversionClaimedAt ?? tour.updatedAt;
+  const claimed = claimStamp === undefined ? Number.NaN : Date.parse(claimStamp);
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(due) || Number.isNaN(claimed) || Number.isNaN(now)) return false;
+  return now - Math.max(due, claimed) > CONVERSION_CLAIM_GRACE_MS;
+}
+
+/**
  * Read the org quiet-hours window. A settings failure falls back to the
  * DEFAULTS rather than breaking arming/sending (the `resolveWithSettings`
  * posture in messages/resolve.ts) - never to "no quiet hours".
@@ -372,15 +440,28 @@ export interface ArmTourRemindersDeps {
  * `now` is the ARM instant, not the booking instant: this runs on booking, on
  * reschedule and on a status revival, and every rule is evaluated against it.
  *
- * Returns the created TourReminderItem rows.
+ * GENERATION (supersession, 2026-09-01): one `ladderId` is minted per CALL and
+ * stamped on every row the call creates, rows born already-skipped included.
+ * A UUID and not a timestamp because `routes/tours.ts` takes an injectable
+ * `deps.now` and the app suite injects a constant, so two arms of one tour can
+ * share an instant (spec 3.1).
+ *
+ * Returns `{ ladderId, rows }`: the created TourReminderItem rows, plus the
+ * generation id to point the tour at - `null` exactly when no row was written,
+ * so a caller never writes a pointer that matches nothing. The CALLER owns the
+ * tour-row write (spec D3a); `ArmTourRemindersDeps` has no `toursRepo` and this
+ * function reads and writes reminder rows only.
  */
 export async function armTourReminders(
   tour: TourItem,
   now: string,
   deps: ArmTourRemindersDeps,
-): Promise<TourReminderItem[]> {
+): Promise<{ ladderId: string | null; rows: TourReminderItem[] }> {
   const log = deps.logger ?? defaultLogger;
   const created: TourReminderItem[] = [];
+  // Minted up front and used by every create below, so the whole ladder shares
+  // one generation. Unused (and never returned) when the call writes no row.
+  const ladderId = randomUUID();
 
   // Invariant: no reminder rows may ever exist for a time-less ('requested')
   // tour. Callers gate arming on scheduledAt presence, but guard anyway
@@ -388,7 +469,7 @@ export async function armTourReminders(
   const scheduledAt = tour.scheduledAt;
   if (typeof scheduledAt !== 'string') {
     log.warn({ tourId: tour.tourId }, 'tour reminders not armed (no scheduledAt)');
-    return created;
+    return { ladderId: null, rows: created };
   }
 
   const window = await readQuietHoursWindow(deps.settingsRepo, log);
@@ -493,6 +574,7 @@ export async function armTourReminders(
         kind,
         dueAt, // the CLAMPED value, like every arm-time skip row (spec 8.2)
         skipped: { at: now, reason: 'booked_too_late' },
+        ladderId,
       });
       created.push(row);
       log.info(
@@ -515,6 +597,7 @@ export async function armTourReminders(
         kind,
         dueAt,
         skipped: { at: now, reason: 'past_event' },
+        ladderId,
       });
       created.push(row);
       log.info(
@@ -547,6 +630,7 @@ export async function armTourReminders(
         kind,
         dueAt,
         skipped: { at: now, reason: 'quiet_hours_superseded' },
+        ladderId,
       });
       created.push(row);
       log.info(
@@ -555,34 +639,21 @@ export async function armTourReminders(
       );
       continue;
     }
-    const row = await deps.tourRemindersRepo.create({ tourId: tour.tourId, kind, dueAt });
+    const row = await deps.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind,
+      dueAt,
+      ladderId,
+    });
     created.push(row);
     log.info({ tourId: tour.tourId, kind, dueAt, reminderId: row.reminderId }, 'tour reminder armed');
   }
 
-  return created;
-}
-
-// ---------------------------------------------------------------------------
-// cancelTourReminders
-// ---------------------------------------------------------------------------
-
-export interface CancelTourRemindersDeps {
-  tourRemindersRepo: TourRemindersRepo;
-  logger?: Logger;
-}
-
-/**
- * Cancel all pending (unsent, uncanceled) reminders for a tour.
- * Used on reschedule and tour cancellation.
- */
-export async function cancelTourReminders(
-  tourId: string,
-  deps: CancelTourRemindersDeps,
-): Promise<void> {
-  const log = deps.logger ?? defaultLogger;
-  await deps.tourRemindersRepo.cancelForTour(tourId);
-  log.info({ tourId }, 'tour reminders canceled');
+  // null when the loop wrote nothing (every kind hit the SILENT past-dueAt skip
+  // at the top of the loop - the only path through pass 2 that creates no row).
+  // A pointer that matches no row means "no live ladder", which is a rotation
+  // the caller performs deliberately, never a side effect of an empty arm.
+  return { ladderId: created.length === 0 ? null : ladderId, rows: created };
 }
 
 // ---------------------------------------------------------------------------
@@ -661,7 +732,7 @@ export interface RunDueTourRemindersDeps {
    * on its own merits - the in-thread visibility requirement documented on
    * sendGroupReminder below - NOT because the wiring forbids the alternative.
    */
-  adapter: MessagingAdapter;
+  adapter: MessagingAdapter & CarrierMessageSender;
   /**
    * Message persistence for the GROUP route: sendRelayAnnouncement stores each
    * rung as a system announcement in the relay thread (founder decision
@@ -798,6 +869,14 @@ export async function runDueTourReminders(
  * `'tour_already_passed'` is written by BOTH the sweep and the fire-time gate
  * above - which is the point: the sweep is cleanup of a condition the runtime
  * also enforces, not the only thing enforcing it.
+ *
+ * The supersession pair (2026-09-01) is a FOURTH category: POLL-ONLY.
+ * `'superseded'` (the rung's ladderId does not match its tour's
+ * currentLadderId) and `'conversion_stalled'` (a `pending:` conversion claim
+ * outlived CONVERSION_CLAIM_GRACE_MS) are both stamped HERE and nowhere else -
+ * not at arm time (neither condition can exist on a row the armer is writing)
+ * and not by the sweep script. forceSendReminder REFUSES on the first of them
+ * rather than passing it here, because a human action never retires a rung.
  */
 async function claimSkipRow(
   row: TourReminderItem,
@@ -1064,6 +1143,67 @@ async function processReminderRow(
     return;
   }
 
+  // CONVERSION CLAIM IN FLIGHT (supersession spec 3.3). POSITION IS BEHAVIOUR
+  // here too, in both directions:
+  //   - ABOVE the batch-supersession block below, because that block STAMPS
+  //     (skippedAt is terminal). A rung deferred for a claim would be retired
+  //     on its way past, under a token naming the wrong cause, and nothing
+  //     could undo it when the conversion released.
+  //   - ABOVE the pointer check below, so a claim in flight is answered ONCE
+  //     and never re-examined. placements.ts rotates the pointer only when the
+  //     finalize lands, so mid-claim the pointer usually still matches - but on
+  //     a tour that was ALSO rescheduled, deferring is still the truer answer:
+  //     the conversion is about to decide this rung's fate by deleting it.
+  //   - BELOW the past-tour gate, on the gate's own argument: a rung whose tour
+  //     has already happened is not waiting on anything.
+  // The PREFIX is the predicate, not string-ness: the sentinel is
+  // `pending:${randomUUID()}` (routes/placements.ts) and the FINALIZE replaces
+  // it with a real placementId in the same field, so a bare is-a-string test
+  // would defer every converted tour forever.
+  if (
+    typeof tour.convertedPlacementId === 'string' &&
+    tour.convertedPlacementId.startsWith('pending:')
+  ) {
+    if (conversionClaimExpired(row.dueAt, tour, now)) {
+      log.error(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+        'tour reminder: placement conversion claim STILL unresolved past the grace window - retiring (claim-skipped)',
+      );
+      await claimSkipRow(row, 'conversion_stalled', now, deps, tour.tenantId);
+      return;
+    }
+    // UNCLAIMED, nothing stamped: the row re-lists on the next tick, and the
+    // conversion's own sweep will delete it if the finalize lands.
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: placement conversion in flight - deferred (not claimed)',
+    );
+    return;
+  }
+
+  // GENERATION POINTER (supersession spec 3.3): this rung belongs to a ladder
+  // the tour has already replaced, so no path may send it. POSITION, again:
+  //   - BELOW the past-tour gate because `tour_already_passed` is the truer
+  //     answer when both hold - the tour happening outranks the schedule being
+  //     rewritten.
+  //   - ABOVE the batch-supersession block below, or a mismatched rung sharing
+  //     a batch with a later rung would be stamped `quiet_hours_superseded`:
+  //     the wrong token for the wrong cause, on the panel, permanently.
+  //   - ABOVE the quiet-hours backstop, or a mismatched rung due inside the
+  //     window would be deferred unclaimed to quiet-end before being refused
+  //     anyway - a rung nothing will ever send is not waiting for quiet-end.
+  // A pre-migration pair (no pointer, no ladderId) is EXEMPT and behaves
+  // exactly as it did before this feature; see lib/ladderPointer.ts for the
+  // whole four-cell argument.
+  if (isSupersededRung(row, tour)) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: ladder superseded by a newer generation - retiring (claim-skipped)',
+    );
+    await claimSkipRow(row, 'superseded', now, deps, tour.tenantId);
+    return;
+  }
+
   // Both quiet-hours checks below run above the group-route branch (which
   // returns early), so landlord_led / pm_team rungs are covered too.
 
@@ -1276,7 +1416,7 @@ async function processReminderRow(
   // concurrent poll ticks both see the same due row but only the first to claim
   // wins. The claim condition also blocks canceledAt rows, closing the
   // cancel-then-poll TOCTOU race in one atomic step.
-  // If the claim fails (another tick or a cancelForTour won), skip silently —
+  // If the claim fails (another tick, an operator cancel, or a sweep won), skip silently -
   // a benign no-op, NOT an error (mirrors missedCallAutoText's marker pattern).
   const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now, body);
   if (!claimed) {
@@ -1571,6 +1711,20 @@ export type ForceSendRefusal =
   /** Phase B: the rung's KIND is discontinued (confirmation), so no path may
    *  send it - the human path least of all. Permanent - never a retry. */
   | 'kind_retired'
+  /** Supersession (2026-09-01): the rung's ladderId does not match its tour's
+   *  currentLadderId, so it belongs to a reminder schedule the tour has already
+   *  replaced. Permanent - never a retry; the CURRENT ladder's rungs are where
+   *  a send can still be made. Shares the token with the poll's claim-skip (the
+   *  poll retires such a rung; the human path only refuses it). */
+  | 'superseded'
+  /** Supersession (2026-09-01, review round M1): the tour is carrying a
+   *  `pending:` placement-conversion sentinel, so its fate is undecided - the
+   *  finalize is about to delete this rung, and a failed conversion will
+   *  release the claim and leave it sendable. RETRYABLE once the conversion
+   *  resolves, which is why it is not in the dashboard's PERMANENT_REFUSALS.
+   *  The poll DEFERS the same rung; neither path stamps it (a human action
+   *  never retires a rung, and skippedAt could not be undone by a release). */
+  | 'conversion_in_progress'
   | ReminderResolutionFailure;
 
 export type ForceSendResult =
@@ -1637,6 +1791,68 @@ export async function forceSendReminder(
     return { outcome: 'refused', reason: 'kind_retired' };
   }
 
+  // THE TOUR, read ONCE for this whole request (supersession decision O4) and
+  // handed to resolveReminderTarget below, which takes a pre-fetched tour -
+  // so the pointer refusal costs no extra read. CONTAINED here for exactly the
+  // reason the blanket below is: this read used to happen INSIDE target
+  // resolution, under that catch, and moving it up must not turn a tours-table
+  // outage into a 500 the route cannot render. Same cause-agnostic copy.
+  let tour: TourItem | undefined;
+  try {
+    tour = await deps.toursRepo.get(tourId);
+  } catch (err) {
+    log.warn(
+      { err, reminderId, tourId, kind: row.kind },
+      'tour reminder force-send: tour read failed - row left pending',
+    );
+    return { outcome: 'refused', reason: 'names_unavailable' };
+  }
+  if (tour === undefined) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'tour_missing' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'tour_missing' };
+  }
+  // SUPERSEDED (spec 3.3): this rung belongs to a ladder the tour has replaced,
+  // so the send paths refuse it and this is the one the operator can actually
+  // press. Placed immediately AFTER kind_retired, keeping that refusal's
+  // "first among the reasoned refusals" argument intact: both are permanent and
+  // never a retry, but a retired KIND is the more absolute of the two, and it
+  // costs no reads at all to say so. Above every gate below for the same reason
+  // kind_retired is: names_unavailable and tour_already_passed invite a retry,
+  // and this one never will. A REFUSAL, never a claim-skip - a human action
+  // does not retire a rung.
+  if (isSupersededRung(row, tour)) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'superseded' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'superseded' };
+  }
+  // CONVERSION CLAIM IN FLIGHT (spec 3.3, review round M1). processReminderRow
+  // defers every rung of a tour carrying this sentinel; this entry point
+  // inherits nothing from it, so without this check Send now composes and fires
+  // a rung for a tour that is becoming a placement - and on a conversion that
+  // crashed between the claim and the finalize the sentinel has no TTL, so the
+  // window is unbounded rather than the milliseconds of the happy path.
+  //
+  // BELOW the pointer check on purpose: a rung whose ladder the tour already
+  // replaced is refused `superseded` whatever any claim is doing, and that is
+  // the truer answer - the claim will pass, the mismatch will not. The PREFIX
+  // is the predicate, exactly as in the poll: the finalize replaces the
+  // sentinel with a real placementId in this same field.
+  if (
+    typeof tour.convertedPlacementId === 'string' &&
+    tour.convertedPlacementId.startsWith('pending:')
+  ) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'conversion_in_progress' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'conversion_in_progress' };
+  }
+
   // CONTAINED (spec 6.3b): target resolution does FOUR bare reads - the tour
   // (:851), the group conversation, the tenant contact (:872) and the 1:1
   // conversation lookup. Uncontained, any of them escapes the route unwrapped
@@ -1659,7 +1875,7 @@ export async function forceSendReminder(
   // the return is inlined.
   let target: ReminderTarget;
   try {
-    target = await resolveReminderTarget(row, deps, log);
+    target = await resolveReminderTarget(row, deps, log, tour);
   } catch (err) {
     log.warn(
       { err, reminderId, tourId, kind: row.kind },
@@ -1815,4 +2031,3 @@ export async function forceSendReminder(
     throw err;
   }
 }
-

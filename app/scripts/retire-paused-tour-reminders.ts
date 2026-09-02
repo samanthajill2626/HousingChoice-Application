@@ -31,6 +31,15 @@
 // CONDITIONAL on exactly the state the planner decided from, so a concurrent
 // runtime write cannot be double-applied and re-running is always safe.
 //
+// DELETED is a FOURTH concurrent outcome (tour-reminder supersession,
+// 2026-09-01): a reschedule, a terminal transition or a placement conversion
+// now hard-deletes the never-sent rungs of the ladder it retires instead of
+// stamping them canceled. The `attribute_exists(reminderId)` clause on the
+// write below is what defends against it - near-decorative before that
+// feature, load-bearing now, because DynamoDB's UpdateItem CREATES a missing
+// item and this run would otherwise resurrect a swept row as an attribute-only
+// stub with no tourId, kind or dueAt.
+//
 // TARGET: DYNAMODB_ENDPOINT SET = that endpoint (DynamoDB Local in the dev
 // loop); DYNAMODB_ENDPOINT UNSET = THE REAL AWS ACCOUNT the ambient
 // credentials select (lib/dynamo.ts). Do not read "unset" as "local" - the
@@ -193,8 +202,11 @@ async function scanAndRetire(
 
   /**
    * Stamp the row terminal under exactly the condition the planner decided
-   * from. A rung the runtime sent, canceled or skipped between the plan and
-   * this write LOSES here, and the loss is reported rather than swallowed.
+   * from. A rung the runtime sent, canceled, skipped or DELETED between the
+   * plan and this write LOSES here, and the loss is reported rather than
+   * swallowed. `attribute_exists(reminderId)` covers the fourth of those and
+   * is not optional: without it UpdateItem would CREATE the swept row again as
+   * a stub carrying only skippedAt and skipReason.
    */
   const retire = async (reminderId: string, reason: ReminderRetirementAction): Promise<void> => {
     await doc.send(
@@ -275,8 +287,9 @@ async function scanAndRetire(
       //   reads like a clean pass.
       //
       //   The ONE exception is the conditional check, which is not a failure at
-      //   all: it means the runtime sent/canceled/skipped the row between the
-      //   plan and the write, and the runtime's outcome is the correct one.
+      //   all: it means the runtime sent, canceled, skipped or DELETED the row
+      //   between the plan and the write, and the runtime's outcome is the
+      //   correct one.
       try {
         await retire(raw.reminderId, action);
         if (action === 'tour_already_passed') result.tourAlreadyPassed += 1;

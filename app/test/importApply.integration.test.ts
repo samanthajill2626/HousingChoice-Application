@@ -248,6 +248,22 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(await countMessages(id)).toBe(4);
   });
 
+  it('keeps evidence-free imported carrier history schema-absent', async () => {
+    const id = conversationIdFor1to1(PHONES.tenantBusy);
+    const rows = await doc.send(new QueryCommand({
+      TableName: table('messages'),
+      KeyConditionExpression: 'conversationId = :conversationId',
+      ExpressionAttributeValues: { ':conversationId': id },
+    }));
+    const carrier = (rows.Items ?? []).filter((item) => item['type'] === 'sms' || item['type'] === 'mms');
+    expect(carrier.length).toBeGreaterThan(0);
+    for (const item of carrier) {
+      expect(item).not.toHaveProperty('transport_schema_version');
+      expect(item).not.toHaveProperty('requested_transport');
+      expect(item).not.toHaveProperty('actual_transport');
+    }
+  });
+
   it('imports a multi-party thread as a `connecting` relay group with no pool number', async () => {
     // Full history and roster at zero Twilio/A2P cost; the founder connects on
     // demand (spec section 3.6).

@@ -23,7 +23,10 @@ grows - up to 4 permanently-pending rows per tour booked - read and paginated
 
 This is BOUNDED IN PRACTICE by the tour lifecycle: marking a tour toured (or
 canceling/rescheduling it) cancels its pending rungs, which does stamp
-`canceledAt` and drops them out of `listDue`. The leak is therefore the
+`canceledAt` and drops them out of `listDue`. (Since the 2026-09-01
+supersession feature that path DELETES those rungs instead of stamping them,
+which strengthens this conclusion rather than changing it: they leave `listDue`
+by ceasing to exist.) The leak is therefore the
 abandoned tours - booked, never marked toured, never canceled - plus everything
 armed while the pause is on and resolved afterwards. Slow, monotonic, and
 harmless at current volumes; it is filed because it does not self-heal and

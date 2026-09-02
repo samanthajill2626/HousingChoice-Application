@@ -1154,7 +1154,22 @@ export type ScheduledSuppressionReason =
   /** TERMINAL: the rung's KIND is retired, so no path will ever send it - not
    *  the poll, and not a human pressing Send now. Outranks every reason above
    *  it and is produced OUTSIDE the shared evaluator (app-side spec 3.1a). */
-  | 'discontinued';
+  | 'discontinued'
+  /** TERMINAL (supersession 2026-09-01): the rung belongs to a ladder its tour
+   *  has already REPLACED - a reschedule, a terminal status change or a
+   *  placement conversion armed a new generation. No path sends it: the poll
+   *  claim-skips it and Send now answers 409. Distinct from `discontinued`,
+   *  which retires the KIND; this retires one generation of a kind that still
+   *  sends. Produced OUTSIDE the shared evaluator, by the callers that can
+   *  compare the rung's ladderId with its tour's currentLadderId. */
+  | 'superseded'
+  /** TEMPORARY (supersession 2026-09-01): the rung's TOUR is mid-conversion to a
+   *  placement - it carries an unresolved `pending:` claim - so the poll defers
+   *  every one of its rungs unclaimed and Send now answers 409. The only reason
+   *  here that RESOLVES: the finalize sweeps the rung, or a failure releases the
+   *  claim and the rung goes back to being an ordinary promise. Produced OUTSIDE
+   *  the shared evaluator by the three callers that hold the tour. */
+  | 'conversion_in_progress';
 
 /** The suppression estimate a GET carries on an upcoming rung/card. */
 export interface ScheduledSuppression {
@@ -1177,11 +1192,29 @@ const EM_DASH = String.fromCharCode(0x2014);
  *  person (nobody can release it - Send now refuses), and not "skipped" (that
  *  describes THIS send being dropped, while the whole KIND has been retired).
  *  Pairs with the 'turned off' label -> "No longer sent - turned off"; the
- *  label deliberately does not repeat the lead, or the note stutters. */
+ *  label deliberately does not repeat the lead, or the note stutters.
+ *
+ *  `superseded` is a FOURTH thing and borrows none of the other three either:
+ *  the rung is not deferred, not held for a person (Send now refuses it), and
+ *  "No longer sent" would say the KIND was retired when the truth is that THIS
+ *  generation of the ladder was replaced. Pairs with the 'the tour's reminders
+ *  were set up again' label -> "Replaced - the tour's reminders were set up
+ *  again", which again does not repeat the lead.
+ *
+ *  `conversion_in_progress` is a FIFTH thing, and the only TEMPORARY one in the
+ *  set that is not a clock: nothing here is being dropped, and nothing is
+ *  waiting on quiet-end - the tour is being turned into a placement and this
+ *  rung's fate is undecided until that lands. "Will wait" is the closest of the
+ *  four and still wrong, because it promises the rung goes out afterwards, which
+ *  the conversion's own sweep will usually make false. Pairs with the 'the tour
+ *  is becoming a placement' label -> "On hold - the tour is becoming a
+ *  placement". */
 export function suppressionLead(reason: ScheduledSuppressionReason): string {
   if (reason === 'quiet_hours') return 'Will wait';
   if (reason === 'paused') return 'Paused';
   if (reason === 'discontinued') return 'No longer sent';
+  if (reason === 'superseded') return 'Replaced';
+  if (reason === 'conversion_in_progress') return 'On hold';
   return 'Will be skipped';
 }
 
@@ -1244,7 +1277,14 @@ export interface TourReminderView {
     | 'kind_retired'
     // Phase B: name resolution kept failing for more than an hour past dueAt -
     // the bounded twin of roster_unavailable.
-    | 'names_unavailable';
+    | 'names_unavailable'
+    // Supersession: the rung's ladder was replaced (a reschedule, a terminal
+    // status change, a placement conversion), so the poll retired it rather
+    // than sending copy from a schedule that no longer exists.
+    | 'superseded'
+    // Supersession: a placement conversion claimed the tour and never
+    // finished, so the rung waited out its grace window and was retired.
+    | 'conversion_stalled';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -1254,11 +1294,38 @@ export interface TourReminderView {
   overdue?: boolean;
 }
 
+/**
+ * One rung of a ladder the tour has ALREADY REPLACED - a reschedule, a
+ * terminal status change, a placement conversion (supersession spec 3.4).
+ * Mirrors the server's TourReminderEarlierView verbatim.
+ *
+ * Identical to `TourReminderView` except that `body` is OPTIONAL, which is the
+ * whole reason it is a separate type. The server never RECOMPOSES a body for
+ * one of these rows - a superseded generation recomposed against the tour's
+ * current schedule would be a sentence about a schedule that never existed -
+ * so `body` is the claim-time snapshot when the row has one and ABSENT when it
+ * does not. Absent is not `''`: the empty string already means "we could not
+ * compose it right now" on the ladder above, which the panel answers with
+ * "Preview unavailable". An earlier rung with no snapshot renders no body
+ * paragraph at all.
+ *
+ * `suppression` still arrives on a PENDING survivor (a rung the sweep missed),
+ * always `{ reason: 'superseded' }` - never on a sent/canceled/skipped one.
+ */
+export type TourReminderEarlierView = Omit<TourReminderView, 'body'> & { body?: string };
+
 /** GET /api/tours/:tourId/reminders response: the ladder + the NEXT rung to fire. */
 export interface TourRemindersPage {
   reminders: TourReminderView[];
   /** The next reminder due to fire (highlight it in the UI). Absent when none upcoming. */
   next?: TourReminderView;
+  /** Survivors of generations this tour has replaced, newest first by
+   *  `sentAt ?? dueAt`. Rendered behind a COLLAPSED disclosure below the
+   *  ladder - they are history, not a promise, and they never feed `next`.
+   *  Optional for the same bundle-outlives-response reason as `timezone`, and
+   *  because the server OMITS the key entirely when there are none (the common
+   *  single-generation tour, and every wholly pre-migration one). */
+  earlier?: TourReminderEarlierView[];
   /** The IANA zone the reminder bodies were composed in (the ORG's zone, spec
    *  D8) - render every timestamp shown beside those bodies in THIS zone, not
    *  the browser's. Optional in the same spirit as `upcoming` below: a client
@@ -1295,6 +1362,15 @@ export const REMINDER_SUPPRESSION_LABELS: Readonly<
   // Reads "No longer sent - turned off". Deliberately NOT a restatement of the
   // lead: "no longer sent" here would render the phrase twice.
   discontinued: 'turned off',
+  // Reads "Replaced - the tour's reminders were set up again". Cause-NEUTRAL on
+  // purpose: a ladder is replaced by a reschedule, by a terminal status change
+  // and by a placement conversion, and the panel cannot tell which from the
+  // rung. Does not repeat the lead, same rule as `discontinued`.
+  superseded: "the tour's reminders were set up again",
+  // Reads "On hold - the tour is becoming a placement". TEMPORARY, unlike the
+  // two above it: the claim resolves either way, so the copy describes what is
+  // happening rather than declaring the rung dead.
+  conversion_in_progress: 'the tour is becoming a placement',
 };
 
 /** Human-readable phrasings for why a rung WAS retired unsent (state 'skipped'). */
@@ -1314,6 +1390,12 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   tour_already_passed: 'the tour had already happened',
   kind_retired: 'this reminder is no longer sent',
   names_unavailable: "couldn't look up the names",
+  // Reads "Skipped - replaced by a newer reminder schedule". Deliberately worded
+  // apart from quiet_hours_superseded above ("superseded by a later reminder"),
+  // which is a LATER RUNG of the same ladder winning the slot - a different
+  // event with a different remedy.
+  superseded: 'replaced by a newer reminder schedule',
+  conversion_stalled: 'the placement conversion never finished',
 };
 
 /**
@@ -1365,6 +1447,27 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   // would be a lie for both - nothing about retrying can change the outcome.
   tour_already_passed: 'That tour has already happened, so nothing was sent.',
   kind_retired: 'Confirmation texts are no longer sent, so nothing was sent.',
+  // Supersession (2026-09-01), also permanent: the rung belongs to a reminder
+  // schedule the tour has already replaced. The refetched list shows the
+  // current ladder, which is where a send can still be made.
+  superseded:
+    "This tour's reminders were set up again, so that one is out of date - nothing was sent.",
+  // Permanent for the same reason, but NOT a refusal any send-now path returns
+  // today: forceSendReminder leaves a claim-in-flight tour alone, so the only
+  // way an operator meets this token is a rung the poll ALREADY retired (which
+  // answers reminder_not_pending). The entry exists so the day the refusal is
+  // added, staff never meet the generic "please try again" - which would be a
+  // lie about a rung nothing can send. Same posture as the compile-completeness
+  // entry in DeadlinesNudgesCard's suppression labels.
+  conversion_stalled:
+    'That tour is stuck part-way through becoming a placement, so nothing was sent.',
+  // Supersession (2026-09-01, review round M1) and NOT permanent: the tour is
+  // mid-conversion, so this rung's fate is still undecided - the finalize is
+  // about to delete it, and a conversion that fails releases its claim and
+  // leaves it sendable. So the copy says WAIT rather than "nothing can change
+  // this", and this code is deliberately absent from the permanent list.
+  conversion_in_progress:
+    'That tour is being turned into a placement right now, so nothing was sent - try again once that finishes.',
   // Post-claim race (the gate flipped mid-send): the row IS consumed but nothing
   // went out, so these must read as errors, not successes.
   contact_no_consent: 'No SMS consent on file - record consent before sending this by hand.',
@@ -1586,6 +1689,16 @@ export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai
 /** Message transport. `call` is a metadata-only voice-call timeline entry. */
 export type MessageType = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
+export const MESSAGE_TRANSPORTS = ['sms', 'mms', 'rcs'] as const;
+export type MessageTransport = (typeof MESSAGE_TRANSPORTS)[number];
+export type TransportAggregationState = 'planned' | 'attempted' | 'excluded';
+
+interface MessageTransportFields {
+  transport_schema_version?: 1;
+  requested_transport?: MessageTransport;
+  actual_transport?: MessageTransport;
+}
+
 /** Coarse human-facing call outcome: `answered` (a leg connected), `missed`
  *  (nobody answered / busy / failed), `voicemail` (founder-bridge seam). */
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
@@ -1654,6 +1767,9 @@ export interface RelayRecipientDelivery {
   errorCode?: string;
   sentAt?: string;
   deliveredAt?: string;
+  requestedTransport?: MessageTransport;
+  actualTransport?: MessageTransport;
+  transportAggregationState?: TransportAggregationState;
 }
 
 /** GET /api/events 'conversation.updated' payload. */
@@ -2158,7 +2274,7 @@ export interface UnitsPage {
 
 /** One timeline message (GET /api/conversations/:id/messages → { messages }).
  *  Newest-first. Field names are the server's persisted shape. */
-export interface Message {
+export interface Message extends MessageTransportFields {
   conversationId: string;
   /** Sort key: `<providerTs>#<providerSid>`; unique per message. */
   tsMsgId: string;
@@ -2344,7 +2460,7 @@ interface TimelineBase {
   at: string; /* ISO, sort key */
 }
 
-export interface TimelineMessage extends TimelineBase {
+export interface TimelineMessage extends TimelineBase, MessageTransportFields {
   kind: 'message';
   conversationId: string;
   tsMsgId: string;
@@ -2388,6 +2504,8 @@ export interface TimelineMessage extends TimelineBase {
    *  decides that; the accompanying `status` is `failed` on relay and
    *  `undelivered` on a group leg. Absent on 1:1 messages. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  /** Local-only marker. Never persisted or returned by the authenticated API. */
+  optimistic?: boolean;
   /** Relay group (M1.7): who authored a relayed message — a member's key
    *  (contactId, else `phone#<E164>`), the `'team'` sentinel (a team reply),
    *  or the `'system'` sentinel (an app announcement: group intro / tour

@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateScheduledSendSuppression, isKillSwitchOff, isOptedOut, isManualMode } from '../src/services/scheduledSendSuppression.js';
-import type { MessagingAdapter, SendMessageParams } from '../src/adapters/messaging.js';
+import type {
+  CarrierMessageSender,
+  MessagingAdapter,
+  SendMessageParams,
+} from '../src/adapters/messaging.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createEventBus } from '../src/lib/events.js';
 import type { AuditRepo } from '../src/repos/auditRepo.js';
@@ -285,6 +289,15 @@ function makeSendFakes(
     putParkedEmailEvent: async () => {},
     listParkedEmailEvents: async () => [],
     deleteParkedEmailEvent: async () => {},
+    setMessageActualTransport: async () => 'missing',
+    initializeRecipientDelivery: async () => 'missing',
+    setRecipientTransportAggregationState: async () => 'missing',
+    setRecipientActualTransport: async () => 'missing',
+    applyRecipientSendResult: async () => 'missing',
+    // Relay fan-out ladder (M5) - no fan-out runs in this suite.
+    claimFanoutPass: async () => {
+      throw new Error('claimFanoutPass: not used in this suite');
+    },
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,
     putRelaySidPointer: async () => {},
@@ -330,7 +343,24 @@ function makeSendFakes(
     append: async () => {},
     listByEntity: async () => [],
   };
-  const adapter: MessagingAdapter = {
+  const adapter: MessagingAdapter & CarrierMessageSender = {
+    classifyMessageTransport(facts) {
+      return Object.freeze({
+        requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms',
+      });
+    },
+    prepareMessageSend(intent, params) {
+      return Object.freeze({ requestedTransport: intent.requestedTransport, params });
+    },
+    async sendPreparedMessage(prepared) {
+      sent.push(prepared.params);
+      return {
+        providerSid: `SMfake-${sent.length}`,
+        status: 'queued',
+        providerTs: '2026-06-12T10:00:00.000Z',
+        actualTransport: prepared.requestedTransport,
+      };
+    },
     sendMessage: async (params) => {
       sent.push(params);
       return { providerSid: `SMfake-${sent.length}`, status: 'queued', providerTs: '2026-06-12T10:00:00.000Z' };

@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-02).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` and its feature branch + worktree were deleted during worktree cleanup. **This file
+> is NOT current documentation, and the live code may have drifted from it. Do not treat it as
+> authoritative guidance on how the system should be built or how it behaves today.** For
+> current truth read the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `AGENTS.md`). The mission's review record - including its measurements - is preserved at
+> `docs/superpowers/reviews/2026-08-31-npm-test-soundness/`.
+
 # npm test soundness (M7) - design
 
 - Date: 2026-08-31

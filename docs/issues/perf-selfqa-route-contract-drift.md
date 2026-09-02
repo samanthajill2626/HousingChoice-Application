@@ -2,7 +2,7 @@
 id: perf-selfqa-route-contract-drift
 title: Perf self-QA fails on route-contract drift - /api/unread-counts is undeclared
 type: bug
-severity: medium
+severity: med
 status: resolved
 area: e2e/performance
 created: 2026-08-24

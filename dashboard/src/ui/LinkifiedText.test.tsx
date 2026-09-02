@@ -131,6 +131,20 @@ describe('tokenizeLinkifiedText', () => {
 });
 
 describe('LinkifiedText', () => {
+  it('renders non-link tokens as direct text nodes without span wrappers', () => {
+    const { container } = render(
+      <div>
+        <LinkifiedText text="before example.com after" />
+      </div>,
+    );
+    const host = container.firstElementChild!;
+
+    expect(host.childNodes).toHaveLength(3);
+    expect(host.childNodes[0]).toMatchObject({ nodeType: Node.TEXT_NODE, nodeValue: 'before ' });
+    expect(host.childNodes[2]).toMatchObject({ nodeType: Node.TEXT_NODE, nodeValue: ' after' });
+    expect(host.querySelector('span')).toBeNull();
+  });
+
   it('renders escaped source text and accessible safe anchors without a visible wrapper', () => {
     const { container } = render(
       <div>

@@ -1,4 +1,5 @@
 import Autolinker from 'autolinker';
+import { Fragment } from 'react';
 import { safeHttpUrl } from '../lib/safeUrl.js';
 import styles from './LinkifiedText.module.css';
 
@@ -73,7 +74,7 @@ export function LinkifiedText({ text, displayEnd, suffix }: LinkifiedTextProps):
     <>
       {tokens.map((token) =>
         token.kind === 'text' ? (
-          <span key={`${token.start}-${token.end}`}>{token.text}</span>
+          <Fragment key={`${token.start}-${token.end}`}>{token.text}</Fragment>
         ) : (
           <a
             key={`${token.start}-${token.end}`}

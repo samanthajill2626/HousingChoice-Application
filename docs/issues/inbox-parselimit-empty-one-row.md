@@ -3,11 +3,24 @@ id: inbox-parselimit-empty-one-row
 title: Inbox ?limit= (empty, zero, or negative) serves a one-row page instead of the default
 type: bug
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-08-09
-refs: app/src/routes/inbox.ts
+resolved: 2026-09-02
+refs: app/src/routes/inbox.ts, app/src/routes/aiRuns.ts, app/test/inboxApi.test.ts
 ---
+
+**Resolution (2026-09-02).** Fixed on branch `feat/inbox-unknown-tab-paging`
+(small-fix lane). `parseLimit` in `app/src/routes/inbox.ts` now takes the full
+aiRuns predicate: a non-string, empty or whitespace value and a zero or
+negative integer all fall back to `DEFAULT_INBOX_LIMIT`; the floor is replaced
+by the fallback, not deleted, and the clamp to `MAX_INBOX_LIMIT` is unchanged.
+The do-not-re-sync warning in `aiRuns.ts` is retired; the two copies now agree.
+The other seven `parseLimit` copies (400 on an empty value) are untouched, per
+the collateral note above. Tests in `app/test/inboxApi.test.ts`: `?limit=`,
+`?limit=%20`, `?limit=0` and `?limit=-5` each serve a default-sized page, with
+`limit=1` as the one-row control and `limit=1000` answering 200 (the clamp,
+not a 400).
 
 **Problem.** `parseLimit` in `app/src/routes/inbox.ts` (lines 1731-1737) treats
 an empty string as a number: `Number('') === 0`, which IS an integer, so the

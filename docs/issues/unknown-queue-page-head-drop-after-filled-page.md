@@ -3,11 +3,30 @@ id: unknown-queue-page-head-drop-after-filled-page
 title: Unknown-queue page-head thread-read failure drops a row with zero retries when the cursor came from a FILLED page
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-26
-refs: app/src/routes/inbox.ts:1935, app/test/inboxUnknownTab.test.ts
+resolved: 2026-09-02
+refs: app/src/routes/inbox.ts, app/test/inboxUnknownTab.test.ts
 ---
+
+**Resolution (2026-09-02).** Built as suggested, on branch
+`feat/inbox-unknown-tab-paging` (small-fix lane, rescoped from mission M6).
+The unknown cursor now carries its provenance: a fourth field `d` in the
+`{q,b,k}` namespace, set ONLY by the thread-read deferral and naming the
+contactId the page stopped at. `decodeUnknownCursor` returns the position plus
+that id; the page-head step-over fires only when `resume.deferredContactId ===
+contact.contactId` (and nothing has been kept), never on the bare existence of
+a cursor. A cursor minted by the page-full exit or a block roll-over carries no
+`d`, so the first row after a filled page is DEFERRED on a transient fault and
+served on the next request. Exactly one retry per row from any page; a
+permanently failing row is still stepped over on its second failure, so the
+walk still terminates. `d` is validated (absent or a non-empty string; anything
+else is a 400) because it licenses a drop. Pinned in
+`app/test/inboxUnknownTab.test.ts`: "the first row after a FILLED page gets its
+ONE retry too" (with a mutation probe naming the old predicate) and "a
+PERMANENT fault after a filled page is deferred ONCE, then stepped over"; the
+tamper list gained the two malformed-`d` shapes and the honest-`d` round trip.
 
 **Problem.** The Unknown tab's paged walk defers a page when a contact's
 participant-GSI read throws: the page stops at that row and mints a cursor AT

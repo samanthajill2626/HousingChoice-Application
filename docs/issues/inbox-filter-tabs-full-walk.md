@@ -3,11 +3,69 @@ id: inbox-filter-tabs-full-walk
 title: The Unknown inbox tab walks every open conversation, unbounded, when matches are sparse
 type: debt
 severity: high
-status: open
+status: resolved
 area: app
 created: 2026-08-03
-updated: 2026-08-26
-refs: app/src/routes/inbox.ts, app/src/lib/tables.ts, app/src/routes/contacts.ts, dashboard/src/routes/inbox/useInbox.ts
+updated: 2026-09-02
+resolved: 2026-09-02
+refs: app/src/routes/inbox.ts, app/src/lib/unknownQueue.ts, app/src/lib/tables.ts, app/src/routes/contacts.ts, dashboard/src/routes/inbox/useInbox.ts
+---
+
+**Resolution (2026-09-02).** The read this issue was filed for - `filter=unknown`
+walking the `byLastActivity` open partition and resolving a contact per open
+conversation - was removed by `66989d6f` "feat(inbox): filter=unknown reads the
+contact triage partition, not the open-partition walk" and landed on `main` in
+the 2026-08-26 merge of `feat/inbox-unread-cluster` (`1467832b`), then paged
+and unbounded by `1ceb2e52`. The tab reads the contacts `byTypeStatus`
+`(type='unknown')` partition through `app/src/lib/unknownQueue.ts`, one bounded
+Query per status block, untriaged first, with the index's own cursor. It never
+touches the open-conversation partition and never consults `conv.type`, so the
+stale-`unknown_1to1` drift measured below is no longer the cause of any cost.
+The frontmatter stayed `open` for a week after the fix because the RESOLVED
+block below was written into the body without re-stamping it - the same
+prose-outlives-code trap this file already records once.
+
+Re-measured 2026-09-02 on a hermetic lane (lane 8, `hc-local-8-`), which is
+what the intake for mission M6 asked for before any work; it is what stood the
+mission down. `--audit-triage-partition --no-status-narrow` prices the read
+that ships; `--audit-unknown-page` replays the retired walk on the same data:
+
+| profile | open partition | unknown partition (rows / Queries) | retired walk: contact lookups paid for matching rows |
+| --- | --- | --- | --- |
+| lean | 1 | 0 / 1, exhausted | 1 for 0 |
+| full | 16 | 1 (`needs_review`) / 1, exhausted, 0 soft-deleted | 11 for at most 1 |
+
+The seeded worlds are tiny (no unknown contact at all in `lean`), so the
+hermetic numbers are a floor and a shape check, not a stress figure: even
+there the retired walk paid eleven lookups to find one row while the shipping
+read paid one Query. The dev/prod measurements above (2026-08-25) remain the
+sizing evidence for the retired walk (684 lookups for at most 8 rows) and for
+the shipping read (7 rows, one Query, prod).
+
+What this file still tracked as OWED is now filed on its own, so it can carry
+a severity and be found in triage:
+
+- [`inbox-all-tab-open-partition-safety-net`](inbox-all-tab-open-partition-safety-net.md)
+  (med) - spec section 5's raw-scan budget + cursor + `truncated` contract for
+  the `filter=all` pager, deferred by human ruling 2026-08-25; the two plan-
+  review traps are carried there verbatim.
+- [`staff-thread-needs-triage-chip-all-unread`](staff-thread-needs-triage-chip-all-unread.md)
+  (low) - the labelling half of the class (c) ruling: `roleFromContact` still
+  falls `team_member` through to `'unknown'`, so an internal staff member's 1:1
+  row on the All and Unread tabs still carries `needsTriage: true` and the
+  "Needs triage" chip.
+
+The two cursor defects of the shipping read are their own issues:
+[`unknown-queue-page-head-drop-after-filled-page`](unknown-queue-page-head-drop-after-filled-page.md)
+(resolved 2026-09-02, the cursor now carries its provenance) and
+[`unknown-queue-status-flip-duplicates-across-pages`](unknown-queue-status-flip-duplicates-across-pages.md)
+(open at low, documented acceptance). Global newest-first ordering across pages
+stays with
+[`denormalize-contact-last-activity-for-ordered-paging`](denormalize-contact-last-activity-for-ordered-paging.md),
+untouched. The 2026-08-25 "part (B)" of the suggested fix below - denormalizing
+`contactId` onto the conversation item - was CUT with the badge deferral and is
+not owed. Everything below this line is the historical record.
+
 ---
 
 **Problem.** `filter=unknown` is the ONLY read left on `GET /api/inbox` with no
@@ -583,4 +641,6 @@ picks it up:
    deleted along with the tail.
 
 The unbounded read this issue was filed for is gone from `filter=unknown`; the
-safety net is about `filter=all`, and it is still owed.
+safety net is about `filter=all`, and it is still owed - filed 2026-09-02 as
+[`inbox-all-tab-open-partition-safety-net`](inbox-all-tab-open-partition-safety-net.md),
+which carries the two traps above and is the authority from here on.

@@ -63,6 +63,24 @@ function addressLines(a: PublicFlyer['address']): string | null {
   return full === '' ? null : full;
 }
 
+/** A Google Maps link for the home's address - "where is this?" is the tenant's
+ *  next question after the rent, and a flyer arrives by text on a phone, where
+ *  this hands off to the native Maps app. Uses the documented Maps URL API
+ *  (`search/?api=1&query=`), which takes a free-text query, so a partial address
+ *  (city + state, no street) still lands somewhere useful. The parts are joined
+ *  with ', ' rather than reusing the DISPLAYED string, whose ' - ' separators are
+ *  a presentation choice; every part is encodeURIComponent'd, and the host is a
+ *  literal, so nothing here can become another scheme or origin. Null when the
+ *  address carries nothing but blanks (the row then renders as plain text). */
+function mapsHref(a: PublicFlyer['address']): string | null {
+  const query = [a.line1, a.line2, a.city, a.state, a.zip]
+    .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+    .join(', ');
+  return query === ''
+    ? null
+    : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
 /** "I'm interested in <line1, city | neighborhood | this home>" */
 function interestedPrefill(flyer: PublicFlyer): string {
   const line1 = flyer.address.line1;
@@ -212,6 +230,7 @@ export function FlyerPage(): React.JSX.Element {
   const safeListingUrl = safeHttpUrl(flyer.listing_link);
   const pets = petsLabel(flyer.pets);
   const address = addressLines(flyer.address);
+  const mapUrl = mapsHref(flyer.address);
   const utilities = textOrNull(flyer.utilities);
   const accessibility = textOrNull(flyer.accessibility);
   const leaseTerms = textOrNull(flyer.lease_terms);
@@ -260,7 +279,20 @@ export function FlyerPage(): React.JSX.Element {
         {address !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Address</dt>
-            <dd className={styles.dd}>{address}</dd>
+            {/* The address itself is the map link (no separate "Map" affordance).
+                The visible text stays the address and the hidden suffix only
+                ADDS to it, so the accessible name still contains what a voice
+                user would say (WCAG 2.5.3). */}
+            <dd className={styles.dd}>
+              {mapUrl !== null ? (
+                <a href={mapUrl} target="_blank" rel="noreferrer">
+                  {address}
+                  <span className={styles.srOnly}> - open in Google Maps</span>
+                </a>
+              ) : (
+                address
+              )}
+            </dd>
           </div>
         )}
         {flyer.deposit !== null && (

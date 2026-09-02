@@ -81,6 +81,12 @@ const NUDGE_SUPPRESSION_LABELS: Readonly<Record<ScheduledSuppressionReason, stri
   // placement nudges have no such pointer and no writer emits it. Entry kept
   // identical to the tour copy; no chip branch below, deliberately.
   superseded: "the tour's reminders were set up again",
+  // COMPILE COMPLETENESS ONLY, the third of these (review round NEW-3).
+  // `conversion_in_progress` is a fact about a TOUR being converted into a
+  // placement; a placement nudge is what exists AFTER that, so no writer on this
+  // surface can emit it. Entry kept identical to the tour copy; no chip branch
+  // below, deliberately.
+  conversion_in_progress: 'the tour is becoming a placement',
 };
 
 /** A compact state chip for a single nudge rung (mirrors RemindersPanel's StateChip). */

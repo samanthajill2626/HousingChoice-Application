@@ -1162,7 +1162,14 @@ export type ScheduledSuppressionReason =
    *  which retires the KIND; this retires one generation of a kind that still
    *  sends. Produced OUTSIDE the shared evaluator, by the callers that can
    *  compare the rung's ladderId with its tour's currentLadderId. */
-  | 'superseded';
+  | 'superseded'
+  /** TEMPORARY (supersession 2026-09-01): the rung's TOUR is mid-conversion to a
+   *  placement - it carries an unresolved `pending:` claim - so the poll defers
+   *  every one of its rungs unclaimed and Send now answers 409. The only reason
+   *  here that RESOLVES: the finalize sweeps the rung, or a failure releases the
+   *  claim and the rung goes back to being an ordinary promise. Produced OUTSIDE
+   *  the shared evaluator by the three callers that hold the tour. */
+  | 'conversion_in_progress';
 
 /** The suppression estimate a GET carries on an upcoming rung/card. */
 export interface ScheduledSuppression {
@@ -1192,12 +1199,22 @@ const EM_DASH = String.fromCharCode(0x2014);
  *  "No longer sent" would say the KIND was retired when the truth is that THIS
  *  generation of the ladder was replaced. Pairs with the 'the tour's reminders
  *  were set up again' label -> "Replaced - the tour's reminders were set up
- *  again", which again does not repeat the lead. */
+ *  again", which again does not repeat the lead.
+ *
+ *  `conversion_in_progress` is a FIFTH thing, and the only TEMPORARY one in the
+ *  set that is not a clock: nothing here is being dropped, and nothing is
+ *  waiting on quiet-end - the tour is being turned into a placement and this
+ *  rung's fate is undecided until that lands. "Will wait" is the closest of the
+ *  four and still wrong, because it promises the rung goes out afterwards, which
+ *  the conversion's own sweep will usually make false. Pairs with the 'the tour
+ *  is becoming a placement' label -> "On hold - the tour is becoming a
+ *  placement". */
 export function suppressionLead(reason: ScheduledSuppressionReason): string {
   if (reason === 'quiet_hours') return 'Will wait';
   if (reason === 'paused') return 'Paused';
   if (reason === 'discontinued') return 'No longer sent';
   if (reason === 'superseded') return 'Replaced';
+  if (reason === 'conversion_in_progress') return 'On hold';
   return 'Will be skipped';
 }
 
@@ -1350,6 +1367,10 @@ export const REMINDER_SUPPRESSION_LABELS: Readonly<
   // and by a placement conversion, and the panel cannot tell which from the
   // rung. Does not repeat the lead, same rule as `discontinued`.
   superseded: "the tour's reminders were set up again",
+  // Reads "On hold - the tour is becoming a placement". TEMPORARY, unlike the
+  // two above it: the claim resolves either way, so the copy describes what is
+  // happening rather than declaring the rung dead.
+  conversion_in_progress: 'the tour is becoming a placement',
 };
 
 /** Human-readable phrasings for why a rung WAS retired unsent (state 'skipped'). */

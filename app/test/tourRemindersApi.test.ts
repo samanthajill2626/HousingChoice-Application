@@ -972,6 +972,81 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // Send now) already refuse it. The check runs AHEAD of `discontinued` for the
   // same reason `discontinued` runs ahead of the evaluator: it is a fact about
   // stored state that no recipient-side reason should override.
+  // CONVERSION IN FLIGHT (review round NEW-3). The panel is the surface an
+  // operator actually clicks Send now from, and during a claim it was rendering
+  // the rung as `upcoming` with a live fire-time estimate and an ENABLED button
+  // whose only possible answer was 409 conversion_in_progress.
+  it('renders a claim-in-flight rung SUPPRESSED conversion_in_progress rather than as a promise', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const tourId = await seedQuietTour(world, 'cip-1', '+15550600061');
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-cip' });
+    seedReminder(world, {
+      reminderId: 'rem-cip',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(6),
+      ladderId: 'ladder-cip',
+    });
+    // The reversible disarm the conversion route holds while it creates the
+    // placement. The PREFIX is the predicate, not string-ness.
+    await world.toursRepo.claimConversion(tourId, 'pending:cip-claim');
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const { reminders } = res.body as {
+      reminders: { reminderId: string; state: string; suppression?: { reason: string } }[];
+    };
+    // ANTI-VACUITY: still upcoming and still on the CURRENT ladder - the
+    // annotation is the point, not the fixture having gone terminal or stale.
+    expect(reminders.map((r) => r.reminderId)).toEqual(['rem-cip']);
+    expect(reminders[0]?.state).toBe('upcoming');
+    expect(reminders[0]?.suppression).toEqual({ reason: 'conversion_in_progress' });
+  });
+
+  it('a FINALIZED tour is not a claim - its rungs keep their promise', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const tourId = await seedQuietTour(world, 'cip-2', '+15550600062');
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-cip2' });
+    seedReminder(world, {
+      reminderId: 'rem-cip-final',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(6),
+      ladderId: 'ladder-cip2',
+    });
+    // The finalize writes a REAL placementId to the same field; a bare
+    // is-a-string test would suppress every converted tour's rungs forever.
+    await world.toursRepo.patch(tourId, { convertedPlacementId: 'placement-cip-real' });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    expect(res.body.reminders[0]?.suppression).toBeUndefined();
+  });
+
+  it('SUPERSEDED outranks a claim in flight on the panel too', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const tourId = await seedQuietTour(world, 'cip-3', '+15550600063');
+    await world.toursRepo.patch(tourId, { currentLadderId: 'ladder-cip3-new' });
+    seedReminder(world, {
+      reminderId: 'rem-cip-old',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(6),
+      ladderId: 'ladder-cip3-old',
+    });
+    await world.toursRepo.claimConversion(tourId, 'pending:cip3-claim');
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    // A mismatched rung belongs to a replaced ladder whether or not a claim is
+    // in flight, and `superseded` is the PERMANENT half of that pair - the same
+    // precedence the Send-now refusal already uses.
+    expect(res.body.earlier?.[0]?.suppression).toEqual({ reason: 'superseded' });
+  });
+
   describe('superseded rungs', () => {
     // S7 RE-POINT: the annotation is unchanged, but the rung carrying it now
     // lives in `earlier[]` - the partition (T7.1) moved it out of `reminders[]`

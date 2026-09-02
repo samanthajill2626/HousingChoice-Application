@@ -193,6 +193,11 @@ const SUPPRESSION_REASONS = [
   // shared evaluator, by the callers that can compare the rung's generation
   // pointer against its tour's.
   'superseded',
+  // Supersession (2026-09-01, review round NEW-3). Produced outside the shared
+  // evaluator too, by the same three callers - they hold the tour, and the
+  // `pending:` conversion claim lives on it. The only TEMPORARY member of this
+  // list, which is why it is absent from PERMANENT_REFUSALS above.
+  'conversion_in_progress',
 ];
 
 describe('suppression copy', () => {

@@ -1041,11 +1041,23 @@ async function gatherUpcoming(params: {
           // its pre-migration exemption: a legacy rung on a pointerless tour is
           // NOT superseded, or this line would retire every rung armed before
           // the feature on its first read.
+          //
+          // CONVERSION IN FLIGHT short-circuits next (review round NEW-3), and
+          // it is the same tour this walk already holds - no extra read. While
+          // the `pending:` sentinel stands the poll defers every rung of this
+          // tour and Send now answers 409, so a live "sends in 3h" here would be
+          // a promise both send paths refuse. BELOW the two TERMINAL reasons
+          // above (this one resolves) and ABOVE the recipient-state estimate
+          // (the claim is what gates the next tick). The PREFIX is the
+          // predicate: the finalize writes a real placementId to the same field.
           const suppression = isSupersededRung(row, tour)
             ? ({ reason: 'superseded' } as const)
             : DISCONTINUED_REMINDER_KINDS.has(row.kind)
               ? ({ reason: 'discontinued' } as const)
-              : suppressionFor(
+              : typeof tour.convertedPlacementId === 'string' &&
+                  tour.convertedPlacementId.startsWith('pending:')
+                ? ({ reason: 'conversion_in_progress' } as const)
+                : suppressionFor(
                   tenantConv,
                   false,
                   row.dueAt,

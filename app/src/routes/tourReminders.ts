@@ -713,6 +713,18 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // hoisting a variable out of a branch to share it is how the two builders
     // would start disagreeing. viewOf computes a third for the same reason.
     const listNowIso = new Date().toISOString();
+    // CONVERSION IN FLIGHT (review round NEW-3). A tour-level fact, so it is
+    // read once rather than per row: while `convertedPlacementId` carries the
+    // `pending:` sentinel the poll DEFERS every rung of this tour and Send now
+    // answers 409 conversion_in_progress. Without this the panel rendered such a
+    // rung as `upcoming` with a live fire-time estimate and an ENABLED Send-now
+    // button whose only possible answer was that 409 - the surface promising
+    // what the send path refuses, which is the exact lie this feature exists to
+    // end (lib/ladderPointer.ts). The PREFIX is the predicate: the finalize
+    // replaces the sentinel with a real placementId in the same field.
+    const conversionInProgress =
+      typeof tour.convertedPlacementId === 'string' &&
+      tour.convertedPlacementId.startsWith('pending:');
     const reminderViews: TourReminderView[] = currentRows
       .map((row) => {
         const state = stateOf(row);
@@ -766,7 +778,19 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
               ? ({ reason: 'superseded' } as const)
               : discontinued
                 ? ({ reason: 'discontinued' } as const)
-                : suppressionOf !== undefined
+                : // BELOW both TERMINAL reasons above and ABOVE the evaluator.
+                  // Below, because this one is TEMPORARY - the claim resolves -
+                  // and the module's ladder rationale is that the harder reason
+                  // wins; a chip reading "Converting" over a rung whose ladder
+                  // was replaced, or whose kind will never send again, would
+                  // flip to the permanent truth minutes later. Above the
+                  // evaluator, because a claim in flight is what actually gates
+                  // the next tick: the poll defers this rung unclaimed whatever
+                  // the recipient's state, so an opt-out or quiet-hours estimate
+                  // here would describe a send that is not being attempted.
+                  conversionInProgress
+                  ? ({ reason: 'conversion_in_progress' } as const)
+                  : suppressionOf !== undefined
                   ? // en_route is exempt from quiet hours at BOTH runtime sites
                     // (spec 6), so the estimate must not promise a wait here.
                     suppressionOf(row.dueAt, paused, row.kind === 'en_route')

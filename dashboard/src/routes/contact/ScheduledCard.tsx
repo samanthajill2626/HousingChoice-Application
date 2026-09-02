@@ -39,6 +39,12 @@ const SUPPRESSION_COPY: Readonly<
   // suppressionNote leads it "Replaced", so the label carries only the cause:
   // "Replaced - the tour's reminders were set up again".
   superseded: "the tour's reminders were set up again",
+  // TEMPORARY, unlike the two above (supersession 2026-09-01): the card's tour
+  // is mid-conversion to a placement, so the poll defers this rung and Send now
+  // refuses it - until the claim resolves, when the rung is either swept or
+  // released. suppressionNote leads it "On hold", hence a label that carries
+  // only the cause: "On hold - the tour is becoming a placement".
+  conversion_in_progress: 'the tour is becoming a placement',
 };
 
 /** The fire-time line: while the send is still in the future, "sends <relative> -
@@ -74,6 +80,13 @@ function scheduledLabel(
   // for a message from a schedule that no longer exists. Kept distinct from
   // "No longer sent" (that says the KIND is retired) - see suppressionLead.
   if (item.suppression?.reason === 'superseded') return 'Replaced';
+  // ABOVE the fire-time fall-through, and TEMPORARY unlike the two above it
+  // (review round NEW-3). It has to replace the time for the same reason
+  // `superseded` does - the poll will not pick this rung up before its dueAt,
+  // so "sends in 6 days" would stand for days on a rung nothing is going to
+  // attempt - but it is deliberately NOT worded like a retirement: the claim
+  // resolves, and the card must not have declared the rung dead when it does.
+  if (item.suppression?.reason === 'conversion_in_progress') return 'On hold';
   if (item.suppression?.reason === 'paused') return 'Paused';
   return fireTimeLabel(item.at, now, timezone);
 }

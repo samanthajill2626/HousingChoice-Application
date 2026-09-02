@@ -389,6 +389,42 @@ describe('RemindersPanel', () => {
     expect(screen.getByRole('button', { name: /Cancel the/ })).toBeInTheDocument();
   });
 
+  // CONVERSION IN FLIGHT (review round NEW-3). The panel is the surface an
+  // operator clicks Send now from, and during a claim it rendered the rung as a
+  // live promise with an ENABLED button whose only possible answer was 409
+  // conversion_in_progress - a row arguing with itself. Unlike the two chips
+  // above it, this state RESOLVES, so the copy must not retire the rung.
+  it('renders a claim-in-flight rung as "Converting", never a fire time and with no Send now', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          // Past due, so the fall-through would chip "sending shortly" on a rung
+          // the poll is deliberately leaving unclaimed.
+          dueAt: '2000-01-01T00:00:00Z',
+          suppression: { reason: 'conversion_in_progress' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Converting')).toBeInTheDocument());
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    // Never borrows a word that would declare the rung dead - the claim resolves.
+    expect(screen.queryByText('Replaced')).not.toBeInTheDocument();
+    expect(screen.queryByText('No longer sent')).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument();
+    // The note underneath carries the why, without repeating the lead.
+    expect(screen.getByText(/On hold . /)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
+    // No Send now while the claim stands (the server answers 409); Cancel stays,
+    // exactly as it does for a superseded rung.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel the/ })).toBeInTheDocument();
+  });
+
   // The retired half of the same story: once the poll has claim-skipped a rung
   // for a conversion claim that never finished, the chip has to say WHICH
   // failure it was - a reason-less "Skipped" sends the operator hunting.

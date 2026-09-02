@@ -70,6 +70,14 @@ const MAX_ANCHOR_MS = 6 * 3_600_000;
  * dueAt, so between the reschedule and the fire time nothing retires it, and a
  * rung the sweep missed can stay upcoming-and-overdue indefinitely.
  *
+ * A CONVERSION_IN_PROGRESS rung is deliberately NOT skipped (review round
+ * NEW-3), for the same reason `paused` is not: the state RESOLVES. The claim
+ * lives for milliseconds on the happy path, and when it clears the rung either
+ * fires or is swept - both of which the panel should notice. Skipping it here
+ * would leave the operator looking at "Converting" long after the conversion
+ * landed. Anchoring on it costs the 20s overdue re-check at worst, and the
+ * grace window bounds even a crashed claim.
+ *
  * Shared with the placement-nudge card (usePlacementNudges), hence the
  * structural `suppression` shape rather than a view-specific type.
  *
@@ -155,6 +163,17 @@ function StateChip({
   // written above: a rung that will never send is never "overdue".
   if (rung.suppression?.reason === 'superseded') {
     return <span className={`${styles.chip} ${styles.paused}`}>Replaced</span>;
+  }
+  // TEMPORARY, and the only one of these three that is (review round NEW-3):
+  // the tour is mid-conversion to a placement, so the poll defers this rung
+  // unclaimed and Send now answers 409 conversion_in_progress - but the claim
+  // resolves. ABOVE `overdue` for the reason the two above give (a rung nothing
+  // is attempting is not "overdue"), and its own word rather than "Replaced" or
+  // "No longer sent", both of which would declare the rung dead just before it
+  // came back. TONE: `upcoming`, not the muted `paused` tone the two permanent
+  // chips take - this is an in-progress state, and it should not look retired.
+  if (rung.suppression?.reason === 'conversion_in_progress') {
+    return <span className={`${styles.chip} ${styles.upcoming}`}>Converting</span>;
   }
   // OVERDUE (spec 8): the server says this rung's send time has passed and it
   // still has not sent. It REPLACES the fire-time promise below rather than
@@ -435,10 +454,19 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                       for the identical reason: the server refuses it 409
                       superseded, permanently, because its ladder no longer
                       exists. The current ladder's own rungs still offer the
-                      button, which is where a send can actually be made. */}
+                      button, which is where a send can actually be made.
+                      NOT rendered during a CONVERSION either (review round
+                      NEW-3), and this is the one TEMPORARY member of the set:
+                      the server refuses with 409 conversion_in_progress while
+                      the tour's `pending:` claim stands, so the button's only
+                      possible answer right now is that refusal. It comes BACK
+                      on its own when the claim resolves and the rung survives -
+                      which is why the chip above says "Converting" rather than
+                      retiring the row. */}
                   {rung.state === 'upcoming' &&
                   rung.suppression?.reason !== 'discontinued' &&
-                  rung.suppression?.reason !== 'superseded' ? (
+                  rung.suppression?.reason !== 'superseded' &&
+                  rung.suppression?.reason !== 'conversion_in_progress' ? (
                     <button
                       type="button"
                       className={styles.action}

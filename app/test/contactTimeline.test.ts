@@ -1367,6 +1367,39 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
   // to know the tour was rescheduled, so a rung of a replaced ladder promising
   // "sends in 3h" here is the lie in its purest form. Same shared predicate as
   // the poll and the panel (lib/ladderPointer.ts) - the three cannot disagree.
+  // CONVERSION IN FLIGHT (review round NEW-3), the same surface one reason
+  // further down the ladder. A contact page has even less context than the
+  // panel: nothing on it says the tour is being converted, so "sends in 3h" here
+  // is a promise the poll is actively deferring and Send now refuses.
+  it('marks a claim-in-flight rung `conversion_in_progress` on the timeline', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600061';
+    world.contacts.push({ contactId: 'ct-cip', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-cip', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-cip',
+      unitId: 'u-cip',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-tl-cip' });
+    // A LIVE kind on the current generation: a discontinued kind or a pointer
+    // mismatch would both outrank the claim and pass this for the wrong reason.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+      ladderId: 'ladder-tl-cip',
+    });
+    await world.toursRepo.claimConversion(tour.tourId, 'pending:tl-cip-claim');
+
+    const res = await request(app).get('/api/contacts/ct-cip/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toEqual({ reason: 'conversion_in_progress' });
+  });
+
   it('marks a pointer-mismatched pending rung `superseded` on the timeline', async () => {
     const { world, app } = makeGatherHarness();
     const phone = '+15550600051';

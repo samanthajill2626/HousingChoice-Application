@@ -101,6 +101,44 @@ describe('ScheduledCard', () => {
     expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
   });
 
+  // Conversion in flight (review round NEW-3): the card's tour is being turned
+  // into a placement, so the poll defers this rung and Send now refuses it. The
+  // one TEMPORARY member of the set - it must replace the fire time like the two
+  // above, without borrowing a word that declares the rung dead.
+  it('renders a claim-in-flight rung as "On hold", never a fire time', () => {
+    render(
+      <ScheduledCard
+        item={{ ...BASE, suppression: { reason: 'conversion_in_progress' } }}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByText('On hold')).toBeInTheDocument();
+    expect(screen.queryByText(/sends in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Replaced')).not.toBeInTheDocument();
+    expect(screen.queryByText('No longer sent')).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    // suppressionNote joins with an EM dash; the label does not repeat the lead.
+    expect(screen.getByText(/On hold . /)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Will wait/)).not.toBeInTheDocument();
+  });
+
+  it('a claim-in-flight rung already PAST its fire time does not say "sending shortly"', () => {
+    render(
+      <ScheduledCard
+        item={{
+          ...BASE,
+          at: '2026-06-18T09:00:00Z',
+          suppression: { reason: 'conversion_in_progress' },
+        }}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByText('On hold')).toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+  });
+
   it('a paused rung already PAST its fire time does not say "sending shortly"', () => {
     render(
       <ScheduledCard

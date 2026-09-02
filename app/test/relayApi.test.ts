@@ -1611,6 +1611,45 @@ describe('relay-group API (M1.7)', () => {
       }
     });
 
+    // THE THIRD exception, on the same argument again (review round NEW-3). The
+    // owner tour is mid-conversion, so the poll defers every one of these rungs
+    // and Send now refuses them - and this bucket would otherwise promise
+    // "sends in Nh" for all three inside the relay thread itself.
+    it('every rung carries conversion_in_progress while the tour holds a pending claim', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // The reversible disarm the conversion route holds across its create.
+      await world.toursRepo.claimConversion(tour.tourId, 'pending:relay-cip');
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled).toHaveLength(3);
+      for (const item of scheduled) {
+        expect(item.suppression, item.reminderKind).toEqual({
+          reason: 'conversion_in_progress',
+        });
+      }
+
+      // ANTI-VACUITY: releasing the claim gives every promise back. Nothing was
+      // stamped, which is the whole point of a REVERSIBLE disarm.
+      await world.toursRepo.releaseConversionClaim(tour.tourId, 'pending:relay-cip');
+      const after = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      for (const item of after.body.scheduled as Array<{ suppression?: unknown }>) {
+        expect(item.suppression).toBeUndefined();
+      }
+    });
+
     it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed in this bucket', async () => {
       // Acceptance 12. The helper above points its tour, so this case builds
       // the pre-migration shape deliberately: pointer cleared, rows unstamped.

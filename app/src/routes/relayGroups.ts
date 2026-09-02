@@ -361,11 +361,24 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         // the only way four sites cannot disagree about one row. The
         // member-level opt-out note above still stands and is still why nothing
         // ELSE is evaluated here.
+        //
+        // THE THIRD exception (review round NEW-3): the owner tour is carrying
+        // an unresolved `pending:` placement-conversion claim. Free for the same
+        // reason - the tour is already in hand - and necessary for the same one:
+        // while the sentinel stands the poll defers every rung of this tour and
+        // Send now answers 409, so this card would promise "sends in Nh" for a
+        // send nothing is attempting. Ordered LAST of the three because it is
+        // the only TEMPORARY one: a replaced generation and a retired kind are
+        // both permanent, and the harder fact wins. The PREFIX is the predicate,
+        // not string-ness: the finalize writes a real placementId to this field.
         ...(isSupersededRung(row, tour)
           ? { suppression: { reason: 'superseded' as const } }
-          : DISCONTINUED_REMINDER_KINDS.has(row.kind) && {
-              suppression: { reason: 'discontinued' as const },
-            }),
+          : DISCONTINUED_REMINDER_KINDS.has(row.kind)
+            ? { suppression: { reason: 'discontinued' as const } }
+            : typeof tour.convertedPlacementId === 'string' &&
+              tour.convertedPlacementId.startsWith('pending:') && {
+                suppression: { reason: 'conversion_in_progress' as const },
+              }),
         conversationId,
         refType: 'tour' as const,
         refId: tour.tourId,

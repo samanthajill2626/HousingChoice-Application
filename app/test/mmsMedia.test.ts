@@ -233,6 +233,31 @@ describe('GET /api/messages/:providerSid/media/:idx (authed)', () => {
     expect((res.body as Buffer).toString()).toContain('media-bytes-for:');
   });
 
+  // PAIRED with the identical assertion on GET /api/calls/:callId/recording
+  // (test/voiceRecording.test.ts). Both authenticated media routes declare the
+  // SAME caching posture on purpose (Cameron, 2026-09-02): `private` so no
+  // shared proxy or CDN ever holds authenticated PII bytes, with a cacheable
+  // window accepted because inline Timeline thumbnails re-request this URL on
+  // every render. The residual `private` does NOT close - reuse on an
+  // already-signed-in machine across a session change - is an accepted risk
+  // recorded in docs/issues/authenticated-mms-media-browser-cache.md. If that
+  // decision is ever revisited, BOTH routes and BOTH tests move together.
+  it('declares Cache-Control: private, max-age=3600 (no shared-proxy copy of authed PII)', async () => {
+    const world = createFakeWorld();
+    const app = await seedMms(world);
+
+    const res = await request(app)
+      .get('/api/messages/SMmms0001/media/0')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toBe('private, max-age=3600');
+    // The load-bearing half: never `public`, which would let CloudFront or a
+    // corporate proxy serve these bytes to someone with no session at all.
+    expect(res.headers['cache-control']).not.toContain('public');
+  });
+
   it('XSS GUARD: a dangerous stored Content-Type (text/html) is forced to a download', async () => {
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({ world });

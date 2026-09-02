@@ -42,11 +42,15 @@ not leave a signed-in session on a shared machine), not code.
 **Sibling sweep (2026-09-02).** Every route in the app that streams stored bytes
 was checked:
 
-- `GET /api/calls/:callId/recording` (authenticated, PII audio) declares NO
-  `Cache-Control` at all, so its browser behavior is heuristic rather than
-  stated. Same class, weaker declaration - left alone deliberately: if the MMS
-  media window above is accepted, an equivalent-or-narrower recording window is
-  accepted too. Worth stating explicitly if these headers are ever revisited.
+- `GET /api/calls/:callId/recording` (authenticated, PII audio) declared NO
+  `Cache-Control` at all, leaving an authenticated PII response to browser
+  heuristics. FIXED in this same change (Cameron, 2026-09-02): it now declares
+  `private, max-age=3600`, identical to the MMS media route. An authenticated
+  response should never have an UNSTATED caching policy, and `private` is the
+  load-bearing half - no shared proxy or CDN may hold these bytes. The two
+  routes are now deliberately in LOCKSTEP, each with a paired test asserting
+  the header (`app/test/mmsMedia.test.ts`, `app/test/voiceRecording.test.ts`);
+  change both or neither.
 - `GET /unit-media/:unitId/:object` is `public, max-age=604800` and
   unauthenticated BY DESIGN (spec D5) - public flyer photos on unguessable
   server-minted uuid keys, shape-scoped to exactly two safe segments so the PII
@@ -56,10 +60,13 @@ was checked:
   and transcodes but serves nothing.
 
 Two genuinely unauthenticated media exposures found during the same sweep were
-filed separately: [`outbound-mms-presign-ttl-one-hour`](outbound-mms-presign-ttl-one-hour.md)
-and [`twilio-hosted-inbound-media-retained`](twilio-hosted-inbound-media-retained.md).
-Both involve URLs fetchable with no session at all, which is a materially
-different risk from a local browser cache.
+filed separately, since both involve URLs fetchable with no session at all - a
+materially different risk from a local browser cache:
+[`outbound-mms-presign-ttl-one-hour`](outbound-mms-presign-ttl-one-hour.md)
+(which turned out to be a latent DELIVERY bug as well: our 1h presign TTL is
+shorter than Twilio's 10h queue window) and
+[`twilio-hosted-inbound-media-retained`](twilio-hosted-inbound-media-retained.md)
+(deferred for review at higher volume).
 
 **Revisit only if** the dashboard is ever used on genuinely shared or public
 terminals as a normal pattern, or if a role/permission model arrives where one

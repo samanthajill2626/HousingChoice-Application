@@ -3,7 +3,7 @@ id: twilio-hosted-inbound-media-retained
 title: Inbound MMS media is mirrored but never deleted provider-side, and the provider URL is persisted
 type: security
 severity: med
-status: open
+status: deferred
 area: app
 created: 2026-09-02
 refs: app/src/services/mediaMirror.ts, app/src/routes/webhooks/twilio.ts:649, app/src/adapters/messaging.ts:1079
@@ -44,6 +44,14 @@ Sequencing note: the mirror deliberately tolerates a provider-side race (media
 can appear a beat AFTER the message webhook, with a retry tail into the
 `media.mirror` job), so any delete must key off a CONFIRMED mirror, never off
 the webhook returning.
+
+**Deferred (Cameron, 2026-09-02).** Fine to leave as-is for now; revisit when
+volume goes up. The exposure scales with the number of attachments we have ever
+received, so the argument for acting gets stronger over time, not weaker - which
+is why this is deferred rather than accepted. Step 1 (the console check) is
+cheap and can be done at any point without touching code; do that first when
+this is picked back up, because it decides whether steps 2 and 3 are urgent or
+merely tidy.
 
 Found during the sibling sweep for
 [`authenticated-mms-media-browser-cache`](authenticated-mms-media-browser-cache.md).

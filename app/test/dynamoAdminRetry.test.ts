@@ -45,7 +45,7 @@ import {
   UpdateTableCommand,
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ensureGsis } from '../scripts/db-update-gsis.js';
 import { tableName } from '../src/lib/config.js';
 import {
@@ -272,6 +272,24 @@ const silent = (): void => undefined;
 // ----------------------------------------------------------------------------
 
 describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () => {
+  // SILENCE THE RETRY'S OWN WARNINGS, and only here. Every fault in this file
+  // is provoked on purpose, so these lines are expected noise - 31 of them in a
+  // full run before this stub existed.
+  //
+  // Suppressing them is not tidiness, it is what makes the instrumentation
+  // WORTH having: with this file quiet, ANY `[dynamoAdmin]` line in `npm test`
+  // output came from a REAL suite hitting a REAL container fault, which is the
+  // first recorded sighting this issue has ever had a way to capture. A suite
+  // that cried wolf 31 times a run would train everyone to scroll past the one
+  // that mattered - the same reflex this whole mission exists to break.
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeAll(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+  afterAll(() => {
+    warn.mockRestore();
+  });
+
   it('case 1: CreateTable retries a transient InternalFailure twice and then succeeds', async () => {
     const stub = new StubClient().script('CreateTable', [
       { fail: internalFailure() },

@@ -192,9 +192,29 @@ const DEFAULT_ATTEMPTS = 4;
 // this one number.
 const DEFAULT_DEADLINE_MS = 20_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
-// Argued against DynamoDB Local's own 10s per-table lock timeout: a table that
-// is still not ACTIVE after 10s locally is not going to become so inside the
-// same test hook.
+// 30s, RAISED FROM 10s on 2026-09-01 (human decision), and the reasoning that
+// picked 10s is why it had to move.
+//
+// 10s was argued against DynamoDB Local's own 10s per-table lock timeout: a
+// table still not ACTIVE after 10s is stuck, not busy. That holds on an IDLE
+// box. It does not hold on the box this repo actually runs on, where three or
+// four agents share one container and a lock queue is the normal state rather
+// than the exception - and a ceiling that expires under ordinary contention
+// manufactures exactly the false red this whole module exists to remove.
+//
+// WHY NOT 60s, which was the other candidate: `hookTimeout` is 60_000
+// (app/vitest.config.ts), and every caller here sits in a beforeAll. A 60s
+// ceiling would let the HOOK time out first, replacing this poll's precise
+// error ("table X is still DELETING after 60000ms") with "Hook timed out in
+// 60000ms", which names nothing. Going past 30s means raising hookTimeout
+// first, deliberately, for all ~50 integration suites.
+//
+// THE BUDGETS ARE ADDITIVE, so read this before assuming 30s is the cost: the
+// retry deadline (20s) and this poll are separate clocks, so one faulting table
+// can spend ~50s inside a 60s hook. It fits, but not by much. That is the
+// argument for the console.warn below rather than for a bigger number - if
+// these lines ever appear in a real run, the honest fix is more hook budget,
+// not a longer silent wait.
 //
 // NOT a contradiction of db-update-gsis.ts's 900s timeout, which predates this
 // change (1448b130, 2026-08-16): that one waits on a GSI BACKFILL over a
@@ -215,9 +235,9 @@ const DEFAULT_POLL_INTERVAL_MS = 100;
 // IMMEDIATELY on the InternalFailure. A slower failure, not a lost success.
 //
 // A DescribeTable that FAILS inside the poll counts as not-ACTIVE by design and
-// is not retried (see pollUntilTableActive), so 10s of unreadable container ends
+// is not retried (see pollUntilTableActive), so 30s of unreadable container ends
 // a retried conflict in a hard failure rather than a longer wait.
-const DEFAULT_POLL_CEILING_MS = 10_000;
+const DEFAULT_POLL_CEILING_MS = 30_000;
 
 // URL.hostname yields the BRACKETED form for an IPv6 literal, so both spellings
 // belong here. app/scripts/db-create.ts:25 accepts the same four, from a URL
@@ -281,6 +301,8 @@ async function retryLocalControlPlane(
     schedule?: RetrySchedule | undefined;
     verify?: (() => Promise<boolean>) | undefined;
     onRetry?: (() => void) | undefined;
+    /** What is being sent, for the retry's one log line. */
+    label?: string | undefined;
   },
 ): Promise<void> {
   const attempts = opts.schedule?.attempts ?? DEFAULT_ATTEMPTS;
@@ -337,6 +359,24 @@ async function retryLocalControlPlane(
       if (n >= attempts) throw err;
       if (Date.now() - startedAt >= deadlineMs) throw err;
       opts.onRetry?.();
+      // THE ONLY RECORD THAT THIS EVER FIRES. Until 2026-09-01 the retry was
+      // completely silent, so "how often does a contended box actually hit
+      // this?" was unanswerable - the honest answer to which was not a guess
+      // but a log line. It is warn-level and on a by-hypothesis rare path; if
+      // it turns out to be chatty, that IS the finding, and the remedy is a
+      // bigger hook budget rather than a quieter log.
+      //
+      // console, not a logger: nothing in app/src reaches this module (it is
+      // local dev-loop and test tooling only), so threading a logger through
+      // ~50 call sites to instrument a rare path would be the wrong trade.
+      // globalSetup and db-create already warn this way. The first argument is
+      // a STRING, deliberately - an object literal here would put this call in
+      // front of the log-hygiene call-site guard for no benefit.
+      console.warn(
+        `[dynamoAdmin] retrying ${opts.label ?? 'a control-plane send'} after ` +
+          `${(err as { name?: string }).name ?? 'an unnamed fault'} ` +
+          `(attempt ${n} of ${attempts}) - DynamoDB Local under load`,
+      );
       await sleep(backoffMs(n));
     }
   }
@@ -354,7 +394,11 @@ async function retryLocalControlPlane(
 export async function sendWithRetry<TOut>(
   client: DynamoDBClient,
   send: () => Promise<TOut>,
-  opts: { schedule?: RetrySchedule | undefined; onRetry?: (() => void) | undefined } = {},
+  opts: {
+    schedule?: RetrySchedule | undefined;
+    onRetry?: (() => void) | undefined;
+    label?: string | undefined;
+  } = {},
 ): Promise<TOut> {
   // Definitely assigned: with no `verify` hook the loop can only return after
   // the closure below has run to completion; every other exit throws.
@@ -364,7 +408,7 @@ export async function sendWithRetry<TOut>(
     async () => {
       output = await send();
     },
-    { schedule: opts.schedule, onRetry: opts.onRetry },
+    { schedule: opts.schedule, onRetry: opts.onRetry, label: opts.label },
   );
   return output;
 }
@@ -379,14 +423,14 @@ export async function sendWithRetryVerified(
   client: DynamoDBClient,
   send: () => Promise<unknown>,
   verify: () => Promise<boolean>,
-  opts: { schedule?: RetrySchedule | undefined } = {},
+  opts: { schedule?: RetrySchedule | undefined; label?: string | undefined } = {},
 ): Promise<void> {
   await retryLocalControlPlane(
     client,
     async () => {
       await send();
     },
-    { schedule: opts.schedule, verify },
+    { schedule: opts.schedule, verify, label: opts.label },
   );
 }
 
@@ -457,6 +501,12 @@ export async function pollUntilTableActive(
   const intervalMs = opts.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const ceilingMs = opts.ceilingMs ?? DEFAULT_POLL_CEILING_MS;
   const deadline = Date.now() + ceilingMs;
+  // Entering this poll means a RETRIED create hit a conflict - by hypothesis a
+  // rare path, and until 2026-09-01 an invisible one. See the retry warn above
+  // for why this is a console string rather than a logger payload.
+  console.warn(
+    `[dynamoAdmin] ${physicalName}: a retried CreateTable conflicted; waiting up to ${ceilingMs}ms for ACTIVE`,
+  );
   let observed = 'unknown';
   let lastReadError: unknown;
   for (let reads = 1; ; reads += 1) {
@@ -502,6 +552,9 @@ export async function pollUntilTableGone(
   const intervalMs = opts.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const ceilingMs = opts.ceilingMs ?? DEFAULT_POLL_CEILING_MS;
   const deadline = Date.now() + ceilingMs;
+  console.warn(
+    `[dynamoAdmin] ${physicalName}: a retried DeleteTable conflicted; waiting up to ${ceilingMs}ms for the table to go`,
+  );
   let observed = 'unknown';
   let lastReadError: unknown;
   for (let reads = 1; ; reads += 1) {
@@ -551,6 +604,7 @@ export async function ensureTable(
       () => client.send(new CreateTableCommand(toCreateTableInput(spec, physicalName))),
       {
         schedule: opts.retry,
+        label: `CreateTable ${physicalName}`,
         onRetry: () => {
           retried = true;
         },
@@ -640,7 +694,10 @@ async function enableTtlIfNeeded(
   // same function rather than a standalone read, so it is retried like any
   // other send here. The hook invocation below is a DIFFERENT call site and is
   // NOT retried - two sites, not one contradictory rule.
-  const status = await sendWithRetry(client, () => ttlStatus(client, physicalName), { schedule });
+  const status = await sendWithRetry(client, () => ttlStatus(client, physicalName), {
+    schedule,
+    label: `DescribeTimeToLive ${physicalName}`,
+  });
   if (status === 'ENABLED' || status === 'ENABLING') return;
   await sendWithRetryVerified(
     client,
@@ -659,7 +716,7 @@ async function enableTtlIfNeeded(
       const observed = await ttlStatus(client, physicalName);
       return observed === 'ENABLED' || observed === 'ENABLING';
     },
-    { schedule },
+    { schedule, label: `UpdateTimeToLive ${physicalName}` },
   );
 }
 
@@ -678,6 +735,7 @@ export async function deleteTableIfExists(
       () => client.send(new DeleteTableCommand({ TableName: physicalName })),
       {
         schedule: opts.retry,
+        label: `DeleteTable ${physicalName}`,
         onRetry: () => {
           retried = true;
         },

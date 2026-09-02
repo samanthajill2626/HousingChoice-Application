@@ -208,7 +208,7 @@ export async function ensureGsis(
           const status = await indexStatus(client, physicalName, gsi.indexName);
           return status === 'CREATING' || status === 'ACTIVE';
         },
-        { schedule: opts.retry },
+        { schedule: opts.retry, label: `UpdateTable ${physicalName}.${gsi.indexName}` },
       );
       await waitUntilTableExists({ client, maxWaitTime: 120 }, { TableName: physicalName });
       await waitUntilIndexActive(client, physicalName, gsi.indexName);

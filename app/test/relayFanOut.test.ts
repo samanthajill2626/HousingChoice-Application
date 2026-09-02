@@ -943,6 +943,8 @@ describe('relay.fanOut (M1.7)', () => {
     expect(row.delivery_recipients?.['c-bob']).toEqual({
       status: 'failed',
       errorCode: 'contact_opted_out',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
     });
     expect(row.delivery_recipients?.['c-alice']?.status).toBe('queued'); // fake adapter returns 'queued'
   });

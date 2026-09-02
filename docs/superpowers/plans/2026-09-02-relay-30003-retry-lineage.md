@@ -23,8 +23,8 @@ first.** This plan argues from it and does not restate its reasoning; where a st
 says "per D<n>", that decision carries the reasoning and the counter-arguments
 already rejected.
 
-Revision 3, after plan review rounds 1 (two reviewers, 42 findings) and 2 (12
-findings, none blocking). Adjudications:
+Revision 4, after plan review rounds 1 (two reviewers, 42 findings), 2 (12
+findings) and 3 (7 findings, one changing a decision). Adjudications:
 `docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/plan-r1-adjudications.md`.
 
 ## Global Constraints
@@ -94,8 +94,8 @@ parallel. Everything from Task 11 depends on both halves.
 - `app/src/jobs/relayFanOut.ts` - extract the per-leg send body into an exported
   unit both the fan-out and the retry job call; export `RelayTransportMode`.
 - `app/src/routes/webhooks/twilio.ts` - the claim, the SSE on claim, the
-  `retryClaim` log field, the relay severity predicate, the
-  `flagPlacementAttention` scoping.
+  `retryClaim` log field, the relay severity predicate, and one condition on
+  `flagPlacementAttention` so a ladder escalates once rather than once per rung.
 - `app/src/repos/conversationsRepo.ts` - a status-preserving activity bump.
 - `app/src/jobs/registerHandlers.ts` - register the new job and read the backoff
   override (WORKER-side, not `dev.ts`).
@@ -512,7 +512,11 @@ git commit -m "refactor(relay): extract sendOneRelayLeg so the retry job can reu
   `:1531-1578`)
 - Create: `app/test/conversationsRepoActivityBump.integration.test.ts`. Neither
   `conversationsRepo.integration.test.ts` nor `messagesRepo.integration.test.ts`
-  exists - follow `app/test/mediaPointers.integration.test.ts` for the harness.
+  exists. The conversations-repo harness is
+  `app/test/relayRepos.integration.test.ts`, which already constructs relay
+  conversations and drives `setRelayStatus` (`:97`, `:222`, `:389`). Do NOT copy
+  `mediaPointers.integration.test.ts` here - it builds a messages repo and never
+  constructs a conversation.
 
 **Interfaces:**
 - Produces: `touchLastActivityPreservingStatus(conversationId: string, preview: string | undefined, at: string): Promise<ConversationItem | undefined>`
@@ -524,8 +528,11 @@ so a group closed during the backoff would be resurrected by its own retry.
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
+// `setRelayStatus` takes THREE required arguments including `expectedCurrent`
+// (conversationsRepo.ts:850-854); calling it with two makes Step 2's red a
+// typecheck error on the wrong symbol instead of the missing method.
 it('bumps activity without reopening a closed relay group', async () => {
-  await conversations.setRelayStatus(conversationId, 'closed');
+  await conversations.setRelayStatus(conversationId, 'closed', 'open');
   const before = await conversations.getById(conversationId);
   await conversations.touchLastActivityPreservingStatus(
     conversationId, 'the original text', new Date().toISOString());
@@ -884,7 +891,7 @@ the existing rule hides a PREDECESSOR, this one hides the row itself.
 **Read delivered-ness from the retry row OWN slot** -
 `msg.delivery_recipients?.[msg.relay_retry_member_key]?.status === 'delivered'` -
 together with `msg.relay_retry_origin_direction === 'outbound'`. Do NOT route this
-through Task 6 join: `visible` would then depend on the time-derived half, and a
+through Task 6's join: `visible` would then depend on the time-derived half, and a
 memo over `items` would freeze it. The filter is a pure function of the row.
 
 - [ ] **Step 4: Run and watch them pass**
@@ -1133,7 +1140,7 @@ original version was a no-op with a fake red state: all three hosts already feed
 the same shared `<Timeline>`, so Task 9 covers them. It still earns its own gate,
 because **the tour host passes a MILESTONE-MERGED item list**
 (`TourConversation.tsx:463-467`) rather than `thread.items` - so Task 7's filter
-and Task 12's join must be correct against a MIXED list, which no other host
+and Task 6's join must be correct against a MIXED list, which no other host
 exercises.
 
 If either host is already green at Step 1, say so in the commit message rather
@@ -1374,6 +1381,13 @@ The order is load-bearing and each line answers a review finding:
    the root at creation time (D2, Task 1), and `sendOneRelayLeg` writes THIS row,
    whose own schema is what `applyRecipientSendResult` checks
    (`messagesRepo.ts:3240`).
+
+   **The mode is not just a flag.** `RelayTransportMode`'s versioned arm carries a
+   `MessageTransportIntent` (`relayFanOut.ts:957-959`) that the fan-out COMPUTES
+   via `adapter.classifyMessageTransport` (`:974-978`) and never stores - and
+   `row.requested_transport` is undefined on an inbound retry row by D2, so
+   reading it is not the answer either. The retry job classifies afresh from the
+   retry row's own type and media, exactly as the fan-out does for a source.
 4. Gates in order: group still open; member still on the roster;
    `relayRetryDigest(rootTsMsgId, member.phone)` still equals
    `row.relay_retry_dest_digest`; member not suppressed (`isMemberSuppressed`,
@@ -1410,8 +1424,8 @@ git commit -m "feat(relay): the 30003 retry job - gates, ladder and terminal clo
 
 **Files:**
 - Modify: `app/src/routes/webhooks/twilio.ts` (inside
-  `handleRelayRecipientStatus` `:2442-2561`, and `flagPlacementAttention`
-  `:2526`)
+  `handleRelayRecipientStatus` `:2442-2561`, plus ONE condition at the
+  `flagPlacementAttention` call site `:2526` - the function itself is unchanged)
 - Test: `app/test/relayWebhook.test.ts`, `app/test/twilioStatusWebhook.test.ts`
 
 **Interfaces:**
@@ -1537,16 +1551,32 @@ it('emits message.persisted when the claim lands', async () => {
     expect.objectContaining({ tsMsgId: rootTsMsgId }));
 });
 
-// flagPlacementAttention (:2522-2528) is UNCHANGED by this branch, and that is a
-// decision rather than an oversight. It escalates to a human on the first 30003,
-// which is arguably premature once a machine retry exists - but deferring it
-// until the chain is terminal would DELETE the escalation for three of the four
-// terminal outcomes: gate refusal, enqueue failure and transient cap all end
-// inside the JOB with no further callback, and the function is a closure inside
-// `createTwilioWebhookRouter` (:412) that the job cannot reach. Losing an
-// escalation is strictly worse than sending one early. Filed, not fixed.
-it('still escalates the placement on the first 30003, unchanged', async () => {
+// flagPlacementAttention (:2522-2528) escalates to a human on a failed leg. Two
+// wrong answers were considered and rejected before this one.
+//
+// DEFERRING it until the chain is terminal would DELETE the escalation for three
+// of the four terminal outcomes: gate refusal, enqueue failure and transient cap
+// all end inside the JOB with no further callback, and the function is a closure
+// inside `createTwilioWebhookRouter` (:412) that the job cannot reach.
+//
+// Leaving it ENTIRELY alone is not "unchanged behavior" either, which is the
+// trap: every rung's callback re-enters this same handler, so a three-rung ladder
+// escalates FOUR times. Each call rewrites `attention.at` with a fresh timestamp
+// (:420), re-emits `placement.updated` (:427) and logs another
+// `placement_escalation` (:428) - so the triage clock a human reads resets at
+// +60s, +180s and +420s, and the leg looks newly-failed each time.
+//
+// So: escalate on the ROOT's callback only. Exactly one escalation per failed
+// leg, at the same moment as today, and no clock resets.
+it('escalates once on the first 30003, exactly as today', async () => {
   await postStatus(failure);
+  expect(flagPlacementAttentionSpy).toHaveBeenCalledTimes(1);
+});
+
+// The regression this exists to prevent. One callback cannot see it - the whole
+// ladder must run.
+it('does not re-escalate on any rung of the ladder', async () => {
+  for (let i = 0; i < 5; i += 1) await postFailureForLatestAttempt();
   expect(flagPlacementAttentionSpy).toHaveBeenCalledTimes(1);
 });
 ```
@@ -1578,8 +1608,11 @@ Inside `handleRelayRecipientStatus`, after the existing slot write and before th
 8. `enqueueRelayRetryLeg`. On throw, close the retry leg `enqueue_failed` and log
    the terminal ERROR (D14).
 9. Emit `message.persisted` for the ROOT (D16).
-10. Leave `flagPlacementAttention` (`:2526`) exactly as it is - the test above
-    records why deferring it would lose three escalations.
+10. Skip `flagPlacementAttention` (`:2526`) when the source row is itself a retry
+    row (`relay_retry_of !== undefined`). The root's own callback still escalates
+    at exactly the moment it does today; the rungs no longer reset the triage
+    clock. See the two tests above for why neither deferring it nor leaving it
+    untouched is correct.
 
 - [ ] **Step 4: Run and watch them pass**
 
@@ -1813,14 +1846,14 @@ mirroring, Tasks 1 and 11), and 19 (`retryClaim` values, Tasks 12 and 13).
 Sec 8's four obligations are Task 15.
 
 **Placeholders.** None. The two tasks with no new production code - Task 3
-(behavior-preserving extraction) and Task 13 (host verification) - say so
+(behavior-preserving extraction) and Task 10 (host verification) - say so
 explicitly and state what their deliverable is instead.
 
 **Type consistency.** `RelayRetryState`, `RelayRetryRow` and `EffectiveRelayLeg`
-are defined once in Task 6 and consumed by name in Tasks 11 and 12.
+are defined once in Task 6 and consumed by name in Tasks 8 and 9.
 `EffectiveRelayLeg` EXTENDS `RelayDeliverySlot`, so every existing presenter
 caller keeps compiling. `RelayLegSendOutcome` and the re-exported
-`RelayTransportMode` are defined in Task 3 and consumed in Task 8. The six stored
+`RelayTransportMode` are defined in Task 3 and consumed in Task 11. The six stored
 lineage names are fixed in Task 1; Task 5 projects four and names the two it
 withholds.
 
@@ -1832,7 +1865,13 @@ incoherent window instead of closing it, since a delivered retry would render
 `Delivered 1/1` beside an original still reading `1 failed`. Both are closed by
 putting the entire display first.
 
-Between any two commits the product is coherent, and now for a reason that does
+Between any two commits the PRODUCT is coherent, and now for a reason that does
 not depend on reading the task list carefully: **before Task 12 no retry row
 exists anywhere**, so every display task is provably inert - its tests construct
 rows by hand, and production has none to render.
+
+The BRANCH is a different matter and the claim does not extend to it: the pinning
+e2e still asserts `delivered 1/2 - 1 failed` until Task 14 renames and rewrites
+it, so gate 4 is red from Task 8 until then. That is not fixable by ordering - the
+spec it pins and the presenter it tests cannot both be right mid-branch - so run
+gate 4 at Task 14 and at the end, not between.

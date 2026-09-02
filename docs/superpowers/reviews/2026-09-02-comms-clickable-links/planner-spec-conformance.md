@@ -31,3 +31,23 @@ There are no remaining must-fix findings. The feature conforms to the approved s
 ## Findings
 
 No must-fix findings.
+
+## Final wide re-review - 2026-09-02 (HEAD `e1d8f471b3f90fc3b827de4a7481f462ad08bbad`)
+
+### Verdict: PASS
+
+This re-review did not rely on `planner-review-adjudication.md` as an authority. I independently inspected the complete `3136c60e..e1d8f471` documentation delta, the approved specification, the live linkifier and all approved reader seams, the E1 source, and the self-QA/final-gate records. `git diff --exit-code 3136c60e..e1d8f471 -- dashboard package-lock.json e2e/tests` exited 0: the correction changes no runtime source, dependency, lockfile, or browser test.
+
+The corrected specification status is accurate and suitably scoped: `docs/superpowers/specs/2026-09-02-comms-clickable-links-design.md:3` says it is approved after the Autolinker public-API re-review, and that re-review is explicitly PASS with no must-fixes at `autolinker-public-api-rereview.md:7-13,116-118`. It does not claim that the unrelated raw-red full E2E gate passed.
+
+The E1 handback correction is also accurate. `handback.md:10` now says `popup navigation`; the real test waits for a `popup`, clicks the explicit anchor, and asserts the popup destination at `e2e/tests/dashboard-next/comms-clickable-links.spec.ts:78-81`. It then proves the dashboard route and bubble metadata did not change at `:83-84`. The hermetic self-QA record reports the same routed-popup behavior and passing focused proof at `self-qa.md:22-33`.
+
+The broader implementation and consumer conclusion remains unchanged: `dashboard/src/ui/LinkifiedText.tsx:16-95` remains the sole shared parser/tokenizer/anchor implementation, Timeline continues to use it only for message bodies and the two plain-text email views at `dashboard/src/routes/contact/Timeline.tsx:1035-1040,1506-1519`, and only loaded unmatched-email detail uses it outside Timeline at `dashboard/src/routes/email/UnmatchedRow.tsx:177-184`. The raw unmatched preview, original HTML-email sandbox, composers, transcripts, and metadata remain outside that renderer.
+
+### New findings
+
+No new severity-labeled findings. The prior PASS remains valid.
+
+### Residual risk
+
+The recorded raw full E2E result remains exit 1 for the separately attributed outbound-MMS viewer failure (`final-gate-adjudication.md:16-46`). This documentation correction neither hides nor changes that existing suite-health risk.

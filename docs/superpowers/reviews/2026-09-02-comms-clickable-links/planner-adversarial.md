@@ -42,3 +42,33 @@ the existing bubble metadata toggle (`dashboard/src/routes/contact/Timeline.tsx:
 - External links are visibly underlined and keyboard-focusable, but their
   accessible name does not state that they open a new tab. That is a future UX
   refinement, not a failure of link semantics or keyboard operation.
+
+## Final wide re-review - 2026-09-02 (HEAD `e1d8f471`)
+
+### Verdict: PASS
+
+No new severity-labeled findings.
+
+This was a fresh full-diff sweep, not a confirmation of the earlier result. I
+verified the only new documentation correction directly: the E2E actually waits
+for a popup and proves its external navigation, so changing the handback from
+"popup non-opening assertion" to "popup navigation" is accurate
+(`e2e/tests/dashboard-next/comms-clickable-links.spec.ts:78-80`). The design
+status-line correction has no runtime or test effect.
+
+I re-traced every Timeline caller and its optimistic writers: contact, relay,
+native-group, tour, and placement conversations all supply messages to the one
+modified shared renderer; no write, SSE, delivery, source-selection, or
+attachment path was changed. The unmatched-email change remains confined to the
+already-lazy opened-detail response, outside the header button
+(`dashboard/src/routes/email/UnmatchedRow.tsx:101-116`,
+`dashboard/src/routes/email/UnmatchedRow.tsx:177-208`). Additional parser
+probes confirmed code-unit-correct offsets after surrogate pairs, literal
+markup delimiters retained as React text, rejected unsupported schemes, and
+source-punctuation preservation. `git diff --check main...HEAD` is clean.
+
+The prior residual risks remain bounded. In particular, Autolinker can identify
+a scheme URL after adjacent word text (for example `xhttps://example.com`),
+but the renderer links the exact detected `https://...` substring and preserves
+the prefix as text. Without a product word-boundary requirement, that is parser
+policy rather than a confirmed source/destination-integrity defect.

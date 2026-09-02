@@ -7,8 +7,9 @@ Status: Human decision applied; revised design and plan require focused review.
 
 Replace the superseded `linkifyjs@4.3.3` proposal with direct dashboard
 `autolinker@4.1.5`. Remove `linkifyjs` from the amended dependency design and do
-not add it to manifests. Use Autolinker's URL-only `parse`/match API, not its HTML
-renderer, anchor builder, `link()` method, or replacement callback.
+not add it to manifests. Use one Autolinker instance's URL-only plain-text
+`parseText`/match API, not HTML-aware `parse`, its renderer, anchor builder,
+`link()` method, or replacement callback.
 
 The required parser configuration is:
 
@@ -23,9 +24,10 @@ The required parser configuration is:
 ```
 
 The ordinary React token renderer preserves every source character. It derives a
-candidate destination from a protocol-relative matched source by prefixing
-`https:`; otherwise it uses the URL match's `getAnchorHref()`. Every candidate then
-passes through `safeHttpUrl`. Unsupported parsed schemes therefore remain exact
+candidate destination from a protocol-relative matched source by prefixing `https:`.
+For parser `www`/`tld` classifications it prefixes exact matched source with
+`https://`; otherwise it uses the URL match's `getAnchorHref()`. Every candidate
+then passes through `safeHttpUrl`. Unsupported parsed schemes therefore remain exact
 plain text rather than becoming destinations.
 
 ## Corpus and dependency evidence

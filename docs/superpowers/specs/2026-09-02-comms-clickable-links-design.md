@@ -1,6 +1,6 @@
 # Clickable links in communications - design specification
 
-Status: v5 - REVISED after parser corpus adjudication; pending re-review
+Status: v6 - REVISED after Autolinker amendment review; pending re-review
 Date: 2026-09-02
 Revised: 2026-09-02
 Branch: `feat/comms-clickable-links`
@@ -140,8 +140,9 @@ normalization, snippet-boundary handling, and event control, so a React adapter
 would not remove the application-specific renderer. `linkifyjs` core is not
 selected: its protocol-relative handling and U+3002 boundary behavior require an
 application-owned Unicode boundary grammar to satisfy the locked visible-text
-contract. The feature uses only Autolinker's match parser, never its HTML renderer,
-anchor builder, `link()` method, or replacement callback.
+contract. The feature uses only Autolinker's plain-text `parseText()` match API,
+never its HTML-aware `parse()`/renderer path, anchor builder, `link()` method, or
+replacement callback.
 
 Before the dependency commit is accepted, the build must prove:
 
@@ -158,20 +159,34 @@ No vulnerability remediation outside this dependency delta belongs to this missi
 
 ## 6. Recognition and normalization contract
 
-Keep the Autolinker URL-only options module scoped rather than constructing a
-configuration during each React render. Call `Autolinker.parse(text, {
-urls: { schemeMatches: true, tldMatches: true, ipV4Matches: false }, email: false,
-phone: false, mention: false, hashtag: false })`, then retain only results whose
-`type` is `url`. Use `getOffset()` and `getMatchedText()` as the parser-owned source
-range. This keeps email addresses, phone numbers, fuzzy IPs, bare single-label
-hosts, and protocol-relative local-only targets outside the rendered-link input.
+Keep one Autolinker instance with URL-only options module scoped rather than
+constructing configuration during each React render. Call its plain-text
+`parseText(text)` method, never HTML-aware `parse(text)`, with:
+
+```ts
+{
+  urls: { schemeMatches: true, tldMatches: true, ipV4Matches: false },
+  email: false,
+  phone: false,
+  mention: false,
+  hashtag: false,
+}
+```
+
+Then retain only results whose
+`type` is `url`. Use `getOffset()`, `getMatchedText()`, and `getUrlMatchType()` as
+the parser-owned source/range/classification input. This keeps email addresses,
+phone numbers, fuzzy IPs, bare single-label hosts, and protocol-relative local-only
+targets outside the rendered-link input without treating a sender body as HTML.
 
 For every parser result:
 
 1. Preserve exact source characters for display using the parser-owned source range.
-2. Prefix a parser-owned source beginning with `//` with `https:`. For every other
-   URL match, use `getAnchorHref()` as the candidate: it preserves explicit HTTP(S)
-   and supplies the parser's HTTPS target for TLD/bare matches.
+2. Prefix a parser-owned source beginning with `//` with `https:`. When
+   `getUrlMatchType()` reports `www` or `tld`, prefix the exact matched source with
+   `https://`. Otherwise use `getAnchorHref()` as the candidate, which preserves
+   explicit HTTP(S) and allows the final safety boundary to reject an unsupported
+   parsed scheme.
 3. Pass the candidate through `safeHttpUrl`.
 4. Emit an anchor only when that check returns a destination. Otherwise emit the
    original source characters as text.
@@ -281,7 +296,9 @@ Add pure-helper tests that establish the contract for:
 - unsupported schemes never becoming an anchor destination, and parser-observed
   behavior for any separately recognized public bare domain after their delimiters;
 - U+3002, U+FF0C, U+3001, and ASCII/full-width brackets remaining literal boundary
-  characters; and
+  characters;
+- literal `script`, anchor, and comment-shaped source text retaining parser-visible
+  URLs as text-plus-link tokens rather than receiving HTML-aware suppression; and
 - HTML-looking content remaining escaped text;
 - HTTP(S) safety rejection degrading to the exact original text; and
 - a URL crossing the 140-character snippet boundary retaining its complete `href`

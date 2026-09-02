@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v6 - REVISED after Autolinker parser-corpus adjudication; pending re-review
+Status: v7 - REVISED after Autolinker amendment review; pending re-review
 Date: 2026-09-02
 Branch: `feat/comms-clickable-links`
 Worktree: `W:\\tmp\\comms-clickable-links`
@@ -28,16 +28,18 @@ Vitest/Testing Library, Playwright.
 
 - Add `autolinker` 4.1.5 only to `dashboard/package.json` runtime dependencies.
   Resolve its exact version in the root `package-lock.json`.
-- Call `Autolinker.parse(text, { urls: { schemeMatches: true, tldMatches: true,
-  ipV4Matches: false }, email: false, phone: false, mention: false, hashtag: false
-  })`, retain only `type === 'url'` results, and use `getOffset()` plus
-  `getMatchedText()`. Never call its HTML renderer, `link()`, anchor builder, or
-  replacement callback; do not add URL recognition, punctuation trimming, a suffix
-  list, or a local-host grammar.
-- Normalize a parser-owned `//` source by prefixing `https:`. For every other URL
-  match, pass `getAnchorHref()` directly to `safeHttpUrl`; that preserves explicit
-  HTTP(S), keeps unsupported schemes rejected, and uses the parser's HTTPS target
-  for fuzzy `www` and bare-domain sources.
+- Construct one module-scoped `new Autolinker({ urls: { schemeMatches: true,
+  tldMatches: true, ipV4Matches: false }, email: false, phone: false, mention:
+  false, hashtag: false })` and call its plain-text `parseText(text)` method. Retain
+  only `type === 'url'` results and use `getOffset()`, `getMatchedText()`, and
+  `getUrlMatchType()`. Never call HTML-aware `parse()`, its HTML renderer, `link()`,
+  anchor builder, or replacement callback; do not add URL recognition, punctuation
+  trimming, a suffix list, or a local-host grammar.
+- Normalize a parser-owned `//` source by prefixing `https:`. When the parser reports
+  `getUrlMatchType()` as `www` or `tld`, prefix exact matched source with
+  `https://`; otherwise pass `getAnchorHref()` to `safeHttpUrl`. This preserves
+  explicit HTTP(S), keeps unsupported schemes rejected, and enforces HTTPS for fuzzy
+  public domains without application-owned URL classification.
 - Keep communications bodies as React text nodes and anchors. Never generate HTML
   strings or use `dangerouslySetInnerHTML`.
 - Preserve explicit HTTP and HTTPS. Normalize `//` with `https:` and fuzzy `www`
@@ -101,8 +103,8 @@ Vitest/Testing Library, Playwright.
 **Interfaces:**
 
 - Consumes: `safeHttpUrl(url: string | null | undefined): string | null` from
-  `dashboard/src/lib/safeUrl.ts`; `Autolinker.parse` URL matches and their source
-  range/match methods.
+  `dashboard/src/lib/safeUrl.ts`; one `Autolinker.parseText` URL-match stream and
+  its source range/match classification methods.
 - Produces:
 
 ```ts
@@ -155,7 +157,7 @@ native dependency. The audit exits 0 with zero dependency vulnerabilities.
 Run the target-architecture package smoke independently of the Windows tree:
 
 ```powershell
-docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact autolinker@4.1.5 >/dev/null && node --input-type=module -e \"import Autolinker from 'autolinker'; const options={urls:{schemeMatches:true,tldMatches:true,ipV4Matches:false},email:false,phone:false,mention:false,hashtag:false}; const port='example.com:8443/a?x=1#top'; const [portMatch]=Autolinker.parse(port,options); const protocolRelative='//example.com/a'; const [protocolRelativeMatch]=Autolinker.parse(protocolRelative,options); if (!portMatch || portMatch.type!=='url' || portMatch.getOffset()!==0 || portMatch.getMatchedText()!==port || !protocolRelativeMatch || protocolRelativeMatch.type!=='url' || protocolRelativeMatch.getOffset()!==0 || protocolRelativeMatch.getMatchedText()!==protocolRelative || Autolinker.parse('housing.zip/path',options).length!==1) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
+docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact autolinker@4.1.5 >/dev/null && node --input-type=module -e \"import Autolinker from 'autolinker'; const options={urls:{schemeMatches:true,tldMatches:true,ipV4Matches:false},email:false,phone:false,mention:false,hashtag:false}; const parser=new Autolinker(options); const href=m=>m.getMatchedText().startsWith('//') ? 'https:'+m.getMatchedText() : (m.getUrlMatchType()==='www'||m.getUrlMatchType()==='tld') ? 'https://'+m.getMatchedText() : m.getAnchorHref(); const port='example.com:8443/a?x=1#top'; const [portMatch]=parser.parseText(port); const protocolRelative='//example.com/a'; const [protocolRelativeMatch]=parser.parseText(protocolRelative); if (!portMatch || portMatch.type!=='url' || portMatch.getOffset()!==0 || portMatch.getMatchedText()!==port || href(portMatch)!=='https://'+port || !protocolRelativeMatch || protocolRelativeMatch.type!=='url' || protocolRelativeMatch.getOffset()!==0 || protocolRelativeMatch.getMatchedText()!==protocolRelative || href(protocolRelativeMatch)!=='https:'+protocolRelative || parser.parseText('housing.zip/path').length!==1 || parser.parseText('<script>https://example.com/a</script>').length!==1) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
 ```
 
 Expected: `linux-arm64-linkifier-ok`. This probe may download packages but writes
@@ -249,6 +251,10 @@ Also assert, with explicit expected token/href arrays:
   uses an unsupported scheme. Assert any independently returned public bare-domain
   token by the parser's observed source range and HTTPS destination, rather than
   imposing an application scheme grammar;
+- literal `<script>https://example.com/a</script>`,
+  `<a>https://example.com/a</a>`, and
+  `<!-- https://example.com/a -->` produce a link token at the source URL offset;
+  their surrounding tag/comment characters remain ordinary escaped React text;
 - rendering `<img src=x onerror=alert(1)> example.com` creates no `img`, preserves
   that literal text, and creates exactly one safe anchor;
 - rendered anchors have the original accessible name, normalized `href`,
@@ -293,10 +299,17 @@ const autolinkerOptions = {
   hashtag: false,
 };
 
-type AutolinkerMatch = Extract<ReturnType<typeof Autolinker.parse>[number], { type: 'url' }>;
+const autolinker = new Autolinker(autolinkerOptions);
+
+type AutolinkerMatch = Extract<ReturnType<typeof autolinker.parseText>[number], { type: 'url' }>;
 
 function normalizedHref(match: AutolinkerMatch, source: string): string | null {
-  const candidate = source.startsWith('//') ? `https:${source}` : match.getAnchorHref();
+  const matchType = match.getUrlMatchType();
+  const candidate = source.startsWith('//')
+    ? `https:${source}`
+    : matchType === 'www' || matchType === 'tld'
+      ? `https://${source}`
+      : match.getAnchorHref();
   return safeHttpUrl(candidate);
 }
 
@@ -308,7 +321,7 @@ export function tokenizeLinkifiedText(text: string, displayEnd?: number): Linkif
   const tokens: LinkifiedToken[] = [];
   let cursor = 0;
 
-  for (const match of Autolinker.parse(text, autolinkerOptions)) {
+  for (const match of autolinker.parseText(text)) {
     if (match.type !== 'url') continue;
     const start = match.getOffset();
     const source = match.getMatchedText();

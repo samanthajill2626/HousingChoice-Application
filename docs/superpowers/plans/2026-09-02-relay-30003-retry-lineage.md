@@ -23,7 +23,8 @@ first.** This plan argues from it and does not restate its reasoning; where a st
 says "per D<n>", that decision carries the reasoning and the counter-arguments
 already rejected.
 
-Revision 2, after plan review round 1 (two reviewers, 42 findings). Adjudications:
+Revision 3, after plan review rounds 1 (two reviewers, 42 findings) and 2 (12
+findings, none blocking). Adjudications:
 `docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/plan-r1-adjudications.md`.
 
 ## Global Constraints
@@ -60,10 +61,18 @@ and an inbound retry duplicates the member's own message, the exact outcome D20
 exists to prevent. A filter with no rows to filter is a harmless no-op; rows with
 no filter are a visible defect.
 
-So: Tasks 1-4 are server groundwork that changes no behavior; Tasks 5-7 put the
-wire fields, the join and the render filter in place; only then does Task 9 begin
-creating rows. Tasks 1-4 and 5-7 are independent of each other and may run in
-parallel. Everything from Task 8 depends on both halves.
+**And the whole display lands before ANY of it.** Round 2 found that moving only
+the filter forward relocated the incoherent window rather than closing it: with
+the claim before the presenter, a delivered retry passes the filter and renders
+`Delivered 1/1` in success green beside an original still reading
+`1 failed - Phone unreachable (error 30003)` - two bubbles contradicting each
+other about one message.
+
+So the order is: **Tasks 1-4** server groundwork that changes no behavior;
+**Tasks 5-10** the entire display, inert because no retry row exists yet;
+**Tasks 11-13** the server side that starts creating them; then the browser proof
+and the issue closures. Tasks 1-4 and 5-10 are independent and may run in
+parallel. Everything from Task 11 depends on both halves.
 
 ---
 
@@ -227,8 +236,8 @@ Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Write the failing persistence tests**
 
-Follow the harness in `app/test/messagesRepo.integration.test.ts` for table setup
-and teardown.
+Follow `app/test/mediaPointers.integration.test.ts` for table setup, teardown
+and - for this task hardest assertion - how to count media-pointer rows.
 
 ```ts
 it('round-trips the six lineage values', async () => {
@@ -501,9 +510,9 @@ git commit -m "refactor(relay): extract sendOneRelayLeg so the retry job can reu
 **Files:**
 - Modify: `app/src/repos/conversationsRepo.ts` (beside `touchLastActivity`
   `:1531-1578`)
-- Create: `app/test/conversationsRepoActivityBump.integration.test.ts` - there is
-  no existing `conversationsRepo.integration.test.ts`; follow the harness in
-  `app/test/messagesRepo.integration.test.ts`.
+- Create: `app/test/conversationsRepoActivityBump.integration.test.ts`. Neither
+  `conversationsRepo.integration.test.ts` nor `messagesRepo.integration.test.ts`
+  exists - follow `app/test/mediaPointers.integration.test.ts` for the harness.
 
 **Interfaces:**
 - Produces: `touchLastActivityPreservingStatus(conversationId: string, preview: string | undefined, at: string): Promise<ConversationItem | undefined>`
@@ -695,7 +704,7 @@ from both rollup counters.
 - [ ] **Step 1: Write the failing state-machine tests**
 
 ```ts
-import { STALE_SENT_AFTER_MS } from './deliveryStatus';   // :58 - D18 reuses the
+import { STALE_SENT_AFTER_MS } from './deliveryStatus.js';   // :58 - D18 reuses the
 // module's ONLY budget so two staleness horizons cannot drift apart.
 
 it('is retrying while a claimed rung is live', () => {
@@ -816,7 +825,7 @@ git commit -m "feat(dashboard): derive per-member relay retry state from thread 
 - Test: `dashboard/src/routes/contact/Timeline.test.tsx`
 
 **This task sits here on purpose.** The server starts appending retry rows in
-Task 9. If the filter arrived after that, every relay thread would render up to
+Task 12. If the filter arrived after that, every relay thread would render up to
 three unfiltered duplicate bubbles in between, and an inbound retry would
 duplicate the member's own message - the exact outcome D20 exists to prevent. A
 filter with no rows to filter is a no-op; rows with no filter are a visible
@@ -872,6 +881,12 @@ Expected: FAIL - every retry row renders.
 Add the D20 predicate ALONGSIDE the existing `supersededIds` rule, not inside it -
 the existing rule hides a PREDECESSOR, this one hides the row itself.
 
+**Read delivered-ness from the retry row OWN slot** -
+`msg.delivery_recipients?.[msg.relay_retry_member_key]?.status === 'delivered'` -
+together with `msg.relay_retry_origin_direction === 'outbound'`. Do NOT route this
+through Task 6 join: `visible` would then depend on the time-derived half, and a
+memo over `items` would freeze it. The filter is a pure function of the row.
+
 - [ ] **Step 4: Run and watch them pass**
 
 Run: `cd dashboard; npx vitest run src/routes/contact/Timeline.test.tsx`
@@ -886,7 +901,281 @@ git commit -m "feat(dashboard): hide retry rows that earn no bubble, before any 
 
 ---
 
-## Task 8: The retry job
+## Task 8: The presenter
+
+**Files:**
+- Modify: `dashboard/src/routes/contact/deliveryStatus.ts`
+  (`presentRelayDelivery` `:394-456`, `presentLegDelivery` `:508-545`,
+  `INTERNAL_CODE_REASONS` `:688-692`, `RelayDeliveryOptions` `:351`)
+- Test: `dashboard/src/routes/contact/deliveryStatus.test.ts`
+
+**Interfaces:**
+- Consumes: `EffectiveRelayLeg` (Task 6).
+- Produces: `presentRelayDelivery` and `presentLegDelivery` accept
+  `EffectiveRelayLeg` (which extends `RelayDeliverySlot`, so every existing
+  caller keeps compiling).
+
+- [ ] **Step 1: Write the failing chip tests**
+
+```ts
+// D19's table, at the chip.
+it.each([
+  ['retrying',           'delivered 3/4 - 1 retrying'],
+  ['delivered-on-retry', 'delivered 4/4 - 1 on retry'],
+  ['unconfirmed',        'delivered 3/4 - 1 not confirmed'],
+])('renders %s as %s', (retryState, label) => {
+  expect(presentRelayDelivery(legsWith(retryState), relayOpts)?.label).toBe(label);
+});
+
+it('keeps today exact string when the cap is exhausted', () => {
+  const chip = presentRelayDelivery(legsWith('terminal'), relayOpts);
+  expect(`${chip?.label} - ${chip?.reason}`)
+    .toBe('delivered 3/4 - 1 failed - Phone unreachable (error 30003)');
+});
+
+// D19: a bubble can hold more than one state at once. Fixed order, zero-count
+// categories omitted.
+it('composes a failed leg and a retrying leg in one label', () => {
+  expect(presentRelayDelivery(mixedLegs, relayOpts)?.label)
+    .toBe('delivered 2/4 - 1 failed, 1 retrying');
+});
+
+// The retry `unconfirmed` and the pre-existing staleness "not confirmed" share
+// one label slot; they must stay DISJOINT counts, never double-counted.
+it('counts a stale ORIGINAL leg and an unconfirmed RETRY leg once each', () => {
+  expect(presentRelayDelivery(staleAndUnconfirmed, relayOpts)?.label)
+    .toBe('delivered 2/4 - 2 not confirmed');
+});
+
+// D19: the shared success label serves native group text and the broadcasts
+// routes and must not move.
+it('leaves the all-delivered label untouched without a retry', () => {
+  expect(presentRelayDelivery(allDelivered, relayOpts)?.label).toBe('Delivered 4/4');
+});
+
+// D15: an unmapped internal code prints as a fake carrier error.
+it.each([
+  ['retry_group_closed',   'Not retried - group closed'],
+  ['retry_member_removed', 'Not retried - no longer in this group'],
+  ['retry_number_changed', 'Not retried - number changed since'],
+  ['retry_opted_out',      'Not retried - opted out'],
+])('renders %s as prose with no (error N) tail', (code, copy) => {
+  expect(deliveryReason(code, { relay: true })).toBe(copy);
+});
+```
+
+- [ ] **Step 2: Write the failing row tests**
+
+```ts
+// D19's second table - the row and recital grammar.
+it.each([
+  ['retrying',           'Retrying - Phone unreachable (error 30003)'],
+  ['delivered-on-retry', 'Delivered on retry'],
+])('renders the per-recipient row for %s', (retryState, text) => {
+  expect(rowTextOf(presentLegDelivery(legWith(retryState), 'relay'))).toBe(text);
+});
+
+// The FENCED product must not move. There is no way to import a `main` build, so
+// the real proof is that every PRE-EXISTING group-text case in this file still
+// passes unchanged - Step 5 runs them. Do not invent a `presentLegDeliveryOnMain`.
+it('leaves a native group-text leg with no retryState untouched', () => {
+  expect(presentLegDelivery(groupTextLeg, 'group_text'))
+    .toMatchObject({ label: 'Undelivered', isFailure: true });
+});
+```
+
+- [ ] **Step 3: Run and watch them fail**
+
+Run: `cd dashboard; npx vitest run src/routes/contact/deliveryStatus.test.ts -t retry`
+Expected: FAIL.
+
+- [ ] **Step 4: Implement**
+
+Subtract `retrying`, `delivered-on-retry` and `unconfirmed` legs from the `failed`
+bucket before the `failed > 0` branch (`:416`) - it is the FIRST branch, so an
+unsubtracted leg wins over every new state. Add the retrying count to the
+composed label; add the `on retry` suffix to the delivered count; fold retry
+`unconfirmed` into the existing not-confirmed count without double-counting a leg
+that is also `isStaleLeg`. Scope every new string behind a retry-aware option on
+`RelayDeliveryOptions`. Add the four codes to `INTERNAL_CODE_REASONS`.
+
+- [ ] **Step 5: Run and watch them pass**
+
+Run: `cd dashboard; npx vitest run src/routes/contact/deliveryStatus.test.ts`
+Expected: PASS, including every pre-existing case.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add dashboard/src/routes/contact/deliveryStatus.ts dashboard/src/routes/contact/deliveryStatus.test.ts
+git commit -m "feat(dashboard): render relay retry states at the chip and the row"
+```
+
+---
+
+## Task 9: Timeline positions and the ticker
+
+**Files:**
+- Modify: `dashboard/src/routes/contact/Timeline.tsx` - the entries call `:937`,
+  `MessageBubble`/`StreamItem` props `:814-835` and `:1538-1552`, the
+  `recipientSummaryName` sites `:959-968` and `:993-1004`, the per-recipient row
+  `:1112-1115`, `hasTickableLeg` `:798-812`, the run-condition comment `:1806`
+- Test: `dashboard/src/routes/contact/Timeline.delivery.test.tsx`,
+  `Timeline.ticker.test.tsx`
+
+- [ ] **Step 1: Write the failing three-position test**
+
+```ts
+// M5's D21: one flag feeds the rollup, the recital and the row, and the whole
+// content of D21 is that they cannot disagree. Patch the chip alone and the
+// other two keep reciting "Undelivered - Phone unreachable (error 30003)".
+it('shows delivered-on-retry at the chip, the recital AND the row', async () => {
+  renderTimeline({ items: [outboundOriginalWithFailedLeg, deliveredRetryRow] });
+  const rollup = screen.getByRole('img');
+  expect(rollup).toHaveTextContent('delivered 2/2 - 1 on retry');
+  expect(rollup).toHaveAccessibleName(/Relay Unreachable: Delivered on retry/);
+  await userEvent.click(screen.getByText(BODY));
+  expect(within(screen.getByRole('list', { name: 'Delivery by recipient' }))
+    .getByText(/Delivered on retry/)).toBeVisible();
+});
+
+// Sec 2 + D18: an INBOUND source has no chip, but it DOES have the recital
+// (inboundRecipientName, :993-1004) and the rows - the only delivery information
+// a screen-reader user gets from that bubble. Leaving them stale would be
+// strictly worse than today.
+it('updates the inbound recital when a member-originated leg recovers', () => {
+  renderTimeline({ items: [inboundOriginalWithFailedLeg, deliveredRetryRow] });
+  expect(screen.getByRole('group')).toHaveAccessibleName(/Delivered on retry/);
+  expect(screen.queryByRole('img')).toBeNull();
+});
+```
+
+- [ ] **Step 2: Write the failing ticker tests**
+
+Use the harness the ticker suite already establishes -
+`Timeline.ticker.test.tsx:98-119,157-203` spies `window.setInterval` /
+`clearInterval` and captures the id; its own comments explain why
+`vi.getTimerCount()` is unusable here. Do not invent a `tickerArmed()`.
+
+```ts
+// D18: severing from stalenessClockMs severs from the ONLY clock advance. The
+// original's failed leg is terminal and can never arm the ticker, and D20 keeps
+// the retry row out of `visible` - so without an explicit clause `tickNow` is
+// frozen and "retrying" is computed once, for ever.
+it('arms the interval for a live retry with no other activity', () => {
+  renderTimeline({ items: [outboundOriginal, queuedRetryRow] });
+  expect(setIntervalSpy).toHaveBeenCalled();
+});
+
+it('flips retrying to not confirmed as the clock passes the budget', () => {
+  renderTimeline({ items: [outboundOriginal, queuedRetryRow] });
+  expect(screen.getByRole('img')).toHaveTextContent('1 retrying');
+  act(() => { vi.advanceTimersByTime(STALE_SENT_AFTER_MS + 1_000); });
+  expect(screen.getByRole('img')).toHaveTextContent('1 not confirmed');
+});
+
+// The new clause must TERMINATE. This is a different assertion from
+// "unconfirmed eventually appears" and both are required.
+it('clears the interval once the retry resolves', () => {
+  const { rerender } = renderTimeline({ items: [outboundOriginal, queuedRetryRow] });
+  rerender({ items: [outboundOriginal, deliveredRetryRow] });
+  expect(clearIntervalSpy).toHaveBeenCalledWith(capturedTickerId);
+});
+```
+
+- [ ] **Step 3: Run and watch them fail**
+
+Run: `cd dashboard; npx vitest run src/routes/contact/Timeline.delivery.test.tsx src/routes/contact/Timeline.ticker.test.tsx`
+Expected: FAIL.
+
+- [ ] **Step 4: Implement**
+
+Compute `indexRelayRetries` once at thread level beside `visible`, memoized on
+`items`; call `projectRelayLegs` per bubble against `bubbleNowMs`. Pass entries
+WITH their keys (`:937` currently discards them). Thread the projected legs
+through `MessageBubble` and `StreamItem`. Point the rollup, the rollup recital,
+the inbound recital and the per-recipient row at the projected legs - **not** the
+message-level chip's accessible name (`:978-989`), which reads `msg.error_code`
+and is inert for relay by construction.
+
+`hasTickableLeg` takes `(item, tickNow)` today and is called from the
+`tickerArmed` memo over `visible` (`:1851-1854`). D20 removes retry rows from
+`visible`, so the predicate cannot find a live retry by itself: give it a third
+parameter carrying Task 6 thread-level retry index
+(`hasTickableLeg(item, tickNow, retries)`) and pass it at that call site. This is
+the one clause whose absence reintroduces BOTH the frozen display and a
+non-terminating interval.
+Extend BOTH counts in the comments: the docblock's "FIVE clauses carry that
+mirror" and the run-condition comment at `:1806` ("the four non-terminations").
+
+- [ ] **Step 5: Run and watch them pass**
+
+Run: `cd dashboard; npx vitest run src/routes/contact/`
+Expected: PASS, including every pre-existing Timeline case.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add dashboard/src/routes/contact/Timeline.tsx dashboard/src/routes/contact/Timeline.delivery.test.tsx dashboard/src/routes/contact/Timeline.ticker.test.tsx
+git commit -m "feat(dashboard): relay retry states at every position, with a live ticker"
+```
+
+---
+
+## Task 10: Verify all three relay Timeline hosts
+
+**Files:**
+- Test only: `dashboard/src/routes/tours/TourConversation.test.tsx`,
+  `dashboard/src/routes/placements/PlacementConversation.test.tsx`
+
+**This is a VERIFICATION task, not an implementation one.** Plan review found the
+original version was a no-op with a fake red state: all three hosts already feed
+the same shared `<Timeline>`, so Task 9 covers them. It still earns its own gate,
+because **the tour host passes a MILESTONE-MERGED item list**
+(`TourConversation.tsx:463-467`) rather than `thread.items` - so Task 7's filter
+and Task 12's join must be correct against a MIXED list, which no other host
+exercises.
+
+If either host is already green at Step 1, say so in the commit message rather
+than inventing a change.
+
+- [ ] **Step 1: Write the host tests**
+
+Follow the host suite OWN harness: `TourConversation.test.tsx` defines
+`renderConvo(props)` (`:178`) and drives content through
+`vi.mock('../../api/index.js')` (`:44`), not an `items` prop. There is no
+`renderTourConversation({items})`.
+
+```ts
+it('renders delivered-on-retry in the tour transcript, beside milestones', async () => {
+  mockThread([outboundOriginal, deliveredRetryRow]);   // via the api mock at :44
+  renderConvo();
+  expect(await screen.findByRole('img')).toHaveTextContent('delivered 2/2 - 1 on retry');
+});
+
+it('hides a failed retry among merged milestone items', async () => {
+  mockThread([outboundOriginal, failedRetryRow]);
+  renderConvo();
+  expect(await screen.findAllByText(BODY)).toHaveLength(1);
+});
+```
+
+- [ ] **Step 2: Run them**
+
+Run: `cd dashboard; npx vitest run src/routes/tours src/routes/placements`
+Expected: PASS if the shared component covers them; a real FAIL means the merged
+list broke the filter, which is the defect this task exists to catch.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add dashboard/src/routes/tours/ dashboard/src/routes/placements/
+git commit -m "test(dashboard): pin relay retry rendering on the tour and placement hosts"
+```
+
+---
+
+## Task 11: The retry job
 
 **Files:**
 - Create: `app/src/jobs/relayRetryLeg.ts`
@@ -1018,14 +1307,14 @@ it('re-presigns attachments on every attempt', async () => {
 // D2: the transport MODE mirrors the ORIGINAL. Every relay source written before
 // 2026-09-02 is legacy, so this is the ordinary case for an old message - and
 // getting it wrong throws at relayFanOut.ts:1436-1439 on the first send.
-it('drives a legacy original down the legacy path', async () => {
-  await seedLegacyOriginal();
+it('drives a legacy retry row down the legacy path', async () => {
+  await seedLegacyRetryRow();
   await runHandler(payload);
   expect(sendOneRelayLegSpy.mock.calls[0][0].transport).toMatchObject({ kind: 'legacy' });
 });
 
-it('drives a versioned original down the versioned path', async () => {
-  await seedVersionedOriginal();
+it('drives a versioned retry row down the versioned path', async () => {
+  await seedVersionedRetryRow();
   await runHandler(payload);
   expect(sendOneRelayLegSpy.mock.calls[0][0].transport).toMatchObject({ kind: 'versioned' });
 });
@@ -1053,10 +1342,19 @@ it('closes with transient_cap when the retry row pass budget caps', async () => 
 });
 ```
 
-Every helper above maps onto an existing harness: `runHandler` follows
-`app/test/relayFanOut.test.ts`'s job-handler invocation, `slotOf` and
-`exhaustFanoutPasses` follow the same file's `claimFanoutPass` usage, and the log
-collectors follow `app/test/twilioStatusWebhook.test.ts`.
+Every helper above maps onto an existing harness, and these mappings were
+verified: `runHandler` follows `app/test/relayFanOut.test.ts` `dispatchJob`
+invocation; `slotOf` and `exhaustFanoutPasses` follow the same file
+`claimFanoutPass` usage; the log collector is `createLogCapture()` as used at
+`app/test/twilioStatusWebhook.test.ts:861`, which KEEPS the returned handle - the
+call sites in `relayWebhook.test.ts` (`:85`, `:345`, `:678`) discard it and are
+the wrong ones to copy.
+
+**Mocking boundary.** `sendSpy` is the ADAPTER, so `sendOneRelayLeg` runs for
+real and writes the slot and the `relaysid#` pointer. `sendOneRelayLegSpy` mocks
+the MODULE, so neither write happens. Use the adapter spy for the gate, bump and
+send tests; use the module spy only for the transient-outcome tests, which need
+an outcome the adapter cannot produce on demand.
 
 - [ ] **Step 4: Run them and watch them fail**
 
@@ -1069,9 +1367,13 @@ The order is load-bearing and each line answers a review finding:
 
 1. `putJobExecutionMarker(getContext()?.jobId, conversationId)` - return early if
    it has already run (D4).
-2. Re-read the retry row and its ROOT (`relay_retry_of` always points at the
-   root, never at the previous rung). Close and return if either is missing.
-3. Resolve the transport MODE from the ROOT (D2).
+2. Re-read the RETRY row. `relay_retry_of` always names the root, but the job
+   needs it only as a STRING for the digest - do NOT require the root ROW to be
+   readable, which would add a close path for a row nothing else needs.
+3. Resolve the transport MODE from the RETRY ROW ITSELF. It was seeded to mirror
+   the root at creation time (D2, Task 1), and `sendOneRelayLeg` writes THIS row,
+   whose own schema is what `applyRecipientSendResult` checks
+   (`messagesRepo.ts:3240`).
 4. Gates in order: group still open; member still on the roster;
    `relayRetryDigest(rootTsMsgId, member.phone)` still equals
    `row.relay_retry_dest_digest`; member not suppressed (`isMemberSuppressed`,
@@ -1104,7 +1406,7 @@ git commit -m "feat(relay): the 30003 retry job - gates, ladder and terminal clo
 
 ---
 
-## Task 9: The claim in the status webhook
+## Task 12: The claim in the status webhook
 
 **Files:**
 - Modify: `app/src/routes/webhooks/twilio.ts` (inside
@@ -1113,7 +1415,7 @@ git commit -m "feat(relay): the 30003 retry job - gates, ladder and terminal clo
 - Test: `app/test/relayWebhook.test.ts`, `app/test/twilioStatusWebhook.test.ts`
 
 **Interfaces:**
-- Consumes: Tasks 1, 2 and 8.
+- Consumes: Tasks 1, 2 and 11.
 - Produces: no new exports.
 
 - [ ] **Step 1: Write the failing claim tests**
@@ -1208,6 +1510,16 @@ it('stops at the cap', async () => {
   expect(retryRows()).toHaveLength(3);
 });
 
+// Sec 7 intention 7, on EVERY rung. The e2e proves rung 1 in a browser; only a
+// unit test can walk the whole ladder, and "no duplicate send" is the criterion
+// a green chip cannot establish.
+it('never sends to any other member, on any rung', async () => {
+  for (let i = 0; i < 5; i += 1) await postFailureForLatestAttempt();
+  const others = sendSpy.mock.calls.filter((c) => c[0].to !== memberPhone);
+  expect(others).toHaveLength(0);
+  expect(sendSpy.mock.calls.filter((c) => c[0].to === memberPhone)).toHaveLength(3);
+});
+
 // D14: Sec 7 intention 6. The enqueue lives HERE, so its failure closes here.
 it('closes the retry leg enqueue_failed when the enqueue throws', async () => {
   enqueueSpy.mockRejectedValueOnce(new Error('queue down'));
@@ -1225,16 +1537,16 @@ it('emits message.persisted when the claim lands', async () => {
     expect.objectContaining({ tsMsgId: rootTsMsgId }));
 });
 
-// Unenumerated reader found in plan review: flagPlacementAttention (:2526)
-// escalates to a HUMAN on the first 30003. While the machine is still retrying
-// that escalation is premature.
-it('does not escalate the placement while a retry is claimed', async () => {
+// flagPlacementAttention (:2522-2528) is UNCHANGED by this branch, and that is a
+// decision rather than an oversight. It escalates to a human on the first 30003,
+// which is arguably premature once a machine retry exists - but deferring it
+// until the chain is terminal would DELETE the escalation for three of the four
+// terminal outcomes: gate refusal, enqueue failure and transient cap all end
+// inside the JOB with no further callback, and the function is a closure inside
+// `createTwilioWebhookRouter` (:412) that the job cannot reach. Losing an
+// escalation is strictly worse than sending one early. Filed, not fixed.
+it('still escalates the placement on the first 30003, unchanged', async () => {
   await postStatus(failure);
-  expect(flagPlacementAttentionSpy).not.toHaveBeenCalled();
-});
-
-it('escalates the placement once the ladder is terminal', async () => {
-  for (let i = 0; i < 5; i += 1) await postFailureForLatestAttempt();
   expect(flagPlacementAttentionSpy).toHaveBeenCalledTimes(1);
 });
 ```
@@ -1266,7 +1578,8 @@ Inside `handleRelayRecipientStatus`, after the existing slot write and before th
 8. `enqueueRelayRetryLeg`. On throw, close the retry leg `enqueue_failed` and log
    the terminal ERROR (D14).
 9. Emit `message.persisted` for the ROOT (D16).
-10. Gate `flagPlacementAttention` (`:2526`) on no live retry.
+10. Leave `flagPlacementAttention` (`:2526`) exactly as it is - the test above
+    records why deferring it would lose three escalations.
 
 - [ ] **Step 4: Run and watch them pass**
 
@@ -1282,7 +1595,7 @@ git commit -m "feat(relay): claim a 30003 retry from the relay status callback"
 
 ---
 
-## Task 10: The severity taxonomy and the retryClaim cause field
+## Task 13: The severity taxonomy and the retryClaim cause field
 
 **Files:**
 - Modify: `app/src/routes/webhooks/twilio.ts` (`:294-314`, the relay failure log
@@ -1351,266 +1664,6 @@ Expected: PASS.
 ```bash
 git add app/src/routes/webhooks/twilio.ts app/test/twilioStatusWebhook.test.ts
 git commit -m "fix(relay): attempt-aware severity and a retryClaim cause on every failure line"
-```
-
----
-
-## Task 11: The presenter
-
-**Files:**
-- Modify: `dashboard/src/routes/contact/deliveryStatus.ts`
-  (`presentRelayDelivery` `:394-456`, `presentLegDelivery` `:508-545`,
-  `INTERNAL_CODE_REASONS` `:688-692`, `RelayDeliveryOptions` `:351`)
-- Test: `dashboard/src/routes/contact/deliveryStatus.test.ts`
-
-**Interfaces:**
-- Consumes: `EffectiveRelayLeg` (Task 6).
-- Produces: `presentRelayDelivery` and `presentLegDelivery` accept
-  `EffectiveRelayLeg` (which extends `RelayDeliverySlot`, so every existing
-  caller keeps compiling).
-
-- [ ] **Step 1: Write the failing chip tests**
-
-```ts
-// D19's table, at the chip.
-it.each([
-  ['retrying',           'delivered 3/4 - 1 retrying'],
-  ['delivered-on-retry', 'delivered 4/4 - 1 on retry'],
-  ['unconfirmed',        'delivered 3/4 - 1 not confirmed'],
-])('renders %s as %s', (retryState, label) => {
-  expect(presentRelayDelivery(legsWith(retryState), relayOpts)?.label).toBe(label);
-});
-
-it('keeps today exact string when the cap is exhausted', () => {
-  const chip = presentRelayDelivery(legsWith('terminal'), relayOpts);
-  expect(`${chip?.label} - ${chip?.reason}`)
-    .toBe('delivered 3/4 - 1 failed - Phone unreachable (error 30003)');
-});
-
-// D19: a bubble can hold more than one state at once. Fixed order, zero-count
-// categories omitted.
-it('composes a failed leg and a retrying leg in one label', () => {
-  expect(presentRelayDelivery(mixedLegs, relayOpts)?.label)
-    .toBe('delivered 2/4 - 1 failed, 1 retrying');
-});
-
-// The retry `unconfirmed` and the pre-existing staleness "not confirmed" share
-// one label slot; they must stay DISJOINT counts, never double-counted.
-it('counts a stale ORIGINAL leg and an unconfirmed RETRY leg once each', () => {
-  expect(presentRelayDelivery(staleAndUnconfirmed, relayOpts)?.label)
-    .toBe('delivered 2/4 - 2 not confirmed');
-});
-
-// D19: the shared success label serves native group text and the broadcasts
-// routes and must not move.
-it('leaves the all-delivered label untouched without a retry', () => {
-  expect(presentRelayDelivery(allDelivered, relayOpts)?.label).toBe('Delivered 4/4');
-});
-
-// D15: an unmapped internal code prints as a fake carrier error.
-it.each([
-  ['retry_group_closed',   'Not retried - group closed'],
-  ['retry_member_removed', 'Not retried - no longer in this group'],
-  ['retry_number_changed', 'Not retried - number changed since'],
-  ['retry_opted_out',      'Not retried - opted out'],
-])('renders %s as prose with no (error N) tail', (code, copy) => {
-  expect(deliveryReason(code, { relay: true })).toBe(copy);
-});
-```
-
-- [ ] **Step 2: Write the failing row tests**
-
-```ts
-// D19's second table - the row and recital grammar.
-it.each([
-  ['retrying',           'Retrying - Phone unreachable (error 30003)'],
-  ['delivered-on-retry', 'Delivered on retry'],
-])('renders the per-recipient row for %s', (retryState, text) => {
-  expect(rowTextOf(presentLegDelivery(legWith(retryState), 'relay'))).toBe(text);
-});
-
-// The FENCED product must not move.
-it('leaves a native group-text leg unchanged', () => {
-  expect(presentLegDelivery(groupTextLeg, 'group_text'))
-    .toEqual(presentLegDeliveryOnMain(groupTextLeg, 'group_text'));
-});
-```
-
-- [ ] **Step 3: Run and watch them fail**
-
-Run: `cd dashboard; npx vitest run src/routes/contact/deliveryStatus.test.ts -t retry`
-Expected: FAIL.
-
-- [ ] **Step 4: Implement**
-
-Subtract `retrying`, `delivered-on-retry` and `unconfirmed` legs from the `failed`
-bucket before the `failed > 0` branch (`:416`) - it is the FIRST branch, so an
-unsubtracted leg wins over every new state. Add the retrying count to the
-composed label; add the `on retry` suffix to the delivered count; fold retry
-`unconfirmed` into the existing not-confirmed count without double-counting a leg
-that is also `isStaleLeg`. Scope every new string behind a retry-aware option on
-`RelayDeliveryOptions`. Add the four codes to `INTERNAL_CODE_REASONS`.
-
-- [ ] **Step 5: Run and watch them pass**
-
-Run: `cd dashboard; npx vitest run src/routes/contact/deliveryStatus.test.ts`
-Expected: PASS, including every pre-existing case.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add dashboard/src/routes/contact/deliveryStatus.ts dashboard/src/routes/contact/deliveryStatus.test.ts
-git commit -m "feat(dashboard): render relay retry states at the chip and the row"
-```
-
----
-
-## Task 12: Timeline positions and the ticker
-
-**Files:**
-- Modify: `dashboard/src/routes/contact/Timeline.tsx` - the entries call `:937`,
-  `MessageBubble`/`StreamItem` props `:814-835` and `:1538-1552`, the
-  `recipientSummaryName` sites `:959-968` and `:993-1004`, the per-recipient row
-  `:1112-1115`, `hasTickableLeg` `:798-812`, the run-condition comment `:1806`
-- Test: `dashboard/src/routes/contact/Timeline.delivery.test.tsx`,
-  `Timeline.ticker.test.tsx`
-
-- [ ] **Step 1: Write the failing three-position test**
-
-```ts
-// M5's D21: one flag feeds the rollup, the recital and the row, and the whole
-// content of D21 is that they cannot disagree. Patch the chip alone and the
-// other two keep reciting "Undelivered - Phone unreachable (error 30003)".
-it('shows delivered-on-retry at the chip, the recital AND the row', async () => {
-  renderTimeline({ items: [outboundOriginalWithFailedLeg, deliveredRetryRow] });
-  const rollup = screen.getByRole('img');
-  expect(rollup).toHaveTextContent('delivered 2/2 - 1 on retry');
-  expect(rollup).toHaveAccessibleName(/Relay Unreachable: Delivered on retry/);
-  await userEvent.click(screen.getByText(BODY));
-  expect(within(screen.getByRole('list', { name: 'Delivery by recipient' }))
-    .getByText(/Delivered on retry/)).toBeVisible();
-});
-
-// Sec 2 + D18: an INBOUND source has no chip, but it DOES have the recital
-// (inboundRecipientName, :993-1004) and the rows - the only delivery information
-// a screen-reader user gets from that bubble. Leaving them stale would be
-// strictly worse than today.
-it('updates the inbound recital when a member-originated leg recovers', () => {
-  renderTimeline({ items: [inboundOriginalWithFailedLeg, deliveredRetryRow] });
-  expect(screen.getByRole('group')).toHaveAccessibleName(/Delivered on retry/);
-  expect(screen.queryByRole('img')).toBeNull();
-});
-```
-
-- [ ] **Step 2: Write the failing ticker tests**
-
-Use the harness the ticker suite already establishes -
-`Timeline.ticker.test.tsx:98-119,157-203` spies `window.setInterval` /
-`clearInterval` and captures the id; its own comments explain why
-`vi.getTimerCount()` is unusable here. Do not invent a `tickerArmed()`.
-
-```ts
-// D18: severing from stalenessClockMs severs from the ONLY clock advance. The
-// original's failed leg is terminal and can never arm the ticker, and D20 keeps
-// the retry row out of `visible` - so without an explicit clause `tickNow` is
-// frozen and "retrying" is computed once, for ever.
-it('arms the interval for a live retry with no other activity', () => {
-  renderTimeline({ items: [outboundOriginal, queuedRetryRow] });
-  expect(setIntervalSpy).toHaveBeenCalled();
-});
-
-it('flips retrying to not confirmed as the clock passes the budget', () => {
-  renderTimeline({ items: [outboundOriginal, queuedRetryRow] });
-  expect(screen.getByRole('img')).toHaveTextContent('1 retrying');
-  act(() => { vi.advanceTimersByTime(STALE_SENT_AFTER_MS + 1_000); });
-  expect(screen.getByRole('img')).toHaveTextContent('1 not confirmed');
-});
-
-// The new clause must TERMINATE. This is a different assertion from
-// "unconfirmed eventually appears" and both are required.
-it('clears the interval once the retry resolves', () => {
-  const { rerender } = renderTimeline({ items: [outboundOriginal, queuedRetryRow] });
-  rerender({ items: [outboundOriginal, deliveredRetryRow] });
-  expect(clearIntervalSpy).toHaveBeenCalledWith(capturedTickerId);
-});
-```
-
-- [ ] **Step 3: Run and watch them fail**
-
-Run: `cd dashboard; npx vitest run src/routes/contact/Timeline.delivery.test.tsx src/routes/contact/Timeline.ticker.test.tsx`
-Expected: FAIL.
-
-- [ ] **Step 4: Implement**
-
-Compute `indexRelayRetries` once at thread level beside `visible`, memoized on
-`items`; call `projectRelayLegs` per bubble against `bubbleNowMs`. Pass entries
-WITH their keys (`:937` currently discards them). Thread the projected legs
-through `MessageBubble` and `StreamItem`. Point the rollup, the rollup recital,
-the inbound recital and the per-recipient row at the projected legs - **not** the
-message-level chip's accessible name (`:978-989`), which reads `msg.error_code`
-and is inert for relay by construction.
-
-`hasTickableLeg` needs the projected state as an input; D20 removes retry rows
-from `visible`, so the thread-level projection must be available to the predicate.
-Extend BOTH counts in the comments: the docblock's "FIVE clauses carry that
-mirror" and the run-condition comment at `:1806` ("the four non-terminations").
-
-- [ ] **Step 5: Run and watch them pass**
-
-Run: `cd dashboard; npx vitest run src/routes/contact/`
-Expected: PASS, including every pre-existing Timeline case.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add dashboard/src/routes/contact/Timeline.tsx dashboard/src/routes/contact/Timeline.delivery.test.tsx dashboard/src/routes/contact/Timeline.ticker.test.tsx
-git commit -m "feat(dashboard): relay retry states at every position, with a live ticker"
-```
-
----
-
-## Task 13: Verify all three relay Timeline hosts
-
-**Files:**
-- Test only: `dashboard/src/routes/tours/TourConversation.test.tsx`,
-  `dashboard/src/routes/placements/PlacementConversation.test.tsx`
-
-**This is a VERIFICATION task, not an implementation one.** Plan review found the
-original version was a no-op with a fake red state: all three hosts already feed
-the same shared `<Timeline>`, so Task 12 covers them. It still earns its own gate,
-because **the tour host passes a MILESTONE-MERGED item list**
-(`TourConversation.tsx:463-467`) rather than `thread.items` - so Task 7's filter
-and Task 12's join must be correct against a MIXED list, which no other host
-exercises.
-
-If either host is already green at Step 1, say so in the commit message rather
-than inventing a change.
-
-- [ ] **Step 1: Write the host tests**
-
-```ts
-it('renders delivered-on-retry in the tour transcript, beside milestones', () => {
-  renderTourConversation({ items: [outboundOriginal, deliveredRetryRow, milestone] });
-  expect(screen.getByRole('img')).toHaveTextContent('delivered 2/2 - 1 on retry');
-});
-
-it('hides a failed retry among merged milestone items', () => {
-  renderTourConversation({ items: [outboundOriginal, failedRetryRow, milestone] });
-  expect(screen.getAllByText(BODY)).toHaveLength(1);
-});
-```
-
-- [ ] **Step 2: Run them**
-
-Run: `cd dashboard; npx vitest run src/routes/tours src/routes/placements`
-Expected: PASS if the shared component covers them; a real FAIL means the merged
-list broke the filter, which is the defect this task exists to catch.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add dashboard/src/routes/tours/ dashboard/src/routes/placements/
-git commit -m "test(dashboard): pin relay retry rendering on the tour and placement hosts"
 ```
 
 ---
@@ -1746,17 +1799,18 @@ git commit -m "docs(issues): close the relay 30003 retry lineage pair"
 
 ## Self-Review
 
-**Spec coverage.** D1-D3 -> Tasks 1, 9. D4 -> Task 8. D5 -> Tasks 1, 8, 9. D6 ->
-Tasks 1, 14. D7-D8 -> Tasks 2, 9. D9 -> Task 8. D10 -> Tasks 3, 8. D11 -> Tasks
-1, 5. D12 -> Tasks 1, 8. D13 -> Tasks 1, 8. D14 -> Task 9 (the enqueue lives
-there, so its failure closes there). D15 -> Task 11. D16 -> Tasks 4, 8, 9. D17 ->
-Task 5. D18 -> Tasks 6, 12. D19 -> Tasks 6, 11, 12. D20 -> Task 7. D21-D22 ->
-Tasks 7, 12. D23 -> Tasks 9, 10.
+**Spec coverage.** D1-D3 -> Tasks 1, 12. D4 -> Task 11. D5 -> Tasks 1, 11, 12.
+D6 -> Tasks 1, 14. D7-D8 -> Tasks 2, 12. D9 -> Task 11. D10 -> Tasks 3, 11.
+D11 -> Tasks 1, 5. D12 -> Tasks 1, 11. D13 -> Tasks 1, 11. D14 -> Task 12 (the
+enqueue lives there, so its failure closes there). D15 -> Task 8. D16 -> Tasks 4,
+11, 12. D17 -> Task 5. D18 -> Tasks 6, 9. D19 -> Tasks 6, 8, 9. D20 -> Task 7.
+D21-D22 -> Tasks 7, 9. D23 -> Tasks 12, 13.
 
-All twenty Sec 7 intentions have a named step, including the four plan review
-round 1 found missing: 6 (enqueue failure, Task 9), 11's server half (no
-`retry_of`, Task 9), 18 (legacy mirroring, Tasks 1 and 8), and 19 (`retryClaim`
-values, Tasks 9 and 10). Sec 8's four obligations are Task 15.
+All twenty Sec 7 intentions have a named step, including the five the plan
+reviews found missing or thin: 6 (enqueue failure, Task 12), 7 (no duplicate send
+on EVERY rung, Task 12), 11's server half (no `retry_of`, Task 12), 18 (legacy
+mirroring, Tasks 1 and 11), and 19 (`retryClaim` values, Tasks 12 and 13).
+Sec 8's four obligations are Task 15.
 
 **Placeholders.** None. The two tasks with no new production code - Task 3
 (behavior-preserving extraction) and Task 13 (host verification) - say so
@@ -1770,10 +1824,15 @@ caller keeps compiling. `RelayLegSendOutcome` and the re-exported
 lineage names are fixed in Task 1; Task 5 projects four and names the two it
 withholds.
 
-**Ordering.** Tasks 1-4 (server groundwork, no behavior change) and Tasks 5-7
-(wire, join, filter) are independent and may run in parallel. **Task 7 must land
-before Task 9** - that is the ordering defect plan review round 1 found, and the
-reason the display work now precedes the claim. From Task 8 onward everything
-depends on both halves. Between any two commits the product is coherent: before
-Task 9 no retry row exists, and the Task 7 filter is a no-op on data that is not
-there yet.
+**Ordering.** Tasks 1-4 (server groundwork, no behavior change) and Tasks 5-10
+(the whole display) are independent and may run in parallel. **Every display task
+lands before Task 12** - the claim. Round 1 found the filter arriving five tasks
+after the rows it filters; round 2 found that moving only the filter relocated the
+incoherent window instead of closing it, since a delivered retry would render
+`Delivered 1/1` beside an original still reading `1 failed`. Both are closed by
+putting the entire display first.
+
+Between any two commits the product is coherent, and now for a reason that does
+not depend on reading the task list carefully: **before Task 12 no retry row
+exists anywhere**, so every display task is provably inert - its tests construct
+rows by hand, and production has none to render.

@@ -22,6 +22,7 @@ import { expectTodayReady } from '../../support/today.js';
 //   1. Full info is public with NO gate - address/deposit/fee/utilities/pets/
 //      accessibility/lease-terms/RTA/video all render upfront; the intake form is
 //      present; no login redirect. Plus a raw flyer-API sanity check (contact_number).
+//      The address is a Google Maps link - href only, never clicked (it leaves the app).
 //   2. The bottom form submit swaps ONLY the CTA to a thank-you in place (the info
 //      above stays), stamps the contact capture_source:'flyer' + unit_of_interest,
 //      and records the welcome SMS in the dev outbox.
@@ -58,6 +59,11 @@ async function devLogin(page: Page): Promise<void> {
 function uniquePhone(): string {
   return `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
 }
+
+/** The city/state/zip every shareable unit here is created with. Named so the
+ *  Google Maps assertion can rebuild the SAME full address the page links to
+ *  (only line1 varies per run, via the stamp). */
+const UNIT_CITY_STATE_ZIP = { city: 'Atlanta', state: 'GA', zip: '30314' } as const;
 
 interface ShareableUnit {
   unitId: string;
@@ -111,7 +117,7 @@ async function createShareableUnit(
       rent_max: u.rent,
       area: u.area,
       media: ['https://photos.example.com/a.jpg'],
-      address: { line1: u.addressLine1, city: 'Atlanta', state: 'GA', zip: '30314' },
+      address: { line1: u.addressLine1, ...UNIT_CITY_STATE_ZIP },
       utilities: u.utilities,
       video_url: u.videoUrl,
       application_fee: u.applicationFee,
@@ -172,6 +178,20 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
 
     // Every tenant-useful fact is shown UPFRONT - no gate (this IS the feature).
     await expect(page.getByText(unit.addressLine1)).toBeVisible();
+    // The address IS the map link - never click it (it leaves for google.com);
+    // assert the href, like the sms: links. The query carries the whole address,
+    // not just line1, so a Maps lookup is not ambiguous across cities.
+    await expect(page.getByRole('link', { name: new RegExp(unit.addressLine1) })).toHaveAttribute(
+      'href',
+      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+        [
+          unit.addressLine1,
+          UNIT_CITY_STATE_ZIP.city,
+          UNIT_CITY_STATE_ZIP.state,
+          UNIT_CITY_STATE_ZIP.zip,
+        ].join(', '),
+      )}`,
+    );
     await expect(page.getByText('Deposit')).toBeVisible();
     await expect(page.getByText(`$${unit.deposit}`)).toBeVisible();
     await expect(page.getByText('Application fee')).toBeVisible();

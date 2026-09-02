@@ -113,6 +113,39 @@ describe('FlyerPage', () => {
     expect(screen.queryByRole('link', { name: /text us/i })).toBeNull();
   });
 
+  it('the address links to Google Maps with the full address as the query', async () => {
+    getFlyer.mockResolvedValue(FLYER);
+    renderPage();
+
+    const link = await screen.findByRole('link', { name: /88 Sycamore St/i });
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.google.com/maps/search/?api=1&query=' +
+        encodeURIComponent('88 Sycamore St, Decatur, GA, 30030'),
+    );
+    // Opens away from the flyer (a tenant mid-funnel keeps their place), and the
+    // hidden suffix leaves the address itself as the visible label.
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAccessibleName(/open in Google Maps/i);
+  });
+
+  it('a partial address still maps; a blank one renders as plain text', async () => {
+    // City + state only - the Maps free-text query still lands somewhere useful.
+    getFlyer.mockResolvedValue({ ...FLYER, address: { city: 'Decatur', state: 'GA' } });
+    const first = renderPage();
+    expect(await screen.findByRole('link', { name: /Decatur, GA/i })).toHaveAttribute(
+      'href',
+      'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent('Decatur, GA'),
+    );
+    first.unmount();
+
+    // Whitespace-only parts print (addressLines keeps them) but must not link.
+    getFlyer.mockResolvedValue({ ...FLYER, address: { line1: '   ' } });
+    renderPage();
+    await screen.findByText('Address');
+    expect(screen.queryByRole('link', { name: /google maps/i })).toBeNull();
+  });
+
   it('renders the Accepts line from the projected authorities', async () => {
     // The public "Accepts:" line answers the tenant's actual question ("will this
     // home take MY voucher"): it lists the unit's accepted AUTHORITIES, not the

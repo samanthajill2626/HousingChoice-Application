@@ -6,6 +6,7 @@ import {
   type CDPSession,
   type Locator,
   type Page,
+  type TestInfo,
 } from '@playwright/test';
 import {
   sendAsParty,
@@ -33,6 +34,7 @@ import { expectTodayReady } from '../../support/today.js';
 //       relay.media_only catalog copy ("<name> sent an attachment.").
 //   (e) the composer attach control is usable at 360px with no horizontal overflow.
 const NEXT = dashboardUrl;
+const RECORD_VIEWER_SCROLL_DIAGNOSTICS = process.env['E2E_TRACE'] === '1';
 
 // The 5-byte-ish valid PNG fixture Playwright's file picker uploads (a real file
 // is required; the fake never fetches outbound media - a valid URL is enough).
@@ -92,6 +94,11 @@ interface ElementBox {
   y: number;
   width: number;
   height: number;
+}
+
+interface ViewerScrollOffsets {
+  appFrame: { top: number; left: number };
+  timeline: { top: number; left: number };
 }
 
 async function readViewerScale(page: Page): Promise<number> {
@@ -166,6 +173,261 @@ async function expectRecordedScalesWithinBounds(page: Page, phase: string): Prom
     expect(scale, `${phase} transient scale fell below fit`).toBeGreaterThanOrEqual(1);
     expect(scale, `${phase} transient scale exceeded cap`).toBeLessThanOrEqual(8);
   }
+}
+
+async function startViewerScrollDiagnostics(page: Page): Promise<void> {
+  if (!RECORD_VIEWER_SCROLL_DIAGNOSTICS) return;
+
+  await page.evaluate(() => {
+    type DiagnosticWindow = typeof window & {
+      __hcViewerScrollDiagnostics?: unknown[];
+      __hcViewerScrollRecord?: (label: string) => void;
+      __hcViewerScrollStop?: () => void;
+    };
+
+    const ownedWindow = window as DiagnosticWindow;
+    ownedWindow.__hcViewerScrollStop?.();
+
+    const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
+    const timeline = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
+    const routeRoot = appFrame?.firstElementChild;
+    const comms = timeline?.closest<HTMLElement>(
+      'section[aria-label="Communications and activity"]',
+    );
+    if (
+      appFrame === null ||
+      timeline === null ||
+      !(routeRoot instanceof HTMLElement) ||
+      !(comms instanceof HTMLElement)
+    ) {
+      throw new Error('viewer scroll diagnostic owners missing');
+    }
+
+    const compactText = (value: string | null): string | null => {
+      const normalized = value?.replace(/\s+/g, ' ').trim() ?? '';
+      return normalized === '' ? null : normalized.slice(0, 120);
+    };
+
+    const describeTarget = (target: EventTarget | Node): string => {
+      if (!(target instanceof Element)) {
+        return target instanceof Node ? target.nodeName : 'non-node event target';
+      }
+      if (target === appFrame) return 'appFrame';
+      if (target === timeline) return 'timeline';
+      if (target === routeRoot) return 'routeRoot';
+      const testId = target.getAttribute('data-testid');
+      const role = target.getAttribute('role');
+      const ariaLabel = target.getAttribute('aria-label');
+      const classes = [...target.classList].slice(0, 2).join('.');
+      const suffix =
+        testId !== null
+          ? `[data-testid=${testId}]`
+          : ariaLabel !== null
+            ? `[aria-label=${ariaLabel}]`
+            : role !== null
+              ? `[role=${role}]`
+              : classes === ''
+                ? ''
+                : `.${classes}`;
+      return `${target.tagName.toLowerCase()}${suffix}`;
+    };
+
+    const describeNode = (node: Node): Record<string, unknown> => ({
+      target: describeTarget(node),
+      text: compactText(node.textContent),
+    });
+
+    let lastPointer:
+      | {
+          clientX: number;
+          clientY: number;
+          buttons: number;
+          pointerType: string;
+        }
+      | null = null;
+    const onPointerMove = (event: PointerEvent): void => {
+      lastPointer = {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        buttons: event.buttons,
+        pointerType: event.pointerType,
+      };
+    };
+    document.addEventListener('pointermove', onPointerMove, { capture: true, passive: true });
+
+    const measureRect = (element: Element): Record<string, number> => {
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+
+    const measure = (element: HTMLElement) => {
+      const maximumTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      return {
+        top: element.scrollTop,
+        left: element.scrollLeft,
+        scrollHeight: element.scrollHeight,
+        scrollWidth: element.scrollWidth,
+        clientHeight: element.clientHeight,
+        clientWidth: element.clientWidth,
+        maximumTop,
+        distanceFromBottom: maximumTop - element.scrollTop,
+        rect: measureRect(element),
+      };
+    };
+
+    ownedWindow.__hcViewerScrollDiagnostics = [];
+    const record = (kind: string, label: string, detail?: unknown): void => {
+      const events = ownedWindow.__hcViewerScrollDiagnostics;
+      if (events === undefined) return;
+      const canvas = document.querySelector<HTMLElement>('[data-image-viewer-canvas="true"]');
+      const pointerTarget =
+        lastPointer === null
+          ? null
+          : document.elementFromPoint(lastPointer.clientX, lastPointer.clientY);
+      events.push({
+        atMs: performance.now(),
+        kind,
+        label,
+        detail,
+        appFrame: measure(appFrame),
+        timeline: measure(timeline),
+        routeRoot: {
+          ...measure(routeRoot),
+          childElementCount: routeRoot.childElementCount,
+        },
+        viewerInteraction: {
+          canvasRect: canvas === null ? null : measureRect(canvas),
+          pointer: lastPointer,
+          elementUnderPointer:
+            pointerTarget === null
+              ? null
+              : {
+                  ...describeNode(pointerTarget),
+                  insideCanvas: canvas?.contains(pointerTarget) ?? false,
+                },
+        },
+        timelineContext: {
+          streamChildElementCount: timeline.childElementCount,
+          commsChildElementCount: comms.childElementCount,
+          headerHeight:
+            comms.querySelector<HTMLElement>(':scope > header')?.getBoundingClientRect().height ??
+            null,
+          upcomingHeight:
+            comms
+              .querySelector<HTMLElement>(
+                ':scope > section[aria-label="Upcoming scheduled messages"]',
+              )
+              ?.getBoundingClientRect().height ?? null,
+          loadOlderPresent: [...comms.querySelectorAll('button')].some(
+            (button) => compactText(button.textContent) === 'Load older messages',
+          ),
+          newMessagesPillPresent:
+            comms.querySelector('[aria-label="Jump to the newest messages"]') !== null,
+        },
+      });
+      if (events.length > 800) events.splice(0, events.length - 800);
+    };
+
+    const onAppFrameScroll = (): void => record('scroll', 'appFrame');
+    const onTimelineScroll = (): void => record('scroll', 'timeline');
+    appFrame.addEventListener('scroll', onAppFrameScroll, { passive: true });
+    timeline.addEventListener('scroll', onTimelineScroll, { passive: true });
+
+    const mutationObserver = new MutationObserver((records) => {
+      record(
+        'mutation',
+        'application subtree',
+        records.slice(0, 20).map((mutation) => ({
+          type: mutation.type,
+          target: describeTarget(mutation.target),
+          attributeName: mutation.attributeName,
+          addedNodes: mutation.addedNodes.length,
+          removedNodes: mutation.removedNodes.length,
+          added: [...mutation.addedNodes].slice(0, 5).map(describeNode),
+          removed: [...mutation.removedNodes].slice(0, 5).map(describeNode),
+        })),
+      );
+    });
+    mutationObserver.observe(appFrame, {
+      attributes: true,
+      attributeFilter: ['aria-hidden', 'class', 'hidden', 'inert', 'style'],
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      record('resize', entries.map((entry) => describeTarget(entry.target)).join(', '));
+    });
+    resizeObserver.observe(appFrame);
+    resizeObserver.observe(timeline);
+    resizeObserver.observe(routeRoot);
+
+    ownedWindow.__hcViewerScrollRecord = (label: string): void => record('phase', label);
+    ownedWindow.__hcViewerScrollStop = (): void => {
+      appFrame.removeEventListener('scroll', onAppFrameScroll);
+      timeline.removeEventListener('scroll', onTimelineScroll);
+      document.removeEventListener('pointermove', onPointerMove, { capture: true });
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+      delete ownedWindow.__hcViewerScrollRecord;
+      delete ownedWindow.__hcViewerScrollStop;
+    };
+    record('phase', 'recorder-start');
+  });
+}
+
+async function recordViewerScrollPhase(page: Page, label: string): Promise<void> {
+  if (!RECORD_VIEWER_SCROLL_DIAGNOSTICS) return;
+  await page.evaluate((phase) => {
+    const ownedWindow = window as typeof window & {
+      __hcViewerScrollRecord?: (label: string) => void;
+    };
+    ownedWindow.__hcViewerScrollRecord?.(phase);
+  }, label);
+}
+
+async function attachViewerScrollDiagnostics(
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+  stop = false,
+): Promise<void> {
+  if (!RECORD_VIEWER_SCROLL_DIAGNOSTICS) return;
+  const events = await page.evaluate((shouldStop) => {
+    const ownedWindow = window as typeof window & {
+      __hcViewerScrollDiagnostics?: unknown[];
+      __hcViewerScrollStop?: () => void;
+    };
+    if (ownedWindow.__hcViewerScrollStop === undefined) return null;
+    const output = [...(ownedWindow.__hcViewerScrollDiagnostics ?? [])];
+    if (shouldStop) ownedWindow.__hcViewerScrollStop?.();
+    return output;
+  }, stop);
+  if (events === null) return;
+  await testInfo.attach(name, {
+    body: JSON.stringify(events, null, 2),
+    contentType: 'application/json',
+  });
+}
+
+async function readNamedViewerScrollOffsets(page: Page): Promise<ViewerScrollOffsets> {
+  return page.evaluate(() => {
+    const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
+    const timelineStream = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
+    if (appFrame === null || timelineStream === null) throw new Error('named scroll owner missing');
+    return {
+      appFrame: { top: appFrame.scrollTop, left: appFrame.scrollLeft },
+      timeline: { top: timelineStream.scrollTop, left: timelineStream.scrollLeft },
+    };
+  });
 }
 
 async function requireBox(locator: Locator, label: string): Promise<ElementBox> {
@@ -244,10 +506,18 @@ function outboundMediaLegs(threads: FakeThread[], party: string) {
 }
 
 test.describe('Outbound MMS - 1:1 contact composer', () => {
+  test.afterEach(async ({ page }, testInfo) => {
+    // A phase assertion can fail before the success path reaches its explicit
+    // final attachment. Preserve and stop an installed recorder before the page
+    // fixture is torn down; other tests in this describe install nothing, so the
+    // helper returns without creating an empty attachment.
+    await attachViewerScrollDiagnostics(page, testInfo, 'viewer-scroll-after-test.json', true);
+  });
+
   test('(a) attach + send an image: the fake records media AND the timeline renders it', async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     let openedPages = 0;
     page.context().on('page', () => {
@@ -302,6 +572,16 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
       })
       .toBeGreaterThan(0);
 
+    // Fake delivery advances asynchronously after the provider accepts the MMS.
+    // Timeline deliberately re-runs its message-sentinel anchoring when that
+    // rendered status changes, so take the viewer's scroll baseline only after
+    // this send reaches its terminal UI state. This is a lifecycle condition,
+    // not a delay: it isolates viewer gestures from the send still settling.
+    const sentBubble = timeline.getByText(token, { exact: true }).locator('..');
+    await expect(sentBubble.getByText('Delivered', { exact: true })).toBeVisible({
+      timeout: 20_000,
+    });
+
     // Open from the real Timeline only after arranging both scroll owners. This
     // makes the provider capture distinct, nonzero AppFrame + Timeline values.
     const trigger = timeline.getByRole('button', { name: 'View Attachment 1' }).last();
@@ -353,11 +633,17 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     const openedTrigger = page.locator(
       `[data-e2e-viewer-trigger="${focusProbeMarker}"]`,
     );
+    await startViewerScrollDiagnostics(page);
+    await recordViewerScrollPhase(page, 'arranged-before-open');
 
     await trigger.click();
     expect(openedPages).toBe(0);
     const dialog = page.getByRole('dialog', { name: 'Attachment 1' });
     await expect(dialog).toBeVisible();
+    await recordViewerScrollPhase(page, 'dialog-visible');
+    expect(await readNamedViewerScrollOffsets(page), 'opening the viewer moved a scroll owner').toEqual(
+      expectedScroll,
+    );
     await expect(page.locator('[data-modal-variant="media"]')).toHaveCSS('z-index', '200');
     expect(page.url()).toBe(beforeUrl);
 
@@ -434,6 +720,10 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     await page.mouse.wheel(0, -80);
     await expect.poll(() => readViewerScale(page)).toBe(8);
     await expectRecordedScalesWithinBounds(page, 'desktop discrete wheel');
+    await recordViewerScrollPhase(page, 'wheel-zoom-complete');
+    expect(await readNamedViewerScrollOffsets(page), 'wheel zoom moved a scroll owner').toEqual(
+      expectedScroll,
+    );
 
     // Pan to every boundary at high zoom; each extreme must leave real pixels
     // intersecting the inspection canvas on both axes.
@@ -444,43 +734,34 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
       { x: pointer.x, y: 5000, label: 'desktop pan bottom bound' },
     ];
     for (const target of panTargets) {
+      await recordViewerScrollPhase(page, `${target.label}-before`);
       await page.mouse.move(pointer.x, pointer.y);
       await page.mouse.down();
       await page.mouse.move(target.x, target.y, { steps: 12 });
       await page.mouse.up();
       await expectViewerImageOverlapsCanvas(dialog, canvas, 'Attachment 1', target.label);
+      await recordViewerScrollPhase(page, `${target.label}-after`);
+      expect(
+        await readNamedViewerScrollOffsets(page),
+        `${target.label} moved a scroll owner`,
+      ).toEqual(expectedScroll);
     }
 
-    const scrollWhileOpen = await page.evaluate(() => {
-      const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
-      const timelineStream = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
-      if (appFrame === null || timelineStream === null) throw new Error('named scroll owner missing');
-      return {
-        appFrame: { top: appFrame.scrollTop, left: appFrame.scrollLeft },
-        timeline: { top: timelineStream.scrollTop, left: timelineStream.scrollLeft },
-      };
-    });
+    await recordViewerScrollPhase(page, 'before-while-open-capture');
+    const scrollWhileOpen = await readNamedViewerScrollOffsets(page);
+    await attachViewerScrollDiagnostics(page, testInfo, 'viewer-scroll-before-assertion.json');
     expect(scrollWhileOpen).toEqual(expectedScroll);
 
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
+    await recordViewerScrollPhase(page, 'dialog-closed-by-escape');
     await expect(openedTrigger).toBeFocused();
     expect(page.url()).toBe(beforeUrl);
     await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
-          const timelineStream = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
-          if (appFrame === null || timelineStream === null) {
-            throw new Error('named scroll owner missing after dismissal');
-          }
-          return {
-            appFrame: { top: appFrame.scrollTop, left: appFrame.scrollLeft },
-            timeline: { top: timelineStream.scrollTop, left: timelineStream.scrollLeft },
-          };
-        }),
-      )
+      .poll(() => readNamedViewerScrollOffsets(page))
       .toEqual(expectedScroll);
+    await recordViewerScrollPhase(page, 'dismissal-restore-complete');
+    await attachViewerScrollDiagnostics(page, testInfo, 'viewer-scroll-final.json', true);
 
     // Small Ctrl-wheel deltas model trackpad pinch separately from discrete wheel.
     await openedTrigger.click();

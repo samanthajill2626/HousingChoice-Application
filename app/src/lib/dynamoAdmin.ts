@@ -578,7 +578,15 @@ export async function ensureTable(
         if (!(pollErr instanceof TableNotActiveError)) throw pollErr;
         // Rethrow the ORIGINAL conflict - the poll never saw it - with what we
         // observed appended, so the message names both halves of the story.
+        //
+        // The MESSAGE alone is not the whole story, which is why the poll error
+        // rides along as `cause`: it carries the table, the observed status, and
+        // its own cause - the last read failure from the container, i.e. the
+        // answer to "why would it not say". lib/logSerializers.ts wires `cause`
+        // and recurses into it, so that chain reaches the logs intact. Set only
+        // when the original has none, the same rule the verification hook uses.
         err.message = `${err.message} (${pollErr.message})`;
+        if (err.cause === undefined) err.cause = pollErr;
         throw err;
       }
     }
@@ -705,8 +713,11 @@ export async function deleteTableIfExists(
       } catch (pollErr) {
         if (!(pollErr instanceof TableNotGoneError)) throw pollErr;
         // Rethrow the ORIGINAL conflict - the poll never saw it - with what we
-        // observed appended, so the message names both halves of the story.
+        // observed appended, so the message names both halves of the story, and
+        // carry the poll error as `cause` for the reasons given on the
+        // ensureTable side.
         err.message = `${err.message} (${pollErr.message})`;
+        if (err.cause === undefined) err.cause = pollErr;
         throw err;
       }
     }

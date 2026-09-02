@@ -55,6 +55,7 @@ import {
   pollUntilTableActive,
   pollUntilTableGone,
   TableNotActiveError,
+  TableNotGoneError,
 } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec, type TableSpec } from '../src/lib/tables.js';
 
@@ -828,5 +829,31 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     // it. With the gate below the hook this log carries a second
     // DescribeTimeToLive - the hook read that a non-local client must never pay.
     expect(stub.ttlLog()).toEqual(['DescribeTimeToLive', 'UpdateTimeToLive']);
+  });
+
+  it('case 28: the rethrown conflict carries the whole chain, not just a message', async () => {
+    // The two callers used to splice pollErr.message onto the conflict and drop
+    // the OBJECT - keeping the string and losing the table, the observed status,
+    // and the read failure underneath, which is the only thing that answers
+    // "why would the container not say". lib/logSerializers.ts wires `cause` and
+    // recurses into it, so the chain reaches the logs once it survives here.
+    const readErr = lockTimeout();
+    const conflict = resourceInUse();
+    const stub = new StubClient()
+      .script('DeleteTable', [{ fail: internalFailure() }, { fail: conflict }])
+      .fallback('DescribeTable', { fail: readErr });
+
+    const failure = await deleteTableIfExists(stub.asClient(), 'stub-c28', {
+      retry: FAST,
+      poll: { intervalMs: 1, ceilingMs: 20 },
+    }).catch((err: unknown) => err);
+
+    // Still the ORIGINAL conflict, exactly as before - the chain is ADDITIVE.
+    expect(failure).toBe(conflict);
+    const cause = (failure as Error).cause;
+    expect(cause).toBeInstanceOf(TableNotGoneError);
+    expect((cause as TableNotGoneError).tableName).toBe('stub-c28');
+    // ...and one link further down, the read failure the poll actually met.
+    expect((cause as Error).cause).toBe(readErr);
   });
 });

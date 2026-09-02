@@ -334,11 +334,15 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // disagree.
   //
   // STOP is omitted here for the same logged A2P decision that removed it from
-  // relay.intro (changelog 1.2.1 #7). Note these two carry NO sender identity at
-  // all - not even the "it's Sam" the naked intro opens with. Engineering stated
-  // that exposure (see the 2026-08-20 note above); it goes to the founder as a
-  // question rather than being invented here, and until she rules her copy ships
-  // as written. TODO(founder-message-template-updates-owed).
+  // relay.intro (changelog 1.2.1 #7). These entries DID once carry no sender
+  // identity at all, which engineering raised as an exposure (see the
+  // 2026-08-20 note above) and handed to the founder as a question. **That is
+  // now RESOLVED: "It's Sam." was added to all three intros, so the reader
+  // learns who the text is from.** The founder also ruled 2026-09-01 that the
+  // tenant-addressed wording stays as written even though every roster member
+  // receives the identical body - see item 9 of
+  // docs/superpowers/reviews/2026-08-31-tour-reminder-ladder-phase-b/founder-handback-items.md.
+  // Still true and deliberate: no brand and no STOP on these three.
   //
   // {where} is declared LAST in every entry per spec 9.3: it is the one value
   // that is not brace-stripped, and with the single-pass interpolate fix that is

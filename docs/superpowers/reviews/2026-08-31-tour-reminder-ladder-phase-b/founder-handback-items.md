@@ -1,5 +1,23 @@
 # Owed to the founder - tour reminder ladder Phase B
 
+## ALL NINE RESOLVED - 2026-09-01 (Cameron)
+
+Nothing here is outstanding. Recorded per item, because several were disclosures
+rather than questions and it should be clear which were *decided* and which were
+merely *told*:
+
+| # | outcome |
+|---|---|
+| 1, 6, 7 | **Disclosures - all sent.** The `en_route` quiet-hours exemption in both directions (a 4am tour texting at 3am, a 10pm tour texting at 9pm) and the book-then-open workflow point. Nothing to decide. |
+| 2 | **RESOLVED IN CODE on another branch.** All three intros now open `"Hey {tenantFirstName}! It's Sam."` - verified in `app/src/messages/catalog.ts` (`relay.intro_tour_today`, `relay.intro_tour`, `relay.intro_placement`). The comment above those entries said the opposite and carried a stale `TODO(founder-message-template-updates-owed)`; corrected in the same pass. Still deliberate and unchanged: **no brand and no STOP** on these three, per the logged A2P decision. |
+| 3, 4, 5 | Confirmed / already answered. `pm` means property manager; the ~370-character placement intro is a cost note, not a gate, so her words stand; and `{landlord}` was already wired to tour templates as `{propertyContactFirstName}` on `tour.en_route_landlord_led`. |
+| 8 | **APPROVED as written.** The role-less `Hey, adding {name} to the group.` ships for the common case - standalone groups and any joiner not on the property roster. |
+| 9 | **APPROVED as written.** The tenant-addressed wording stays, and every roster member keeps receiving the identical body - so the landlord reads copy that greets the tenant by name. A deliberate ruling, not an oversight: it reads as a group text a navigator wrote, which everyone is simply seeing. The per-recipient send path exists if that is ever revisited. |
+
+The original items follow, unedited.
+
+---
+
 Product questions and disclosures the Phase B build raised and did NOT decide.
 None of these is build work; each needs Sam (or Cameron on her behalf) to answer
 or acknowledge. Items 1-5 are quoted verbatim from section 15 of

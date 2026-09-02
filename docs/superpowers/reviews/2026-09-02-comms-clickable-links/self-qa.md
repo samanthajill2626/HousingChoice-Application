@@ -38,4 +38,3 @@ identity, and stopped bubble propagation.
 8 launcher and children, dropped `hc-local-8-*` tables, released lane 8, and
 removed owned session state. No live port, deployment, or infrastructure target
 was accessed.
-

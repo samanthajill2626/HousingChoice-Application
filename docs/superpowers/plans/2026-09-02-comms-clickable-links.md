@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v1 - DRAFT for adversarial review
+Status: v2 - DRAFT after adversarial review round 1
 Date: 2026-09-02
 Branch: `feat/comms-clickable-links`
 Worktree: `W:\\tmp\\comms-clickable-links`
@@ -30,8 +30,9 @@ plain-text email, while `UnmatchedRow` adopts it only for opened full email deta
   `dashboard/package.json` runtime dependencies. Resolve exact versions in the root
   `package-lock.json`; never import the older transitive `linkify-it` 5.0.2 copy.
 - Configure the v6 named `LinkifyIt` export with `fuzzyLink: true`,
-  `fuzzyEmail: false`, `fuzzyIP: false`, `urlAuth: false`, and the full `tlds`
-  list. Disable `ftp:` and `mailto:` schemas explicitly.
+  `fuzzyEmail: false`, `fuzzyIP: false`, and `urlAuth: false`; then replace its
+  built-in suffix list through `parser.tlds(tlds)`. Disable `ftp:` and `mailto:`
+  schemas explicitly.
 - Keep communications bodies as React text nodes and anchors. Never generate HTML
   strings or use `dangerouslySetInnerHTML`.
 - Preserve explicit HTTP and HTTPS. Normalize `//` with `https:` and fuzzy `www`
@@ -130,23 +131,26 @@ values; `package-lock.json` resolves `linkify-it` 6.1.0 for the dashboard and
 `uc.micro` 3.x beneath it. The mailparser-owned 5.0.2 resolution may remain as a
 separate transitive node.
 
-- [ ] **Step 2: Prove the dependency boundary before importing it**
+- [ ] **Step 2: Prove a clean Windows install and the dependency boundary**
 
-Run:
+Run a clean Windows workspace installation from the updated manifests and lockfile,
+then inspect the resolved graph:
 
 ```powershell
+npm ci
 npm ls --workspace @housingchoice/dashboard linkify-it tlds uc.micro
 node -e "for (const n of ['linkify-it','tlds','uc.micro']) { const p=require('./node_modules/'+n+'/package.json'); const lifecycle=['preinstall','install','postinstall'].filter(k=>p.scripts?.[k]); console.log(n,p.version,p.license,lifecycle.join(',')||'no-install-scripts',p.os||'all-os',p.cpu||'all-cpu',p.optionalDependencies||'no-optional-deps') }"
 ```
 
-Expected: dashboard resolves `linkify-it@6.1.0` and `tlds@1.261.0`; all three
-runtime packages report MIT, no install lifecycle scripts, no OS/CPU restriction,
-and no optional native dependency.
+Expected: bare `npm ci` exits 0 after rebuilding `node_modules` from the updated
+lockfile. Dashboard resolves `linkify-it@6.1.0` and `tlds@1.261.0`; all three runtime
+packages report MIT, no install lifecycle scripts, no OS/CPU restriction, and no
+optional native dependency.
 
 Run the target-architecture package smoke independently of the Windows tree:
 
 ```powershell
-docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact linkify-it@6.1.0 tlds@1.261.0 >/dev/null && node --input-type=module -e \"import { LinkifyIt } from 'linkify-it'; import { createRequire } from 'node:module'; const require=createRequire(import.meta.url); const tlds=require('tlds'); const parser=new LinkifyIt({ fuzzyLink:true, fuzzyEmail:false, fuzzyIP:false, urlAuth:false, tlds }); if (!parser.test('example.com/path')) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
+docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact linkify-it@6.1.0 tlds@1.261.0 >/dev/null && node --input-type=module -e \"import { LinkifyIt } from 'linkify-it'; import { createRequire } from 'node:module'; const require=createRequire(import.meta.url); const tlds=require('tlds'); const parser=new LinkifyIt({ fuzzyLink:true, fuzzyEmail:false, fuzzyIP:false, urlAuth:false }).tlds(tlds); if (!parser.test('housing.zip/path')) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
 ```
 
 Expected: `linux-arm64-linkifier-ok`. This probe may download packages but writes
@@ -159,6 +163,25 @@ normalization and Testing Library role assertions for rendering. The test file m
 include these concrete cases:
 
 ```ts
+import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  LinkifiedText,
+  tokenizeLinkifiedText,
+  type LinkifiedToken,
+} from './LinkifiedText.js';
+
+vi.mock('../lib/safeUrl.js', async () => {
+  const actual = await vi.importActual<typeof import('../lib/safeUrl.js')>(
+    '../lib/safeUrl.js',
+  );
+  return {
+    ...actual,
+    safeHttpUrl: (url: string | null | undefined) =>
+      url === 'https://reject.com/path' ? null : actual.safeHttpUrl(url),
+  };
+});
+
 const linkTokens = (text: string, displayEnd?: number) =>
   tokenizeLinkifiedText(text, displayEnd).filter(
     (token): token is Extract<LinkifiedToken, { kind: 'link' }> => token.kind === 'link',
@@ -187,6 +210,14 @@ it('keeps the complete href when the display boundary cuts through a URL', () =>
     }),
   ]);
 });
+
+it('preserves the exact source when the final safety boundary rejects a match', () => {
+  expect(tokenizeLinkifiedText('before reject.com/path after')).toEqual([
+    { kind: 'text', start: 0, end: 7, text: 'before ' },
+    { kind: 'text', start: 7, end: 22, text: 'reject.com/path' },
+    { kind: 'text', start: 22, end: 28, text: ' after' },
+  ]);
+});
 ```
 
 Also assert, with explicit expected token/href arrays:
@@ -195,8 +226,9 @@ Also assert, with explicit expected token/href arrays:
   distinct offsets;
 - a trailing period/comma and balanced parentheses are excluded according to the
   parser match;
-- `housing.museum/path` and an international domain assembled with `\u` escapes
-  are recognized through the full TLD list;
+- `housing.zip/path`, a suffix absent from the parser's documented built-in list,
+  and an international domain assembled with `\u` escapes are recognized through
+  the full TLD list;
 - bare `localhost`, `server`, `192.0.2.1`, `renter@example.com`, and
   `+1-555-010-0001` produce no link tokens;
 - `http://localhost:5174/a`, `https://localhost/a`, and `//localhost/a` do produce
@@ -247,9 +279,8 @@ const parser = new LinkifyIt({
   fuzzyEmail: false,
   fuzzyIP: false,
   urlAuth: false,
-  tlds,
 });
-parser.add('ftp:', null).add('mailto:', null);
+parser.tlds(tlds).add('ftp:', null).add('mailto:', null);
 
 type LinkMatch = NonNullable<ReturnType<LinkifyIt['match']>>[number];
 
@@ -430,6 +461,10 @@ Assert the following observable behavior:
 - the MMS still renders its attachment independently;
 - a message with `relay_sender_key: 'team'` still shows `Team` beside its linkified
   body;
+- a native-group message with `relay_sender_key: 'phone#+14045550112'`,
+  `relayRoster: [{ contactId: 'c2', phone: '+14045550112', name: 'Lars Landlord' }]`,
+  and `rosterKind: 'group_text'` still shows `Lars Landlord` beside its linkified
+  body;
 - clicking the bare-domain anchor leaves the nearest bubble without its generated
   `revealed` class, while clicking the body outside the anchor adds that class;
 - all links carry `_blank` and `noopener noreferrer`.
@@ -447,7 +482,9 @@ complete normalized URL, and the collapsed snippet's full `textContent` equals
 `${body.slice(0, 140).trimEnd()}...`. Open `View full email` and assert its scoped
 body contains the full-label link with the same destination. Add a second fixture
 whose first 140 characters end in two spaces and assert there is no whitespace
-between the final visible character and `...`.
+between the final visible character and `...`. Add a third body of 141 spaces and
+assert its collapsed snippet is exactly `...`, preserving the current all-whitespace
+truncation behavior.
 
 - [ ] **Step 2: Run the Timeline test and verify the red state**
 
@@ -487,7 +524,7 @@ const snippetEnd = truncated
 Replace the collapsed snippet and expanded body expressions with:
 
 ```tsx
-{snippetEnd > 0 ? (
+{snippetEnd > 0 || truncated ? (
   <div className={styles.emailSnippet}>
     <LinkifiedText text={bodyText} displayEnd={snippetEnd} suffix={truncated ? '...' : undefined} />
   </div>
@@ -708,7 +745,7 @@ If the fixture route requires the full seed profile in the current live code, us
 `POST /__dev/reseed?profile=full` and restore the lean profile in `afterAll`, matching
 `message-transport-fidelity.spec.ts`. Do not introduce a new dev endpoint.
 
-- [ ] **Step 2: Run the targeted browser spec and verify the red state**
+- [ ] **Step 2: Run the targeted post-integration browser acceptance proof**
 
 First verify no interactive session is live in this worktree. Then run only through
 the sanctioned root entry point:
@@ -717,20 +754,28 @@ the sanctioned root entry point:
 npm run e2e -- tests/dashboard-next/comms-clickable-links.spec.ts
 ```
 
-Expected before integration: FAIL because the communication contains no link roles.
-No `E2E_CHILD_LOG_DIR` is needed; this is not a content-loss investigation or a
-timing-sensitive symptom.
+Expected after S1-S3: exit 0. S1-S3 already provide red-to-green unit and component
+proof before implementation; this e2e is intentionally a post-integration acceptance
+test rather than a falsely ordered red test. No `E2E_CHILD_LOG_DIR` is needed; this
+is not a content-loss investigation or a timing-sensitive symptom.
 
-- [ ] **Step 3: Re-run the targeted browser spec after S1-S3**
+- [ ] **Step 3: Confirm the targeted run left a clean hermetic lane**
 
-Run the same bare command:
+After the successful run, inspect the worktree lane state:
 
 ```powershell
-npm run e2e -- tests/dashboard-next/comms-clickable-links.spec.ts
+$laneState = Get-Content -LiteralPath 'e2e/.artifacts/lane.json' | ConvertFrom-Json
+$livePorts = @($laneState.ports.PSObject.Properties | Where-Object {
+  Test-NetConnection -ComputerName 127.0.0.1 -Port ([int]$_.Value) -InformationLevel Quiet -WarningAction SilentlyContinue
+})
+if ($livePorts.Count -gt 0) { throw "e2e lane still has listeners: $($livePorts.Name -join ', ')" }
+Write-Output 'e2e-lane-ports-free'
 ```
 
-Expected: exit 0. Confirm Playwright tears its stack down and no listener survives
-on that lane before another run.
+Expected: `e2e-lane-ports-free`, proving the Playwright webServer stack is torn down.
+If the run was interrupted,
+use the recorded lane only to identify its worktree-owned ports and confirm no
+listener survives before another run; do not kill shared browser processes.
 
 - [ ] **Step 4: Commit E1**
 
@@ -844,7 +889,9 @@ actions remain human-owned.
   `LinkifiedToken`, and `tokenizeLinkifiedText`; S2 and S3 import only
   `LinkifiedText`; tests import the pure helper/types from the same module.
 - Ordering: S1 creates the API; S2 and S3 consume it; E1 proves the integrated
-  reader; E2 starts only after every implementation commit is quiet.
+  reader as a post-integration acceptance test; E2 starts only after every
+  implementation commit is quiet. S1-S3 each retain a correctly ordered focused
+  red-to-green cycle.
 - Dependency boundary: exact dashboard runtime versions, Windows install,
   manifest/license/lifecycle proof, browser production build, and disposable Linux
   ARM64 runtime import are all explicit.

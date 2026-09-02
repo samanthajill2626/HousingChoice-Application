@@ -107,7 +107,7 @@ different: it maps the event TYPE to a label at render time
 two surfaces will disagree about the same old event. Expected; not a bug.
 Reseeded environments (all e2e lanes, any dev wipe) show the new text only.
 
-### AI extraction run log (owed post-merge operation)
+### AI extraction run log (applied dev + prod; nothing owed)
 
 The admin-only forensic log is at `/settings/ai-runs`. It retains each `ai_runs` envelope for 90 days;
 the contact/conversation pointer can outlive that row and then renders as an expired run. A missing log
@@ -127,9 +127,9 @@ table below:
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
-| AI run log (2026-08) - **NOT YET APPLIED anywhere** | `ai_runs` | **new table** - PK `itemId`, GSI `byEntity` (`entityKey` + `sortKey`), TTL `expires_at` | `/settings/ai-runs` forensic log |
+| AI run log (2026-08) - **APPLIED dev + prod** | `ai_runs` | **new table** - PK `itemId`, GSI `byEntity` (`entityKey` + `sortKey`), TTL `expires_at` | `/settings/ai-runs` forensic log |
 
-**Tenant-list visibility (2026-08-10) - GSI DELETION owed, dev then prod.** The
+**Tenant-list visibility (2026-08-10) - GSI DELETION DONE on dev AND prod (operator-confirmed 2026-09-01); nothing owed here. A separate DATA cleanup remains parked - that is data, not infra.** The
 tenant-list-visibility feature removed the dead `byJurisdiction` GSI from the units-table schema
 (`app/src/lib/tables.ts` + BOTH generated `tables.auto.tfvars.json` files are already committed,
 verified idempotent under `gen-tables --check`). After it merges, run `npm run plan -- dev` (the
@@ -142,7 +142,7 @@ create without it.
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
-| Tenant-list visibility (2026-08) - **committed, NOT YET APPLIED anywhere** | `units` | **GSI DELETE** - `byJurisdiction` (attribute no longer written; zero callers) | nothing (dead index removal) |
+| Tenant-list visibility (2026-08) - **APPLIED dev + prod** | `units` | **GSI DELETE** - `byJurisdiction` (attribute no longer written; zero callers) | nothing (dead index removal) |
 
 **New-dashboard backend-slice schema — APPLIED TO DEV (2026-07-01); PROD applies at the M1.11 go-live cutover.**
 
@@ -160,7 +160,7 @@ the new tables started empty. BE1/BE5/BE6 added NO schema — multi-phone is an 
 `contacts` (phone-pointer items live in the existing table), and media/similar/today are read-only
 aggregations over existing tables.
 
-**Contact-rosters schema — NOT YET APPLIED anywhere (owed at merge, 2026-08-05).**
+**Contact-rosters schema - APPLIED on dev AND prod (operator-confirmed 2026-09-01); nothing owed. Kept as the record of what the tables are.**
 `pendingRosterActions` (**new table** — PK `actionId`, GSIs `byOwner` (hash `ownerKey`) and `byDueAt`
 (hash `_actionPartition`, range `dueAt`)) powers the quiet-hours deferral rows for the People card.
 It is in both `tables.auto.tfvars.json` files; **dev** needs `npm run plan -- dev` + `npm run apply -- dev`
@@ -176,7 +176,7 @@ and pre-rename threads with a voice override dial the thread roster instead. The
 routine post-merge **dev reseed** clears both (prod has no data pre-cutover). Do the
 reseed BEFORE the post-merge masked-call smoke, or the smoke tests stale rows.
 
-**Placement deadline-model schema — NOT YET APPLIED (as of 2026-07-03; feature branch `feat/placement-deadline-model` unmerged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
+**Placement deadline-model schema - APPLIED on dev AND prod (operator-confirmed 2026-09-01); nothing owed. Kept as the record of what the tables are.**
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
@@ -185,7 +185,7 @@ reseed BEFORE the post-merge masked-call smoke, or the smoke tests stale rows.
 
 Both are in the regenerated `tables.auto.tfvars.json` files. **Online** operations — no recreate, **no data migration**: the new table starts empty, and any old `next_deadline_type`/`next_deadline_at` attributes left on existing placement rows simply go unread (flexible-doc). Post-merge on **dev**: `npm run plan -- dev` (review the `placementDeadlines` add + `byNextDeadline` drop) → `npm run apply -- dev`. **No reseed/backfill** — deployed envs hold no demo fixtures (`db:seed` targets DynamoDB Local only, never AWS), so the new table starts empty and dev placement deadlines simply **accrue naturally** as placements enter `awaiting_landlord_submission` (rta_window) and as tenant voucher dates are set. (To exercise the feature with seed data, reseed a **local** stack — `npm run dev -- --local --seeded`, or a running `e2e:session` + `npm run e2e:reseed` — both target DynamoDB Local.) **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
 
-**Relay-group inbox truncation fix schema — NOT YET APPLIED (as of 2026-07-06; feature branch `feat/relay-group-view` unmerged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
+**Relay-group inbox truncation fix schema - APPLIED on dev AND prod (operator-confirmed 2026-09-01); nothing owed. Kept as the record of what the tables are.**
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
@@ -193,7 +193,7 @@ Both are in the regenerated `tables.auto.tfvars.json` files. **Online** operatio
 
 In the regenerated `tables.auto.tfvars.json` files. **Online** operation — no recreate, **no data migration required**: the write path stamps `relay_status` on create/close/reopen, so new + touched relay groups populate the index automatically. Existing open relay groups predating the GSI lack `relay_status` until re-stamped, but **dev is reseeded** (`db:seed` stamps `relay_group#open` on the seeded open relays) and **prod relay-group volume is ~none**, so no backfill is needed. Post-merge on **dev**: `npm run plan -- dev` (review the `byRelayStatus` add) → `npm run apply -- dev`. **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
 
-**Broadcasts team-wide list schema — NOT YET APPLIED to dev (as of 2026-07-08, on `main`). Apply to DEV with the next dev deploy; PROD rides the M1.11 cutover.**
+**Broadcasts team-wide list schema - APPLIED on dev AND prod (operator-confirmed 2026-09-01); nothing owed. Kept as the record of what the tables are.**
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
@@ -208,7 +208,7 @@ In the regenerated `tables.auto.tfvars.json` files. **Online** operations, but t
 
 Rehearsed end-to-end on DynamoDB Local 2026-07-08 (GSI add → backfill 4 rows → re-run skipped 4 → GSI drops → dashboard verified team-wide). **Local stacks:** a persisted DynamoDB Local table predating this change lacks `byCreated` (`db:create` never retrofits GSIs — docs/issues/e2e-lane-tables-stale-schema.md) and the Broadcasts list 500s; either redo the dev-stack sequence above by hand (as rehearsed) or just delete the stale `hc-local-…-broadcasts` table and reboot the stack (recreate + reseed). Mind the lane-key trap: e2e lane tables are namespaced by ACCESS KEY (no `-sharedDb`), so aws-cli must use the lane's `accessKeyId=hclane<L>` (printed at boot) or the table is invisible — this cost two red e2e runs on 2026-07-08.
 
-**Email channel v1 schema (SES two-way email) - NOT YET APPLIED (feature branch `feat/email-channel`, Phase A merged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
+**Email channel v1 schema (SES two-way email) - APPLIED on dev AND prod (operator-confirmed 2026-09-01); nothing owed. Kept as the record of what the tables are.**
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
@@ -219,7 +219,7 @@ Rehearsed end-to-end on DynamoDB Local 2026-07-08 (GSI add → backfill 4 rows �
 
 All FOUR changes are already in both `tables.auto.tfvars.json` files (GSIs regenerated in Phase A; the `unmatched_email` table in B3; the `messages` TTL in the fix wave). **Online** operations - no recreate, **no backfill**: both GSI adds are sparse and populate as email participation is written (existing phone-only threads and contacts without an email never carry the indexed attribute, so they never index), the new table starts empty, and enabling `messages` TTL only reaps future orphan parked events. Post-merge on **dev**: `npm run plan -- dev` (review: two GSI adds + one new table with TTL + one TTL enable on `messages`) -> `npm run apply -- dev`. **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
 
-**Inbox unread index schema - NOT YET APPLIED anywhere (feature branch `feat/inbox-unread-index`). Apply to DEV after merge; PROD rides the M1.11 cutover. This one has a BACKFILL, and an order.**
+**Inbox unread index schema - APPLIED AND DEPLOYED on dev AND prod; the backfill's dry run reported ZERO rows in both, so the live backfill was never needed (see the dated OUTCOME below). Nothing owed. The order below is kept as the record, and because the founder's LOCAL dataset still needs it.**
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
@@ -321,9 +321,9 @@ Property photos upload **directly from the browser to the media S3 bucket** via 
 
 **Local dev needs NOTHING here** - the harness MinIO allows all CORS origins by default (spike-verified 2026-07-15, `.superpowers/spike/phase0-results.md`), so `s3-create.ts` adds no CORS step and no local config is required. The new app-workspace dep (`@aws-sdk/s3-presigned-post`) rides `npm install` on deploy.
 
-### Unit media via CloudFront (same-origin photo reads): owed ops on deploy (in order)
+### Unit media via CloudFront (same-origin photo reads): APPLIED AND DEPLOYED, dev + prod
 
-**Infra + app change - `feat/unit-media-cloudfront` (design 2026-07-21). NOT YET APPLIED/DEPLOYED. Apply to DEV after merge; PROD rides the M1.11 cutover.** Serves unit photo GETs SAME-ORIGIN through the existing CloudFront distribution (a new S3+OAC media origin + a `/unit-media/*` behavior, 7-day cache) instead of presign-per-read, returns CSP `img-src` to `'self' data: blob:` (the bucket origin is dropped from `img-src` ONLY; `connect-src` keeps it for uploads), best-effort-deletes removed photos, and wires live-mode local dev to the real dev media bucket. Reads work in EVERY env via the app's own `GET /unit-media/*` streaming route even before the apply (it pipes from the media store on the EC2 instance role); the apply is what moves the READ onto CloudFront (`x-cache`, edge caching) and lets `img-src` drop the bucket origin. Uploads are UNCHANGED (browser-to-S3 presigned POST).
+**Infra + app change - `feat/unit-media-cloudfront` (design 2026-07-21). DONE: applied and deployed on dev AND prod (operator-confirmed 2026-09-01); nothing owed.** The rollout steps below are kept as the record of what was created and, in particular, for the step-4 verification list and the step-5 live-mode foot-gun, which are standing hazards rather than one-time actions. **Note this one never looked broken while it sat here:** reads worked in every environment the whole time via the app's own `GET /unit-media/*` route on the EC2 instance role, so the apply only moved the READ onto CloudFront and let `img-src` drop the bucket origin. Serves unit photo GETs SAME-ORIGIN through the existing CloudFront distribution (a new S3+OAC media origin + a `/unit-media/*` behavior, 7-day cache) instead of presign-per-read, returns CSP `img-src` to `'self' data: blob:` (the bucket origin is dropped from `img-src` ONLY; `connect-src` keeps it for uploads), best-effort-deletes removed photos, and wires live-mode local dev to the real dev media bucket. Reads work in EVERY env via the app's own `GET /unit-media/*` streaming route even before the apply (it pipes from the media store on the EC2 instance role); the apply is what moves the READ onto CloudFront (`x-cache`, edge caching) and lets `img-src` drop the bucket origin. Uploads are UNCHANGED (browser-to-S3 presigned POST).
 
 Order is not critical (deploy-first serves photos via the EC2 fallback route; apply-first is inert until the app emits relative `/unit-media` URLs) - do both, then verify. To roll it out in an env:
 
@@ -334,11 +334,11 @@ Order is not critical (deploy-first serves photos via the EC2 fallback route; ap
 5. **Live-mode local dev QA (`:5174`):** `npm run dev` (live) now logs the resolved media bucket at boot; photo upload + display work at `:5174` - upload needs step 2's `localhost:5174` CORS origin applied first (display works without it, since the app route streams server-side). **Foot-gun (by design, D4 mirror-true):** live mode now holds REAL destructive authority over the shared dev bucket - removing a photo in a local live session issues a real S3 DeleteObject on `hc-dev-media-<account>` (unrecoverable; the deployed dev stack loses that object too). Local photo-removal testing that should not touch shared dev data belongs on the hermetic stack (`npm run dev -- --local --mock --seeded`).
 6. **Prod** rides the M1.11 cutover (`npm run plan -- prod` / `npm run apply -- prod` + the promote), matching how the s3_media upload CORS was staged.
 
-### Outbound MMS media transcoding (2026-07-16): npm install owed; NO new infra
+### Outbound MMS media transcoding (2026-07-16): DONE - deps installed, deployed; NO new infra
 
 The MMS composer upload moved to the same direct-to-S3 presign/confirm pattern, and confirm now transcodes webp/pdf/oversized images into a Twilio-deliverable JPEG (fixes Twilio error 12300). Post-merge:
 
-- **`npm install` is owed on merge** - new app-workspace runtime deps `sharp` + `@hyzyla/pdfium` (the arm64 `npm ci --workspace app --omit=dev` was container-proven on the branch; the lockfile carries `@img/sharp-linux-arm64`).
+- **`npm install` was owed on merge and is DONE** - the app-workspace runtime deps `sharp` + `@hyzyla/pdfium` are installed and deployed (the arm64 `npm ci --workspace app --omit=dev` was container-proven on the branch; the lockfile carries `@img/sharp-linux-arm64`). Kept because a fresh clone or a new deploy host still needs them, and the arm64 optional-dep detail is the part that bites.
 - **No new Terraform.** The MMS upload uses the SAME media bucket + the SAME `s3_media` CORS rule as unit photos (already applied on dev); prod CORS rides the M1.11 cutover apply above. Reads/writes use the existing EC2 role `s3:GetObject`/`s3:PutObject` on `MEDIA_BUCKET`.
 - The busboy `POST /api/media/uploads` endpoint is REMOVED (superseded by `/api/media/presign` + `/api/media/confirm`); nothing operational referenced it.
 

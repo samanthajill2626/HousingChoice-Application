@@ -583,9 +583,62 @@ const MMS_ERROR_CODE_REASONS: Record<string, string> = {
   '30006': "Attachment didn't get through, texts may still work",
 };
 
-/** Whether the failing leg carried media - an MMS bubble or a relay MMS rollup. */
+/**
+ * Overrides that apply ONLY to a RELAY leg, checked after MMS_ERROR_CODE_REASONS
+ * and before ERROR_CODE_REASONS.
+ *
+ * 30003 is the whole map, and the reason is D19: NO RELAY RETRY EXISTS. The
+ * status webhook returns on the relay-pointer branch before it ever reaches the
+ * 1:1 30003 retry enqueue, and the retry-counter branch that added this map adds
+ * no relay retry either. So "will retry" on a relay leg is a promise the product
+ * cannot keep - it was false before this change and it is false after it - and
+ * staff read it as "leave this alone, it is still going".
+ *
+ * NATIVE GROUP TEXT IS EXCLUDED, AND ITS STATED RATIONALE WAS WRONG. The
+ * exclusion (D20) rested on "a group text's 30003 retry is real, because the
+ * webhook's 30003 arm carries no group_text guard where the 30005/30006 and
+ * 21610 arms do". The first half is true and the conclusion does not follow:
+ * the retry IS enqueued, and then it CANNOT SUCCEED. `retrySend`'s handler
+ * calls `sendMessage`, which throws `GroupTextSendNotSupportedError` for any
+ * `conversation.type === 'group_text'` (app/src/services/sendMessage.ts:293);
+ * the handler catches `SendRefusedError`, logs, and stops the chain. So a
+ * native group-text leg promises a retry that never sends, exactly as a relay
+ * leg does.
+ *
+ * The exclusion is KEPT anyway, deliberately (Cameron, 2026-09-01): the promise
+ * is equally false on `main`, so leaving it costs nothing new, and widening the
+ * override reaches a render path this branch fenced off. It is tracked as
+ * `group-text-30003-leg-retry-promise-unverified`, now PROVEN rather than
+ * suspected. Anyone extending this map should start there - and should expect
+ * the three tests that pin the group-text carve-out to flip, since they
+ * currently encode this rationale rather than the behaviour.
+ *
+ * The 1:1 entry above stays byte-for-byte as it is, em dash and all: a 1:1
+ * 30003 retry genuinely does send.
+ *
+ * THE CARRIER CODE IS KEPT. Only the promise is dropped: 30003 is a real number
+ * an operator can look up, unlike the app-invented codes in
+ * INTERNAL_CODE_REASONS. Nothing here appends it - the `(error <code>)` template
+ * at the end of `deliveryReason` does, which is why the string below stops at the
+ * observation.
+ */
+const RELAY_ERROR_CODE_REASONS: Record<string, string> = {
+  '30003': 'Phone unreachable',
+};
+
+/** What SCOPES a reason to the leg that actually failed. Both flags are hints,
+ *  not routing: an unmapped code reads the same whatever they say.
+ *
+ *  `media` and `relay` are independent, and their ORDER is decided in
+ *  `deliveryReason` rather than here - see the chain there. */
 export interface DeliveryReasonOptions {
+  /** The failing leg carried media - an MMS bubble or a relay MMS rollup. */
   media?: boolean;
+  /** The failing leg is a RELAY fan-out leg, as opposed to a native group text,
+   *  a 1:1 message, an email or a broadcast recipient. Set from the timeline's
+   *  `rosterKind`; absent everywhere the presenter has no product input, which is
+   *  exactly the set of positions D19 leaves alone. */
+  relay?: boolean;
 }
 
 /**
@@ -605,9 +658,28 @@ export interface DeliveryReasonOptions {
  * This is STAFF-FACING dashboard copy, so it lives here beside
  * ERROR_CODE_REASONS rather than in the app's message catalog (which is the
  * single source for automated MEMBER-facing copy).
+ *
+ * `transient_cap` and `enqueue_failed` are the two closes the fan-out ladders
+ * write when a multi-recipient send can no longer advance: the pass cap is spent
+ * with legs still deferred, or the continuation could not be scheduled at all
+ * (app/src/jobs/broadcastFanOut.ts and relayFanOut.ts). They are kept DISTINCT
+ * on purpose - reusing the cap's wording for a scheduling failure would tell an
+ * operator retries ran when none did.
+ *
+ * `enqueue_failed` deliberately does NOT name a cause. The same close also fires
+ * from the hop-count and no-adapter guards in jobs.ts, so "the queue is down"
+ * would be a guess an operator would then act on.
+ *
+ * Unlike `contact_opted_out`, neither gets a per-position escape hatch:
+ * `presentLegDelivery` intercepts the opted-out code alone, so these two are
+ * written into recipient SLOTS and one sentence has to serve a broadcast's
+ * results badge, the relay rollup, the accessible-name recital and a single
+ * member's row.
  */
 const INTERNAL_CODE_REASONS: Record<string, string> = {
   contact_opted_out: 'Everyone here has opted out - nothing was sent',
+  transient_cap: 'Sending gave up after repeated carrier deferrals',
+  enqueue_failed: 'Sending could not be scheduled',
 };
 
 /**
@@ -632,8 +704,20 @@ export function deliveryReason(
   if (errorCode === undefined || errorCode.length === 0) return undefined;
   const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
   if (internal !== undefined) return internal;
+  // THE ORDER IS LOAD-BEARING, and it is pinned by a test because nothing
+  // observable depends on it today: media FIRST, relay SECOND, base LAST. The
+  // two override maps are disjoint right now (media holds 30005/30006, relay
+  // holds 30003), so either order gives the same answers - which is precisely
+  // why it has to be decided before the maps grow. Consulted the other way
+  // round, a relay map that ever gained a 30005 would silently un-hedge the
+  // prod-2026-08-24 MMS copy on a relay attachment leg, on the very surface whose
+  // own comment (Timeline.tsx per-recipient row) calls that contradiction the
+  // thing it exists to prevent. The MMS hedge is about what the CARRIER could not
+  // move; the relay override is about what THIS APP will not do next. When both
+  // apply, the carrier's reading is the one staff need first.
   const mapped =
     (opts.media === true ? ownReason(MMS_ERROR_CODE_REASONS, errorCode) : undefined) ??
+    (opts.relay === true ? ownReason(RELAY_ERROR_CODE_REASONS, errorCode) : undefined) ??
     ownReason(ERROR_CODE_REASONS, errorCode);
   return mapped !== undefined
     ? `${mapped} (error ${errorCode})`

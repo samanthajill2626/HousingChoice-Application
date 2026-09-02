@@ -6,11 +6,18 @@
 // These suites would have caught the broadcasts.setRecipient /
 // messages.setRecipientDelivery overlap bug (enqueue_failed on a real send).
 //
+// It also covers the FAN-OUT PASS CLAIM (M5) on both repos: `claimFanoutPass`
+// is a conditional ADD on a TOP-LEVEL scalar (`fanout_attempt`) whose atomicity,
+// cap refusal and missing-vs-capped disambiguation only exist against a real
+// DynamoDB. The fakes model the semantics; they cannot model the race, and a
+// slot-resident counter would look correct in them.
+//
 // Self-skipping like the other integration suites: when nothing answers at
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -44,7 +51,7 @@ if (!reachable) {
   );
 }
 
-describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions against DynamoDB Local', () => {
+describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-out pass claims against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
   const client = createDynamoClient({ endpoint });
   const doc = createDocumentClient({ endpoint });
@@ -55,6 +62,8 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions against Dy
   const messages = createMessagesRepo(repoDeps);
 
   const bases = ['broadcasts', 'messages'] as const;
+  const broadcastsTable = tableName('broadcasts', testEnv);
+  const messagesTable = tableName('messages', testEnv);
 
   beforeAll(async () => {
     for (const base of bases) {
@@ -387,5 +396,204 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions against Dy
     const after = await broadcasts.getById(b.broadcastId);
     expect(after).toBeDefined();
     expect(after?.status).toBe('sending');
+  });
+
+  // --- claimFanoutPass: the durable fan-out pass counter (M5, spec D1-D6) ---
+  //
+  // The continuation ladders used to count passes in the ENQUEUED ENVELOPE, so a
+  // broken queue froze the count and the cap-and-close branch was unreachable.
+  // The count now lives on the durable item as a TOP-LEVEL scalar claimed by a
+  // conditional ADD before the work it authorises. What only a real DynamoDB can
+  // prove, and what these cases are here for: the ADD is atomic under
+  // concurrency, the cap is a ConditionExpression rather than a read-then-write,
+  // and a refused claim is disambiguated `capped` vs `missing` by a STRONGLY
+  // consistent read (both repos' plain getters are eventually consistent).
+
+  /** A fresh draft broadcast with NO fanout_attempt (a pre-branch row). */
+  async function seedBroadcast(): Promise<string> {
+    const created = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'fan-out claim',
+    });
+    return created.broadcastId;
+  }
+
+  /** A relay INBOUND source message with NO fanout_attempt (a pre-branch row). */
+  async function seedSourceMessage(): Promise<{ conversationId: string; tsMsgId: string }> {
+    const conversationId = `conv-claim-${randomUUID().slice(0, 8)}`;
+    const providerTs = new Date().toISOString();
+    const providerSid = `SM${randomUUID().slice(0, 12)}`;
+    const appended = await messages.append({
+      conversationId,
+      providerSid,
+      providerTs,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'unknown',
+      deliveryStatus: 'delivered',
+      relaySenderKey: 'c-alice',
+      deliveryRecipients: {},
+      body: 'is the unit still available?',
+    });
+    return { conversationId, tsMsgId: appended.tsMsgId };
+  }
+
+  /** Plant an exact counter value (a raw write - no repo method sets it). */
+  async function setStoredFanoutAttempt(
+    table: string,
+    key: Record<string, string>,
+    value: number,
+  ): Promise<void> {
+    await doc.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: key,
+        UpdateExpression: 'SET #fa = :n',
+        ExpressionAttributeNames: { '#fa': 'fanout_attempt' },
+        ExpressionAttributeValues: { ':n': value },
+      }),
+    );
+  }
+
+  /** Read the persisted counter back STRONGLY consistently. */
+  async function readStoredFanoutAttempt(
+    table: string,
+    key: Record<string, string>,
+  ): Promise<number | undefined> {
+    const { Item } = await doc.send(
+      new GetCommand({ TableName: table, Key: key, ConsistentRead: true }),
+    );
+    return (Item as { fanout_attempt?: number } | undefined)?.fanout_attempt;
+  }
+
+  it('broadcasts.claimFanoutPass: an item written BEFORE this branch (no fanout_attempt) claims at 1 - D4, spec 7.8', async () => {
+    const broadcastId = await seedBroadcast();
+    expect(await broadcasts.claimFanoutPass(broadcastId, 3)).toEqual({
+      outcome: 'claimed',
+      attempt: 1,
+    });
+    // ADD creates the attribute from absent: no migration, no backfill, no
+    // seeding step at the creation site.
+    expect(await readStoredFanoutAttempt(broadcastsTable, { broadcastId })).toBe(1);
+  });
+
+  it('messages.claimFanoutPass: a source message written BEFORE this branch (no fanout_attempt) claims at 1 - D4, spec 7.8', async () => {
+    const { conversationId, tsMsgId } = await seedSourceMessage();
+    expect(await messages.claimFanoutPass(conversationId, tsMsgId, 3)).toEqual({
+      outcome: 'claimed',
+      attempt: 1,
+    });
+    expect(await readStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId })).toBe(1);
+  });
+
+  it('broadcasts.claimFanoutPass: at cap-1 the LAST pass is claimed; at cap the claim is refused with the unchanged count', async () => {
+    const broadcastId = await seedBroadcast();
+    await setStoredFanoutAttempt(broadcastsTable, { broadcastId }, 2);
+    expect(await broadcasts.claimFanoutPass(broadcastId, 3)).toEqual({
+      outcome: 'claimed',
+      attempt: 3,
+    });
+    expect(await broadcasts.claimFanoutPass(broadcastId, 3)).toEqual({
+      outcome: 'capped',
+      attempt: 3,
+    });
+    // The refused claim must not have advanced the counter (the cap is a
+    // ConditionExpression, so the ADD never ran).
+    expect(await readStoredFanoutAttempt(broadcastsTable, { broadcastId })).toBe(3);
+  });
+
+  it('messages.claimFanoutPass: at cap-1 the LAST pass is claimed; at cap the claim is refused with the unchanged count', async () => {
+    const { conversationId, tsMsgId } = await seedSourceMessage();
+    await setStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId }, 2);
+    expect(await messages.claimFanoutPass(conversationId, tsMsgId, 3)).toEqual({
+      outcome: 'claimed',
+      attempt: 3,
+    });
+    expect(await messages.claimFanoutPass(conversationId, tsMsgId, 3)).toEqual({
+      outcome: 'capped',
+      attempt: 3,
+    });
+    expect(await readStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId })).toBe(3);
+  });
+
+  it('broadcasts.claimFanoutPass: a MISSING broadcast returns `missing`, never `capped`', async () => {
+    // The two refusals are the SAME ConditionalCheckFailedException; only the
+    // consistent re-read tells them apart, and the caller closes differently.
+    expect(await broadcasts.claimFanoutPass(`bcast-${randomUUID()}`, 3)).toEqual({
+      outcome: 'missing',
+    });
+  });
+
+  it('messages.claimFanoutPass: a MISSING source message returns `missing`, never `capped`', async () => {
+    const { conversationId } = await seedSourceMessage();
+    // Same partition, a tsMsgId never written: the existence predicate is
+    // attribute_exists(tsMsgId) - the RANGE key - so this is a missing ITEM,
+    // not a live conversation.
+    expect(await messages.claimFanoutPass(conversationId, '9999-01-01T00:00:00.000Z#SMnope', 3)).toEqual({
+      outcome: 'missing',
+    });
+    expect(
+      await messages.claimFanoutPass(`conv-absent-${randomUUID().slice(0, 8)}`, 'ts#SMnope', 3),
+    ).toEqual({ outcome: 'missing' });
+  });
+
+  it('broadcasts.claimFanoutPass: 8 CONCURRENT claims take 8 DISTINCT pass numbers, exactly 1..8 - D5, spec 7.2', async () => {
+    const broadcastId = await seedBroadcast();
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => broadcasts.claimFanoutPass(broadcastId, 8)),
+    );
+    expect(results.every((r) => r.outcome === 'claimed')).toBe(true);
+    const attempts = results
+      .map((r) => (r.outcome === 'missing' ? -1 : r.attempt))
+      .sort((a, b) => a - b);
+    expect(new Set(attempts).size).toBe(8);
+    expect(attempts).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(await readStoredFanoutAttempt(broadcastsTable, { broadcastId })).toBe(8);
+  });
+
+  it('messages.claimFanoutPass: 8 CONCURRENT claims take 8 DISTINCT pass numbers, exactly 1..8 - D5, spec 7.2', async () => {
+    const { conversationId, tsMsgId } = await seedSourceMessage();
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => messages.claimFanoutPass(conversationId, tsMsgId, 8)),
+    );
+    expect(results.every((r) => r.outcome === 'claimed')).toBe(true);
+    const attempts = results
+      .map((r) => (r.outcome === 'missing' ? -1 : r.attempt))
+      .sort((a, b) => a - b);
+    expect(new Set(attempts).size).toBe(8);
+    expect(attempts).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(await readStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId })).toBe(8);
+  });
+
+  it('broadcasts.claimFanoutPass: the count SURVIVES a wholesale recipient-slot write (setRecipient) - D2, spec 7.1', async () => {
+    // setRecipient is the write that matters: `SET recipients.#ck = :rec`
+    // replaces the WHOLE slot, so a counter living inside a slot would be erased
+    // on every pass and read 1 forever - the exact no-op D2 forbids.
+    const broadcastId = await seedBroadcast();
+    await broadcasts.markSending(broadcastId, { 'c-1': { status: 'queued' } });
+    expect(await broadcasts.claimFanoutPass(broadcastId, 3)).toEqual({
+      outcome: 'claimed',
+      attempt: 1,
+    });
+    expect(await broadcasts.setRecipient(broadcastId, 'c-1', { status: 'sent' })).toBe(true);
+    expect(await readStoredFanoutAttempt(broadcastsTable, { broadcastId })).toBe(1);
+  });
+
+  it('messages.claimFanoutPass: the count SURVIVES a wholesale recipient-slot write (setRecipientDelivery) - D2, spec 7.1', async () => {
+    // setRecipientDelivery, NOT updateRecipientDeliveryStatus. The latter writes
+    // CHILD FIELDS only (delivery_recipients.#mk.#st = :s and friends), so a
+    // slot-resident counter would SURVIVE it and this test would pass against
+    // the very design D2 rules out. Only the wholesale slot SET proves it.
+    const { conversationId, tsMsgId } = await seedSourceMessage();
+    expect(await messages.claimFanoutPass(conversationId, tsMsgId, 3)).toEqual({
+      outcome: 'claimed',
+      attempt: 1,
+    });
+    await messages.setRecipientDelivery(conversationId, tsMsgId, 'c-bob', {
+      status: 'sent',
+      sid: 'SMout-bob',
+    });
+    expect(await readStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId })).toBe(1);
   });
 });

@@ -1334,6 +1334,22 @@ export function createFakeWorld(): FakeWorld {
     },
 
     // --- Relay groups (M1.7) ---
+    async claimFanoutPass(conversationId, tsMsgId, cap) {
+      // Models the REAL semantics, not a rubber stamp: a fake that always
+      // returned `claimed` would make every cap test in the fan-out suites pass
+      // vacuously. Increment-and-return, refuse at cap with the UNCHANGED count,
+      // and return `missing` (never a throw) for an absent item - the real repo
+      // disambiguates its ConditionalCheckFailed the same way.
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item) return { outcome: 'missing' };
+      const current = typeof item.fanout_attempt === 'number' ? item.fanout_attempt : 0;
+      if (current >= cap) return { outcome: 'capped', attempt: current };
+      const next = current + 1;
+      // Stored by reference (the array holds the items themselves), so this is
+      // the same top-level attribute a test can seed or assert on.
+      item.fanout_attempt = next;
+      return { outcome: 'claimed', attempt: next };
+    },
     async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       if (!item) throw new Error(`setRecipientDelivery: no message ${conversationId}/${tsMsgId}`);
@@ -2738,6 +2754,26 @@ export function createFakeWorld(): FakeWorld {
       }
       b.recipients = { ...b.recipients, [contactKey]: recipient };
       return true;
+    },
+    async claimFanoutPass(broadcastId, cap) {
+      // Models the REAL semantics (increment-and-return, refuse at cap with the
+      // UNCHANGED count); a fake that always claimed would make every cap test
+      // pass vacuously.
+      //
+      // TWO deliberate departures from the neighbouring methods:
+      // 1. It reads and writes the MAP ENTRY, never a getById result - getById
+      //    returns a shallow COPY, so a claim built on one would silently ignore
+      //    a test that seeded `world.broadcasts.get(id)!.fanout_attempt`.
+      // 2. A missing broadcast RETURNS `missing` instead of throwing the
+      //    synthesized ConditionalCheckFailedException the other mutators throw
+      //    - otherwise the missing branch could never be exercised here.
+      const b = broadcasts.get(broadcastId);
+      if (!b) return { outcome: 'missing' };
+      const current = typeof b.fanout_attempt === 'number' ? b.fanout_attempt : 0;
+      if (current >= cap) return { outcome: 'capped', attempt: current };
+      const next = current + 1;
+      b.fanout_attempt = next;
+      return { outcome: 'claimed', attempt: next };
     },
     async bumpStats(broadcastId, delta) {
       const b = broadcasts.get(broadcastId);

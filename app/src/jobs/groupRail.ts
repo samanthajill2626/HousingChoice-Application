@@ -56,7 +56,14 @@ export function registerGroupRailJobHandler(deps: GroupRailJobDeps = {}): void {
       return;
     }
     rail ??= createGroupRailService({ ...(deps.logger !== undefined && { logger: deps.logger }) });
-    const result = await rail.ensureGroupRail({ conversationId: payload.conversationId, members: [] });
+    const result = await rail.ensureGroupRail({
+      conversationId: payload.conversationId,
+      members: [],
+      // Nobody is waiting on this job, so it can afford to wait out Twilio's
+      // async binding propagation rather than report a fresh rail as short of
+      // its roster (rail-binding-propagation-retry).
+      awaitBindingPropagation: true,
+    });
     if (result.status === 'failed' || result.status === 'unavailable') {
       // WARN, not ERROR: a rail-less thread is inbound-only, which the thread
       // view says out loud. The ERROR channel is reserved for the guardrail

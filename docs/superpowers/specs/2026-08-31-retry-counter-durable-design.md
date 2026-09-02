@@ -198,9 +198,30 @@ edit. Filed rather than shipped as a no-op that reads like a fix.
 today - the relay pointer branch of the status webhook returns before the 1:1
 retry branch - and this branch adds none.
 
-**D20. Native group text is NOT included.** Its 30003 retry is real: the
-30005/30006 and 21610 arms each carry a `group_text` guard, and the 30003 arm
-carries none, so a group-text 30003 reaches the retry enqueue like any 1:1.
+**D20. Native group text is NOT included** - but **the original rationale for
+that was WRONG, and is corrected here rather than quietly left standing.**
+
+The decision was justified as "its 30003 retry is real: the 30005/30006 and
+21610 arms each carry a `group_text` guard, and the 30003 arm carries none, so a
+group-text 30003 reaches the retry enqueue like any 1:1." The premise is true;
+the conclusion does not follow. The retry is ENQUEUED and then **cannot
+succeed**: `retrySend` calls `sendMessage`, which throws
+`GroupTextSendNotSupportedError` for `conversation.type === 'group_text'`
+(`sendMessage.ts:293`), and the handler catches `SendRefusedError`, logs, and
+stops the chain. A native group-text leg promises a retry that never sends -
+exactly the falsehood D19 exists to remove.
+
+Found by the planner's plan-blind adversarial reviewer at handback. It is the
+sixth instance in this mission of the pattern Sec 10 names: a mechanism traced
+partway - here to the enqueue - and credited for what happens after it.
+
+**The exclusion stands anyway, on Cameron's 2026-09-01 ruling**, for reasons
+that do not depend on the broken premise: the promise is equally false on
+`main`, so keeping it regresses nothing, and widening the override reaches a
+render path this branch fenced. The debt is tracked as
+`group-text-30003-leg-retry-promise-unverified` (now PROVEN, not suspected),
+which also records that the three tests pinning the carve-out encode this
+rationale and will need to flip when it is fixed.
 
 **D21. Every render position for a relay leg's reason changes together.**
 `Timeline.tsx` states the invariant in its own comment: one flag feeds the

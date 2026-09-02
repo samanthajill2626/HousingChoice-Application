@@ -1,29 +1,50 @@
 ---
 id: group-text-30003-leg-retry-promise-unverified
-title: A native group-text 30003 LEG promises a retry that no code path schedules
+title: A native group-text 30003 promises a retry that never sends, at BOTH the leg and message levels
 type: bug
 severity: low
 status: open
 area: dashboard/messaging
 created: 2026-09-01
-refs: app/src/routes/webhooks/twilio.ts:2408, app/src/routes/webhooks/twilio.ts:2567, app/src/services/groupReceipts.ts:336, app/src/services/groupReceipts.ts:422, dashboard/src/routes/contact/deliveryStatus.ts:597, dashboard/src/routes/contact/Timeline.delivery.test.tsx:517
+updated: 2026-09-01
+refs: app/src/services/sendMessage.ts:293, app/src/routes/webhooks/twilio.ts:2408, app/src/routes/webhooks/twilio.ts:2567, app/src/services/groupReceipts.ts:336, app/src/services/groupReceipts.ts:422, dashboard/src/routes/contact/deliveryStatus.ts:597, dashboard/src/routes/contact/Timeline.delivery.test.tsx:517
 ---
 
-**Problem.** The "will retry" tail on a 30003 is true at the MESSAGE level and
-false at the LEG level, and native group text is currently exempted from the
-relay fix on the strength of the message-level fact alone. M5 traced both
-levels; the evidence is recorded here so the follow-on mission starts from the
-trace rather than from a one-level rationale.
+**Problem.** The "will retry" tail on a native group-text 30003 is FALSE, at
+both the leg and the message level, by two different mechanisms. Native group
+text is nonetheless exempted from M5's relay fix - originally because the
+message level looked genuine, and now (2026-09-01) as a deliberate scope call
+after that turned out to be wrong too. See the update immediately below, then
+the two-level trace.
 
-Both of the following hold, at different levels:
+**UPDATE 2026-09-01, planner handback review: level 1 below is WRONG, and with
+it the last support for D20's exemption. NEITHER level retries.**
 
-1. MESSAGE level - the retry is real. The 30003 arm of the `/webhooks/twilio`
-   status route resolves `messages.getByProviderSid(MessageSid)`
+The message-level retry is ENQUEUED but **cannot send**. `retrySend`'s handler
+calls `sendMessage`, and `sendMessage` throws `GroupTextSendNotSupportedError`
+for any `conversation.type === 'group_text'`
+(`app/src/services/sendMessage.ts:293`, class at `:177`). The handler catches
+`SendRefusedError` - which that error extends - logs "send refused, retry chain
+stopped", and returns. No native group text has ever been re-sent after a 30003.
+
+So the trace is not "true at the message level, false at the leg level". It is
+false at BOTH, by two different mechanisms: the leg level never schedules a
+retry, and the message level schedules one that is refused on execution. The
+severity below is left at `low` because nothing REGRESSED - `main` makes the
+same false promise - but the rationale for treating group text differently from
+relay is gone.
+
+The original two-level trace, kept because the leg-level half is still correct
+and still needed:
+
+1. MESSAGE level - **the retry is enqueued and then refused** (see the update
+   above; this bullet originally read "the retry is real"). The 30003 arm of the
+   `/webhooks/twilio` status route resolves
+   `messages.getByProviderSid(MessageSid)`
    (`app/src/routes/webhooks/twilio.ts:2408`) and enqueues `retrySend`
-   (`:2567`) with no `group_text` guard. A message-level group-text 30003
-   therefore DOES reach the retry enqueue, exactly as a 1:1 does. This is the
-   fact M5's spec recorded (R4-6) and the fact D20's group-text exemption rests
-   on.
+   (`:2567`) with no `group_text` guard - so it DOES reach the enqueue, exactly
+   as a 1:1 does. That is where the trace originally stopped, and stopping there
+   is what made the exemption look justified.
 2. LEG level - the retry does not exist. Per-recipient group-text delivery codes
    are not written by that route at all. They are written by the Conversations
    receipts side, `applyReceipt` ->
@@ -70,10 +91,16 @@ followed by a retry, and every message-level 1:1 30003 is. Two candidate shapes:
   code is `row.slot.errorCode`.
 
 Either way the message-level chip needs the `group_text` aggregate case handled
-separately, because its code can be leg-derived (above). Confirm before
-building: whether a group-text leg can ever be retried by any path (grep found
-none), and whether the rollup should keep copying a leg code onto the message
-row at all.
+separately, because its code can be leg-derived (above).
+
+**One open question remains** - whether the rollup should keep copying a leg
+code onto the message row at all. The other one is now ANSWERED: no group-text
+leg is ever retried, and no group-text MESSAGE is either, since the enqueued
+retry is refused at `sendMessage.ts:293`.
+
+Note the axis question is now simpler than it looks: for `group_text` BOTH
+levels want the honest copy, so a leg-vs-message distinction is not needed to
+fix this issue - only to avoid changing 1:1, where the retry is genuine.
 
 **Related.**
 [relay-30003-classified-transient-retrying](./relay-30003-classified-transient-retrying.md)

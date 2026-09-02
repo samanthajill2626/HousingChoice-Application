@@ -594,12 +594,27 @@ const MMS_ERROR_CODE_REASONS: Record<string, string> = {
  * cannot keep - it was false before this change and it is false after it - and
  * staff read it as "leave this alone, it is still going".
  *
- * NATIVE GROUP TEXT IS DELIBERATELY EXCLUDED (D20), which is why this is scoped
- * by product rather than applied to ERROR_CODE_REASONS outright. A group text's
- * 30003 retry is real: the 30005/30006 and 21610 arms of the webhook each carry a
- * group_text guard and the 30003 arm carries none, so a group-text leg reaches
- * the retry enqueue exactly as a 1:1 does. The 1:1 entry above therefore stays
- * byte-for-byte as it is, em dash and all.
+ * NATIVE GROUP TEXT IS EXCLUDED, AND ITS STATED RATIONALE WAS WRONG. The
+ * exclusion (D20) rested on "a group text's 30003 retry is real, because the
+ * webhook's 30003 arm carries no group_text guard where the 30005/30006 and
+ * 21610 arms do". The first half is true and the conclusion does not follow:
+ * the retry IS enqueued, and then it CANNOT SUCCEED. `retrySend`'s handler
+ * calls `sendMessage`, which throws `GroupTextSendNotSupportedError` for any
+ * `conversation.type === 'group_text'` (app/src/services/sendMessage.ts:293);
+ * the handler catches `SendRefusedError`, logs, and stops the chain. So a
+ * native group-text leg promises a retry that never sends, exactly as a relay
+ * leg does.
+ *
+ * The exclusion is KEPT anyway, deliberately (Cameron, 2026-09-01): the promise
+ * is equally false on `main`, so leaving it costs nothing new, and widening the
+ * override reaches a render path this branch fenced off. It is tracked as
+ * `group-text-30003-leg-retry-promise-unverified`, now PROVEN rather than
+ * suspected. Anyone extending this map should start there - and should expect
+ * the three tests that pin the group-text carve-out to flip, since they
+ * currently encode this rationale rather than the behaviour.
+ *
+ * The 1:1 entry above stays byte-for-byte as it is, em dash and all: a 1:1
+ * 30003 retry genuinely does send.
  *
  * THE CARRIER CODE IS KEPT. Only the promise is dropped: 30003 is a real number
  * an operator can look up, unlike the app-invented codes in

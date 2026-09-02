@@ -79,7 +79,16 @@ export const BROADCAST_SEND_JOB = 'broadcast.send';
 /** Continuation cap: a transient failure re-enqueues at most this many times. */
 export const MAX_BROADCAST_ATTEMPTS = 3;
 
-/** Exponential backoff for the transient-failure continuation: 5s, 10s, 20s. */
+/**
+ * Exponential backoff for the transient-failure continuation, as a function of
+ * the pass it is waiting FOR: 5s, 10s, 20s for attempts 1, 2, 3.
+ *
+ * The LIVE ladder waits 10s then 20s, because the continuation is scheduled with
+ * `nextAttempt` - it waits its OWN backoff, not the finished pass's. The twin in
+ * relayFanOut is called with the CURRENT attempt and so waits 5s then 10s; that
+ * difference is deliberate and preserved (design D7/D11). Read the call site
+ * before changing either.
+ */
 export function broadcastBackoffMs(attempt: number): number {
   return 5_000 * 2 ** (attempt - 1);
 }

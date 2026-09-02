@@ -20,7 +20,6 @@ import {
   TransactionCanceledException,
 } from '@aws-sdk/client-dynamodb';
 import {
-  DeleteCommand,
   PutCommand,
   QueryCommand,
   type QueryCommandInput,

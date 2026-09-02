@@ -3,15 +3,16 @@ id: npm-test-dynamodb-local-contention
 title: npm test is not reliably green - four integration suites fail nondeterministically under shared DynamoDB Local contention
 type: bug
 severity: high
-status: open
+status: resolved
 area: app/test-infra
 created: 2026-08-05
-updated: 2026-09-01
+updated: 2026-09-02
+resolved: 2026-09-02
 reopened: 2026-08-21
 refs: app/test/groupCrossCheck.test.ts, app/test/unreadIndexRepo.integration.test.ts:561, app/test/seedProfile.integration.test.ts:122, app/test/seedLive.test.ts, app/src/lib/dynamoAdmin.ts, app/scripts/db-update-gsis.ts, app/vitest.config.ts
 ---
 
-**Update (2026-09-01, npm-test-soundness mission - the issue stays OPEN).**
+**Update (2026-09-01, npm-test-soundness mission - the work below shipped; see the 2026-09-02 closure at the top of the reopen section).**
 The unprotected control-plane surface named below is closed: every mutating
 send in `app/src/lib/dynamoAdmin.ts` now retries `InternalFailure` /
 `InternalServerError` behind a fail-closed local-endpoint gate, with a
@@ -436,6 +437,50 @@ which is exactly why the load rig was needed to test the fix at all.
   days old - the warning fired and nobody acted on it.
 - Reopen if a full `npm test` fails a DynamoDB suite that mints its own
   throwaway prefix, on an otherwise-idle box, twice.
+
+---
+
+## CLOSED 2026-09-02, with a MECHANICAL reopen trigger
+
+**Reopen on ANY `[dynamoAdmin]` line in real suite output.** That is the
+whole trigger. It replaces the prose one above, which is kept for history.
+
+Why this can be an alarm now and could not be before: since 2026-09-01 the
+control-plane retry announces itself (`app/src/lib/dynamoAdmin.ts` - one
+warn per re-send naming the command, table, fault and attempt; one on entry
+to each bounded poll naming its budget), and
+`app/test/dynamoAdminRetry.test.ts` stubs `console.warn` for exactly this
+reason - **every fault that suite provokes is deliberate, so a line escaping
+into a real run cannot have come from a test faking one.** Measured on the
+first instrumented run: 31 lines, all from the stub suite, ZERO from real
+suites. Both final gate runs: zero.
+
+So one line is one real container fault, and it arrives pre-diagnosed. When
+you see one: capture the run's `err.$metadata.httpStatusCode` and
+`$metadata.attempts` before anything else - that settles the open
+SDK-nesting question recorded in
+[`dynamo-local-control-plane-fault-shape-unverified`](./dynamo-local-control-plane-fault-shape-unverified.md)
+for free, and it is only capturable while a sighting is in hand.
+
+**Why closed rather than left open on a timer.** Nothing here names work any
+more: the retry shipped, suite A's latency remedy was struck on 13 green
+runs, and the misleading clean-key recipe is superseded in all three files
+that carried it. What is left is a WATCH, and a watch with an automatic
+alarm does not need an open ticket - it needs the alarm wired, which it now
+is.
+
+A dated close was considered and rejected on this issue's own evidence. It
+was closed once before, on 2026-08-21, and reopened the SAME DAY by a run
+that contradicted the close - so "closed" here has to mean something
+sharper than a countdown. And a countdown is exactly what misled the
+2026-09-01 mission's intake, which began from a belief that this file
+carried a 7-day soak clause; it never did, anywhere. Dates in this registry
+rot quietly (the `aiRunsRepo` TTL fuse dated 2026-11-04 is still sitting
+below, known and undefused). Triggers do not.
+
+The two genuinely unverified questions this mission could not settle moved
+OUT rather than keeping this file open as a parking space - see the issue
+linked above.
 
 <!--
   MERGED 2026-08-21. Four separately filed issues, one root cause and one cost.

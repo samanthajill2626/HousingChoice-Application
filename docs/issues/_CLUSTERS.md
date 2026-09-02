@@ -241,7 +241,7 @@ soundness items; the e2e-under-load items are T-E2E-LOAD.
 
 | sev | issue | why it ships here |
 |---|---|---|
-| high | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | anchor - STILL OPEN after the 2026-09-01 mission (no sighting to prove cured); the control-plane retry landed, suite A's latency remedy was struck on 13 green runs, the clean-key recipe superseded |
+| high | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | anchor - **CLOSED 2026-09-02** with a MECHANICAL reopen trigger (any `[dynamoAdmin]` line in real suite output). Retry landed, suite A struck on 13 green runs, clean-key recipe superseded; the two unverified questions moved to [dynamo-local-control-plane-fault-shape-unverified](./dynamo-local-control-plane-fault-shape-unverified.md) |
 | med | [logcallsiteguard-hook-budget-equals-its-own-cost](./logcallsiteguard-hook-budget-equals-its-own-cost.md) | RESOLVED 2026-09-01 - the 196s premise did not reproduce (6.5s hook, 27x headroom); budget unchanged, measured comments shipped |
 | med | [static-smoke-fails-on-stale-dashboard-dist](./static-smoke-fails-on-stale-dashboard-dist.md) | RESOLVED 2026-09-01 - split: fixture-served behaviour + tracked-source identity never skip; the dist check can only PASS or SKIP |
 

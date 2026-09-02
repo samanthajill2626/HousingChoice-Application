@@ -91,9 +91,13 @@ async function revealMessage(page: Page, body: string) {
 async function expectTransport(page: Page, body: string, transport: string) {
   const bubble = await revealMessage(page, body);
   await expect(
-    bubble.getByText(new RegExp(`^${escapeRegExp(transport)}(?: - |$)`)),
+    bubble.getByText(new RegExp(`^${escapeRegExp(transport)} - `)),
   ).toBeVisible({ timeout: 15_000 });
   return bubble;
+}
+
+async function expectNoTransportTransition(bubble: ReturnType<Page['locator']>, requested: string) {
+  await expect(bubble.getByText(new RegExp(`^${escapeRegExp(requested)} -> `))).toHaveCount(0);
 }
 
 test.beforeEach(async ({ request }) => {
@@ -252,6 +256,7 @@ test('requested and actual carrier transports stay faithful across dashboard mes
 
   // A versioned RCS request stays pending until signed provider evidence arrives.
   const callbackBubble = await expectTransport(page, callbackBody, 'RCS');
+  await expectNoTransportTransition(callbackBubble, 'RCS');
   const callbackResult = await postStatusCallback(request, {
     messageSid: callbackSid,
     status: 'delivered',
@@ -259,7 +264,7 @@ test('requested and actual carrier transports stay faithful across dashboard mes
     to: DIRECT_PHONE,
   });
   expect(callbackResult.status, callbackResult.body).toBe(200);
-  await expect(callbackBubble).toContainText('RCS -> SMS', { timeout: 20_000 });
+  await expect(callbackBubble.getByText(/^RCS -> SMS - /)).toBeVisible({ timeout: 20_000 });
 
   const mixedBubble = await expectTransport(page, mixedBody, 'RCS -> Mixed');
   const mixedList = mixedBubble.getByRole('list', { name: 'Delivery by recipient' });
@@ -269,6 +274,7 @@ test('requested and actual carrier transports stay faithful across dashboard mes
   await expect(mixedList.getByRole('listitem', { name: /RCS -> SMS/ })).toHaveCount(1);
 
   const incompleteBubble = await expectTransport(page, incompleteBody, 'RCS');
+  await expectNoTransportTransition(incompleteBubble, 'RCS');
   await expect(incompleteBubble).not.toContainText('Mixed');
   await expect(
     incompleteBubble.getByRole('list', { name: 'Delivery by recipient' }).getByRole('listitem'),
@@ -295,7 +301,7 @@ test('requested and actual carrier transports stay faithful across dashboard mes
   ).toHaveCount(1);
   await expect(
     excludedList.getByRole('listitem', {
-      name: new RegExp(`^${escapeRegExp(displayPhone(excludedPhone))}\b`),
+      name: new RegExp(`^${escapeRegExp(displayPhone(excludedPhone))} - `),
     }),
   ).toHaveCount(0);
 
@@ -336,7 +342,10 @@ test('requested and actual carrier transports stay faithful across dashboard mes
       { timeout: 20_000, message: 'the direct SMS never reached the fake provider' },
     )
     .toBe(1);
-  await expect(optimisticBubble).toContainText('SMS', { timeout: 20_000 });
+  await expect(optimisticBubble).toContainText(/SMS - to \(555\) 010-0001 - /, {
+    timeout: 20_000,
+  });
+  await expectNoTransportTransition(optimisticBubble, 'SMS');
 
   await page.goto(`${NEXT}/conversations/${NATIVE_GROUP}`);
   await expect(page.getByText(/Everyone in this group text sees everyone's real number/)).toBeVisible({
@@ -347,7 +356,7 @@ test('requested and actual carrier transports stay faithful across dashboard mes
     'Saturday 10am works on our side - confirming with the owner.',
     'MMS',
   );
-  await expect(nativeBubble).not.toContainText(/^SMS(?: - |$)/);
+  await expectNoTransportTransition(nativeBubble, 'MMS');
 
   await page.goto(`${NEXT}/conversations/${RELAY_CONVERSATION}`);
   await expect(page.getByText('With Diana Osei & Gloria Mensah')).toBeVisible({ timeout: 15_000 });

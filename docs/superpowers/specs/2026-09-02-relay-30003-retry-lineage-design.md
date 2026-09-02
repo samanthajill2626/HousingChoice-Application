@@ -8,9 +8,10 @@ Issues closed: `relay-30003-retry-lineage` (med),
 Issues filed by this mission: `relay-member-key-collapses-two-phones-one-contact`,
 plus the inbound-display gap named in Sec 2.
 
-Revision 2, after adversarial review round 1 (two reviewers, 44 findings). The
-adjudications are at
-`docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/spec-r1-adjudications.md`.
+Revision 3, after adversarial review round 1 (two reviewers, 44 findings) and
+round 2 (one continued reviewer, 13 findings). Adjudications are at
+`docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/spec-r1-adjudications.md`
+and `.../spec-r2-adjudications.md`.
 
 Read `docs/issues/relay-30003-retry-lineage.md` first, including its
 "Design knowledge from M5" section. This document does not restate it; it
@@ -58,7 +59,10 @@ relay conversation outright (`app/src/services/sendMessage.ts:297`,
 - `app/src/jobs/relayFanOut.ts` - extraction of the per-leg send unit.
 - `app/src/repos/messagesRepo.ts` - lineage fields and the media-pointer
   suppression for retry rows.
-- The conversation bump caller for D13.
+- `app/src/repos/conversationsRepo.ts` - D16 needs a status-preserving bump and
+  no such method exists: `touchLastActivity` writes `status = 'open'` in its
+  primary branch and its status-free variant is a catch-branch fallback
+  (`:1531-1578`). A new repo method is required, plus its caller.
 - `app/src/routes/dev.ts` and the e2e lane env - the backoff injection seam.
 - `dashboard/src/routes/contact/deliveryStatus.ts`,
   `dashboard/src/routes/contact/Timeline.tsx` including the `MessageBubble` and
@@ -83,11 +87,21 @@ relay conversation outright (`app/src/services/sendMessage.ts:297`,
   presenter is shared; that is not a reason to change them. In particular
   `stalenessClockMs` is NOT modified (D18).
 - **The rollup chip's `outbound` gate.** A member-originated relay source is
-  inbound (`twilio.ts:641`) and renders no rollup chip and no accessible-name
-  recital (`Timeline.tsx:837`, `:934-940`), so the dominant relay case shows
-  nothing about who received a message. The retry ships for BOTH directions;
-  the visible contract lands only where a rollup renders today. Filed as its own
-  issue on the founder's 2026-09-02 ruling.
+  inbound (`twilio.ts:641`) and renders no VISIBLE rollup chip
+  (`Timeline.tsx:837`, `:934-940`), so a sighted operator sees nothing at a
+  glance when one leg of a member's message fails. Filed as its own issue on the
+  founder's 2026-09-02 ruling; adding a chip to an inbound bubble needs copy the
+  product has never written.
+
+  **It does NOT follow that inbound sources render nothing.** Two of D21's three
+  positions exist there: the per-recipient rows (`Timeline.tsx:948-951`) and a
+  dedicated accessible-name recital built for exactly this case -
+  `inboundRecipientName` (`:993-1004`, rendered `:1068-1070` as a hidden semantic
+  group), which is the ONLY delivery information a screen-reader user gets from
+  that bubble. Those two are IN scope on both directions. Leaving them out would
+  ship a recital that recites `Undelivered - Phone unreachable (error 30003)`
+  for ever on a leg whose retry delivered - a reader that actively contradicts
+  the new rule, and strictly worse than today.
 - The relay member-key scheme. One contact on two numbers still collapses into
   one delivery slot. Filed as
   `relay-member-key-collapses-two-phones-one-contact`; D3 works around it.
@@ -117,6 +131,21 @@ fan-out drives today). `type` follows the original (`sms`/`mms`); the
 message-level `delivery_status` is seeded `queued` and, as for every relay
 source, is never advanced - the rollup is the honest surface (see D21).
 
+**The seeded SLOT is specified too, and it is not the same question as the row.**
+The row's single-entry map seeds
+`{ status: 'queued', requestedTransport: <intent>, transportAggregationState: 'planned' }`.
+The `planned` value is load-bearing: `setVersionedAggregationState` can only reach
+`attempted` from `planned` (`messagesRepo.ts:3112-3114`, `:3126`) and throws
+otherwise (`relayFanOut.ts:1418-1424`), so a slot seeded without it throws on the
+very first retry send. The fan-out never hits this because its preflight seeds
+`planned` (`relayFanOut.ts:1326-1339`) - and that preflight is OUTSIDE the range
+D10 extracts.
+
+Note the distinction, which is easy to invert: the inbound prohibition is on the
+MESSAGE's `requestedTransport` (`messagesRepo.ts:913-915`), NOT on the slot's,
+which is validated but permitted (`:922-937`). An inbound retry row's slot may and
+must carry one.
+
 **D3. The claim is the row's `sid#<providerSid>` pointer, created atomically
 with the row.** `append` runs a transaction whose index 1 is that pointer, and
 attributes a dedupe to index 1 ONLY (`messagesRepo.ts:2295-2306`); a condition
@@ -132,9 +161,14 @@ deterministic sort key.
 - The SID contains no `#` (`splitTsMsgId` splits on the first one,
   `messagesRepo.ts:204-209`) and no phone number.
 - `providerTs` is a WALL CLOCK taken at claim time, not derived from the root.
-  This orders the retry after its original in the thread and keeps it out of the
-  fan-out's five-row source-read window (`relayFanOut.ts:771-779`, whose docblock
-  assumes relay sources arrive one at a time).
+  This orders the retry after its original in the thread. The hazard it avoids is
+  narrower than "the five-row window": `bumpKey` appends U+FFFF so that window's
+  bound already excludes any newer row whatever its timestamp
+  (`relayFanOut.ts:771-774`, `:1465-1473`). The real hazard is a DERIVED
+  timestamp - at an identical `providerTs`, `<ts>#relayretry-...` sorts BELOW
+  `<ts>#team-...` and `<ts>#system-...` and would land inside the window. Note
+  that the docblock's standing assumption, "relay sources are inbound, one at a
+  time", is weakened by a design that appends relay-source-shaped rows on a timer.
 
 A duplicate callback, a redelivered callback and two concurrent callbacks all
 lose this create and return `deduped: true`, claiming nothing.
@@ -163,6 +197,14 @@ for lineage today: the relay branch passes `direction: 'outbound'` into
   a parallel ladder.
 - Only the DIGEST is stored (see D11). The changed-number gate compares digests;
   the retry job reads the number it actually sends to from the live roster.
+- **The digest's protection is partial, and the spec must not overclaim it.**
+  `relayMemberKey` falls back to `phone#<E164>` for a contact-less member
+  (`messagesRepo.ts:189-193`), and contact-less members are the normal shape in
+  this repo's fixtures - this feature's own e2e builds two. On those, the member
+  key beside the digest already publishes the destination. That exposure is
+  PRE-EXISTING (`delivery_recipients` is member-keyed and already forwarded to the
+  client) and is not fixed here. The digest is still correct for contact-keyed
+  members, and it is still the right claim identity for both.
 
 **D6. Attempt numbering, cap and backoff match the 1:1 policy exactly**: up to
 three retries at 60s, 120s and 240s (`retrySend.ts:37`, `:39-42`). Matching
@@ -183,20 +225,41 @@ separates fan-out and team legs from announcement legs. The test asserts the
 VALUE, not the imported constant. A retry row inherits the original's sender key
 (D2), so its own failures continue the same chain.
 
-**D8. The trigger is narrow, and it IS gated on the slot transition.** A retry is
-claimed only for: a delivery-status callback resolved through the relay pointer,
-reporting a failure, carrying error code 30003, passing D7, with rungs remaining,
-AND where `updateRecipientDeliveryStatus` actually transitioned the slot
-(`twilio.ts:2466-2472`).
+**D8. The trigger is narrow, and it gates on the SLOT'S POST-WRITE STATE - never
+on whether this callback transitioned it.** A retry is claimed only for: a
+delivery-status callback resolved through the relay pointer, passing D7, with
+rungs remaining, where the leg's slot after this callback's write is terminal AND
+its error code is 30003.
 
-**This looks like M5's constraint 2 and is not, and the reason must not be lost.**
-Constraint 2 says a claim gated on the transition caps the ladder at rung 1 -
-true when every rung writes the SAME slot, because after the first failure the
-slot is already `undelivered` and nothing transitions. Under D1 each rung lands
-on its OWN row's fresh slot, which always transitions. The gate is therefore safe,
-and it is also necessary: it is what stops a late 30003 callback claiming a retry
-for a leg the fan-out already closed for a different cause - a 30007 marked
-failed synchronously (`relayFanOut.ts:1209-1216`) or an opted-out leg (`:1127-1130`).
+**Gating on `transitioned` was considered and rejected, and the reasoning must
+not be lost, because the obvious version of it is wrong twice over.**
+
+- Its apparent justification does not exist. It would supposedly stop a late
+  30003 claiming a retry for a leg the fan-out already closed as 30007
+  (`relayFanOut.ts:1209-1216`) or opted-out (`:1127-1130`) - but neither leg was
+  ever sent, so neither has a provider SID, so neither has a `relaysid#` pointer.
+  `putRelaySidPointer` is called only on the success branch (`:1263-1267`), and
+  the relay branch of `/status` is reachable only through a pointer. No callback
+  can ever resolve to those slots.
+- It would make a crash UNRECOVERABLE. The slot write happens at
+  `twilio.ts:2466-2472` and a claim must follow it. A process death in between
+  leaves the slot `undelivered` with no retry row; the redelivered callback then
+  transitions nothing (`ALLOWED_PRIOR` admits `undelivered` only from
+  `queued`/`sent`) and a transition-gated claim would refuse for ever. Gating on
+  the slot's STATE instead, the redelivery reads terminal-plus-30003, claims, wins
+  the create, and recovers the retry.
+
+The state gate still closes the one reachable contradiction - a leg that sent,
+took a terminal 30007 DLR, then received a second, contradictory 30003 DLR: its
+slot reads 30007, so no claim. And duplicate suppression was never this gate's
+job: D3's create already dedupes a repeated callback, since the same root,
+destination and attempt yield the same digest.
+
+Note this is NOT M5's constraint 2 in either form. That trap is a claim gated on
+a transition of the SAME slot every rung, which after rung 1 never transitions
+again. Here each rung owns its own row and slot, and the gate reads state rather
+than transition.
+
 A synchronous 30003 at send time is not a trigger; it is not in `TRANSIENT_CODES`
 and reaches the loop body's rethrow (`:1247`).
 
@@ -224,21 +287,49 @@ retry job re-enqueues the SAME rung**, bounded by the retry row's own
 `claimFanoutPass` budget. That budget is legitimate and unshared: the retry row is
 a different message, so M5's constraint 5 holds.
 
+This is a SECOND ladder inside the retry job, with a different budget and a
+different backoff from the 60/120/240 retry ladder, so it is specified rather than
+implied - all four of its parts live outside the extracted range and none of them
+comes for free:
+
+- The retry job itself calls `claimFanoutPass` against the RETRY row before
+  re-enqueueing (the fan-out's own call is at `relayFanOut.ts:1097-1114`).
+- On `capped` the job closes the retry leg terminally with the transient-cap code
+  and emits the D23 terminal ERROR. `closeRelay` is a nested closure
+  (`relayFanOut.ts:1060`) and is not callable from here, so the close is written
+  directly, as in D14.
+- The re-enqueue uses the fan-out's transient backoff shape, not the retry
+  ladder's: `fanOutBackoffMs` yields 5s then 10s (`relayFanOut.ts:91-100`).
+- A transient re-enqueue does NOT consume a retry rung. The rung is already
+  claimed; this is the same rung trying again.
+
+Both backoffs are injectable through the job's deps (Sec 7), or the e2e cannot
+drive either.
+
 Reusing `relay.fanOut` itself with a one-member recipient list was considered and
 rejected - see Sec 10.
 
-**D11. The retry row carries four lineage values; three reach the wire.** Stored:
+**D11. The retry row carries five lineage values; four reach the wire.** Stored:
 the root message id, the member key of the leg being retried, the attempt number,
-and the DIGEST of the destination. The member key is what the presenter joins on -
-it must match the original's slot map. The digest is the claim identity and the
-changed-number gate.
+the DIGEST of the destination, and the ORIGINAL'S DIRECTION. The member key is
+what the presenter joins on - it must match the original's slot map. The digest is
+the claim identity and the changed-number gate.
+
+The original's direction is stored because D20's render predicate needs it and
+nothing else supplies it: the original may not be loaded (D22), and there is no
+per-message lookup. Carrying it makes the predicate self-contained, so an orphaned
+retry decides correctly with no fallback guess - and neither guess is safe
+(default-render produces the duplicate member message the predicate exists to
+prevent; default-hide drops half the approved contract on first load).
 
 The raw destination is never stored, because
 `GET /api/conversations/:id/messages` returns stored rows AS-IS
-(`api.ts:2148-2199`) - so anything on the row reaches every browser on every
-relay thread load, whatever the projector forwards. The three fields that reach
-the wire are the root id, the member key and the attempt number; no handset
-number is among them.
+(`api.ts:2148-2199`) - so anything on the row reaches every browser on every relay
+thread load, whatever the projector forwards. The four fields that reach the wire
+are the root id, the member key, the attempt number and the original's direction.
+**This is not a claim that no handset number reaches the client**: for a
+contact-less member the member key IS `phone#<E164>`, and that is pre-existing (see
+D5). It is a claim that this design adds none.
 
 **D12. The retry sends the original outbound representation, with the raw body
 stored and the leg copy stored separately.** The product rule is explicit
@@ -285,7 +376,14 @@ with its copy, in the same change.
   (`conversationsRepo.ts:1531-1560`), and the bump runs 60-240 seconds after
   D9's open-group gate - so a group closed during the backoff would be
   resurrected to `open` by its own retry, contradicting the "this group chat is
-  now closed" message already sent and re-arming every open-gated path.
+  now closed" message already sent and re-arming every open-gated path. There is
+  no existing method to call: the status-free variant at `:1577-1578` is the
+  CATCH-branch fallback, reached only when the condition fails, so a new repo
+  method is required (Sec 2). Note the correct and intended consequence: the
+  `byLastActivity` GSI is keyed `(status, last_activity_at)`
+  (`conversationsRepo.ts:632`, `:699`), so a status-free bump on a closed group
+  re-sorts it within the `closed` partition rather than moving it to `open`. That
+  re-sort is the observable difference from doing nothing.
 - **SSE:** fires when the CLAIM lands, not only after the send. The failure
   callback emits `message.persisted` at `twilio.ts:2512` and nothing else was
   emitted until the send, so the chip would read `1 failed` for the whole first
@@ -311,8 +409,13 @@ never rewritten.
 
 Approved by the founder on 2026-09-02. The rollup chip, its accessible-name
 recital and the per-recipient row move together (M5's D21); the message-level
-chip stays excluded. **The contract applies to sources that render a rollup
-today, i.e. outbound ones** - see Sec 2's fence.
+chip stays excluded.
+
+**The contract applies to every position that EXISTS, on both source directions.**
+An outbound source has all three. An inbound source has two - the per-recipient
+rows and `inboundRecipientName`'s recital - and those two carry the new states
+exactly as they carry today's. Only the visible chip is out of scope on an inbound
+source, because there is no chip there to move (Sec 2).
 
 **D18. A per-member RETRY STATE is derived at the join, and staleness is not
 touched.** The presenter is given the recipient ENTRIES (with their keys - the
@@ -320,13 +423,28 @@ call site currently discards them at `Timeline.tsx:937`) and the retry rows that
 reference this message. From those it derives, per member key, one of:
 `retrying`, `delivered-on-retry`, `terminal`, or `unconfirmed`.
 
-`unconfirmed` is a rung that has not reached `sent` within the budget, measured
-from the RETRY ROW's own `at`. This deliberately does NOT go through
-`stalenessClockMs`: that helper is shared with native group text, which Sec 2
-fences out, and its refusal to age a `queued` leg is deliberate and documented
-(`deliveryStatus.ts:191-201`). It also could not express this - `bubbleClocks`
-yields ONE clock per bubble (`Timeline.tsx:734-742`), and this state must be
-computed from one row's clock and rendered on another's.
+`unconfirmed` is a rung that has not reached `sent` within `STALE_SENT_AFTER_MS`
+(`deliveryStatus.ts:58`, the module's only budget - reused so two staleness
+horizons cannot drift), measured from the RETRY ROW's own `at`.
+
+This deliberately does NOT go through `stalenessClockMs`: that helper is shared
+with native group text, which Sec 2 fences out, and its refusal to age a `queued`
+leg is deliberate and documented (`deliveryStatus.ts:191-201`). It also could not
+express this - `bubbleClocks` yields ONE clock per bubble
+(`Timeline.tsx:734-742`), and this state must be computed from one row's clock and
+rendered on another's.
+
+**But severing from that helper also severs from the only re-render driver, and
+the retry state must therefore arm the ticker itself.** `tickerArmed` is computed
+from `hasTickableLeg` over the RENDERED set (`Timeline.tsx:1851-1854`, `:798-812`)
+and both its predicates route through `stalenessClockMs`. The original's failed
+leg is terminal and can never arm it; the retry row is hidden by D20 and is not in
+`visible` at all. So without an explicit clause, `tickNow` is frozen in exactly
+the case this state exists for - Sec 9's stranded claim, where no SSE arrives and
+no item changes - and `retrying` would be computed once and never recomputed. That
+is the indefinite promise M5 removed, reintroduced one level down. `hasTickableLeg`
+gains a retry-state clause so a live retry keeps the ticker running until it
+resolves.
 
 **D19. The four end states, with the arithmetic stated.** `failed > 0` is the
 FIRST branch (`deliveryStatus.ts:416`), so without explicit arithmetic every
@@ -340,11 +458,46 @@ state below collapses into today's failure string.
 | `unconfirmed` | subtracted from `failed`, added to `not confirmed` | `delivered 3/4 - 1 not confirmed` | none |
 
 `<reason>` is the carrier reason when the cap was exhausted, and the D15 close
-code's copy when a gate refused or the enqueue failed - **projected onto the
-ORIGINAL's presentation through the same join**, because the refused retry row
-has no bubble of its own to carry it. Without that projection an operator whose
-retry was refused because the number changed would read exactly the same string
-as one whose cap ran out.
+code's copy when a gate refused or the enqueue failed. Without that an operator
+whose retry was refused because the number changed would read exactly the same
+string as one whose cap ran out.
+
+**The projection happens ONCE, onto the recipient ENTRIES, and nothing downstream
+reads a raw slot.** The join produces an effective `{status, errorCode}` per
+member key, and `presentRelayDelivery`, `orderRecipientRows` and every
+`recipientSummaryName` call consume that derived set. This is not a convenience:
+the original's failure reason is derived INDEPENDENTLY in five places - the rollup
+chip's own reason (`deliveryStatus.ts:420-427`), the rollup's accessible name
+(`Timeline.tsx:959-968` recomputing per row at `:593-597`), the message-level
+chip's accessible name (`:978-989`), the inbound recital (`:993-1004`), and the
+per-recipient row (`:1112-1115`) - three of which read `row.slot.errorCode`
+directly, and all of which render a reason only when `presentLegDelivery` returns
+`isFailure: true` (`deliveryStatus.ts:508-545`). So a projected state must move
+BOTH the code and the failure-ness, and for `retrying` and `delivered-on-retry`
+the failure-ness moves the other way.
+
+Patch the rollup alone and the recital and the row keep reciting
+`Undelivered - Phone unreachable (error 30003)` beside a chip that says otherwise -
+M5's D21 violation exactly, and on an inbound source the recital is the only
+position there is.
+
+**The other two positions get their own grammar, stated here so a build cannot
+satisfy the table with the chip alone.** The per-recipient row and the recital
+recite the same fact in the row's voice:
+
+| Retry state | Row and recital |
+|---|---|
+| `retrying` | `Retrying - Phone unreachable (error 30003)` |
+| `delivered-on-retry` | `Delivered on retry` |
+| `terminal` | `Undelivered - <reason>` (today's, with the close-code reason where one applies) |
+| `unconfirmed` | today's not-confirmed row copy |
+
+Neither position can express the first two today: the row's copy comes from
+`presentLegDelivery` plus `deliveryReason` (`Timeline.tsx:1095`, `:1112-1115`),
+the recital's from the same pair inside `recipientSummaryName` (`:593-597`), and
+`presentDeliveryStatus` is exhaustive over `DeliveryStatus`
+(`deliveryStatus.ts:139-141`). The projected `{status, errorCode}` of D19 is what
+gives them an input they can express.
 
 The cap-exhausted string is today's, unchanged. Every other string is new and is
 scoped behind a retry-aware option on `RelayDeliveryOptions`
@@ -352,11 +505,18 @@ scoped behind a retry-aware option on `RelayDeliveryOptions`
 capital, success-toned, and also serving native group text and the broadcasts
 routes - does not move.
 
-**D20. A retry row renders ONLY when its leg delivered AND its original is
-outbound.** A failed attempt records durably but earns no bubble: the thread
-shows what reached someone, and a failed retry reached no one. An inbound
-original renders no rollup at all, so its retry renders nothing either - which is
-also what stops an inbound retry row appearing as a duplicate member message.
+**D20. A retry row renders ONLY when its leg delivered AND its original was
+outbound**, both read from the retry row's own stored lineage (D11) so the
+predicate never depends on the original being loaded. A failed attempt records
+durably but earns no bubble: the thread shows what reached someone, and a failed
+retry reached no one. An inbound original's retry renders nothing, which is what
+stops an inbound retry row appearing as a duplicate member message - it would
+otherwise carry the same raw body, sender key and author as the original (D2, D12).
+
+The filter lives in Timeline's `visible` memo (`Timeline.tsx:1787-1799`), the one
+point all three hosts converge. The tour host feeds that memo a milestone-merged
+list rather than the raw thread (`TourConversation.tsx:463-467`), so the filter
+must be correct against a mixed item list, not just a message list.
 
 This is a new predicate, NOT a reuse of `retry_of`. **The retry row must not
 carry `retry_of` at all.** It is the natural field to reach for, it is already
@@ -388,11 +548,20 @@ platform working, not a failure". A purely attempt-aware predicate would turn
 every relay opt-out into an alarm, which is a strictly larger increase than the
 one this section asks the founder to approve.
 
+**The legs D7 fences out keep WARN.** Announcements - relay intro, member-added,
+group-closed and every tour-reminder rung - reach the same severity site
+(`twilio.ts:2500-2511`) through the same pointers, and no retry is ever claimed
+for them, so a rule of "ERROR whenever no retry was claimed" would turn every one
+of them into an alarm. Alarming a tour-reminder rung from a mission whose scope
+fences that file out is exactly the unrequested blast radius this design exists to
+avoid. The attempt-aware ERROR applies to fan-out and team legs only.
+
 **The terminal ERROR is emitted by whoever observes the terminal state.** Gate
-refusal (D9) and enqueue failure (D14) generate no further callback, so the
-webhook handler that owns the severity decision never runs again - the retry JOB
-emits those. Cap exhaustion is observed by the callback handler. The stranded
-claim of Sec 9 is observed by nobody and stays a recorded residual.
+refusal (D9), enqueue failure (D14) and the transient cap (D10) generate no
+further callback, so the webhook handler that owns the severity decision never
+runs again - the retry JOB emits those. Cap exhaustion is observed by the callback
+handler. The stranded claim of Sec 9 is observed by nobody and stays a recorded
+residual.
 
 The shared `TRANSIENT_RETRYING_DELIVERY_CODES` set keeps its current values for
 the 1:1 and native-group-text paths, which this branch does not touch - but its
@@ -404,8 +573,10 @@ sends. The rewritten comment names that exception and points at
 correct everywhere.
 
 **This raises alarm volume and needs the founder's sign-off at the spec gate.** A
-terminally undelivered relay leg begins reaching `hc-<env>-error-logs` and the
-Recent Errors panel, where today it is silent. The alternative - keep WARN and
+terminally undelivered relay FAN-OUT OR TEAM leg begins reaching
+`hc-<env>-error-logs` and the Recent Errors panel, where today it is silent.
+Announcement legs and 21610 opt-outs are excluded, so the increase is bounded to
+the legs a retry ladder actually ran for. The alternative - keep WARN and
 rewrite the comment to say "a single relay leg is not alarm-worthy at this
 volume" - is honest and cheaper, and the issue offers both. The recommendation is
 attempt-aware, because after this change a terminal relay failure is a real dead
@@ -435,17 +606,30 @@ Test intentions. The plan owns seams and mechanics.
 7. Other members receive no duplicate send, on every rung.
 8. A delivered retry cannot be regressed by a late callback from an older
    attempt.
-9. A transient send error (429/30022) re-enqueues the same rung and does not
-   consume a retry rung, bounded by the retry row's own budget.
+9. A transient send error (429/30022) re-enqueues the SAME rung, consumes no
+   retry rung, and closes terminally with the transient-cap code when the retry
+   row's own pass budget caps.
 10. MMS retries re-presign, preserve the original leg copy byte for byte when the
     sender's display name has changed between attempts, store the RAW body on the
     row, and add no rows to the media gallery.
 11. A retry row does not carry `retry_of`, and the original bubble still renders
     beside a delivered retry.
-12. Presenter: all four states of D19 at all three positions, with the arithmetic
-    and the close-code projection; a non-delivered retry renders no bubble; an
-    inbound original renders no retry bubble. The shared `Delivered N/N` label and
+12. Presenter: all four states of D19 at EVERY position that exists, with the
+    arithmetic and the close-code projection - the chip, the rollup recital, the
+    per-recipient row, AND `inboundRecipientName` on a member-originated source.
+    **The inbound recital is its own test**: a member-originated leg whose retry
+    delivered must stop reciting `Undelivered`, and nothing but this test covers
+    the only delivery information a screen-reader user gets from that bubble. A
+    non-delivered retry renders no bubble; an inbound original renders no retry
+    bubble even when its retry delivered. The shared `Delivered N/N` label and
     native group text are unchanged.
+15. A stranded claim - a retry row created whose send never happens - reaches
+    `unconfirmed` on screen with NO other thread activity and no refetch. Freezing
+    the ticker is the failure mode; a test that lets another leg age proves
+    nothing.
+16. A crash between the slot write and the claim is RECOVERED by the redelivered
+    callback: the slot already reads terminal/30003, so the state gate still
+    claims. A transition gate would fail this test, which is why it exists.
 13. The claim emits an SSE, so the chip reads `1 retrying` without waiting a
     backoff interval; the post-send bump does not write `status`, proven by a
     group closed mid-backoff staying closed.
@@ -487,11 +671,23 @@ Owed at handback:
 ## 9. Risks and residual exposures
 
 **A crash between the claim and the enqueue strands a retry.** The row exists,
-nothing sends, and a duplicate callback correctly declines to claim again. The
-leg renders `unconfirmed` rather than a permanent `retrying`, so the display
-stays honest, but the send is genuinely lost and no ERROR is emitted - nobody
-observes it. Closing this needs the reconciliation sweep the issue puts out of
-scope. Recorded, not fixed.
+nothing sends, and a duplicate callback correctly declines to claim again (the
+create is already lost). The leg renders `unconfirmed` rather than a permanent
+`retrying` - which D18's ticker clause is what actually delivers - but the send is
+genuinely lost and no ERROR is emitted, because nobody observes it. Closing this
+needs the reconciliation sweep the issue puts out of scope. Recorded, not fixed.
+
+The EARLIER window, between the slot write and the claim, is deliberately
+recoverable: D8 gates on the slot's state rather than on this callback's
+transition, so a redelivered callback reads terminal/30003 and claims. That choice
+is what keeps the two windows from compounding.
+
+**A delivered outbound MMS retry shows its attachments in two bubbles.** D13
+suppresses the media-POINTER rows, so the gallery index is correct, but each
+bubble renders its own `media_attachments` (`Timeline.tsx:1036`). This is
+arguably right - a retry IS a second send that carried the photo again - but it is
+a visible consequence of D13 plus D20 and is recorded so nobody reads
+"adds no rows to the media gallery" as "looks identical in the thread".
 
 **The member-key collapse is worked around, not fixed.** Where two of a contact's
 numbers share one slot, the retry knows exactly which handset it is retrying but

@@ -22,7 +22,9 @@ the collateral note above. Tests in `app/test/inboxApi.test.ts`: `?limit=`,
 `limit=1` as the one-row control and `limit=1000` answering 200 (the clamp,
 not a 400).
 
-**Problem.** `parseLimit` in `app/src/routes/inbox.ts` (lines 1731-1737) treats
+**Problem.** `parseLimit` in `app/src/routes/inbox.ts` (the module-private
+function above `createInboxRouter`; line numbers in this file have moved three
+times, so none is given) treats
 an empty string as a number: `Number('') === 0`, which IS an integer, so the
 clamp floor turns `?limit=` (and `?limit=%20`) into `Math.max(1, 0) = 1` - a
 one-row inbox page where the caller plainly wanted the default.

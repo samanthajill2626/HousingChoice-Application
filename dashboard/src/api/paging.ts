@@ -33,7 +33,10 @@ export const MAX_PAGES = 50;
 /** The server's MAX_PAGE_LIMIT. Asking for it halves the round trips a full walk
  *  costs (the server's default page is 50). It is a CEILING, not a hint: routes
  *  accept 1..100 and 400 anything outside that (`parseLimit`) rather than
- *  clamping, so raising this breaks every list view on first load. */
+ *  clamping, so raising this breaks every list view on first load. Two routes
+ *  are the documented exception and are NOT walked by this helper: /api/inbox
+ *  and /api/ai-runs clamp an oversized limit and fall back to their default on
+ *  an empty, zero or negative one (docs/issues/inbox-parselimit-empty-one-row.md). */
 export const PAGE_LIMIT = '100';
 
 /**

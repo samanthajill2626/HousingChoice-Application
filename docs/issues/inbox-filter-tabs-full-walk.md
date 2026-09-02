@@ -19,8 +19,10 @@ the 2026-08-26 merge of `feat/inbox-unread-cluster` (`1467832b`), then paged
 and unbounded by `1ceb2e52`. The tab reads the contacts `byTypeStatus`
 `(type='unknown')` partition through `app/src/lib/unknownQueue.ts`, one bounded
 Query per status block, untriaged first, with the index's own cursor. It never
-touches the open-conversation partition and never consults `conv.type`, so the
-stale-`unknown_1to1` drift measured below is no longer the cause of any cost.
+touches the open-conversation partition and never uses `conv.type` to decide
+QUEUE MEMBERSHIP (it still reads it to exclude relay-group threads from a
+contact's open set, coverage class b), so the stale-`unknown_1to1` drift
+measured below is no longer the cause of any cost.
 The frontmatter stayed `open` for a week after the fix because the RESOLVED
 block below was written into the body without re-stamping it - the same
 prose-outlives-code trap this file already records once.

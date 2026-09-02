@@ -19,9 +19,13 @@ that id; the page-head step-over fires only when `resume.deferredContactId ===
 contact.contactId` (and nothing has been kept), never on the bare existence of
 a cursor. A cursor minted by the page-full exit or a block roll-over carries no
 `d`, so the first row after a filled page is DEFERRED on a transient fault and
-served on the next request. Exactly one retry per row from any page; a
-permanently failing row is still stepped over on its second failure, so the
-walk still terminates. `d` is validated (absent or a non-empty string; anything
+served on the next request. At least one retry per row from any page, exactly
+one when nothing has moved under the cursor; a permanently failing row is
+stepped over on its second failure AT THE HEAD, so the walk terminates whenever
+the same row is at the head on two consecutive requests (the churn cases - a
+new contact sorting into or ahead of the head between requests - are stated at
+the guard's comment; both err toward an extra retry, never a drop). `d` is
+validated (absent or a non-empty string; anything
 else is a 400) because it licenses a drop. Pinned in
 `app/test/inboxUnknownTab.test.ts`: "the first row after a FILLED page gets its
 ONE retry too" (with a mutation probe naming the old predicate) and "a

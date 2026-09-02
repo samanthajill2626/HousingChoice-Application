@@ -312,7 +312,7 @@ function decodeCursor(cursor: string): Record<string, unknown> {
     throw new InboxBadRequestError('cursor does not match this filter');
   }
   // AND THE SAME AGAIN for `filter=unknown`, which pages the byTypeStatus
-  // blocks with its own `{q,b,k}` cursor (2026-08-26). Its `k` is a
+  // blocks with its own `{q,b,k,d}` cursor (2026-08-26). Its `k` is a
   // byTypeStatus ExclusiveStartKey - the WRONG index for the 'open' partition
   // Query this key feeds - so replaying one here is exactly the cross-partition
   // mis-Query the namespacing exists to prevent.
@@ -323,9 +323,14 @@ function decodeCursor(cursor: string): Record<string, unknown> {
 }
 
 // --- The unknown-queue cursor (rework 2026-08-26) ----------------------------
-// A THIRD cursor namespace: `{q:1, b, k}` where `b` is the index into
-// UNKNOWN_QUEUE_BLOCKS the walk is inside and `k` is that block's byTypeStatus
-// ExclusiveStartKey. An absent `k` means "the block's first page", which is
+// A THIRD cursor namespace: `{q:1, b, k, d}` where `b` is the index into
+// UNKNOWN_QUEUE_BLOCKS the walk is inside, `k` is that block's byTypeStatus
+// ExclusiveStartKey, and `d` (2026-09-02), which the SERVER mints only on a
+// cursor a thread-read deferral produced, naming the contactId the next
+// request re-reads first - the one field that can license stepping over a row.
+// The decoder accepts a well-formed `d` on any cursor (it is unsigned); what
+// that buys a forger is bounded at the decoder, see UnknownCursor.
+// An absent `k` means "the block's first page", which is
 // also how a roll-over to the next block is expressed - so ONE shape covers
 // both "resume mid-block" and "start the next block", and a block boundary
 // needs no special case on either side of the wire.
@@ -436,7 +441,15 @@ function decodeUnknownCursor(cursor: string): UnknownResume {
   }
   // `d` is ours too: absent, or a non-empty contactId. It never reaches
   // DynamoDB, so a bad value is not a 500 risk - but it LICENSES a row drop, so
-  // a malformed one is refused rather than silently ignored.
+  // a malformed one is refused rather than silently ignored. SHAPE ONLY, and
+  // the same robustness-not-security posture as `k` above: the cursor is
+  // unsigned, so a well-formed forged `d` paired with the matching position IS
+  // honoured, and it can cost the forger one un-retried row PER FORGED CURSOR
+  // (the step-over fires at most once per request and still needs a genuine
+  // thread-read failure on that row) - and nothing a forged POSITION (`b`/`k`)
+  // could not already skip outright, which is why this is robustness and not
+  // a security boundary. Nothing it can do reaches another session or another
+  // partition.
   if (payload.d !== undefined && (typeof payload.d !== 'string' || payload.d === '')) {
     throw new InboxBadRequestError('invalid cursor');
   }
@@ -516,7 +529,7 @@ function decodeUnreadCursor(cursor: string): UnreadCursor {
   }
   const payload = parsed as { u?: unknown; a?: unknown; c?: unknown; s?: unknown };
   // A cursor minted under `all` (a bare LastEvaluatedKey), under `groups` (the
-  // repo's `{t,k}`) or under `unknown` (the `{q,b,k}` block cursor, 2026-08-26)
+  // repo's `{t,k}`) or under `unknown` (the `{q,b,k,d}` block cursor, 2026-08-26)
   // carries no `u:1` and lands here.
   if (payload.u !== 1) throw new InboxBadRequestError('cursor does not match this filter');
   if (typeof payload.a !== 'string' || typeof payload.c !== 'string') {
@@ -749,7 +762,7 @@ export async function aggregateInbox(
   // here. The other three filters own their own cursor NAMESPACE: `groups`
   // decodes inside listGroupTexts (the repo's tagged `{t,k}`), `unread` via
   // decodeUnreadCursor (the `{u,a,c,s}` index cursor) in its branch below, and
-  // `unknown` via decodeUnknownCursor (the `{q,b,k}` block cursor, 2026-08-26)
+  // `unknown` via decodeUnknownCursor (the `{q,b,k,d}` block cursor, 2026-08-26)
   // in its own. Decoding any of those as an 'open'-partition LastEvaluatedKey
   // is precisely the cross-partition replay the namespacing exists to prevent.
   const startKey =
@@ -805,7 +818,14 @@ export async function aggregateInbox(
   // - `drops` is a NORMAL-TRAFFIC field, not an exception field: `dupContact`
   //   fires for every extra thread of a multi-number contact on the same page.
   //   Its absence means nothing was dropped; its presence means nothing is
-  //   wrong.
+  //   wrong - WITH ONE EXCEPTION (2026-09-02): `unknownThreadReadFailed` fires
+  //   only at the unknown-queue page-head step-over, always alongside a
+  //   `log.error`, and always means a triage row was DISCARDED from that walk.
+  //   A thread-read failure that merely DEFERS the page (the row is re-read
+  //   next request) is NOT in `drops`; it shows on the unknown branch's
+  //   top-level `threadReadFailures` count and its WARN. So on a deferral page
+  //   `queueRows` exceeds `count` with no `drops` at all - `threadReadFailures`
+  //   is the field that closes that gap, not `drops`.
   // - `filteredRelay` and `filteredGroup` are PAGE-ONE-ONLY (both merge blocks
   //   gate on `startKey === undefined`), so their absence on page 2+ carries no
   //   information at all.
@@ -1782,9 +1802,15 @@ export async function aggregateInbox(
      * a failure is a DEFERRAL (the page stops and the next request re-reads the
      * row) or a DROP (the row already had its retry and the walk steps over it)
      * is decided one level up, and the level has to match the decision: WARN for
-     * the deferral, ERROR for the drop. This helper owns the counter and the
+     * the deferral, ERROR for the drop. This helper owns the FAILURE tally
+     * (`threadReadFailures`, its own top-level log field) and the
      * discrimination; `lastThreadReadErr` carries the cause to whichever line
-     * the caller writes.
+     * the caller writes. THE `drops` KEY IS THE CALLER'S TOO (adversarial
+     * review 2026-09-02, R2-5): `drops` means "assembly discarded a row", and a
+     * deferral discards nothing - the row is re-read next request - so
+     * `unknownThreadReadFailed` is counted only at the step-over. Before that
+     * every deferral inflated `drops` on a summary line whose contract says
+     * "its absence means nothing was dropped".
      */
     let lastThreadReadErr: unknown;
     const resolveOpenThreads = async (
@@ -1795,7 +1821,6 @@ export async function aggregateInbox(
         return all.filter((c) => c.status === 'open' && c.type !== 'relay_group');
       } catch (err) {
         threadReadFailures += 1;
-        dropped('unknownThreadReadFailed');
         lastThreadReadErr = err;
         return undefined;
       }
@@ -2004,9 +2029,27 @@ export async function aggregateInbox(
           // (`retryFrom` is `{ block: 0 }` precisely so a first-row failure on
           // page one still mints a real one) naming it; request N+1 arrives
           // with that cursor, re-reads the row, and if it fails again steps
-          // over. Exactly one retry per row, then guaranteed progress, from ANY
-          // page - which is also why the walk still terminates on a permanently
-          // failing row. The empty page carrying a cursor is a rendered state,
+          // over. AT LEAST one retry per row, from ANY page - exactly one when
+          // nothing has moved under the cursor - and PROGRESS WHENEVER THE
+          // SAME ROW IS AT THE HEAD ON TWO CONSECUTIVE REQUESTS, which is why
+          // a permanently failing row no longer stalls the walk. Stated as the
+          // conditions they are (adversarial review 2026-09-02, two rounds):
+          // (1) if a DIFFERENT contact sorts into the head position between
+          // the two requests (a new unknown whose id sorts before the deferred
+          // one, or a status flip moving the deferred row out of the block)
+          // and that row's read ALSO fails, the request defers again at the
+          // same position with a new `d`; (2) if a new row sorts in AHEAD of
+          // the deferred one and is CONSUMED - kept, or dropped as threadless
+          // (the class-a stubs this partition is documented to hold), retyped
+          // or duplicate - `retryFromMoved` is true by the time
+          // the deferred row fails again, so it is deferred a SECOND time (a
+          // second WARN, an advanced position) and stepped over on the request
+          // after. Both are the conservative direction. Each round is a WARN
+          // and a visible empty-page-with-Load-more, never a server loop, and
+          // (1) needs the head to change on EVERY consecutive pair during an
+          // outage; the old predicate advanced positionally in that case at
+          // the price of dropping a row nobody had retried, which is the trade
+          // this change refuses. The empty page carrying a cursor is a rendered state,
           // not a dead end: Inbox.tsx renders Load more on `hasMore` alone and
           // switches its empty copy to `emptyMoreCopy()` for exactly that
           // pairing.
@@ -2023,6 +2066,9 @@ export async function aggregateInbox(
               { err: lastThreadReadErr, contactId: contact.contactId },
               'inbox: unknown-queue thread read FAILED at the PAGE HEAD - the row is DROPPED and the walk steps over it',
             );
+            // The ONLY site that counts a thread-read failure as a DROP: this
+            // is the one path that discards the row.
+            dropped('unknownThreadReadFailed');
             retryFrom = after;
             retryFromMoved = true;
             continue;
@@ -2031,9 +2077,10 @@ export async function aggregateInbox(
           // short page whose Load more re-reads it - the walk visibly pauses at
           // that row instead of quietly omitting it and reporting the queue as
           // fully drained. VISIBLE-STUCK BEATS SILENT-LOSS, and it is the same
-          // posture the scan-budget exit already takes. The WARN and the
-          // `unknownThreadReadFailed` counter name the row, so the pause is
-          // diagnosable from the log line the very first time it happens.
+          // posture the scan-budget exit already takes. The WARN names the
+          // row and the `threadReadFailures` count flags the page, so the
+          // pause is diagnosable from the log the very first time it happens -
+          // and `drops` stays silent, because nothing was dropped.
           log.warn(
             { err: lastThreadReadErr, contactId: contact.contactId },
             'inbox: unknown-queue thread read FAILED - the page STOPS here and resumes AT this row',

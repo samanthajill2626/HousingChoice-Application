@@ -270,7 +270,7 @@ describe('GET /api/inbox (C8)', () => {
   // RENAMED 2026-08-26 (fix wave 2, F6). The old name was "400 on
   // filter=unknown with any cursor (the unknown feed mints none)", and BOTH
   // claims died when the feed became paged: minting cursors is now that feed's
-  // whole purpose, and a valid `{q,b,k}` cursor returns 200 (the real-index
+  // whole purpose, and a valid `{q,b,k,d}` cursor returns 200 (the real-index
   // paged walk in test/inbox.integration.test.ts). The assertion itself was
   // always about a FOREIGN cursor - `{idx:0}` is the `all` feed's shape - so
   // the test was passing under a name that told a grepper the opposite.

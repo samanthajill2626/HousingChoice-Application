@@ -475,17 +475,24 @@ describe('filter=unknown - the contact-side read', () => {
     // The failure is its OWN code path: the specific WARN with the contactId...
     const failLine = warn.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'));
     expect(failLine?.[0]).toMatchObject({ contactId: 'c-q2-broken' });
-    // ...and its OWN drop reason, distinct from the empty-thread-set drop. A
-    // build that routes this through the best-effort contactConversations seam
-    // (which returns [] for both) collapses these two counters into one and
-    // goes red here.
+    // ...and its OWN tally, distinct from the empty-thread-set drop. A build
+    // that routes this through the best-effort contactConversations seam
+    // (which returns [] for both) collapses the two into one drop and goes red
+    // here. A DEFERRAL IS NOT A DROP (2026-09-02, adversarial R2-5): the row is
+    // re-read next request, so `drops` must NOT carry the thread-read key on
+    // this page - only the step-over counts it. The failure is visible on the
+    // top-level `threadReadFailures` field instead.
     const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
-    expect(assembled?.drops).toMatchObject({ unknownThreadReadFailed: 1 });
+    expect(assembled?.drops?.unknownThreadReadFailed).toBeUndefined();
     expect(assembled?.threadReadFailures).toBe(1);
     // c-q3-empty is BEHIND the failed row and was never consumed, so its
     // no-open-thread drop has not happened yet. That is the point: the page
-    // stopped rather than reading past the failure.
-    expect(assembled?.drops).not.toHaveProperty('unknownNoOpenThread');
+    // stopped rather than reading past the failure. (With the deferral no
+    // longer counted, this page has NO drops at all, so the `drops` field is
+    // absent from the line - which is the contract: absence means nothing
+    // was dropped.)
+    expect(assembled?.drops?.unknownNoOpenThread).toBeUndefined();
+    expect(assembled?.drops).toBeUndefined();
   });
 
   it('a TRANSIENT thread-read failure costs a SHORT PAGE, not a lost row: the retry serves it', async () => {
@@ -548,7 +555,10 @@ describe('filter=unknown - the contact-side read', () => {
     // readUnknownQueue THROWS to outlaw one file over ("a Load more that never
     // advances and never ends", unknownQueue.ts's budget guard).
     //
-    // So the retry is capped at ONE. THE CAP NOW REQUIRES A CURSOR, and this pin
+    // So the retry is capped at ONE. THE CAP REQUIRES A DEFERRAL CURSOR NAMING
+    // THIS ROW (since 2026-09-02; from 2026-08-26 to then it required only that
+    // a cursor exist, which gave the first row after a filled page zero retries
+    // - see the two FILLED-page pins further down), and this pin
     // was REWRITTEN on 2026-08-26 (phase-6 review) because the version that
     // stood here asserted the cap firing on request ONE - a request that had
     // retried nothing, because there was no previous request to have retried it.
@@ -612,8 +622,9 @@ describe('filter=unknown - the contact-side read', () => {
     // COMPLETE (`nextCursor: null`), on the tab whose entire purpose is that
     // nothing rots unseen.
     //
-    // THE MUTATION PROBE: delete `resume !== undefined` from the page-head guard
-    // in app/src/routes/inbox.ts and this goes RED on the FIRST assertion below
+    // THE MUTATION PROBE: replace the page-head guard's first clause
+    // (`resume?.deferredContactId === contact.contactId`) in
+    // app/src/routes/inbox.ts with `true` and this goes RED on the FIRST assertion below
     // - request one drops c-p1-broken, serves the rows behind it and ends the
     // walk `nextCursor: null`, so the union of every page is missing a row while
     // the feed claims to be complete.

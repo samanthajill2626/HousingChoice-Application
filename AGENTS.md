@@ -198,8 +198,12 @@ above, which is not a named flake: re-run the failing FILES alone, run the full
 suite at the branch's base commit, and compare failing FILES rather than failing
 cases, reporting both runs. See
 [`npm-test-dynamodb-local-contention`](docs/issues/npm-test-dynamodb-local-contention.md),
-which is still open - the per-file-keys fix closed its reopened cause, but an
-`UpdateTable` `InternalFailure` tail remains.
+CLOSED 2026-09-02 with a MECHANICAL reopen trigger: **any `[dynamoAdmin]`
+line in real suite output is one real container fault** - the acceptance
+suite stubs `console.warn` so such a line cannot come from a test faking
+one. If you see one, capture that run's `err.$metadata.httpStatusCode` and
+`attempts` before anything else (see
+[`dynamo-local-control-plane-fault-shape-unverified`](docs/issues/dynamo-local-control-plane-fault-shape-unverified.md)).
 
 ## Required completion gates
 

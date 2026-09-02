@@ -40,6 +40,11 @@ a temporary lint-baseline cleanup had removed generated dependencies. The
 worktree source was restored from HEAD, `npm ci` completed with EXIT 0, and the
 single executable isolated test then passed. Those bootstrap logs, the full-run
 log, and the isolated-run logs remain in `.superpowers/sdd/final-gates/`.
+The same temporary cleanup removed the interrupted full-run's generated browser
+artifacts before source recovery. The captured full-run log survives, and the
+successful isolated runs generated fresh browser artifacts. This limits only
+post hoc inspection of the original interrupted failures; it does not change
+their recorded single-test isolated outcomes.
 
 ## Live self-QA
 

@@ -1,0 +1,3 @@
+# Task 8 fix wave 1
+
+Read `.superpowers/sdd/task-8-review.md`. Fix only its F1-F4 in `app/src/lib/seed/cast.ts`, `app/src/routes/dev.ts`, `app/src/lib/seed/messageTransport.ts`, `e2e/fixtures/fakeTwilio.ts`, `fake-twilio/web/src/api/types.ts`, and exact focused tests. Correct the explicit cast fact (no helper inference); reject SMS/MMS prefix in e2e helper; reject versioned outbound declaration without request while preserving versioned unresolved inbound/legacy; mirror fake-web DTO. Red first, then Task 8 focused tests/typechecks as needed. Explicit stage and commit `fix: validate explicit fixture transport` plus Codex trailer. Report `.superpowers/sdd/task-8-fix-wave-1-report.md`.

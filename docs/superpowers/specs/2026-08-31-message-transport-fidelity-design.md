@@ -1,3 +1,14 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-02).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` (merges `80f448bb` and `a2602e32`) and its feature branch + worktree were deleted
+> during worktree cleanup. **This file is NOT current documentation, and the live code may
+> have drifted from it. Do not treat it as authoritative guidance on how the system should be
+> built or how it behaves today.** For current truth read the code and the living docs (e.g.
+> `RUNBOOK.md`, `e2e/README.md`, `AGENTS.md`). The mission's review record - reviews,
+> adjudications, slice and fix-wave reports, the handback, and the rescued worktree records -
+> is preserved at `docs/superpowers/reviews/2026-08-31-message-transport-fidelity/`.
+
 # Message transport fidelity - design specification
 
 Status: v6 - APPROVED for implementation planning

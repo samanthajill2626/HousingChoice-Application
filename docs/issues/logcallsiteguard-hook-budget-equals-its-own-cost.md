@@ -3,9 +3,11 @@ id: logcallsiteguard-hook-budget-equals-its-own-cost
 title: logCallSiteGuard's beforeAll budget (180s) is smaller than the hook's own measured cost
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-26
+resolved: 2026-09-01
+updated: 2026-09-01
 refs: app/test/logCallSiteGuard.test.ts:140, app/test/logCallSiteGuard.test.ts:143
 ---
 
@@ -42,3 +44,38 @@ inside a single hook. If the guard is meant to be a slow whole-program check,
 consider giving it its own project/lane so it does not contend with the rest of
 the workspace. Whatever the shape, the invariant to restore is: a green machine
 running this file alone should finish in a small fraction of its budget.
+
+**Resolution (2026-09-01).** Measured on the npm-test-soundness mission
+(records: `docs/superpowers/reviews/2026-08-31-npm-test-soundness/measurements/s2-guard-cost.md`),
+the premise did not reproduce: the file alone costs 10.1s wall with 6.5s in
+the hook (3 runs, QUIET box), and inside a fully contended five-workspace
+`npm test` (host CPU 100%, a concurrent vitest run plus two e2e suites) it ran
+31.5s - against the unchanged 180s hook budget. The budget was therefore ~27x
+the solo cost and ~5.7x the worst loaded observation, not ~1x as recorded
+above. The invariant this issue asked for ("a green machine running this file
+alone should finish in a small fraction of its budget") holds as measured:
+10.1s of 180s is 5.6%.
+
+What changed on the branch: comments only. The file now carries the measured
+per-phase numbers (buildProgram is 85-86% of the hook; `ts.createProgram`
+alone 75%), the dated machine state, and an explicit warning that the 27x
+headroom is load insurance, not slack to trim. No cut was made: the one
+pre-committed remedy (the eager `:97` symbol lookup) measured 4ms and was
+declined on the measurement; the two sites that do dominate
+(`ts.createProgram`; `isErrorTyped`'s `getTypeAtLocation`) have no
+pre-committed remedy and are returned as open decisions in the mission
+handback.
+
+The 196.2s / 179.1s figures above could not be reproduced and their cause was
+not established. The most plausible account - unproven - is that they were
+taken on 2026-08-26, the same day
+[`npm-test-runner-rpc-starves-under-concurrent-e2e`](./npm-test-runner-rpc-starves-under-concurrent-e2e.md)
+was diagnosed and `maxWorkers: 4` landed (`27d31bbc`): under the old
+16-worker default the coordinator and every worker contended for cores, which
+is also consistent with the `[vitest-worker]: Timeout calling "onTaskUpdate"`
+this issue records alongside the hook timeout. That RPC failure was never a
+hook-budget problem and was fixed by `maxWorkers`, not by anything here - this
+closure claims no credit for it.
+
+Reopen trigger: `Hook timed out in 180000ms` on this file again, under
+`maxWorkers: 4`, with the machine state captured.

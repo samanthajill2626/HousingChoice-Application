@@ -135,6 +135,25 @@ describe('logger call-site guard', () => {
   // beforeAll, NOT describe-body: describe bodies run at COLLECTION, where
   // no test timeout applies and a buildProgram throw fails the whole file
   // with no case to key on. The explicit timeout covers the full compile.
+  //
+  // WHY 180s FOR A HOOK THAT COSTS 6.5s. Measured 2026-09-01, this file alone,
+  // 3 runs, on a box recorded as QUIET (0 other live vitest runs, host CPU
+  // 9-26%, DynamoDB Local container 7.6-10.2% CPU): the hook is 6.46-6.56s -
+  // buildProgram 5.52-5.66s of it, scanProgram 0.91-0.93s. Inside buildProgram
+  // the cost is ts.createProgram (4.81s: parse and module-resolve 241 roots
+  // plus every reachable .d.ts); config parse plus host setup is 16ms and
+  // getTypeChecker 0.70s. Inside scanProgram it is getTypeAtLocation (0.73s
+  // over 1204 calls); the other three checker sites total under 30ms, so the
+  // eager getShorthandAssignmentValueSymbol below (1217 calls, 284 of them on
+  // an already-legal key) costs 4ms and is not worth reordering for.
+  //
+  // 180s is therefore ~27x the measured solo cost, not the ~1x it looks like.
+  // That headroom is deliberate and is NOT slack to trim: the failure this
+  // budget exists for is `Hook timed out in 180000ms` inside a full `npm test`,
+  // where this thread builds a whole TypeScript program while every other
+  // worker saturates the box. Solo cost is a LOWER bound on loaded cost, so a
+  // budget set to 4x solo (26s) would red on load constantly. Do not lower it
+  // on the strength of a solo measurement - including this one.
   let gp: GuardProgram;
   let findings: string[];
   beforeAll(() => {
@@ -142,6 +161,14 @@ describe('logger call-site guard', () => {
     findings = scanProgram(gp);
   }, 180_000);
 
+  // MEASURED 2026-09-01, this file alone, 3 runs: this `it` costs 2.46-2.59s,
+  // essentially all of it `getPreEmitDiagnostics` (2.46-2.58s) - the
+  // whole-program type-check the hook never pays for. 4x the slowest is 10.3s,
+  // inside the global testTimeout of 60_000 (app/vitest.config.ts:60), so this
+  // `it` needs no explicit per-test budget. Machine state recorded with each
+  // run: 0 other live vitest runs, host CPU 9-26%, container 7.6-10.2% CPU.
+  // If this ever grows past ~15s solo, give it its own third argument on the
+  // same >=4x rule rather than raising the global.
   it('the real program is healthy: files resolved, no unresolved-module diagnostics', () => {
     const sourceCount = gp.program
       .getSourceFiles()
@@ -149,6 +176,9 @@ describe('logger call-site guard', () => {
     expect(sourceCount).toBeGreaterThan(50);
     // TS2307 = cannot find module. A misconfigured program resolves nothing,
     // reports these, and would otherwise scan an empty world and pass.
+    // NOT redundant with sourceCount: app/tsconfig.json is `"include": ["src"]`,
+    // so every app/src file is a program ROOT and is counted whether or not its
+    // imports resolve. A program that resolved NOTHING still counts 239.
     const unresolved = ts
       .getPreEmitDiagnostics(gp.program)
       .filter((d) => d.code === 2307 && !(d.file?.fileName.endsWith(CANARY_NAME) ?? false))

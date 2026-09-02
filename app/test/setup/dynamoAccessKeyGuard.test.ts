@@ -57,6 +57,90 @@ const explicitKey = Boolean(process.env.HC_TEST_EXPLICIT_ACCESS_KEY);
  */
 const WORKTREE_DERIVED_KEYS_MARKER = 'hc:dynamo-lane worktree-derived-keys';
 
+/**
+ * A suite carrying this marker never opens a DynamoDB Local database - it
+ * drives a stub client and creates no container tables; declared so the
+ * creates-tables guard does not read its imports as container writes.
+ *
+ * The two markers above are the "this suite DOES create container tables, and
+ * here is how it stays collision-free" declarations. This one is the third
+ * answer: the premise is false. A pure stub suite legitimately names
+ * ensureTable and CreateTableCommand in its source without ever sending them
+ * anywhere, and salting its stub table names with randomUUID() to satisfy the
+ * regex mechanically would pass the guard by pretending the names are
+ * container tables.
+ */
+const NO_CONTAINER_TABLES_MARKER = 'hc:dynamo-lane none';
+
+/**
+ * Matched as a DECLARATION LINE, not as a substring - the rule
+ * optsIntoSharedLocalTables already applies to the shared marker, and for a
+ * concrete reason here: THIS file defines the constant above and imports the
+ * container-reaching client factory, so a substring match would make the guard
+ * exempt (and then flag) itself. Prose about the marker must never behave as
+ * the marker. Built from the constant so the text exists in one place.
+ */
+const NO_CONTAINER_TABLES_LINE = new RegExp(
+  `^\\s*//\\s*${NO_CONTAINER_TABLES_MARKER}\\.?\\s*$`,
+  'm',
+);
+
+/** True when this suite has declared that it touches no DynamoDB Local database. */
+function declaresNoContainerTables(absPath: string): boolean {
+  return NO_CONTAINER_TABLES_LINE.test(readFileSync(absPath, 'utf8'));
+}
+
+/**
+ * What a `none` suite must not contain. Kept beside the marker so the two rot
+ * together or not at all.
+ *
+ * THIS IS A ONE-FILE SOURCE SCAN AND IT DOES NOT FOLLOW IMPORTS. It is a
+ * statement about the declaring file's own text, not about its module graph, so
+ * a helper module that builds a client on the suite's behalf is invisible to it.
+ * What it does name is the set of entry points a test file uses to reach the
+ * container directly: the app's own client factory (src/lib/dynamo.js) and its
+ * three constructors, and the table-creating script/setup modules
+ * (db-create.js, db-seed.js, globalSetup.js, globalTeardown.js) and the helpers
+ * they export - because createAllTables builds its own client and creates all 22
+ * specs under FIXED names, which is the cross-worktree collision this guard
+ * exists to prevent. A quoted hc-local- prefix or a TABLE_PREFIX key is the
+ * second half: a stub suite has no business naming real tables.
+ *
+ * THE KNOWN ONE-HOP GAP, live in the tree today: dynamoAdminRetry.test.ts
+ * imports scripts/db-update-gsis.js, which imports the client factory. Harmless
+ * - that module's client construction sits behind its CLI argv guard and never
+ * runs under vitest - and db-update-gsis.js is deliberately NOT listed below,
+ * since listing it would flag the one legitimate `none` suite in the tree. It is
+ * the concrete measure of what a text scan cannot see.
+ *
+ * Every alternative is CODE-SHAPED on purpose - an import clause, a call, a
+ * quoted prefix, an object key. The very comment that declares the marker has
+ * to be able to explain what it is exempt from, and a bare-substring version of
+ * this check flagged this file's own declaring suite for saying the words
+ * "src/lib/dynamo.js" in that explanation.
+ *
+ * A bare `new DynamoDBClient(...)` from the SDK is deliberately NOT matched:
+ * dynamoAdminRetry.test.ts case 13 constructs two purely to read
+ * config.endpoint and never sends. The evasion that leaves open - pairing a
+ * bare client with ensureTable against real table names - is narrow: such a
+ * file still matches the creates-tables regex above, so it is exempt ONLY by
+ * carrying a marker, and a `none` declaration on a file that really sends is a
+ * false statement a reviewer can see, not a silent hole.
+ */
+const CONTAINER_REACHING = new RegExp(
+  [
+    String.raw`from\s+['"][^'"]*\/dynamo\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/db-create\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/db-seed\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/globalSetup\.js['"]`,
+    String.raw`from\s+['"][^'"]*\/globalTeardown\.js['"]`,
+    String.raw`\b(?:createDynamoClient|createDocumentClient|getDocumentClient)\s*\(`,
+    String.raw`\b(?:createAllTables|dropAllTables|ensureKeyedLocalTables|dropKeyedLocalTables)\s*\(`,
+    String.raw`['"\`]hc-local-`,
+    String.raw`\bTABLE_PREFIX\b\s*:`,
+  ].join('|'),
+);
+
 /** Every *.test.ts under the app workspace - i.e. everything this hook governs. */
 function allAppTestFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -288,6 +372,11 @@ describe('per-file DynamoDB Local access keys', () => {
         // dynamoKeyLedger.test.ts, whose fixed probe key this guard flagged
         // the day keys went machine-wide.
         if (src.includes(WORKTREE_DERIVED_KEYS_MARKER)) return false;
+        // The third accepted answer: the suite creates no container tables at
+        // all - it names ensureTable/CreateTableCommand only to drive a stub
+        // client (test/dynamoAdminRetry.test.ts). Declared the same way, and
+        // held honest by the rot-proof case below.
+        if (declaresNoContainerTables(f)) return false;
         return !/randomUUID|Math\.random/.test(src);
       })
       .map((f) => testFileId(f));
@@ -301,7 +390,44 @@ describe('per-file DynamoDB Local access keys', () => {
         `every key the suite uses from testAccessKeyId() and declare it with ` +
         `"${WORKTREE_DERIVED_KEYS_MARKER}" (see dynamoKeyLedger.test.ts); or - only ` +
         `if the suite truly needs the shared hc-local- tables - add the marker ` +
-        `"${SHARED_LOCAL_TABLES_MARKER}".`,
+        `"${SHARED_LOCAL_TABLES_MARKER}"; or - only if the suite creates NO ` +
+        `container tables at all, because it drives a stub client - declare ` +
+        `"${NO_CONTAINER_TABLES_MARKER}" on a comment line of its own (see ` +
+        `dynamoAdminRetry.test.ts).`,
+    ).toEqual([]);
+  });
+
+  it('a suite declared as touching NO container tables really cannot reach one', () => {
+    // The rot-proof half of the third marker. The marker asserts a NEGATIVE
+    // ("this file opens no DynamoDB Local database"), which nothing else would
+    // notice going stale: someone adds one real client to a stub suite, the
+    // marker keeps exempting it, and the fixed table names it now creates
+    // collide across worktrees exactly as the guard above exists to prevent.
+    //
+    // What counts as reaching a database is listed at CONTAINER_REACHING: the
+    // app's client factory and its constructors, the table-creating script and
+    // setup entry points and their helpers, or a real table name. Read the
+    // limitation stated there before trusting this case - it is a one-file
+    // source scan that does not follow imports, so a suite that opens a
+    // database through a helper module of its own passes it.
+    //
+    // Constructing a bare DynamoDBClient from the SDK is NOT caught here, and
+    // should not be: dynamoAdminRetry.test.ts case 13 makes two of them purely
+    // to read config.endpoint, and never sends.
+    const offenders = allAppTestFiles(TEST_DIR)
+      .filter((f) => declaresNoContainerTables(f))
+      .filter((f) => CONTAINER_REACHING.test(readFileSync(f, 'utf8')))
+      .map((f) => testFileId(f));
+
+    expect(
+      offenders,
+      `These suites declare "${NO_CONTAINER_TABLES_MARKER}" - that they open no ` +
+        `DynamoDB Local database - but their CODE imports the app client factory ` +
+        `module or a table-creating script/setup module, calls one of their ` +
+        `constructors or table helpers, or names a real table. Either ` +
+        `drop the marker and satisfy the creates-tables guard the normal way ` +
+        `(a per-run random prefix, or worktree-derived keys), or keep the suite ` +
+        `on stubs.`,
     ).toEqual([]);
   });
 

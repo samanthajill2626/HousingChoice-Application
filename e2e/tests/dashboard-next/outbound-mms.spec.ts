@@ -96,6 +96,11 @@ interface ElementBox {
   height: number;
 }
 
+interface ViewerScrollOffsets {
+  appFrame: { top: number; left: number };
+  timeline: { top: number; left: number };
+}
+
 async function readViewerScale(page: Page): Promise<number> {
   const raw = await page
     .locator('[data-image-viewer-scale]')
@@ -232,8 +237,37 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
       text: compactText(node.textContent),
     });
 
-    const measure = (element: HTMLElement) => {
+    let lastPointer:
+      | {
+          clientX: number;
+          clientY: number;
+          buttons: number;
+          pointerType: string;
+        }
+      | null = null;
+    const onPointerMove = (event: PointerEvent): void => {
+      lastPointer = {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        buttons: event.buttons,
+        pointerType: event.pointerType,
+      };
+    };
+    document.addEventListener('pointermove', onPointerMove, { capture: true, passive: true });
+
+    const measureRect = (element: Element): Record<string, number> => {
       const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+
+    const measure = (element: HTMLElement) => {
       const maximumTop = Math.max(0, element.scrollHeight - element.clientHeight);
       return {
         top: element.scrollTop,
@@ -244,14 +278,7 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
         clientWidth: element.clientWidth,
         maximumTop,
         distanceFromBottom: maximumTop - element.scrollTop,
-        rect: {
-          top: rect.top,
-          bottom: rect.bottom,
-          left: rect.left,
-          right: rect.right,
-          width: rect.width,
-          height: rect.height,
-        },
+        rect: measureRect(element),
       };
     };
 
@@ -259,6 +286,11 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
     const record = (kind: string, label: string, detail?: unknown): void => {
       const events = ownedWindow.__hcViewerScrollDiagnostics;
       if (events === undefined) return;
+      const canvas = document.querySelector<HTMLElement>('[data-image-viewer-canvas="true"]');
+      const pointerTarget =
+        lastPointer === null
+          ? null
+          : document.elementFromPoint(lastPointer.clientX, lastPointer.clientY);
       events.push({
         atMs: performance.now(),
         kind,
@@ -269,6 +301,17 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
         routeRoot: {
           ...measure(routeRoot),
           childElementCount: routeRoot.childElementCount,
+        },
+        viewerInteraction: {
+          canvasRect: canvas === null ? null : measureRect(canvas),
+          pointer: lastPointer,
+          elementUnderPointer:
+            pointerTarget === null
+              ? null
+              : {
+                  ...describeNode(pointerTarget),
+                  insideCanvas: canvas?.contains(pointerTarget) ?? false,
+                },
         },
         timelineContext: {
           streamChildElementCount: timeline.childElementCount,
@@ -331,6 +374,7 @@ async function startViewerScrollDiagnostics(page: Page): Promise<void> {
     ownedWindow.__hcViewerScrollStop = (): void => {
       appFrame.removeEventListener('scroll', onAppFrameScroll);
       timeline.removeEventListener('scroll', onTimelineScroll);
+      document.removeEventListener('pointermove', onPointerMove, { capture: true });
       mutationObserver.disconnect();
       resizeObserver.disconnect();
       delete ownedWindow.__hcViewerScrollRecord;
@@ -362,13 +406,27 @@ async function attachViewerScrollDiagnostics(
       __hcViewerScrollDiagnostics?: unknown[];
       __hcViewerScrollStop?: () => void;
     };
+    if (ownedWindow.__hcViewerScrollStop === undefined) return null;
     const output = [...(ownedWindow.__hcViewerScrollDiagnostics ?? [])];
     if (shouldStop) ownedWindow.__hcViewerScrollStop?.();
     return output;
   }, stop);
+  if (events === null) return;
   await testInfo.attach(name, {
     body: JSON.stringify(events, null, 2),
     contentType: 'application/json',
+  });
+}
+
+async function readNamedViewerScrollOffsets(page: Page): Promise<ViewerScrollOffsets> {
+  return page.evaluate(() => {
+    const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
+    const timelineStream = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
+    if (appFrame === null || timelineStream === null) throw new Error('named scroll owner missing');
+    return {
+      appFrame: { top: appFrame.scrollTop, left: appFrame.scrollLeft },
+      timeline: { top: timelineStream.scrollTop, left: timelineStream.scrollLeft },
+    };
   });
 }
 
@@ -448,6 +506,14 @@ function outboundMediaLegs(threads: FakeThread[], party: string) {
 }
 
 test.describe('Outbound MMS - 1:1 contact composer', () => {
+  test.afterEach(async ({ page }, testInfo) => {
+    // A phase assertion can fail before the success path reaches its explicit
+    // final attachment. Preserve and stop an installed recorder before the page
+    // fixture is torn down; other tests in this describe install nothing, so the
+    // helper returns without creating an empty attachment.
+    await attachViewerScrollDiagnostics(page, testInfo, 'viewer-scroll-after-test.json', true);
+  });
+
   test('(a) attach + send an image: the fake records media AND the timeline renders it', async ({
     page,
     request,
@@ -505,6 +571,16 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
         message: 'the sent attachment image never loaded (authed serve pipeline)',
       })
       .toBeGreaterThan(0);
+
+    // Fake delivery advances asynchronously after the provider accepts the MMS.
+    // Timeline deliberately re-runs its message-sentinel anchoring when that
+    // rendered status changes, so take the viewer's scroll baseline only after
+    // this send reaches its terminal UI state. This is a lifecycle condition,
+    // not a delay: it isolates viewer gestures from the send still settling.
+    const sentBubble = timeline.getByText(token, { exact: true }).locator('..');
+    await expect(sentBubble.getByText('Delivered', { exact: true })).toBeVisible({
+      timeout: 20_000,
+    });
 
     // Open from the real Timeline only after arranging both scroll owners. This
     // makes the provider capture distinct, nonzero AppFrame + Timeline values.
@@ -565,6 +641,9 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     const dialog = page.getByRole('dialog', { name: 'Attachment 1' });
     await expect(dialog).toBeVisible();
     await recordViewerScrollPhase(page, 'dialog-visible');
+    expect(await readNamedViewerScrollOffsets(page), 'opening the viewer moved a scroll owner').toEqual(
+      expectedScroll,
+    );
     await expect(page.locator('[data-modal-variant="media"]')).toHaveCSS('z-index', '200');
     expect(page.url()).toBe(beforeUrl);
 
@@ -642,6 +721,9 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     await expect.poll(() => readViewerScale(page)).toBe(8);
     await expectRecordedScalesWithinBounds(page, 'desktop discrete wheel');
     await recordViewerScrollPhase(page, 'wheel-zoom-complete');
+    expect(await readNamedViewerScrollOffsets(page), 'wheel zoom moved a scroll owner').toEqual(
+      expectedScroll,
+    );
 
     // Pan to every boundary at high zoom; each extreme must leave real pixels
     // intersecting the inspection canvas on both axes.
@@ -659,39 +741,24 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
       await page.mouse.up();
       await expectViewerImageOverlapsCanvas(dialog, canvas, 'Attachment 1', target.label);
       await recordViewerScrollPhase(page, `${target.label}-after`);
+      expect(
+        await readNamedViewerScrollOffsets(page),
+        `${target.label} moved a scroll owner`,
+      ).toEqual(expectedScroll);
     }
 
     await recordViewerScrollPhase(page, 'before-while-open-capture');
-    const scrollWhileOpen = await page.evaluate(() => {
-      const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
-      const timelineStream = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
-      if (appFrame === null || timelineStream === null) throw new Error('named scroll owner missing');
-      return {
-        appFrame: { top: appFrame.scrollTop, left: appFrame.scrollLeft },
-        timeline: { top: timelineStream.scrollTop, left: timelineStream.scrollLeft },
-      };
-    });
+    const scrollWhileOpen = await readNamedViewerScrollOffsets(page);
     await attachViewerScrollDiagnostics(page, testInfo, 'viewer-scroll-before-assertion.json');
     expect(scrollWhileOpen).toEqual(expectedScroll);
 
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
+    await recordViewerScrollPhase(page, 'dialog-closed-by-escape');
     await expect(openedTrigger).toBeFocused();
     expect(page.url()).toBe(beforeUrl);
     await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const appFrame = document.querySelector<HTMLElement>('[data-viewer-test-appframe]');
-          const timelineStream = document.querySelector<HTMLElement>('[data-viewer-test-timeline]');
-          if (appFrame === null || timelineStream === null) {
-            throw new Error('named scroll owner missing after dismissal');
-          }
-          return {
-            appFrame: { top: appFrame.scrollTop, left: appFrame.scrollLeft },
-            timeline: { top: timelineStream.scrollTop, left: timelineStream.scrollLeft },
-          };
-        }),
-      )
+      .poll(() => readNamedViewerScrollOffsets(page))
       .toEqual(expectedScroll);
     await recordViewerScrollPhase(page, 'dismissal-restore-complete');
     await attachViewerScrollDiagnostics(page, testInfo, 'viewer-scroll-final.json', true);

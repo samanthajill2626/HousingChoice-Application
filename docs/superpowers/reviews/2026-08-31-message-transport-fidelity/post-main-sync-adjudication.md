@@ -42,5 +42,6 @@ then add the legacy equivalent before implementing the owner/lease fix.
 
 The post-main-sync P1 is deferred by explicit human scope, not rejected or
 silently waived. Merge readiness for message-transport-fidelity now depends on
-fresh green completion gates after the merge and on committing this adjudication,
-the two post-main-sync review reports, and the issue record.
+the post-sync completion record, the human-directed E2E exception, and committing
+this adjudication, the two post-main-sync review reports, and the issue record.
+Those conditions are recorded in `post-main-sync-gates.md`.

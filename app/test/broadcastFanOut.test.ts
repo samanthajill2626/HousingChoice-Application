@@ -10,7 +10,7 @@ import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
-import type { SendMessageParams } from '../src/adapters/messaging.js';
+import type { PreparedMessageSend } from '../src/adapters/messaging.js';
 import {
   _resetForTests,
   configureJobsLogger,
@@ -359,9 +359,13 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     // Bob's send rate-limits (429); Alice succeeds.
-    world.adapter.sendMessage = async (params: SendMessageParams) => {
-      if (params.to === b.phone) throw Object.assign(new Error('rate limited'), { code: 429 });
-      return { providerSid: `SMok-${params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+    world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+      if (prepared.params.to === b.phone) throw Object.assign(new Error('rate limited'), { code: 429 });
+      return {
+        providerSid: `SMok-${prepared.params.to}`,
+        status: 'sent',
+        providerTs: new Date().toISOString(),
+      };
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
@@ -385,7 +389,7 @@ describe('broadcast.send (M1.8a)', () => {
     seedUnit(world);
     seedBroadcast(world, [b]);
     wireHandler(world, logger);
-    world.adapter.sendMessage = async () => {
+    world.adapter.sendPreparedMessage = async () => {
       throw Object.assign(new Error('rate limited'), { code: 429 });
     };
 
@@ -405,7 +409,7 @@ describe('broadcast.send (M1.8a)', () => {
     seedUnit(world);
     seedBroadcast(world, [b]);
     wireHandler(world, logger);
-    world.adapter.sendMessage = async () => {
+    world.adapter.sendPreparedMessage = async () => {
       throw Object.assign(new Error('filtered'), { code: 30007 });
     };
 
@@ -425,7 +429,7 @@ describe('broadcast.send (M1.8a)', () => {
     seedUnit(world);
     seedBroadcast(world, [b]);
     wireHandler(world, logger);
-    world.adapter.sendMessage = async () => {
+    world.adapter.sendPreparedMessage = async () => {
       throw Object.assign(new Error('invalid'), { code: 30005 });
     };
 
@@ -512,7 +516,7 @@ describe('broadcast.send (M1.8a)', () => {
     seedUnit(world);
     seedBroadcast(world, [b]);
     wireHandler(world, logger);
-    world.adapter.sendMessage = async () => {
+    world.adapter.sendPreparedMessage = async () => {
       throw Object.assign(new Error('rate limited'), { code: 429 });
     };
 
@@ -733,9 +737,13 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
     // Bob rate-limits (429 transient) -> deferred to a continuation, slot stays
     // queued, NO bumpStats. Alice succeeds.
-    world.adapter.sendMessage = async (params: SendMessageParams) => {
-      if (params.to === b.phone) throw Object.assign(new Error('rate limited'), { code: 429 });
-      return { providerSid: `SMok-${params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+    world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+      if (prepared.params.to === b.phone) throw Object.assign(new Error('rate limited'), { code: 429 });
+      return {
+        providerSid: `SMok-${prepared.params.to}`,
+        status: 'sent',
+        providerTs: new Date().toISOString(),
+      };
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });

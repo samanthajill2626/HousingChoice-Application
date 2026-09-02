@@ -1,20 +1,21 @@
 ---
 id: broadcast-fanout-gate-regression
-title: Broadcast fan-out retries fail on current main
+title: Invalidated broadcast fan-out mainline regression attribution
 type: bug
-severity: med
-status: open
+severity: low
+status: resolved
 area: app
 created: 2026-09-01
 refs: app/test/broadcastFanOut.test.ts:354, app/src/jobs/broadcastFanOut.ts
 ---
 
-**Problem.** `npm test` on the message-transport-fidelity synced branch reproduces six
-`broadcastFanOut.test.ts` failures: 429 continuation enqueueing, terminal transient
-failure, 30007 and 30005 failure handling, next-attempt backoff, and transient-defer
-event emission. Both the test and implementation are byte-identical to merged `main`,
-so this feature must not modify them. The failures leave the root completion gate red.
+**Problem.** The first final-gate triage saw six `broadcastFanOut.test.ts` failures and
+incorrectly classified them as a current-main regression because the test and job files
+are byte-identical to main. That file-level comparison missed a changed dependency:
+transport-fidelity routes the real send wrapper through `sendPreparedMessage`, while
+these tests replace only legacy `adapter.sendMessage`.
 
-**Suggested fix.** Reproduce the six cases on a clean, non-overlapping DynamoDB Local
-test run at current `main`, identify the changed broadcast send/error boundary, and
-restore the documented continuation and derived-event contracts with red/green proof.
+**Resolution (2026-09-01).** A detached `7be40139` baseline passed all 25 broadcast
+tests under a distinct clean DynamoDB key. The branch-only prepared-send seam is the
+cause, so the transport-fidelity mission owns a narrow test-fixture correction. This
+record remains only to prevent a future re-triage from repeating the invalid attribution.

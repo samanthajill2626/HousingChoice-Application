@@ -363,6 +363,28 @@ describe('GET /api/calls/:callId/recording (M1.9c, authed)', () => {
     expect((res.body as Buffer).toString()).toContain('recording-bytes-for:');
   });
 
+  // PAIRED with the identical assertion on GET /api/messages/:sid/media/:idx
+  // (test/mmsMedia.test.ts). This route previously declared NO caching policy
+  // at all, leaving an authenticated PII response to browser heuristics; it now
+  // states the same posture as its sibling (Cameron, 2026-09-02). `private` is
+  // the load-bearing half - no shared proxy or CDN may ever hold recording
+  // bytes. The residual it does NOT close is an accepted risk recorded in
+  // docs/issues/authenticated-mms-media-browser-cache.md. Change both routes
+  // and both tests together or neither.
+  it('declares Cache-Control: private, max-age=3600 (matches the MMS media route)', async () => {
+    const world = createFakeWorld();
+    const app = await seedRecordedCall(world);
+
+    const res = await request(app)
+      .get('/api/calls/CAbiz0001/recording')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toBe('private, max-age=3600');
+    expect(res.headers['cache-control']).not.toContain('public');
+  });
+
   it('404 when the call has no recording', async () => {
     const world = createFakeWorld();
     // A founder bridge exists but NO recording callback fired.

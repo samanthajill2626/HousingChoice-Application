@@ -3,7 +3,7 @@ id: quiet-hours-e2e-fails-inside-its-own-window
 title: The quiet-hours scenario spec fails gate 4 for roughly four hours every evening
 type: bug
 severity: high
-status: open
+status: resolved
 area: e2e
 created: 2026-09-01
 refs: e2e/tests/scenarios/quiet-hours.spec.ts:433, e2e/tests/scenarios/quiet-hours.spec.ts:161, e2e/tests/scenarios/quiet-hours.spec.ts:405
@@ -75,3 +75,14 @@ the band would flip it back.
 **Related.** Landed with the tour-reminder ladder work
 (`feat/tour-reminder-ladder-phase-b`, merged @1af02926); the retiming and the
 pause removal that unmasked it are both referenced in the spec's own comment.
+
+**Resolution (2026-09-01, `fix/quiet-hours-spec-window`).** Option 1: test (3)
+now stores TWO windows in sequence because it proves two different things. The
+panel assertions run under the rung-anchored `QUIET_AROUND_DAY_BEFORE` (as
+test (2) already did) and assert `QUIET_NOTE` PRESENT - deterministic at any
+hour, and the honest narrative: the panel promises a deferral, then a human
+overrides it. `windowAroundNow()` is re-stored just before the Send-now click,
+serving only the wall-clock bypass premise, with no note assertion after the
+switch. Verified with the single spec run at 20:57 EDT - inside the band that
+failed - plus the spec's own comments updated to forbid asserting a rung note
+under a wall-clock-anchored window.

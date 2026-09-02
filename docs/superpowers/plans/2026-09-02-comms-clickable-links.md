@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v2 - DRAFT after adversarial review round 1
+Status: v3 - READY for launch gate after adversarial review round 2
 Date: 2026-09-02
 Branch: `feat/comms-clickable-links`
 Worktree: `W:\\tmp\\comms-clickable-links`
@@ -226,6 +226,10 @@ Also assert, with explicit expected token/href arrays:
   distinct offsets;
 - a trailing period/comma and balanced parentheses are excluded according to the
   parser match;
+- `[example.com/bracket/path]` links only `example.com/bracket/path`, leaving both
+  square brackets as text;
+- `example.com/unicode/path\u3002` links only `example.com/unicode/path`, leaving
+  the Unicode sentence punctuation as text;
 - `housing.zip/path`, a suffix absent from the parser's documented built-in list,
   and an international domain assembled with `\u` escapes are recognized through
   the full TLD list;

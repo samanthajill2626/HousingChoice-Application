@@ -6,7 +6,7 @@
 // never inline content - esp. relay-group content). A "Comms only" toggle hides
 // milestones; a reply box notes the target number and sends to the resolved
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
-// render as React text nodes and safety-checked anchors — never dangerouslySetInnerHTML.
+// render as React text nodes and safety-checked anchors - never dangerouslySetInnerHTML.
 // Accessibility-first (roles/labels) so it's testable.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';

@@ -93,6 +93,14 @@ describe('tokenizeLinkifiedText', () => {
     expect(textTokens(source).map(({ text }) => text).join('')).toBe(source);
   });
 
+  it.each(['http:example.com/a', 'https:example.com/a', 'http:///example.com/a'])(
+    'keeps malformed HTTP scheme source %s as exact text',
+    (source) => {
+      expect(links(source)).toEqual([]);
+      expect(textTokens(source).map(({ text }) => text).join('')).toBe(source);
+    },
+  );
+
   it('preserves the exact source when the final safety boundary rejects a match', () => {
     expect(tokenizeLinkifiedText('before reject.com/path after')).toEqual([
       { kind: 'text', start: 0, end: 7, text: 'before ' },

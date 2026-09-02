@@ -27,13 +27,21 @@ async function plantMessage(request: APIRequestContext, body: string): Promise<v
   ).toBeTruthy();
 }
 
+async function reseedLean(request: APIRequestContext): Promise<void> {
+  const response = await request.post(`${NEXT}/__dev/reseed`);
+  expect(response.ok(), `lean reseed failed: ${response.status()} ${await response.text()}`).toBeTruthy();
+}
+
+test.afterEach(async ({ request }) => {
+  await reseedLean(request);
+});
+
 test('communications body links are safe, complete, and do not toggle bubble metadata', async ({
   context,
   page,
   request,
 }) => {
-  const reseed = await request.post(`${NEXT}/__dev/reseed`);
-  expect(reseed.ok(), `reseed failed: ${reseed.status()} ${await reseed.text()}`).toBeTruthy();
+  await reseedLean(request);
 
   const explicitText = 'https://example.com/explicit?x=1#top';
   const bareText = 'example.com/bare/path?unit=2#photos';

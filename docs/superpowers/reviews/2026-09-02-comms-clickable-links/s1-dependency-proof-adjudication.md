@@ -8,9 +8,9 @@ dependency proof, without changing production behavior or dependency scope.
 
 S1 installed exact dashboard `autolinker@4.1.5` with its only runtime dependency
 `tslib@2.8.1`. Its clean Windows install, dashboard build, manifest inspection, and
-disposable Linux ARM64 install/import proof passed. The installed manifests reported
-MIT licensing, no preinstall/install/postinstall hooks, no optional dependencies,
-and no native binary path.
+disposable Linux ARM64 install/import proof passed. The installed manifests report
+MIT for Autolinker and 0BSD for tslib, with no preinstall/install/postinstall hooks,
+no optional dependencies, and no native binary path.
 
 The workspace production audit reported four existing high findings in `nanoid`,
 `postcss`, `react-router`, and `react-router-dom`; it reported no Autolinker or

@@ -28,6 +28,9 @@ function maskedParserText(text: string): string {
 type AutolinkerMatch = Extract<ReturnType<typeof Autolinker.parse>[number], { type: 'url' }>;
 
 function normalizedHref(match: AutolinkerMatch, source: string): string | null {
+  if (match.getUrlMatchType() === 'scheme' && !/^https?:\/\/[^/?#]+/i.test(source)) {
+    return null;
+  }
   const candidate = source.startsWith('//')
     ? `https:${source}`
     : match.getUrlMatchType() === 'tld'

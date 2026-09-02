@@ -8,10 +8,10 @@ Issues closed: `relay-30003-retry-lineage` (med),
 Issues filed by this mission: `relay-member-key-collapses-two-phones-one-contact`,
 plus the inbound-display gap named in Sec 2.
 
-Revision 3, after adversarial review round 1 (two reviewers, 44 findings) and
-round 2 (one continued reviewer, 13 findings). Adjudications are at
+Revision 4, after adversarial review round 1 (two reviewers, 44 findings),
+round 2 (13 findings) and round 3 (13 findings). Adjudications are at
 `docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/spec-r1-adjudications.md`
-and `.../spec-r2-adjudications.md`.
+and its `spec-r2-` and `spec-r3-` siblings.
 
 Read `docs/issues/relay-30003-retry-lineage.md` first, including its
 "Design knowledge from M5" section. This document does not restate it; it
@@ -68,7 +68,9 @@ relay conversation outright (`app/src/services/sendMessage.ts:297`,
   `dashboard/src/routes/contact/Timeline.tsx` including the `MessageBubble` and
   `StreamItem` prop plumbing,
   `dashboard/src/routes/conversation/useRelayThread.ts`,
-  `dashboard/src/api/types.ts`.
+  `dashboard/src/api/types.ts`,
+  `dashboard/src/lib/messageTransport.ts:43-56` - the funnel every projected
+  entry passes through.
 - All THREE hosts that mount the relay Timeline:
   `dashboard/src/routes/conversation/ConversationDetail.tsx:480`,
   `dashboard/src/routes/tours/TourConversation.tsx:467`,
@@ -145,6 +147,17 @@ Note the distinction, which is easy to invert: the inbound prohibition is on the
 MESSAGE's `requestedTransport` (`messagesRepo.ts:913-915`), NOT on the slot's,
 which is validated but permitted (`:922-937`). An inbound retry row's slot may and
 must carry one.
+
+**The retry row's transport MODE follows the ORIGINAL's, and the original can be
+LEGACY.** Every relay source written before 2026-09-02 is legacy
+(`relayFanOut.ts:791-795` is where the mode is resolved). A retry row that always
+seeded a versioned slot while mirroring a legacy original would drive the
+extracted body down `markRecipient`'s blind whole-slot write (`:1436-1463`),
+erasing the `planned` state this decision just mandated. So the mode is resolved
+from the original and the slot is seeded to match it: versioned original,
+versioned slot with `planned`; legacy original, legacy slot and no aggregation
+state. A retry of an old message is the ordinary case, not an edge one - the
+ladder exists precisely for messages that failed to land.
 
 **D3. The claim is the row's `sid#<providerSid>` pointer, created atomically
 with the row.** `append` runs a transaction whose index 1 is that pointer, and
@@ -228,8 +241,27 @@ VALUE, not the imported constant. A retry row inherits the original's sender key
 **D8. The trigger is narrow, and it gates on the SLOT'S POST-WRITE STATE - never
 on whether this callback transitioned it.** A retry is claimed only for: a
 delivery-status callback resolved through the relay pointer, passing D7, with
-rungs remaining, where the leg's slot after this callback's write is terminal AND
-its error code is 30003.
+rungs remaining, where THIS CALLBACK's error code is 30003, the leg's slot after
+this callback's write is terminal, and the slot's own error code is either 30003
+or ABSENT.
+
+Three parts of that sentence are load-bearing and none is obvious:
+
+- **The read must be CONSISTENT.** `updateRecipientDeliveryStatus` returns a bare
+  boolean (`messagesRepo.ts:3516`) and `getByTsMsgId` is eventually consistent
+  (`:2960-2965`), so a naive re-read after the write intermittently sees the
+  pre-write slot and claims nothing - a silent, load-dependent dropped retry that
+  no test would reliably catch. Use `getMessageConsistent` (`:1885`), which exists
+  for exactly this and which six sibling mutators already establish the precedent
+  for.
+- **The CALLBACK's code, not only the slot's.** A code-less `failed` callback
+  arriving first makes the slot terminal, which then blocks the 30003 callback's
+  transition, so the 30003 is never written to the slot
+  (`messagesRepo.ts:3459-3466`, `:3477-3481`). Gating on the stored code alone
+  would refuse a real first failure.
+- **The slot's code must still be 30003 or absent.** That is what keeps the
+  30007 case closed: a leg that sent, took a terminal 30007, then received a
+  contradictory 30003 has a slot reading 30007, so no claim.
 
 **Gating on `transitioned` was considered and rejected, and the reasoning must
 not be lost, because the obvious version of it is wrong twice over.**
@@ -268,7 +300,7 @@ Before sending: the group is still open; the member is still on the roster and
 the digest of their current number still matches the digest this ladder was
 claimed against; the member is not suppressed or opted out. A refusal writes a
 terminal state on the retry leg with a close code naming the gate that refused,
-claims no further rung, and emits the terminal ERROR of D22. This is what makes
+claims no further rung, and emits the terminal ERROR of D23. This is what makes
 acceptance criterion 8 true.
 
 **D10. The per-leg send is EXTRACTED from the fan-out and shared, not
@@ -352,7 +384,7 @@ must suppress those pointers while still carrying the durable `s3Key`s they
 re-presign from.
 
 **D14. An enqueue failure closes the retry leg terminally**, with a close code
-distinct from cap-exhausted, and emits the terminal ERROR of D22. Reusing one
+distinct from cap-exhausted, and emits the terminal ERROR of D23. Reusing one
 code would tell an operator retries ran when none did - M5's D10, and the reason
 `relayFanOut` closes on `enqueue_failed` while `retrySend` does nothing.
 `closeRelay` is a nested closure (`relayFanOut.ts:1060`) and is not reusable from
@@ -396,8 +428,8 @@ with its copy, in the same change.
 
 ## 4. Decisions: what a retry looks like on the wire
 
-**D17. Three lineage fields are added to `TimelineMessage` and to the relay
-projector.** The raw row's unknown top-level fields do not survive the client
+**D17. The four wire-bound lineage fields of D11 are added to `TimelineMessage`
+and to the relay projector.** The raw row's unknown top-level fields do not survive the client
 projectors, each of which spreads a fixed field list
 (`useRelayThread.ts:69-135`, `contactTimeline.ts:406-464`,
 `buildTimelineFallback.ts:64-104`). The precedent for adding one is
@@ -423,9 +455,19 @@ call site currently discards them at `Timeline.tsx:937`) and the retry rows that
 reference this message. From those it derives, per member key, one of:
 `retrying`, `delivered-on-retry`, `terminal`, or `unconfirmed`.
 
-`unconfirmed` is a rung that has not reached `sent` within `STALE_SENT_AFTER_MS`
-(`deliveryStatus.ts:58`, the module's only budget - reused so two staleness
-horizons cannot drift), measured from the RETRY ROW's own `at`.
+`unconfirmed` has TWO halves and both are required, because a ladder can go quiet
+in two different places:
+
+- a rung that never reached `sent` within `STALE_SENT_AFTER_MS` of the RETRY ROW's
+  own `at` - the stranded claim; and
+- a rung that DID reach `sent` and never received a receipt within
+  `STALE_SENT_AFTER_MS` of its `sentAt` - the ordinary missing-DLR case.
+
+Specifying only the first would leave a sent-but-unacknowledged rung reading
+`retrying` for ever, which is the same falsehood M5 removed and the one this
+design has now nearly reintroduced twice. `STALE_SENT_AFTER_MS`
+(`deliveryStatus.ts:58`) is the module's only staleness budget and is reused for
+both halves so two horizons cannot drift apart.
 
 This deliberately does NOT go through `stalenessClockMs`: that helper is shared
 with native group text, which Sec 2 fences out, and its refusal to age a `queued`
@@ -446,6 +488,22 @@ is the indefinite promise M5 removed, reintroduced one level down. `hasTickableL
 gains a retry-state clause so a live retry keeps the ticker running until it
 resolves.
 
+Two consequences of that clause, both of which must be honored:
+
+- **It forces the join to THREAD level.** `hasTickableLeg` is called with
+  `(item, tickNow)` over `visible` (`Timeline.tsx:798`, `:1851-1854`), and D20 has
+  already filtered the retry rows OUT of `visible`. So the per-member retry state
+  cannot be computed inside a bubble from its own props; it is computed once at
+  the thread level, over all items including the hidden retry rows, and passed
+  down - which is also where D20's own filter lives. D19's projection consumes
+  that same thread-level result rather than re-deriving it.
+- **It adds a FIFTH non-termination to a predicate whose docblock enumerates
+  four** (`Timeline.tsx:788-812`, run-condition doc at `:1801-1815`). That
+  docblock is the record of four shipped bugs on this exact axis. The new clause
+  must terminate - a retry state resolves to `delivered-on-retry`, `terminal` or
+  `unconfirmed` in bounded time - and the docblock must be extended to say so,
+  not left describing four.
+
 **D19. The four end states, with the arithmetic stated.** `failed > 0` is the
 FIRST branch (`deliveryStatus.ts:416`), so without explicit arithmetic every
 state below collapses into today's failure string.
@@ -462,14 +520,24 @@ code's copy when a gate refused or the enqueue failed. Without that an operator
 whose retry was refused because the number changed would read exactly the same
 string as one whose cap ran out.
 
-**The projection happens ONCE, onto the recipient ENTRIES, and nothing downstream
-reads a raw slot.** The join produces an effective `{status, errorCode}` per
-member key, and `presentRelayDelivery`, `orderRecipientRows` and every
-`recipientSummaryName` call consume that derived set. This is not a convenience:
+**The projection happens ONCE, at thread level, onto the recipient ENTRIES, and
+nothing downstream reads a raw slot.** The join produces, per member key, an
+effective `{status, errorCode}` PLUS a separate `retryState` field -
+`retrying`, `delivered-on-retry`, `terminal` or `unconfirmed`. `presentRelayDelivery`,
+`orderRecipientRows` and every `recipientSummaryName` call consume that derived
+set.
+
+**`retryState` is a separate field and must NOT be smuggled into `status`.**
+`DeliveryStatus` is a closed union and `presentDeliveryStatus` returns null for
+anything outside it (`deliveryStatus.ts:128-141`), so an overloaded
+`status: 'retrying'` renders as NO state at all on the row and the recital, while
+`presentRelayDelivery`'s counters (`:410-414`) match neither `delivered` nor
+`failed` and silently drop the leg from both buckets - producing a neutral
+`delivered 3/4` that looks like a message still in flight. Every consumer branches
+on `retryState` explicitly; `status` keeps only values the union already admits. This is not a convenience:
 the original's failure reason is derived INDEPENDENTLY in five places - the rollup
 chip's own reason (`deliveryStatus.ts:420-427`), the rollup's accessible name
-(`Timeline.tsx:959-968` recomputing per row at `:593-597`), the message-level
-chip's accessible name (`:978-989`), the inbound recital (`:993-1004`), and the
+(`Timeline.tsx:959-968` recomputing per row at `:593-597`), the inbound recital (`:993-1004`), and the
 per-recipient row (`:1112-1115`) - three of which read `row.slot.errorCode`
 directly, and all of which render a reason only when `presentLegDelivery` returns
 `isFailure: true` (`deliveryStatus.ts:508-545`). So a projected state must move
@@ -548,6 +616,13 @@ platform working, not a failure". A purely attempt-aware predicate would turn
 every relay opt-out into an alarm, which is a strictly larger increase than the
 one this section asks the founder to approve.
 
+**A fan-out or team leg that ends terminally logs ERROR whether or not a ladder
+ran.** That includes the middle cases: a claim declined because `To` was missing
+or malformed (D5), or because the source row could not be read (D7). Those are
+real dead ends for a real tenant - the distinction that matters is the PRODUCT the
+leg belongs to, not whether the ladder happened to start. The founder's
+sign-off estimate covers that whole set.
+
 **The legs D7 fences out keep WARN.** Announcements - relay intro, member-added,
 group-closed and every tour-reminder rung - reach the same severity site
 (`twilio.ts:2500-2511`) through the same pointers, and no retry is ever claimed
@@ -623,6 +698,11 @@ Test intentions. The plan owns seams and mechanics.
     non-delivered retry renders no bubble; an inbound original renders no retry
     bubble even when its retry delivered. The shared `Delivered N/N` label and
     native group text are unchanged.
+13. The claim emits an SSE, so the chip reads `1 retrying` without waiting a
+    backoff interval; the post-send bump does not write `status`, proven by a
+    group closed mid-backoff staying closed.
+14. Severity: WARN while claimed, ERROR when terminal, 21610 still carved out,
+    and the 1:1 and native-group-text paths unchanged.
 15. A stranded claim - a retry row created whose send never happens - reaches
     `unconfirmed` on screen with NO other thread activity and no refetch. Freezing
     the ticker is the failure mode; a test that lets another leg age proves
@@ -630,12 +710,6 @@ Test intentions. The plan owns seams and mechanics.
 16. A crash between the slot write and the claim is RECOVERED by the redelivered
     callback: the slot already reads terminal/30003, so the state gate still
     claims. A transition gate would fail this test, which is why it exists.
-13. The claim emits an SSE, so the chip reads `1 retrying` without waiting a
-    backoff interval; the post-send bump does not write `status`, proven by a
-    group closed mid-backoff staying closed.
-14. Severity: WARN while claimed, ERROR when terminal, 21610 still carved out,
-    and the 1:1 and native-group-text paths unchanged.
-
 **E2E (hermetic).** `relay-30003-no-retry-promise.spec.ts` is UPDATED, not
 replaced - it is the checklist for what the new copy must satisfy, and its
 negative assertions all survive. The flow: arm one leg to fail 30003, send, watch
@@ -681,6 +755,14 @@ The EARLIER window, between the slot write and the claim, is deliberately
 recoverable: D8 gates on the slot's state rather than on this callback's
 transition, so a redelivered callback reads terminal/30003 and claims. That choice
 is what keeps the two windows from compounding.
+
+**One unreadable source row costs both the retry and the truth about it.** D7's
+fence is fail-closed, so a transient read miss on the source (`twilio.ts:2449`)
+declines the claim permanently - no later callback re-opens it - and D23 then logs
+that leg ERROR. The alarm is correct in kind (the leg IS a dead end) but wrong in
+cause: it will read as a carrier failure when it was our read. Accepted as the
+price of a fence that cannot fail open onto the tour-reminder ladder, and recorded
+so the next person diagnosing such an alarm starts in the right place.
 
 **A delivered outbound MMS retry shows its attachments in two bubbles.** D13
 suppresses the media-POINTER rows, so the gallery index is correct, but each

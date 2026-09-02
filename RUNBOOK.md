@@ -117,12 +117,13 @@ even when the hermetic dev extraction tick simulates a future poll clock. A `dro
 reason is an unexplained gap; search logs for `unexplained dropped decision` and investigate the input and
 apply path.
 
-Do not run these automatically. After this feature merges, run `npm run plan -- dev` and `npm run apply -- dev`
-to create the `ai_runs` table before the dev deploy. Run the corresponding production Terraform apply at the
-M1.11 cutover before the prod deploy. Separately, and only when production rollout is approved, set
-`AI_EXTRACTION_ENABLED=true` for production; that flag flip is independent of the Terraform applies.
-Until the dev apply lands, `/settings/ai-runs` and `GET /api/ai-runs` 500 on dev deploys (local/hermetic
-lanes are unaffected - they bootstrap their own tables). The schema it adds, in the same shape as the
+**ALL DONE (operator-confirmed 2026-09-01): applied and deployed on dev AND prod, and
+`AI_EXTRACTION_ENABLED=true` is ON in production.** The sequence is kept because it is the
+right order for any future env: `npm run plan -- <env>` + `npm run apply -- <env>` to create
+the `ai_runs` table BEFORE that env's deploy, then the flag flip - which is an `.env` key and
+independent of the Terraform applies. Until an env's apply lands, `/settings/ai-runs` and
+`GET /api/ai-runs` 500 there (local/hermetic lanes are unaffected - they bootstrap their own
+tables). The schema it adds, in the same shape as the
 table below:
 
 | Change | Table | Kind | Powers |
@@ -804,9 +805,10 @@ number: unpinned sender, no flyer number, voice not configured). Order: rename t
 `.env.<env>`, then `npm run secrets:push -- <env>`, then deploy, then
 `npm run secrets:prune -- <env> --yes` to delete the orphaned `OUR_PHONE_NUMBERS` parameter.
 
-**Go-live flags are env keys, not dashboard toggles.** Flipping `SMS_SENDING_ENABLED` (and
-`RELAY_LIVE_PROVISIONING`) at go-live is an `.env.<env>` edit + `npm run secrets:push -- <env>` +
-a deploy - app-behavior keys, not Terraform-managed. **Settings > System status** shows their state
+**Go-live flags are env keys, not dashboard toggles.** **STATUS 2026-09-01: production is FULLY
+LIVE - SMS, relay, voice and AI extraction are all ON in prod. No flag flip is outstanding.**
+Flipping `SMS_SENDING_ENABLED` (and `RELAY_LIVE_PROVISIONING`) is an `.env.<env>` edit +
+`npm run secrets:push -- <env>` + a deploy - app-behavior keys, not Terraform-managed. **Settings > System status** shows their state
 (and the configured `BUSINESS_PHONE_NUMBER`, on the "Sending from" pill) READ-ONLY: there is no
 control in the dashboard that can change any of them.
 
@@ -1260,7 +1262,8 @@ webhook and worker simply skip the extraction path). To turn it on in an env:
 5. **Deploy** so the app + worker roll and re-hydrate the new env keys (a re-deploy of the current
    `DEPLOYED_TAG` suffices) - the worker then starts the third poll and the webhook starts scheduling.
 
-Dev applies after merge; **prod rides the M1.11 cutover**. If extraction seems dead in a deployed env:
+**DONE on dev AND prod (2026-09-01): applied, deployed, and `AI_EXTRACTION_ENABLED=true` in both.**
+The steps above are the recipe for a future env. If extraction seems dead in a deployed env:
 confirm `AI_EXTRACTION_ENABLED=true` is hydrated on the box, the `ai_extraction` table exists, and look
 for `extraction poll error` lines in the worker logs.
 

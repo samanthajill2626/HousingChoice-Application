@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-01).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` and its feature branch + worktree were deleted during worktree cleanup. **This file
+> is NOT current documentation, and the live code may have drifted from it. Do not treat it as
+> authoritative guidance on how the system should be built or how it behaves today.** For
+> current truth read the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `documentation/GLOSSARY.md`). The mission's review record is preserved at
+> `docs/superpowers/reviews/2026-08-31-retry-counter-durable/`.
+
 # Retry counters and the cap-and-close branch - implementation plan
 
 Spec: `docs/superpowers/specs/2026-08-31-retry-counter-durable-design.md`

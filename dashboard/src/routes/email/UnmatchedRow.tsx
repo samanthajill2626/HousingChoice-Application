@@ -7,7 +7,7 @@
 // mutations, modals, and navigation.
 import { useState } from 'react';
 import { getUnmatchedEmailDetail, type UnmatchedEmailItem, type UnmatchedEmailRow } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { LinkifiedText, Spinner } from '../../ui/index.js';
 import { EmailHtmlFrame } from '../contact/EmailHtmlFrame.js';
 import type { UnmatchedFilter } from './useUnmatchedEmail.js';
 import styles from './EmailTriage.module.css';
@@ -179,7 +179,9 @@ export function UnmatchedRow({
               <p className={styles.detailMeta}>
                 From {detail.from.address.length > 0 ? detail.from.address : 'unknown sender'}
               </p>
-              <div className={styles.body}>{detail.text}</div>
+              <div className={styles.body}>
+                <LinkifiedText text={detail.text} />
+              </div>
               {detail.html_sanitized !== undefined ? (
                 // B7: the plain-text body renders above; this discloses the
                 // ORIGINAL HTML formatting in a fully sandboxed, CSP-locked iframe

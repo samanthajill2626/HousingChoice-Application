@@ -1,7 +1,8 @@
 # Clickable links in communications - design specification
 
-Status: v1 - DRAFT for adversarial review
+Status: v2 - DRAFT after adversarial review round 1
 Date: 2026-09-02
+Revised: 2026-09-02
 Branch: `feat/comms-clickable-links`
 Worktree: `W:\\tmp\\comms-clickable-links`
 Base: `main` at `b45e6fdca1ca9fc986df02e9d7b768c6aad1de19`
@@ -11,7 +12,9 @@ Base: `main` at `b45e6fdca1ca9fc986df02e9d7b768c6aad1de19`
 Web links written in communications are clickable everywhere those communications
 are read in the dashboard Timeline. This covers inbound and outbound SMS, MMS,
 Relay messages, native group messages, and the plain-text presentation of inbound
-and outbound email.
+and outbound email. It also covers the full plain-text body after an operator opens
+an inbound email in unmatched-email triage. List-row previews remain previews and
+are not interactive content.
 
 Recognition follows the mature linkification behavior users already know from
 handsets and email clients. It includes explicit `https://` and `http://` URLs,
@@ -38,7 +41,9 @@ communications readers in scope:
 `MessageBubble` currently places `msg.body` directly in a text-only `div` for
 SMS/MMS and the two group paths. `EmailCard` similarly renders a roughly
 140-character plain-text snippet and the full plain-text body as escaped React
-text. None of these presentations creates anchors.
+text. `dashboard/src/routes/email/UnmatchedRow.tsx` is a separate inbound-email
+reader: its expanded detail renders the full plain-text body directly, outside the
+Timeline. None of these body presentations creates anchors.
 
 The shared renderer is the correct seam. Linkifying at each caller would duplicate
 behavior and create drift between direct, placement, tour, Relay, and native group
@@ -55,8 +60,10 @@ The following decisions were made during the approved brainstorm:
 4. Recognize explicit HTTP and HTTPS URLs, protocol-relative URLs, `www` URLs, and
    bare domains with a valid public top-level domain. A domain remains one URL when
    followed by a port, path, query string, or fragment.
-5. Do not linkify email addresses, phone numbers, fuzzy IP addresses, `localhost`,
-   single-label host names, or non-web schemes in this mission.
+5. Do not linkify email addresses, phone numbers, fuzzy IP addresses, bare
+   `localhost`, other bare single-label host names, or non-web schemes in this
+   mission. An explicit `http://localhost`, `https://localhost`, or
+   `//localhost` is an explicit web URL and follows the normal HTTP(S) contract.
 6. Preserve explicit `http://` and `https://` destinations. Normalize
    protocol-relative, `www`, and other bare-domain matches to `https://` before the
    final safety check.
@@ -66,10 +73,14 @@ The following decisions were made during the approved brainstorm:
    and reveal or hide transport metadata.
 9. Keep all unlinked content as text nodes. Do not use `dangerouslySetInnerHTML`
    or accept HTML from a communications body.
-10. Preserve the current email snippet contract: at most 140 source characters,
-    followed by three ASCII periods when truncated. A URL that crosses the
-    truncation boundary remains clickable for its visible portion and retains the
-    complete original URL as its destination.
+10. Preserve the current Timeline email snippet contract: take at most 140 source
+    characters, remove trailing whitespace from that visible slice, and append
+    three ASCII periods when truncated. A URL that crosses the resulting display
+    boundary remains clickable for its visible portion and retains the complete
+    original URL as its destination.
+11. In unmatched-email triage, linkify only the full plain-text body shown after the
+    operator opens a row. The collapsed snippet stays non-interactive inside its
+    existing row-toggle button, matching the non-interactive Inbox preview rule.
 
 ## 4. Scope boundaries
 
@@ -79,6 +90,7 @@ The following decisions were made during the approved brainstorm:
   direction or whether the type is SMS or MMS.
 - The collapsed plain-text snippet in `EmailCard`.
 - The expanded plain-text body in `EmailCard`.
+- The expanded plain-text body in `UnmatchedRow` after its detail has loaded.
 - The direct, placement, tour, Relay, and native group readers that receive those
   renderers through the shared Timeline.
 - Styling required for readable, wrapping, keyboard-focusable anchors inside the
@@ -86,9 +98,9 @@ The following decisions were made during the approved brainstorm:
 
 ### 4.2 Out of scope
 
-- Inbox row previews, scheduled-message previews, quick-reply/template editors,
-  call transcripts, voicemail transcripts, notes, and other text that is not a
-  sent or received communication body.
+- Inbox row previews, the collapsed unmatched-email row snippet, scheduled-message
+  previews, quick-reply/template editors, call transcripts, voicemail transcripts,
+  notes, and other text that is not an opened sent or received communication body.
 - Email subject, from/to/cc address lines, attachment names, delivery explanations,
   and message metadata.
 - The server-sanitized original HTML email shown in `EmailHtmlFrame`. That content
@@ -165,9 +177,14 @@ For every parser match:
 6. Emit an anchor only when that check returns a destination. Otherwise emit the
    original source characters as text.
 
-This makes `safeHttpUrl`, not the parser, the final scheme authority. Explicitly
-unsupported schemes such as `javascript:`, `data:`, `vbscript:`, `file:`, `ftp:`,
-and `mailto:` remain literal text even when adjacent text contains a valid link.
+This makes `safeHttpUrl`, not the parser, the final destination-scheme authority.
+The unsupported-scheme token and target in `javascript:`, `data:`, `vbscript:`,
+`file:`, `ftp:`, and `mailto:` do not become destinations using those schemes.
+The parser may still independently recognize a valid bare domain after a delimiter
+inside surrounding text, such as the `example.com` after the comma in
+`data:text/html,example.com`; if so, that independent match follows the ordinary
+HTTPS normalization and safety check. Tests lock this established parser behavior
+instead of imposing a second application-authored URL grammar.
 
 The parser owns boundaries for ordinary sentence punctuation, balanced
 parentheses/brackets, Unicode punctuation, multiple links, query strings, and
@@ -190,15 +207,19 @@ offsets rather than link text, so repeated identical URLs are supported.
 
 ### 7.2 Full message bodies
 
-`MessageBubble` and expanded `EmailCard` bodies call `LinkifiedText` without a
-display limit. Newlines and spacing continue to rely on the existing `white-space:
-pre-wrap` body styles. Long URLs continue to wrap using `overflow-wrap: anywhere`.
+`MessageBubble`, expanded `EmailCard`, and expanded `UnmatchedRow` bodies call
+`LinkifiedText` without a display limit. Newlines and spacing continue to rely on
+the existing `white-space: pre-wrap` body styles. Long URLs continue to wrap using
+`overflow-wrap: anywhere`.
 
 ### 7.3 Email snippets
 
-The collapsed email presentation calls the same component with a source-character
-limit of 140 and requests the existing three-period suffix when the original body
-is longer.
+The collapsed Timeline email presentation calls the same component with a
+source-character limit of 140 and requests the existing three-period suffix when
+the original body is longer. Before tokens are clipped, it computes the actual
+display end as `bodyText.slice(0, 140).trimEnd().length`; this preserves the current
+trailing-whitespace behavior without trimming the complete source used to resolve
+link destinations.
 
 Parsing occurs against the complete original body before the display range is
 applied. If a matched URL begins before character 140 and ends after it, the token's
@@ -251,10 +272,11 @@ Add pure-helper tests that establish the contract for:
 - sentence punctuation, balanced parentheses, brackets, and Unicode punctuation;
 - modern and international top-level domains supplied by `tlds`;
 - repeated identical links with distinct source offsets;
-- email addresses, phone numbers, fuzzy IP addresses, `localhost`, and single-label
-  hosts remaining text;
-- `javascript:`, `data:`, `vbscript:`, `file:`, `ftp:`, and `mailto:` remaining
-  text;
+- email addresses, phone numbers, fuzzy IP addresses, bare `localhost`, and other
+  bare single-label hosts remaining text;
+- explicit HTTP(S) and protocol-relative localhost URLs remaining eligible;
+- unsupported schemes never becoming an anchor destination, plus parser-owned
+  behavior for a valid bare domain after a delimiter in unsupported-scheme text;
 - HTML-looking content remaining escaped text;
 - HTTP(S) safety rejection degrading to the exact original text; and
 - a URL crossing the 140-character snippet boundary retaining its complete `href`
@@ -266,6 +288,8 @@ Add or extend shared Timeline component tests for:
 - SMS text and an MMS body with attachments still rendering independently;
 - Relay/native-group sender attribution remaining intact around linkified text;
 - collapsed and expanded plain-text email bodies;
+- expanded unmatched-email plain-text detail while its collapsed row snippet stays
+  non-interactive;
 - safe `href`, `target`, and `rel` values;
 - link activation not toggling `MessageBubble` metadata; and
 - ordinary bubble activation still toggling metadata.
@@ -316,21 +340,24 @@ remain human-owned.
 The feature is accepted when:
 
 - every in-scope Timeline reader renders the shared SMS/MMS/group and plain-text
-  email presentations through the same linkification contract;
+  email presentations through the same linkification contract, and the expanded
+  unmatched-email plain-text reader uses that component directly;
 - explicit HTTP(S), protocol-relative, `www`, and valid bare-domain web URLs are
   clickable in both inbound and outbound content;
 - inferred destinations use HTTPS and explicit schemes are preserved;
-- only safety-checked HTTP(S) destinations become anchors;
+- only safety-checked HTTP(S) destinations become anchors, including any valid bare
+  domain independently recognized after punctuation in otherwise unsupported-
+  scheme text;
 - link labels preserve the sender's source text and all other content remains
   escaped text;
 - punctuation and delimiter handling match the selected parser rather than a local
   regular expression;
-- email snippets keep the current 140-character presentation without corrupting a
-  crossing URL destination;
+- Timeline email snippets keep the current 140-character and trailing-whitespace
+  presentation without corrupting a crossing URL destination;
 - links open in a new tab with the required relationship attributes and do not
   toggle bubble metadata;
-- out-of-scope previews, composers, transcripts, metadata, and original HTML email
-  remain unchanged;
+- out-of-scope previews, including the unmatched-email row snippet, plus composers,
+  transcripts, metadata, and original HTML email remain unchanged;
 - focused tests, the targeted hermetic browser proof, full feature gates,
   adversarial review, and live self-QA all pass; and
 - the branch is handed back unmerged with no deployment or production mutation.

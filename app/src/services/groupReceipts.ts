@@ -52,6 +52,7 @@ import { summarizeError } from '../lib/errors.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
+import { normalizeTwilioTransportEvidence } from '../adapters/twilioMessageTransport.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
@@ -196,6 +197,7 @@ export interface GroupReceiptsServiceDeps {
     | 'updateDeliveryStatus'
     | 'updateRecipientDeliveryStatus'
     | 'setRecipientDeliverySid'
+    | 'setRecipientActualTransport'
     | 'parkGroupReceipt'
     | 'listParkedGroupReceipts'
     | 'deleteParkedGroupReceipt'
@@ -389,6 +391,57 @@ export function createGroupReceiptsService(
       return { outcome: 'dropped', reason: 'unknown_participant' };
     }
 
+    // The source row carries the group adapter's authoritative rail fact. A
+    // receipt ChannelMessageSid can corroborate that fact or raise a safe
+    // conflict warning, but it can never create or replace it.
+    if (
+      input.channelMessageSid !== undefined &&
+      message.requested_transport !== undefined &&
+      message.actual_transport !== undefined
+    ) {
+      const channelEvidence = normalizeTwilioTransportEvidence({
+        direction: 'outbound',
+        requestedTransport: message.requested_transport,
+        messageSid: input.channelMessageSid,
+        authenticatedProviderTraffic: true,
+      });
+      if (
+        channelEvidence.kind === 'conflict' ||
+        (channelEvidence.kind === 'observed' &&
+          channelEvidence.transport !== message.actual_transport)
+      ) {
+        log.warn(
+          {
+            event: 'group_receipt_transport_evidence_conflict',
+            providerSid: input.messageSid,
+            requestedTransport: message.requested_transport,
+            authoritativeTransport: message.actual_transport,
+            ...(channelEvidence.kind === 'observed'
+              ? {
+                  observedTransport: channelEvidence.transport,
+                  evidenceSource: channelEvidence.source,
+                }
+              : {
+                  evidenceSource: channelEvidence.source,
+                  ...channelEvidence.safeFacts,
+                }),
+          },
+          'group receipt channel evidence conflicted with the authoritative native-group rail',
+        );
+      }
+    }
+
+    const actualOutcome =
+      message.actual_transport === undefined
+        ? undefined
+        : await messages.setRecipientActualTransport(
+            message.conversationId,
+            message.tsMsgId,
+            memberKey,
+            message.actual_transport,
+          );
+    const actualUpdated = actualOutcome === 'updated';
+
     let effectiveErrorCode = input.errorCode;
     if (input.errorCode === OPT_OUT_ERROR_CODE) {
       // BEST EFFORT, LIKE EVERY OTHER DERIVED BOOKKEEPING STEP IN THIS MODULE
@@ -437,7 +490,22 @@ export function createGroupReceiptsService(
         status: ruling.status,
         errorCode: effectiveErrorCode,
       });
-      // REFRESH THE UI. A per-recipient delivery move re-renders the group
+    }
+
+    // A status no-op does not make the provider SID disposable. Keep this
+    // independent of the transport outcome as well, so a transport-only update
+    // cannot return before the established sid-if-absent behavior runs.
+    if (!applied && input.channelMessageSid !== undefined) {
+      await messages.setRecipientDeliverySid(
+        message.conversationId,
+        message.tsMsgId,
+        memberKey,
+        input.channelMessageSid,
+      );
+    }
+
+    if (applied || actualUpdated) {
+      // REFRESH THE UI. A per-recipient delivery or transport move re-renders the group
       // thread, exactly as it re-renders the relay thread - the relay status
       // route emits this same event immediately after its own successful
       // transition (routes/webhooks/twilio.ts, "a per-recipient delivery move
@@ -456,21 +524,14 @@ export function createGroupReceiptsService(
         conversationId: message.conversationId,
         tsMsgId: message.tsMsgId,
         direction: message.direction,
-        deliveryStatus: ruling.status,
+        deliveryStatus:
+          applied
+            ? ruling.status
+            : (message.delivery_recipients?.[memberKey]?.status ?? message.delivery_status),
       });
       return { outcome: 'applied', memberKey };
     }
 
-    // The transition was refused as a regression - a duplicate or out-of-order
-    // receipt. Its SID is still worth having: keep it if the slot has none.
-    if (input.channelMessageSid !== undefined) {
-      await messages.setRecipientDeliverySid(
-        message.conversationId,
-        message.tsMsgId,
-        memberKey,
-        input.channelMessageSid,
-      );
-    }
     return { outcome: 'duplicate', memberKey };
   }
 

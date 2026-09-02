@@ -1689,6 +1689,16 @@ export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai
 /** Message transport. `call` is a metadata-only voice-call timeline entry. */
 export type MessageType = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
+export const MESSAGE_TRANSPORTS = ['sms', 'mms', 'rcs'] as const;
+export type MessageTransport = (typeof MESSAGE_TRANSPORTS)[number];
+export type TransportAggregationState = 'planned' | 'attempted' | 'excluded';
+
+interface MessageTransportFields {
+  transport_schema_version?: 1;
+  requested_transport?: MessageTransport;
+  actual_transport?: MessageTransport;
+}
+
 /** Coarse human-facing call outcome: `answered` (a leg connected), `missed`
  *  (nobody answered / busy / failed), `voicemail` (founder-bridge seam). */
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
@@ -1757,6 +1767,9 @@ export interface RelayRecipientDelivery {
   errorCode?: string;
   sentAt?: string;
   deliveredAt?: string;
+  requestedTransport?: MessageTransport;
+  actualTransport?: MessageTransport;
+  transportAggregationState?: TransportAggregationState;
 }
 
 /** GET /api/events 'conversation.updated' payload. */
@@ -2261,7 +2274,7 @@ export interface UnitsPage {
 
 /** One timeline message (GET /api/conversations/:id/messages → { messages }).
  *  Newest-first. Field names are the server's persisted shape. */
-export interface Message {
+export interface Message extends MessageTransportFields {
   conversationId: string;
   /** Sort key: `<providerTs>#<providerSid>`; unique per message. */
   tsMsgId: string;
@@ -2447,7 +2460,7 @@ interface TimelineBase {
   at: string; /* ISO, sort key */
 }
 
-export interface TimelineMessage extends TimelineBase {
+export interface TimelineMessage extends TimelineBase, MessageTransportFields {
   kind: 'message';
   conversationId: string;
   tsMsgId: string;
@@ -2491,6 +2504,8 @@ export interface TimelineMessage extends TimelineBase {
    *  decides that; the accompanying `status` is `failed` on relay and
    *  `undelivered` on a group leg. Absent on 1:1 messages. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  /** Local-only marker. Never persisted or returned by the authenticated API. */
+  optimistic?: boolean;
   /** Relay group (M1.7): who authored a relayed message — a member's key
    *  (contactId, else `phone#<E164>`), the `'team'` sentinel (a team reply),
    *  or the `'system'` sentinel (an app announcement: group intro / tour

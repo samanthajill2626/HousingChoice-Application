@@ -228,7 +228,7 @@ describe('Conversations REST - posting a message', () => {
       expect(receipt.params['MessageSid']).toBe(messageSid);
       expect(receipt.params['ParticipantSid']).toMatch(/^MBfake/);
       // BOTH join keys the receipts design needs.
-      expect(receipt.params['ChannelMessageSid']).toMatch(/^SMfake/);
+      expect(receipt.params['ChannelMessageSid']).toMatch(/^SM[0-9a-f]{32}$/);
     }
     expect(receipts.map((r) => r.params['Status']).sort()).toEqual([
       'delivered',
@@ -508,7 +508,7 @@ describe('POST /control/send-group-as-party - inbound carrier group injection', 
     const inbound = posted.find((p) => p.path === '/webhooks/twilio/sms')!;
     expect(inbound.params['NumMedia']).toBe('1');
     expect(inbound.params['MediaContentType0']).toBe('image/png');
-    expect(inbound.params['MessageSid']).toMatch(/^MMfake/);
+    expect(inbound.params['MessageSid']).toMatch(/^MM[0-9a-f]{32}$/);
   });
 
   it('A28: can emit the TRIPWIRE shape - MM prefix, NumMedia 0, no envelope', async () => {
@@ -522,7 +522,7 @@ describe('POST /control/send-group-as-party - inbound carrier group injection', 
     // The shape a SILENTLY REMOVED OtherRecipients contract would produce. The
     // engine otherwise derives the prefix from media presence alone, so without
     // this override the tripwire is untestable.
-    expect(inbound.params['MessageSid']).toMatch(/^MMfake/);
+    expect(inbound.params['MessageSid']).toMatch(/^MM[0-9a-f]{32}$/);
     expect(inbound.params['NumMedia']).toBe('0');
     expect(inbound.params['OtherRecipients0']).toBeUndefined();
     expect(inbound.params['OtherRecipients']).toBeUndefined();

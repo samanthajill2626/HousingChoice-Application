@@ -42,7 +42,7 @@
 //
 // PII (doc §9): NEVER log a phone number. Log only reminderId/tourId/tenantId/kind.
 import { randomUUID } from 'node:crypto';
-import type { MessagingAdapter } from '../adapters/messaging.js';
+import type { CarrierMessageSender, MessagingAdapter } from '../adapters/messaging.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -732,7 +732,7 @@ export interface RunDueTourRemindersDeps {
    * on its own merits - the in-thread visibility requirement documented on
    * sendGroupReminder below - NOT because the wiring forbids the alternative.
    */
-  adapter: MessagingAdapter;
+  adapter: MessagingAdapter & CarrierMessageSender;
   /**
    * Message persistence for the GROUP route: sendRelayAnnouncement stores each
    * rung as a system announcement in the relay thread (founder decision
@@ -2031,4 +2031,3 @@ export async function forceSendReminder(
     throw err;
   }
 }
-

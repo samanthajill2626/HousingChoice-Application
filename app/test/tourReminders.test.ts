@@ -24,6 +24,7 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
 import type {
+  CarrierMessageSender,
   MessagingAdapter,
   SendMessageParams,
 } from '../src/adapters/messaging.js';
@@ -2558,23 +2559,38 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
   /** Adapter spy for the GROUP route: records direct sends; never a network. */
   function createAdapterSpy(opts: { failFor?: string[] } = {}): {
-    adapter: MessagingAdapter;
+    adapter: MessagingAdapter & CarrierMessageSender;
     sends: SendMessageParams[];
   } {
     const sends: SendMessageParams[] = [];
     let sidCounter = 0;
-    const adapter: MessagingAdapter = {
-      async sendMessage(params) {
-        if (opts.failFor?.includes(params.to)) {
-          throw new Error('adapter spy: injected send failure');
-        }
-        sends.push(params);
-        sidCounter += 1;
+    async function send(params: SendMessageParams) {
+      if (opts.failFor?.includes(params.to)) {
+        throw new Error('adapter spy: injected send failure');
+      }
+      sends.push(params);
+      sidCounter += 1;
+      return {
+        providerSid: `SMspy-${sidCounter}`,
+        status: 'queued' as const,
+        providerTs: new Date().toISOString(),
+      };
+    }
+    const adapter: MessagingAdapter & CarrierMessageSender = {
+      classifyMessageTransport(facts) {
+        return { requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms' };
+      },
+      prepareMessageSend(intent, params) {
+        return { requestedTransport: intent.requestedTransport, params };
+      },
+      async sendPreparedMessage(prepared) {
         return {
-          providerSid: `SMspy-${sidCounter}`,
-          status: 'queued',
-          providerTs: new Date().toISOString(),
+          ...(await send(prepared.params)),
+          actualTransport: prepared.requestedTransport,
         };
+      },
+      async sendMessage(params) {
+        return send(params);
       },
       async getMediaStream() {
         throw new Error('adapter spy: getMediaStream not expected');

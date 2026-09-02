@@ -81,7 +81,11 @@ import {
 } from '../lib/composeFailTally.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import {
+  createMessagingAdapter,
+  type CarrierMessageSender,
+  type MessagingAdapter,
+} from '../adapters/messaging.js';
 import { createSendMessageService, type SendMessageService } from '../services/sendMessage.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 
@@ -130,7 +134,7 @@ export interface TourRemindersRouterDeps {
   /** 1:1 route: the shared send service (force-sends use automated: false). */
   sendMessageService?: SendMessageService;
   /** GROUP route: per-member provider sends via sendRelayAnnouncement. */
-  adapter?: MessagingAdapter;
+  adapter?: MessagingAdapter & CarrierMessageSender;
   /** GROUP route: persists the rung as a system announcement in the thread. */
   messagesRepo?: MessagesRepo;
   /** Records WHO clicked Send now (`reminder_force_sent` on `tours#<id>`). */

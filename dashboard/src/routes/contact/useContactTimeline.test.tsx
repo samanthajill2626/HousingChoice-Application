@@ -281,6 +281,13 @@ describe('useContactTimeline — optimistic send', () => {
     // Appears immediately (no await), outbound, status queued → "Sending…".
     expect(bodies()).toContain('on my way|queued');
     expect(screen.getAllByTestId('item')).toHaveLength(2);
+    const optimistic = api!.items.find(
+      (item) => item.kind === 'message' && item.body === 'on my way',
+    );
+    expect(optimistic).toMatchObject({ optimistic: true });
+    expect(optimistic).not.toHaveProperty('transport_schema_version');
+    expect(optimistic).not.toHaveProperty('requested_transport');
+    expect(optimistic).not.toHaveProperty('actual_transport');
   });
 
   it('stamps the real status on resolve, then de-dupes once the server refetch carries it', async () => {
@@ -302,6 +309,11 @@ describe('useContactTimeline — optimistic send', () => {
     });
     // Reconciled bubble now reads "sent" — still the optimistic row (one copy).
     expect(bodies().filter((b) => b.startsWith('hi there'))).toEqual(['hi there|sent']);
+    expect(api!.items.find((item) => item.kind === 'message' && item.body === 'hi there')).toMatchObject({
+      optimistic: true,
+      id: 'srv-9',
+      delivery_status: 'sent',
+    });
 
     // The SSE refetch brings the SERVER row (same tsMsgId, now delivered) → the
     // optimistic copy drops out, leaving exactly one "hi there" at the real status.
@@ -320,6 +332,9 @@ describe('useContactTimeline — optimistic send', () => {
           type: 'sms',
           delivery_status: 'delivered',
           body: 'hi there',
+          transport_schema_version: 1,
+          requested_transport: 'rcs',
+          actual_transport: 'sms',
         },
       ],
     } satisfies ContactTimelinePage);
@@ -331,6 +346,13 @@ describe('useContactTimeline — optimistic send', () => {
       expect(bodies().filter((b) => b.startsWith('hi there'))).toEqual(['hi there|delivered']),
     );
     expect(screen.getAllByTestId('item')).toHaveLength(2); // s1 + the one reconciled row
+    expect(api!.items.find((item) => item.kind === 'message' && item.body === 'hi there')).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+    });
+    expect(api!.items.find((item) => item.kind === 'message' && item.body === 'hi there'))
+      .not.toHaveProperty('optimistic');
   });
 
   it('removes the optimistic bubble when the send fails', async () => {

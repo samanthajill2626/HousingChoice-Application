@@ -314,6 +314,49 @@ describe('GET /api/conversations/:conversationId/messages', () => {
     expect(bad.status).toBe(400);
   });
 
+  it('returns persisted transport facts through the raw message page', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+    await world.messagesRepo.append({
+      conversationId: 'conv-1',
+      providerSid: 'SMtransport',
+      providerTs: '2026-06-12T12:00:00.000Z',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'sent',
+      transportSchemaVersion: 1,
+      requestedTransport: 'rcs',
+      actualTransport: 'sms',
+      deliveryRecipients: {
+        'contact-1': {
+          status: 'sent',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+
+    const res = await request(app)
+      .get('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.messages[0]).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      delivery_recipients: {
+        'contact-1': {
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    });
+  });
+
   it('hydrates a trimmed current display name with one deduplicated batch read', async () => {
     const { app, world } = makeWebhookHarness();
     seedConversation(world, 'conv-1');

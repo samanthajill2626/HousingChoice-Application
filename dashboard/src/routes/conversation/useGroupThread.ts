@@ -122,6 +122,7 @@ export function useGroupThread(conversationId: string): GroupThreadState {
           // Group sends are TEXT ONLY in v1 (spec 6.2), so there is no
           // attachment placeholder to carry.
           type: 'sms',
+          optimistic: true,
           body,
           delivery_status: 'queued',
           relay_sender_key: 'team',

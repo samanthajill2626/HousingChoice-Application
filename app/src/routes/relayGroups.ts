@@ -26,6 +26,7 @@ import { parseIntroBody } from '../lib/relayIntroBody.js';
 import {
   VoiceCapabilityError,
   createMessagingAdapter,
+  type CarrierMessageSender,
   type MessagingAdapter,
 } from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -119,7 +120,7 @@ export interface RelayGroupsRouterDeps {
    *  (same wiring as the relay.intro chain): it persists the announcement + sends
    *  one leg per member FROM the pool number. */
   messagesRepo?: MessagesRepo;
-  adapter?: MessagingAdapter;
+  adapter?: MessagingAdapter & CarrierMessageSender;
   /** OrgSettings source for the operator-overridable close copy (resolveWithSettings). */
   settingsRepo?: SettingsRepo;
   /** BE2/C2: emit added_to_group_text / removed_from_group_text milestones. */

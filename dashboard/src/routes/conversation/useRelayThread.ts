@@ -108,6 +108,15 @@ export function toTimelineMessage(m: Message): TimelineMessage | TimelineCall | 
     direction: m.direction,
     author: m.author,
     type: m.type,
+    ...((m.type === 'sms' || m.type === 'mms') && m.transport_schema_version !== undefined && {
+      transport_schema_version: m.transport_schema_version,
+    }),
+    ...((m.type === 'sms' || m.type === 'mms') && m.requested_transport !== undefined && {
+      requested_transport: m.requested_transport,
+    }),
+    ...((m.type === 'sms' || m.type === 'mms') && m.actual_transport !== undefined && {
+      actual_transport: m.actual_transport,
+    }),
     ...(m.body !== undefined && { body: m.body }),
     ...(m.media_attachments !== undefined && { media_attachments: m.media_attachments }),
     delivery_status: m.delivery_status,
@@ -253,6 +262,7 @@ export function useRelayThread(conversationId: string): RelayThreadState {
         direction: 'outbound',
         author: 'teammate',
         type: hasMedia ? 'mms' : 'sms',
+        optimistic: true,
         body,
         delivery_status: 'queued',
         relay_sender_key: 'team',

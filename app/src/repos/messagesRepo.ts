@@ -28,6 +28,14 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import {
+  decideActualTransportWrite,
+  decideTransportAggregationWrite,
+  MESSAGE_TRANSPORTS,
+  TRANSPORT_SCHEMA_VERSION,
+  type MessageTransport,
+  type TransportAggregationState,
+} from '../lib/messageTransport.js';
 import { isE164 } from '../lib/phone.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import type { FanoutClaimResult } from './fanoutClaim.js';
@@ -133,6 +141,10 @@ export function allowedPriorStatuses(next: DeliveryStatus): DeliveryStatus[] {
   return ALLOWED_PRIOR[next];
 }
 
+export function isSuccessfulDeliveryStatus(status: DeliveryStatus): boolean {
+  return status === 'queued' || status === 'sent' || status === 'delivered';
+}
+
 /**
  * Per-recipient delivery state for a relay-group fan-out (M1.7). The relayed
  * message is stored ONCE (the inbound source message); this map records the
@@ -147,6 +159,25 @@ export interface RelayRecipientDelivery {
   errorCode?: string;
   sentAt?: string;
   deliveredAt?: string;
+  requestedTransport?: MessageTransport;
+  actualTransport?: MessageTransport;
+  transportAggregationState?: TransportAggregationState;
+}
+
+export type TransportMutationOutcome =
+  | 'updated'
+  | 'idempotent'
+  | 'stale'
+  | 'conflict'
+  | 'legacy_noop'
+  | 'missing';
+
+export interface RecipientSendResultPatch {
+  status: DeliveryStatus;
+  sid?: string;
+  sentAt?: string;
+  errorCode?: string;
+  actualTransport?: MessageTransport;
 }
 
 /**
@@ -623,6 +654,9 @@ export interface NewMessage {
   mediaAttachments?: MediaAttachment[];
   deliveryStatus: DeliveryStatus;
   errorCode?: string;
+  transportSchemaVersion?: 1;
+  requestedTransport?: MessageTransport;
+  actualTransport?: MessageTransport;
   /** Relay group (M1.7): sender member key on an inbound relay message. */
   relaySenderKey?: string;
   /** Relay group (M1.7): inbound landed on a closed relay thread (no fan-out).
@@ -844,6 +878,65 @@ function assertRelayExternalCallerShape(message: NewMessage): void {
   }
 }
 
+function assertMessageTransport(value: unknown, field: string): asserts value is MessageTransport {
+  if (!MESSAGE_TRANSPORTS.includes(value as MessageTransport)) {
+    throw new TypeError(`invalid ${field}`);
+  }
+}
+
+function assertTransportPersistenceShape(message: NewMessage): void {
+  if (
+    message.transportSchemaVersion !== undefined &&
+    message.transportSchemaVersion !== TRANSPORT_SCHEMA_VERSION
+  ) {
+    throw new TypeError('invalid transport schema version');
+  }
+
+  const slots = Object.values(message.deliveryRecipients ?? {});
+  const hasMessageTransport =
+    message.transportSchemaVersion !== undefined ||
+    message.requestedTransport !== undefined ||
+    message.actualTransport !== undefined;
+  const hasRecipientTransport = slots.some(
+    (slot) =>
+      slot.requestedTransport !== undefined ||
+      slot.actualTransport !== undefined ||
+      slot.transportAggregationState !== undefined,
+  );
+
+  if ((hasMessageTransport || hasRecipientTransport) && message.transportSchemaVersion !== 1) {
+    throw new TypeError('transport fields require schema version 1');
+  }
+  if (hasMessageTransport && message.type !== 'sms' && message.type !== 'mms') {
+    throw new TypeError('carrier transport fields require a carrier message');
+  }
+  if (message.direction === 'inbound' && message.requestedTransport !== undefined) {
+    throw new TypeError('inbound messages cannot request a transport');
+  }
+  if (message.requestedTransport !== undefined) {
+    assertMessageTransport(message.requestedTransport, 'requested transport');
+  }
+  if (message.actualTransport !== undefined) {
+    assertMessageTransport(message.actualTransport, 'actual transport');
+  }
+  for (const slot of slots) {
+    if (slot.requestedTransport !== undefined) {
+      assertMessageTransport(slot.requestedTransport, 'recipient requested transport');
+    }
+    if (slot.actualTransport !== undefined) {
+      assertMessageTransport(slot.actualTransport, 'recipient actual transport');
+    }
+    if (
+      slot.transportAggregationState !== undefined &&
+      slot.transportAggregationState !== 'planned' &&
+      slot.transportAggregationState !== 'attempted' &&
+      slot.transportAggregationState !== 'excluded'
+    ) {
+      throw new TypeError('invalid recipient transport aggregation state');
+    }
+  }
+}
+
 export interface MessageItem {
   conversationId: string;
   tsMsgId: string;
@@ -856,6 +949,9 @@ export interface MessageItem {
   provider_ts: string;
   delivery_status: DeliveryStatus;
   error_code?: string;
+  transport_schema_version?: 1;
+  requested_transport?: MessageTransport;
+  actual_transport?: MessageTransport;
   created_at: string;
   /**
    * Mirrored MMS attachments (M1.1 webhook path): each carries its S3 key AND
@@ -1314,6 +1410,36 @@ export interface MessagesRepo {
 
   // --- Relay groups (M1.7) -------------------------------------------------
 
+  setMessageActualTransport(
+    conversationId: string,
+    tsMsgId: string,
+    observed: MessageTransport,
+  ): Promise<TransportMutationOutcome>;
+  initializeRecipientDelivery(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    slot: RelayRecipientDelivery,
+  ): Promise<'created' | 'existing' | 'legacy_noop' | 'missing'>;
+  setRecipientTransportAggregationState(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    next: TransportAggregationState,
+  ): Promise<TransportMutationOutcome>;
+  setRecipientActualTransport(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    observed: MessageTransport,
+  ): Promise<TransportMutationOutcome>;
+  applyRecipientSendResult(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    patch: RecipientSendResultPatch,
+  ): Promise<TransportMutationOutcome>;
+
   /**
    * Claim ONE pass of the relay fan-out CONTINUATION ladder on a source message
    * (M5): an atomic conditional ADD on the top-level `fanout_attempt`, refused
@@ -1756,6 +1882,67 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     return Item as MessageItem | undefined;
   }
 
+  async function getMessageConsistent(
+    conversationId: string,
+    tsMsgId: string,
+  ): Promise<MessageItem | undefined> {
+    const { Item } = await doc.send(
+      new GetCommand({
+        TableName: table,
+        Key: { conversationId, tsMsgId },
+        ConsistentRead: true,
+      }),
+    );
+    return Item as MessageItem | undefined;
+  }
+
+  function actualDecisionOutcome(
+    decision: ReturnType<typeof decideActualTransportWrite>,
+  ): TransportMutationOutcome {
+    if (decision.kind === 'idempotent') return 'idempotent';
+    if (decision.kind === 'stale-rcs-observation') return 'stale';
+    if (decision.kind === 'conflict') return 'conflict';
+    return 'conflict';
+  }
+
+  function safeMemberKey(memberKey: string): string {
+    return memberKey.startsWith('phone#') ? 'phone#redacted' : memberKey;
+  }
+
+  function classifyRecipientSendResult(
+    slot: RelayRecipientDelivery,
+    patch: RecipientSendResultPatch,
+  ): TransportMutationOutcome {
+    const statusAdvances = allowedPriorStatuses(patch.status).includes(slot.status);
+    const statusSame = slot.status === patch.status;
+    const statusStale = !statusAdvances && !statusSame;
+    const actualDecision =
+      patch.actualTransport === undefined
+        ? undefined
+        : decideActualTransportWrite(slot.actualTransport, patch.actualTransport, slot.requestedTransport);
+    const terminalCurrent =
+      slot.status === 'delivered' || slot.status === 'undelivered' || slot.status === 'failed';
+    const errorEligible = (statusAdvances || statusSame) && !(terminalCurrent && statusStale);
+    const clearsTransientError =
+      patch.errorCode === undefined && isSuccessfulDeliveryStatus(patch.status) && errorEligible && slot.errorCode !== undefined;
+    const writesError =
+      patch.errorCode !== undefined &&
+      errorEligible &&
+      slot.errorCode !== patch.errorCode &&
+      !(terminalCurrent && statusSame && slot.errorCode !== undefined);
+    const stillWritable =
+      statusAdvances ||
+      (patch.sid !== undefined && slot.sid === undefined) ||
+      (patch.sentAt !== undefined && slot.sentAt === undefined) ||
+      actualDecision?.kind === 'write' ||
+      clearsTransientError ||
+      writesError;
+
+    if (stillWritable || actualDecision?.kind === 'conflict') return 'conflict';
+    if (actualDecision?.kind === 'stale-rcs-observation' || statusStale) return 'stale';
+    return 'idempotent';
+  }
+
   /**
    * DISCARD STALE CREDITS AND TAKE A PENDING SLOT, returning the new balance.
    *
@@ -1922,6 +2109,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
     async append(message) {
       assertRelayExternalCallerShape(message);
+      assertTransportPersistenceShape(message);
       const tsMsgId = buildTsMsgId(message.providerTs, message.providerSid);
       const now = new Date().toISOString();
       const item: MessageItem = {
@@ -1936,6 +2124,15 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         provider_ts: message.providerTs,
         delivery_status: message.deliveryStatus,
         error_code: message.errorCode,
+        ...(message.transportSchemaVersion !== undefined && {
+          transport_schema_version: message.transportSchemaVersion,
+        }),
+        ...(message.requestedTransport !== undefined && {
+          requested_transport: message.requestedTransport,
+        }),
+        ...(message.actualTransport !== undefined && {
+          actual_transport: message.actualTransport,
+        }),
         created_at: now,
         // Outbound MMS: persist the durable attachment keys so sent media
         // renders through the authed serve endpoint (gap #3). Only when present.
@@ -2786,6 +2983,393 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
     // --- Relay groups (M1.7) -----------------------------------------------
 
+    async setMessageActualTransport(conversationId, tsMsgId, observed) {
+      assertMessageTransport(observed, 'actual transport');
+      const names: Record<string, string> = {
+        '#v': 'transport_schema_version',
+        '#actual': 'actual_transport',
+      };
+      const values: Record<string, unknown> = {
+        ':v': TRANSPORT_SCHEMA_VERSION,
+        ':observed': observed,
+      };
+      const writable =
+        observed === 'rcs'
+          ? 'attribute_not_exists(#actual)'
+          : '(attribute_not_exists(#actual) OR #actual = :rcs)';
+      if (observed !== 'rcs') values[':rcs'] = 'rcs';
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET #actual = :observed',
+            ConditionExpression: `#v = :v AND ${writable}`,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+          }),
+        );
+        return 'updated';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+
+      const message = await getMessageConsistent(conversationId, tsMsgId);
+      if (!message) return 'missing';
+      if (message.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const decision = decideActualTransportWrite(
+        message.actual_transport,
+        observed,
+        message.requested_transport,
+      );
+      if (decision.kind === 'conflict') {
+        log.warn(
+          {
+            conversationId,
+            tsMsgId,
+            currentTransport: message.actual_transport,
+            attemptedTransport: observed,
+          },
+          'message actual transport conflict refused',
+        );
+      } else if (decision.kind === 'stale-rcs-observation') {
+        log.info(
+          {
+            conversationId,
+            tsMsgId,
+            currentTransport: message.actual_transport,
+            attemptedTransport: observed,
+          },
+          'message actual transport stale after RCS fallback',
+        );
+      }
+      return actualDecisionOutcome(decision);
+    },
+
+    async initializeRecipientDelivery(conversationId, tsMsgId, memberKey, slot) {
+      if (slot.requestedTransport !== undefined) {
+        assertMessageTransport(slot.requestedTransport, 'recipient requested transport');
+      }
+      if (slot.actualTransport !== undefined) {
+        assertMessageTransport(slot.actualTransport, 'recipient actual transport');
+      }
+      if (
+        slot.transportAggregationState !== undefined &&
+        slot.transportAggregationState !== 'planned' &&
+        slot.transportAggregationState !== 'attempted' &&
+        slot.transportAggregationState !== 'excluded'
+      ) {
+        throw new TypeError('invalid recipient transport aggregation state');
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET #dr.#mk = :slot',
+            ConditionExpression:
+              '#v = :v AND attribute_exists(#dr) AND attribute_not_exists(#dr.#mk)',
+            ExpressionAttributeNames: {
+              '#v': 'transport_schema_version',
+              '#dr': 'delivery_recipients',
+              '#mk': memberKey,
+            },
+            ExpressionAttributeValues: { ':v': TRANSPORT_SCHEMA_VERSION, ':slot': slot },
+          }),
+        );
+        return 'created';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+
+      const message = await getMessageConsistent(conversationId, tsMsgId);
+      if (!message) return 'missing';
+      if (message.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      return message.delivery_recipients?.[memberKey] === undefined ? 'missing' : 'existing';
+    },
+
+    async setRecipientTransportAggregationState(conversationId, tsMsgId, memberKey, next) {
+      if (next !== 'planned' && next !== 'attempted' && next !== 'excluded') {
+        throw new TypeError('invalid recipient transport aggregation state');
+      }
+      const names: Record<string, string> = {
+        '#v': 'transport_schema_version',
+        '#dr': 'delivery_recipients',
+        '#mk': memberKey,
+        '#state': 'transportAggregationState',
+      };
+      const values: Record<string, unknown> = {
+        ':v': TRANSPORT_SCHEMA_VERSION,
+        ':next': next,
+      };
+      let writable: string;
+      if (next === 'planned') {
+        names['#actual'] = 'actualTransport';
+        values[':excluded'] = 'excluded';
+        writable =
+          '(attribute_not_exists(#dr.#mk.#state) OR ' +
+          '(#dr.#mk.#state = :excluded AND attribute_not_exists(#dr.#mk.#actual)))';
+      } else if (next === 'attempted') {
+        values[':planned'] = 'planned';
+        writable = '#dr.#mk.#state = :planned';
+      } else {
+        values[':planned'] = 'planned';
+        writable =
+          '(attribute_not_exists(#dr.#mk.#state) OR #dr.#mk.#state = :planned)';
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET #dr.#mk.#state = :next',
+            ConditionExpression: `#v = :v AND attribute_exists(#dr.#mk) AND ${writable}`,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+          }),
+        );
+        return 'updated';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+
+      const message = await getMessageConsistent(conversationId, tsMsgId);
+      if (!message) return 'missing';
+      if (message.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const slot = message.delivery_recipients?.[memberKey];
+      if (!slot) return 'missing';
+      const decision = decideTransportAggregationWrite(
+        slot.transportAggregationState,
+        next,
+        slot.actualTransport,
+      );
+      if (decision.kind === 'idempotent') return 'idempotent';
+      if (decision.kind === 'conflict') {
+        log.warn(
+          {
+            conversationId,
+            tsMsgId,
+            memberKey: safeMemberKey(memberKey),
+            currentState: decision.current,
+            attemptedState: decision.attempted,
+          },
+          'recipient transport aggregation conflict refused',
+        );
+      }
+      return 'conflict';
+    },
+
+    async setRecipientActualTransport(conversationId, tsMsgId, memberKey, observed) {
+      assertMessageTransport(observed, 'recipient actual transport');
+      const names = {
+        '#v': 'transport_schema_version',
+        '#dr': 'delivery_recipients',
+        '#mk': memberKey,
+        '#actual': 'actualTransport',
+      };
+      const values: Record<string, unknown> = {
+        ':v': TRANSPORT_SCHEMA_VERSION,
+        ':observed': observed,
+      };
+      const writable =
+        observed === 'rcs'
+          ? 'attribute_not_exists(#dr.#mk.#actual)'
+          : '(attribute_not_exists(#dr.#mk.#actual) OR #dr.#mk.#actual = :rcs)';
+      if (observed !== 'rcs') values[':rcs'] = 'rcs';
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET #dr.#mk.#actual = :observed',
+            ConditionExpression:
+              `#v = :v AND attribute_exists(#dr.#mk) AND ${writable}`,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+          }),
+        );
+        return 'updated';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+
+      const message = await getMessageConsistent(conversationId, tsMsgId);
+      if (!message) return 'missing';
+      if (message.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const slot = message.delivery_recipients?.[memberKey];
+      if (!slot) return 'missing';
+      const decision = decideActualTransportWrite(
+        slot.actualTransport,
+        observed,
+        slot.requestedTransport,
+      );
+      if (decision.kind === 'conflict') {
+        log.warn(
+          {
+            conversationId,
+            tsMsgId,
+            memberKey: safeMemberKey(memberKey),
+            currentTransport: slot.actualTransport,
+            attemptedTransport: observed,
+          },
+          'recipient actual transport conflict refused',
+        );
+      } else if (decision.kind === 'stale-rcs-observation') {
+        log.info(
+          {
+            conversationId,
+            tsMsgId,
+            memberKey: safeMemberKey(memberKey),
+            currentTransport: slot.actualTransport,
+            attemptedTransport: observed,
+          },
+          'recipient actual transport stale after RCS fallback',
+        );
+      }
+      return actualDecisionOutcome(decision);
+    },
+
+    async applyRecipientSendResult(conversationId, tsMsgId, memberKey, patch) {
+      if (patch.actualTransport !== undefined) {
+        assertMessageTransport(patch.actualTransport, 'recipient actual transport');
+      }
+
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const message = await getMessageConsistent(conversationId, tsMsgId);
+        if (!message) return 'missing';
+        if (message.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+        const slot = message.delivery_recipients?.[memberKey];
+        if (!slot) return 'missing';
+
+        const statusAdvances = allowedPriorStatuses(patch.status).includes(slot.status);
+        const statusSame = slot.status === patch.status;
+        const statusStale = !statusAdvances && !statusSame;
+        const actualDecision =
+          patch.actualTransport === undefined
+            ? undefined
+            : decideActualTransportWrite(
+                slot.actualTransport,
+                patch.actualTransport,
+                slot.requestedTransport,
+              );
+        const terminalCurrent =
+          slot.status === 'delivered' || slot.status === 'undelivered' || slot.status === 'failed';
+        const errorEligible = (statusAdvances || statusSame) && !(terminalCurrent && statusStale);
+        const sets: string[] = [];
+        const removes: string[] = [];
+        const conditions = ['#v = :v', 'attribute_exists(#dr.#mk)'];
+        const names: Record<string, string> = {
+          '#v': 'transport_schema_version',
+          '#dr': 'delivery_recipients',
+          '#mk': memberKey,
+        };
+        const values: Record<string, unknown> = { ':v': TRANSPORT_SCHEMA_VERSION };
+
+        if (statusAdvances) {
+          names['#status'] = 'status';
+          values[':status'] = patch.status;
+          values[':currentStatus'] = slot.status;
+          sets.push('#dr.#mk.#status = :status');
+          conditions.push('#dr.#mk.#status = :currentStatus');
+        }
+        if (patch.sid !== undefined && slot.sid === undefined) {
+          names['#sid'] = 'sid';
+          values[':sid'] = patch.sid;
+          sets.push('#dr.#mk.#sid = if_not_exists(#dr.#mk.#sid, :sid)');
+        }
+        if (patch.sentAt !== undefined && slot.sentAt === undefined) {
+          names['#sentAt'] = 'sentAt';
+          values[':sentAt'] = patch.sentAt;
+          sets.push('#dr.#mk.#sentAt = if_not_exists(#dr.#mk.#sentAt, :sentAt)');
+        }
+        if (actualDecision?.kind === 'write' && patch.actualTransport !== undefined) {
+          names['#actual'] = 'actualTransport';
+          values[':actual'] = patch.actualTransport;
+          sets.push('#dr.#mk.#actual = :actual');
+          if (slot.actualTransport === undefined) {
+            conditions.push('attribute_not_exists(#dr.#mk.#actual)');
+          } else {
+            values[':currentActual'] = slot.actualTransport;
+            conditions.push('#dr.#mk.#actual = :currentActual');
+          }
+        }
+
+        if (errorEligible) {
+          if (patch.errorCode === undefined) {
+            if (
+              isSuccessfulDeliveryStatus(patch.status) && slot.errorCode !== undefined
+            ) {
+              names['#error'] = 'errorCode';
+              removes.push('#dr.#mk.#error');
+              names['#status'] = 'status';
+              values[':currentStatus'] = slot.status;
+              if (!conditions.includes('#dr.#mk.#status = :currentStatus')) {
+                conditions.push('#dr.#mk.#status = :currentStatus');
+              }
+            }
+          } else if (slot.errorCode !== patch.errorCode) {
+            names['#error'] = 'errorCode';
+            values[':error'] = patch.errorCode;
+            names['#status'] = 'status';
+            values[':currentStatus'] = slot.status;
+            if (terminalCurrent && statusSame) {
+              if (slot.errorCode === undefined) {
+                sets.push('#dr.#mk.#error = if_not_exists(#dr.#mk.#error, :error)');
+              }
+            } else {
+              sets.push('#dr.#mk.#error = :error');
+            }
+            if (!conditions.includes('#dr.#mk.#status = :currentStatus')) {
+              conditions.push('#dr.#mk.#status = :currentStatus');
+            }
+          }
+        }
+
+        if (sets.length === 0 && removes.length === 0) {
+          if (actualDecision?.kind === 'conflict') return 'conflict';
+          if (actualDecision?.kind === 'stale-rcs-observation' || statusStale) return 'stale';
+          return 'idempotent';
+        }
+
+        const update = [
+          ...(sets.length > 0 ? [`SET ${sets.join(', ')}`] : []),
+          ...(removes.length > 0 ? [`REMOVE ${removes.join(', ')}`] : []),
+        ].join(' ');
+        try {
+          await doc.send(
+            new UpdateCommand({
+              TableName: table,
+              Key: { conversationId, tsMsgId },
+              UpdateExpression: update,
+              ConditionExpression: conditions.join(' AND '),
+              ExpressionAttributeNames: names,
+              ExpressionAttributeValues: values,
+            }),
+          );
+          if (actualDecision?.kind === 'conflict') {
+            log.warn(
+              {
+                conversationId,
+                tsMsgId,
+                memberKey: safeMemberKey(memberKey),
+                currentTransport: actualDecision.current,
+                attemptedTransport: actualDecision.attempted,
+              },
+              'recipient send result transport conflict refused',
+            );
+          }
+          return 'updated';
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        }
+      }
+      const finalMessage = await getMessageConsistent(conversationId, tsMsgId);
+      if (!finalMessage) return 'missing';
+      if (finalMessage.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) return 'legacy_noop';
+      const finalSlot = finalMessage.delivery_recipients?.[memberKey];
+      if (!finalSlot) return 'missing';
+      return classifyRecipientSendResult(finalSlot, patch);
+    },
     async claimFanoutPass(conversationId, tsMsgId, cap) {
       // One conditional ADD, no read first: the condition IS the cap, so two
       // concurrent deliveries can never take the same pass number. `#fa` is

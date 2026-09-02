@@ -45,12 +45,14 @@ import { loadConfig, type AppConfig } from '../lib/config.js';
 import { summarizeError } from '../lib/errors.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { sharedA2pBucket, TokenBucketBusyError, type TokenBucket } from '../lib/tokenBucket.js';
 import {
   createGroupConversationsAdapter,
   GroupConversationsAuthorRejectedError,
   GroupConversationsUnavailableError,
+  type GroupMessageSender,
   type GroupConversationsPort,
 } from '../adapters/groupConversations.js';
 import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../adapters/messaging.js';
@@ -209,7 +211,7 @@ export interface GroupSendOutcome {
 export interface GroupSendServiceDeps {
   config?: AppConfig;
   logger?: Logger;
-  groupConversations?: GroupConversationsPort;
+  groupConversations?: GroupConversationsPort & GroupMessageSender;
   // Narrow Picks so a test fake is four functions, not a whole repo.
   // `findByParticipantPhone` is the READ half of the number-scoped suppression
   // seam (services/numberSuppression) - the same seam the roster chip and the
@@ -390,9 +392,19 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       participantMap = ensured.participantMap ?? {};
     }
 
+    // The adapter fixes the requested rail before any provider call. The same
+    // immutable intent survives a one-time rail repair; only the prepared post's
+    // destination changes.
+    const transportIntent = port.classifyGroupMessageTransport();
+
     /** One post attempt at a given rail. */
     async function postOnce(sid: string) {
-      return port.postGroupMessage({ conversationSid: sid, author: businessNumber as string, body });
+      const prepared = port.prepareGroupMessagePost(transportIntent, {
+        conversationSid: sid,
+        author: businessNumber as string,
+        body,
+      });
+      return port.postPreparedGroupMessage(prepared);
     }
 
     /**
@@ -609,7 +621,20 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
           'group send: suppression read failed - member slot seeded queued (a stuck slot is recoverable; a wrong "opted out" label is not)',
         );
       }
-      deliveryRecipients[key] = suppressed ? suppressedSlot() : { status: 'queued' };
+      deliveryRecipients[key] = suppressed
+        ? {
+            ...suppressedSlot(),
+            requestedTransport: transportIntent.requestedTransport,
+            transportAggregationState: 'excluded',
+          }
+        : {
+            status: 'queued',
+            requestedTransport: transportIntent.requestedTransport,
+            ...(posted.actualTransport !== undefined && {
+              actualTransport: posted.actualTransport,
+            }),
+            transportAggregationState: 'attempted',
+          };
     }
     // Spec 4.3: the aggregate derives from the slots. It is `queued` for an
     // ordinary send and only differs when EVERY member is suppressed - a send
@@ -632,6 +657,11 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       author,
       body,
       deliveryStatus: seededStatus.status,
+      transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+      requestedTransport: transportIntent.requestedTransport,
+      ...(posted.actualTransport !== undefined && {
+        actualTransport: posted.actualTransport,
+      }),
       ...(seededStatus.errorCode !== undefined && { errorCode: seededStatus.errorCode }),
       // WHO SAID THIS (fix wave 5, adversarial 12). Attribution on a multi-party
       // timeline is resolved from `relay_sender_key` by ONE rule

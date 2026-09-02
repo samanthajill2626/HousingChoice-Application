@@ -77,9 +77,22 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
       author: 'teammate',
       body: 'group reply',
       deliveryStatus: 'queued',
+      transportSchemaVersion: 1,
+      requestedTransport: 'mms',
+      actualTransport: 'mms',
       deliveryRecipients: {
-        'phone#+16175550111': { status: 'queued' },
-        'phone#+16175550222': { status: 'queued' },
+        'phone#+16175550111': {
+          status: 'queued',
+          requestedTransport: 'mms',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+        'phone#+16175550222': {
+          status: 'queued',
+          requestedTransport: 'mms',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
       },
       groupRailSnapshot: {
         conversationSid: 'CHrail1',
@@ -116,8 +129,24 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
 
     const stored = await messages.getByProviderSid(providerSid);
     expect(stored?.delivery_recipients).toEqual({
-      'phone#+16175550111': { status: 'queued' },
-      'phone#+16175550222': { status: 'queued' },
+      'phone#+16175550111': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
+      'phone#+16175550222': {
+        status: 'queued',
+        requestedTransport: 'mms',
+        actualTransport: 'mms',
+        transportAggregationState: 'attempted',
+      },
+    });
+    expect(stored).toMatchObject({
+      type: 'sms',
+      transport_schema_version: 1,
+      requested_transport: 'mms',
+      actual_transport: 'mms',
     });
     expect(stored?.group_conversation_sid).toBe('CHrail1');
     expect(stored?.group_participant_map).toEqual({

@@ -27,7 +27,9 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import twilio from 'twilio';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import type { MessageTransport } from '../lib/messageTransport.js';
 import type { DeliveryStatus } from '../repos/messagesRepo.js';
+import { normalizeTwilioTransportEvidence } from './twilioMessageTransport.js';
 import { createRedirectingHttpClient } from './twilioHttpClient.js';
 
 export interface SendMessageParams {
@@ -60,6 +62,27 @@ export interface SendMessageParams {
   from?: string;
 }
 
+export interface MessageTransportFacts {
+  hasForwardableMedia: boolean;
+}
+
+export interface MessageTransportIntent {
+  requestedTransport: MessageTransport;
+}
+
+export interface PreparedMessageSend extends MessageTransportIntent {
+  params: SendMessageParams;
+}
+
+export interface CarrierMessageSender {
+  classifyMessageTransport(facts: MessageTransportFacts): MessageTransportIntent;
+  prepareMessageSend(
+    intent: MessageTransportIntent,
+    params: SendMessageParams,
+  ): PreparedMessageSend;
+  sendPreparedMessage(prepared: PreparedMessageSend): Promise<SendMessageResult>;
+}
+
 /** Provisioned phone-number capabilities (M1.7). */
 export interface PhoneNumberCapabilities {
   sms: boolean;
@@ -80,6 +103,8 @@ export interface SendMessageResult {
   status: DeliveryStatus;
   /** PROVIDER timestamp (ISO 8601) — the stable half of the messages SK. */
   providerTs: string;
+  /** Provider-normalized carrier transport, when trustworthy evidence exists. */
+  actualTransport?: MessageTransport;
 }
 
 /**
@@ -403,7 +428,7 @@ export interface TwilioClientLike {
       body?: string;
       mediaUrl?: string[];
       messagingServiceSid: string;
-    }): Promise<{ sid: string; status: string; dateCreated: Date | null }>;
+    }): Promise<{ sid: string; status: string; dateCreated: Date | null; from?: string | null }>;
   };
   /**
    * Outbound call origination (M1.9a). Optional on the interface so the
@@ -591,7 +616,7 @@ function poolNumberFriendlyName(appEnv: string): string {
   return `HousingChoice ${appEnv} relay (group chats)`;
 }
 
-export class TwilioMessagingDriver implements MessagingAdapter {
+export class TwilioMessagingDriver implements MessagingAdapter, CarrierMessageSender {
   private readonly client: TwilioClientLike;
   private readonly log: Logger;
 
@@ -611,7 +636,28 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     this.log = deps.logger ?? defaultLogger;
   }
 
+  classifyMessageTransport(facts: MessageTransportFacts): MessageTransportIntent {
+    return Object.freeze({
+      requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms',
+    });
+  }
+
+  prepareMessageSend(
+    intent: MessageTransportIntent,
+    params: SendMessageParams,
+  ): PreparedMessageSend {
+    return Object.freeze({ requestedTransport: intent.requestedTransport, params });
+  }
+
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
+    const intent = this.classifyMessageTransport({
+      hasForwardableMedia: (params.mediaUrls?.length ?? 0) > 0,
+    });
+    return this.sendPreparedMessage(this.prepareMessageSend(intent, params));
+  }
+
+  async sendPreparedMessage(prepared: PreparedMessageSend): Promise<SendMessageResult> {
+    const { params } = prepared;
     // A2P kill-switch BACKSTOP: refuse to hand a message to Twilio when SMS
     // sending is disabled (pre-A2P). Refusing BEFORE messages.create is what
     // prevents the 30034 ("message from an unregistered number") that damages
@@ -670,10 +716,36 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       },
       'twilio message created',
     );
+    const transportEvidence = normalizeTwilioTransportEvidence({
+      direction: 'outbound',
+      requestedTransport: prepared.requestedTransport,
+      messageSid: message.sid,
+      ...(message.from !== undefined && message.from !== null
+        ? { from: message.from }
+        : params.from !== undefined
+          ? { from: params.from }
+          : {}),
+      authenticatedProviderTraffic: true,
+    });
+    if (transportEvidence.kind === 'conflict') {
+      this.log.warn(
+        {
+          event: 'message_transport_evidence_conflict',
+          providerSid: message.sid,
+          requestedTransport: prepared.requestedTransport,
+          evidenceSource: transportEvidence.source,
+          ...transportEvidence.safeFacts,
+        },
+        'twilio message result carried conflicting transport evidence',
+      );
+    }
     return {
       providerSid: message.sid,
       status: mapTwilioStatus(message.status),
       providerTs: (message.dateCreated ?? new Date()).toISOString(),
+      ...(transportEvidence.kind === 'observed' && {
+        actualTransport: transportEvidence.transport,
+      }),
     };
   }
 
@@ -1049,7 +1121,7 @@ export class TwilioMessagingDriver implements MessagingAdapter {
 // Console driver — local dev: no Twilio account, no network sends.
 // ---------------------------------------------------------------------------
 
-export class ConsoleMessagingDriver implements MessagingAdapter {
+export class ConsoleMessagingDriver implements MessagingAdapter, CarrierMessageSender {
   private readonly log: Logger;
   /**
    * Monotonic counter for deterministic fake provisioned numbers (M1.7) so
@@ -1062,7 +1134,28 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     this.log = deps.logger ?? defaultLogger;
   }
 
+  classifyMessageTransport(facts: MessageTransportFacts): MessageTransportIntent {
+    return Object.freeze({
+      requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms',
+    });
+  }
+
+  prepareMessageSend(
+    intent: MessageTransportIntent,
+    params: SendMessageParams,
+  ): PreparedMessageSend {
+    return Object.freeze({ requestedTransport: intent.requestedTransport, params });
+  }
+
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
+    const intent = this.classifyMessageTransport({
+      hasForwardableMedia: (params.mediaUrls?.length ?? 0) > 0,
+    });
+    return this.sendPreparedMessage(this.prepareMessageSend(intent, params));
+  }
+
+  async sendPreparedMessage(prepared: PreparedMessageSend): Promise<SendMessageResult> {
+    const { params } = prepared;
     // Redacted by design: recipient + lengths only — never the body (PII).
     this.log.info(
       {
@@ -1078,6 +1171,7 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
       providerSid: `SMconsole-${params.idempotencyKey ?? randomUUID()}`,
       status: 'sent',
       providerTs: new Date().toISOString(),
+      actualTransport: prepared.requestedTransport,
     };
   }
 
@@ -1213,9 +1307,11 @@ export interface CreateMessagingAdapterDeps {
   twilioClient?: TwilioClientLike;
 }
 
-export function createMessagingAdapter(deps: CreateMessagingAdapterDeps = {}): MessagingAdapter {
+export function createMessagingAdapter(
+  deps: CreateMessagingAdapterDeps = {},
+): MessagingAdapter & CarrierMessageSender {
   const config = deps.config ?? loadConfig();
-  const base: MessagingAdapter = (() => {
+  const base: MessagingAdapter & CarrierMessageSender = (() => {
     if (config.messagingDriver === 'console') {
       return new ConsoleMessagingDriver({ logger: deps.logger });
     }

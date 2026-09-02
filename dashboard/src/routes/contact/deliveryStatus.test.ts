@@ -266,6 +266,16 @@ describe('isStaleLeg / canEverGoStale - the S3 eligibility table', () => {
     expect(canEverGoStale({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
     expect(isStaleLeg({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
   });
+
+  it('never stales or arms a timer for an excluded recipient with no suppression code', () => {
+    const removed = {
+      status: 'sent',
+      sentAt: QUIET,
+      transportAggregationState: 'excluded',
+    } satisfies RelayDeliverySlot;
+    expect(isStaleLeg(removed, L0, NOW)).toBe(false);
+    expect(canEverGoStale(removed, L0, NOW)).toBe(false);
+  });
 });
 
 describe('presentRelayDelivery', () => {
@@ -613,6 +623,34 @@ describe('presentRelayDelivery', () => {
         nowMs: NOW,
       }),
     ).toEqual({ label: 'delivered 1/2', tone: 'neutral', isFailure: false });
+  });
+
+  it('removes excluded-without-code recipients from every rollup count', () => {
+    expect(
+      presentRelayDelivery([
+        { status: 'delivered' },
+        {
+          status: 'failed',
+          transportAggregationState: 'excluded',
+        },
+      ]),
+    ).toEqual({ label: 'Delivered 1/1', tone: 'success', isFailure: false });
+    expect(
+      presentRelayDelivery([
+        {
+          status: 'queued',
+          transportAggregationState: 'excluded',
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('keeps a source-time state-absent queued slot in the delivery denominator', () => {
+    expect(presentRelayDelivery([{ status: 'queued' }])).toEqual({
+      label: 'delivered 0/1',
+      tone: 'neutral',
+      isFailure: false,
+    });
   });
 });
 
@@ -967,6 +1005,36 @@ describe('presentLegDelivery - one recipient row', () => {
   it('labels an opted-out RELAY leg as not sent - the app itself declined to send', () => {
     expect(
       presentLegDelivery({ status: 'failed', errorCode: 'contact_opted_out' }, 'relay', MSG_AT, NOW),
+    ).toEqual({ label: 'Not sent - opted out', tone: 'neutral', isFailure: false });
+  });
+
+  it('hides an excluded-without-code row before it can present delivery or staleness', () => {
+    expect(
+      presentLegDelivery(
+        {
+          status: 'sent',
+          sentAt: QUIET,
+          transportAggregationState: 'excluded',
+        },
+        'relay',
+        MSG_AT,
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps opted-out copy even when transport aggregation excludes the slot', () => {
+    expect(
+      presentLegDelivery(
+        {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          transportAggregationState: 'excluded',
+        },
+        'relay',
+        MSG_AT,
+        NOW,
+      ),
     ).toEqual({ label: 'Not sent - opted out', tone: 'neutral', isFailure: false });
   });
 

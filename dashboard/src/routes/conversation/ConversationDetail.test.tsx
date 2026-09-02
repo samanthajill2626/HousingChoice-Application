@@ -388,17 +388,36 @@ describe('ConversationDetail group view', () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
     getConversation.mockResolvedValue(relayHeader());
-    sendMessage.mockResolvedValue({
-      conversationId: 'conv-g1',
-      providerSid: 'team-1',
-      tsMsgId: '2026-07-04T10:00:00.000Z#team-1',
-      status: 'queued',
-    });
+    let resolveSend!: (value: {
+      conversationId: string;
+      providerSid: string;
+      tsMsgId: string;
+      status: string;
+    }) => void;
+    sendMessage.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
     renderAt('conv-g1');
     await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
     await user.type(screen.getByLabelText('Reply message'), 'On my way');
     await user.click(screen.getByRole('button', { name: /^Send$/ }));
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith('conv-g1', { body: 'On my way' }));
+    const bubble = (await screen.findByText('On my way')).closest('[class*="bubble"]');
+    expect(bubble).not.toBeNull();
+    expect(within(bubble as HTMLElement).queryByText(/^SMS(?: -|$)/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSend({
+        conversationId: 'conv-g1',
+        providerSid: 'team-1',
+        tsMsgId: '2026-07-04T10:00:00.000Z#team-1',
+        status: 'queued',
+      });
+      await Promise.resolve();
+    });
+    expect(within(bubble as HTMLElement).queryByText(/^SMS(?: -|$)/)).not.toBeInTheDocument();
   });
 
   // THE FIRST TIMELINE-CONTENT TEST IN THIS FILE (slice S5, adjudication A8).
@@ -431,11 +450,24 @@ describe('ConversationDetail group view', () => {
         delivery_status: 'sent',
         provider_ts: sentAt,
         relay_sender_key: 'team',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
         delivery_recipients: {
           // Reverse of participant order on purpose - the rows come back in
           // ROSTER order, not map order.
-          c2: { status: 'sent' },
-          c1: { status: 'delivered', deliveredAt: sentAt },
+          c2: {
+            status: 'sent',
+            requestedTransport: 'rcs',
+            actualTransport: 'sms',
+            transportAggregationState: 'attempted',
+          },
+          c1: {
+            status: 'delivered',
+            deliveredAt: sentAt,
+            requestedTransport: 'rcs',
+            actualTransport: 'rcs',
+            transportAggregationState: 'attempted',
+          },
         },
       } as unknown as Message,
     ]);
@@ -446,6 +478,7 @@ describe('ConversationDetail group view', () => {
     // The rollup escalates with NO interaction - that is the half of the feature
     // an operator sees without opening anything.
     expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(screen.getByText(/^RCS -> Mixed -/)).toBeInTheDocument();
     // The list is CONDITIONALLY rendered, so this absence check is only
     // meaningful beside the reveal that follows it.
     expect(screen.queryByRole('list', { name: 'Delivery by recipient' })).not.toBeInTheDocument();
@@ -458,9 +491,11 @@ describe('ConversationDetail group view', () => {
     // Scoped to the rows: the Members card carries these names too.
     expect(recipients[0]).toHaveTextContent('Keisha Kane');
     expect(recipients[0]).toHaveTextContent('Delivered');
+    expect(recipients[0]).toHaveTextContent('RCS');
     expect(recipients[0]).toHaveTextContent(formatTime(sentAt));
     expect(recipients[1]).toHaveTextContent('Lars Landlord');
     expect(recipients[1]).toHaveTextContent('Sent - not confirmed');
+    expect(recipients[1]).toHaveTextContent('RCS -> SMS');
     // Both keys match the roster, so no row may claim a membership it cannot
     // know.
     expect(within(list).queryByText(/former member/)).not.toBeInTheDocument();

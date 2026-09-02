@@ -5,6 +5,7 @@
 // cookie next to the origin secret (every /api route is behind requireAuth).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { Readable } from 'node:stream';
 import request from 'supertest';
 import {
   InMemorySchedulerAdapter,
@@ -1011,6 +1012,12 @@ describe('relay-group API (M1.7)', () => {
   it('FIX 2: POST a message to a relay group stores ONCE + fans out to ALL members FROM the pool (no send to participant_phone)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
+    const appendedInputs: Array<Parameters<typeof world.messagesRepo.append>[0]> = [];
+    const originalAppend = world.messagesRepo.append.bind(world.messagesRepo);
+    vi.spyOn(world.messagesRepo, 'append').mockImplementation(async (input) => {
+      appendedInputs.push(structuredClone(input));
+      return originalAppend(input);
+    });
     const created = await request(app)
       .post('/api/relay-groups')
       .set('x-origin-verify', SECRET)
@@ -1040,6 +1047,26 @@ describe('relay-group API (M1.7)', () => {
     expect(teamRows).toHaveLength(1);
     expect(teamRows[0]!.direction).toBe('outbound');
     expect(teamRows[0]!.author).toBe('teammate');
+    expect(teamRows[0]).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+      delivery_recipients: {
+        'phone#+15550100001': { status: 'queued', requestedTransport: 'sms' },
+        'phone#+15550100002': { status: 'queued', requestedTransport: 'sms' },
+      },
+    });
+    expect(
+      Object.values(teamRows[0]!.delivery_recipients ?? {}).every(
+        (slot) => slot.transportAggregationState === 'attempted',
+      ),
+    ).toBe(true);
+    const sourceAppend = appendedInputs.find((input) => input.relaySenderKey === 'team');
+    expect(sourceAppend).toBeDefined();
+    expect(
+      Object.values(sourceAppend?.deliveryRecipients ?? {}).every(
+        (slot) => slot.transportAggregationState === undefined,
+      ),
+    ).toBe(true);
 
     // Fanned out to BOTH members FROM the pool number — never participant_phone.
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
@@ -1047,6 +1074,105 @@ describe('relay-group API (M1.7)', () => {
     expect(world.sent.some((s) => s.to === poolNumber)).toBe(false);
     // Neutral team label prefix (the SMS-facing brand — spec §5), NEVER a phone.
     expect(world.sent.every((s) => s.body === 'HousingChoice: Showing is at 4pm')).toBe(true);
+  });
+
+  it('classifies relay source intent from durable attachments and stable media availability', async () => {
+    const pool = makeFakePoolNumbers();
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }] });
+    const id = created.body.conversation.conversationId as string;
+    world.sent.length = 0;
+    await world.mediaStore.put(
+      'uploads/deadbeef',
+      Readable.from([Buffer.from('image')]),
+      'image/png',
+    );
+
+    const res = await request(app)
+      .post(`/api/conversations/${id}/messages`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body: 'photo', attachmentKeys: ['uploads/deadbeef'] });
+
+    expect(res.status).toBe(201);
+    expect(classify).toHaveBeenCalledWith({ hasForwardableMedia: true });
+    const source = world.messages.find(
+      (message) => message.conversationId === id && message.relay_sender_key === 'team',
+    );
+    expect(source).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'mms',
+    });
+    expect(
+      Object.values(source?.delivery_recipients ?? {}).every(
+        (slot) => slot.requestedTransport === 'mms',
+      ),
+    ).toBe(true);
+  });
+
+  it('persists connecting relay intent before the queued_pending hold', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+
+    const res = await request(app)
+      .post(`/api/conversations/${connecting.conversationId}/messages`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body: 'hold this' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('queued_pending');
+    const source = world.messages.find((message) => message.tsMsgId === res.body.tsMsgId);
+    expect(source).toMatchObject({
+      delivery_status: 'queued_pending',
+      transport_schema_version: 1,
+      requested_transport: 'sms',
+    });
+    expect(
+      Object.values(source?.delivery_recipients ?? {}).every(
+        (slot) =>
+          slot.requestedTransport === 'sms' && slot.transportAggregationState === undefined,
+      ),
+    ).toBe(true);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('classifies a body-only relay source as sms when media storage is unavailable', async () => {
+    const pool = makeFakePoolNumbers();
+    const classify = vi.spyOn(world.adapter, 'classifyMessageTransport');
+    const { app } = makeWebhookHarness({
+      world,
+      poolNumbersService: pool,
+      withoutMediaStore: true,
+    });
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    world.sent.length = 0;
+
+    const res = await request(app)
+      .post(`/api/conversations/${created.body.conversation.conversationId}/messages`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body: 'text only' });
+
+    expect(res.status).toBe(201);
+    expect(classify).toHaveBeenCalledWith({ hasForwardableMedia: false });
+    const source = world.messages.find((message) => message.tsMsgId === res.body.tsMsgId);
+    expect(source).toMatchObject({ transport_schema_version: 1, requested_transport: 'sms' });
   });
 
   // Member added to an EXISTING group (2026-07-14): announced to the whole

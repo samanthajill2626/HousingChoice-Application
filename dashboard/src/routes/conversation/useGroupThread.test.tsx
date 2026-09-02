@@ -49,8 +49,9 @@ async function flushDebounce(): Promise<void> {
 }
 
 function Probe({ conversationId = 'g1' }: { conversationId?: string }): React.JSX.Element {
-  const { status, items, hasOlder, loadingOlder, loadOlder, olderPagesLoaded } =
-    useGroupThread(conversationId);
+  const thread = useGroupThread(conversationId);
+  latestThread = thread;
+  const { status, items, hasOlder, loadingOlder, loadOlder, olderPagesLoaded } = thread;
   return (
     <div>
       <span data-testid="status">{status}</span>
@@ -65,9 +66,57 @@ function Probe({ conversationId = 'g1' }: { conversationId?: string }): React.JS
   );
 }
 
+let latestThread: ReturnType<typeof useGroupThread> | null = null;
+
 beforeEach(() => {
   getConversationMessages.mockReset();
   lastHandlers = {};
+  latestThread = null;
+});
+
+describe('useGroupThread transport state', () => {
+  it('keeps optimistic carrier rows transport-free until server refetch', async () => {
+    getConversationMessages.mockResolvedValue([]);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    let tempId = '';
+    act(() => {
+      tempId = latestThread!.addOptimistic('g1', 'pending');
+    });
+    expect(latestThread!.items[0]).toMatchObject({ optimistic: true });
+    expect(latestThread!.items[0]).not.toHaveProperty('requested_transport');
+
+    act(() => {
+      latestThread!.resolveOptimistic(tempId, {
+        conversationId: 'g1',
+        providerSid: 'GM1',
+        tsMsgId: 'm1',
+        status: 'sent',
+      });
+    });
+    expect(latestThread!.items[0]).toMatchObject({ optimistic: true, id: 'm1' });
+
+    getConversationMessages.mockResolvedValueOnce([{
+      ...message(1),
+      tsMsgId: 'm1',
+      body: 'pending',
+      transport_schema_version: 1,
+      requested_transport: 'mms',
+      actual_transport: 'mms',
+    }]);
+    await act(async () => {
+      lastHandlers.onMessagePersisted?.({ conversationId: 'g1' });
+      await flushDebounce();
+    });
+    await waitFor(() => expect(latestThread!.items).toHaveLength(1));
+    expect(latestThread!.items[0]).toMatchObject({
+      transport_schema_version: 1,
+      requested_transport: 'mms',
+      actual_transport: 'mms',
+    });
+    expect(latestThread!.items[0]).not.toHaveProperty('optimistic');
+  });
 });
 
 describe('useGroupThread paging', () => {

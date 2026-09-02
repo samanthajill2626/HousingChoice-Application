@@ -36,6 +36,7 @@ const CAROL = '+15550100003';
 const DAVE = '+15550100004';
 // A phone on NO roster for POOL (an unknown/stranger sender).
 const ZARA = '+15550100009';
+const RELAY_INBOUND_SID = `SM${'5'.repeat(32)}`;
 
 const ERROR = 50;
 
@@ -63,7 +64,7 @@ function seedRelay(world: FakeWorld, overrides: Partial<ConversationItem> = {}):
 
 function relayInboundParams(over: Record<string, string> = {}): Record<string, string> {
   return {
-    MessageSid: 'SMrelay-in-1',
+    MessageSid: RELAY_INBOUND_SID,
     AccountSid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     MessagingServiceSid: 'MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     From: ALICE,
@@ -113,6 +114,11 @@ describe('relay inbound webhook (M1.7)', () => {
     expect(relayMsgs).toHaveLength(1);
     expect(relayMsgs[0]!.direction).toBe('inbound');
     expect(relayMsgs[0]!.relay_sender_key).toBe('c-alice');
+    expect(relayMsgs[0]).toMatchObject({
+      transport_schema_version: 1,
+      actual_transport: 'sms',
+    });
+    expect(relayMsgs[0]!.requested_transport).toBeUndefined();
 
     // Fan-out to Bob + Carol only (never Alice), FROM the pool number, prefixed.
     expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
@@ -158,12 +164,14 @@ describe('relay inbound webhook (M1.7)', () => {
     const res = await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
     expect(res.status).toBe(200);
     // Delivered into ALICE's OWN 1:1 thread (a non-group conversation) with provenance.
-    const msg = world.messages.find((m) => m.provider_sid === 'SMrelay-in-1')!;
+    const msg = world.messages.find((m) => m.provider_sid === RELAY_INBOUND_SID)!;
     expect(msg).toBeDefined();
     expect(msg.conversationId).not.toBe(group.conversationId);
     expect(msg.via_closed_group).toBe(group.conversationId);
     // The old received_on_closed_thread flag is gone from the SMS path.
     expect(msg.received_on_closed_thread).toBeUndefined();
+    expect(msg).toMatchObject({ transport_schema_version: 1, actual_transport: 'sms' });
+    expect(msg.requested_transport).toBeUndefined();
     // The closed GROUP transcript received nothing, and nothing fanned out.
     expect(world.messages.filter((m) => m.conversationId === group.conversationId)).toHaveLength(0);
     expect(world.sent).toHaveLength(0);
@@ -180,6 +188,9 @@ describe('relay inbound webhook (M1.7)', () => {
     expect(res.status).toBe(200);
     // A 1:1 conversation was created + the message stored (no relay fan-out).
     expect(world.messages.find((m) => m.provider_sid === 'SM1to1')).toBeDefined();
+    expect(world.messages.find((m) => m.provider_sid === 'SM1to1')).toMatchObject({
+      transport_schema_version: 1,
+    });
     expect(world.sent).toHaveLength(0);
   });
 
@@ -216,6 +227,55 @@ describe('relay inbound webhook (M1.7)', () => {
     });
     const after = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
     expect(after.delivery_recipients?.['c-bob']?.status).toBe('delivered'); // unchanged
+  });
+
+  it('recipient callback resolves the stored request before writing actual transport', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const sourceSid = `SM${'d'.repeat(32)}`;
+    const legSid = `SM${'e'.repeat(32)}`;
+    const appended = await world.messagesRepo.append({
+      conversationId: 'conv-relay-transport',
+      providerSid: sourceSid,
+      providerTs: '2026-09-01T12:00:00.000Z',
+      type: 'sms',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      transportSchemaVersion: 1,
+      actualTransport: 'sms',
+      deliveryRecipients: {
+        'c-bob': { status: 'queued', requestedTransport: 'rcs' },
+      },
+    });
+    await world.messagesRepo.putRelaySidPointer(legSid, {
+      conversationId: 'conv-relay-transport',
+      tsMsgId: appended.tsMsgId,
+      memberKey: 'c-bob',
+    });
+
+    await signedTwilioPost(app, '/webhooks/twilio/status', {
+      MessageSid: legSid,
+      MessageStatus: 'queued',
+      From: POOL,
+      To: BOB,
+    });
+
+    const source = await world.messagesRepo.getByTsMsgId(
+      'conv-relay-transport',
+      appended.tsMsgId,
+    );
+    expect(source?.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'queued',
+      requestedTransport: 'rcs',
+      actualTransport: 'sms',
+    });
+    expect(
+      world.emitted.filter(
+        (event) =>
+          event.event === 'message.persisted' &&
+          (event.payload as { tsMsgId?: string }).tsMsgId === appended.tsMsgId,
+      ),
+    ).toHaveLength(1);
   });
 
   it('raced fan-out leg: relaysid pointer ABSENT on the first lookup, PRESENT after the retry → processed, no unknown-SID drop', async () => {

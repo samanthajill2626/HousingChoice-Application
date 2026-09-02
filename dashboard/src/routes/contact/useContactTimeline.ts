@@ -272,6 +272,7 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
         tsMsgId: tempId,
         direction: 'outbound' as const,
         author: 'teammate' as const,
+        optimistic: true,
         body,
         // 'queued' renders as "Sending..." (deliveryStatus) - the in-progress state.
         delivery_status: 'queued' as const,

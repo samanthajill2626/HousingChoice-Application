@@ -121,6 +121,96 @@ describe('Timeline', () => {
     expect(screen.getByText(/SMS - \(404\) 010-0007 - 9:14a/)).toBeInTheDocument();
   });
 
+  it.each([
+    {
+      label: 'pending RCS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-pending',
+        tsMsgId: 'transport-pending',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
+      } as TimelineItem,
+      expected: 'RCS',
+    },
+    {
+      label: 'SMS agreement',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-agreement',
+        tsMsgId: 'transport-agreement',
+        transport_schema_version: 1,
+        requested_transport: 'sms',
+        actual_transport: 'sms',
+      } as TimelineItem,
+      expected: 'SMS',
+    },
+    {
+      label: 'RCS fallback',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-fallback',
+        tsMsgId: 'transport-fallback',
+        transport_schema_version: 1,
+        requested_transport: 'rcs',
+        actual_transport: 'sms',
+      } as TimelineItem,
+      expected: 'RCS -> SMS',
+    },
+    {
+      label: 'unresolved inbound',
+      item: {
+        ...MESSAGE_IN,
+        id: 'transport-unknown',
+        tsMsgId: 'transport-unknown',
+        transport_schema_version: 1,
+      } as TimelineItem,
+      expected: 'Unknown',
+    },
+    {
+      label: 'legacy SMS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-legacy',
+        tsMsgId: 'transport-legacy',
+      } as TimelineItem,
+      expected: 'SMS',
+    },
+    {
+      label: 'text-only native Group MMS',
+      item: {
+        ...MESSAGE_OUT,
+        id: 'transport-group-mms',
+        tsMsgId: 'transport-group-mms',
+        type: 'sms',
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
+      } as TimelineItem,
+      expected: 'MMS',
+    },
+  ])('renders $label from the normalized transport contract', ({ item, expected }) => {
+    renderTimeline({ items: [item] });
+    expect(screen.getByText(new RegExp(`^${expected} -`))).toBeInTheDocument();
+  });
+
+  it('shows no transport for an optimistic direct message even when local fields claim one', () => {
+    const optimistic: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'transport-optimistic',
+      tsMsgId: 'transport-optimistic',
+      body: 'optimistic transport stays hidden',
+      optimistic: true,
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+    };
+    renderTimeline({ items: [optimistic] });
+    const bubble = screen.getByText('optimistic transport stays hidden').closest('[class*="bubble"]');
+    expect(bubble).not.toBeNull();
+    expect(within(bubble as HTMLElement).queryByText(/RCS|SMS/)).not.toBeInTheDocument();
+  });
+
   it('renders a cluster label (day - time) for the first message', () => {
     renderTimeline({ items: [MESSAGE_IN] });
     expect(screen.getByText(/Mon Jun 8 - 9:14a/)).toBeInTheDocument();
@@ -1265,6 +1355,268 @@ describe('Timeline relay-group annotations', () => {
     renderTimeline({ items: [queued], relayRoster: ROSTER });
     expect(screen.getByText('Queued - will send when connected')).toBeInTheDocument();
     expect(screen.queryByText('delivered 0/2')).not.toBeInTheDocument();
+  });
+
+  it('keeps legacy Relay recipient delivery copy free of an unresolved transport claim', () => {
+    renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
+
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toHaveAccessibleName(
+      'delivered 1 of 2, 1 not confirmed. Keisha Kane: Delivered. Lars Landlord: Sent, not confirmed.',
+    );
+
+    fireEvent.click(screen.getByText('Team reply to the group'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered' }),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/Unknown/)).not.toBeInTheDocument();
+  });
+
+  it('keeps legacy Group MMS recipient delivery copy free of an unresolved transport claim', () => {
+    const legacyGroupMms: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'legacy-group-mms-recipient',
+      tsMsgId: 'legacy-group-mms-recipient',
+      body: 'legacy Group MMS recipient',
+      type: 'mms',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+      },
+    };
+
+    renderTimeline({
+      items: [legacyGroupMms],
+      relayRoster: ROSTER,
+      rosterKind: 'group_text',
+    });
+
+    expect(screen.getByText('Delivered 1/1')).toHaveAccessibleName(
+      'Delivered 1 of 1. Keisha Kane: Delivered.',
+    );
+
+    fireEvent.click(screen.getByText('legacy Group MMS recipient'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered' }),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/Unknown/)).not.toBeInTheDocument();
+  });
+
+  it('keeps Unknown on version-1 recipient slots with no transport facts', () => {
+    const unresolved: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'version-1-unresolved-recipient',
+      tsMsgId: 'version-1-unresolved-recipient',
+      body: 'version-1 unresolved recipient',
+      transport_schema_version: 1,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+      },
+    };
+
+    renderTimeline({ items: [unresolved], relayRoster: ROSTER });
+
+    expect(screen.getByText('Delivered 1/1')).toHaveAccessibleName(
+      'Delivered 1 of 1. Keisha Kane: Delivered, Unknown.',
+    );
+
+    fireEvent.click(screen.getByText('version-1 unresolved recipient'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - Unknown' }),
+    ).toBeInTheDocument();
+  });
+
+  it('renders complete and incomplete relay transport aggregates without changing delivery state', () => {
+    const complete: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'relay-transport-complete',
+      tsMsgId: 'relay-transport-complete',
+      body: 'complete transport aggregate',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'rcs',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+    const incomplete: TimelineItem = {
+      ...complete,
+      id: 'relay-transport-incomplete',
+      tsMsgId: 'relay-transport-incomplete',
+      body: 'incomplete transport aggregate',
+      delivery_recipients: {
+        c1: complete.delivery_recipients!.c1!,
+        c2: {
+          status: 'sent',
+          requestedTransport: 'rcs',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({ items: [complete, incomplete], relayRoster: ROSTER });
+    expect(screen.getByText(/^RCS -> Mixed -/)).toBeInTheDocument();
+    expect(screen.getByText(/^RCS - 9:20a$/)).toBeInTheDocument();
+    expect(screen.getByText('Delivered 2/2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('complete transport aggregate'));
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - RCS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Lars Landlord - Delivered - RCS -> SMS' }),
+    ).toBeInTheDocument();
+  });
+
+  it('discloses inbound relay legs while filtering removed members and preserving suppressed and state-absent rows', () => {
+    const roster = [
+      ...ROSTER,
+      { contactId: 'c3', phone: '+14045550113', name: 'Opted Out' },
+      { contactId: 'c4', phone: '+14045550114', name: 'State Absent' },
+    ];
+    const inbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'relay-inbound-transport',
+      tsMsgId: 'relay-inbound-transport',
+      body: 'inbound relay transport',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'queued',
+          requestedTransport: 'rcs',
+          transportAggregationState: 'excluded',
+        },
+        c3: {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+          requestedTransport: 'sms',
+          transportAggregationState: 'excluded',
+        },
+        c4: {
+          status: 'delivered',
+          requestedTransport: 'sms',
+          actualTransport: 'sms',
+        },
+      },
+    };
+
+    renderTimeline({ items: [inbound], relayRoster: roster });
+    expect(screen.getByText(/^SMS -/)).toBeInTheDocument();
+    expect(screen.getByText(/1 member opted out/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('inbound relay transport'));
+
+    const list = screen.getByRole('list', { name: 'Delivery by recipient' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3);
+    expect(within(list).queryByText('Lars Landlord')).not.toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Keisha Kane - Delivered - RCS -> SMS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'Opted Out - Not sent - opted out - SMS' }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).getByRole('listitem', { name: 'State Absent - Delivered - SMS' }),
+    ).toBeInTheDocument();
+  });
+
+  it('exposes inbound relay leg facts before interaction without changing the source transport', () => {
+    const inbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'relay-inbound-collapsed-accessibility',
+      tsMsgId: 'relay-inbound-collapsed-accessibility',
+      body: 'inbound relay accessibility',
+      transport_schema_version: 1,
+      requested_transport: 'rcs',
+      actual_transport: 'sms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c1: {
+          status: 'delivered',
+          deliveredAt: '2026-06-08T09:25:00',
+          requestedTransport: 'rcs',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'sms',
+          actualTransport: 'sms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({ items: [inbound], relayRoster: ROSTER });
+
+    expect(screen.getByText(/^SMS - \(404\) 010-0007 - 9:14a$/)).toBeInTheDocument();
+    expect(screen.queryByText(/^RCS -> SMS -/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Delivery by recipient' })).not.toBeInTheDocument();
+
+    const disclosure = screen.getByRole('group', { name: /Delivery by recipient/ });
+    const expectedName =
+      'Delivery by recipient. Keisha Kane: Delivered, RCS -> SMS, 9:25a. ' +
+      'Lars Landlord: Delivered, SMS.';
+    expect(disclosure).toHaveAccessibleName(expectedName);
+    const accessibleName = disclosure.getAttribute('aria-label');
+    expect(accessibleName?.split('9:25a')).toHaveLength(2);
+    expect(accessibleName).not.toContain('9:14a');
+
+    fireEvent.click(screen.getByText('inbound relay accessibility'));
+
+    expect(screen.queryByRole('group', { name: expectedName })).not.toBeInTheDocument();
+    expect(screen.getByRole('list', { name: 'Delivery by recipient' })).toBeInTheDocument();
+  });
+
+  it('does not add the inbound Relay accessibility owner to a native group message', () => {
+    const nativeGroupInbound: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'native-group-inbound-accessibility',
+      tsMsgId: 'native-group-inbound-accessibility',
+      transport_schema_version: 1,
+      actual_transport: 'mms',
+      relay_sender_key: 'c1',
+      delivery_recipients: {
+        c2: {
+          status: 'delivered',
+          requestedTransport: 'mms',
+          actualTransport: 'mms',
+          transportAggregationState: 'attempted',
+        },
+      },
+    };
+
+    renderTimeline({
+      items: [nativeGroupInbound],
+      relayRoster: ROSTER,
+      rosterKind: 'group_text',
+    });
+
+    expect(screen.queryByRole('group', { name: /Delivery by recipient/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/^MMS -/)).toBeInTheDocument();
   });
 
   it('attributes an inbound relay bubble to the sending member', () => {

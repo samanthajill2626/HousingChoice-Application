@@ -53,6 +53,7 @@ import {
   ensureTable,
   isLocalDynamoEndpoint,
   pollUntilTableActive,
+  pollUntilTableGone,
   TableNotActiveError,
 } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec, type TableSpec } from '../src/lib/tables.js';
@@ -549,6 +550,12 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
       conflict,
     );
     expect(stub.count('DeleteTable')).toBe(1);
+    // THE HOT PATH, pinned the way case 3 pins ensureTable's. The wait exists
+    // only for a RETRIED conflict; an un-retried one must cost no extra
+    // round-trip. Without this line you can delete the `retried &&` guard at
+    // dynamoAdmin.ts and the whole suite stays green - it just gets 10s slower
+    // per un-retried conflict, across ~50 delete-then-create hooks.
+    expect(stub.count('DescribeTable')).toBe(0);
   });
 
   it('case 19: a retried conflict on a table that never goes ACTIVE rethrows the CONFLICT', async () => {
@@ -764,5 +771,62 @@ describe('dynamoAdmin control-plane retry (DynamoDB Local InternalFailure)', () 
     // Four sends: the bound was still honoured, it just did not pre-empt the read.
     expect(stub.count('UpdateTimeToLive')).toBe(4);
     expect(stub.count('DescribeTimeToLive')).toBe(5);
+  });
+
+  it('case 26: an UNREADABLE poll read is never mistaken for a finished delete', async () => {
+    // The safety rule of pollUntilTableGone, and until now unfalsifiable: no
+    // case made DescribeTable fail for a reason OTHER than not-found, so
+    // replacing `if (readErr instanceof ResourceNotFoundException) return;`
+    // (dynamoAdmin.ts) with a bare `return;` left cases 23 and 24 green - while
+    // turning "the container is too busy to answer" into "the table is gone"
+    // and handing the caller a table that still exists.
+    //
+    // Both failure shapes the container actually produces are scripted, so the
+    // rule is pinned against the errors it will really meet, not a synthetic one.
+    const gone = new StubClient().script('DescribeTable', [
+      { fail: internalFailure() },
+      { fail: lockTimeout() },
+      { fail: resourceNotFound() },
+    ]);
+
+    await expect(
+      pollUntilTableGone(gone.asClient(), 'stub', { intervalMs: 1, ceilingMs: 5_000 }),
+    ).resolves.toBeUndefined();
+    // Three reads, not one: only the not-found answer ends the wait.
+    expect(gone.count('DescribeTable')).toBe(3);
+
+    // The mirror on the ACTIVE poll: an unreadable read is not ACTIVE either.
+    const active = new StubClient().script('DescribeTable', [
+      { fail: internalFailure() },
+      { ok: tableDescription('ACTIVE') },
+    ]);
+
+    await expect(
+      pollUntilTableActive(active.asClient(), 'stub', { intervalMs: 1, ceilingMs: 5_000 }),
+    ).resolves.toBeUndefined();
+    expect(active.count('DescribeTable')).toBe(2);
+  });
+
+  it('case 27: a NON-LOCAL endpoint never reaches the verification hook', async () => {
+    // The invariant the whole design rests on, and it had no test: the endpoint
+    // gate sits AHEAD of the hook, so a non-local client pays exactly today's
+    // cost - one send, error out - and never performs the extra read.
+    //
+    // Cases 11 and 12 do NOT prove this, though the module comment cited them:
+    // both use NO_TTL, which builds no verification hook at all, so they would
+    // pass unchanged with the gate BELOW the hook. Only a hooked send can tell
+    // the two orderings apart.
+    const failure = internalFailure();
+    const stub = new StubClient()
+      .endpointHostname('dynamodb.us-east-1.amazonaws.com')
+      .fallback('UpdateTimeToLive', { fail: failure });
+
+    await expect(
+      ensureTable(stub.asClient(), TTL_SPEC, 'stub', LIVE_ENV, { retry: FAST }),
+    ).rejects.toBe(failure);
+    // The pre-send guard read, then the one mutation send, and NOTHING after
+    // it. With the gate below the hook this log carries a second
+    // DescribeTimeToLive - the hook read that a non-local client must never pay.
+    expect(stub.ttlLog()).toEqual(['DescribeTimeToLive', 'UpdateTimeToLive']);
   });
 });

@@ -299,7 +299,13 @@ async function retryLocalControlPlane(
       if (!isRetryableContainerFault(err)) throw err;
       // The endpoint gate stays AHEAD of the hook: against a non-local endpoint
       // this module is inert, and an inert module must not spend a control-plane
-      // read either (cases 11 and 12 assert exactly zero extra sends).
+      // read either.
+      //
+      // CASE 27 is what proves that ordering. Cases 11 and 12 do NOT, though an
+      // earlier version of this comment cited them: both use a spec with no
+      // ttlAttribute, so no verification hook is ever built and they would pass
+      // unchanged with this gate BELOW the hook. Only a HOOKED send on a
+      // non-local endpoint can tell the two orderings apart.
       local ??= await isLocalDynamoEndpoint(client);
       if (!local) throw err;
       if (opts.verify) {

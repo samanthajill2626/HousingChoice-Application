@@ -86,4 +86,3 @@ Decision: ACCEPT.
 
 Suppressed no-attempt slots are excluded from the transport-field requirement,
 store neither requested nor actual, and retain their existing suppression copy.
-

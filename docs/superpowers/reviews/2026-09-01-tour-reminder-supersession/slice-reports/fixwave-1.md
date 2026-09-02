@@ -161,3 +161,31 @@ unchanged, so the fake mirror needed no edit. The M2 change reads
 Untouched by design (ACCEPT-RECORD): M1's three preview surfaces, N1-N4, S5's
 `names_unavailable` token. The B1 ownership-read-to-sweep window is accepted and
 documented in spec 3.2 and in the code comment.
+
+## Follow-up: m2 regression, found in live QA - FIXED
+
+`ec144ff7` re-derived the anchor whenever block presence FLIPPED, in both
+directions. The MOUNT flip is the harmful half. TourConversation delivers a
+thread's messages and its Upcoming block in ONE commit, so the re-derive ran
+against a scrollTop no pin had yet run on: at 0 the sentinel sat 221px below the
+viewport bottom, `deriveStreamAnchor` answered `null`, and the SAME effect pass
+then took the `grew` branch. Measured on lane 1: scrollTop 0,
+distanceFromBottom 655, the "New messages" pill visible ON OPEN. That breaks
+acceptance 13 for every view that mounts messages and block together, and is
+timing-flaky for the rest.
+
+The mount flip cannot invalidate anything: the block renders BELOW the sentinel,
+so it only adds content beneath the fold - a `sentinel` or `null` anchor stays
+correct. m2's actual desync was always the UNMOUNT (a stale `below` plus a
+bottom gap measured with the block present), so the re-derive is now gated on
+that direction alone. Deps, `prevHasBlockRef` and the no-`upcoming`-array rule
+are unchanged.
+
+RED (`red-m2-regression.txt`): a commit delivering clusters and a non-empty
+`upcoming` together, with the sentinel beyond the 48px band at scrollTop 0 ->
+`expected +0 to be 200`, i.e. no pin at all, exactly the live shape. The m2
+unmount test still passes, so the fix did not simply revert m2.
+
+Gates: `npm run typecheck` exit 0; `Timeline.test.tsx` + `streamAnchor.test.ts`
+exit 0, 141 passed. No e2e or stack action - an interactive session was live on
+lane 1.

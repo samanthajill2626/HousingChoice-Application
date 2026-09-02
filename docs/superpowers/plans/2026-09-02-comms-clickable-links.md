@@ -155,7 +155,10 @@ npm audit --omit=dev --workspace @housingchoice/dashboard
 Expected: bare `npm ci` exits 0 after rebuilding `node_modules` from the updated
 lockfile. Dashboard resolves `autolinker@4.1.5` and `tslib`; both manifests report
 their licenses, no install lifecycle scripts, no OS/CPU restriction, and no optional
-native dependency. The audit exits 0 with zero dependency vulnerabilities.
+native dependency. Record any workspace-wide audit baseline separately; block only
+an advisory introduced through the `autolinker`/`tslib` graph. The human-provided
+isolated runtime audit for that graph reported zero vulnerabilities, while this
+repository's existing production audit may report unrelated advisories.
 
 Run the target-architecture package smoke independently of the Windows tree:
 

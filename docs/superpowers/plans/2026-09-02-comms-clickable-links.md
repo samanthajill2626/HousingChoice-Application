@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v3 - READY for launch gate after adversarial review round 2
+Status: v4 - REVISED after S1 parser blocker; pending focused design review
 Date: 2026-09-02
 Branch: `feat/comms-clickable-links`
 Worktree: `W:\\tmp\\comms-clickable-links`
@@ -14,25 +14,28 @@ communications body while preserving plain-text security, message behavior, and
 email-snippet presentation.
 
 **Architecture:** A new design-system component owns one module-scoped
-`linkify-it` parser, converts untrusted source text into ordered text/link tokens,
+`linkifyjs` core tokenizer, converts untrusted source text into ordered text/link tokens,
 normalizes inferred destinations to HTTPS, and passes every destination through
 `safeHttpUrl`. The shared Timeline adopts it for SMS/MMS/group bodies and
 plain-text email, while `UnmatchedRow` adopts it only for opened full email detail.
 
-**Tech Stack:** React 19, TypeScript ESM, CSS Modules, `linkify-it` 6.1.0,
-`tlds` 1.261.0, Vitest/Testing Library, Playwright.
+**Tech Stack:** React 19, TypeScript ESM, CSS Modules, `linkifyjs` 4.3.3,
+Vitest/Testing Library, Playwright.
 
 **Spec:** `docs/superpowers/specs/2026-09-02-comms-clickable-links-design.md`
 
 ## Global Constraints
 
-- Add `linkify-it` 6.1.0 and `tlds` 1.261.0 only to
-  `dashboard/package.json` runtime dependencies. Resolve exact versions in the root
-  `package-lock.json`; never import the older transitive `linkify-it` 5.0.2 copy.
-- Configure the v6 named `LinkifyIt` export with `fuzzyLink: true`,
-  `fuzzyEmail: false`, `fuzzyIP: false`, and `urlAuth: false`; then replace its
-  built-in suffix list through `parser.tlds(tlds)`. Disable `ftp:` and `mailto:`
-  schemas explicitly.
+- Add `linkifyjs` 4.3.3 only to `dashboard/package.json` runtime dependencies.
+  Resolve its exact version in the root `package-lock.json`.
+- Call `linkify.find(text, 'url', { defaultProtocol: 'https' })`, retain only
+  `type === 'url'` results, and use its source offsets. When the two immediately
+  preceding source characters are `//`, widen that one parser-owned result start by
+  exactly two characters. This protocol-relative adjustment is not a competing URL
+  regexp; do not add any other URL recognition, punctuation trimming, or suffix list.
+- Preserve an explicit source containing `://` for `safeHttpUrl` to validate. Prefix
+  a widened protocol-relative source with `https:` and a fuzzy `www` or bare-domain
+  source with `https://` before the final safety check.
 - Keep communications bodies as React text nodes and anchors. Never generate HTML
   strings or use `dangerouslySetInnerHTML`.
 - Preserve explicit HTTP and HTTPS. Normalize `//` with `https:` and fuzzy `www`
@@ -96,8 +99,7 @@ plain-text email, while `UnmatchedRow` adopts it only for opened full email deta
 **Interfaces:**
 
 - Consumes: `safeHttpUrl(url: string | null | undefined): string | null` from
-  `dashboard/src/lib/safeUrl.ts`; `LinkifyIt` and its inferred match type from
-  `linkify-it`; the default TLD array from `tlds`.
+  `dashboard/src/lib/safeUrl.ts`; `linkifyjs.find` and its inferred result type.
 - Produces:
 
 ```ts
@@ -123,13 +125,12 @@ export function LinkifiedText(props: LinkifiedTextProps): React.JSX.Element;
 Run from the repository root:
 
 ```powershell
-npm install --save-exact --workspace @housingchoice/dashboard linkify-it@6.1.0 tlds@1.261.0
+npm install --save-exact --workspace @housingchoice/dashboard linkifyjs@4.3.3
 ```
 
-Expected: `dashboard/package.json` contains exact `6.1.0` and `1.261.0` dependency
-values; `package-lock.json` resolves `linkify-it` 6.1.0 for the dashboard and
-`uc.micro` 3.x beneath it. The mailparser-owned 5.0.2 resolution may remain as a
-separate transitive node.
+Expected: `dashboard/package.json` contains the exact `4.3.3` dependency value and
+`package-lock.json` resolves `linkifyjs` 4.3.3 for the dashboard with no runtime
+dependency beneath it.
 
 - [ ] **Step 2: Prove a clean Windows install and the dependency boundary**
 
@@ -138,19 +139,18 @@ then inspect the resolved graph:
 
 ```powershell
 npm ci
-npm ls --workspace @housingchoice/dashboard linkify-it tlds uc.micro
-node -e "for (const n of ['linkify-it','tlds','uc.micro']) { const p=require('./node_modules/'+n+'/package.json'); const lifecycle=['preinstall','install','postinstall'].filter(k=>p.scripts?.[k]); console.log(n,p.version,p.license,lifecycle.join(',')||'no-install-scripts',p.os||'all-os',p.cpu||'all-cpu',p.optionalDependencies||'no-optional-deps') }"
+npm ls --workspace @housingchoice/dashboard linkifyjs
+node -e "const path=require('node:path'); const p=require(require.resolve('linkifyjs/package.json',{paths:[path.resolve('dashboard')]})); const lifecycle=['preinstall','install','postinstall'].filter(k=>p.scripts?.[k]); console.log('linkifyjs',p.version,p.license,lifecycle.join(',')||'no-install-scripts',p.os||'all-os',p.cpu||'all-cpu',p.optionalDependencies||'no-optional-deps')"
 ```
 
 Expected: bare `npm ci` exits 0 after rebuilding `node_modules` from the updated
-lockfile. Dashboard resolves `linkify-it@6.1.0` and `tlds@1.261.0`; all three runtime
-packages report MIT, no install lifecycle scripts, no OS/CPU restriction, and no
-optional native dependency.
+lockfile. Dashboard resolves `linkifyjs@4.3.3`; its package reports MIT, no install
+lifecycle scripts, no OS/CPU restriction, and no optional native dependency.
 
 Run the target-architecture package smoke independently of the Windows tree:
 
 ```powershell
-docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact linkify-it@6.1.0 tlds@1.261.0 >/dev/null && node --input-type=module -e \"import { LinkifyIt } from 'linkify-it'; import { createRequire } from 'node:module'; const require=createRequire(import.meta.url); const tlds=require('tlds'); const parser=new LinkifyIt({ fuzzyLink:true, fuzzyEmail:false, fuzzyIP:false, urlAuth:false }).tlds(tlds); if (!parser.test('housing.zip/path')) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
+docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact linkifyjs@4.3.3 >/dev/null && node --input-type=module -e \"import * as linkify from 'linkifyjs'; const options={defaultProtocol:'https'}; const port='example.com:8443/a?x=1#top'; const [portMatch]=linkify.find(port,'url',options); const protocolRelative='//example.com/a'; const [protocolRelativeMatch]=linkify.find(protocolRelative,'url',options); if (!portMatch || portMatch.type!=='url' || portMatch.start!==0 || portMatch.end!==port.length || !protocolRelativeMatch || protocolRelativeMatch.start!==2 || protocolRelativeMatch.end!==protocolRelative.length || linkify.find('housing.zip/path','url',options).length!==1) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
 ```
 
 Expected: `linux-arm64-linkifier-ok`. This probe may download packages but writes
@@ -230,9 +230,8 @@ Also assert, with explicit expected token/href arrays:
   square brackets as text;
 - `example.com/unicode/path\u3002` links only `example.com/unicode/path`, leaving
   the Unicode sentence punctuation as text;
-- `housing.zip/path`, a suffix absent from the parser's documented built-in list,
-  and an international domain assembled with `\u` escapes are recognized through
-  the full TLD list;
+- `housing.zip/path`, a current public suffix, and an international domain assembled
+  with `\u` escapes are recognized by the selected parser;
 - bare `localhost`, `server`, `192.0.2.1`, `renter@example.com`, and
   `+1-555-010-0001` produce no link tokens;
 - `http://localhost:5174/a`, `https://localhost/a`, and `//localhost/a` do produce
@@ -263,8 +262,7 @@ installation first.
 Create `dashboard/src/ui/LinkifiedText.tsx` with this structure and behavior:
 
 ```tsx
-import { LinkifyIt } from 'linkify-it';
-import tlds from 'tlds';
+import * as linkify from 'linkifyjs';
 import { safeHttpUrl } from '../lib/safeUrl.js';
 import styles from './LinkifiedText.module.css';
 
@@ -278,23 +276,14 @@ export interface LinkifiedTextProps {
   suffix?: string;
 }
 
-const parser = new LinkifyIt({
-  fuzzyLink: true,
-  fuzzyEmail: false,
-  fuzzyIP: false,
-  urlAuth: false,
-});
-parser.tlds(tlds).add('ftp:', null).add('mailto:', null);
+const linkifyOptions = { defaultProtocol: 'https' } as const;
 
-type LinkMatch = NonNullable<ReturnType<LinkifyIt['match']>>[number];
-
-function normalizedHref(match: LinkMatch): string | null {
-  const candidate =
-    match.schema === ''
-      ? `https://${match.raw}`
-      : match.schema === '//'
-        ? `https:${match.raw}`
-        : match.url;
+function normalizedHref(source: string, protocolRelative: boolean): string | null {
+  const candidate = protocolRelative
+    ? `https:${source}`
+    : source.includes('://')
+      ? source
+      : `https://${source}`;
   return safeHttpUrl(candidate);
 }
 
@@ -306,24 +295,29 @@ export function tokenizeLinkifiedText(text: string, displayEnd?: number): Linkif
   const tokens: LinkifiedToken[] = [];
   let cursor = 0;
 
-  for (const match of parser.match(text) ?? []) {
-    if (match.index >= visibleEnd) break;
-    if (cursor < match.index) {
+  for (const match of linkify.find(text, 'url', linkifyOptions)) {
+    if (match.type !== 'url') continue;
+    const protocolRelative =
+      match.start >= 2 && text.slice(match.start - 2, match.start) === '//';
+    const start = protocolRelative ? match.start - 2 : match.start;
+    if (start >= visibleEnd) break;
+    if (cursor < start) {
       tokens.push({
         kind: 'text',
         start: cursor,
-        end: match.index,
-        text: text.slice(cursor, match.index),
+        end: start,
+        text: text.slice(cursor, start),
       });
     }
 
-    const end = Math.min(match.lastIndex, visibleEnd);
-    const href = normalizedHref(match);
-    const visible = text.slice(match.index, end);
+    const end = Math.min(match.end, visibleEnd);
+    const source = text.slice(start, match.end);
+    const href = normalizedHref(source, protocolRelative);
+    const visible = text.slice(start, end);
     tokens.push(
       href === null
-        ? { kind: 'text', start: match.index, end, text: visible }
-        : { kind: 'link', start: match.index, end, text: visible, href },
+        ? { kind: 'text', start, end, text: visible }
+        : { kind: 'link', start, end, text: visible, href },
     );
     cursor = end;
   }
@@ -401,7 +395,7 @@ npm run build --workspace @housingchoice/dashboard
 ```
 
 Expected: all exit 0. The build is the browser-bundling proof for the package's ESM
-entry and the `tlds` data import.
+entry and typed core API import.
 
 - [ ] **Step 7: Commit S1**
 

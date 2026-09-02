@@ -1,6 +1,6 @@
 # Clickable links in communications - design specification
 
-Status: v2 - READY for human review after adversarial review round 2
+Status: v3 - REVISED after S1 parser blocker; pending focused design review
 Date: 2026-09-02
 Revised: 2026-09-02
 Branch: `feat/comms-clickable-links`
@@ -115,38 +115,38 @@ The following decisions were made during the approved brainstorm:
 
 ## 5. Dependency decision
 
-Add `linkify-it` 6.1.0 and `tlds` 1.261.0 as direct runtime dependencies of the
+Add `linkifyjs` 4.3.3 as the direct runtime dependency of the
 `@housingchoice/dashboard` workspace. The install command is scoped to
 `dashboard/package.json`; the root lockfile records the resolved dependency graph.
 
-`linkify-it` is selected because it is a focused plain-text URL tokenizer with
+`linkifyjs` core is selected because it is a mature plain-text tokenizer with
 Unicode and international-domain support, punctuation and nested-delimiter rules,
-custom normalization, browser support, an MIT license, and no native component.
-Version 6.1.0 includes TypeScript declarations and has one small pure-JavaScript
-runtime dependency, `uc.micro`. The repository already resolves an older 5.0.2
-copy transitively through email parsing, but the dashboard must declare and resolve
-the approved 6.1.0 API directly instead of importing an incidental transitive
-dependency.
+source offsets, browser support, an MIT license, TypeScript declarations, and no
+native component or runtime dependency. Its `find` API natively returns one URL
+match for the required fuzzy bare-domain form with port, path, query, and fragment,
+such as `example.com:8443/a?x=1#top`. Its maintained URL recognition also handles
+ordinary bare and `www` forms plus current suffixes such as `.zip`.
 
-The complete `tlds` list replaces `linkify-it`'s intentionally short built-in list
-so bare domains with current public top-level domains behave like URLs. It is also
-MIT licensed, pure data/JavaScript, and already present transitively in the lockfile;
-the dashboard still declares it directly because its parser configuration imports
-it at runtime.
+The S1 spike rejected the prior `linkify-it` 6.1.0 plus `tlds` design: under its
+required configuration it returned no match for the required bare-domain port/path
+form. Extending that parser with a repository URL grammar would violate the locked
+no-competing-regexp boundary, so both uncommitted dependency additions are removed.
 
-`linkifyjs` is not selected: its React adapter is convenient, but this feature needs
-custom URL safety, scheme normalization, snippet-boundary handling, and event
-control, so the adapter would not remove the application-specific renderer.
+`linkify-react` is not selected: this feature still needs custom URL safety, scheme
+normalization, snippet-boundary handling, and event control, so a React adapter
+would not remove the application-specific renderer. `autolinker` is not selected:
+its additional phone, email, mention, hashtag, and HTML-oriented surface is broader
+than this HTTP(S)-only requirement.
 `autolinker` is not selected: its additional phone, email, mention, hashtag, and
 HTML-oriented surface is broader than this HTTP(S)-only requirement. A small
 tokenizer plus ordinary React nodes is the narrower dependency and trust boundary.
 
 Before the dependency commit is accepted, the build must prove:
 
-- the exact direct dependencies and transitive graph in `package-lock.json`;
+- the exact direct dependency and resolved graph in `package-lock.json`;
 - successful clean workspace installation on Windows;
 - a successful production dashboard build, which proves browser bundling and the
-  imported `tlds` data shape;
+  imported `linkifyjs` API shape;
 - package licenses from the installed manifests; and
 - absence of install scripts or native/optional binaries, so Linux ARM64 deployment
   has no platform-specific path to exercise.
@@ -155,24 +155,23 @@ No vulnerability remediation outside this dependency delta belongs to this missi
 
 ## 6. Recognition and normalization contract
 
-Create one module-scoped parser instance rather than constructing a parser during
-each React render. Configure it explicitly so upstream defaults cannot silently
-broaden the contract:
+Keep the `linkifyjs` core options module scoped rather than constructing a
+configuration during each React render. Call `linkify.find(text, 'url', {
+defaultProtocol: 'https' })`, then retain only results whose type is `url`. This
+keeps email addresses, phone numbers, bare single-label hosts, and fuzzy IPs outside
+the rendered-link input while preserving explicit and fuzzy web recognition.
 
-- load the full `tlds` list;
-- enable fuzzy web links;
-- disable fuzzy email addresses;
-- disable fuzzy IP addresses;
-- disable `ftp:` and `mailto:` schemas; and
-- accept only matches that can become an HTTP or HTTPS destination.
+For every parser result:
 
-For every parser match:
-
-1. Preserve the exact matched source characters for display.
-2. Preserve an explicit `http://` or `https://` destination as parsed.
-3. Prefix a protocol-relative match with `https:`.
-4. Prefix a fuzzy `www` or bare-domain match with `https://`, replacing the
-   parser's default inferred scheme rather than exposing an inferred HTTP link.
+1. Preserve exact source characters for display using its source offsets.
+2. If the two adjacent characters immediately before a parser result are `//`, widen
+   that one parser-owned result's start offset by exactly two characters. This is the
+   only protocol-relative adjustment: it restores the source characters that
+   `linkifyjs` excludes from its own result, and is not a URL-recognition regexp.
+3. Preserve an explicit source containing `://` and let `safeHttpUrl` decide whether
+   that scheme is HTTP(S).
+4. Prefix the widened protocol-relative source with `https:`. Prefix a fuzzy `www`
+   or bare-domain source with `https://`.
 5. Pass the resulting string through `safeHttpUrl`.
 6. Emit an anchor only when that check returns a destination. Otherwise emit the
    original source characters as text.
@@ -187,10 +186,9 @@ HTTPS normalization and safety check. Tests lock this established parser behavio
 instead of imposing a second application-authored URL grammar.
 
 The parser owns boundaries for ordinary sentence punctuation, balanced
-parentheses/brackets, Unicode punctuation, multiple links, query strings, and
-fragments. Application code must not trim punctuation with a second regular
-expression. The full TLD list owns fuzzy-domain validity; application code must not
-maintain a competing suffix list.
+parentheses/brackets, Unicode punctuation, multiple links, ports, paths, query
+strings, and fragments. Application code must not trim punctuation with a second
+regular expression or maintain a competing suffix list.
 
 ## 7. Rendering design
 
@@ -270,7 +268,8 @@ Add pure-helper tests that establish the contract for:
 - a bare domain with port, path, query, and fragment;
 - multiple links in one body;
 - sentence punctuation, balanced parentheses, brackets, and Unicode punctuation;
-- modern and international top-level domains supplied by `tlds`;
+- current and international top-level domains recognized by `linkifyjs`, including
+  `.zip`;
 - repeated identical links with distinct source offsets;
 - email addresses, phone numbers, fuzzy IP addresses, bare `localhost`, and other
   bare single-label hosts remaining text;

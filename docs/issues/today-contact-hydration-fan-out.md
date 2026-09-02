@@ -6,6 +6,7 @@ severity: low
 status: open
 area: app/today
 created: 2026-08-21
+updated: 2026-09-01
 refs: app/src/routes/today.ts:357, app/src/routes/today.ts:371, app/src/routes/today.ts:376, app/src/routes/today.ts:608
 ---
 
@@ -63,3 +64,28 @@ Related: [`contacts-batchget-amplified-reads`](contacts-batchget-amplified-reads
 (the six batched surfaces and the two repo primitives this would reuse),
 [`unread-badge-request-round-trip-cost`](unread-badge-request-round-trip-cost.md)
 (the other read-amplification survivor, and the one that actually matters).
+
+**Measured (2026-09-01, feat/participant-snapshot-refresh). STILL OPEN.**
+`GET /api/today` in the `app/test/todayApi.test.ts` harness issued
+`contactsRepo.getById` for **N = 1 distinct contact (1 call total)**, measured
+with temporary instrumentation in the read-count test and identical before and
+after that branch's change. The instrumentation was not committed.
+
+That number does NOT close this issue. It sizes the HARNESS, whose densest
+`/api/today` fixture holds one thread contact - it cannot stand in for the
+imported dataset, and this issue's own rule above (see "Measure before
+building") names `npm run perf:pages` against that dataset as the sanctioned
+measurement. `perf:pages` `local` / `hosted-dev` are human-invoked targets, so
+the number that decides this has to come from Cameron's run. Until then the
+honest state is "unmeasured on real data", not "small".
+
+What the branch DID establish: resolving participant names on Today added ZERO
+reads. The `who` label now resolves from the contact the deleted-contact gate
+already memoized, so `getById` per thread contact stays pinned at 1 - the
+fan-out this issue describes is not any wider than it was on 2026-08-21. The
+close-nag member names added one BATCH (`getDisplaysByIds`) over the open relay
+groups, not per-member `getById` calls, so it does not feed this lazy accessor
+either.
+
+Close this as `wontfix` when the imported-dataset N comes back small; keep it
+open, and do the two-pass rework above, if it does not.

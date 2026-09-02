@@ -45,8 +45,20 @@ export type MessageId =
   | 'nudge.rta_window_closing'
   // Operational — relay group intro (jobs/relayFanOut.ts)
   | 'relay.intro'
+  // Operational - relay group intro, TOUR-owned, tour is TODAY in the org
+  // timezone (jobs/relayFanOut.ts). Split from the dated variant because the
+  // no-dead-tokens rule forbids one entry declaring both {time} and {when}.
+  | 'relay.intro_tour_today'
+  // Operational - relay group intro, TOUR-owned, any other day (jobs/relayFanOut.ts)
+  | 'relay.intro_tour'
+  // Operational - relay group intro, PLACEMENT-owned (jobs/relayFanOut.ts)
+  | 'relay.intro_placement'
   // Operational - relay group member-added announcement (jobs/relayFanOut.ts)
   | 'relay.member_added'
+  // Operational - relay group member-added announcement, role RESOLVED
+  // (jobs/relayFanOut.ts). Separate entry, not an empty clause: {role} sits
+  // MID-sentence and cannot blank out cleanly.
+  | 'relay.member_added_role'
   // Operational - relay group media-only fan-out body (jobs/relayFanOut.ts)
   | 'relay.media_only'
   // Operational - relay group closed final message (routes/relayGroups.ts close)
@@ -257,9 +269,18 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   //      anything that comes up - I'll share updates as I get them from the
   //      housing authority. It can be a long process, so ask me anything in here!`
   //
-  // {members} is the count-plurality / Oxford-list `connection` string, computed
-  // in code (jobs/relayFanOut.ts composeIntroBody) and passed in. NOTE it is a
-  // whole SENTENCE, not a name list.
+  // PHASE B, 2026-08-31: {members} is GONE, replaced by {names}. {members} was a
+  // whole computed SENTENCE (jobs/relayFanOut.ts, the composer now called
+  // composeNameList) carrying fixed copy that never varied - copy belongs here,
+  // where it is visible, not buried in a composer. {names} is the bare list
+  // only ("Alicia,
+  // Marcus, and Dana"), built by composeNameList. The SENT TEXT is byte-identical
+  // to the pre-change body for every roster except a single nameless member,
+  // where the old code restructured the sentence ("You're now connected on this
+  // number.") and a token cannot: 9.2's table routes that row to the "1 other
+  // person" phrasing instead. {names} is TOTAL - it never returns the empty
+  // string - because an unvalued token in a non-editable default THROWS rather
+  // than degrading, which would lose an intro after its idempotency claim.
   //
   // "Sam" is hardcoded, accepted by Cameron 2026-08-18 while she is the only
   // person opening groups. Revisit if that changes - the greeting would name
@@ -281,28 +302,157 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'relay.intro': {
     id: 'relay.intro',
     default:
-      "Hey, it's Sam. {members} Use this group text for anything that comes up. It can be a " +
-      'long process, so ask me anything in here!',
+      "Hey, it's Sam. You're now connected with {names} on this number. Reply here and " +
+      'everyone in the group sees it. Use this group text for anything that comes up. It ' +
+      'can be a long process, so ask me anything in here!',
     class: 'operational',
     editable: false,
     channel: 'sms',
-    vars: ['members'],
+    vars: ['names'],
   },
-  // Member added to an EXISTING group: announced to the WHOLE group. {joined} =
-  // "<Name> joined this group chat." and {members} = the connection sentence,
-  // both computed in code (jobs/relayFanOut.ts composeMemberAddedBody). The
-  // founder's wording also wanted the new member's ROLE ("who is
-  // tenant/landlord/property manager"); there is no role token on this job, so
-  // it is left out rather than faked. TODO(founder-message-template-updates-owed).
-  // editable:false for the same reason as relay.intro above - composeMemberAdded-
-  // Body passes no overrides either, and nothing can store one.
+  // --- Operational: relay group intro, OWNER-ROUTED variants ---
+  //
+  // do-not-remove-without-reading - FOUNDER WORDING, Sam 2026-08-24, authorised
+  // by Cameron 2026-08-31 (Phase B spec 9.1). Byte-exact from her text; the
+  // three entries below are hers, not a paraphrase.
+  //
+  // The intro job holds the conversation already, so routing on getOwner(conv)
+  // is free. Precedence, highest first: an operator-edited intro_body sends
+  // verbatim; then tour; then placement; then the naked entry above. Any missing
+  // input (no landlord, no address, no tour time) falls back to the naked intro
+  // rather than emptying a clause - both variants use {where} MID-sentence,
+  // which is exactly the case the empty-clause trick cannot handle.
+  //
+  // "on {when}" vs Sam's "at {when}": our {when} renders "Tue, Sep 8 at 3:00 PM",
+  // so "at Tue, Sep 8 at 3:00 PM" reads badly. Cameron approved "on" for the
+  // dated form (spec 9.1). The TODAY form drops the date entirely and uses
+  // {time} - "on Monday, August 31st at 3:00 PM" for a tour later the same day
+  // is confusing. There is deliberately NO "tomorrow" variant.
+  //
+  // "Today" is decided in the SAME timezone the booked-too-late rules use for
+  // their same-day test (resolveQuietHoursTimezone), so the two can never
+  // disagree.
+  //
+  // STOP is omitted here for the same logged A2P decision that removed it from
+  // relay.intro (changelog 1.2.1 #7). Note these two carry NO sender identity at
+  // all - not even the "it's Sam" the naked intro opens with. Engineering stated
+  // that exposure (see the 2026-08-20 note above); it goes to the founder as a
+  // question rather than being invented here, and until she rules her copy ships
+  // as written. TODO(founder-message-template-updates-owed).
+  //
+  // {where} is declared LAST in every entry per spec 9.3: it is the one value
+  // that is not brace-stripped, and with the single-pass interpolate fix that is
+  // belt-and-braces rather than load-bearing.
+  'relay.intro_tour_today': {
+    id: 'relay.intro_tour_today',
+    default:
+      "Hey {tenantFirstName}! It's Sam. Putting you in a group text with {propertyContactFirstName} " +
+      'to tour {where} at {time}. Looking forward to you seeing the property and meeting ' +
+      "{propertyContactFirstName}! Please let us know when you're on the way.",
+    class: 'operational',
+    editable: false,
+    channel: 'sms',
+    vars: ['tenantFirstName', 'propertyContactFirstName', 'time', 'where'],
+  },
+  'relay.intro_tour': {
+    id: 'relay.intro_tour',
+    default:
+      "Hey {tenantFirstName}! It's Sam. Putting you in a group text with {propertyContactFirstName} " +
+      'to tour {where} on {when}. Looking forward to you seeing the property and meeting ' +
+      "{propertyContactFirstName}! Please let us know when you're on the way.",
+    class: 'operational',
+    editable: false,
+    channel: 'sms',
+    vars: ['tenantFirstName', 'propertyContactFirstName', 'when', 'where'],
+  },
+  // The housing-authority sentence the 2026-08-20 note above records REMOVING
+  // from relay.intro comes back HERE, and that is not drift. The stated
+  // rationale for the removal was "updates come from the landlord, not from
+  // Sam"; this wording HONOURS it - the updates are attributed to
+  // {propertyContactFirstName}, not to Sam. The existing assertion is scoped to
+  // relay.intro, which is a different id (spec 9.1, recorded with its date so
+  // the next reader of that comment does not file this as drift).
+  'relay.intro_placement': {
+    id: 'relay.intro_placement',
+    default:
+      "Hey {tenantFirstName}! It's Sam. Excited to have you move into {where}. Please use this group " +
+      'text for all future communication and {propertyContactFirstName} will share updates ' +
+      'as they receive them from the housing authority. This can be a long process so if ' +
+      'you have any questions feel free to ask in here! We are committed to the process and ' +
+      'are excited to have you move in.',
+    class: 'operational',
+    editable: false,
+    channel: 'sms',
+    vars: ['tenantFirstName', 'propertyContactFirstName', 'where'],
+  },
+  // Member added to an EXISTING group - the NO-ROLE wording (spec 9.4), sent to
+  // everyone ALREADY on the thread.
+  //
+  // do-not-remove-without-reading - THIS ENTRY REVERSES THE FOUNDER DECISION OF
+  // 2026-07-14, dated here so nobody re-derives the old rationale and "fixes" it
+  // back. That decision made member_added a SINGLE body to the whole group
+  // ("Hey! <Name> joined this group chat. You're now connected with ...")
+  // precisely so it could double as the new member's first contact. Phase B
+  // splits it per recipient: the group hears this line, and the NEW MEMBER
+  // receives the naked relay.intro instead, with the full post-add roster in
+  // {names} - the right body for them because a relay member can see no history
+  // (they receive forward traffic only), so that message IS their whole context,
+  // and it is the one that carries "it's Sam" and says who else is on the
+  // number. Authority: Cameron, 2026-08-31, on Sam's 2026-08-24 wording.
+  //
+  // Superseded wording, for reference:
+  //   relay.member_added (..2026-08-31)  `Hey! {joined} {members}`
+  //     with {joined} = "<Name> joined this group chat." and {members} = the
+  //     whole connection sentence, both computed in code.
+  //
+  // The ROLE clause the old comment recorded as OWED now lives on
+  // relay.member_added_role below; this entry is the fallback for when the role
+  // does not resolve, because {role} sits MID-sentence and Phase A spec 6.4's
+  // empty-clause trick only works for a trailing sentence.
+  //
+  // {name} is the FIRST name and is TOTAL - "a new member" when nothing
+  // resolves (joinedName), lower-cased so it reads mid-sentence, never a phone.
+  // STOP omitted per changelog 1.2.1 #7 (the new member's first contact IS an
+  // intro, so the same logged A2P decision governs). editable:false for the same
+  // reason as relay.intro above - nothing can store or route an override.
   'relay.member_added': {
     id: 'relay.member_added',
-    default: 'Hey! {joined} {members}',
+    default: 'Hey, adding {name} to the group.',
     class: 'operational',
     editable: false,
     channel: 'sms',
-    vars: ['joined', 'members'],
+    vars: ['name'],
+  },
+  // do-not-remove-without-reading - FOUNDER WORDING, Sam 2026-08-24, authorised
+  // by Cameron 2026-08-31 (Phase B spec 9.4). This is the role clause the
+  // member_added entry above records as OWED ("there is no role token on this
+  // job, so it is left out rather than faked") - Phase B supplies it from
+  // UnitContact.role, NOT ContactItem.type, which has no property-manager value.
+  //
+  // It is a SEPARATE entry rather than an empty clause because {role} sits
+  // MID-sentence: Phase A spec 6.4's empty-clause trick only works for a
+  // trailing sentence. When the role does not resolve, the no-role wording lives
+  // on relay.member_added instead.
+  //
+  // The role source is UnitContact.role on the OWNING tour's / placement's unit;
+  // the owner's own tenant reads 'tenant' whatever the property roster says.
+  // Absent a role, the announcement uses relay.member_added above.
+  //
+  // {name} is the FIRST name and is TOTAL - "a new member" when nothing
+  // resolves, lower-cased so it reads mid-sentence, never a phone. An unvalued
+  // {name} in a non-editable default THROWS, killing the handler AFTER its
+  // idempotency claim, so the announcement would be LOST rather than retried.
+  //
+  // STOP omitted per the same logged A2P decision (changelog 1.2.1 #7).
+  // editable:false for the same reason as the entries above - nothing can store
+  // or route an override for a relay entry.
+  'relay.member_added_role': {
+    id: 'relay.member_added_role',
+    default: 'Hey, adding {name} to the group as the {role}.',
+    class: 'operational',
+    editable: false,
+    channel: 'sms',
+    vars: ['name', 'role'],
   },
   // Body for a MEDIA-ONLY message fanned out to a relay group (no text to
   // relay). "<name> sent an attachment." - the media rides along on the leg.

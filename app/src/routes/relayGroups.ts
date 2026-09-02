@@ -37,12 +37,12 @@ import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import { findOpenGroupWithSamePhones } from '../services/relayGroupDuplicates.js';
 import {
   addMemberToRelay,
-  nameFromContact,
   parseRelayMember,
   removeMemberFromRelay,
   resolveMemberName,
   type RelayMemberDeps,
 } from '../services/relayMembers.js';
+import { resolveRosterNames, withLiveNames } from '../lib/participantNames.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
@@ -71,7 +71,10 @@ import {
 } from '../lib/composeFailTally.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import { resolveTourContactNames } from '../lib/tourContacts.js';
-import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import {
+  DISCONTINUED_REMINDER_KINDS,
+  readQuietHoursWindow,
+} from '../jobs/tourReminders.js';
 import {
   buildStandaloneOpenPreview,
   type QuietHoursState,
@@ -331,6 +334,16 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
             throw err;
           }
         })(),
+        // The ONE suppression this bucket carries (Phase B spec 3.1, R3): a
+        // DISCONTINUED kind. It is a property of the kind alone - no recipient
+        // IO, no evaluator - and without it a pause-era `confirmation` would go
+        // on promising "sends in Nh" in every relay thread, through the SAME
+        // ScheduledCard the contact timeline renders, while both other surfaces
+        // said it will never go out. The note above about member-level opt-out
+        // still stands and is why nothing ELSE is evaluated here.
+        ...(DISCONTINUED_REMINDER_KINDS.has(row.kind) && {
+          suppression: { reason: 'discontinued' as const },
+        }),
         conversationId,
         refType: 'tour' as const,
         refId: tour.tourId,
@@ -466,31 +479,16 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       res.status(404).json({ error: 'relay_group_not_found' });
       return;
     }
-    const members = await Promise.all(
-      (conversation.participants ?? []).map(async (member) => {
-        if (!member.contactId) return member;
-        // The participant name is a creation-time convenience snapshot. Once a
-        // member has a contactId, never let that snapshot outrank current contact
-        // state: current name wins, otherwise the dashboard uses this current
-        // roster phone as its fallback.
-        const memberWithoutStoredName = { ...member };
-        delete memberWithoutStoredName.name;
-        try {
-          const name = nameFromContact(await contacts.getById(member.contactId));
-          return name === undefined
-            ? memberWithoutStoredName
-            : { ...memberWithoutStoredName, name };
-        } catch (err) {
-          // A transient contact lookup must not make the Relay thread unusable.
-          // IDs are safe to log; names and phone numbers are deliberately absent.
-          log.warn(
-            { err, conversationId, contactId: member.contactId },
-            'relay roster contact lookup failed - returning roster phone without stored name',
-          );
-          return memberWithoutStoredName;
-        }
-      }),
-    );
+    // The roster's stored name is a creation-time snapshot. Resolve every
+    // member's CURRENT contact name in ONE batch (lib/participantNames):
+    //   contact name (readable, non-deleted, non-empty)
+    //   -> the stored roster name
+    //   -> nothing, and the dashboard renders this current roster phone
+    //      (recipientLabel / groupThread: "full name, else formatted number").
+    // The middle rung is the 2026-08-31 ruling: a read blip used to drop a name
+    // the operator had a moment ago and show a bare number instead.
+    const names = await resolveRosterNames([conversation], contacts, log);
+    const members = withLiveNames(conversation.participants, names);
     res.json({ members });
   });
 

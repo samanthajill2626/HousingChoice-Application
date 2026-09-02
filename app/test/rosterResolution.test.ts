@@ -458,6 +458,32 @@ describe('resolveRoster - the property default (no thread, no plan)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// describeRoster - the DISPLAY name chain
+// ---------------------------------------------------------------------------
+
+describe('describeRoster - name precedence (M1)', () => {
+  it('FACT mode: the contact name beats a stale stored roster name; a removed contact keeps the row name', async () => {
+    const deps = makeDeps({
+      conversations: {
+        'conv-1': relayGroup('conv-1', [
+          { contactId: 'c-tenant', phone: '+15550100001', name: 'Old Tina' },
+          { contactId: 'c-gone', phone: '+15550100002', name: 'Gone Person' },
+        ]),
+      },
+      units: { 'unit-1': { unitId: 'unit-1', landlordId: 'c-owner', status: 'available' } },
+      contacts: {
+        'c-tenant': contact('c-tenant', '+15550100001', 'Tina'),
+        'c-gone': { ...contact('c-gone', '+15550100002', 'Deleted'), deleted_at: '2026-01-01T00:00:00.000Z' },
+      },
+    });
+
+    const view = await describeRoster(deps, { ...TOUR, groupThreadId: 'conv-1' });
+
+    expect(view.members.map((m) => m.name)).toEqual(['Tina Person', 'Gone Person']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isOnRoster / rosterEquals
 // ---------------------------------------------------------------------------
 

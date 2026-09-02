@@ -425,7 +425,7 @@ describe('relay-group API (M1.7)', () => {
     ]);
   });
 
-  it('GET roster drops the creation-time name when the current contact is unnamed', async () => {
+  it('GET roster keeps the creation-time name when the current contact is unnamed (M1 ruling 2026-08-31)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     world.contacts.push({
@@ -445,14 +445,14 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
 
     expect(roster.status).toBe(200);
-    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+    // Contact name -> stored name -> (client renders the phone). An unnamed
+    // contact no longer erases a name the operator had a moment ago.
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }]);
   });
 
-  it('GET roster falls back to the roster phone, not a stale name, when contact lookup fails', async () => {
-    const originalGetById = world.contactsRepo.getById.bind(world.contactsRepo);
-    world.contactsRepo.getById = async (contactId) => {
-      if (contactId === 'c-alice') throw new Error('injected contact lookup failure');
-      return originalGetById(contactId);
+  it('GET roster keeps the stored name when the contact read fails (M1 ruling 2026-08-31)', async () => {
+    world.contactsRepo.getDisplaysByIds = async () => {
+      throw new Error('injected contact lookup failure');
     };
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
@@ -467,7 +467,37 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
 
     expect(roster.status).toBe(200);
-    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }]);
+  });
+
+  it('RED: GET roster resolves in ONE batch over the unique contact ids; no per-member getById', async () => {
+    const CAROL_LOCAL = '+15550100003';
+    const POOL_LOCAL = '+15550300996';
+    const { app } = authedHarness(world, makeFakePoolNumbers());
+    world.contacts.push({ contactId: 'c-live', type: 'tenant', status: 'active', phone: ALICE, firstName: 'Alicia', lastName: 'Live' });
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: POOL_LOCAL,
+      members: [
+        { contactId: 'c-live', phone: ALICE, name: 'Old Alice' },
+        { contactId: 'c-missing', phone: BOB, name: 'Stored Bob' },
+        { contactId: '', phone: CAROL_LOCAL },
+      ],
+    });
+    const batches: string[][] = [];
+    const real = world.contactsRepo.getDisplaysByIds.bind(world.contactsRepo);
+    world.contactsRepo.getDisplaysByIds = async (ids) => { batches.push([...ids]); return real(ids); };
+    const getByIdSpy = vi.spyOn(world.contactsRepo, 'getById');
+
+    const res = await request(app).get(`/api/conversations/${conversation.conversationId}/members`).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.members).toEqual([
+      { contactId: 'c-live', phone: ALICE, name: 'Alicia Live' },
+      { contactId: 'c-missing', phone: BOB, name: 'Stored Bob' },
+      { contactId: '', phone: CAROL_LOCAL },
+    ]);
+    expect(batches).toHaveLength(1);
+    expect(new Set(batches[0])).toEqual(new Set(['c-live', 'c-missing']));
+    expect(getByIdSpy).not.toHaveBeenCalled();
   });
 
   it('refuses member-add on a CONNECTING group (D11): 409 group_connecting, roster unchanged (burn invariant protected)', async () => {
@@ -1166,16 +1196,22 @@ describe('relay-group API (M1.7)', () => {
       .send({ phone: BOB, name: 'Bob' });
     expect(add.status).toBe(200);
 
-    // Announced to BOTH members (Bob's welcome doubles as Alice's notice).
+    // Announced to BOTH members - but with DIFFERENT copy since Phase B (spec
+    // 9.4): Alice hears who joined, Bob gets the naked intro as his first
+    // contact. This group is STANDALONE, so no owner and therefore no role.
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
     expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
-    expect(world.sent[0]!.body).toContain('Bob joined this group chat.');
-    // Persisted in the thread: the intro row + ONE join-notice row.
+    expect(world.sent.find((s) => s.to === ALICE)!.body).toBe('Hey, adding Bob to the group.');
+    const bobLeg = world.sent.find((s) => s.to === BOB)!;
+    expect(bobLeg.body).toContain("You're now connected with Alice and Bob");
+    // Persisted in the thread: the intro row + ONE join-notice row - and spec
+    // 9.6's named exception, the join row carries the NEW MEMBER's body.
     const systemRows = world.messages.filter(
       (m) => m.conversationId === id && m.relay_sender_key === 'system',
     );
     expect(systemRows).toHaveLength(2);
-    expect(systemRows.some((m) => (m.body ?? '').includes('Bob joined this group chat.'))).toBe(true);
+    expect(systemRows.some((m) => (m.body ?? '') === bobLeg.body)).toBe(true);
+    expect(systemRows.some((m) => (m.body ?? '').includes('Hey, adding Bob'))).toBe(false);
 
     // Idempotent re-add: no new announcement, no new sends.
     world.sent.length = 0;
@@ -1591,20 +1627,22 @@ describe('relay-group API (M1.7)', () => {
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(200);
       const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
-      // The full 4-rung ladder is upcoming (armed 2 days before the tour;
-      // no_show_checkin is manual-send only, so it is not in the ladder).
-      expect(scheduled).toHaveLength(4);
+      // The full 3-rung auto ladder is upcoming (armed 2 days before the tour).
+      // Two kinds are absent by design: no_show_checkin is manual-send only,
+      // and confirmation stopped arming 2026-08-31 (Phase B).
+      expect(scheduled).toHaveLength(3);
       // dueAt ascending; each item is wire-parity TimelineScheduled.
       const ats = scheduled.map((s) => s['at'] as string);
       expect([...ats].sort()).toEqual(ats);
       const first = scheduled[0]!;
       expect(first['kind']).toBe('scheduled');
       expect(first['source']).toBe('tour_reminder');
-      expect(first['reminderKind']).toBe('confirmation');
+      // day_before is the earliest live rung now that confirmation is gone.
+      expect(first['reminderKind']).toBe('day_before');
       // The flipped copy: composed by the SAME composer the send path uses, so
-      // the body opens with the confirmation lead-in and carries the local time
+      // the body opens with the day_before lead-in and carries the local time
       // (zone-agnostic shape - this bucket does not pin the org zone).
-      expect(first['body']).toContain('your tour is set for');
+      expect(first['body']).toContain('confirming your tour tomorrow at');
       expect(first['body']).toMatch(/at \d{1,2}:\d{2} (AM|PM)/);
       expect(first['conversationId']).toBe(conversationId);
       expect(first['refType']).toBe('tour');
@@ -1616,19 +1654,64 @@ describe('relay-group API (M1.7)', () => {
 
       // Fire one rung (claim = sent) — it must drop out of the bucket.
       const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
-      const confirmation = rows.find((r) => r.kind === 'confirmation')!;
-      await world.tourRemindersRepo.claimSend(confirmation.reminderId, '2026-08-01T10:01:00.000Z');
+      const dayBefore = rows.find((r) => r.kind === 'day_before')!;
+      await world.tourRemindersRepo.claimSend(dayBefore.reminderId, '2026-08-01T10:01:00.000Z');
       const after = await request(app)
         .get(`/api/conversations/${conversationId}/scheduled`)
         .set('x-origin-verify', SECRET)
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(200);
-      expect(after.body.scheduled).toHaveLength(3);
+      expect(after.body.scheduled).toHaveLength(2);
       expect(
         (after.body.scheduled as Array<{ reminderKind: string }>).some(
-          (s) => s.reminderKind === 'confirmation',
+          (s) => s.reminderKind === 'day_before',
         ),
       ).toBe(false);
+    });
+
+    it('a DISCONTINUED rung carries the discontinued suppression; live rungs carry none', async () => {
+      // The FIFTH read surface (Phase B spec 3.1's standing hazard: grep for
+      // readers, do not reason from the writer's side). This bucket renders
+      // through the SAME ScheduledCard as the contact timeline, in every relay
+      // thread - so without this a pause-era confirmation would keep promising
+      // "sends in Nh" here while the tour panel and the contact page both said
+      // it will never go out.
+      //
+      // NOTE what is deliberately NOT added: no other suppression is evaluated
+      // in this bucket. Member-level opt-out suppresses individual LEGS at send
+      // time, never the group send itself, and the placement-nudge twin owns
+      // the rest of that gap.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // A PAUSE-ERA row, written directly: arming stopped 2026-08-31 (Phase B),
+      // so `armTourReminders` above no longer produces one - and this surface
+      // exists precisely for the rows that were armed BEFORE it stopped and are
+      // still sitting pending until the sweep reaches them. dueAt is the old
+      // arm instant, which is what those rows actually carry.
+      await world.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind: 'confirmation',
+        dueAt: '2026-08-01T10:00:00.000Z',
+      });
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      const confirmation = scheduled.find((s) => s.reminderKind === 'confirmation');
+      expect(confirmation?.suppression).toEqual({ reason: 'discontinued' });
+      // ANTI-VACUITY: it is per-KIND, not "this bucket suppresses everything".
+      for (const kind of ['day_before', 'morning_of', 'en_route']) {
+        expect(
+          scheduled.find((s) => s.reminderKind === kind)?.suppression,
+          kind,
+        ).toBeUndefined();
+      }
     });
 
     it('a self_guided owner routes 1:1 — the group bucket stays empty', async () => {
@@ -1704,11 +1787,10 @@ describe('relay-group API (M1.7)', () => {
         .expect(200);
 
       const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
-      expect(scheduled).toHaveLength(4);
+      expect(scheduled).toHaveLength(3);
       expect(scheduled.every((s) => s['body'] === '')).toBe(true);
       // Everything else about each rung survives.
       expect(scheduled.map((s) => s['reminderKind'])).toEqual([
-        'confirmation',
         'day_before',
         'morning_of',
         'en_route',
@@ -1799,9 +1881,9 @@ describe('relay-group API (M1.7)', () => {
       const byKind = Object.fromEntries(scheduled.map((s) => [s['reminderKind'] as string, s]));
       expect(byKind['en_route']!['body']).toBe('');
       expect(byKind['day_before']!['body']).not.toBe('');
-      expect(byKind['confirmation']!['body']).not.toBe('');
+      expect(byKind['morning_of']!['body']).not.toBe('');
       // The card itself survives - only the text is withheld.
-      expect(scheduled).toHaveLength(4);
+      expect(scheduled).toHaveLength(3);
     });
   });
 });

@@ -46,6 +46,9 @@ import type {
   RosterActionSkipReason,
 } from '../repos/pendingRosterActionsRepo.js';
 import { unitContacts, type UnitContact, type UnitsRepo } from '../repos/unitsRepo.js';
+import type { ToursRepo } from '../repos/toursRepo.js';
+import type { PlacementsRepo } from '../repos/placementsRepo.js';
+import type { SettingsRepo } from '../repos/settingsRepo.js';
 
 /** One PLAN entry: exactly one of contactId / phone (validated at write time). */
 export interface RosterEntry {
@@ -137,6 +140,22 @@ export interface RosterResolutionDeps {
    * membership, it is a promise about membership.
    */
   actions?: Pick<PendingRosterActionsRepo, 'listByOwner'>;
+  /**
+   * The OWNER-ROUTED relay copy's extra reads (Phase B spec 9.0 / 9.3), all
+   * OPTIONAL like `actions` above and for the same reason: resolveRoster and
+   * describeRoster never touch them, only the preview BODY composer does.
+   *
+   * Wired, a tour or placement preview shows the same variant the intro job
+   * will send - which is what keeps an operator from pinning the wrong variant
+   * by editing a previewed naked intro (spec 9.0). Omitted, the resolver has no
+   * read that can answer and the preview degrades to the naked intro, exactly
+   * as spec 9.5 degrades every other missing input. The three production
+   * preview routes MUST wire them; the toursApi / placementsApi parity pins go
+   * through the real routes and are what prove that.
+   */
+  tours?: Pick<ToursRepo, 'get'>;
+  placements?: Pick<PlacementsRepo, 'getById'>;
+  settings?: Pick<SettingsRepo, 'getOrgSettings'>;
   log: Logger;
 }
 
@@ -535,14 +554,13 @@ export async function describeRoster(
     const reachability: RosterReachability =
       phone === undefined ? 'no_phone' : optedOut ? 'opted_out' : 'reachable';
 
-    // Display-name backfill: a FACT row can carry no name (a pointer at a
-    // non-relay thread, or a row predating name storage) while its contactId
-    // resolves fine - the card and tabs must say "Tina Tenant", never
-    // "Number ending 0301" or a raw id, for a person we positively identified
-    // two paragraphs up. Display only: reachability keeps the STORED phone,
-    // and a removed contact keeps whatever the row itself said.
+    // Display name: the CONTACT's current name first (we read it two
+    // paragraphs up), then whatever the row itself stored. The stored name is
+    // a creation-time snapshot; the card and the tabs must say "Tina Tenant"
+    // today, not on the day the group was made. Display only: reachability
+    // keeps the STORED phone, and a removed contact keeps the row's own name.
     const name =
-      nonEmpty(member.name) ?? (!removed && contact !== undefined ? displayName(contact) : undefined);
+      (!removed && contact !== undefined ? displayName(contact) : undefined) ?? nonEmpty(member.name);
     let sharesPhoneWithName: string | undefined;
     if (phone !== undefined) {
       if (firstOnPhone.has(phone)) {

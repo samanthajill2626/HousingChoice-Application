@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   MESSAGE_TRANSPORTS,
   REMINDER_SKIP_REASON_LABELS,
+  REMINDER_SUPPRESSION_LABELS,
   sendNowErrorMessage,
   suggestionResolutionErrorMessage,
+  suppressionLead,
+  suppressionNote,
 } from './types.js';
 
 describe('MESSAGE_TRANSPORTS', () => {
@@ -110,6 +113,9 @@ const SKIP_REASONS = [
   'roster_unavailable',
   'invalid_schedule',
   'booked_too_late',
+  'tour_already_passed',
+  'kind_retired',
+  'names_unavailable',
 ];
 
 describe('REMINDER_SKIP_REASON_LABELS', () => {
@@ -130,5 +136,78 @@ describe('REMINDER_SKIP_REASON_LABELS', () => {
     for (const [reason, label] of Object.entries(REMINDER_SKIP_REASON_LABELS)) {
       expect(label, reason).not.toContain('_');
     }
+  });
+});
+
+describe('SEND_NOW_ERROR_COPY', () => {
+  // Refusal codes whose generic "try again" fallback would be a LIE - the
+  // condition is permanent, so retrying can never work. Every such code MUST
+  // carry explicit copy. names_unavailable is deliberately NOT listed: it keeps
+  // its existing cause-agnostic copy, because there retrying IS the right
+  // advice (spec 7.2). SEND_NOW_ERROR_COPY is module-private, so this asserts
+  // through the exported resolver.
+  const PERMANENT_REFUSALS = ['tour_already_passed', 'kind_retired'];
+  it('carries explicit copy for every permanent refusal', () => {
+    for (const code of PERMANENT_REFUSALS) {
+      expect(sendNowErrorMessage(code), code).not.toBe(
+        "Couldn't send that just now - please try again.",
+      );
+    }
+  });
+});
+
+// The suppression vocabulary the app can send on an UPCOMING rung/card. Listed
+// as plain strings, like SKIP_REASONS above and for the same reason: the
+// exhaustive Record type catches "dashboard union grew, label missing", but
+// nothing catches "the app added a reason and the dashboard union was never
+// touched" - which fails no build and degrades the note to a raw token.
+const SUPPRESSION_REASONS = [
+  'sms_sending_disabled',
+  'contact_opted_out',
+  'manual_mode',
+  'stale_stage',
+  'quiet_hours',
+  'paused',
+  'discontinued',
+];
+
+describe('suppression copy', () => {
+  it('carries a staff-facing label for every reason the app can send', () => {
+    const labels: Readonly<Record<string, string | undefined>> = REMINDER_SUPPRESSION_LABELS;
+    for (const reason of SUPPRESSION_REASONS) {
+      const label = labels[reason];
+      expect(label, reason).toBeDefined();
+      expect(label?.length ?? 0, reason).toBeGreaterThan(0);
+    }
+    expect(Object.keys(REMINDER_SUPPRESSION_LABELS).sort()).toEqual(
+      [...SUPPRESSION_REASONS].sort(),
+    );
+  });
+
+  it('never puts a machine token in front of staff', () => {
+    for (const [reason, label] of Object.entries(REMINDER_SUPPRESSION_LABELS)) {
+      expect(label, reason).not.toContain('_');
+    }
+  });
+
+  // `discontinued` is TERMINAL: neither a timed deferral nor a human hold, so
+  // it must borrow neither "Will wait" (which promises a release) nor "Paused"
+  // (which promises a person could release it) - and not "Will be skipped"
+  // either, which describes THIS send being dropped rather than the kind being
+  // retired.
+  it('leads a discontinued rung with "No longer sent"', () => {
+    expect(suppressionLead('discontinued')).toBe('No longer sent');
+    expect(suppressionLead('discontinued')).not.toBe(suppressionLead('paused'));
+    expect(suppressionLead('discontinued')).not.toBe(suppressionLead('quiet_hours'));
+  });
+
+  it('labels it "turned off", so the note does not stutter', () => {
+    // The lead already says "No longer sent"; a label repeating that phrase
+    // would render "No longer sent - no longer sent".
+    expect(REMINDER_SUPPRESSION_LABELS['discontinued']).toBe('turned off');
+    const note = suppressionNote('discontinued', REMINDER_SUPPRESSION_LABELS['discontinued']);
+    expect(note).toContain('No longer sent');
+    expect(note).toContain('turned off');
+    expect(note.toLowerCase().split('no longer sent').length - 1).toBe(1);
   });
 });

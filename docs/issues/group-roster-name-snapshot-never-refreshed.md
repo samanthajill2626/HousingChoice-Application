@@ -3,10 +3,11 @@ id: group-roster-name-snapshot-never-refreshed
 title: Renaming a contact never updates group titles or member chips - the roster stores a name snapshot nothing refreshes
 type: bug
 severity: high
-status: open
+status: resolved
 area: app/relay
 created: 2026-08-25
-refs: app/src/repos/conversationsRepo.ts:104-109, app/src/lib/groupTitle.ts:29-52, app/src/lib/rosterResolution.ts:216-229
+resolved: 2026-09-01
+refs: app/src/repos/conversationsRepo.ts:104-109, app/src/lib/groupTitle.ts:29-52, app/src/lib/rosterResolution.ts:216-229, app/src/lib/participantNames.ts
 ---
 
 **Problem.** `ConversationParticipant` carries a denormalized name:
@@ -90,3 +91,68 @@ and its neighbour turned out to cost 693 reads per render. **Measure both.**
 **Not the same issue as** the 1:1 `participant_display_name` drift, which is
 real but costless today and is deliberately out of scope in
 [`inbox-filter-tabs-full-walk`](./inbox-filter-tabs-full-walk.md)'s design.
+
+**Resolution (2026-09-01, feat/participant-snapshot-refresh).** Shape 1, resolve
+at READ time. Every operator-facing roster surface resolves names from the
+contact at read time with one batch per page (`app/src/lib/participantNames.ts`
+- `collectRosterContactIds` / `withLiveNames` / `hydrateConversationRosters`,
+over `contactsRepo.getDisplaysByIds`): inbox group and relay rows, the contact
+page's group cards, the relay members panel, the People card
+(`describeRoster`), the `GET /calls/:callId` passthrough, the push sender label,
+and the voice masked party label including the spoken whisper. The chain is
+live contact name -> stored snapshot -> formatted phone, so a short batch (a
+throttle) degrades to today's behavior rather than to a phone number. Surfaces
+that already held the contact - Today, the People card, push, voice - only had
+their precedence flipped and added ZERO reads. `participants[].name` keeps every
+writer it had; nothing was backfilled. `app/src/lib/rosterDriftTally.ts` plus
+`measure-unread-contact-coverage.ts --audit-denorm` now walk group rosters, so
+the drift this issue reported is measurable instead of invisible.
+
+NOT covered, deliberately, and all of it stated rather than assumed:
+
+- The two group push TITLES (`routes/webhooks/twilio.ts:730` `relayThreadLabel`,
+  `:1813` `groupThreadLabel`). Computed on the webhook ack path with no contact
+  in hand; hydrating them would add an awaited read there. Accepted stale.
+- The close-group confirm dialogs
+  (`dashboard/src/routes/placements/PlacementDetail.tsx:373`,
+  `dashboard/src/routes/tours/TourDetail.tsx:454`). They read
+  `GET /conversations/:id` alone, which was left unhydrated because every other
+  view that fetches it also fetches `/members` or `/group-members` on the same
+  mount.
+- `GET /api/conversations` (`toConversationSummary`,
+  `app/src/routes/api.ts:453-465`) ships the raw roster and the stored
+  `participant_display_name`. Its one consumer is
+  `dashboard/src/api/endpoints.ts:512`, feeding Today's OFFLINE fallback
+  (`dashboard/src/routes/today/buildToday.ts:103-112`), which now only guards
+  against an EMPTY stored name. Out of scope by the spec's decision 4 (no
+  unnecessary reads).
+- The SSE `conversation.updated` event's raw roster
+  (`app/src/lib/events.ts:103`, `:110`, `:117`). No consumer reads the names off
+  it today - clients treat the event as a refetch signal - so hydrating it would
+  buy nothing. Same decision 4.
+- Bare-phone relay members (`routes/relayGroups.ts:483`). There is no contact to
+  resolve; they keep the stored name, else the client renders the number.
+- Three staff-only readers that still render the stored name, filed as
+  [`staff-only-roster-name-readers-stale`](./staff-only-roster-name-readers-stale.md).
+- **Outbound message content, by the spec's decision 6 - and this is the half of
+  this issue that is NOT fixed.** `jobs/relayFanOut.ts` still composes from the
+  STORED roster names: the sender prefix at `:774`
+  (`payload.senderNameOverride ?? senderMember?.name`), the intro body at
+  `:1018-1021`, the member-added bodies at `:1082-1086`. The intro and
+  member-added bodies were rewritten by `feat/tour-reminder-ladder-phase-b` and
+  run at most seconds after the add/create path wrote the name from the live
+  contact (`services/relayMembers.ts` `resolveMemberName`), so their drift
+  window is only a rename between provisioning and the job firing. The SENDER
+  PREFIX is the durable one - read for the life of the group, and the one site
+  that would add a per-message read - so a stale name observed on a relayed
+  message is the signal to reopen this or file a follow-up. The `high` severity
+  above was set for that outbound reach; it survives the close.
+
+One more residue seam, added by the planner's independent review
+(2026-09-01): the group_text members panel (`routes/api.ts`
+`GET /group-members`) converges stored roster names by PHONE with no
+soft-delete check, so it can seed a deleted contact's name - or, on a
+moved number, another contact's name - into the stored fallback rung the
+read-time chain trusts second. Pre-existing behavior in an
+out-of-scope-by-design route; recorded so the fallback rung's provenance
+is not mistaken for clean.

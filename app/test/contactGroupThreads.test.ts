@@ -197,6 +197,36 @@ describe('GET /api/contacts/:id/group-threads', () => {
     expect(res.body.groups).toHaveLength(1);
   });
 
+  // M1 participant-snapshot-refresh: the stored roster `name` is a write-time
+  // snapshot nothing refreshes. The card resolves the OTHER members from their
+  // contacts at read time - in ONE batch over the threads this contact is on -
+  // and hands the fresher roster to the same groupThreadLabel derivation, so the
+  // title and the name list can never disagree with the contact record.
+  // The renamed contact's FIRST name differs on purpose: groupThreadLabel takes
+  // the first token, so a surname-only rename would title identically either way
+  // and the assertion would prove nothing.
+  it('RED: title and otherMemberNames use the contact name over the stored snapshot', async () => {
+    seedContact();
+    world.contacts.push({
+      contactId: 'c-other',
+      type: 'landlord',
+      status: 'active',
+      phone: OTHER_PHONE,
+      firstName: 'Marc',
+      lastName: 'Renamed',
+    });
+    await seedGroup('gt-1', [
+      { contactId: TENANT, phone: PHONE_A, name: 'Tasha Tenant' },
+      { contactId: 'c-other', phone: OTHER_PHONE, name: 'Marcus Landlord' },
+    ]);
+
+    const res = await authedGet(`/api/contacts/${TENANT}/group-threads`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.groups[0].title).toBe('With Marc');
+    expect(res.body.groups[0].otherMemberNames).toEqual(['Marc Renamed']);
+  });
+
   it('404s an unknown contact and a phone-pointer id', async () => {
     seedContact();
     expect((await authedGet('/api/contacts/nope/group-threads')).status).toBe(404);

@@ -242,6 +242,13 @@ function makeDeps(): InboxRouterDeps {
       async getById(contactId: string) {
         return [PARITY_CONTACT].find((c) => c.contactId === contactId);
       },
+      // Explicit and empty (M1). The roster-name boundary batches through this
+      // method; the cast above would let it be MISSING, and the resulting
+      // TypeError is swallowed - so this suite would go green by resolving zero
+      // names silently rather than by resolving none.
+      async getDisplaysByIds() {
+        return new Map();
+      },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
       // A18: the deleted-contact probe and every latest-message hydration read

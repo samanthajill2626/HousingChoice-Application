@@ -451,20 +451,18 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   const FIXED_NOW = '2026-07-13T14:00:00.000Z';
   const SCHEDULED_AT = '2026-07-15T18:00:00.000Z';
   const TENANT_PHONE = '+15550300001';
-  // Rung bodies COMPOSED the way the send path composes them (single source of
+  /** The first instant the day_before rung is due: 19:30 EDT on Jul 14, the
+   *  earliest LIVE rung of this ladder. The confirmation rung (dueAt =
+   *  FIXED_NOW) is discontinued since 2026-08-31, so the poll never sends it
+   *  and the first tick has nothing to do. */
+  const DAY_BEFORE_DUE = '2026-07-14T23:30:00.000Z';
+  // Rung body COMPOSED the way the send path composes it (single source of
   // truth): this tour's instant, the zone the quiet-hours window resolves to
   // (quietOffSettingsRepo inherits DEFAULT_ORG_SETTINGS.timezone), no address
   // ('unit-tick-1' is never seeded) and no names - the tick fixture's tenant
   // contact carries no firstName, so the send composes the "Hey there,"
-  // fallback. tourType is VALUE-IRRELEVANT for these two kinds: only the
-  // en_route rung forks on it (tourCopy.ts idFor).
-  const CONFIRMATION_BODY = composeTourReminderBody({
-    kind: 'confirmation',
-    scheduledAt: SCHEDULED_AT,
-    timezone: DEFAULT_ORG_SETTINGS.timezone,
-    tourType: 'self_guided',
-    names: {},
-  });
+  // fallback. tourType is VALUE-IRRELEVANT for this kind: only the en_route
+  // rung forks on it (tourCopy.ts idFor).
   const DAY_BEFORE_BODY = composeTourReminderBody({
     kind: 'day_before',
     scheduledAt: SCHEDULED_AT,
@@ -519,8 +517,18 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   }
 
   /** Seed tenant + 1:1 conversation, then arm a tour VIA THE ROUTE with the
-   *  injected clock (confirmation dueAt = FIXED_NOW, day_before = 19:30 EDT on
-   *  Jul 14 = '2026-07-14T23:30:00.000Z'). */
+   *  injected clock, and SEED a pending `confirmation` rung due at FIXED_NOW
+   *  directly through the repo.
+   *
+   *  The direct seed is load-bearing, not scenery (review round 1, A-M1). Since
+   *  2026-08-31 `REMINDER_KINDS` no longer contains `confirmation`, so arming
+   *  through POST /api/tours writes no such row - which would make every
+   *  "the tick is a no-op BECAUSE the kind is discontinued" claim below vacuous:
+   *  nothing would be due at FIXED_NOW at all. Seeding one reproduces the real
+   *  pause-era population (rows armed before the kind was retired, which the
+   *  one-time sweep exists to clean up) so the discontinued filter is genuinely
+   *  the thing being exercised. The earliest rung a tick can actually FIRE is
+   *  still day_before at DAY_BEFORE_DUE. */
   async function armTourViaRoute(app: Express, world: FakeWorld): Promise<string> {
     world.contacts.push({
       contactId: 'contact-tick-tenant',
@@ -548,27 +556,51 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
         tourType: 'self_guided',
       });
     expect(created.status).toBe(201);
-    return created.body.tour.tourId as string;
+    const tourId = created.body.tour.tourId as string;
+    await world.tourRemindersRepo.create({ tourId, kind: 'confirmation', dueAt: FIXED_NOW });
+    return tourId;
   }
 
   it('fires the due rows at the supplied now — and only those, exactly once', async () => {
     const { app, world } = buildTickHarness();
-    await armTourViaRoute(app, world);
+    const tourId = await armTourViaRoute(app, world);
 
-    // At FIXED_NOW only the confirmation rung (dueAt = FIXED_NOW) is due.
+    // At FIXED_NOW the only DUE row is the seeded confirmation rung (armTourVia
+    // Route puts one there on purpose), and that kind is DISCONTINUED - so a
+    // tick here is a real no-op for a reason, not because the ladder happens to
+    // be empty. The tick route runs PRODUCTION semantics since 2026-08-31 (the
+    // dev-only manualOnlyKinds override is gone), which is what makes this
+    // assertion meaningful: nothing is being switched off for the test.
     const res = await request(app).post('/__dev/tour-reminders/tick').send({ now: FIXED_NOW });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, now: FIXED_NOW });
-    expect(world.sent).toHaveLength(1);
-    expect(world.sent[0]).toMatchObject({ to: TENANT_PHONE, body: CONFIRMATION_BODY });
+    expect(world.sent).toHaveLength(0);
+    // ANTI-VACUITY: the row really was due and really was left alone. Held back,
+    // NOT claim-skipped - the poll has no in-app writer for kind_retired (only
+    // the one-time sweep stamps it), which is what keeps the panel honest
+    // through its own read of the same set.
+    const confirmRow = (await world.tourRemindersRepo.listByTour(tourId)).find(
+      (r) => r.kind === 'confirmation',
+    );
+    expect(confirmRow?.dueAt).toBe(FIXED_NOW);
+    expect(confirmRow?.sentAt).toBeUndefined();
+    expect(confirmRow?.skippedAt).toBeUndefined();
 
-    // A later tick fires the NEXT rung once; the claimed row never re-sends.
+    // A later tick fires the earliest LIVE rung once.
     const res2 = await request(app)
       .post('/__dev/tour-reminders/tick')
       .send({ now: '2026-07-14T23:31:00.000Z' });
     expect(res2.status).toBe(200);
-    expect(world.sent).toHaveLength(2);
-    expect(world.sent[1]).toMatchObject({ to: TENANT_PHONE, body: DAY_BEFORE_BODY });
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]).toMatchObject({ to: TENANT_PHONE, body: DAY_BEFORE_BODY });
+
+    // ...and the claimed row never re-sends: a third tick at the same instant
+    // adds nothing. (This is the half the old two-rung sequence proved.)
+    const res3 = await request(app)
+      .post('/__dev/tour-reminders/tick')
+      .send({ now: '2026-07-14T23:31:00.000Z' });
+    expect(res3.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
   });
 
   it('normalizes a milliseconds-less now to full toISOString() form', async () => {
@@ -583,12 +615,13 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, now: '2026-07-14T23:31:00.000Z' });
 
-    // The day_before row (dueAt @ 19:30 EDT Jul 14, carrying .000 ms) fired
-    // against the normalized now - proof the ms-less input collapsed. The
-    // confirmation rung is due in the SAME batch and is retired unsent by
-    // release supersession (quiet-hours spec section 5: only the rung closest
-    // to the event sends when a catch-up tick releases several at once).
+    // The day_before row (dueAt @ DAY_BEFORE_DUE, carrying .000 ms) fired
+    // against the normalized now - proof the ms-less input collapsed. It is the
+    // ONLY body, and that is a second live assertion: the seeded confirmation
+    // rung is due inside the SAME catch-up window and never enters the batch at
+    // all, because discontinued kinds are filtered out of the poll's due rows.
     expect(world.sent.map((s) => s.body)).toEqual([DAY_BEFORE_BODY]);
+    expect(Date.parse(DAY_BEFORE_DUE)).toBeLessThan(Date.parse(res.body.now as string));
   });
 
   it('defaults now to the wall clock when the body carries none', async () => {

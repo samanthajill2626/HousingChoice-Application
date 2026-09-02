@@ -43,6 +43,35 @@ describe('ScheduledCard', () => {
     expect(screen.getByText(/Paused . send manually/)).toBeInTheDocument();
   });
 
+  // Discontinued (Phase B): the same equality-then-fallthrough shape as
+  // `paused`, one reason further along. A card that can NEVER send must not
+  // render a fire-time promise, and must not say "Paused" - that would invite a
+  // Send now the job refuses.
+  it('renders a discontinued rung as "No longer sent", never a fire time and never Paused', () => {
+    render(
+      <ScheduledCard item={{ ...BASE, suppression: { reason: 'discontinued' } }} now={NOW} />,
+    );
+    expect(screen.getByText('No longer sent')).toBeInTheDocument();
+    expect(screen.queryByText(/sends in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    // suppressionNote joins with an EM dash; the label does not repeat the lead.
+    expect(screen.getByText(/No longer sent . turned off/)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Will wait/)).not.toBeInTheDocument();
+  });
+
+  it('a discontinued rung already PAST its fire time does not say "sending shortly"', () => {
+    render(
+      <ScheduledCard
+        item={{ ...BASE, at: '2026-06-18T09:00:00Z', suppression: { reason: 'discontinued' } }}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByText('No longer sent')).toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+  });
+
   it('a paused rung already PAST its fire time does not say "sending shortly"', () => {
     render(
       <ScheduledCard

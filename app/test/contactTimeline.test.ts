@@ -1177,6 +1177,13 @@ const CONFIRMATION_BODY = composeTourReminderBody({
   tourType: 'self_guided',
   names: {},
 });
+const MORNING_OF_BODY = composeTourReminderBody({
+  kind: 'morning_of',
+  scheduledAt: TOUR_AT,
+  timezone: DEFAULT_ORG_SETTINGS.timezone,
+  tourType: 'self_guided',
+  names: {},
+});
 const DAY_BEFORE_BODY = composeTourReminderBody({
   kind: 'day_before',
   scheduledAt: TOUR_AT,
@@ -1186,16 +1193,27 @@ const DAY_BEFORE_BODY = composeTourReminderBody({
 });
 const APPROVAL_BODY = resolveMessage('nudge.approval_check');
 
+/** What a re-pause of ONE live tour kind looks like. Production pauses nothing
+ *  since 2026-08-31 (Phase B), so every `paused` case here injects this. */
+const PAUSE_DAY_BEFORE: ReadonlySet<ReminderKind> = new Set<ReminderKind>(['day_before']);
+
 describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B server)', () => {
+  it('the production tour hold-back is empty - nothing is paused by default', () => {
+    // The unpause, on the surface that mirrors it. Without this pin every
+    // `paused` case below could be green while production held everything back.
+    expect(MANUAL_ONLY_REMINDER_KINDS.size).toBe(0);
+  });
+
   function makeGatherHarness(
     // Quiet hours OFF by default so these cases keep asserting the pre-quiet
     // reasons regardless of the time of day the suite runs; the quiet cases
     // pass a window-around-now stub explicitly.
     settingsRepo: SettingsReadRepo = quietOffSettingsRepo(),
-    // The manual-only hold-back is OFF by default here for the same reason:
-    // since 2026-08-20 every auto-armed rung kind is paused in production, and
-    // `paused` outranks quiet hours - so the default would mask every estimate
-    // these cases exist to prove. The hold-back has its own cases below.
+    // The manual-only hold-back defaults to EMPTY here, which since 2026-08-31
+    // is also the PRODUCTION default (Phase B emptied
+    // MANUAL_ONLY_REMINDER_KINDS). The parameter is kept because it is now the
+    // only way to reach pause-mode behaviour at all: the cases below that assert
+    // `paused` pass a non-empty set explicitly.
     manualOnlyReminderKinds: ReadonlySet<ReminderKind> = new Set(),
     // The nudge ladder's hold-back, off by default for the same reason.
     manualOnlyNudgeKinds: ReadonlySet<NudgeKind> = new Set(),
@@ -1273,9 +1291,11 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       scheduledAt: '2099-01-10T10:00:00.000Z',
       tourType: 'self_guided',
     });
-    // Insert out of dueAt order to prove the ascending sort.
+    // Insert out of dueAt order to prove the ascending sort. BOTH rungs are
+    // LIVE kinds: this case asserts NO suppression, and a discontinued rung
+    // carries one unconditionally (spec 3.1a).
     await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'day_before', dueAt: '2099-01-09T10:00:00.000Z' });
-    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'morning_of', dueAt: '2099-01-05T10:00:00.000Z' });
 
     const res = await request(app).get('/api/contacts/ct-1/timeline');
     expect(res.status).toBe(200);
@@ -1283,8 +1303,8 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up).toHaveLength(2);
     expect(up.every((i) => i.kind === 'scheduled' && i.source === 'tour_reminder')).toBe(true);
     expect(up.map((i) => i.at)).toEqual(['2099-01-05T10:00:00.000Z', '2099-01-09T10:00:00.000Z']);
-    expect(up[0]!.reminderKind).toBe('confirmation');
-    expect(up[0]!.body).toBe(CONFIRMATION_BODY);
+    expect(up[0]!.reminderKind).toBe('morning_of');
+    expect(up[0]!.body).toBe(MORNING_OF_BODY);
     expect(up[1]!.body).toBe(DAY_BEFORE_BODY);
     expect(up.every((i) => i.conversationId === 'conv-ct-1')).toBe(true);
     expect(up.every((i) => i.suppression === undefined)).toBe(true);
@@ -1296,11 +1316,13 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(res.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
   });
 
-  // Manual-only hold-back (founder decision 2026-08-20): the contact page's
-  // Upcoming cards must agree with the tour panel. A rung the poll will never
-  // claim cannot advertise "sends in 3h" here while the panel calls it paused.
-  it('marks a paused tour rung `paused` under the PRODUCTION hold-back', async () => {
-    const { world, app } = makeGatherHarness(undefined, MANUAL_ONLY_REMINDER_KINDS);
+  // Manual-only hold-back: the contact page's Upcoming cards must agree with the
+  // tour panel. A rung the poll will never claim cannot advertise "sends in 3h"
+  // here while the panel calls it paused. Production pauses nothing today
+  // (2026-08-31), so the set is INJECTED - this is the mechanism a future
+  // re-pause would use, and it has to keep working on BOTH surfaces.
+  it('marks a paused tour rung `paused` when a kind is held back', async () => {
+    const { world, app } = makeGatherHarness(undefined, PAUSE_DAY_BEFORE);
     const phone = '+15550600031';
     world.contacts.push({ contactId: 'ct-paused', type: 'tenant', status: 'active', phone });
     seedConv(world, 'conv-ct-paused', phone, 'tenant_1to1');
@@ -1321,6 +1343,83 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     const up = res.body.upcoming as Array<Record<string, unknown>>;
     expect(up).toHaveLength(1);
     expect(up[0]!.suppression).toEqual({ reason: 'paused' });
+  });
+
+  // Discontinued kinds (Phase B spec 3.1, row 4). This surface has its OWN
+  // read of the kind sets - it does not inherit the tour panel's - and it is
+  // the one the design called out as the row most likely to be missed: without
+  // it, the contact page would keep promising "sends in 3h" on a rung that can
+  // never send, one surface over from the panel that says otherwise.
+  it('marks a discontinued tour rung `discontinued`, on the PRODUCTION default (nothing injected)', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600034';
+    world.contacts.push({ contactId: 'ct-disc', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-disc', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-disc',
+      unitId: 'u-disc',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-09T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-disc/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(2);
+    expect(up[0]!.reminderKind).toBe('confirmation');
+    expect(up[0]!.suppression).toEqual({ reason: 'discontinued' });
+    // Never `paused`: the two mean opposite things to an operator, and only one
+    // of them leaves Send now working.
+    // ANTI-VACUITY: the live rung beside it still promises its send.
+    expect(up[1]!.reminderKind).toBe('day_before');
+    expect(up[1]!.suppression).toBeUndefined();
+  });
+
+  it('discontinued OUTRANKS an opted-out contact on the timeline too', async () => {
+    // The same terminal-beats-everything rule the tour panel pins (spec 3.1a).
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600035';
+    world.contacts.push({
+      contactId: 'ct-disc-opt',
+      type: 'tenant',
+      status: 'active',
+      phone,
+      sms_opt_out: true,
+    });
+    seedConv(world, 'conv-ct-disc-opt', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-disc-opt',
+      unitId: 'u-disc-opt',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-09T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-disc-opt/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up[0]!.suppression).toEqual({ reason: 'discontinued' });
+    // The opt-out is genuinely live - so the line above is a precedence proof.
+    expect(up[1]!.suppression).toEqual({ reason: 'contact_opted_out' });
   });
 
   it('marks a paused NUDGE rung `paused` under the PRODUCTION hold-back', async () => {
@@ -1353,8 +1452,10 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
 
   it('the two ladders hold back independently: a paused TOUR rung leaves nudges alone', async () => {
     // The tour pause must not leak onto the other ladder (and vice versa) - two
-    // independent sets, two independent decisions.
-    const { world, app } = makeGatherHarness(undefined, MANUAL_ONLY_REMINDER_KINDS);
+    // independent sets, two independent decisions. Live proof of the asymmetry
+    // today: MANUAL_ONLY_NUDGE_KINDS is still full while
+    // MANUAL_ONLY_REMINDER_KINDS is empty, so the tour side is injected.
+    const { world, app } = makeGatherHarness(undefined, PAUSE_DAY_BEFORE);
     const phone = '+15550600032';
     world.contacts.push({ contactId: 'ct-nudge', type: 'tenant', status: 'active', phone });
     seedConv(world, 'conv-ct-nudge', phone, 'tenant_1to1');
@@ -1507,7 +1608,10 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       scheduledAt: '2099-01-10T10:00:00.000Z',
       tourType: 'self_guided',
     });
-    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+    // A LIVE kind: discontinued outranks the opt-out (spec 3.1a), so riding
+    // `confirmation` here would silently stop testing the opt-out. The
+    // discontinued/opt-out precedence has its own case below.
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'day_before', dueAt: '2099-01-05T10:00:00.000Z' });
 
     const res = await request(app).get('/api/contacts/ct-5/timeline');
     expect(res.status).toBe(200);
@@ -1534,10 +1638,11 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       tourType: 'self_guided',
     });
     // Both rungs are due at the same wall time tomorrow: inside TOMORROW's
-    // occurrence of the window (the rung due later sorts second).
+    // occurrence of the window (the rung due later sorts second). A LIVE kind -
+    // discontinued outranks quiet hours and would mask it (spec 3.1a).
     await world.tourRemindersRepo.create({
       tourId: tour.tourId,
-      kind: 'confirmation',
+      kind: 'morning_of',
       dueAt: isoHoursFromNow(24),
     });
     const placement = await world.placementsRepo.create({
@@ -1559,6 +1664,61 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up.every((i) => JSON.stringify(i.suppression) === JSON.stringify({ reason: 'quiet_hours' }))).toBe(true);
   });
 
+  // THE THIRD SITE of the en_route quiet-hours exemption (Phase B spec 6
+  // addendum), on the surface that aggregates BOTH ladders. The exemption is
+  // applied at the REMINDER call site of suppressionFor - never inside
+  // suppressionFor or quietFor themselves, which the placement-nudge walk above
+  // shares: a placement nudge has no en_route and must keep its quiet
+  // suppression untouched, which the nudge in this fixture proves.
+  it('never chips quiet_hours on an en_route rung, while its day_before sibling and a placement nudge still do', async () => {
+    const { world, app } = makeGatherHarness(quietNowSettingsRepo());
+    const phone = '+15550600021';
+    world.contacts.push({ contactId: 'ct-21', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-21', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-21',
+      unitId: 'u-21',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Same wall time tomorrow for both rungs - inside TOMORROW's occurrence of
+    // the window. Only the KIND differs, which is what makes this a control.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'en_route',
+      dueAt: isoHoursFromNow(24),
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(24.5),
+    });
+    const placement = await world.placementsRepo.create({
+      tenantId: 'ct-21',
+      unitId: 'u-21',
+      stage: 'awaiting_receipt',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'receipt_check',
+      // Still inside tomorrow's occurrence (the stub window is now-1h..now+1h),
+      // just after the two rungs so the ordering below is deterministic.
+      dueAt: isoHoursFromNow(24.75),
+    });
+
+    const res = await request(app).get('/api/contacts/ct-21/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(3);
+    expect(up[0]!.reminderKind).toBe('en_route');
+    expect(up[0]!.suppression).toBeUndefined();
+    expect(up[1]!.reminderKind).toBe('day_before');
+    expect(up[1]!.suppression).toEqual({ reason: 'quiet_hours' });
+    // The SHARED helper is untouched: the placement ladder still chips.
+    expect(up[2]!.source).toBe('placement_nudge');
+    expect(up[2]!.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
   // The SF1 false positive: inside the window the wall clock says "quiet", but a
   // rung due days from now will not wait for tonight's window - while a rung
   // already due IS being held by the fire-time backstop right now.
@@ -1575,9 +1735,10 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     });
     // Already due, with a dueAt outside every occurrence: the poll is deferring
     // it RIGHT NOW (worker-downtime catch-up that crossed the window start).
+    // A LIVE kind - discontinued would outrank the quiet estimate (spec 3.1a).
     await world.tourRemindersRepo.create({
       tourId: tour.tourId,
-      kind: 'confirmation',
+      kind: 'morning_of',
       dueAt: isoHoursFromNow(-30),
     });
     // Three days out at a time of day outside EVERY occurrence of the window.
@@ -1591,7 +1752,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(res.status).toBe(200);
     const up = res.body.upcoming as Array<Record<string, unknown>>;
     expect(up).toHaveLength(2);
-    expect(up[0]!.reminderKind).toBe('confirmation');
+    expect(up[0]!.reminderKind).toBe('morning_of');
     expect(up[0]!.suppression).toEqual({ reason: 'quiet_hours' });
     expect(up[1]!.reminderKind).toBe('day_before');
     expect(up[1]!.suppression).toBeUndefined();
@@ -1611,10 +1772,10 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       scheduledAt: '2099-01-10T10:00:00.000Z',
       tourType: 'self_guided',
     });
-    // Future, but before the window opens.
+    // Future, but before the window opens. A LIVE kind (spec 3.1a).
     await world.tourRemindersRepo.create({
       tourId: tour.tourId,
-      kind: 'confirmation',
+      kind: 'morning_of',
       dueAt: isoHoursFromNow(1),
     });
     // Inside tonight's occurrence.
@@ -1628,7 +1789,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(res.status).toBe(200);
     const up = res.body.upcoming as Array<Record<string, unknown>>;
     expect(up).toHaveLength(2);
-    expect(up[0]!.reminderKind).toBe('confirmation');
+    expect(up[0]!.reminderKind).toBe('morning_of');
     expect(up[0]!.suppression).toBeUndefined();
     expect(up[1]!.reminderKind).toBe('day_before');
     expect(up[1]!.suppression).toEqual({ reason: 'quiet_hours' });
@@ -1651,10 +1812,11 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     });
     // Overdue, and its wall time sits inside a PAST occurrence of the window
     // (-20h = the same wall time as +4h): the poller already released it when
-    // that occurrence ended, so nothing is holding it now.
+    // that occurrence ended, so nothing is holding it now. A LIVE kind
+    // (spec 3.1a) - a discontinued rung is chipped unconditionally.
     await world.tourRemindersRepo.create({
       tourId: tour.tourId,
-      kind: 'confirmation',
+      kind: 'day_before',
       dueAt: isoHoursFromNow(-20),
     });
 
@@ -1677,10 +1839,11 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       tourType: 'self_guided',
     });
     // Inside tomorrow's occurrence, so quiet hours WOULD chip this rung on its
-    // own - the opt-out has to outrank it, not merely fill a gap.
+    // own - the opt-out has to outrank it, not merely fill a gap. A LIVE kind:
+    // discontinued outranks BOTH and would make this pass for the wrong reason.
     await world.tourRemindersRepo.create({
       tourId: tour.tourId,
-      kind: 'confirmation',
+      kind: 'day_before',
       dueAt: isoHoursFromNow(24),
     });
 

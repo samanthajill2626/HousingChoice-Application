@@ -270,6 +270,158 @@ describe('RemindersPanel', () => {
     expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
   });
 
+  // Discontinued (Phase B): the chip must NOT fall through to the fire-time
+  // promise, and must not borrow the Paused wording either - "Paused" invites a
+  // Send now that the job refuses with kind_retired.
+  //
+  // CHIP ORDER: this branch sits ABOVE `paused`, and the `overdue` chip (when it
+  // lands) must sit BELOW this one - a rung that will never send is never
+  // "overdue".
+  it('renders a discontinued rung as "No longer sent", never a fire time and never Paused', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'confirmation',
+          state: 'upcoming',
+          // Past its fire time: the fallthrough would chip "sending shortly"
+          // forever on a rung nothing will ever claim.
+          dueAt: '2000-01-01T00:00:00Z',
+          suppression: { reason: 'discontinued' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('No longer sent')).toBeInTheDocument());
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    // The note underneath carries the other half, without stuttering.
+    expect(screen.getByText(/No longer sent . turned off/)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Will wait/i)).not.toBeInTheDocument();
+    // ...and NO "Send now" (review round 1, B-S1). The chip changed to stop
+    // inviting a click the server can only refuse (409 kind_retired, permanently
+    // and by design); the affordance has to follow it. Cancel/Restore stay: a
+    // discontinued rung is still a pending row an operator may want off the
+    // ladder.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel the/ })).toBeInTheDocument();
+  });
+
+  it('ANTI-VACUITY for the above: a plain upcoming rung DOES offer Send now', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-1', kind: 'confirmation', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Send the/ })).toBeInTheDocument(),
+    );
+  });
+
+  it('a discontinued rung still in the FUTURE does not promise "sends in Nh" either', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'confirmation',
+          state: 'upcoming',
+          dueAt: '2099-01-09T10:00:00Z',
+          suppression: { reason: 'discontinued' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('No longer sent')).toBeInTheDocument());
+    expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
+  });
+
+  // OVERDUE (Phase B spec 8). The server derives it - the panel never compares
+  // clocks itself - and it exists because `state` is computed from terminal
+  // markers alone, so a rung stuck behind any pre-claim deferral reads
+  // "upcoming" with a dueAt weeks in the past and the chip keeps promising a
+  // send. "Sending shortly" on a rung that has been sending shortly for a
+  // fortnight is the same lie in a politer register.
+  it('replaces the fire-time promise with an Overdue chip when the server says overdue', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Overdue')).toBeInTheDocument());
+    // The promise this chip replaces.
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
+  });
+
+  it('an overdue rung still renders its suppression note alongside the chip', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+          suppression: { reason: 'quiet_hours' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Overdue')).toBeInTheDocument());
+    // COMPOSES rather than competes (spec 8.1): the chip says the send time has
+    // passed, the note says WHY nothing has gone out.
+    expect(screen.getByText(/Will wait . quiet hours/i)).toBeInTheDocument();
+  });
+
+  // CHIP ORDER (worklist R15): discontinued is ABOVE overdue. A rung nothing
+  // will ever send is not "overdue" - it is finished, and "Overdue" would read
+  // as something a navigator can chase.
+  it('a discontinued rung that is ALSO overdue still reads "No longer sent"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'confirmation',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+          suppression: { reason: 'discontinued' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('No longer sent')).toBeInTheDocument());
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument();
+  });
+
+  // ...and the other side of the order: overdue is ABOVE paused, so a rung a
+  // human still has to send by hand says so with the urgency it has earned.
+  it('an overdue rung that is ALSO paused chips Overdue, and keeps the paused note', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          dueAt: '2000-01-01T00:00:00Z',
+          overdue: true,
+          suppression: { reason: 'paused' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Overdue')).toBeInTheDocument());
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    expect(screen.getByText(/Paused . send manually/i)).toBeInTheDocument();
+  });
+
   it('keeps Send now on a paused rung (the whole point of leaving it pending)', async () => {
     getTourReminders.mockResolvedValue({
       reminders: [
@@ -375,6 +527,46 @@ describe('nextReminderRefetchDelay (pure)', () => {
     expect(
       nextReminderRefetchDelay([{ state: 'upcoming', dueAt: '2026-08-01T12:00:00Z' }], NOW),
     ).toBe(6 * 3_600_000);
+  });
+
+  // Review round 1, B-S2. The 20s overdue re-check assumes the worker will flip
+  // the rung within a tick or two. A DISCONTINUED rung never flips, so a tab
+  // left open on a tour with a pause-era confirmation would hammer
+  // GET /api/tours/:id/reminders every 20 seconds forever - a route that reads
+  // the tour, the unit, two contacts, settings and the whole ladder per request.
+  it('ignores a discontinued rung entirely - it will never flip, so there is nothing to wait for', () => {
+    expect(
+      nextReminderRefetchDelay(
+        [
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'discontinued' },
+          },
+        ],
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it('a discontinued rung does not shadow a LIVE one behind it', () => {
+    expect(
+      nextReminderRefetchDelay(
+        [
+          // Earliest, and permanently stuck - it must not win the anchor.
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'discontinued' },
+          },
+          { state: 'upcoming', dueAt: '2026-07-10T12:00:30Z' },
+          // A PAUSED rung is NOT skipped: a human can still send it, so the
+          // panel keeps re-checking for that flip.
+          { state: 'upcoming', dueAt: '2026-07-10T18:00:00Z', suppression: { reason: 'paused' } },
+        ],
+        NOW,
+      ),
+    ).toBe(32_000);
   });
 });
 

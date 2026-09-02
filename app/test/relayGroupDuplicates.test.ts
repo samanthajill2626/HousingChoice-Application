@@ -319,7 +319,7 @@ describe('findOpenGroupWithSamePhones - the wire rule', () => {
     //
     // The outbound half is unaffected and stays that way: the intro body a tenant
     // actually receives still drops a nameless member (relayFanOut
-    // composeConnectionSentence), pinned by the preview-body guard in
+    // composeNameList), pinned by the preview-body guard in
     // app/test/rosterEdits.test.ts.
     const row = {
       conversationId: 'conv-1',

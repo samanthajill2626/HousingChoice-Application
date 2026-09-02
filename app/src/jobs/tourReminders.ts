@@ -156,11 +156,69 @@ export function computeDueAt(
 }
 
 /**
+ * THE past-tour predicate (Phase B 6.1a): a rung whose OWN dueAt precedes the
+ * tour, on a tour that has already started, must not send - its copy assumes
+ * the tour has not happened yet. no_show_checkin (dueAt = scheduledAt + 30m)
+ * is exempt BY CONSTRUCTION, never by a name in a list: its dueAt does not
+ * precede the tour. Absent/unparseable scheduledAt -> false; invalid_schedule
+ * owns those rows and this gate must not steal the more accurate token.
+ *
+ * NOT called "start passed": that already names a different, CLIENT-side gate
+ * (e2e/tests/tour-no-show-checkin.spec.ts) on the very kind this one exempts.
+ *
+ * SHARED with scripts/retire-paused-tour-reminders.ts (sweep population A) so
+ * the sweep and the runtime can never disagree about the same row.
+ *
+ * INCLUSIVE at the start instant (`now >= start`): at t=start the forward-
+ * looking copy is already stale. jobs/relayFanOut.ts's past-tour guard gates the
+ * same sentence and uses the same boundary - one instant, one answer.
+ */
+export function retiredByTourStart(
+  row: Pick<TourReminderItem, 'dueAt'>,
+  scheduledAt: string | undefined,
+  now: string,
+): boolean {
+  if (typeof scheduledAt !== 'string') return false;
+  const start = Date.parse(scheduledAt);
+  if (!Number.isFinite(start)) return false;
+  // BOTH sides are compared as INSTANTS, not as text. A stored '...T15:00:00Z'
+  // sorts BEFORE '...T14:00:00.000Z', and a dueAt written with a UTC offset
+  // ('...T11:00:00-05:00' is 16:00Z) sorts by its printed hour - so string
+  // order decides either operand by lexicographic accident rather than by time.
+  // Every dueAt computeDueAt writes is canonical, but the sweep
+  // (scripts/retire-paused-tour-reminders.ts) scans the WHOLE table, so a
+  // hand-seeded or imported row reaches here too. An unparseable dueAt yields
+  // no honest answer -> false, matching the unparseable-scheduledAt rule above.
+  const due = Date.parse(row.dueAt);
+  if (!Number.isFinite(due)) return false;
+  // ALL THREE operands follow the ONE rule (round 2, B NOTE-4). `now` is
+  // runtime-produced at every call site today, so a text compare was not
+  // reachable - but an exported predicate whose arguments follow two different
+  // rules is precisely where the next half-normalized comparison hides, which is
+  // the finding that produced the dueAt half above.
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(nowMs)) return false;
+  return due < start && nowMs >= start;
+}
+
+/**
  * Ladder order by proximity to the event. Supersession keeps the LATEST rung of
- * a colliding pair: clamping can only push an EARLIER rung forward onto a later
- * one's slot, and when it does, the earlier rung's copy is the stale one
- * ("your tour is tomorrow" landing on tour day). Exported for the fire-time
- * backstop's batch check.
+ * a colliding pair, because the later rung's copy is the current one ("your
+ * tour is tomorrow" must not land beside "your tour is today").
+ *
+ * THE COMPARISON IS AN INEQUALITY, NOT AN EQUALITY, and this paragraph is why
+ * (Phase B spec 6.2). An earlier draft of this docblock said clamping "can only
+ * push an EARLIER rung forward onto a later one's slot" - true while EVERY rung
+ * clamped to the same window edge, which is what made `otherDue === dueAt` a
+ * sufficient test. The en_route quiet-hours exemption (spec 6) breaks that
+ * coincidence: for an 08:30 tour, en_route stays at its raw 07:30 while
+ * morning_of clamps forward to 08:00, so the ladder INVERTS - a later rung now
+ * fires BEFORE an earlier one, and equality would arm both. The rule the
+ * equality was only ever a proxy for is "a rung is stale when a LATER rung
+ * fires at or before it", so that is what supersededBySlot tests. Do not
+ * narrow it back to equality.
+ *
+ * Exported for the fire-time backstop's batch check.
  */
 export const LADDER_ORDER: ReminderKind[] = [
   'confirmation',
@@ -171,38 +229,80 @@ export const LADDER_ORDER: ReminderKind[] = [
 ];
 
 /**
- * do-not-remove-without-reading — FOUNDER DECISION, 2026-08-20, TEMPORARY.
+ * do-not-remove-without-reading - the TEMPORARY human hold. EMPTY today.
  *
- * Tour reminders are MANUAL ONLY. The ladder still ARMS every rung on booking
- * (so the panel keeps showing the schedule, the draft copy, and a working "Send
- * now"), but the poll never sends one on its own. A human decides when each
- * reminder goes out.
+ * What this set is FOR: pausing a rung kind's AUTOMATIC send while leaving the
+ * rung fully alive. A kind listed here still arms on booking, still shows its
+ * schedule and draft copy on the tour panel, and still has a working "Send now"
+ * - the poll simply never claims it, so a human decides when it goes out. The
+ * panel chips "Paused - send manually" so nobody reads a fire-time promise that
+ * is not coming.
  *
- * This mirrors the application-nudge pause of 2026-08-18
- * (jobs/placementNudges.ts MANUAL_ONLY_NUDGE_KINDS) and was taken for the same
- * root reason: automated sends are going out under a founder who does not yet
- * have a settled model of when the system speaks for her, and an unexpected text
- * to a tenant or landlord is more expensive than a missed one.
+ * It is EMPTY, which means the ladder is fully automatic again as of 2026-08-31
+ * (Phase B). The empty state is the point: it is what "TO RESTORE: empty this
+ * set. Nothing else has to change" always meant, and it now holds.
  *
- * `confirmation` is INCLUDED (Cameron's explicit call). It is the rung with the
- * strongest case for staying automatic - the recipient agreed to the tour
- * seconds earlier - so its inclusion is a deliberate decision, not a side effect
- * of pausing the ladder.
+ * HISTORY, because the shape of the decision matters more than the dates:
+ * 2026-08-20 (founder decision, Cameron) every auto-armed kind went in here -
+ * mirroring the application-nudge pause of 2026-08-18
+ * (jobs/placementNudges.ts MANUAL_ONLY_NUDGE_KINDS), and for the same root
+ * reason: automated sends were going out under a founder who did not yet have a
+ * settled model of when the system speaks for her, and an unexpected text to a
+ * tenant or landlord is more expensive than a missed one. `confirmation` was
+ * INCLUDED then by Cameron's explicit call, and on 2026-08-24 Sam retired that
+ * rung outright ("No confirmation text at all - I'm scheduling manually, so it's
+ * redundant"). That is a different decision with a different meaning, so it left
+ * this set entirely.
  *
- * `no_show_checkin` is absent because it was never auto-armed in the first place
- * (see REMINDER_KINDS) - it has always been manual.
+ * `no_show_checkin` was never here because it was never auto-armed at all (see
+ * REMINDER_KINDS) - it has always been manual.
  *
- * NOT the same thing as emptying REMINDER_KINDS: that would stop the ARMING, and
- * take the schedule and its copy off the tour page entirely - the opposite of
- * what was asked for.
+ * TO PAUSE AGAIN: add kinds here. Nothing else has to change for the poll, the
+ * tour panel, or the contact timeline - the three surfaces that read this set.
+ * ONE scheduled surface does not and never did: routes/relayGroups.ts's group
+ * scheduled view carries no paused chip (it reads DISCONTINUED_REMINDER_KINDS
+ * only), so a re-pause would show there as a plain upcoming rung.
  *
- * TO RESTORE: empty this set. Nothing else has to change.
+ * A kind that must NEVER send belongs in DISCONTINUED_REMINDER_KINDS below, not
+ * here. The two are deliberately separate: "paused" means a human decides WHEN,
+ * so Send now must keep working; "discontinued" means it never goes out at all,
+ * so Send now must refuse. Listing a retired kind here would have left a live
+ * Send now button beside a "Paused" chip on a message we had decided to stop
+ * sending.
+ *
+ * NOT the same thing as emptying REMINDER_KINDS: that stops the ARMING, and
+ * takes the schedule and its copy off the tour page entirely.
  */
-export const MANUAL_ONLY_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([
+export const MANUAL_ONLY_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([]);
+
+/**
+ * do-not-remove-without-reading - PERMANENT, Phase B (2026-08-31).
+ *
+ * Kinds that are DISCONTINUED: no path may ever send one. Distinct from
+ * MANUAL_ONLY_REMINDER_KINDS on purpose - "paused" means a human decides WHEN
+ * this goes out (Send now works, chip says Paused); "discontinued" means it
+ * NEVER goes out (force-send refuses kind_retired, chip says "no longer
+ * sent"). Conflating them put a working Send now button beside a Paused chip
+ * on a kind we had retired.
+ *
+ * FIVE surfaces read this set, all mandatory. Two SEND surfaces: the poll's
+ * due-row filter below, and forceSendReminder. Three READ surfaces, each with
+ * its OWN read rather than inheriting another's answer - the tour panel
+ * (routes/tourReminders.ts), the contact timeline (routes/contactTimeline.ts),
+ * and the relay group thread's scheduled bucket (routes/relayGroups.ts). Miss
+ * any read surface and it goes on promising "sends in Nh" for a rung that can
+ * never send, which is the exact lie this mechanism exists to end. If you add
+ * a sixth surface that renders a pending rung, it reads this set too.
+ *
+ * NOT injectable via deps - e2e must never grow a send path production lacks.
+ *
+ * confirmation: founder decision, Sam 2026-08-24 - "No confirmation text at
+ * all - I'm scheduling manually, so it's redundant." Armed rows from the
+ * pause era are retired by scripts/retire-paused-tour-reminders.ts; this set
+ * is what makes that sweep hygiene rather than a race against the deploy.
+ */
+export const DISCONTINUED_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([
   'confirmation',
-  'day_before',
-  'morning_of',
-  'en_route',
 ]);
 
 /**
@@ -232,12 +332,16 @@ export async function readQuietHoursWindow(
 // a human judgment the system cannot verify, so it is sent manually from the tour
 // page ("Send no-show check-in"). The kind stays valid everywhere else (catalog,
 // ReminderKind union, computeDueAt case) for that manual send.
-const REMINDER_KINDS: ReminderKind[] = [
-  'confirmation',
-  'day_before',
-  'morning_of',
-  'en_route',
-];
+//
+// confirmation is intentionally NOT auto-armed either, for a different reason:
+// the founder retired the rung outright (Sam, 2026-08-24 - "No confirmation text
+// at all - I'm scheduling manually, so it's redundant"), so arming stopped
+// 2026-08-31 (Phase B). The kind likewise stays valid everywhere else - the
+// ReminderKind union, computeDueAt, LADDER_ORDER and the message catalog all
+// keep it, so in-flight rows armed during the pause and rows in seeded history
+// still compose, sort and display. SENDING is guarded separately by
+// DISCONTINUED_REMINDER_KINDS above; this list only stops NEW rows being born.
+const REMINDER_KINDS: ReminderKind[] = ['day_before', 'morning_of', 'en_route'];
 
 export interface ArmTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;
@@ -303,7 +407,18 @@ export async function armTourReminders(
   for (const kind of REMINDER_KINDS) {
     const raw = computeDueAt(kind, scheduledAt, now, window);
     raws.set(kind, raw);
-    dues.set(kind, clampOutOfQuietHours(raw, window));
+    // EN_ROUTE IS EXEMPT FROM QUIET HOURS (founder decision, Sam 2026-08-31;
+    // Phase B spec 6). Its whole value is landing an hour before the tour - a
+    // clamped "she is headed that way shortly" at 08:00 for an 08:30 tour is
+    // not a late reminder, it is a wrong one, and for a tour at or before 08:00
+    // the clamp meant NO reminder at all. There is no floor on the tour hour:
+    // a 04:00 tour really does text at 03:00 (spec 6.1, handback item).
+    // The exemption lives HERE, at the call site, by kind:
+    // clampOutOfQuietHours is shared with the placement ladder and the
+    // timeline and must stay kind-blind. The fire-time backstop in
+    // processReminderRow carries the mirror-image exemption; one without the
+    // other reopens the hole.
+    dues.set(kind, kind === 'en_route' ? raw : clampOutOfQuietHours(raw, window));
   }
 
   // Spec 7.1: an org whose quiet window contains 19:30 makes every day_before
@@ -412,8 +527,16 @@ export async function armTourReminders(
     const supersededBySlot = REMINDER_KINDS.some((other) => {
       if (LADDER_ORDER.indexOf(other) <= myOrder) return false;
       const otherDue = dues.get(other);
-      // The later rung must itself be armable (not past-event) to supersede.
-      return otherDue === dueAt && otherDue < scheduledIso;
+      // WIDENED (Phase B 6.2): a LATER rung firing at or BEFORE this one makes
+      // this one's copy stale - equality was only ever a proxy that held while
+      // every rung clamped to the same window edge; the en_route exemption
+      // breaks that coincidence (08:30 tour: en_route 07:30, morning_of
+      // clamped 08:00 - reverse ladder order without this). On an unclamped
+      // ladder rungs are strictly increasing, so this is false for every pair.
+      // `undefined` never supersedes: absence is not an earlier send time.
+      // The trailing conjunct is unchanged: the later rung must itself be
+      // armable (not past-event) to supersede.
+      return otherDue !== undefined && otherDue <= dueAt && otherDue < scheduledIso;
     });
     const staleDayBefore =
       kind === 'day_before' && localDateOf(dueAt, window.timezone) === tourLocalDate;
@@ -469,10 +592,15 @@ export async function cancelTourReminders(
 export interface RunDueTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;
   /**
-   * Rung kinds the poll must NEVER send automatically. Defaults to
-   * MANUAL_ONLY_REMINDER_KINDS; an explicit set overrides it (the e2e tick
-   * route passes an EMPTY set so the harness can still drive the automatic
-   * path). Mirrors RunDuePlacementNudgesDeps.manualOnlyKinds.
+   * Rung kinds this poll holds back from an AUTOMATIC send, leaving them
+   * pending. Defaults to MANUAL_ONLY_REMINDER_KINDS, which is EMPTY today - so
+   * this is now a TEST SEAM: it is how a suite exercises pause-mode behaviour
+   * that production no longer exhibits by default. Mirrors
+   * RunDuePlacementNudgesDeps.manualOnlyKinds (whose own set is NOT empty).
+   *
+   * It does NOT reach DISCONTINUED_REMINDER_KINDS, and must never be made to:
+   * a discontinued kind is unsendable by every path, and a seam that could
+   * switch that off would give e2e a send path production does not have.
    */
   manualOnlyKinds?: ReadonlySet<ReminderKind>;
   /**
@@ -586,26 +714,48 @@ export async function runDueTourReminders(
 
   const allDueRows = await deps.tourRemindersRepo.listDue(now);
 
-  // MANUAL-ONLY FILTER (founder decision 2026-08-20) - see MANUAL_ONLY_REMINDER_KINDS.
-  // These rows are LEFT PENDING on purpose, NOT claim-skipped: "Send now"
-  // (forceSendReminder) only works on a row that is still pending, so retiring
-  // them here would silently disable the very button this change exists to
-  // preserve. They simply stop being candidates for an automatic send. The
-  // panel chip stays honest via the route's `paused` suppression estimate
-  // (routes/tourReminders.ts), NOT via a skip stamp.
+  // HELD-BACK FILTER - two INDEPENDENT causes, both leaving the row PENDING:
+  //   - manual-only (MANUAL_ONLY_REMINDER_KINDS, empty today): a human decides
+  //     when this goes out, so "Send now" must keep working;
+  //   - discontinued (DISCONTINUED_REMINDER_KINDS): this kind never goes out at
+  //     all, and forceSendReminder refuses it too.
+  // Neither is a claim-skip, on purpose: "Send now" (forceSendReminder) only
+  // works on a row that is still pending, so retiring a PAUSED row here would
+  // silently disable the very button the pause exists to preserve - and a
+  // discontinued row is retired by scripts/retire-paused-tour-reminders.ts,
+  // which is the ONE writer of the kind_retired skip token (spec 3.1). Both
+  // panels stay honest through their own reads of the same two sets, NOT
+  // through a skip stamp.
   //
   // The filtered array is ALSO what feeds the supersession backstop below (the
   // `batch` argument), and that is deliberate: supersession retires an EARLIER
-  // rung when a LATER one is releasable in the same batch, so a paused later
-  // rung must not suppress an earlier rung that WILL still send. With every
-  // auto-armed kind paused this is moot today - it matters on a PARTIAL restore.
+  // rung when a LATER one is releasable in the same batch, so a rung that will
+  // NOT send must not suppress an earlier rung that will.
+  //
+  // The counts are separated because the two causes call for opposite actions:
+  // a manual-only count is a queue somebody has to work through, a discontinued
+  // count is rows the sweep has not reached yet.
   const manualOnly = deps.manualOnlyKinds ?? MANUAL_ONLY_REMINDER_KINDS;
-  const dueRows = allDueRows.filter((r) => !manualOnly.has(r.kind));
+  const blocked = (r: TourReminderItem): boolean =>
+    manualOnly.has(r.kind) || DISCONTINUED_REMINDER_KINDS.has(r.kind);
+  const dueRows = allDueRows.filter((r) => !blocked(r));
   const heldBack = allDueRows.length - dueRows.length;
   if (heldBack > 0) {
+    // A kind in BOTH sets is counted ONCE, under discontinued: the two counters
+    // exist to tell two OPPOSITE actions apart (a queue a human has to work
+    // through vs rows the sweep has not reached), and a discontinued kind has
+    // no queue - nothing can send it, by hand or otherwise. Unreachable while
+    // MANUAL_ONLY_REMINDER_KINDS is empty; the mechanism is kept alive for a
+    // re-pause, which is exactly when the overlap becomes possible.
+    const heldBackManualOnly = allDueRows.filter(
+      (r) => manualOnly.has(r.kind) && !DISCONTINUED_REMINDER_KINDS.has(r.kind),
+    ).length;
+    const heldBackDiscontinued = allDueRows.filter((r) =>
+      DISCONTINUED_REMINDER_KINDS.has(r.kind),
+    ).length;
     log.info(
-      { heldBack, now },
-      'tour reminder poll: manual-only rungs left pending (no automatic send)',
+      { heldBack, heldBackManualOnly, heldBackDiscontinued, now },
+      'tour reminder poll: rungs left pending (no automatic send)',
     );
   }
   if (dueRows.length === 0) return;
@@ -640,6 +790,14 @@ export async function runDueTourReminders(
  * `reason` is the FULL ReminderSkipReason union, so the compiler cannot stop
  * you: `'booked_too_late'` is an ARM-ONLY reason (armTourReminders decides it
  * from the RAW offsets before any row exists) and must NEVER be passed here.
+ *
+ * There is a THIRD category since Phase B: SWEEP-ONLY reasons, which no poll
+ * path passes either. `'kind_retired'` is written exclusively by
+ * scripts/retire-paused-tour-reminders.ts (a discontinued kind never reaches
+ * the poll at all, so there is nothing here to retire), while
+ * `'tour_already_passed'` is written by BOTH the sweep and the fire-time gate
+ * above - which is the point: the sweep is cleanup of a condition the runtime
+ * also enforces, not the only thing enforcing it.
  */
 async function claimSkipRow(
   row: TourReminderItem,
@@ -798,13 +956,20 @@ type ReminderTarget =
  * conversation. Read-only - it claims nothing and sends nothing, so each caller
  * decides what "unresolvable" MEANS: the poll retires the rung (claim-skip with
  * the returned reason), a human force-send refuses and leaves it pending.
+ *
+ * `prefetchedTour` exists so the poll's past-tour gate (Phase B 6.1a), which
+ * runs ABOVE every other pre-claim gate and therefore needs the tour first, is
+ * a HOIST of this read rather than a second one. When it is absent (the
+ * force-send path) the read happens here as it always did, and the
+ * `tour_missing` answer is byte-identical either way.
  */
 async function resolveReminderTarget(
   row: TourReminderItem,
   deps: RunDueTourRemindersDeps,
   log: Logger,
+  prefetchedTour?: TourItem,
 ): Promise<ReminderTarget> {
-  const tour = await deps.toursRepo.get(row.tourId);
+  const tour = prefetchedTour ?? (await deps.toursRepo.get(row.tourId));
   if (!tour) {
     log.warn(
       { reminderId: row.reminderId, tourId: row.tourId },
@@ -866,9 +1031,41 @@ async function processReminderRow(
   deps: RunDueTourRemindersDeps,
   log: Logger,
 ): Promise<void> {
-  // Both quiet-hours checks below run FIRST - above the tour fetch and above
-  // the group-route branch (which returns early), so landlord_led / pm_team
-  // rungs are covered too.
+  // PAST-TOUR GATE (Phase B 6.1a) - FIRST, above supersededInBatch and above
+  // the quiet-hours backstop. POSITION IS BEHAVIOUR here:
+  //   - Below supersededInBatch, a post-tour catch-up batch retires morning_of
+  //     as "superseded by" an en_route this gate then retires, putting
+  //     "superseded by a later reminder" on the panel beside the rung it names
+  //     reading "the tour had already happened" - on the ROUTINE
+  //     worker-downtime path, not a three-way coincidence.
+  //   - Below isQuietTime, a past-tour rung due inside the window re-lists
+  //     unclaimed every tick until quiet-end instead of retiring once.
+  // The tour read MOVES UP here with the gate rather than being duplicated:
+  // resolveReminderTarget takes the pre-fetched tour below, so this is a hoist,
+  // not a second read. ACCEPTED CONSEQUENCE of the hoist, pinned by a test: a
+  // row that is both superseded-in-batch AND tour-missing now reads
+  // `tour_missing` (it used to read `quiet_hours_superseded`) - the truer
+  // answer, since a rung whose tour is gone was not superseded by anything.
+  const tour = await deps.toursRepo.get(row.tourId);
+  if (!tour) {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId },
+      'tour reminder: tour not found',
+    );
+    await claimSkipRow(row, 'tour_missing', now, deps);
+    return;
+  }
+  if (retiredByTourStart(row, tour.scheduledAt, now)) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: tour already started - retiring (claim-skipped)',
+    );
+    await claimSkipRow(row, 'tour_already_passed', now, deps, tour.tenantId);
+    return;
+  }
+
+  // Both quiet-hours checks below run above the group-route branch (which
+  // returns early), so landlord_led / pm_team rungs are covered too.
 
   // RELEASE SUPERSESSION (the backstop twin of arm-time supersession): if a
   // LATER rung of the SAME tour is also due in this batch, this rung's copy is
@@ -907,7 +1104,16 @@ async function processReminderRow(
   // re-fires within one poll tick of quiet-end. This must NEVER become a
   // post-claim refusal: claimSend IS the sentAt stamp, so a refusal after it
   // would destroy the message permanently.
-  if (isQuietTime(now, window)) {
+  //
+  // EN_ROUTE IS EXEMPT (Phase B spec 6) - the mirror image of the arm-time
+  // exemption above, and one without the other reopens the hole: an exempt row
+  // stored at 03:00 would arrive here and be deferred to 08:00 anyway. Quiet
+  // hours used to be the only brake on a worker returning from an outage
+  // overnight, which is why the PAST-TOUR GATE runs first, above this branch:
+  // it is what now bounds the catch-up backlog, retiring every en_route whose
+  // tour has already happened instead of texting it. Removing that gate would
+  // make this exemption unsafe.
+  if (row.kind !== 'en_route' && isQuietTime(now, window)) {
     log.info(
       { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
       'tour reminder due during quiet hours - deferred (not claimed)',
@@ -919,7 +1125,7 @@ async function processReminderRow(
   // with forceSendReminder so a human send can never route differently from the
   // poll; the POLL retires an unresolvable rung with the same claim-skip
   // reasons it always used.
-  const target = await resolveReminderTarget(row, deps, log);
+  const target = await resolveReminderTarget(row, deps, log, tour);
   if ('unresolvable' in target) {
     log.info(
       {
@@ -939,7 +1145,9 @@ async function processReminderRow(
     return;
   }
 
-  const { tour, conversation: conv } = target;
+  // `tour` is already in scope from the past-tour gate above (the same row the
+  // target resolved against, since it was handed the pre-fetched one).
+  const { conversation: conv } = target;
 
   // D7 REMINDER COUPLING (contact-rosters): this rung is GROUP-ELIGIBLE but fell
   // back to the tenant 1:1, and the tour has a PENDING open_group - the relay
@@ -947,8 +1155,15 @@ async function processReminderRow(
   // the reminder to the tenant alone, minutes before the group it belongs in
   // exists. Leave the rung UNCLAIMED (the ladder's existing "wait" idiom: it
   // re-lists next tick, and the open applies within one tick of quiet-end).
-  // BOUNDED BY TOUR START: at/after the scheduled time the rung proceeds through
-  // today's fallback, so a morning_of reminder can never be held past the tour.
+  // BOUNDED BY TOUR START, and since Phase B (6.1a) the bound is enforced
+  // ABOVE this branch, not by it. Every rung that can reach this wait has a
+  // dueAt BEFORE the tour, so the past-tour gate at the top of this function
+  // has already retired it by the time the tour starts - which is what makes
+  // "a morning_of reminder can never be held past the tour" true, and makes
+  // the at-or-after-start escape below unreachable for a pre-tour rung. The
+  // `beforeStart` disjunct STAYS as defence-in-depth: it costs nothing, and a
+  // post-tour-dueAt rung (no_show_checkin) is exempt from the gate and would
+  // still need it.
   if (tour.tourType !== 'self_guided' && deps.pendingRosterActionsRepo !== undefined) {
     const pendingOpen = await deps.pendingRosterActionsRepo.getById(
       rosterActionIdFor({ ownerType: 'tour', ownerId: tour.tourId, action: 'open_group' }),
@@ -1035,6 +1250,19 @@ async function processReminderRow(
       return;
     }
     if (err instanceof ReminderNamesUnavailableError) {
+      // BOUNDED (Phase B spec 7, ledger item 7 - the acceptance that expired
+      // with the pause): same grace as the roster twin above. Past it the copy
+      // is stale regardless of recovery - an "on the way" text landing ninety
+      // minutes late is worse than a chip saying it did not send - so retire
+      // visibly instead of re-listing forever.
+      if (rosterWaitExpired(row.dueAt, now)) {
+        log.error(
+          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+          'tour reminder: name resolution STILL failing past the grace window - retiring (claim-skipped)',
+        );
+        await claimSkipRow(row, 'names_unavailable', now, deps, tour.tenantId);
+        return;
+      }
       log.warn(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
         'tour reminder: name resolution read failed - leaving the rung unclaimed for the next tick',
@@ -1201,13 +1429,24 @@ async function sendGroupReminder(
       await claimSkipRow(row, 'invalid_schedule', now, deps, tour.tenantId);
       return;
     }
-    // THE QUIET BACKSTOP, deliberately: no claim, no skip stamp. A PERMANENTLY
-    // failing read therefore re-lists every tick with NO self-clearing bound -
-    // accepted for Phase A because the production poll sits behind the
-    // manual-only filter and spec 8.2 grants no reason token for a bounded
-    // escalation. That acceptance EXPIRES with the pause; it is item (7) of
-    // the Phase B ledger issue, which is what gets read at unpause.
+    // BOUNDED (Phase B spec 7, ledger item 7 - DISCHARGED here, not carried).
+    // Phase A left this branch unbounded: no claim, no skip stamp, so a
+    // PERMANENTLY failing read re-listed every tick forever. That was accepted
+    // only because the production poll sat behind the manual-only filter, and
+    // the filter is empty again. THIS route is the one that matters most: a
+    // landlord_led / pm_team en_route rung is the ONLY rung whose copy forks on
+    // the property-contact name, so it is the single rung-differential names
+    // failure in the whole ladder - bounding the 1:1 twin alone would have
+    // closed the smaller half of the hole. Same grace as that twin.
     if (err instanceof ReminderNamesUnavailableError) {
+      if (rosterWaitExpired(row.dueAt, now)) {
+        log.error(
+          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+          'tour reminder: name resolution STILL failing past the grace window - retiring (claim-skipped)',
+        );
+        await claimSkipRow(row, 'names_unavailable', now, deps, tour.tenantId);
+        return;
+      }
       log.warn(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
         'tour reminder: name resolution read failed - leaving the rung unclaimed for the next tick',
@@ -1326,6 +1565,12 @@ export type ForceSendRefusal =
    *  lookup, not a name. Pre-claim, row left pending; the operator copy is
    *  deliberately cause-agnostic ("everything this message needs"). */
   | 'names_unavailable'
+  /** Phase B: the tour had already started, so this rung's copy is stale (the
+   *  same fire-time gate the poll applies). Permanent - never a retry. */
+  | 'tour_already_passed'
+  /** Phase B: the rung's KIND is discontinued (confirmation), so no path may
+   *  send it - the human path least of all. Permanent - never a retry. */
+  | 'kind_retired'
   | ReminderResolutionFailure;
 
 export type ForceSendResult =
@@ -1376,9 +1621,24 @@ export async function forceSendReminder(
   if (row.sentAt !== undefined || row.canceledAt !== undefined || row.skippedAt !== undefined) {
     return { outcome: 'not_pending' };
   }
+  // DISCONTINUED KIND (Phase B spec 3.1): the human path least of all. Placed
+  // HERE, above target resolution, so it is FIRST in the refusal precedence -
+  // ahead of names_unavailable and tour_already_passed. That ordering is the
+  // honest one: those two invite a retry ("try again", "next time"), and this
+  // one never will. It also costs no reads to say so. INLINE, like the two
+  // returns above it: `refuse` is declared further down, past the gates that
+  // need a resolved target. Never a claim-skip - a human action does not retire
+  // a rung; scripts/retire-paused-tour-reminders.ts is what stamps kind_retired.
+  if (DISCONTINUED_REMINDER_KINDS.has(row.kind)) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: 'kind_retired' },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: 'kind_retired' };
+  }
 
   // CONTAINED (spec 6.3b): target resolution does FOUR bare reads - the tour
-  // (:652), the group conversation, the tenant contact (:673) and the 1:1
+  // (:851), the group conversation, the tenant contact (:872) and the 1:1
   // conversation lookup. Uncontained, any of them escapes the route unwrapped
   // as a 500, where 6.3b demands "a REFUSAL the route can render, not silence"
   // - a panel that degrades gracefully beside a Send-now button that 500s on
@@ -1424,6 +1684,14 @@ export async function forceSendReminder(
     );
     return { outcome: 'refused', reason };
   };
+  // PAST-TOUR REFUSAL (Phase B 6.1a), the SAME predicate as the poll gate - a
+  // rung whose own dueAt precedes the tour, on a tour that has started. Never a
+  // name-in-a-list exception: no_show_checkin's dueAt FOLLOWS the tour, so the
+  // one rung an operator needs after a no-show passes this untouched. A
+  // REFUSAL, never a claim-skip: a human action does not retire a rung.
+  if (retiredByTourStart(row, target.tour.scheduledAt, nowIso)) {
+    return refuse('tour_already_passed');
+  }
   if (isKillSwitchOff(smsSendingEnabled)) return refuse('sms_sending_disabled');
   if (target.route === 'one_to_one') {
     // D11 (contact-rosters): this send targets the tenant 1:1, so the roster

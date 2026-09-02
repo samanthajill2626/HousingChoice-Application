@@ -166,6 +166,7 @@ import {
 import { type SystemStatusService } from '../services/systemStatus.js';
 import { isOneToOneBucket, isUnreadVisible } from '../lib/unreadFeed.js';
 import { markUnread } from '../lib/markUnread.js';
+import { hydrateConversationRosters } from '../lib/participantNames.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -393,11 +394,14 @@ export interface ApiRouterDeps {
    */
   unreadWalkLimit?: number;
   /**
-   * Test seam: the reminder kinds the tour-reminders read route treats as
-   * held back from automatic sending (founder decision 2026-08-20). Production
-   * leaves it undefined and takes MANUAL_ONLY_REMINDER_KINDS; the quiet-hours
-   * route suite passes an EMPTY set, because `paused` outranks quiet hours and
-   * would otherwise make that preview unobservable.
+   * Test seam: the reminder kinds the tour-reminders read route (and the
+   * contact timeline) treat as held back from automatic sending. Production
+   * leaves it undefined and takes MANUAL_ONLY_REMINDER_KINDS, which is EMPTY
+   * today (2026-08-31, Phase B) - so a suite that wants to observe the `paused`
+   * chip now passes a NON-empty set here. It is the only way to reach that
+   * behaviour, since production no longer exhibits it by default. (It used to
+   * be passed EMPTY, for the opposite reason: everything was paused and
+   * `paused` outranks quiet hours, which made that preview unobservable.)
    */
   tourReminderManualOnlyKinds?: ReadonlySet<ReminderKind>;
   /** The same seam for the placement-nudge ladder (held back since 2026-08-18).
@@ -2217,7 +2221,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.json({ call, conversation: null });
       return;
     }
-    res.json({ call, conversation });
+    // The quick-reply seam renders member names off this roster; resolve them
+    // (one batch over one roster, lib/participantNames) rather than hand the
+    // client the creation-time snapshot.
+    const [hydrated] = await hydrateConversationRosters([conversation], contacts, log);
+    res.json({ call, conversation: hydrated });
   });
 
   // GET /api/calls/:callId/recording — stream the founder-bridge recording back

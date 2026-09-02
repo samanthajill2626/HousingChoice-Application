@@ -461,8 +461,12 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
   // quietHoursEnabled: false is a LEAN-SEED-ONLY posture (worklist A1). The
   // PRODUCT default stays ON (a fresh stack must never text at 4am), but with
   // it on, arm-time clamping makes every tour-booking e2e time-of-day
-  // dependent: a night run would clamp the confirmation rung to 08:00 and the
-  // tick seams would stop firing the rungs their specs expect. Turning it off
+  // dependent: a night run would clamp a rung forward to 08:00 org-local, and
+  // a spec that ticks at a rung's COMPUTED time would stop firing it. (Until
+  // 2026-08-31 the sharpest case was the confirmation rung, armed at `now` and
+  // therefore clamped by the clock the suite happened to run on; that rung no
+  // longer arms, but day_before at 19:30 org-local still moves under a window
+  // whose start is earlier.) Turning it off
   // for the seeded e2e/dev world keeps those specs clock-independent;
   // e2e/tests/scenarios/quiet-hours.spec.ts enables it explicitly (and
   // restores it) for its own scenarios.

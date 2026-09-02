@@ -486,3 +486,82 @@ describe('isMemberSuppressed - per-phone 1:1 flag (BE1 scope)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+// Per-recipient bodies (Phase B spec 9.6): the member-added split's mechanism,
+// and a NAMED, DATED exception (Cameron 2026-08-31) to the 2026-07-14 rule that
+// everything sent into a relay group is visible in its thread. One row, one
+// bubble, one rollup chip - and `body` stays the persisted/previewed copy.
+describe('sendRelayAnnouncement - the optional per-member bodyFor (spec 9.6)', () => {
+  async function openGroup(world: ReturnType<typeof createFakeWorld>, poolNumber: string) {
+    return world.conversationsRepo.createRelayGroup({
+      poolNumber,
+      members: [
+        { phone: ALICE, contactId: 'c-a', name: 'Alice' },
+        { phone: BOB, contactId: 'c-b', name: 'Bob' },
+      ],
+    });
+  }
+
+  // THE DEFAULT IS BYTE-IDENTICAL. Every existing caller - tour reminders
+  // included - omits the selector, and must be untouched by its existence.
+  it('OMITTED, every member gets `body` verbatim and the row matches', async () => {
+    const world = createFakeWorld();
+    const conv = await openGroup(world, '+15550100070');
+
+    const result = await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'One body for everyone.',
+      kind: 'relay.intro',
+    });
+
+    expect(result?.sentCount).toBe(2);
+    expect(world.sent.map((s) => s.body)).toEqual([
+      'One body for everyone.',
+      'One body for everyone.',
+    ]);
+    const row = world.messages.find((m) => m.conversationId === conv.conversationId)!;
+    expect(row.body).toBe('One body for everyone.');
+  });
+
+  it('SUPPLIED, each leg gets its own body while the ROW keeps `body`', async () => {
+    const world = createFakeWorld();
+    const conv = await openGroup(world, '+15550100071');
+
+    const result = await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: "Bob's own copy.",
+      kind: 'relay.member_added',
+      bodyFor: (m) => (m.phone === BOB ? "Bob's own copy." : 'The group copy.'),
+    });
+
+    expect(result?.sentCount).toBe(2);
+    expect(world.sent.find((s) => s.to === ALICE)!.body).toBe('The group copy.');
+    expect(world.sent.find((s) => s.to === BOB)!.body).toBe("Bob's own copy.");
+    // ONE row, carrying `body` - never the per-leg override.
+    const rows = world.messages.filter((m) => m.conversationId === conv.conversationId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.body).toBe("Bob's own copy.");
+    expect(rows[0]!.body).not.toBe('The group copy.');
+    // The inbox preview inherits the PERSISTED body (touchLastActivity), which
+    // is what keeps the thread and the inbox row telling the same story.
+    const updated = await world.conversationsRepo.getById(conv.conversationId);
+    expect((updated?.last_message_preview ?? '').startsWith("Bob's own copy.")).toBe(true);
+  });
+
+  it('drives per-member bodies in persist:false legs-only mode too (no row to keep)', async () => {
+    const world = createFakeWorld();
+    const conv = await openGroup(world, '+15550100072');
+
+    await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'ignored-in-legs-only',
+      kind: 'relay.intro',
+      persist: false,
+      bodyFor: (m) => (m.phone === BOB ? 'Bob leg.' : 'Alice leg.'),
+    });
+
+    expect(world.sent.find((s) => s.to === ALICE)!.body).toBe('Alice leg.');
+    expect(world.sent.find((s) => s.to === BOB)!.body).toBe('Bob leg.');
+    expect(world.messages.filter((m) => m.conversationId === conv.conversationId)).toHaveLength(0);
+  });
+});

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v4 - REVISED after S1 parser blocker; pending focused design review
+Status: v5 - REVISED after S1 parser blocker and amendment review; pending re-review
 Date: 2026-09-02
 Branch: `feat/comms-clickable-links`
 Worktree: `W:\\tmp\\comms-clickable-links`
@@ -29,13 +29,16 @@ Vitest/Testing Library, Playwright.
 - Add `linkifyjs` 4.3.3 only to `dashboard/package.json` runtime dependencies.
   Resolve its exact version in the root `package-lock.json`.
 - Call `linkify.find(text, 'url', { defaultProtocol: 'https' })`, retain only
-  `type === 'url'` results, and use its source offsets. When the two immediately
-  preceding source characters are `//`, widen that one parser-owned result start by
-  exactly two characters. This protocol-relative adjustment is not a competing URL
-  regexp; do not add any other URL recognition, punctuation trimming, or suffix list.
-- Preserve an explicit source containing `://` for `safeHttpUrl` to validate. Prefix
-  a widened protocol-relative source with `https:` and a fuzzy `www` or bare-domain
-  source with `https://` before the final safety check.
+  `type === 'url'` results, and use its source offsets. If the three immediately
+  preceding source characters are `://`, preserve that parser result as literal text.
+  Otherwise, when the two immediately preceding source characters are `//`, widen
+  that one parser-owned result start by exactly two characters. This protocol-relative
+  adjustment is not a competing URL regexp; do not add any other URL recognition,
+  punctuation trimming, or suffix list.
+- Prefix a widened protocol-relative source with `https:`. For every other result,
+  pass the parser-supplied `href` directly to `safeHttpUrl`; that preserves explicit
+  HTTP(S), retains embedded `://` inside fuzzy paths/queries/fragments, and applies
+  the configured HTTPS default to fuzzy `www` and bare-domain sources.
 - Keep communications bodies as React text nodes and anchors. Never generate HTML
   strings or use `dangerouslySetInnerHTML`.
 - Preserve explicit HTTP and HTTPS. Normalize `//` with `https:` and fuzzy `www`
@@ -240,6 +243,10 @@ Also assert, with explicit expected token/href arrays:
   for `javascript:example.com`, `mailto:renter@example.com`, `ftp://example.com`,
   and the independent `example.com` match after the comma in
   `data:text/html,example.com`;
+- `javascript://example.com/a`, `data://example.com/a`, `vbscript://example.com/a`,
+  and `foo://example.com/a` produce no link tokens, while a fuzzy URL with
+  `https://` embedded in its path, query, or fragment retains the parser-supplied
+  HTTPS destination;
 - rendering `<img src=x onerror=alert(1)> example.com` creates no `img`, preserves
   that literal text, and creates exactly one safe anchor;
 - rendered anchors have the original accessible name, normalized `href`,
@@ -278,12 +285,14 @@ export interface LinkifiedTextProps {
 
 const linkifyOptions = { defaultProtocol: 'https' } as const;
 
-function normalizedHref(source: string, protocolRelative: boolean): string | null {
-  const candidate = protocolRelative
-    ? `https:${source}`
-    : source.includes('://')
-      ? source
-      : `https://${source}`;
+type LinkifyMatch = ReturnType<typeof linkify.find>[number];
+
+function normalizedHref(
+  match: LinkifyMatch,
+  source: string,
+  protocolRelative: boolean,
+): string | null {
+  const candidate = protocolRelative ? `https:${source}` : match.href;
   return safeHttpUrl(candidate);
 }
 
@@ -297,8 +306,12 @@ export function tokenizeLinkifiedText(text: string, displayEnd?: number): Linkif
 
   for (const match of linkify.find(text, 'url', linkifyOptions)) {
     if (match.type !== 'url') continue;
+    const precededBySchemeDelimiter =
+      match.start >= 3 && text.slice(match.start - 3, match.start) === '://';
     const protocolRelative =
-      match.start >= 2 && text.slice(match.start - 2, match.start) === '//';
+      !precededBySchemeDelimiter &&
+      match.start >= 2 &&
+      text.slice(match.start - 2, match.start) === '//';
     const start = protocolRelative ? match.start - 2 : match.start;
     if (start >= visibleEnd) break;
     if (cursor < start) {
@@ -312,7 +325,9 @@ export function tokenizeLinkifiedText(text: string, displayEnd?: number): Linkif
 
     const end = Math.min(match.end, visibleEnd);
     const source = text.slice(start, match.end);
-    const href = normalizedHref(source, protocolRelative);
+    const href = precededBySchemeDelimiter
+      ? null
+      : normalizedHref(match, source, protocolRelative);
     const visible = text.slice(start, end);
     tokens.push(
       href === null

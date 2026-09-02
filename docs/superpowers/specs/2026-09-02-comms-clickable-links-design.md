@@ -1,6 +1,6 @@
 # Clickable links in communications - design specification
 
-Status: v3 - REVISED after S1 parser blocker; pending focused design review
+Status: v4 - REVISED after S1 parser blocker and amendment review; pending re-review
 Date: 2026-09-02
 Revised: 2026-09-02
 Branch: `feat/comms-clickable-links`
@@ -164,14 +164,17 @@ the rendered-link input while preserving explicit and fuzzy web recognition.
 For every parser result:
 
 1. Preserve exact source characters for display using its source offsets.
-2. If the two adjacent characters immediately before a parser result are `//`, widen
-   that one parser-owned result's start offset by exactly two characters. This is the
-   only protocol-relative adjustment: it restores the source characters that
-   `linkifyjs` excludes from its own result, and is not a URL-recognition regexp.
-3. Preserve an explicit source containing `://` and let `safeHttpUrl` decide whether
-   that scheme is HTTP(S).
-4. Prefix the widened protocol-relative source with `https:`. Prefix a fuzzy `www`
-   or bare-domain source with `https://`.
+2. If the three adjacent characters immediately before a parser result are `://`,
+   leave that result as literal text. This prevents an unsupported-scheme payload
+   such as `javascript://example.com` from being recast as a protocol-relative HTTPS
+   destination.
+3. Otherwise, if the two adjacent characters immediately before a parser result are
+   `//`, widen that one parser-owned result's start offset by exactly two characters.
+   This is the only protocol-relative adjustment: it restores the source characters
+   that `linkifyjs` excludes from its own result, and is not a URL-recognition regexp.
+4. Prefix the widened protocol-relative source with `https:`. For every other parser
+   result, use the parser's own `href`, which preserves explicit HTTP(S) and applies
+   the configured HTTPS default to fuzzy `www` and bare-domain sources.
 5. Pass the resulting string through `safeHttpUrl`.
 6. Emit an anchor only when that check returns a destination. Otherwise emit the
    original source characters as text.
@@ -276,6 +279,10 @@ Add pure-helper tests that establish the contract for:
 - explicit HTTP(S) and protocol-relative localhost URLs remaining eligible;
 - unsupported schemes never becoming an anchor destination, plus parser-owned
   behavior for a valid bare domain after a delimiter in unsupported-scheme text;
+- a `scheme://` payload remaining literal rather than becoming a widened
+  protocol-relative anchor; and
+- a fuzzy URL whose path, query, or fragment contains `https://` retaining the
+  parser-supplied HTTPS destination;
 - HTML-looking content remaining escaped text;
 - HTTP(S) safety rejection degrading to the exact original text; and
 - a URL crossing the 140-character snippet boundary retaining its complete `href`

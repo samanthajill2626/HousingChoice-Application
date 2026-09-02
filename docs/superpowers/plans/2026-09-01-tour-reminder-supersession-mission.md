@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-02).** This is the mission
+> block the build-orchestrator was dispatched with, as written at the time. The work shipped
+> to `main` (merge `dc686a04`) and its feature branch + worktree were deleted during worktree
+> cleanup, so the worktree path named below no longer exists. **This file is NOT current
+> documentation and is not authoritative guidance on how the system behaves today.** For
+> current truth read the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `AGENTS.md`). The mission's review record is preserved at
+> `docs/superpowers/reviews/2026-09-01-tour-reminder-supersession/`.
+
 # MISSION: Tour reminder supersession + Upcoming placement
 
 Worktree: `W:\tmp\tour-reminder-supersession`

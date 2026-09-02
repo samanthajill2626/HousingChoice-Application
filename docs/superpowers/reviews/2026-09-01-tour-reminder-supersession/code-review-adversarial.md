@@ -637,3 +637,190 @@ Neither reproduced round-1 defect survives in its reported form: the round-1 B1
 probe (park A at its sweep) now hits the ownership guard, and the round-1 M3
 probe (exit-gate PATCH on a terminal tour) no longer touches the rows. What
 replaced B1's race is NEW-1's single-request version of the same end state.
+
+---
+
+# Round 3 - re-review of fix wave 2 (@445b6b28, base @9af87a2c)
+
+Inputs: the 6-commit fix diff, `code-review-adjudications-r2.md`, and
+`.superpowers/sdd/reports/fixwave-2.md`. Walked the new sweep's interleavings
+cold before reading either adjudication. No throwaway needed this round - the
+round-2 probes are settled by reading the shipped control flow (below). Nothing
+committed.
+
+Counts: **4 NEW** (1 MAJOR, 3 NOTE), **0 STILL-OPEN**, **10 CLOSED**
+(NEW-1..NEW-6, C1..C4).
+
+## 1. The transactional sweep - interleavings walked
+
+`app/src/repos/tourRemindersRepo.ts:502-577`. Two filters (`sentAt === undefined`
+and `ladderId !== expectedPointer`), then one `TransactWriteItems` per candidate
+pairing a `ConditionCheck` on the TOUR's `currentLadderId` with the `Delete`.
+
+All four named interleavings come out correct:
+
+- **CAS-loser late sweep** (my original B1). A patch(R_A) -> B patch(R_B), arm
+  L_B, CAS wins, sweep(L_B) -> A arm L_A, A CAS(R_A) LOSES so `sweepPointer`
+  stays null (`app/src/routes/tours.ts:1289-1300`) and A sweeps nothing. End:
+  pointer L_B with live L_B rows; A's rows are unpointed debris. The reverse
+  order is also correct - A sweeps first, its ConditionCheck fails on B's
+  pointer, it breaks having deleted nothing, and B's sweep then removes both
+  older generations.
+- **Terminal vs revival.** T patch(R_T, canceled) -> V patch(R_V, scheduled),
+  arm L_V, CAS wins -> T sweep(R_T) is refused at item 0 and breaks. V's fresh
+  ladder survives - the R2-1 defect. Reverse order: V's CAS loses to T's
+  rotation, V sweeps nothing, T's sweep(R_T) removes the original ladder AND
+  L_V. Both end states are self-consistent.
+- **Conversion vs revival.** Reachable only in principle: `from-tour` requires a
+  `toured` + convertible tour, and `canReschedule('toured')` is false
+  (`app/src/routes/tours.ts:1112-1116`), so the revival 409s before it can
+  patch. Recorded, not a finding.
+- **Claim mid-sweep.** The poll stamps `sentAt` between `listByTour` and the
+  delete -> item 1 cancels, `continue`, the send survives. When BOTH cancel,
+  item 0 is tested first and breaks, which is the right precedence (the pointer
+  moved, so the rest of this sweep has no mandate anyway).
+
+Checked and clean, so they are not re-investigated later:
+
+- **IAM.** `dynamodb:ConditionCheckItem` is already granted
+  (`infra/modules/ec2/main.tf:55`), so the cross-table transaction is not an
+  AccessDenied waiting for the first deploy. This was my leading suspicion.
+- **Table naming.** `tourRemindersRepo.ts:268` uses
+  `tableName('tours', deps.env)`, byte-identical to `toursRepo.ts:271`, so the
+  new cross-table reference cannot diverge from the lane prefix.
+- **Transact limits.** Two items per transaction, one transaction per row -
+  nowhere near the 100-item / 4 MB caps.
+- **The fake** (`app/test/helpers/twilioWebhookHarness.ts:3042-3060`) mirrors both
+  filters and stops on a pointer mismatch. Its per-row re-check is atomic in
+  practice (no `await` in the loop body), so it does not diverge on the paths it
+  can model. What it cannot model is the subject of R3-1.
+- **Suppression census.** `conversion_in_progress` reaches all four sites -
+  `routes/tourReminders.ts:792`, `routes/contactTimeline.ts:1059`,
+  `routes/relayGroups.ts:380`, and the dashboard's three exhaustive Records
+  (`types.ts:1373`, `ScheduledCard.tsx:47`, `DeadlinesNudgesCard.tsx:89`) plus
+  `RemindersPanel.tsx:175,469`. No enumeration left behind.
+
+## 2. NEW findings
+
+### R3-1 (MAJOR). The mechanism the whole B1/NEW-1 fix rests on has no test that exercises it
+
+The decisive lines are the positional cancellation decode at
+`app/src/repos/tourRemindersRepo.ts:551-568`: `reasons[0]` means "a newer
+generation owns this tour, STOP", `reasons[1]` means "this one row was sent,
+keep it and continue". Those two branches are the entire difference between a
+correct sweep and B1 coming back.
+
+Neither is tested, in any form:
+
+- No `tourRemindersRepo.integration.test.ts` exists. Both other Transact users
+  in this repo have one - `aiRunsRepo.integration.test.ts`,
+  `suggestionResolutionRepo.integration.test.ts` - so this departs from the
+  repo's own convention for exactly the path where it matters most.
+- `CancellationReasons` and `TransactionCanceledException` appear NOWHERE under
+  `app/test`. The only test contact with the new code is
+  `app/test/tourReminders.test.ts:762` and `:806`, which `instanceof`-match the
+  command on a stubbed `doc.send` - they assert that a transaction was sent, not
+  what happens when one is cancelled.
+- The fake cannot cover it and the implementer says so
+  (`twilioWebhookHarness.ts:3048-3052`): it is strongly consistent by
+  construction, so no harness test can ever produce either cancellation.
+
+To be fair to the code: I read the decode as CORRECT. AWS returns one
+`CancellationReasons` entry per `TransactItems` entry, positionally aligned,
+with `Code: 'None'` for items that did not cause the cancellation, so indexing
+[0] and [1] is right, and the comment at `:539-542` states that dependency
+explicitly. This is a coverage finding, not a defect claim.
+
+It still earns MAJOR because both failure modes are silent and opposite. A wrong
+[0] read keeps sweeping while the pointer names another generation - B1, exactly
+as reproduced in round 1. A wrong [1] read aborts the remaining ladder on a
+benign mid-sweep claim, leaving debris that reads as history. Neither surfaces
+as an error; the sweep logs and returns normally in both. An integration test
+against DynamoDB Local that (a) rotates the pointer between two candidate rows
+and asserts the second survives, and (b) stamps `sentAt` on a candidate and
+asserts the sweep continues past it, would pin both and costs one file.
+
+### R3-2 (NOTE). The ConditionCheck makes the sweep SAFE, not COMPLETE
+
+`deleteSupersededForTour` builds its candidate list from `listByTour`
+(`app/src/repos/tourRemindersRepo.ts:265-275`), a Query on the `byTour` GSI - and
+a GSI can never be read consistently, so the list is eventually consistent by
+construction. A row written moments earlier can be missed. That is harmless
+(the missed row is unpointed and refused by every send path) and both routes
+already word their failure logs as "survives... until the next sweep". Recording
+it only because the docstring's "no interleaving can delete a row while the
+pointer names another generation" is a safety guarantee and reads like a
+completeness one.
+
+### R3-3 (NOTE). The crash residue grew by one generation
+
+The sweep moved below the arm and the CAS (`app/src/routes/tours.ts:1264-1330`).
+A process death between the arm and the CAS now leaves BOTH the old generation
+and the freshly armed one unpointed, where the old sweep-then-arm order left
+only one. The pointer refuses both, so nothing fires and nothing is lost - the
+cost is a longer `earlier[]` on the next panel load. The arm-failure branch is
+documented at `:1272-1281`; this crash window is not.
+
+### R3-4 (NOTE). Two smaller costs, named so they are not surprises
+
+- Write cost: one `TransactWriteItems` per candidate row, two items across two
+  tables, and transactional writes bill at 2x. A five-rung sweep goes from five
+  conditional deletes to five two-item transactions. Immaterial at this scale,
+  worth knowing before anyone reuses the shape on a hot loop.
+- `app/src/jobs/tourReminders.ts:369` falls back to
+  `tour.conversionClaimedAt ?? tour.updatedAt`. A claim taken BEFORE this deploy
+  has no stamp, so NEW-2's behaviour persists for that population until those
+  claims resolve. Correct choice (there is nothing better to fall back to) and a
+  draining set.
+
+## 3. The three deviations
+
+**(a) R2-1 closed by generation-scoping rather than by reordering - SOUND, and
+the implementer is right against the adjudication.** I walked terminal-vs-revival
+in both orders above. What refuses the cross-generation delete is the
+`ConditionCheck` alone; the terminal branch would be safe with its original
+ordering, exactly as `fixwave-2.md` imprecision 1 says. The reordering is
+independently right (it is what let the ownership reads go), but it is not what
+closes R2-1, and the regression test cannot separate the two. Record the
+adjudication as imprecise here, not the implementer.
+
+**(b) Sweeping against the rotation when the re-arm produced `ladderId === null`
+- SOUND.** `app/src/routes/tours.ts:1302-1310`. With no rows armed there is no
+CAS, so the pointer is still `rotation`; every unsent row carries something else,
+so all of them are candidates; the ConditionCheck passes because the rotation is
+what the tour holds. It restores precisely the coverage the pre-arm sweep gave
+for free, and it is the one cell "if the write won / if the write lost" does not
+name. Also note this now DELETES the old ladder in the case my round-1 N4
+flagged, so N4's "empty, unexplained panel" is reached deliberately rather than
+by omission - unchanged in severity, better understood.
+
+**(c) `conversion_in_progress` ordered BELOW `discontinued` - SOUND for the
+operator.** Verified at `app/src/routes/tourReminders.ts:783-799` and
+`dashboard/src/routes/contact/ScheduledCard.tsx:82-90`: it sits below the two
+PERMANENT reasons and above the evaluator and `paused`. Both halves are right. A
+temporary reason must not mask a permanent one, or the chip flips from
+"On hold" to "No longer sent" minutes later and the first reading was a lie.
+And it must outrank the evaluator, because the poll defers this rung unclaimed
+whatever the recipient's opt-out or quiet-hours state - an estimate there would
+describe a send nobody is attempting. The obvious reading the adjudication
+invited (straight after `superseded`) would have been wrong; imprecision 3 is
+correctly called.
+
+## 4. Round-2 verdicts against the fixed code
+
+| # | verdict | evidence |
+| --- | --- | --- |
+| NEW-1 (MAJOR) | **CLOSED** | Both ownership reads deleted (`routes/tours.ts`, `routes/placements.ts:810-818`); the guard is now server-side inside the transaction, so there is no read to be stale. The one surviving read-your-own-write - the CAS-loser response re-read - takes `{ consistentRead: true }` (`routes/tours.ts:1298`), backed by the new opt-in at `repos/toursRepo.ts:325-334`. My round-2 probe (serve the post-patch read stale once) can no longer reach a wrong branch: nothing branches on that read. |
+| NEW-2 (MINOR) | **CLOSED** | `conversionClaimedAt` written beside the sentinel by `claimConversion` (`repos/toursRepo.ts:477-490`), removed with it by `releaseConversionClaim` (`:502-514`), mirrored in the fake (`twilioWebhookHarness.ts:2895,2907`), consumed at `jobs/tourReminders.ts:369`. `updatedAt` no longer extends the window. Residue: R3-4. |
+| NEW-3 (MINOR) | **CLOSED** | All four sites now short-circuit; census above. |
+| NEW-4 (MINOR) | **CLOSED** | `patchedStatus !== currentStatus` (`routes/tours.ts:1214-1220`) - a repeat `{status:'canceled'}` no longer rotates or sweeps, so the pre-migration terminal tour's legacy rungs survive both doors. |
+| NEW-5 (NOTE) | **CLOSED** | The loser branch's re-read is consistent; the branch that overwrote `tour` from an unvalidated read is gone entirely. |
+| NEW-6 (NOTE) | **CLOSED (moot)** | Both added reads were removed. Net store traffic on the re-arm path is now BELOW @9af87a2c and equal to @65c19506, with the guarantee actually delivered. |
+| C1 | **CLOSED** | There is no residual ownership-read-to-sweep window, because there is no ownership read. The thing I declined to accept no longer exists. |
+| C2 | **upheld** | See deviation (a) - and the adjudication has now been imprecise in the implementer's favour twice on this same fix. |
+| C3 | **CLOSED** | Both halves resolved together, as asked: the cap is real again (NEW-2) and the surfaces annotate rather than promise (NEW-3). M1's preview residue is no longer an accepted residue at all. |
+| C4 | **CLOSED** | See NEW-4. |
+
+No round-1 or round-2 finding remains open. The single item I would still gate
+on is R3-1: the branch's central data-loss defence is, today, argued rather than
+tested.

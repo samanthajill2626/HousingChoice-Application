@@ -454,3 +454,179 @@ Also verified closed, from the adversarial list: m3 (the canceled matrix
 `day_before` row is gone, `app/src/lib/seed/matrix.ts:1041-1050`, with the
 row-side coherence invariant added) and m4 (retire-script comments,
 `e2e/support/selectors.md`, both issue docs).
+
+---
+
+# Round 3 - re-review of fix wave 2 (@445b6b28)
+
+Contract: the re-amended spec 3.2 (steps 1-4, transactional sweep, terminal
+TRANSITION) and 3.3 (`conversionClaimedAt`, `conversion_in_progress` on all
+three preview surfaces), plus `code-review-adjudications-r2.md`.
+
+Verification, single-file runs only (the adversarial reviewer is live in this
+worktree): `npx vitest run test/tourReminders.test.ts` -> 143/143 green, which
+is the file carrying the DynamoDB-Local exercises of the real
+`TransactWriteItems` sweep (rotating pointer mid-sweep, racing claim,
+non-cancellation errors). Two throwaway probes were written to re-run my R2-1
+and R2-2 reproductions and have been DELETED.
+
+**Counts: 0 NEW BLOCKING, 0 NEW MAJOR, 0 NEW MINOR, 1 NEW NOTE. R2-1 CLOSED
+(probe-verified), R2-2 CLOSED (probe-verified), R2-3 CLOSED, R2-4 STILL-OPEN
+(NOTE, no action recommended). Amended acceptance 8: DELIVERED. All three
+implementer deviations are within the spec's words or its plain intent - none is
+drift.**
+
+The design moved in the right direction and it is worth saying why: a
+check-then-act ownership read was the wrong tool and failed twice for two
+unrelated reasons (an eventually consistent GetItem; a caller that never got the
+guard). Replacing it with a store-enforced condition removes the whole class
+rather than the two instances. My R2-1 finding asked for a third copy of the
+guard; the fix wave correctly declined that and made the guard unnecessary.
+
+## 1. Conformance of the new code to amended 3.2 / 3.3
+
+**Amended 3.2 steps 1-4 - CONFORMS**, clause by clause, at
+`app/src/routes/tours.ts:1252-1352`:
+
+| step | shipped | verdict |
+| --- | --- | --- |
+| 1 rotate, riding the patch | `:1220` unchanged (`patch['currentLadderId'] = rotation`) | CONFORMS |
+| 2 arm | `:1268-1273`, moved above the sweep | CONFORMS |
+| 3 CAS, loser reads CONSISTENTLY | `:1284` `setLadderIdIf`; loser logs at error and re-reads at `:1301` with `{ consistentRead: true }` | CONFORMS |
+| 4 sweep IF WON, transactional, expected = the ladder just pointed at; current-ladder rows excluded; IF LOST no sweep | `sweepPointer` set only on the win (`:1291`) and on the no-rows cell; sweep at `:1338`; candidate filter `r.ladderId !== expectedPointer` at `app/src/repos/tourRemindersRepo.ts:509-511`; the loser's branch never assigns `sweepPointer` | CONFORMS |
+
+The transaction itself (`tourRemindersRepo.ts:516-546`) pairs a `ConditionCheck`
+on the TOUR's `currentLadderId` at TransactItems[0] with the guarded `Delete` at
+[1], and the cancellation handling reads `CancellationReasons` POSITIONALLY -
+[0] means a newer generation owns the tour (log info, `break`), [1] means the row
+was claimed mid-sweep (log debug, `continue`), anything else logs at error and
+continues. That positional dependence is real and is called out in the code
+comment; it is correct as written.
+
+I also checked the deployment half, because a store-enforced guard is exactly the
+thing that passes every local gate and fails in prod on permissions:
+`TransactWriteItems` needs `dynamodb:ConditionCheckItem` on the TOURS table, and
+`infra/modules/ec2/main.tf:55` already grants it across all nine stack tables
+plus their indexes. No Terraform change is owed.
+
+**Terminal branch - CONFORMS to the amended wording exactly.**
+`app/src/routes/tours.ts:1213-1218` is
+`patchedStatus !== currentStatus && (patchedStatus === 'canceled' || ... )` -
+"an explicit terminal `status` the tour does NOT already hold", both halves. The
+sweep is the same transactional machinery with the rotation as the expected
+pointer (`:1373`), wrapped in try/catch with a `log.error` naming the tourId and
+a rethrow, and the stale "Same no-try/catch posture as the re-arm branch"
+comment I flagged in R2-1 is gone.
+
+**Conversion - CONFORMS.** `app/src/routes/placements.ts:810` passes
+`rotatedLadderId` into the sweep inside the existing best-effort try/catch; the
+eventually consistent ownership read that stood there is removed. The 201 still
+stands on any sweep outcome.
+
+**Amended acceptance 8 - DELIVERED.** I re-ran my round-2 reproduction (park a
+terminal `PATCH {status:'canceled'}` between its patch write and its sweep; let a
+revival `PATCH {scheduledAt}` complete underneath). Round 2 measured
+`rowsLeft=0`; at this commit it measures:
+
+```
+R2-1 PROBE status=scheduled pointer=dc58ef9c-... winner=dc58ef9c-... rowsLeft=3
+```
+
+The winner's three rows survive, by identity, and the pointer names them. The
+guarantee is now stronger than the amendment's own words: because the condition
+rides each delete atomically, there is no residual window left to accept, and
+the amendment correctly deleted the paragraph that used to name one.
+
+**3.3 `conversionClaimedAt` - CONFORMS.** `claimConversion` writes the stamp on
+the same conditional update as the sentinel (`app/src/repos/toursRepo.ts:477-491`)
+and `releaseConversionClaim` REMOVEs both (`:502-514`), so a stamp can never
+outlive the claim it describes. `conversionClaimExpired`
+(`app/src/jobs/tourReminders.ts:350-372`) measures from
+`max(dueAt, conversionClaimedAt ?? updatedAt)`. The fallback is right and its
+scope is stated at the site: it covers a claim written before the stamp existed -
+an in-flight conversion across the deploy - and nothing else. This closes my own
+round-1 F2 properly, which the first fix did not: `updatedAt` is
+last-touched-by-anything, so a tour edited more than once an hour made a STALLED
+claim immortal, which is the unbounded deferral in a new costume.
+
+**Send-now hidden, refetch delay not skipping - both CONFORM.**
+`dashboard/src/routes/tours/RemindersPanel.tsx:467-469` adds
+`conversion_in_progress` to the Send-now gate (the server answers 409, so the
+button's only possible answer is a refusal). `nextReminderRefetchDelay`
+(`:73-79`, `:99-101`) deliberately does NOT skip it - only `discontinued` and
+`superseded` are skipped - which is the correct reading: those two are permanent
+and this one resolves, and skipping it would leave "Converting" on screen after
+the conversion landed. This is the trap the charge names and the code avoids it
+with a comment saying why.
+
+## 2. The implementer's three deviations
+
+| # | deviation | verdict |
+| --- | --- | --- |
+| 1 | `ladderId === null` (the arm wrote no rows) sweeps against `rotation` | **Within the spec's INTENT; outside its words.** See R3-1 - the only new NOTE. |
+| 2 | `conversion_in_progress` ordered BELOW `discontinued`, not "straight after `superseded`" | **Within the spec's words - and the better call.** 3.3 fixes no position. The suppression module's stated ladder is that the harder reason wins (`app/src/services/scheduledSendSuppression.ts:1-25`), and this is the only temporary member of the set: a chip reading "Converting" over a rung whose KIND will never send again would flip to the permanent truth minutes later. All four sites order it identically (`routes/tourReminders.ts:781-793`, `contactTimeline.ts:1053-1057`, `relayGroups.ts:364-374`, and the panel chip at `RemindersPanel.tsx:167-176`), which is the property that actually matters. Not drift. |
+| 3 | "R2-1 is closed by fix 1, not by fix 2" | **Correct, and I verified it independently.** My probe passes because `deleteSupersededForTour` re-checks the pointer per row - fix 1's contract - and the terminal branch's ordering never changed. The reordering is right for its own reasons (it is what removes the reads), but it is not what closes R2-1, and the regression test cannot tell the two apart. Volunteering that a test proves less than it appears to is the behaviour I want to see in these reports, not a deviation to hold against it. |
+
+### R3-1 - NEW, NOTE - the "arm produced no rows" cell is unspecified, and the code fills it correctly
+
+`app/src/routes/tours.ts:1304-1313`, spec 3.2 step 4
+
+Amended step 4 is written as a dichotomy - "IF the write WON: sweep ... IF the
+write LOST: no sweep" - and there is a third cell: `ladderId === null`, where no
+pointer write is attempted at all. The implementer sweeps against `rotation`,
+which the tour is already holding from step 1 and which no row carries, so the
+candidate filter excludes nothing and the ConditionCheck still refuses the sweep
+if a concurrent writer has rotated since. I traced it and it is right in both
+directions: safe (the guard is intact), and necessary (without it a re-arm that
+arms nothing would leave the old ladder alive - the one case the old pre-arm
+ordering covered for free, and a silent regression if it had been missed).
+
+The code is not the problem; the spec is. Step 4 should name the cell in a
+clause - "when the arm produced no rows the rotation is final and is what this
+request sweeps for" - so the next implementer does not have to re-derive it, and
+so a future reader cannot read the dichotomy as exhaustive and delete the branch.
+Documentation only.
+
+## 3. R2-1..R2-4 verdicts
+
+| # | verdict | evidence |
+| --- | --- | --- |
+| R2-1 (BLOCKING) - terminal sweep ungated | **CLOSED** | `app/src/routes/tours.ts:1373` passes `rotation` into the transactional sweep, inside try/catch with a `log.error` and a rethrow. Probe-verified above: `rowsLeft=3`, pointer names the winner, where round 2 measured `rowsLeft=0` and zero logs. The stale `:1343` comment is gone. |
+| R2-2 (MINOR) - repeat terminal status still swept | **CLOSED** | `:1213-1218` `patchedStatus !== currentStatus`. Probe: a repeat `PATCH {status:'toured'}` on a pre-migration `toured` tour holding a legacy `canceledAt` rung leaves the row present and the pointer ABSENT (`rowStillThere=true pointer=undefined`). The spec was amended to match ("a terminal `status` the tour does NOT already hold"), so wording and code now agree. |
+| R2-3 (CHALLENGE) - fix-wave-1's "harmless" claim was false | **CLOSED** | The claim is retired by the fix rather than defended: the code now implements the tighter rule and the amended spec states it. `fixwave-2.md`'s own "Where the adjudication was imprecise" section does not repeat it. |
+| R2-4 (NOTE) - superseded echo sends `body: ''` | **STILL-OPEN, no action recommended** | Unchanged at `app/src/routes/tourReminders.ts:460` and `:541`. Still unreachable (both client handlers refetch rather than render the echo), and `viewOf` requires a `string`, so omitting is not free. Carrying it forward as recorded residue is the right call; I am not asking for a fix. |
+
+## 4. The `conversion_in_progress` census
+
+Round 2 covered the SEND-NOW half (`ForceSendRefusal` + `SEND_NOW_ERROR_COPY`).
+Fix wave 2 added the SUPPRESSION half, which is the wider one because
+`ScheduledSuppressionReason` feeds three exhaustive maps. Walked independently:
+
+**Forced (a missing entry fails typecheck) - all three present:**
+- `REMINDER_SUPPRESSION_LABELS` - `dashboard/src/api/types.ts:1370-1373`
+- `ScheduledCard`'s `SUPPRESSION_COPY` - `dashboard/src/routes/contact/ScheduledCard.tsx:42-47`
+- `DeadlinesNudgesCard`'s `NUDGE_SUPPRESSION_LABELS` - `dashboard/src/routes/placements/DeadlinesNudgesCard.tsx:84-89`, compile-completeness only with no chip branch, matching the `superseded` precedent directly above it.
+
+**Unforced (green proves nothing) - all present, each with an assertion:**
+- app union + head comment - `app/src/services/scheduledSendSuppression.ts:15-26`
+- dashboard hand-mirrored union - `dashboard/src/api/types.ts:1165-1172`
+- `suppressionLead` -> `'On hold'` - `types.ts:1217`
+- `types.test.ts` `SUPPRESSION_REASONS` hand-list (two-sided exact-set) - `:196`
+- `ScheduledCard.scheduledLabel` -> `'On hold'` above the fire-time fall-through - `ScheduledCard.tsx:83`
+- `RemindersPanel` `StateChip` -> `'Converting'`, in the `upcoming` tone rather than the muted `paused` tone the two permanent chips take - `RemindersPanel.tsx:167-176`
+- `RemindersPanel` Send-now gate - `:467-469`
+- `nextReminderRefetchDelay` NOT skipping it - `:73-79`
+- all three preview surfaces short-circuit on the `pending:` PREFIX using the tour already in hand, no new read - `routes/tourReminders.ts:716-727` (hoisted once per request, not per row), `contactTimeline.ts:1053-1057`, `relayGroups.ts:364-374`
+
+**Deliberately absent, and correctly so:** `ReminderSkipReason` (the poll defers,
+it never stamps), `PERMANENT_REFUSALS` (the state resolves), and the `next`
+exclusion at `routes/tourReminders.ts:895-897` - which excludes only
+`discontinued` and `superseded`. That last one is a judgement call the report does
+not name: a conversion-in-flight rung stays eligible for the "Next" tag, so the
+panel can show "Next" beside a "Converting" chip. I think that is right on the
+same temporary-vs-permanent argument the rest of the wave uses - the rung really
+is the next one due once the claim resolves - and I raise it only so the choice is
+on the record rather than inferred.
+
+Nothing outside the round-1 census map turned up. The `earlier[]` projection needs
+no entry: an earlier rung is `superseded`, which outranks this everywhere.

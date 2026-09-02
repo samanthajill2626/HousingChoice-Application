@@ -93,7 +93,10 @@ because this path has no sweep.
    and its own sweep is responsible; a delete-condition cancellation (the row
    was claimed mid-sweep) skips that row and continues. No interleaving can
    delete a row while the pointer names another generation. IF the write LOST:
-   no sweep.
+   no sweep. IF the arm produced NO rows (`ladderId` null - no pointer write is
+   attempted): sweep against the step-1 rotation anyway, or a re-arm that arms
+   nothing would leave the old generation alive; the pointer deliberately
+   matches nothing, which is the no-live-ladder state (D3).
 
 **Terminal transitions** (`canceled` / `closed` / `toured` / `no_show`) rotate
 (step 1) then sweep transactionally against the rotation (step 4's machinery,

@@ -23,9 +23,11 @@ first.** This plan argues from it and does not restate its reasoning; where a st
 says "per D<n>", that decision carries the reasoning and the counter-arguments
 already rejected.
 
-Revision 4, after plan review rounds 1 (two reviewers, 42 findings), 2 (12
-findings) and 3 (7 findings, one changing a decision). Adjudications:
-`docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/plan-r1-adjudications.md`.
+Revision 5 (final), after plan review rounds 1 (two reviewers, 42 findings), 2 (12
+findings), 3 (7 findings) and 4 (5 findings, two one-instruction fixes and no
+citation that would stop a builder - the terminal round). Adjudications:
+`docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/plan-r1-adjudications.md`
+and its `plan-r2-`, `plan-r3-` and `plan-r4-` siblings.
 
 ## Global Constraints
 
@@ -1386,8 +1388,10 @@ The order is load-bearing and each line answers a review finding:
    `MessageTransportIntent` (`relayFanOut.ts:957-959`) that the fan-out COMPUTES
    via `adapter.classifyMessageTransport` (`:974-978`) and never stores - and
    `row.requested_transport` is undefined on an inbound retry row by D2, so
-   reading it is not the answer either. The retry job classifies afresh from the
-   retry row's own type and media, exactly as the fan-out does for a source.
+   reading it is not the answer either. The retry job classifies afresh via
+   `adapter.classifyMessageTransport({ hasForwardableMedia })` - that is its whole
+   input (`relayFanOut.ts:974-978`), not the message type - exactly as the fan-out
+   does for a source.
 4. Gates in order: group still open; member still on the roster;
    `relayRetryDigest(rootTsMsgId, member.phone)` still equals
    `row.relay_retry_dest_digest`; member not suppressed (`isMemberSuppressed`,
@@ -1579,6 +1583,17 @@ it('does not re-escalate on any rung of the ladder', async () => {
   for (let i = 0; i < 5; i += 1) await postFailureForLatestAttempt();
   expect(flagPlacementAttentionSpy).toHaveBeenCalledTimes(1);
 });
+
+// THE test that separates the right discriminator from a plausible wrong one.
+// "Skip when any retry row exists in this conversation" passes both tests above
+// and silently swallows a SECOND member's failure - a different tenant, never
+// escalated to a human. The discriminator is the SOURCE ROW, not the thread.
+it('still escalates a different member failing mid-ladder', async () => {
+  await postStatus(failure);                       // member A, rung 0
+  await postFailureForLatestAttempt();             // member A, rung 1
+  await postStatus({ ...failure, MessageSid: memberBLegSid, To: memberBPhone });
+  expect(flagPlacementAttentionSpy).toHaveBeenCalledTimes(2);
+});
 ```
 
 - [ ] **Step 2: Run and watch them fail**
@@ -1588,8 +1603,18 @@ Expected: FAIL - no retry rows are ever created.
 
 - [ ] **Step 3: Implement the claim**
 
-Inside `handleRelayRecipientStatus`, after the existing slot write and before the
-`return`:
+**Where the block sits is a correctness question, not a style one.** The span
+between the slot write and the `return` also contains the failure-marker log
+(`:2500-2511`), the SSE emit (`:2512-2521`) and the placement escalation
+(`:2522-2528`). A claim block full of early `return`s dropped in there would skip
+all three on four different exits - and the `fenced_announcement` exit would stop
+an announcement leg escalating on a placement-linked thread, which it does today.
+No test in this plan could see it.
+
+So: **compute the claim outcome in a helper that RETURNS a `retryClaim` value, and
+let control fall through to the existing tail.** No `return` inside the claim
+logic. The tail then reads that value for its severity (Task 13) and its
+escalation condition. The steps below are the helper's logic, not early exits:
 
 1. Skip unless `ErrorCode === '30003'` and `mapped` is a failure.
 2. `getByTsMsgIdConsistent` (Task 2) for the source. Absent - log
@@ -1609,10 +1634,17 @@ Inside `handleRelayRecipientStatus`, after the existing slot write and before th
    the terminal ERROR (D14).
 9. Emit `message.persisted` for the ROOT (D16).
 10. Skip `flagPlacementAttention` (`:2526`) when the source row is itself a retry
-    row (`relay_retry_of !== undefined`). The root's own callback still escalates
-    at exactly the moment it does today; the rungs no longer reset the triage
-    clock. See the two tests above for why neither deferring it nor leaving it
-    untouched is correct.
+    row. Read it from the `source` already fetched at `:2449` - NOT from the
+    claim block's consistent re-read, which only runs on the 30003 path while the
+    escalation also fires for 30005, 30007, 21610 and a code-less `canceled`.
+
+    Two properties make that safe and both are worth knowing: a read miss leaves
+    `source` undefined, so the condition is false and the leg still escalates -
+    it fails OPEN, toward escalating; and `relay_retry_of` is written at append
+    time, so an eventually-consistent read cannot lose it on a row old enough to
+    have a delivery callback. The condition is also false for every row that
+    predates this branch, since Task 1 creates the field - so "unchanged for
+    everything shipped today" is structural, not empirical.
 
 - [ ] **Step 4: Run and watch them pass**
 
@@ -1870,8 +1902,10 @@ not depend on reading the task list carefully: **before Task 12 no retry row
 exists anywhere**, so every display task is provably inert - its tests construct
 rows by hand, and production has none to render.
 
-The BRANCH is a different matter and the claim does not extend to it: the pinning
-e2e still asserts `delivered 1/2 - 1 failed` until Task 14 renames and rewrites
-it, so gate 4 is red from Task 8 until then. That is not fixable by ordering - the
-spec it pins and the presenter it tests cannot both be right mid-branch - so run
-gate 4 at Task 14 and at the end, not between.
+The BRANCH is a narrower matter than it first looks. The pinning e2e stays GREEN
+through Task 11: no retry rows exist yet, so the projection is the identity
+function and the presenter still emits today's strings. It goes red only at
+Task 12, when the first retry row appears, and is restored at Task 14 when the
+spec is rewritten. **Run gate 4 normally through Task 11** - blanking e2e coverage
+across the whole display rewrite would be its own defect, and that rewrite touches
+a presenter shared with two fenced products. Expect red at Tasks 12 and 13 only.

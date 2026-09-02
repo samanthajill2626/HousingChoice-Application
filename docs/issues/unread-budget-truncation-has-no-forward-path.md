@@ -19,8 +19,8 @@ the remaining fix were all stale, and are corrected IN PLACE below.
 RETITLED in the same pass. The old title, "A truncated unread badge renders
 nothing (half fixed - the page now pages)", led with the half that is CLOSED and
 buried the half that is open, which is the exact failure this re-adjudication
-exists to stop - `_CLUSTERS.md` already records the lesson that a stale issue
-TITLE is load-bearing because every triage pass reads titles first. The `id`,
+exists to stop - a stale issue TITLE is load-bearing, because every triage pass
+reads titles first. The `id`,
 filename and slug are UNCHANGED, so every inbound link still resolves.
 
 This issue is now ONE SLICE with

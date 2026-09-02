@@ -192,3 +192,108 @@ sighting exactly which two fields settle it.
 `feat/npm-test-soundness`, UNMERGED (human gate). Gates 1/2/3/5 green on
 `2fdb0dd8`; gate 4 green on `b4ba463a` and exempt for this wave. No infra, no
 post-merge ops. Cleanup only on your explicit go.**
+
+---
+
+# Addendum 2: the planner's FINAL verdict (2026-09-01, 23:04 EDT)
+
+Written after a planner review, a fix wave, a re-review, four
+mutation-tested pins, a SECOND `main` sync and a human decision - all of
+which landed after the text above.
+
+**MERGE-READY at `11f1c031`. All five gates re-run BY THE PLANNER on the
+final merged tree. UNMERGED (human gate). No infra, no deploys, no
+post-merge ops owed.**
+
+## Gates - final tree, bare, from the worktree
+
+| gate | exit | evidence |
+|---|---|---|
+| 1 `npm run typecheck` | **0** | all five workspaces |
+| 2 `npm test` | **0** | **352 files / 6504 tests**, 0 failing, 0 skipped (dashboard 183/2891, e2e 19/492, fake-twilio 34/240, fake-twilio-web 13/111) |
+| 3 `npm run smoke` | **0** | `smoke-dist: OK - 1374 import specifier(s) across 242 emitted file(s)` |
+| 4 `npm run e2e` | **0** | **264 passed (20.9m)**, lane 11, no orphaned listeners |
+| 5 `npx eslint <6 touched .ts files>` | **0** | merge-base baseline also clean |
+
+## Second main sync, and drift
+
+`bd29a248` merged main at `fa26ae76` - **108 commits**, including M1, M5 and
+`fix/quiet-hours-spec-window`. Conflict surface was ONE file,
+`docs/issues/_CLUSTERS.md`: auto-merged, then adjudicated by reading both
+sides (M7's supersession text and main's other bundles both intact). No
+dependency changes, so no reinstall.
+
+**Drift since: 3 commits** (`f88e25da`, `02483bbd`, `2362e0c6`), all
+documentation, **zero intersection with this branch's files**. Reported, not
+chased.
+
+## The one red gate, and why it was not this branch
+
+Gate 4 failed once - 260 passed, 2 failed - and earned a diagnosis rather
+than a re-run. `quiet-hours.spec.ts:398` failed DETERMINISTICALLY and
+reproduced in isolation: `windowAroundNow()` stores a now +/- 2h window
+while the `day_before` rung fires at a FIXED 19:30 org-local, so asserting
+the quiet-hours note ABSENT is a coin flip that lands tails whenever the
+suite runs between 17:30 and 21:30 America/New_York. The spec's own comment
+describes that mechanism and draws the opposite conclusion. Not this branch:
+the diff contains zero `e2e/` files. **Fixed at its root on main by
+`27aad814`, now merged here.** `voice-transcription.spec.ts:252` passed in
+isolation and in both later full runs.
+
+Natural experiment, same tree: 262/262 at 15:54 (outside the window), 260/2
+at 20:28 (inside), 262/262 at 22:0x (outside), 264/264 after the merge.
+
+## Four pins, each MUTATION-TESTED
+
+Break the behaviour, watch the named case go red, restore. Before these, all
+four mutations left the entire suite green.
+
+| pin | mutation | result |
+|---|---|---|
+| case 18 zero-`DescribeTable` | drop `retried &&` from the delete guard | red |
+| case 26 (new) | replace the not-found check with a bare `return` | red |
+| case 27 (new) | move the endpoint gate below the verify block | red |
+| case 28 (new) | drop the `cause` assignment | red |
+
+## 30s ceilings and observability (human decision, `11f1c031`)
+
+Both poll ceilings 10s -> **30s**: the 10s argument assumed an idle box, and
+this box runs three or four agents against one container. **Not 60s**, and
+the code says why - `hookTimeout` is 60_000 and every caller sits in a
+`beforeAll`, so 60s lets the HOOK expire first and replaces a precise error
+with `Hook timed out in 60000ms`. Past 30s means raising `hookTimeout` for
+all ~50 suites, deliberately.
+
+Three `console.warn` sites, because the retry had been silent and "how often
+does this fire?" was unanswerable. **Measured on the first instrumented run:
+31 lines, every one from the stub acceptance suite, ZERO from real suites.**
+The suite now stubs `console.warn` - not tidiness: with it quiet, ANY
+`[dynamoAdmin]` line in `npm test` output is a real suite hitting a real
+container fault, which is the first recorded sighting this issue has ever
+had a way to capture. Both final gate runs: zero lines.
+
+## Open items (none blocking merge)
+
+1. **The anchor stays OPEN**, exactly as the spec predicted before any code
+   was written. Reopen condition unchanged.
+2. **Unverified, now cheap to settle**: whether DynamoDB Local answers these
+   faults with an HTTP 5xx. If so, the SDK's own transient retry (3 attempts
+   on 500/502/503/504) nests under ours and the deadline arithmetic is off
+   by ~3x. The anchor asks the next sighting to record
+   `$metadata.httpStatusCode` and `attempts`; the new warns are what will
+   tell anyone a sighting happened.
+3. **Also unverified**: whether the retried-DELETING path is reachable at
+   all. If the container's `DeleteTable` is synchronous, the re-send draws
+   not-found and `pollUntilTableGone` never runs.
+4. **Known sharp edge, by design**: `dynamoAccessKeyGuard` walks `app/test`
+   on disk, so an untracked scratch `*.test.ts` naming `ensureTable` reds
+   gate 2. Gate 2 needs a scratch-free tree.
+
+## Merge
+
+```
+git -C "w:/AI Projects/Housing Choice/HC Application" merge --no-ff feat/npm-test-soundness
+```
+
+**UNMERGED (human gate).** Worktree left at the final commit; cleanup only
+on explicit go.

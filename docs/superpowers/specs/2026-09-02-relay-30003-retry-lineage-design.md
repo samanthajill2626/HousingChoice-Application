@@ -527,12 +527,15 @@ Two consequences of that clause, both of which must be honored:
   the thread level, over all items including the hidden retry rows, and passed
   down - which is also where D20's own filter lives. D19's projection consumes
   that same thread-level result rather than re-deriving it.
-- **It adds a FIFTH non-termination to a predicate whose docblock enumerates
-  four** (`Timeline.tsx:788-812`, run-condition doc at `:1801-1815`). That
-  docblock is the record of four shipped bugs on this exact axis. The new clause
-  must terminate - a retry state resolves to `delivered-on-retry`, `terminal` or
-  `unconfirmed` in bounded time - and the docblock must be extended to say so,
-  not left describing four.
+- **It adds a clause to a predicate that carries TWO counts, and both move.**
+  `hasTickableLeg`'s docblock says "FIVE clauses carry that mirror" and
+  enumerates them (`Timeline.tsx:~770-797`); the run-condition comment at
+  `:1806` separately says "the four non-terminations that predicate closes".
+  They count different things and a builder must update both rather than
+  assuming one number. The new clause must itself TERMINATE - a retry state
+  resolves to `delivered-on-retry`, `terminal` or `unconfirmed` in bounded time -
+  and that termination is its own test intention, distinct from asserting that
+  `unconfirmed` eventually appears.
 
 **D19. The four end states, with the arithmetic stated.** `failed > 0` is the
 FIRST branch (`deliveryStatus.ts:416`), so without explicit arithmetic every
@@ -576,7 +579,8 @@ anything outside it (`deliveryStatus.ts:128-141`), so an overloaded
 on `retryState` explicitly; `status` keeps only values the union already admits.
 
 **Projecting once is not a convenience.** The original's failure reason is
-derived INDEPENDENTLY in FOUR places - the rollup
+derived INDEPENDENTLY in FIVE places. Four of them must consume the projection:
+the rollup
 chip's own reason (`deliveryStatus.ts:420-427`), the rollup's accessible name
 (`Timeline.tsx:959-968`, recomputing per row at `:593-597`), the inbound recital
 (`:993-1004`), and the per-recipient row (`:1112-1115`) - three of which read `row.slot.errorCode`
@@ -584,6 +588,13 @@ directly, and all of which render a reason only when `presentLegDelivery` return
 `isFailure: true` (`deliveryStatus.ts:508-545`). So a projected state must move
 BOTH the code and the failure-ness, and for `retrying` and `delivered-on-retry`
 the failure-ness moves the other way.
+
+The FIFTH site is the message-level chip's accessible name
+(`Timeline.tsx:978-989`). It is INERT for every retry state - it reads
+`msg.error_code`, which a relay source never carries because the relay path
+writes SLOTS only - and Sec 5 keeps the message-level chip excluded. It is named
+here rather than omitted so a builder auditing the five call sites does not find
+an unexplained one and "fix" it into the projection.
 
 Patch the rollup alone and the recital and the row keep reciting
 `Undelivered - Phone unreachable (error 30003)` beside a chip that says otherwise -

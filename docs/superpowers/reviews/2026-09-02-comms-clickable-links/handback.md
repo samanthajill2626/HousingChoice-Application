@@ -7,7 +7,7 @@
 | S1 | Shipped `LinkifiedText`, using exact `autolinker@4.1.5` parse matches and a final safe HTTP(S) destination check. The renderer produces React text and anchors, never parser HTML. It keeps source punctuation and full URL destinations, maps bare public domains and protocol-relative targets to HTTPS, rejects unsafe schemes, bare local hosts, single-label hosts, and fuzzy IPs. |
 | S2 | Shipped body linkification for Timeline SMS, MMS, Relay, native-group, and email content. Sender attribution and non-interactive email preview rows remain intact. A clipped URL snippet keeps its full anchor destination; whitespace-only clipped content renders as `...`. |
 | S3 | Shipped linkification only in the opened unmatched-email body. Closed rows remain non-interactive and cannot contain nested anchors. |
-| E1 | Added the real-browser communications-links E2E proof, covering anchor behavior, punctuation, a popup non-opening assertion, and message-bubble behavior. The focused E1 test passed. |
+| E1 | Added the real-browser communications-links E2E proof, covering anchor behavior, punctuation, popup navigation, and message-bubble behavior. The focused E1 test passed. |
 | E2 | Completed dependency proof, focused proof, review/fix/re-review, hermetic self-QA, main synchronization, and final gate adjudication. |
 
 ## Parser and dependency decision

@@ -1,6 +1,6 @@
 # Clickable links in communications - design specification
 
-Status: v7 - REVISED after Autolinker API re-review; pending re-review
+Status: v7 - APPROVED after Autolinker public-API re-review
 Date: 2026-09-02
 Revised: 2026-09-02
 Branch: `feat/comms-clickable-links`

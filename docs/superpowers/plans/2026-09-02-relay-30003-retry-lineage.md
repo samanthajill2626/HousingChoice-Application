@@ -29,6 +29,14 @@ citation that would stop a builder - the terminal round). Adjudications:
 `docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/plan-r1-adjudications.md`
 and its `plan-r2-`, `plan-r3-` and `plan-r4-` siblings.
 
+**Build-phase corrections (2026-09-02, read WITH this plan):** the pre-build
+research pass found 27 places where the live tree contradicts a plan mechanic
+(no spec decision changes). The adjudicated deltas - the adapter type Task 3
+needs, the base type Task 6 needs, which process runs the job in the lane, the
+preview argument of the bump, the `retryClaim` vocabulary - are in
+`docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/research-adjudications.md`.
+Where that file and a task below disagree, the adjudication wins.
+
 ## Global Constraints
 
 - **Gates, run bare from the worktree** (`W:\tmp\relay-30003-retry-lineage`):

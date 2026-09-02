@@ -1378,6 +1378,19 @@ export interface MessagesRepo {
    */
   getByTsMsgId(conversationId: string, tsMsgId: string): Promise<MessageItem | undefined>;
   /**
+   * The same point-get with ConsistentRead (spec D7/D8) - for a caller that
+   * must read its OWN just-written state, or must not mistake a partition lag
+   * for an absent row. The relay 30003 claim path is the caller: a stale slot
+   * read drops the claim silently and load-dependently, and a lagged miss on a
+   * fail-closed fence loses the retry permanently.
+   *
+   * Deliberately a SECOND method rather than a flag on `getByTsMsgId`: that one
+   * runs on every relay status callback (`webhooks/twilio.ts`) and only needs
+   * `requestedTransport`, so making it consistent would double a hot-path read
+   * to fix a rare one.
+   */
+  getByTsMsgIdConsistent(conversationId: string, tsMsgId: string): Promise<MessageItem | undefined>;
+  /**
    * BATCH point-get for a whole window (up to MAX_TRANSCRIPT_MESSAGES ids),
    * keyed by tsMsgId. Chunked at the BatchGetItem 100-key limit, with an
    * UnprocessedKeys retry. Missing ids are simply absent from the map.
@@ -3035,6 +3048,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       );
       return Item as MessageItem | undefined;
     },
+
+    // D7: the interface half of the private getMessageConsistent six sibling
+    // mutators already use - the SAME closure, never a second GetCommand, so
+    // the two cannot drift apart.
+    getByTsMsgIdConsistent: getMessageConsistent,
 
     async getManyByTsMsgIds(conversationId, tsMsgIds) {
       const out = new Map<string, MessageItem>();

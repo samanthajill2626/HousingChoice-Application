@@ -238,6 +238,7 @@ function makeFakes(
     upgradeCallOutcomeToVoicemail: async () => false,
     listByConversation: async () => [],
     getByTsMsgId: async () => undefined,
+    getByTsMsgIdConsistent: async () => undefined,
     getManyByTsMsgIds: async () => new Map(),
     annotateMessage: async () => {},
     putMediaPointers: async () => {},

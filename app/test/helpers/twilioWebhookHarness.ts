@@ -1283,6 +1283,11 @@ export function createFakeWorld(): FakeWorld {
     async getByTsMsgId(conversationId, tsMsgId) {
       return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
     },
+    // The same in-memory lookup: an array has no eventual consistency to model,
+    // so the fake cannot distinguish the two reads and must not pretend to.
+    async getByTsMsgIdConsistent(conversationId, tsMsgId) {
+      return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+    },
     async getManyByTsMsgIds(conversationId, tsMsgIds) {
       const wanted = new Set(tsMsgIds);
       return new Map(

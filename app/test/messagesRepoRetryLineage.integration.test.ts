@@ -207,6 +207,25 @@ describe.skipIf(!reachable)('relay retry lineage against DynamoDB Local', () => 
     ).resolves.toBeDefined();
   });
 
+  // D7: the claim path re-reads its source CONSISTENTLY. The repo's own
+  // consistent point-get was a PRIVATE closure inside the factory, so the
+  // webhook could not call it; this is that read on the interface.
+  it('exposes a consistent read on the interface', async () => {
+    const res = await messages.append(
+      retryRow({
+        providerSid: relayRetryProviderSid(relayRetryDigest(ROOT, '+15558675315'), 1),
+        providerTs: '2026-09-02T10:09:00.000Z',
+      }),
+    );
+    await expect(messages.getByTsMsgIdConsistent(CONV, res.tsMsgId)).resolves.toMatchObject({
+      tsMsgId: res.tsMsgId,
+      relay_retry_of: ROOT,
+    });
+    await expect(
+      messages.getByTsMsgIdConsistent(CONV, '2026-09-02T10:09:00.000Z#SMabsent'),
+    ).resolves.toBeUndefined();
+  });
+
   // D2, LEGACY original: no transport fields anywhere. Every relay source
   // written before 2026-09-02 is legacy, so this is the ORDINARY case for an
   // old message.

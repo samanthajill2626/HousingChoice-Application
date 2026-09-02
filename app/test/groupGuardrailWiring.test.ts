@@ -23,6 +23,11 @@ import { createGroupRailService } from '../src/services/groupRail.js';
 import { GROUP_CROSSCHECK_LAST_EVENT_AT_ID } from '../src/repos/settingsRepo.js';
 import { GROUP_CROSSCHECK_GRACE_MS } from '../src/repos/messagesRepo.js';
 import { loadConfig } from '../src/lib/config.js';
+import type {
+  GroupMessageTransportIntent,
+  PostGroupMessageInput,
+  PreparedGroupMessagePost,
+} from '../src/adapters/groupConversations.js';
 
 const SMS_PATH = '/webhooks/twilio/sms';
 const CONVERSATIONS_PATH = '/webhooks/twilio/conversations';
@@ -175,6 +180,7 @@ describe('T6.6(b) - the send path ensures a rail inline', () => {
     await signedTwilioPost(app, SMS_PATH, groupParams());
 
     const created: string[] = [];
+    const preparedPosts: PreparedGroupMessagePost[] = [];
     const port = {
       async createConversationWithParticipants(input: { uniqueName: string; members: string[] }) {
         created.push(input.uniqueName);
@@ -190,11 +196,26 @@ describe('T6.6(b) - the send path ensures a rail inline', () => {
       async fetchByUniqueName() {
         return undefined;
       },
-      async postGroupMessage() {
+      classifyGroupMessageTransport(): GroupMessageTransportIntent {
+        return Object.freeze({ requestedTransport: 'mms' });
+      },
+      prepareGroupMessagePost(
+        intent: GroupMessageTransportIntent,
+        input: PostGroupMessageInput,
+      ): PreparedGroupMessagePost {
+        return Object.freeze({ requestedTransport: intent.requestedTransport, input });
+      },
+      async postPreparedGroupMessage(prepared: PreparedGroupMessagePost) {
+        preparedPosts.push(prepared);
         return {
           messageSid: 'IMposted0001',
           dateCreated: '2026-08-11T12:05:00.000Z',
+          actualTransport: 'mms' as const,
         };
+      },
+      async postGroupMessage(input: PostGroupMessageInput) {
+        const intent = this.classifyGroupMessageTransport();
+        return this.postPreparedGroupMessage(this.prepareGroupMessagePost(intent, input));
       },
       async fetchParticipants() {
         return [];
@@ -229,5 +250,18 @@ describe('T6.6(b) - the send path ensures a rail inline', () => {
     // our conversationId), and the thread now carries it.
     expect(created).toEqual([GROUP_ID]);
     expect(world.conversations.get(GROUP_ID)?.twilio_conversation_sid).toBe(RAIL);
+    expect(preparedPosts).toEqual([
+      {
+        requestedTransport: 'mms',
+        input: { conversationSid: RAIL, author: '+15550000000', body: 'saturday works' },
+      },
+    ]);
+    expect(world.messages).toContainEqual(
+      expect.objectContaining({
+        transport_schema_version: 1,
+        requested_transport: 'mms',
+        actual_transport: 'mms',
+      }),
+    );
   });
 });

@@ -200,7 +200,7 @@ is a finding for the handback, not a silent decision.
 | 7 | local, `UpdateTimeToLive` `InternalFailure`, re-read THROWS | ORIGINAL error rethrown; NO re-send |
 | 8 | local, **`CreateTable`** throws **`InternalServerError`** (the `waiting for a lock` signature) then ok | retried identically to `InternalFailure` |
 | 9 | local, `DescribeTimeToLive` (the PRE-SEND read) `InternalFailure` then ok | retried |
-| 10 | local, **`UpdateTimeToLive`** always `InternalFailure` | exactly **4** sends, then throws; **hook called 3 times, NOT on the final attempt** (the bound is checked first, matching `db-update-gsis.ts:117`). Must be a hook-bearing send, or the assertion is vacuous |
+| 10 | local, **`UpdateTimeToLive`** always `InternalFailure` | exactly **4** sends, then throws; **hook called 3 times, NOT on the final attempt** (the bound is checked first, matching `db-update-gsis.ts:117`). Must be a hook-bearing send, or the assertion is vacuous. **[SUPERSEDED 2026-09-01 - the hook now runs on the FINAL attempt too, so this row reads "hook called 4 times". See the note under S1.2.]** |
 | 11 | **non-local** endpoint, `InternalFailure` once | throws immediately; `send` called ONCE |
 | 12 | no endpoint provider | same as 11 |
 | 13 | **REAL `DynamoDBClient`** with `{endpoint:'http://localhost:8000'}`, and a second region-only | the predicate says local / not-local. *Proves the `Provider<Endpoint>` assumption against the actual SDK, not against our own stub* |
@@ -261,6 +261,18 @@ half; 3 protects the hot path; 6 is what makes the hook contract real.**
 
   Called **at most once per failed attempt**, never itself retried, and
   **not called at all on the final attempt** - the bound is checked first.
+
+  **[SUPERSEDED 2026-09-01, planner-directed - read this before the rule
+  above.]** The final-attempt exclusion is GONE: the hook now runs on every
+  failed attempt INCLUDING the last, and the bound and the deadline stop
+  RE-SENDS only. A mutation the server accepted on attempt 4 was being
+  reported as failed purely because attempt 4 was the last one - the one
+  failure this module exists to remove, and the same argument the deadline
+  reorder had already accepted one line earlier. The consistency argument
+  this rule rested on (`db-update-gsis.ts:117`) died with the old helper.
+  Cost is one extra read per hooked call on the failure path. Pinned by
+  cases 22 and 25; adjudicated in
+  `<records>/code-review/planner-fix-wave-adjudications.md` row 2.
 - The predicate is DEFINED in `dynamoAdmin.ts` and exported (see above);
   `lib` must not import from `scripts`. It is not a copy of
   `isLocalEndpoint` (URL string vs resolved object).

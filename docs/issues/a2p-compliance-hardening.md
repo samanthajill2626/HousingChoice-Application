@@ -3,10 +3,54 @@ id: a2p-compliance-hardening
 title: A2P/CTIA compliance hardening — opt-in consent capture, first-message disclosures, STOP/HELP replies
 type: security
 severity: high
-status: in-progress
+status: resolved
+resolved: 2026-09-01
 area: app
 created: 2026-06-30
 refs: app/src/routes/public.ts:50, app/src/repos/settingsRepo.ts:59, app/src/routes/webhooks/twilio.ts:66, app/src/services/sendMessage.ts:209, app/src/routes/contacts.ts:609, app/src/lib/mergeFields.ts:25, dashboard/src/routes/public/IntakeForm.tsx, docs/a2p/campaign-resubmission.md
+---
+
+**Resolution (2026-09-01). Closed: the posture is founder-accepted, and most of
+it shipped.** Production went fully live the same day - SMS, relay, voice and AI
+all ON.
+
+Two separate things are being recorded, and they should not be conflated:
+
+**1. What was BUILT.** The bulk of P0 and P1 is in the code:
+
+- Consent gate on the public intake form - `IntakeForm.tsx` carries
+  `WEB_FORM_CONSENT_LABEL` from `lib/consentCopy`, marked `do-not-remove`, and
+  the server enforces it too rather than trusting the client.
+- `hasSmsConsent` gates the proactive paths (`jobs/broadcastFanOut.ts`,
+  `jobs/placementNudges.ts`).
+- STOP-family and HELP are handled as system commands in
+  `routes/webhooks/twilio.ts`, ahead of normal message routing.
+- `requiresOptOut` marks the templates that must carry opt-out language.
+- The documented exemptions below (missed-call auto-text, relay groups) were
+  each adjudicated working-as-designed with a stated consent basis, not skipped.
+
+**2. What was ACCEPTED rather than built.** The founder reviewed this posture and
+approved it as written on multiple occasions - a business decision, taken
+knowingly and repeatedly, not an oversight. Not implemented, and now accepted:
+
+- The P2 consent-report export for carrier audits
+  (`/api/contacts/consent-report`) does not exist. If a carrier ever audits the
+  campaign, consent provenance has to be assembled by hand from
+  `capture_source` / `captured_at` and the contact history.
+- Consent provenance stays partial - no first-class
+  `consent_method` / `consent_timestamp` / `consent_version` on every path;
+  manual staff adds still record nothing on the contact.
+- The residual flagged in the 2026-06-30 decisions - recurring-alert enrollment
+  off a bare inbound, with no forced double opt-in - is accepted as disclosed by
+  the first outbound reply.
+
+**What closing this does NOT mean.** It does not mean the exposures were
+eliminated; it means they were priced and accepted by the person entitled to
+accept them. If the A2P campaign is ever re-filed, challenged, or a carrier
+raises a complaint, reopen this file and read section 2 first - it is the record
+of what we chose not to do and why. `docs/a2p/campaign-resubmission.md` is the
+founder hand-off doc for the re-file.
+
 ---
 
 **Problem.** A2P is approved; before flipping live SMS we audited the messaging

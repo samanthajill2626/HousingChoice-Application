@@ -1,3 +1,14 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-02).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` (merge `7be40139`) and its feature branch + worktree were deleted during worktree
+> cleanup. **This file is NOT current documentation, and the live code may have drifted from
+> it. Do not treat it as authoritative guidance on how the system should be built or how it
+> behaves today.** Its line-number citations were already corrected in places by the mission's
+> merged worklist, which is preserved alongside the rest of the review record at
+> `docs/superpowers/reviews/2026-08-31-participant-snapshot-refresh/`. For current truth read
+> the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`, `AGENTS.md`).
+
 # Participant Names: Resolve on Read - Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

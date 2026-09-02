@@ -236,6 +236,9 @@ function makeFakes(
     listParkedEmailEvents: async () => [],
     deleteParkedEmailEvent: async () => {},
     // Relay groups (M1.7) — unused by the send service:
+    claimFanoutPass: async () => {
+      throw new Error('claimFanoutPass: not used in this suite');
+    },
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,
     putRelaySidPointer: async () => {},

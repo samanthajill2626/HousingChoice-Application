@@ -285,6 +285,10 @@ function makeSendFakes(
     putParkedEmailEvent: async () => {},
     listParkedEmailEvents: async () => [],
     deleteParkedEmailEvent: async () => {},
+    // Relay fan-out ladder (M5) - no fan-out runs in this suite.
+    claimFanoutPass: async () => {
+      throw new Error('claimFanoutPass: not used in this suite');
+    },
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,
     putRelaySidPointer: async () => {},

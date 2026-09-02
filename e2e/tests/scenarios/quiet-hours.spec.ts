@@ -28,14 +28,19 @@
 //     it contains it at ANY wall clock: QUIET_AROUND_DAY_BEFORE. The old trick
 //     ("day_before is ~24h out, so it lands at the same local time of day as
 //     windowAroundNow()") died with the sched-24h offset.
-//   - Test (3) (Send now) needs the WALL CLOCK inside the stored window: the
-//     panel's suppression estimate for an already-due rung and the force-send's
-//     quiet-hours BYPASS are both wall-clock facts, and the test never ticks. It
-//     KEEPS windowAroundNow() (a 4-hour window centred on now, in ORG-local
-//     time, so the host's own timezone is irrelevant). Re-anchoring it to the
-//     rung would leave no window over the wall clock and so nothing for the
-//     bypass to bypass - a vacuous proof at every wall clock outside
-//     17:30-21:30 org-local.
+//   - Test (3) (Send now) needs TWO windows, stored one after the other,
+//     because it proves two different things and no single window serves both.
+//     The PANEL assertions (the rung chipped "Will wait") are about the RUNG's
+//     dueAt, so they run under the rung-anchored QUIET_AROUND_DAY_BEFORE -
+//     deterministic at any hour, like test (2). The force-send BYPASS is a
+//     WALL-CLOCK fact (the test never ticks), so windowAroundNow() (a 4-hour
+//     window centred on now, in ORG-local time, so the host's own timezone is
+//     irrelevant) is stored just before the click. Rung-anchored alone leaves
+//     nothing for the bypass to bypass outside 17:30-21:30 org-local; wall-
+//     clock-anchored alone makes ANY note assertion a coin flip on the hour -
+//     the inverted form of that coin flip failed every evening run between
+//     17:30 and 21:30 org-local
+//     (issue quiet-hours-e2e-fails-inside-its-own-window).
 //   - No tick instant is ever computed host-side. 19:30 is ORG-local and this
 //     host-local file cannot compute it, so BOTH of test (2)'s ticks are derived
 //     from the dueAt the SERVER armed (Scenario.armedReminderDueAt): correct by
@@ -154,9 +159,13 @@ function orgLocalHhMm(at: Date): string {
  * instant 5h later is comfortably OUTSIDE it even if a DST change shifts the
  * org-local clock by an hour. Never zero-length (the API rejects start === end).
  *
- * TEST (3) ONLY since 2026-08-26 (see the timing contract): a quiet-hours BYPASS
- * is provable only while the WALL CLOCK is inside a stored window, so this stays.
- * Test (2) anchors to the RUNG instead - QUIET_AROUND_DAY_BEFORE below.
+ * TEST (3)'s BYPASS ONLY (see the timing contract): a quiet-hours BYPASS is
+ * provable only while the WALL CLOCK is inside a stored window, so this stays -
+ * stored just before the Send-now click, AFTER the panel assertions, which
+ * anchor to the RUNG (QUIET_AROUND_DAY_BEFORE below) like test (2). Never
+ * assert a rung's note while THIS window is stored: whether it covers the
+ * rung's 19:30 depends on the hour the suite runs
+ * (issue quiet-hours-e2e-fails-inside-its-own-window).
  */
 function windowAroundNow(): QuietPatch {
   const base = Date.now();
@@ -403,39 +412,39 @@ test('(3) Send now: a human send goes out immediately, even inside the quiet win
 
   await putQuietHours(request, QUIET_OFF);
   const { tenant } = await bookedSelfGuidedTour(flow, page, 'Sendnow');
-  // WALL-CLOCK anchored, deliberately, and NOT switched to the rung-anchored
-  // window test (2) uses: this test never ticks, and a quiet-hours BYPASS is
-  // only provable while the clock is genuinely inside a stored window. Anchoring
-  // to the rung would leave nothing for Send now to bypass at any hour outside
-  // 17:30-21:30 org-local.
-  await putQuietHours(request, windowAroundNow());
 
+  // Panel proof under the RUNG-anchored window (deterministic at any hour, like
+  // test (2)): the rung is upcoming and honestly chipped "Will wait" - the
+  // panel promises a DEFERRAL, which is exactly what Send now overrides. This
+  // used to assert against windowAroundNow() instead, in both polarities over
+  // time, and each was a coin flip on the hour: the rung sits at a FIXED 19:30
+  // org-local ~1.8 days out, so a wall-clock window covers it only when the
+  // suite runs 17:30-21:30 org-local. Asserting QUIET_NOTE under it failed
+  // OUTSIDE that band (masked by the pause until 2026-08-31); asserting its
+  // absence failed INSIDE it, every evening
+  // (issue quiet-hours-e2e-fails-inside-its-own-window).
+  //
+  // PAUSED_NOTE stays a negative: since 2026-08-31 nothing pauses a tour rung,
+  // and a pause note appearing here would mean the ladder was re-paused
+  // silently.
+  await putQuietHours(request, QUIET_AROUND_DAY_BEFORE);
   await flow.openTourReminders();
   const row = reminderRow(page, 'day_before');
-
-  // NOT the exact inversion of test (2), and deliberately so - read this before
-  // "fixing" it to assert QUIET_NOTE. This test's window is anchored to the WALL
-  // CLOCK, while the day_before rung is ~1.8 days out at a FIXED 19:30 org-local
-  // (tourScheduleFullLadder). The panel's estimate for a FUTURE rung asks
-  // whether the RUNG's own dueAt falls in an occurrence of the stored window, so
-  // windowAroundNow() only covers 19:30 when the suite happens to run between
-  // 17:30 and 21:30 org-local. Asserting QUIET_NOTE here would be a coin flip on
-  // the hour. (Before the 2026-08-26 retiming the rung WAS ~24h out and so
-  // landed at the same local time as the window - that is why this line used to
-  // read QUIET_NOTE; the pause then masked the breakage.) The wall clock IS in
-  // the window, which is all the BYPASS below needs.
-  //
-  // So the panel promises the send, and both suppression notes are absent -
-  // PAUSED_NOTE most of all: since 2026-08-31 nothing pauses a tour rung, and a
-  // pause note appearing here would mean the ladder was re-paused silently.
   await flow.expectReminderRung('day_before', 'upcoming');
+  await expect(row.getByText(QUIET_NOTE)).toBeVisible({ timeout: 15_000 });
   await expect(row.getByText(PAUSED_NOTE)).toHaveCount(0);
-  await expect(row.getByText(QUIET_NOTE)).toHaveCount(0);
+
+  // Now the bypass premise: re-store the window around the WALL CLOCK, so the
+  // click below happens while the clock is genuinely inside the stored window.
+  // No note assertion may follow this line (see the timing contract). The click
+  // needs no reload: the bypass is a SERVER fact, evaluated against the stored
+  // window at send time, not against what the open panel happened to render.
+  await putQuietHours(request, windowAroundNow());
 
   // ...and Send now goes out anyway, with the wall clock inside the stored
-  // window: a human send bypasses quiet hours. That bypass is the whole point of
-  // this test, and it is a wall-clock fact, which is why the window stays
-  // anchored to the clock.
+  // window: a human send bypasses quiet hours. That bypass is the whole point
+  // of this test, and it is a wall-clock fact, which is why it rides
+  // windowAroundNow().
   // Per-rung accessible name (worklist A10) - a bare "Send now" would collide.
   await row.getByRole('button', { name: 'Send the Day before reminder now' }).click();
 

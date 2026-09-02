@@ -554,14 +554,13 @@ export async function describeRoster(
     const reachability: RosterReachability =
       phone === undefined ? 'no_phone' : optedOut ? 'opted_out' : 'reachable';
 
-    // Display-name backfill: a FACT row can carry no name (a pointer at a
-    // non-relay thread, or a row predating name storage) while its contactId
-    // resolves fine - the card and tabs must say "Tina Tenant", never
-    // "Number ending 0301" or a raw id, for a person we positively identified
-    // two paragraphs up. Display only: reachability keeps the STORED phone,
-    // and a removed contact keeps whatever the row itself said.
+    // Display name: the CONTACT's current name first (we read it two
+    // paragraphs up), then whatever the row itself stored. The stored name is
+    // a creation-time snapshot; the card and the tabs must say "Tina Tenant"
+    // today, not on the day the group was made. Display only: reachability
+    // keeps the STORED phone, and a removed contact keeps the row's own name.
     const name =
-      nonEmpty(member.name) ?? (!removed && contact !== undefined ? displayName(contact) : undefined);
+      (!removed && contact !== undefined ? displayName(contact) : undefined) ?? nonEmpty(member.name);
     let sharesPhoneWithName: string | undefined;
     if (phone !== undefined) {
       if (firstOnPhone.has(phone)) {

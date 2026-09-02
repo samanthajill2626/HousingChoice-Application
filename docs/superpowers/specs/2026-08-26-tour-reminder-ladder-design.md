@@ -1,3 +1,14 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-01).** This document
+> describes how this work was *designed/planned at the time of writing*. Phase A shipped to
+> `main` and its feature branch + worktree were deleted during worktree cleanup. **This file
+> is NOT current documentation, and the live code may have drifted from it.** Phase B
+> continued this work and names this file as its predecessor; it is ALSO merged, so
+> `docs/superpowers/specs/2026-08-31-tour-reminder-ladder-phase-b-design.md` is history too -
+> read the CODE for current behaviour. A third effort, tour-reminder supersession cleanup, is
+> IN FLIGHT on this same seam and will move these files again. The mission's review record is
+> preserved at `docs/superpowers/reviews/2026-08-30-tour-reminder-ladder/`.
+
 # Tour reminder ladder - founder rewrite (names, retiming, skip rules)
 
 **Date:** 2026-08-26

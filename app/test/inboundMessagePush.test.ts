@@ -362,7 +362,9 @@ describe('inbound message push - relay group', () => {
       kind: 'message',
       conversationId: 'conv-relay-1',
     });
-    // Same label the inbox row renders (parity by construction).
+    // Same RULE as the inbox row - but the push passes the STORED roster while
+    // the inbox hydrates first (lib/participantNames), so after a rename the
+    // two can differ by design. This restatement pins rule-parity only.
     expect(soleMessagePayload(world).title).toBe(relayThreadLabel(relay));
   });
 
@@ -427,6 +429,39 @@ describe('inbound message push - relay group', () => {
       kind: 'message',
       conversationId: 'conv-relay-1',
     });
+  });
+
+  // R2-2: every other assertion on the sender label lives on the NATIVE GROUP
+  // arm, and this describe's world seeds no contacts at all - so `senderContact`
+  // was always undefined here and the relay arm read identically before and
+  // after the contact-first flip. The two arms resolve `senderContact` by
+  // different rules (relay: roster contactId only; group: contactId with a
+  // consistent read, else findByPhone), so the group-arm pin does not cover
+  // this one. Discriminating by construction: the roster's stored name and the
+  // contact's name differ, so whichever rung wins is visible in the assertion.
+  it('PIN: the relay push body prefix prefers the live CONTACT name over the stored roster name', async () => {
+    seedRelay(world, {
+      participants: [
+        // A creation-time snapshot that has since gone stale.
+        { contactId: 'c-alice', phone: ALICE, name: 'Old Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+        { contactId: 'c-carol', phone: CAROL, name: 'Carol' },
+      ],
+    });
+    world.contacts.push({
+      contactId: 'c-alice',
+      type: 'tenant',
+      phone: ALICE,
+      firstName: 'Alicia',
+      lastName: 'Live',
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, relayInboundParams());
+
+    // The TITLE still renders the stored snapshot (the push path passes it by
+    // decision - no awaited read on the ack path), so assert the body prefix.
+    expect(soleMessagePayload(world).body).toBe('Alicia Live: is the unit available?');
   });
 
   it('UNKNOWN sender on the open-group fallback: pushes on the newest open group', async () => {
@@ -524,5 +559,63 @@ describe('inbound message push - native group text', () => {
       kind: 'message',
       conversationId: GROUP_ID,
     });
+  });
+
+  it('RED: the body prefix prefers the CONTACT name over a stale roster name', async () => {
+    const { app } = makeWebhookHarness({ world });
+
+    // The webhook MINTS the group thread on the first inbound - there is no
+    // conversation to age before one arrives. Post once to create it, then age
+    // the SENDER's roster row (a creation-time snapshot) and give that member a
+    // contact whose CURRENT name differs.
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    const thread = world.conversations.get(GROUP_ID)!;
+    thread.participants = (thread.participants ?? []).map((p) =>
+      p.phone === SENDER ? { ...p, contactId: 'c-ana', name: 'Old Ana' } : p,
+    );
+    world.contacts.push({
+      contactId: 'c-ana',
+      type: 'tenant',
+      phone: SENDER,
+      firstName: 'Ana',
+      lastName: 'Reyes',
+    });
+
+    // A DISTINCT sid: a redelivery of the first one dedupes and pushes nothing.
+    await signedTwilioPost(app, SMS_PATH, groupParams({ MessageSid: 'MMgroup0002' }));
+
+    // The TITLE is out of scope (spec section 3) - assert only the body prefix.
+    expect(world.pushBroadcasts).toHaveLength(2);
+    const second = world.pushBroadcasts[1]!.notification.payload as unknown as MessagePushPayload;
+    expect(second.body).toBe('Ana Reyes: hello, looking for a 2 bed');
+  });
+
+  it('RED: a soft-deleted contact supplies no name - the body prefix falls back to the stored roster name', async () => {
+    const { app } = makeWebhookHarness({ world });
+
+    // Same two-post shape as the test above, with the contact SOFT-DELETED.
+    // findByPhone/getById both return deleted rows on purpose (routing keeps
+    // resolving them), so the label itself has to refuse the name: a deleted
+    // contact supplies NO name and the stored snapshot stands.
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    const thread = world.conversations.get(GROUP_ID)!;
+    thread.participants = (thread.participants ?? []).map((p) =>
+      p.phone === SENDER ? { ...p, contactId: 'c-ana', name: 'Old Ana' } : p,
+    );
+    world.contacts.push({
+      contactId: 'c-ana',
+      type: 'tenant',
+      phone: SENDER,
+      firstName: 'Ana',
+      lastName: 'Reyes',
+      deleted_at: '2026-01-01T00:00:00.000Z',
+    });
+
+    // A DISTINCT sid: a redelivery of the first one dedupes and pushes nothing.
+    await signedTwilioPost(app, SMS_PATH, groupParams({ MessageSid: 'MMgroup0003' }));
+
+    expect(world.pushBroadcasts).toHaveLength(2);
+    const second = world.pushBroadcasts[1]!.notification.payload as unknown as MessagePushPayload;
+    expect(second.body).toBe('Old Ana: hello, looking for a 2 bed');
   });
 });

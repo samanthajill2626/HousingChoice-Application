@@ -192,6 +192,19 @@ Small on purpose. The high's file also flags an unfiled sweep for other
 has a dashboard half in `deliveryStatus.ts` - land the backend lineage here
 and let T-DELIVERY-CHIPS render it). **gated-on:** nothing.
 
+**AMENDED 2026-09-01 - M5 shipped as `feat/retry-counter-durable`, and did the
+OPPOSITE of that routing on both counts.** (1) The backend lineage did NOT land
+here: `relay-30003-retry-lineage` is DEFERRED to its own mission - its file
+lists nine acceptance criteria spanning a new job, a new store, webhook changes
+and dashboard rendering, and three design-review rounds failed to converge it
+while the anchor converged after one. What transferred is the PATTERN plus five
+design facts now recorded in that issue. (2) The dashboard half landed HERE, not
+in T-DELIVERY-CHIPS: with no relay retry existing, the "will retry" promise was
+false in both worlds, so stopping it was part of shipping the counter, and
+Cameron authorized editing `Timeline.tsx` on 2026-09-01. The anchor is RESOLVED;
+the sweep ran (residue: `provider-status-unenumerated-defaults`);
+`rail-binding-propagation-retry` stays open as a partial.
+
 ### M6 - Inbox Unknown tab walks the open partition
 
 **High: 1, raised on measurement** (693 contact lookups to return 17 rows;

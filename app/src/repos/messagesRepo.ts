@@ -30,6 +30,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import { isE164 } from '../lib/phone.js';
 import type { RepoDeps } from './conversationsRepo.js';
+import type { FanoutClaimResult } from './fanoutClaim.js';
 
 export type MessageType = 'sms' | 'mms' | 'call' | 'email';
 export type MessageDirection = 'inbound' | 'outbound';
@@ -871,6 +872,12 @@ export interface MessageItem {
   retry_of?: string;
   /** 1-based retry attempt number (caps the 30003 retry chain, doc §7.1). */
   retry_attempt?: number;
+  /** 1-based pass number of the relay fan-out CONTINUATION ladder (M5) - a
+   *  sibling of the 1:1 retry ladder above, never shared with it: a continuation
+   *  would otherwise silently consume the retry budget. Claimed by
+   *  claimFanoutPass; top-level so a wholesale recipient-slot write cannot erase
+   *  it. Absent on rows written before M5 (they claim at 1). */
+  fanout_attempt?: number;
   /**
    * Relay group (M1.7): on an INBOUND relay message, the member key
    * (relayMemberKey) of the sender — which member texted the pool number.
@@ -1307,6 +1314,22 @@ export interface MessagesRepo {
 
   // --- Relay groups (M1.7) -------------------------------------------------
 
+  /**
+   * Claim ONE pass of the relay fan-out CONTINUATION ladder on a source message
+   * (M5): an atomic conditional ADD on the top-level `fanout_attempt`, refused
+   * once the count has reached `cap`.
+   *
+   * The key is the SOURCE MESSAGE (`conversationId` + `tsMsgId`), never the
+   * conversation alone - a conversation-keyed counter would give an entire relay
+   * group ONE lifetime budget. `cap` is a PARAMETER because the caps live in
+   * `jobs/` and a repo must not import from there.
+   *
+   * The count is a top-level scalar deliberately: `setRecipientDelivery`
+   * rewrites a recipient slot WHOLESALE, so a counter inside one would read 1
+   * forever (design D2). Absent on pre-M5 rows - ADD creates it, so the first
+   * claim returns 1 with no migration (D4).
+   */
+  claimFanoutPass(conversationId: string, tsMsgId: string, cap: number): Promise<FanoutClaimResult>;
   /**
    * Record the per-recipient send result on the SOURCE message's
    * delivery_recipients map (relay fan-out): sets `status` (+ optional sid /
@@ -2762,6 +2785,53 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     // --- Relay groups (M1.7) -----------------------------------------------
+
+    async claimFanoutPass(conversationId, tsMsgId, cap) {
+      // One conditional ADD, no read first: the condition IS the cap, so two
+      // concurrent deliveries can never take the same pass number. `#fa` is
+      // aliased like every other conditional ADD in this file (keeps the
+      // reserved-word question off the table). UPDATED_NEW hands back only the
+      // counter, so this never ships the whole item over the wire.
+      let attempt: number | undefined;
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'ADD #fa :one',
+            // attribute_exists on the RANGE key is this file's existence idiom.
+            ConditionExpression:
+              'attribute_exists(tsMsgId) AND (attribute_not_exists(#fa) OR #fa < :cap)',
+            ExpressionAttributeNames: { '#fa': 'fanout_attempt' },
+            ExpressionAttributeValues: { ':one': 1, ':cap': cap },
+            ReturnValues: 'UPDATED_NEW',
+          }),
+        );
+        attempt = (Attributes as { fanout_attempt?: number } | undefined)?.fanout_attempt;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // The refusal is ambiguous - missing item or spent ladder - and the two
+        // demand different handling (close vs log-and-return). Only a STRONGLY
+        // consistent read separates them: getByTsMsgId is eventually consistent
+        // and could report a live item missing, skipping a close.
+        const { Item } = await doc.send(
+          new GetCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            ConsistentRead: true,
+          }),
+        );
+        if (Item === undefined) return { outcome: 'missing' };
+        const current = (Item as MessageItem).fanout_attempt;
+        return { outcome: 'capped', attempt: typeof current === 'number' ? current : 0 };
+      }
+      if (typeof attempt !== 'number') {
+        throw new Error(
+          `claimFanoutPass(${conversationId}/${tsMsgId}): UPDATED_NEW returned no fanout_attempt`,
+        );
+      }
+      return { outcome: 'claimed', attempt };
+    },
 
     async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {
       // CHILD-ONLY SET of the recipient slot (delivery_recipients.<memberKey>).

@@ -162,6 +162,7 @@ import {
 import { type SystemStatusService } from '../services/systemStatus.js';
 import { isOneToOneBucket, isUnreadVisible } from '../lib/unreadFeed.js';
 import { markUnread } from '../lib/markUnread.js';
+import { hydrateConversationRosters } from '../lib/participantNames.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -2198,7 +2199,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.json({ call, conversation: null });
       return;
     }
-    res.json({ call, conversation });
+    // The quick-reply seam renders member names off this roster; resolve them
+    // (one batch over one roster, lib/participantNames) rather than hand the
+    // client the creation-time snapshot.
+    const [hydrated] = await hydrateConversationRosters([conversation], contacts, log);
+    res.json({ call, conversation: hydrated });
   });
 
   // GET /api/calls/:callId/recording — stream the founder-bridge recording back

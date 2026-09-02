@@ -346,7 +346,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'relay.intro_tour_today': {
     id: 'relay.intro_tour_today',
     default:
-      'Hey {tenantFirstName}! Putting you in a group text with {propertyContactFirstName} ' +
+      "Hey {tenantFirstName}! It's Sam. Putting you in a group text with {propertyContactFirstName} " +
       'to tour {where} at {time}. Looking forward to you seeing the property and meeting ' +
       "{propertyContactFirstName}! Please let us know when you're on the way.",
     class: 'operational',
@@ -357,7 +357,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'relay.intro_tour': {
     id: 'relay.intro_tour',
     default:
-      'Hey {tenantFirstName}! Putting you in a group text with {propertyContactFirstName} ' +
+      "Hey {tenantFirstName}! It's Sam. Putting you in a group text with {propertyContactFirstName} " +
       'to tour {where} on {when}. Looking forward to you seeing the property and meeting ' +
       "{propertyContactFirstName}! Please let us know when you're on the way.",
     class: 'operational',
@@ -375,7 +375,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'relay.intro_placement': {
     id: 'relay.intro_placement',
     default:
-      'Hey {tenantFirstName}! Excited to have you move into {where}. Please use this group ' +
+      "Hey {tenantFirstName}! It's Sam. Excited to have you move into {where}. Please use this group " +
       'text for all future communication and {propertyContactFirstName} will share updates ' +
       'as they receive them from the housing authority. This can be a long process so if ' +
       'you have any questions feel free to ask in here! We are committed to the process and ' +

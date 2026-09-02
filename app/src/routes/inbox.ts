@@ -54,6 +54,7 @@ import {
 } from '../lib/events.js';
 import { formatPhoneForDisplay } from '../lib/phone.js';
 import { groupThreadLabel, relayThreadLabel } from '../lib/groupTitle.js';
+import { resolveRosterNames, withLiveNames } from '../lib/participantNames.js';
 import { STAGE_LABELS } from '../lib/statusModel.js';
 import {
   createPlacementsRepo,
@@ -70,6 +71,7 @@ import {
 import {
   createContactsRepo,
   isDeleted,
+  type ContactDisplayItem,
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
@@ -1151,8 +1153,13 @@ export async function aggregateInbox(
    * PII: the returned row carries names/preview to the authed client (like the
    * contact rows); log lines stay counts/IDs only.
    */
-  const relayRowFor = async (conv: ConversationItem): Promise<InboxRow> => {
-    const label = relayThreadLabel(conv);
+  const relayRowFor = async (
+    conv: ConversationItem,
+    names: ReadonlyMap<string, ContactDisplayItem>,
+  ): Promise<InboxRow> => {
+    // Names resolved at the boundary (lib/participantNames): the roster's
+    // stored names are a creation-time snapshot; the label chain is unchanged.
+    const label = relayThreadLabel({ ...conv, participants: withLiveNames(conv.participants, names) });
 
     const preview =
       typeof conv.last_message_preview === 'string' ? conv.last_message_preview : '';
@@ -1187,10 +1194,15 @@ export async function aggregateInbox(
    * PII: the row carries names/preview to the authed client (like every other
    * row); log lines stay counts/IDs only.
    */
-  const groupRowFor = (conv: ConversationItem): InboxRow => ({
+  const groupRowFor = (
+    conv: ConversationItem,
+    names: ReadonlyMap<string, ContactDisplayItem>,
+  ): InboxRow => ({
     kind: 'group_text',
     conversationId: conv.conversationId,
-    name: groupThreadLabel(conv.participants),
+    // Names resolved at the boundary (lib/participantNames): the roster's
+    // stored names are a creation-time snapshot; groupThreadLabel is unchanged.
+    name: groupThreadLabel(withLiveNames(conv.participants, names)),
     unreadCount: unreadOf(conv),
     preview: typeof conv.last_message_preview === 'string' ? conv.last_message_preview : '',
     lastActivityAt: conv.last_activity_at,
@@ -1234,7 +1246,9 @@ export async function aggregateInbox(
   // 'open'-partition cursor the other filters use.
   if (filter === 'groups') {
     const page = await readGroupSource(limit, cursor);
-    const groupRows = page.items.map(groupRowFor);
+    // ONE batched display read for the whole page - never one per member.
+    const names = await resolveRosterNames(page.items, contacts, log);
+    const groupRows = page.items.map((c) => groupRowFor(c, names));
     log.info(
       {
         filter,
@@ -1414,8 +1428,16 @@ export async function aggregateInbox(
         // groupRowFor is deliberately NOT relayRowFor: that one's status
         // normalizer has an 'open' catch-all, which would report a group_open
         // thread to the dashboard as a plain open relay group.
+        // This loop refreshes ONE candidate at a time by the point read above
+        // (its design; see the comment at the top of this arm), so the roster's
+        // name batch rides beside that read: one batch per multi-party
+        // candidate, bounded by the page limit, same order as today.
+        const names = await resolveRosterNames([fresh], contacts, log);
         return {
-          row: candidate.kind === 'relay_group' ? await relayRowFor(fresh) : groupRowFor(fresh),
+          row:
+            candidate.kind === 'relay_group'
+              ? await relayRowFor(fresh, names)
+              : groupRowFor(fresh, names),
         };
       }
       // The unknown-number row, built inline rather than extracted: the pager's
@@ -2288,9 +2310,12 @@ export async function aggregateInbox(
         'inbox: relay-group list truncated by the page budget — some groups omitted',
       );
     }
+    // ONE batched display read above the loop, over every relay roster merged
+    // into this page - never one per group and never one per member.
+    const relayNames = await resolveRosterNames(relayItems, contacts, log);
     const relayRows: InboxRow[] = [];
     for (const conv of relayItems) {
-      const row = await relayRowFor(conv);
+      const row = await relayRowFor(conv, relayNames);
       // Counted like the pager's own filter drops. It USED to reject every
       // relay row under filter=unknown (a relay row's needsTriage is always
       // false), and leaving that uncounted made a zero-row Unknown page look
@@ -2355,7 +2380,11 @@ export async function aggregateInbox(
     // dead for exactly the same reason - no live filter reaches either merge
     // and rejects rows - so read BOTH absences as "no information", not as
     // "nothing was dropped".
-    const groupRows = page.items.map(groupRowFor).filter((row) => {
+    // The group partition's OWN batch. `filter=all` therefore pays two display
+    // reads - this one and the relay partition's above - because the two
+    // sources are read either side of the 1:1 pager; the spec's cost row says so.
+    const groupNames = await resolveRosterNames(page.items, contacts, log);
+    const groupRows = page.items.map((c) => groupRowFor(c, groupNames)).filter((row) => {
       if (passesFilter(row)) return true;
       dropped('filteredGroup');
       return false;

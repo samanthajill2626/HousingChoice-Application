@@ -3,7 +3,7 @@
 // poolNumbers service (no Twilio, no real number), with the jobs machinery
 // wired so the intro enqueue resolves. Authed via the real sealed session
 // cookie next to the origin secret (every /api route is behind requireAuth).
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import request from 'supertest';
 import {
@@ -424,7 +424,7 @@ describe('relay-group API (M1.7)', () => {
     ]);
   });
 
-  it('GET roster drops the creation-time name when the current contact is unnamed', async () => {
+  it('GET roster keeps the creation-time name when the current contact is unnamed (M1 ruling 2026-08-31)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     world.contacts.push({
@@ -444,14 +444,14 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
 
     expect(roster.status).toBe(200);
-    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+    // Contact name -> stored name -> (client renders the phone). An unnamed
+    // contact no longer erases a name the operator had a moment ago.
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }]);
   });
 
-  it('GET roster falls back to the roster phone, not a stale name, when contact lookup fails', async () => {
-    const originalGetById = world.contactsRepo.getById.bind(world.contactsRepo);
-    world.contactsRepo.getById = async (contactId) => {
-      if (contactId === 'c-alice') throw new Error('injected contact lookup failure');
-      return originalGetById(contactId);
+  it('GET roster keeps the stored name when the contact read fails (M1 ruling 2026-08-31)', async () => {
+    world.contactsRepo.getDisplaysByIds = async () => {
+      throw new Error('injected contact lookup failure');
     };
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
@@ -466,7 +466,37 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
 
     expect(roster.status).toBe(200);
-    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }]);
+  });
+
+  it('RED: GET roster resolves in ONE batch over the unique contact ids; no per-member getById', async () => {
+    const CAROL_LOCAL = '+15550100003';
+    const POOL_LOCAL = '+15550300996';
+    const { app } = authedHarness(world, makeFakePoolNumbers());
+    world.contacts.push({ contactId: 'c-live', type: 'tenant', status: 'active', phone: ALICE, firstName: 'Alicia', lastName: 'Live' });
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: POOL_LOCAL,
+      members: [
+        { contactId: 'c-live', phone: ALICE, name: 'Old Alice' },
+        { contactId: 'c-missing', phone: BOB, name: 'Stored Bob' },
+        { contactId: '', phone: CAROL_LOCAL },
+      ],
+    });
+    const batches: string[][] = [];
+    const real = world.contactsRepo.getDisplaysByIds.bind(world.contactsRepo);
+    world.contactsRepo.getDisplaysByIds = async (ids) => { batches.push([...ids]); return real(ids); };
+    const getByIdSpy = vi.spyOn(world.contactsRepo, 'getById');
+
+    const res = await request(app).get(`/api/conversations/${conversation.conversationId}/members`).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.members).toEqual([
+      { contactId: 'c-live', phone: ALICE, name: 'Alicia Live' },
+      { contactId: 'c-missing', phone: BOB, name: 'Stored Bob' },
+      { contactId: '', phone: CAROL_LOCAL },
+    ]);
+    expect(batches).toHaveLength(1);
+    expect(new Set(batches[0])).toEqual(new Set(['c-live', 'c-missing']));
+    expect(getByIdSpy).not.toHaveBeenCalled();
   });
 
   it('refuses member-add on a CONNECTING group (D11): 409 group_connecting, roster unchanged (burn invariant protected)', async () => {

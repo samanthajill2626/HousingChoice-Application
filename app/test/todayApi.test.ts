@@ -1779,4 +1779,87 @@ describe('today action-queue API (BE6/C7)', () => {
       expect(budgetWarns[0]).toMatchObject({ scanned: 2, kept: 2, budget: 2 });
     });
   });
+
+  describe('participant names resolve on read (M1)', () => {
+    const seedUnreadTenantThread = (name: string | undefined, contactId = 't-renamed') =>
+      seedConversation({
+        conversationId: 'conv-renamed',
+        participant_phone: '+15550107777',
+        participants: [{ contactId, phone: '+15550107777' }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-60_000),
+        unread_count: 1,
+        ...(name !== undefined && { participant_display_name: name }),
+      });
+
+    it('RED: a stale participant_display_name loses to the contact name', async () => {
+      seedTenant('t-renamed', 'Renata', 'New');
+      seedUnreadTenantThread('Old Name');
+      const row = (await getItems()).find((i) => i.refId === 't-renamed');
+      expect(row?.who).toBe('Renata New');
+    });
+
+    it('RED: no stored name plus a named contact shows the contact', async () => {
+      seedTenant('t-renamed', 'Renata', 'New');
+      seedUnreadTenantThread(undefined);
+      const row = (await getItems()).find((i) => i.refId === 't-renamed');
+      expect(row?.who).toBe('Renata New');
+    });
+
+    it('PIN: an unreadable contact keeps the stored name', async () => {
+      seedUnreadTenantThread('Stored Name');
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      world.contactsRepo.getById = async (id) => {
+        if (id === 't-renamed') throw new Error('ProvisionedThroughputExceededException');
+        return real(id);
+      };
+      const row = (await getItems()).find((i) => i.refId === 't-renamed');
+      expect(row?.who).toBe('Stored Name');
+    });
+
+    it('PIN: an unlinked thread (no contactId) still renders the formatted phone', async () => {
+      seedUnreadTenantThread(undefined, '');
+      const row = (await getItems()).find((i) => i.who === '(555) 010-7777');
+      expect(row).toBeDefined();
+    });
+
+    it('PIN: resolving names adds NO contact reads - the deleted-check already memoized them', async () => {
+      seedTenant('t-renamed', 'Renata', 'New');
+      seedUnreadTenantThread('Old Name');
+      const real = world.contactsRepo.getById.bind(world.contactsRepo);
+      const reads: string[] = [];
+      world.contactsRepo.getById = async (id) => { reads.push(id); return real(id); };
+      await getItems();
+      expect(reads.filter((id) => id === 't-renamed')).toHaveLength(1);
+    });
+
+    it('RED: relay close-nag member names come from the contacts', async () => {
+      seedTenant('c-nag', 'Nadia', 'Nag');
+      seedConversation({
+        conversationId: 'relay-nag',
+        participant_phone: '+15550190001',
+        pool_number: '+15550190001',
+        participants: [
+          { contactId: 'c-nag', phone: '+15550100011', name: 'Old Nag' },
+          { contactId: '', phone: '+15550100012' },
+        ],
+        status: 'open',
+        // The harness's listRelayGroups filters on THIS field with THIS shape
+        // (twilioWebhookHarness.ts:777-781) - the real byRelayStatus GSI hash.
+        relay_status: 'relay_group#open',
+        close_nag_next_at: iso(-1_000),
+        last_activity_at: iso(-30_000),
+        type: 'relay_group',
+        ai_mode: 'manual',
+        created_at: iso(-60_000),
+      });
+      const res = await authedGet('/api/today');
+      const body = res.body as TodayResponse;
+      const nag = body.relayCloseNags.find((n) => n.conversationId === 'relay-nag');
+      expect(nag?.memberNames).toEqual(['Nadia Nag', '(555) 010-0012']);
+    });
+  });
 });

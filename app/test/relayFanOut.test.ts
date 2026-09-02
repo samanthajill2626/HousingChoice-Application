@@ -862,7 +862,7 @@ describe('relay catalog entries (spec 9.2a)', () => {
         where: '412 Oak St',
       }),
     ).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. " +
         'Looking forward to you seeing the property and meeting Marcus! Please let us know ' +
         "when you're on the way.",
     );
@@ -874,7 +874,7 @@ describe('relay catalog entries (spec 9.2a)', () => {
         where: '412 Oak St',
       }),
     ).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 " +
         'at 3:00 PM. Looking forward to you seeing the property and meeting Marcus! Please ' +
         "let us know when you're on the way.",
     );
@@ -885,7 +885,7 @@ describe('relay catalog entries (spec 9.2a)', () => {
         where: '412 Oak St',
       }),
     ).toBe(
-      'Hey Alicia! Excited to have you move into 412 Oak St. Please use this group text for ' +
+      "Hey Alicia! It's Sam. Excited to have you move into 412 Oak St. Please use this group text for " +
         'all future communication and Marcus will share updates as they receive them from ' +
         'the housing authority. This can be a long process so if you have any questions feel ' +
         'free to ask in here! We are committed to the process and are excited to have you ' +
@@ -1359,7 +1359,7 @@ describe('composeIntroBody (spec 9.1) - entry selection from the resolved varian
 
   it('routes each variant to its founder entry', () => {
     expect(composeIntroBody(TOUR_INPUTS, ['Alicia Reyes', 'Marcus Webb'])).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St on Tue, Sep 8 " +
         'at 3:00 PM. Looking forward to you seeing the property and meeting Marcus! Please ' +
         "let us know when you're on the way.",
     );
@@ -1368,7 +1368,7 @@ describe('composeIntroBody (spec 9.1) - entry selection from the resolved varian
         'Alicia Reyes',
       ]),
     ).toBe(
-      'Hey Alicia! Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. ' +
+      "Hey Alicia! It's Sam. Putting you in a group text with Marcus to tour 412 Oak St at 3:00 PM. " +
         'Looking forward to you seeing the property and meeting Marcus! Please let us know ' +
         "when you're on the way.",
     );
@@ -1391,7 +1391,7 @@ describe('composeIntroBody (spec 9.1) - entry selection from the resolved varian
   // fallback (messages/tourCopy.ts) is the one used.
   it('a variant with NO tenant name greets "Hey there!" and does not throw', () => {
     const body = composeIntroBody({ ...TOUR_INPUTS, tenantFirstName: undefined }, []);
-    expect(body).toContain('Hey there! Putting you in a group text with Marcus');
+    expect(body).toContain("Hey there! It's Sam. Putting you in a group text with Marcus");
   });
 
   // The composer is the LAST line of 9.5's defence: the resolver already
@@ -1533,7 +1533,7 @@ describe('relay.intro / relay.memberAdded on an OWNED group', () => {
     await outbound.settle();
 
     const expected =
-      'Hey Tina! Putting you in a group text with Larry to tour 77 Peachtree St on ' +
+      "Hey Tina! It's Sam. Putting you in a group text with Larry to tour 77 Peachtree St on " +
       'Tue, Sep 8 at 3:00 PM. Looking forward to you seeing the property and meeting ' +
       "Larry! Please let us know when you're on the way.";
     expect(world.sent.map((s) => s.to).sort()).toEqual([TENANT, LANDLORD].sort());

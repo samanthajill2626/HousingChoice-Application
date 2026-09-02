@@ -8,7 +8,7 @@
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
 // render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
 // first (roles/labels) so it's testable.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   ContactEmail,
@@ -1857,15 +1857,22 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const [blockResizeTick, setBlockResizeTick] = useState(0);
   const hasUpcomingBlock = upcoming !== undefined && upcoming.length > 0;
 
-  const currentAnchor = (el: HTMLElement): StreamAnchor => {
-    const sentinel = sentinelRef.current;
-    if (!sentinel) return 'sentinel';
-    return deriveStreamAnchor({
-      sentinelBottom: sentinel.getBoundingClientRect().bottom,
-      viewportBottom: el.getBoundingClientRect().bottom,
-      hasBlock: hasUpcomingBlock,
-    });
-  };
+  // useCallback so the layout effect can list it as a dep without re-running
+  // every render: its identity changes exactly when `hasUpcomingBlock` does,
+  // which is already a dep of that effect - no behavior change, just an honest
+  // dependency list.
+  const currentAnchor = useCallback(
+    (el: HTMLElement): StreamAnchor => {
+      const sentinel = sentinelRef.current;
+      if (!sentinel) return 'sentinel';
+      return deriveStreamAnchor({
+        sentinelBottom: sentinel.getBoundingClientRect().bottom,
+        viewportBottom: el.getBoundingClientRect().bottom,
+        hasBlock: hasUpcomingBlock,
+      });
+    },
+    [hasUpcomingBlock],
+  );
 
   // Bring the sentinel's bottom edge to the scroller's bottom edge - i.e. land
   // on the newest MESSAGE, with the Upcoming block just below the fold.
@@ -2029,7 +2036,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     // `hasUpcomingBlock` is here so the UNMOUNT gets a pass at all: the observer
     // effect only disconnects, nothing ticks `blockResizeTick`, and an item-count
     // change is not required for the block to vanish.
-  }, [clusters, resetScrollKey, paging?.olderPagesLoaded, blockResizeTick, hasUpcomingBlock]);
+  }, [clusters, resetScrollKey, paging?.olderPagesLoaded, blockResizeTick, hasUpcomingBlock, currentAnchor]);
 
   // Clear a stale anchor once the load settles. Runs after paint, so the layout
   // effect above has already had its chance to consume it.

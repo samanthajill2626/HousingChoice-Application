@@ -1438,6 +1438,50 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up[1]!.suppression).toBeUndefined();
   });
 
+  it('FIXTURE B (acceptance 5): after a CLEAN sweep the bucket holds only the current generation, because the rows are gone', async () => {
+    // The twin of the pointer-mismatch test above, on the other side of the
+    // spec's A/B split (the round-5 contradiction): Fixture A is a sweep MISS
+    // rendered suppressed; Fixture B is the sweep WORKING, and the bucket must
+    // come back clean because the superseded rows no longer EXIST - not because
+    // a read-side filter hid them.
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600053';
+    world.contacts.push({ contactId: 'ct-swept', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-swept', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-swept',
+      unitId: 'u-swept',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-swept-new' });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+      ladderId: 'ladder-swept-old',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2099-01-09T10:00:00.000Z',
+      ladderId: 'ladder-swept-new',
+    });
+    await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, 'ladder-swept-new');
+
+    // DELETED, not filtered: the table itself holds one row now.
+    const remaining = await world.tourRemindersRepo.listByTour(tour.tourId);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]!.ladderId).toBe('ladder-swept-new');
+
+    const res = await request(app).get('/api/contacts/ct-swept/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.reminderKind).toBe('morning_of');
+    expect(up[0]!.suppression).toBeUndefined();
+  });
+
   it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed here either', async () => {
     // Acceptance 12, on the surface with the most legacy rows behind it.
     const { world, app } = makeGatherHarness();

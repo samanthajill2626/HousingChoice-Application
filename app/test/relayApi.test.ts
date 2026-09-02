@@ -1641,6 +1641,38 @@ describe('relay-group API (M1.7)', () => {
       }
     });
 
+    it('FIXTURE B (acceptance 5): a CLEANLY swept generation never reaches this bucket - the rows are gone', async () => {
+      // The other side of the A/B split the test above proves: Fixture A is a
+      // sweep MISS rendered suppressed; here the sweep WORKED, so the bucket
+      // holds only the current generation because the old rows no longer exist.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
+      const stale = rows.find((r) => r.kind === 'day_before')!;
+      world.tourRemindersMap.get(stale.reminderId)!.ladderId = 'ladder-group-swept';
+      const pointer = world.toursMap.get(tour.tourId)!.currentLadderId!;
+      await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, pointer);
+
+      // DELETED, not filtered.
+      const remaining = await world.tourRemindersRepo.listByTour(tour.tourId);
+      expect(remaining.find((r) => r.kind === 'day_before')).toBeUndefined();
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<{
+        reminderKind: string;
+        suppression?: { reason: string };
+      }>;
+      expect(scheduled.find((s) => s.reminderKind === 'day_before')).toBeUndefined();
+      // ANTI-VACUITY: the surviving generation still promises its sends.
+      for (const kind of ['morning_of', 'en_route']) {
+        expect(scheduled.find((s) => s.reminderKind === kind)?.suppression, kind).toBeUndefined();
+      }
+    });
+
     // THE THIRD exception, on the same argument again (review round NEW-3). The
     // owner tour is mid-conversion, so the poll defers every one of these rungs
     // and Send now refuses them - and this bucket would otherwise promise

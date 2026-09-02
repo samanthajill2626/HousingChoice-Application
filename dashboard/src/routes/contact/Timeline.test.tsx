@@ -1646,6 +1646,29 @@ describe('Timeline stick-to-bottom', () => {
     expect(pill()).not.toBeInTheDocument();
   });
 
+  it('opens pinned when the messages and the block arrive in the SAME commit', () => {
+    // TourConversation delivers both at once, and the block mounts BELOW the
+    // sentinel - it adds content beneath the fold, it does not move the reader.
+    // Re-deriving the anchor on that flip read the not-yet-pinned scrollTop 0,
+    // called it `null`, and the same effect run then saw `grew`: pill on open,
+    // no pin, acceptance 13 broken (live QA, lane 1). Only the UNMOUNT flip may
+    // re-derive. The harness can only install geometry after a first render, so
+    // the arriving commit is the second one - which is the mechanism anyway.
+    const { rerender } = render(wrap([MESSAGE_IN], 'c1', []));
+    const el = stream();
+    makeScrollable(el, 500);
+    modelRects(el, 200);
+    el.scrollTop = 0; // never scrolled: the pin has not run against real geometry
+
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c1', [BLOCK_ITEM]));
+
+    // 500 - 200 - 100: the sentinel at the fold, i.e. the newest MESSAGE, with
+    // the block just below it. Leaving scrollTop at 0 would strand the operator
+    // 400px up with a pill they never asked for.
+    expect(el.scrollTop).toBe(200);
+    expect(pill()).not.toBeInTheDocument();
+  });
+
   it('re-derives the anchor when the block VANISHES under the operator', () => {
     // A reschedule/terminal/convert empties the bucket - this feature's
     // commonest event - and the block unmounts while the operator is standing

@@ -1946,19 +1946,31 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   useLayoutEffect(() => {
     const el = streamRef.current;
     if (!el) return;
-    // THE BLOCK APPEARED OR VANISHED under the operator (review round m2). Both
-    // the cached anchor and `bottomGapRef` were derived with the OLD block
-    // present, and a reschedule/terminal/convert emptying the bucket is this
-    // feature's commonest event. A stale `below` then restores a gap the content
-    // no longer warrants: the next growth scrolls the operator UP, away from the
+    // THE BLOCK VANISHED under the operator (review round m2). Both the cached
+    // anchor and `bottomGapRef` were derived with the block PRESENT, and a
+    // reschedule/terminal/convert emptying the bucket is this feature's
+    // commonest event. A stale `below` then restores a gap the content no
+    // longer warrants: the next growth scrolls the operator UP, away from the
     // newest message, and clears the pill on the same line - the one situation
     // the pill exists for. Re-derive from the DOM, which has already committed
-    // the mount/unmount. Keyed on the BOOLEAN, never on the `upcoming` array:
+    // the unmount. Keyed on the BOOLEAN, never on the `upcoming` array:
     // GroupTextView passes a fresh `[]` literal every render.
+    //
+    // ONE DIRECTION ONLY. The MOUNT flip must NOT re-derive: the block appears
+    // BELOW the sentinel, so it adds content beneath the fold and cannot
+    // invalidate a `sentinel` or `null` anchor - while the geometry it would be
+    // read against may be a scrollTop no pin has run on yet. TourConversation
+    // delivers the messages and the block in one commit, and re-deriving there
+    // read scrollTop 0, answered `null`, and let the same pass take the `grew`
+    // branch: the thread opened scrolled to the top with a "New messages" pill
+    // (live QA, lane 1). Unmount is the only flip that invalidates anything.
     if (prevHasBlockRef.current !== hasUpcomingBlock) {
+      const vanished = prevHasBlockRef.current;
       prevHasBlockRef.current = hasUpcomingBlock;
-      anchorRef.current = currentAnchor(el);
-      bottomGapRef.current = el.scrollHeight - el.scrollTop;
+      if (vanished) {
+        anchorRef.current = currentAnchor(el);
+        bottomGapRef.current = el.scrollHeight - el.scrollTop;
+      }
     }
     const count = clusters.reduce((n, c) => n + c.items.length, 0);
     const merged = paging?.olderPagesLoaded ?? 0;

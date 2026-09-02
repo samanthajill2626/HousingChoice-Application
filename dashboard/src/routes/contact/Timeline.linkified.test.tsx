@@ -143,4 +143,12 @@ describe('Timeline linkified communications', () => {
     renderTimeline({ items: [email(' '.repeat(141))] });
     expect(screen.getByText('...', { exact: true })).toBeInTheDocument();
   });
+
+  it('preserves trailing source whitespace in an untruncated collapsed email snippet', () => {
+    const body = 'Please review the property details.  \t ';
+    expect(body.length).toBeLessThanOrEqual(140);
+    renderTimeline({ items: [email(body)] });
+
+    expect(document.querySelector('[class*="emailSnippet"]')?.textContent).toBe(body);
+  });
 });

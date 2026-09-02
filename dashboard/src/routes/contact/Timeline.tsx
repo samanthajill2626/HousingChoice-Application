@@ -1480,7 +1480,9 @@ function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
   const subject = msg.subject && msg.subject.trim().length > 0 ? msg.subject : '(no subject)';
   const bodyText = msg.body ?? '';
   const truncated = bodyText.length > EMAIL_SNIPPET_CHARS;
-  const snippetEnd = bodyText.slice(0, EMAIL_SNIPPET_CHARS).trimEnd().length;
+  const snippetEnd = truncated
+    ? bodyText.slice(0, EMAIL_SNIPPET_CHARS).trimEnd().length
+    : bodyText.length;
   const cc = msg.email_cc ?? [];
   const fromTo = [
     msg.email_from ? `from ${msg.email_from}` : null,

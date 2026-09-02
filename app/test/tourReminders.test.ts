@@ -3,8 +3,8 @@
 // Covers:
 //   1. armTourReminders — correct ladder dueAts, past rows skipped
 //   2. runDueTourReminders — sends due reminders, stamps sentAt (idempotency)
-//   3. reschedule — cancel + re-arm, new dueAts
-//   4. cancelTourReminders — pending rows canceled
+//   3. reschedule - sweep + re-arm, new dueAts (the old generation is DELETED)
+//   4. deleteSupersededForTour - every never-sent row dropped (its own describe)
 //   5. same-day tour — day_before skipped (past), future rows armed
 //   6. listDue excludes sentAt/canceledAt rows
 //   7. [concurrency] two racing runDueTourReminders calls → exactly ONE send
@@ -16,6 +16,13 @@
 // Self-skipping: when nothing answers at DYNAMODB_ENDPOINT the suite skips.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  DeleteCommand,
+  GetCommand,
+  QueryCommand,
+  TransactWriteCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb';
 import type {
   CarrierMessageSender,
   MessagingAdapter,
@@ -36,7 +43,7 @@ import {
   type TourReminderItem,
   type TourRemindersRepo,
 } from '../src/repos/tourRemindersRepo.js';
-import { createToursRepo } from '../src/repos/toursRepo.js';
+import { createToursRepo, type TourItem } from '../src/repos/toursRepo.js';
 import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import {
   createSendMessageService,
@@ -47,7 +54,7 @@ import {
 } from '../src/services/sendMessage.js';
 import {
   armTourReminders,
-  cancelTourReminders,
+  CONVERSION_CLAIM_GRACE_MS,
   DISCONTINUED_REMINDER_KINDS,
   forceSendReminder,
   MANUAL_ONLY_REMINDER_KINDS,
@@ -230,6 +237,158 @@ describe('retiredByTourStart - the ONE past-tour predicate (poll gate, force-sen
   });
 });
 
+// ---------------------------------------------------------------------------
+// Supersession S1 (T1.6) - the in-memory fakes must MIRROR the contracts the
+// DynamoDB describe below proves for the real repos. No database here.
+//
+// This file already carries the scar of a fake that dropped `input.skipped` on
+// the floor: TourReminderItem has NO index signature, so an optional field is
+// not enforced on the fake's hand-built literal and the omission typechecks
+// green. The route suites that lean on these three behaviours do not arrive
+// until S3/S8, which is far too late to find out.
+// ---------------------------------------------------------------------------
+describe('fake world repos mirror the S1 repo contracts', () => {
+  const newTour = async (world: ReturnType<typeof createFakeWorld>, seq: string) =>
+    world.toursRepo.create({
+      tenantId: `contact-fake-${seq}`,
+      unitId: `unit-fake-${seq}`,
+      scheduledAt: '2026-12-01T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+  it('create copies ladderId, and omits the field entirely when none is supplied', async () => {
+    const world = createFakeWorld();
+    const tour = await newTour(world, 'create');
+
+    const stamped = await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2026-11-30T23:30:00.000Z',
+      ladderId: 'ladder-fake',
+    });
+    const bare = await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2026-12-01T11:00:00.000Z',
+    });
+
+    expect(stamped.ladderId).toBe('ladder-fake');
+    expect(bare.ladderId).toBeUndefined();
+    expect(bare).not.toHaveProperty('ladderId');
+    // And the STORED row, not just the return value.
+    const stored = await world.tourRemindersRepo.listByTour(tour.tourId);
+    expect(stored.find((r) => r.kind === 'day_before')?.ladderId).toBe('ladder-fake');
+    expect(stored.find((r) => r.kind === 'morning_of')).not.toHaveProperty('ladderId');
+  });
+
+  it('setLadderIdIf has REAL compare semantics - a mismatch writes nothing', async () => {
+    const world = createFakeWorld();
+    const tour = await world.toursRepo.create({
+      tenantId: 'contact-fake-cas',
+      unitId: 'unit-fake-cas',
+      scheduledAt: '2026-12-02T15:00:00.000Z',
+      tourType: 'self_guided',
+      currentLadderId: 'ladder-rotation',
+    });
+
+    // Mismatch loses and leaves the winner's rotation intact.
+    expect(
+      await world.toursRepo.setLadderIdIf(tour.tourId, 'ladder-someone-else', 'ladder-armed'),
+    ).toBe(false);
+    expect((await world.toursRepo.get(tour.tourId))!.currentLadderId).toBe('ladder-rotation');
+
+    // The matching compare wins.
+    expect(
+      await world.toursRepo.setLadderIdIf(tour.tourId, 'ladder-rotation', 'ladder-armed'),
+    ).toBe(true);
+    expect((await world.toursRepo.get(tour.tourId))!.currentLadderId).toBe('ladder-armed');
+  });
+
+  it('setLadderIdIf returns false for an ABSENT pointer and for a missing tour', async () => {
+    const world = createFakeWorld();
+    const bare = await newTour(world, 'cas-absent');
+
+    expect(await world.toursRepo.setLadderIdIf(bare.tourId, 'ladder-x', 'ladder-y')).toBe(false);
+    expect((await world.toursRepo.get(bare.tourId))!.currentLadderId).toBeUndefined();
+    expect(await world.toursRepo.setLadderIdIf('tour-ghost', 'ladder-x', 'ladder-y')).toBe(false);
+  });
+
+  it('deleteSupersededForTour drops every unsent row (canceled and skipped included) and keeps sent', async () => {
+    const world = createFakeWorld();
+    const mine = await newTour(world, 'sweep-mine');
+    const theirs = await newTour(world, 'sweep-theirs');
+    await world.toursRepo.patch(mine.tourId, { currentLadderId: 'ladder-current' });
+    const mk = (tourId: string, kind: ReminderKind) =>
+      world.tourRemindersRepo.create({ tourId, kind, dueAt: '2026-11-30T23:30:00.000Z' });
+
+    const pending = await mk(mine.tourId, 'day_before');
+    const canceled = await mk(mine.tourId, 'morning_of');
+    const skipped = await mk(mine.tourId, 'en_route');
+    const sent = await mk(mine.tourId, 'confirmation');
+    const other = await mk(theirs.tourId, 'day_before');
+    await world.tourRemindersRepo.cancel(canceled.reminderId, '2026-11-20T12:00:00.000Z');
+    await world.tourRemindersRepo.claimSkip(
+      skipped.reminderId,
+      '2026-11-20T12:00:00.000Z',
+      'tour_missing',
+    );
+    await world.tourRemindersRepo.claimSend(sent.reminderId, '2026-11-20T12:00:00.000Z');
+
+    await world.tourRemindersRepo.deleteSupersededForTour(mine.tourId, 'ladder-current');
+
+    const left = await world.tourRemindersRepo.listByTour(mine.tourId);
+    expect(left.map((r) => r.reminderId)).toEqual([sent.reminderId]);
+    expect(left.map((r) => r.reminderId)).not.toContain(pending.reminderId);
+    // Another tour's ladder is untouched.
+    expect((await world.tourRemindersRepo.listByTour(theirs.tourId)).map((r) => r.reminderId)).toEqual(
+      [other.reminderId],
+    );
+  });
+
+  it('deleteSupersededForTour KEEPS the expected generation and STOPS once the pointer moves', async () => {
+    const world = createFakeWorld();
+    const tour = await newTour(world, 'sweep-generation');
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-current' });
+    const mk = (kind: ReminderKind, ladderId: string) =>
+      world.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind,
+        dueAt: '2026-11-30T23:30:00.000Z',
+        ladderId,
+      });
+    const old = await mk('day_before', 'ladder-old');
+    const current = await mk('morning_of', 'ladder-current');
+
+    await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, 'ladder-current');
+
+    // The caller's OWN generation survives; the earlier one is gone.
+    expect(
+      (await world.tourRemindersRepo.listByTour(tour.tourId)).map((r) => r.reminderId),
+    ).toEqual([current.reminderId]);
+    expect(old.reminderId).not.toBe(current.reminderId);
+
+    // And a sweep for a generation the tour has ALREADY replaced deletes
+    // nothing - the fake mirrors the ConditionCheck the real repo rides.
+    const stale = await mk('en_route', 'ladder-older-still');
+    await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, 'ladder-not-stored');
+    expect(
+      (await world.tourRemindersRepo.listByTour(tour.tourId)).map((r) => r.reminderId).sort(),
+    ).toEqual([current.reminderId, stale.reminderId].sort());
+  });
+
+  it('the claim methods still refuse a row that is not there (the post-guard behaviour)', async () => {
+    const world = createFakeWorld();
+    const now = '2026-11-20T12:00:00.000Z';
+
+    expect(await world.tourRemindersRepo.claimSend('reminder-missing', now)).toBe(false);
+    expect(await world.tourRemindersRepo.claimSkip('reminder-missing', now, 'tour_missing')).toBe(
+      false,
+    );
+    expect(await world.tourRemindersRepo.cancel('reminder-missing', now)).toBe(false);
+    expect(await world.tourRemindersRepo.uncancel('reminder-missing')).toBe(false);
+  });
+});
+
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
   const client = createDynamoClient({ endpoint });
@@ -296,6 +455,505 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     client.destroy();
   }, 120_000);
 
+  // Raw row read - there is no getById on TourRemindersRepo, and listByTour is a
+  // vacuous substitute for absence: a resurrected attribute-only stub carries no
+  // tourId and so cannot appear in a byTour query whether the bug is there or not.
+  const rawReminder = async (reminderId: string) => {
+    const { Item } = await doc.send(
+      new GetCommand({
+        TableName: tableName('tourReminders', testEnv),
+        Key: { reminderId },
+      }),
+    );
+    return Item as TourReminderItem | undefined;
+  };
+
+  const deleteReminderRaw = async (reminderId: string) => {
+    await doc.send(
+      new DeleteCommand({
+        TableName: tableName('tourReminders', testEnv),
+        Key: { reminderId },
+      }),
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // Supersession S1 - ladderId stamp on the row (T1.1)
+  // ---------------------------------------------------------------------------
+  describe('create carries the generation pointer (ladderId)', () => {
+    it('stores the supplied ladderId on the row and returns it', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-create-1',
+        unitId: 'unit-ladder-create-1',
+        scheduledAt: '2026-10-01T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-09-30T23:30:00.000Z',
+        ladderId: 'ladder-s1-create',
+      });
+
+      expect(row.ladderId).toBe('ladder-s1-create');
+      expect((await rawReminder(row.reminderId))?.ladderId).toBe('ladder-s1-create');
+    });
+
+    it('omits the attribute entirely when no ladderId is supplied (pre-migration shape)', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-create-2',
+        unitId: 'unit-ladder-create-2',
+        scheduledAt: '2026-10-02T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-10-01T23:30:00.000Z',
+      });
+
+      expect(row.ladderId).toBeUndefined();
+      const stored = await rawReminder(row.reminderId);
+      expect(stored).toBeDefined();
+      expect(stored).not.toHaveProperty('ladderId');
+    });
+
+    it('stamps a born-skipped row too (the arm-time visible trace)', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-create-3',
+        unitId: 'unit-ladder-create-3',
+        scheduledAt: '2026-10-03T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: '2026-10-03T11:00:00.000Z',
+        ladderId: 'ladder-s1-born-skipped',
+        skipped: { at: '2026-09-01T00:00:00.000Z', reason: 'past_event' },
+      });
+
+      expect(row.ladderId).toBe('ladder-s1-born-skipped');
+      const stored = await rawReminder(row.reminderId);
+      expect(stored?.ladderId).toBe('ladder-s1-born-skipped');
+      expect(stored?.skipReason).toBe('past_event');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Supersession S1 - the claim guards (T1.4)
+  //
+  // claimSend/claimSkip/cancel are UpdateCommands conditioned only on
+  // attribute_not_exists(...). DynamoDB's UpdateItem CREATES a missing item, so
+  // against a DELETED row every one of those conditions HOLDS: the claim
+  // succeeds and an attribute-only stub springs into existence with no tourId,
+  // kind or dueAt - and the poll sends. Supersession makes deleted rows routine
+  // (D1 hard-deletes the superseded ladder), so each write gains
+  // attribute_exists(reminderId). uncancel already requires
+  // attribute_exists(canceledAt) and is deliberately untouched.
+  // ---------------------------------------------------------------------------
+  describe('a write against a DELETED row must lose, not resurrect it', () => {
+    const NOW_GUARD = '2026-09-15T12:00:00.000Z';
+
+    const deletedRow = async (label: string) => {
+      const tour = await tours.create({
+        tenantId: `contact-guard-${label}`,
+        unitId: `unit-guard-${label}`,
+        scheduledAt: '2026-09-20T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-09-19T23:30:00.000Z',
+      });
+      await deleteReminderRaw(row.reminderId);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+      return row;
+    };
+
+    it('claimSend returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('send');
+
+      expect(await tourReminders.claimSend(row.reminderId, NOW_GUARD)).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('claimSend with a sentBody returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('send-body');
+
+      expect(await tourReminders.claimSend(row.reminderId, NOW_GUARD, 'a body')).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('claimSkip returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('skip');
+
+      expect(await tourReminders.claimSkip(row.reminderId, NOW_GUARD, 'tour_missing')).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('cancel returns false and leaves NOTHING behind', async () => {
+      const row = await deletedRow('cancel');
+
+      expect(await tourReminders.cancel(row.reminderId, NOW_GUARD)).toBe(false);
+      expect(await rawReminder(row.reminderId)).toBeUndefined();
+    });
+
+    it('the guard does not break the LIVE path: a real pending row still claims', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-guard-live',
+        unitId: 'unit-guard-live',
+        scheduledAt: '2026-09-21T15:00:00.000Z',
+        tourType: 'self_guided',
+      });
+      const send = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-09-20T23:30:00.000Z',
+      });
+      const skip = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'morning_of',
+        dueAt: '2026-09-21T11:00:00.000Z',
+      });
+      const kill = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'en_route',
+        dueAt: '2026-09-21T14:00:00.000Z',
+      });
+
+      expect(await tourReminders.claimSend(send.reminderId, NOW_GUARD, 'body')).toBe(true);
+      expect(await tourReminders.claimSkip(skip.reminderId, NOW_GUARD, 'tour_missing')).toBe(true);
+      expect(await tourReminders.cancel(kill.reminderId, NOW_GUARD)).toBe(true);
+
+      expect((await rawReminder(send.reminderId))?.sentAt).toBe(NOW_GUARD);
+      expect((await rawReminder(skip.reminderId))?.skippedAt).toBe(NOW_GUARD);
+      expect((await rawReminder(kill.reminderId))?.canceledAt).toBe(NOW_GUARD);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Supersession S1 - deleteSupersededForTour (T1.5)
+  //
+  // D1: a superseded ladder's never-sent rungs are HARD-DELETED - pending,
+  // operator-canceled and skipped alike. Only sentAt survives. The retirement
+  // this replaced stamped canceledAt and deliberately left canceled and skipped
+  // rows in place - exactly the rows this deletes, which is why "no pending row
+  // remains" was never the same claim as "the generation is gone". The only
+  // filter here is "no sentAt", and the ConditionExpression on the delete is
+  // what makes the race safe.
+  // ---------------------------------------------------------------------------
+  describe('deleteSupersededForTour', () => {
+    const SWEEP_NOW = '2026-09-25T12:00:00.000Z';
+    /** The generation the CALLER just pointed the tour at - never swept. */
+    const SWEEP_POINTER = 'ladder-current';
+
+    /**
+     * A tour carrying one row of every terminal shape, plus a pending one, all
+     * on a SUPERSEDED generation - and one unsent row of the CURRENT generation,
+     * which the caller just armed and which the sweep must never touch. The
+     * tour's stored pointer is SWEEP_POINTER, which is what the transactional
+     * sweep's ConditionCheck reads.
+     */
+    const sweepWorld = async (label: string) => {
+      const tour = await tours.create({
+        tenantId: `contact-sweep-${label}`,
+        unitId: `unit-sweep-${label}`,
+        scheduledAt: '2026-09-30T15:00:00.000Z',
+        tourType: 'self_guided',
+        currentLadderId: SWEEP_POINTER,
+      });
+      const mk = (kind: ReminderKind, dueAt: string, ladderId = 'ladder-old') =>
+        tourReminders.create({ tourId: tour.tourId, kind, dueAt, ladderId });
+
+      const pending = await mk('day_before', '2026-09-29T23:30:00.000Z');
+      const canceled = await mk('morning_of', '2026-09-30T11:00:00.000Z');
+      const skipped = await mk('en_route', '2026-09-30T14:00:00.000Z');
+      const sent = await mk('confirmation', '2026-09-20T13:00:00.000Z');
+      const current = await mk('day_before', '2026-09-29T23:45:00.000Z', SWEEP_POINTER);
+
+      await tourReminders.cancel(canceled.reminderId, SWEEP_NOW);
+      await tourReminders.claimSkip(skipped.reminderId, SWEEP_NOW, 'tour_missing');
+      await tourReminders.claimSend(sent.reminderId, SWEEP_NOW, 'the body that went out');
+
+      return { tour, pending, canceled, skipped, sent, current };
+    };
+
+    it('deletes pending, operator-canceled AND skipped rows of an EARLIER generation; keeps every SENT row and the CURRENT ladder', async () => {
+      const w = await sweepWorld('mixed');
+
+      await tourReminders.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER);
+
+      expect(await rawReminder(w.pending.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.canceled.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.skipped.reminderId)).toBeUndefined();
+      // The history survives, body and all - a sent rung is a fact.
+      const kept = await rawReminder(w.sent.reminderId);
+      expect(kept?.sentAt).toBe(SWEEP_NOW);
+      expect(kept?.sentBody).toBe('the body that went out');
+      // The caller's OWN generation survives untouched - this is what lets the
+      // re-arm caller sweep AFTER it arms.
+      expect(await rawReminder(w.current.reminderId)).toBeDefined();
+
+      // And the tour's live view holds exactly the sent row and the current one.
+      expect(await tourReminders.listByTour(w.tour.tourId)).toHaveLength(2);
+    });
+
+    it('touches no OTHER tour and is idempotent on a second call', async () => {
+      const mine = await sweepWorld('mine');
+      const theirs = await sweepWorld('theirs');
+
+      await tourReminders.deleteSupersededForTour(mine.tour.tourId, SWEEP_POINTER);
+      await tourReminders.deleteSupersededForTour(mine.tour.tourId, SWEEP_POINTER);
+
+      expect(await tourReminders.listByTour(mine.tour.tourId)).toHaveLength(2);
+      expect(await tourReminders.listByTour(theirs.tour.tourId)).toHaveLength(5);
+    });
+
+    it('a row that gains sentAt BETWEEN the list and the delete SURVIVES', async () => {
+      const w = await sweepWorld('race');
+
+      // The real race, driven through the injectable client rather than a
+      // production seam: listByTour returns the plan, and the poll claims one of
+      // the listed rows before the sweep's delete reaches it. The delete's
+      // attribute_not_exists(sentAt) is what saves the send from being erased.
+      let raced = false;
+      const racingDoc = {
+        send: async (command: unknown) => {
+          const out = await (doc as DynamoDBDocumentClient).send(command as never);
+          if (command instanceof QueryCommand && !raced) {
+            raced = true;
+            await tourReminders.claimSend(w.pending.reminderId, SWEEP_NOW, 'raced body');
+          }
+          return out;
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const racingRepo = createTourRemindersRepo({ doc: racingDoc, env: testEnv, logger });
+
+      await racingRepo.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER);
+
+      expect(raced).toBe(true);
+      const survivor = await rawReminder(w.pending.reminderId);
+      expect(survivor?.sentAt).toBe(SWEEP_NOW);
+      expect(survivor?.sentBody).toBe('raced body');
+      // One lost condition does not abort the batch - the other unsent rows went.
+      expect(await rawReminder(w.canceled.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.skipped.reminderId)).toBeUndefined();
+    });
+
+    it('the POINTER moving mid-sweep STOPS the sweep and the remaining rows SURVIVE', async () => {
+      const w = await sweepWorld('generation');
+
+      // THE case the check-then-act guard could not cover (review rounds
+      // B1/R2-1/NEW-1): a competing writer rotates the pointer AFTER this sweep
+      // has started, so from its first delete onward this request no longer owns
+      // the generation it is sweeping for. The ConditionCheck rides every
+      // delete, so the store itself refuses the rest - there is no window to
+      // accept and no read to be stale.
+      let rotated = false;
+      const rotatingDoc = {
+        send: async (command: unknown) => {
+          const out = await (doc as DynamoDBDocumentClient).send(command as never);
+          if (
+            !rotated &&
+            (command instanceof TransactWriteCommand || command instanceof DeleteCommand)
+          ) {
+            rotated = true;
+            await tours.patch(w.tour.tourId, { currentLadderId: 'ladder-someone-else' });
+          }
+          return out;
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const rotatingRepo = createTourRemindersRepo({ doc: rotatingDoc, env: testEnv, logger });
+
+      const before = logCapture.lines.length;
+      await rotatingRepo.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER);
+      expect(rotated).toBe(true);
+
+      // Exactly ONE candidate went (the delete that raced ahead of the
+      // rotation); the other two are still there, refused by the pointer check.
+      const left = await tourReminders.listByTour(w.tour.tourId);
+      const survivors = [w.pending, w.canceled, w.skipped].filter((r) =>
+        left.some((l) => l.reminderId === r.reminderId),
+      );
+      expect(survivors).toHaveLength(2);
+      // The sent row and the (now itself superseded) current-ladder row stand.
+      expect(await rawReminder(w.sent.reminderId)).toBeDefined();
+      expect(await rawReminder(w.current.reminderId)).toBeDefined();
+
+      // And the handover is VISIBLE: info, not error - a newer writer owning the
+      // ladder is the design working, not a failure.
+      const infos = logCapture.lines
+        .slice(before)
+        .filter((l) => l['level'] === 30 && l['tourId'] === w.tour.tourId);
+      expect(
+        infos.some((l) => String(l['msg'] ?? '').includes('newer generation')),
+      ).toBe(true);
+      expect(
+        logCapture.lines.slice(before).filter((l) => l['level'] === 50),
+      ).toHaveLength(0);
+    });
+
+    it('an UNEXPECTED error on one row logs at error and does not abort the rest', async () => {
+      const w = await sweepWorld('boom');
+
+      const failingDoc = {
+        send: async (command: unknown) => {
+          if (
+            command instanceof TransactWriteCommand &&
+            JSON.stringify(command.input.TransactItems ?? []).includes(w.canceled.reminderId)
+          ) {
+            throw new Error('throttled');
+          }
+          return (doc as DynamoDBDocumentClient).send(command as never);
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const failingRepo = createTourRemindersRepo({ doc: failingDoc, env: testEnv, logger });
+
+      const before = logCapture.lines.length;
+      await expect(
+        failingRepo.deleteSupersededForTour(w.tour.tourId, SWEEP_POINTER),
+      ).resolves.toBeUndefined();
+
+      // The failure is LOUD (never silently vanished) but not fatal.
+      const errors = logCapture.lines
+        .slice(before)
+        .filter((l) => l['level'] === 50 && l['tourId'] === w.tour.tourId);
+      expect(errors).toHaveLength(1);
+
+      expect(await rawReminder(w.canceled.reminderId)).toBeDefined();
+      expect(await rawReminder(w.pending.reminderId)).toBeUndefined();
+      expect(await rawReminder(w.skipped.reminderId)).toBeUndefined();
+      expect((await rawReminder(w.sent.reminderId))?.sentAt).toBe(SWEEP_NOW);
+    });
+
+    it('a tour with no rows at all is a no-op', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-sweep-empty',
+        unitId: 'unit-sweep-empty',
+        scheduledAt: '2026-10-05T15:00:00.000Z',
+        tourType: 'self_guided',
+        currentLadderId: SWEEP_POINTER,
+      });
+
+      await expect(
+        tourReminders.deleteSupersededForTour(tour.tourId, SWEEP_POINTER),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Supersession S2 - the armer mints ONE ladderId per CALL (T2.1)
+  //
+  // A UUID, not a timestamp: routes/tours.ts takes an injectable `deps.now` and
+  // the app suite injects a CONSTANT, so two arms of the same tour inside one
+  // test share an instant (spec 3.1). Every case below therefore pins the same
+  // `now` across both calls - a timestamp-derived id would pass case 1 and fail
+  // case 2 and only case 2.
+  // ---------------------------------------------------------------------------
+  describe('armTourReminders stamps one generation ladderId per call', () => {
+    // Jan 20 10:00 EST, tour the same afternoon at 15:00 EST. Quiet hours OFF,
+    // so the clamp is identity. This mix is deliberate: day_before and
+    // morning_of are both born SKIPPED (booked_too_late - the same-day booking
+    // rule, spec section 8) while en_route arms live, so one call covers both
+    // the create sites that write a skipped row and the one that writes a live
+    // rung.
+    const NOW_LADDER = '2026-01-20T15:00:00.000Z';
+    const SCHEDULED_LADDER = '2026-01-20T20:00:00.000Z';
+
+    const armFor = async (tour: TourItem, now = NOW_LADDER) =>
+      armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: quietOff,
+        logger,
+      });
+
+    it('stamps every row of one call - born-skipped rows included - with the SAME id', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-arm-1',
+        unitId: 'unit-ladder-arm-1',
+        scheduledAt: SCHEDULED_LADDER,
+        tourType: 'self_guided',
+      });
+
+      const { ladderId, rows } = await armFor(tour);
+
+      expect(ladderId).toEqual(expect.any(String));
+      expect(rows).toHaveLength(3);
+      // The mix this fixture exists to produce.
+      const skipped = rows.filter((r) => r.skippedAt !== undefined);
+      expect(skipped.map((r) => r.skipReason)).toEqual(['booked_too_late', 'booked_too_late']);
+      expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(1);
+
+      for (const row of rows) {
+        expect(row.ladderId).toBe(ladderId);
+      }
+
+      // ...and the STORED rows agree. The returned objects are the repo's own
+      // return values, so asserting only on them would pass on a create that
+      // dropped the attribute on the way to DynamoDB.
+      const stored = await tourReminders.listByTour(tour.tourId);
+      expect(stored).toHaveLength(3);
+      for (const row of stored) {
+        expect(row.ladderId).toBe(ladderId);
+      }
+    });
+
+    it('mints a DIFFERENT id for a second arm of the same tour at the same `now`', async () => {
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-arm-2',
+        unitId: 'unit-ladder-arm-2',
+        scheduledAt: SCHEDULED_LADDER,
+        tourType: 'self_guided',
+      });
+
+      const first = await armFor(tour);
+      const second = await armFor(tour);
+
+      expect(first.ladderId).not.toBe(second.ladderId);
+      // Generation, not identity: the two calls' rows are disjoint sets, each
+      // internally consistent. (Nothing sweeps here - S2 writes no deletes.)
+      const firstIds = new Set(first.rows.map((r) => r.reminderId));
+      expect(second.rows.some((r) => firstIds.has(r.reminderId))).toBe(false);
+      for (const row of second.rows) {
+        expect(row.ladderId).toBe(second.ladderId);
+      }
+
+      const stored = await tourReminders.listByTour(tour.tourId);
+      expect(stored).toHaveLength(6);
+      expect(new Set(stored.map((r) => r.ladderId))).toEqual(
+        new Set([first.ladderId, second.ladderId]),
+      );
+    });
+
+    it('returns ladderId null when the arm writes NO rows (a time-less tour)', async () => {
+      // The no-scheduledAt early return is the ONLY zero-row exit. The silent
+      // `dueAt < now` skip cannot produce one on its own: it sits BELOW the
+      // booked-too-late branch, and for day_before those two are exhaustive -
+      // if booked-too-late is false then now <= raw - 4h, and the clamp only
+      // ever moves a dueAt FORWARD (quietHours.ts:153-163), so the clamped
+      // dueAt is still future and the rung falls through to a live or a
+      // past_event/superseded ROW. A day_before row is written on every tour
+      // that has a scheduledAt.
+      const tour = await tours.create({
+        tenantId: 'contact-ladder-arm-3',
+        unitId: 'unit-ladder-arm-3',
+        tourType: 'self_guided',
+      });
+      expect(tour.scheduledAt).toBeUndefined();
+
+      const { ladderId, rows } = await armFor(tour);
+
+      expect(ladderId).toBeNull();
+      expect(rows).toEqual([]);
+      expect(await tourReminders.listByTour(tour.tourId)).toEqual([]);
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Test 1 — arm: correct ladder dueAts for a future tour
   // ---------------------------------------------------------------------------
@@ -316,7 +974,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -380,7 +1038,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
@@ -435,7 +1093,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -481,7 +1139,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -547,7 +1205,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -585,7 +1243,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -641,7 +1299,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: stubSettingsRepo(),
       logger,
@@ -684,7 +1342,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
@@ -721,7 +1379,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, {
+    const { rows } = await armTourReminders(tour, now, {
       tourRemindersRepo: tourReminders,
       settingsRepo: failingSettingsRepo(),
       logger,
@@ -1309,9 +1967,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 3 — reschedule: cancel old reminders, re-arm with new scheduledAt
+  // Test 3 - reschedule: SWEEP the old ladder, re-arm with new scheduledAt
   // ---------------------------------------------------------------------------
-  it('cancel + re-arm on reschedule produces new rows with updated dueAts', async () => {
+  it('sweep + re-arm on reschedule leaves ONLY the fresh ladder, with updated dueAts', async () => {
     const now0 = '2026-07-13T11:00:00.000Z';
     // Both tours sit at 15:00 / 14:00 EDT (they used to be 07:00 / 10:00 EDT):
     // an early-morning tour drops rungs for reasons this case is not about -
@@ -1335,13 +1993,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const origRows = await tourReminders.listByTour(tour.tourId);
     expect(origRows).toHaveLength(3);
+    const origIds = origRows.map((r) => r.reminderId);
 
-    // Cancel and re-arm with the new scheduledAt.
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
+    // Sweep and re-arm with the new scheduledAt - the route's order (S9 T9.1).
+    // The sweep is generation-scoped, so it needs the pointer the caller just
+    // rotated to; this tour was created without one, so rotate it first exactly
+    // as the route's patch does.
+    await tours.patch(tour.tourId, { currentLadderId: 'ladder-rotation' });
+    await tourReminders.deleteSupersededForTour(tour.tourId, 'ladder-rotation');
 
-    // All original rows should be canceled.
-    const afterCancel = await tourReminders.listByTour(tour.tourId);
-    expect(afterCancel.every((r) => r.canceledAt !== undefined)).toBe(true);
+    // Every original row is GONE, not canceled in place. Asserted by identity:
+    // "no pending row remains" was also true of the cancel this replaced.
+    expect(await tourReminders.listByTour(tour.tourId)).toHaveLength(0);
 
     // Patch the tour with the new scheduledAt.
     const patchedTour = await tours.patch(tour.tourId, { scheduledAt: newScheduledAt });
@@ -1351,10 +2014,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       logger,
     });
 
-    // New rows should exist in addition to the canceled ones.
-    const allRows = await tourReminders.listByTour(tour.tourId);
-    const newRows = allRows.filter((r) => r.canceledAt === undefined);
+    // The fresh ladder is the WHOLE table for this tour.
+    const newRows = await tourReminders.listByTour(tour.tourId);
     expect(newRows).toHaveLength(3);
+    expect(newRows.some((r) => origIds.includes(r.reminderId))).toBe(false);
 
     // New day_before should reflect the new scheduledAt: 19:30 org-local the
     // evening before its local date (Jul 20 EDT) = 19:30 EDT Jul 19.
@@ -1367,53 +2030,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 4 — cancel tour: all pending rows marked canceled
+  // Test 4 was `cancelTourReminders marks all pending rows canceled` and is
+  // DROPPED with the wrapper it named (S9 T9.2). Its subject no longer exists,
+  // and every assertion it still made is a strict subset of the
+  // `deleteSupersededForTour` describe above: that suite proves absence by raw
+  // GetCommand against the real table (this one only proved "no pending row
+  // remains", which a delete satisfies too) and proves the SENT row survives
+  // with its body, where this one ended in four lines of commentary conceding
+  // it could not tell. Arm-then-retire against a REAL armed ladder is kept: it
+  // is Test 3 above.
   // ---------------------------------------------------------------------------
-  it('cancelTourReminders marks all pending rows canceled', async () => {
-    const now0 = '2026-07-13T12:00:00.000Z';
-    const scheduledAt = '2026-07-16T10:00:00.000Z';
-
-    const tour = await tours.create({
-      tenantId: 'contact-cancel-1',
-      unitId: 'unit-cancel-1',
-      scheduledAt,
-      tourType: 'landlord_led',
-    });
-
-    await armTourReminders(tour, now0, {
-      tourRemindersRepo: tourReminders,
-      settingsRepo: quietOff,
-      logger,
-    });
-
-    // Manually mark the day_before row as sent (simulates one already fired).
-    // It rode `confirmation` until 2026-08-31; any armed kind does, and
-    // day_before is the earliest live rung.
-    const rows = await tourReminders.listByTour(tour.tourId);
-    const sentRow = rows.find((r) => r.kind === 'day_before');
-    await tourReminders.claimSend(sentRow!.reminderId, now0);
-
-    // Now cancel.
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
-
-    const afterCancel = await tourReminders.listByTour(tour.tourId);
-    // Pending = the same definition cancelForTour uses: no terminal stamp at
-    // all. (This 06:00 EDT tour births morning_of as a past_event skipped row -
-    // a visible trace, not a pending rung, so cancel rightly leaves it alone.)
-    const stillPending = afterCancel.filter(
-      (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
-    );
-    expect(stillPending).toHaveLength(0);
-
-    // The already-sent row should still be sent (not double-canceled).
-    const sentAfter = afterCancel.find((r) => r.kind === 'day_before');
-    expect(sentAfter?.sentAt).toBeDefined();
-    // canceledAt should NOT be set on the sent row (the condition guard).
-    // Note: the cancelForTour implementation only cancels rows with no sentAt AND no canceledAt.
-    // The sent row has sentAt set, so it should be excluded from cancelation.
-    // (If the conditional update races, it should fail silently — but in our test it's deterministic.)
-    // The sent row may or may not have canceledAt — depends on timing. But we verified stillPending=0.
-  });
 
   // ---------------------------------------------------------------------------
   // Test 5 - same-day tour: BOTH near rungs are retired booked_too_late
@@ -1435,7 +2061,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'pm_team',
     });
 
-    const rows = await armTourReminders(tour, now0, {
+    const { rows } = await armTourReminders(tour, now0, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
@@ -1516,7 +2142,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         scheduledAt: opts.scheduledAt ?? TOUR,
         tourType: 'self_guided',
       });
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: opts.settingsRepo ?? quietOff,
         logger,
@@ -1747,11 +2373,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(forThisTour1.map((r) => r.kind).sort()).toEqual(['day_before', 'morning_of']);
 
     // Now retire both, one per terminal stamp: claimSend for sentAt (the
-    // production send path) and cancelTourReminders for canceledAt. Both
-    // exclusions are in this test's NAME, so both are exercised.
+    // production send path) and the per-rung cancel for canceledAt (the
+    // operator action - the only writer of that stamp now that the tour-wide
+    // cancel is gone). Both exclusions are in this test's NAME, so both are
+    // exercised.
     const dayBefore = forThisTour1.find((r) => r.kind === 'day_before')!;
+    const morningOf = forThisTour1.find((r) => r.kind === 'morning_of')!;
     await tourReminders.claimSend(dayBefore.reminderId, now0);
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
+    expect(await tourReminders.cancel(morningOf.reminderId, now0)).toBe(true);
 
     // Second listDue at the SAME instant - so nothing but the two terminal
     // stamps can explain the rows disappearing.
@@ -1882,13 +2511,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     await createDueReminder(tourReminders, tour.tourId, 'day_before', now0);
 
     // List due rows (simulating what runDueTourReminders does internally) —
-    // then cancel the tour BEFORE the claim fires.
+    // then cancel the rung BEFORE the claim fires.
     const dueRows = await tourReminders.listDue(now0);
     const pendingRow = dueRows.find((r) => r.tourId === tour.tourId && r.kind === 'day_before');
     expect(pendingRow).toBeDefined();
 
-    // Cancel the tour's reminders (simulates PATCH /tours/:id { status: 'canceled' }).
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
+    // Cancel the rung (the operator "Cancel" action on the reminders panel -
+    // the surviving writer of canceledAt; a tour-status PATCH now DELETES the
+    // row instead, which the claim guard covers separately).
+    expect(await tourReminders.cancel(pendingRow!.reminderId, now0)).toBe(true);
 
     // Now attempt to run — the claim should fail for the canceled row → zero sends.
     const cancelDeps = {
@@ -3122,11 +3753,16 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     if (opts.groupThreadId !== undefined) {
       await tours.patch(tour.tourId, { groupThreadId: opts.groupThreadId });
     }
-    await armTourReminders(tour, NOW_D11, {
+    const { ladderId } = await armTourReminders(tour, NOW_D11, {
       tourRemindersRepo: tourReminders,
       settingsRepo: quietOff,
       logger,
     });
+    // POINT THE TOUR AT WHAT WAS JUST ARMED, exactly as the route does after
+    // the arm (S3). Without it these rows are STAMPED on a POINTERLESS tour -
+    // the interrupted-pointer-write cell - and the poll refuses every one of
+    // them `superseded` before any D11 roster rule is reached.
+    if (ladderId !== null) await tours.patch(tour.tourId, { currentLadderId: ladderId });
     return tour;
   }
 
@@ -4606,7 +5242,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         tourType: 'self_guided',
       });
 
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: stubSettingsRepo(),
         logger,
@@ -4704,7 +5340,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         tourType: 'self_guided',
       });
 
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: stubSettingsRepo(),
         logger,
@@ -4740,7 +5376,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
         tourType: 'self_guided',
       });
 
-      const rows = await armTourReminders(tour, now, {
+      const { rows } = await armTourReminders(tour, now, {
         tourRemindersRepo: tourReminders,
         settingsRepo: quietOff,
         logger,
@@ -4753,6 +5389,370 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       // Zero supersession rows, zero skips of any kind.
       expect(rows).toHaveLength(3);
       expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
+    });
+  });
+
+  // ===========================================================================
+  // SUPERSESSION REFUSAL (2026-09-01 spec 3.3). The poll refuses a rung whose
+  // generation pointer no longer matches its tour's, and DEFERS - unclaimed -
+  // a rung of a tour with a placement-conversion claim in flight.
+  //
+  // Own DECEMBER 2026 timeline, the file's isolation idiom: no row from any
+  // other test is due at these polls and none of these rows is swept by another
+  // tick. Each case takes a FRESH world (createGroupTestRig), so `world.sent`
+  // counts only its own sends.
+  // ===========================================================================
+  describe('supersession refusal and the conversion-claim deferral (spec 3.3)', () => {
+    const SEEDED_AT = '2026-12-01T15:00:00.000Z';
+
+    /** A tenant + 1:1 thread + a self_guided tour (the unambiguous 1:1 route). */
+    async function seedSupersessionTour(
+      rig: ReturnType<typeof createGroupTestRig>,
+      suffix: string,
+      phone: string,
+    ): Promise<TourItem> {
+      seedTenant(rig.world, `contact-sup-${suffix}`, phone, `conv-sup-${suffix}`, SEEDED_AT);
+      return tours.create({
+        tenantId: `contact-sup-${suffix}`,
+        unitId: `unit-sup-${suffix}`,
+        scheduledAt: '2026-12-10T20:00:00.000Z',
+        tourType: 'self_guided',
+      });
+    }
+
+    it('claim-skips a rung whose ladderId does not match the tour pointer, and nudges the live surfaces', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'mismatch', '+15550280001');
+      // The tour has been rearmed since: its pointer names a generation this
+      // row never belonged to.
+      await tours.patch(tour.tourId, { currentLadderId: 'ladder-sup-new' });
+      const stale = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T20:00:00.000Z',
+        ladderId: 'ladder-sup-old',
+      });
+
+      const events = createEventBus({ logger });
+      const emitted: Array<{ contactId?: string }> = [];
+      events.on('scheduled.updated', (p) => emitted.push(p));
+      const pollAt = '2026-12-09T20:01:00.000Z';
+      await runDueTourReminders(pollAt, { ...rig.deps, events });
+
+      expect(rig.world.sent).toHaveLength(0);
+      expect(rig.groupSends).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === stale.reminderId,
+      );
+      expect(after?.skippedAt).toBe(pollAt);
+      expect(after?.skipReason).toBe('superseded');
+      expect(after?.sentAt).toBeUndefined();
+      // The claim-skip's own emit, so the panel and both Upcoming buckets flip
+      // to the "Replaced" chip without a reload. Filtered by contactId: the
+      // batch is the whole table's due set, so other suites' leftover rows emit
+      // their own claim-skips on this tick.
+      expect(emitted.filter((p) => p.contactId === 'contact-sup-mismatch')).toHaveLength(1);
+      // ...and it leaves listDue exactly once, never re-listed.
+      expect((await tourReminders.listDue(pollAt)).map((r) => r.reminderId)).not.toContain(
+        stale.reminderId,
+      );
+    });
+
+    it('ANTI-VACUITY: a pre-migration pair (bare row, bare tour) still sends', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'legacy', '+15550280002');
+      const legacy = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T21:00:00.000Z',
+      });
+
+      await runDueTourReminders('2026-12-09T21:01:00.000Z', rig.deps);
+
+      expect(rig.world.sent).toHaveLength(1);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === legacy.reminderId,
+      );
+      expect(after?.sentAt).toBe('2026-12-09T21:01:00.000Z');
+      expect(after?.skipReason).toBeUndefined();
+    });
+
+    it('refuses a STAMPED rung on a tour with no pointer (the interrupted pointer write)', async () => {
+      // S3/T3.6's case: the arm stamped the rows and the pointer write failed,
+      // which the route logs LOUDLY. Those rows are refused, not exempt - the
+      // alternative reads a stamped row as pre-migration and sends from a
+      // generation nothing can name.
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'unpointed', '+15550280003');
+      const stamped = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T22:00:00.000Z',
+        ladderId: 'ladder-sup-unpointed',
+      });
+
+      const pollAt = '2026-12-09T22:01:00.000Z';
+      await runDueTourReminders(pollAt, rig.deps);
+
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === stamped.reminderId,
+      );
+      expect(after?.skipReason).toBe('superseded');
+    });
+
+    // -------------------------------------------------------------------------
+    // T5.4 - the conversion-claim deferral. `pending:<uuid>` is the sentinel
+    // routes/placements.ts writes while a conversion is mid-flight.
+    // -------------------------------------------------------------------------
+    it('DEFERS a rung unclaimed while a conversion claim is in flight, then sends it once the claim clears', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'claim', '+15550280004');
+      const sentinel = `pending:${randomUUID()}`;
+      await tours.claimConversion(tour.tourId, sentinel);
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T23:00:00.000Z',
+      });
+
+      const inWindow = '2026-12-09T23:05:00.000Z'; // 5 minutes past due
+      await runDueTourReminders(inWindow, rig.deps);
+
+      expect(rig.world.sent).toHaveLength(0);
+      // NOTHING STAMPED: skippedAt is terminal, so a claim-skip inside the
+      // window could never be undone when the conversion releases.
+      const deferred = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(deferred?.skippedAt).toBeUndefined();
+      expect(deferred?.skipReason).toBeUndefined();
+      expect(deferred?.sentAt).toBeUndefined();
+      expect(deferred?.canceledAt).toBeUndefined();
+      // Still live in listDue - it re-fires on the next tick.
+      expect((await tourReminders.listDue(inWindow)).map((r) => r.reminderId)).toContain(
+        row.reminderId,
+      );
+
+      // The conversion was abandoned and the claim released: the rung sends.
+      await tours.releaseConversionClaim(tour.tourId, sentinel);
+      await runDueTourReminders('2026-12-09T23:06:00.000Z', rig.deps);
+      expect(rig.world.sent).toHaveLength(1);
+    });
+
+    it('RETIRES the rung conversion_stalled once the claim outlives the grace window', async () => {
+      const rig = createGroupTestRig();
+      const errorsBefore = logCapture.atLevel(50).length;
+      const tour = await seedSupersessionTour(rig, 'stuck', '+15550280005');
+      await tours.claimConversion(tour.tourId, `pending:${randomUUID()}`);
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-08T10:00:00.000Z',
+      });
+
+      // One millisecond past the hour: the boundary is exclusive, exactly like
+      // rosterWaitExpired's.
+      const pastWindow = new Date(
+        Date.parse('2026-12-08T10:00:00.000Z') + CONVERSION_CLAIM_GRACE_MS + 1,
+      ).toISOString();
+      await runDueTourReminders(pastWindow, rig.deps);
+
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBe(pastWindow);
+      expect(after?.skipReason).toBe('conversion_stalled');
+      // LOUD: a stuck sentinel has no TTL and no recovery route, so this retire
+      // is the only thing that will ever say so.
+      const newErrors = logCapture
+        .atLevel(50)
+        .slice(errorsBefore)
+        .filter((l) => /conversion claim/i.test(String(l['msg'] ?? '')));
+      expect(newErrors).toHaveLength(1);
+      expect(newErrors[0]!['tourId']).toBe(tour.tourId);
+    });
+
+    // The grace runs from max(dueAt, tour.conversionClaimedAt), not from dueAt
+    // alone (review round M2) and not from updatedAt (review round NEW-2).
+    // claimConversion writes a DEDICATED claim stamp beside the sentinel, so a
+    // FRESH claim always gets the full window - even on a rung that has been
+    // pending for hours, which is routine (a quiet-hours deferral, a roster
+    // wait, an hour of worker downtime) rather than an outage - while an
+    // operator editing the tour cannot extend a STALLED claim forever, which is
+    // exactly what a last-touched-by-anything stamp did. The cases drive the
+    // poll with a stubbed tour read because the repo's own patch always bumps
+    // updatedAt to the wall clock.
+    const claimedTourDeps = (
+      rig: ReturnType<typeof createGroupTestRig>,
+      tour: TourItem,
+      claimedAt: string | undefined,
+      updatedAt: string,
+    ) => {
+      const claimed: TourItem = {
+        ...tour,
+        convertedPlacementId: `pending:${randomUUID()}`,
+        ...(claimedAt !== undefined && { conversionClaimedAt: claimedAt }),
+        updatedAt,
+      };
+      return {
+        ...rig.deps,
+        toursRepo: {
+          ...tours,
+          // Only OUR tour: the batch is the whole table's due set, so another
+          // suite's leftover row must still read its own tour.
+          get: async (id: string) => (id === tour.tourId ? claimed : tours.get(id)),
+        },
+      };
+    };
+
+    it('DEFERS a rung hours past due when the claim is FRESH (grace from conversionClaimedAt)', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'freshclaim', '+15550280011');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-07T02:00:00.000Z',
+      });
+
+      // Five hours overdue, claimed THIS instant - on a tour whose LAST WRITE
+      // was two hours ago. The updatedAt basis would have retired this rung on
+      // the claim's very first tick.
+      const pollAt = '2026-12-07T07:00:00.000Z';
+      await runDueTourReminders(
+        pollAt,
+        claimedTourDeps(rig, tour, pollAt, '2026-12-07T05:00:00.000Z'),
+      );
+
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      // NOTHING STAMPED - the conversion may still fail and release the claim,
+      // and skippedAt could not be undone if it did.
+      expect(after?.skippedAt).toBeUndefined();
+      expect(after?.skipReason).toBeUndefined();
+      expect(after?.sentAt).toBeUndefined();
+      expect((await tourReminders.listDue(pollAt)).map((r) => r.reminderId)).toContain(
+        row.reminderId,
+      );
+    });
+
+    it('RETIRES the same rung once the CLAIM itself outlives the window', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'staleclaim', '+15550280012');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-07T03:00:00.000Z',
+      });
+
+      // Same five-hours-overdue rung; the claim is two hours old, so the window
+      // has genuinely elapsed and the sentinel is stuck. THE TOUR IS BEING
+      // EDITED - updatedAt is this very instant - which is review round NEW-2's
+      // case exactly: `updatedAt` is last-touched-by-ANYTHING, so on a tour
+      // edited more than once an hour the old basis never expired and the
+      // perpetual-"sending shortly" lie was back in a new costume.
+      const pollAt = '2026-12-07T08:00:00.000Z';
+      const claimedAt = '2026-12-07T06:00:00.000Z';
+      await runDueTourReminders(pollAt, claimedTourDeps(rig, tour, claimedAt, pollAt));
+
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBe(pollAt);
+      expect(after?.skipReason).toBe('conversion_stalled');
+    });
+
+    it('falls back to updatedAt for a claim written BEFORE the stamp existed', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'legacyclaim', '+15550280013');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-07T03:00:00.000Z',
+      });
+
+      // No conversionClaimedAt at all - an in-flight claim from before this
+      // deploy. DEFENSIVE ONLY: the fallback keeps the bound from vanishing, and
+      // it errs toward waiting, which is the safer half of this decision.
+      const pollAt = '2026-12-07T08:00:00.000Z';
+      await runDueTourReminders(
+        pollAt,
+        claimedTourDeps(rig, tour, undefined, '2026-12-07T07:45:00.000Z'),
+      );
+
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.skippedAt).toBeUndefined();
+      expect(after?.sentAt).toBeUndefined();
+    });
+
+    it('does NOT defer a FINALIZED tour - a real placementId is not a pending claim', async () => {
+      // The trap the spec names: finalize REPLACES the sentinel with a real
+      // placement id, so a bare "is a string" predicate would defer every
+      // converted tour forever.
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'final', '+15550280006');
+      await tours.patch(tour.tourId, { convertedPlacementId: 'placement-sup-final' });
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T23:30:00.000Z',
+      });
+
+      const pollAt = '2026-12-09T23:31:00.000Z';
+      await runDueTourReminders(pollAt, rig.deps);
+
+      // Post-S8 such a tour's pointer is rotated and the rung is swept; here
+      // (pre-S8, bare row and bare pointer) the pre-migration exemption applies
+      // and the rung is DECIDED - sent - rather than deferred forever.
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBe(pollAt);
+      expect(after?.skipReason).toBeUndefined();
+    });
+
+    // -------------------------------------------------------------------------
+    // T5.5's containment half. The hoisted tour read (O4) moved one of target
+    // resolution's four bare reads ABOVE the blanket catch spec 6.3b requires,
+    // so it has to carry the same containment - and the same cause-agnostic
+    // copy - on its own. Driven at the JOB level: the ROUTE reads the tour
+    // before it calls the job at all, so this cell is unreachable through HTTP.
+    // -------------------------------------------------------------------------
+    it('force-send: a THROWING tour read refuses names_unavailable instead of escaping', async () => {
+      const rig = createGroupTestRig();
+      const tour = await seedSupersessionTour(rig, 'throw', '+15550280007');
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: 'day_before',
+        dueAt: '2026-12-09T18:00:00.000Z',
+      });
+      const boomTours = {
+        ...tours,
+        get: async () => {
+          throw new Error('tours unavailable');
+        },
+      };
+
+      const result = await forceSendReminder(
+        row.reminderId,
+        tour.tourId,
+        '2026-12-09T18:01:00.000Z',
+        true,
+        { ...rig.deps, toursRepo: boomTours },
+      );
+
+      expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+      expect(rig.world.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
     });
   });
 });

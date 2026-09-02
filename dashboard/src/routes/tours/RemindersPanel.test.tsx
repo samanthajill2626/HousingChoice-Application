@@ -8,10 +8,15 @@
 //
 // Pattern mirrors TourDetail.test.tsx: mock the api barrel, import after mocking,
 // assert accessibility-first. The SSE capture mirrors useTourActivity.test.tsx.
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { EventStreamHandlers, TourReminderView, TourRemindersPage } from '../../api/index.js';
+import type {
+  EventStreamHandlers,
+  TourReminderEarlierView,
+  TourReminderView,
+  TourRemindersPage,
+} from '../../api/index.js';
 
 const getTourReminders = vi.fn();
 const patchTourReminder = vi.fn();
@@ -39,6 +44,20 @@ function rung(over: Partial<TourReminderView> = {}): TourReminderView {
     dueAt: '2999-01-01T12:00:00Z',
     state: 'upcoming',
     body: 'Your tour is tomorrow at 2pm.',
+    ...over,
+  };
+}
+
+/** A rung of a ladder this tour has already replaced (supersession S7). NO
+ *  `body` by default - most earlier rungs predate the snapshot field, and
+ *  "there is nothing honest to show" is the default this projection has. */
+function earlierRung(over: Partial<TourReminderEarlierView> = {}): TourReminderEarlierView {
+  return {
+    reminderId: 'e-1',
+    kind: 'day_before',
+    dueAt: '2026-01-01T12:00:00Z',
+    state: 'sent',
+    sentAt: '2026-01-01T12:00:03Z',
     ...over,
   };
 }
@@ -335,6 +354,118 @@ describe('RemindersPanel', () => {
     expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
   });
 
+  // SUPERSEDED (supersession spec 3.3): the rung belongs to a ladder the tour
+  // has already replaced. Every send path refuses it - the poll claim-skips it
+  // and Send now answers 409 - so the panel must neither promise a fire time
+  // nor offer the click. Distinct chip from "No longer sent": that one says the
+  // KIND is retired, this one says THIS generation is.
+  it('renders a superseded rung as "Replaced", never a fire time and with no Send now', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          // Past due: the fall-through would chip "sending shortly" forever on
+          // a rung nothing will ever claim.
+          dueAt: '2000-01-01T00:00:00Z',
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Replaced')).toBeInTheDocument());
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    expect(screen.queryByText('No longer sent')).not.toBeInTheDocument();
+    // The rung will never send, so it is never "overdue" either.
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument();
+    // The note underneath carries the why, without repeating the lead.
+    expect(screen.getByText(/Replaced . /)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
+    // No Send now (the server refuses it 409 superseded); Cancel stays, because
+    // a superseded rung the sweep missed is still a row an operator may remove.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel the/ })).toBeInTheDocument();
+  });
+
+  // CONVERSION IN FLIGHT (review round NEW-3). The panel is the surface an
+  // operator clicks Send now from, and during a claim it rendered the rung as a
+  // live promise with an ENABLED button whose only possible answer was 409
+  // conversion_in_progress - a row arguing with itself. Unlike the two chips
+  // above it, this state RESOLVES, so the copy must not retire the rung.
+  it('renders a claim-in-flight rung as "Converting", never a fire time and with no Send now', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          // Past due, so the fall-through would chip "sending shortly" on a rung
+          // the poll is deliberately leaving unclaimed.
+          dueAt: '2000-01-01T00:00:00Z',
+          suppression: { reason: 'conversion_in_progress' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Converting')).toBeInTheDocument());
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    // Never borrows a word that would declare the rung dead - the claim resolves.
+    expect(screen.queryByText('Replaced')).not.toBeInTheDocument();
+    expect(screen.queryByText('No longer sent')).not.toBeInTheDocument();
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument();
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument();
+    // The note underneath carries the why, without repeating the lead.
+    expect(screen.getByText(/On hold . /)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
+    // No Send now while the claim stands (the server answers 409); Cancel stays,
+    // exactly as it does for a superseded rung.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel the/ })).toBeInTheDocument();
+  });
+
+  // The retired half of the same story: once the poll has claim-skipped a rung
+  // for a conversion claim that never finished, the chip has to say WHICH
+  // failure it was - a reason-less "Skipped" sends the operator hunting.
+  it('names conversion_stalled on a skipped rung instead of a bare "Skipped"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'morning_of',
+          state: 'skipped',
+          skippedAt: '2026-09-01T12:00:00Z',
+          skipReason: 'conversion_stalled',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByText(/^Skipped - .+/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/conversion/i)).toBeInTheDocument();
+    expect(screen.queryByText('Skipped')).not.toBeInTheDocument();
+  });
+
+  // The same for a rung retired because its ladder was replaced.
+  it('names superseded on a skipped rung instead of a bare "Skipped"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'morning_of',
+          state: 'skipped',
+          skippedAt: '2026-09-01T12:00:00Z',
+          skipReason: 'superseded',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText(/^Skipped - .+/)).toBeInTheDocument());
+    expect(screen.queryByText('Skipped')).not.toBeInTheDocument();
+  });
+
   // OVERDUE (Phase B spec 8). The server derives it - the panel never compares
   // clocks itself - and it exists because `state` is computed from terminal
   // markers alone, so a rung stuck behind any pre-claim deferral reads
@@ -563,6 +694,39 @@ describe('nextReminderRefetchDelay (pure)', () => {
           // A PAUSED rung is NOT skipped: a human can still send it, so the
           // panel keeps re-checking for that flip.
           { state: 'upcoming', dueAt: '2026-07-10T18:00:00Z', suppression: { reason: 'paused' } },
+        ],
+        NOW,
+      ),
+    ).toBe(32_000);
+  });
+
+  // A SUPERSEDED rung never flips either: the poll claim-skips it the moment it
+  // is picked up and Send now refuses it, so anchoring the 20s overdue
+  // re-check on one is the same unbounded poll the discontinued case above
+  // closed. It reaches the panel on a rung the sweep missed, which is exactly
+  // the row that sits past-due indefinitely.
+  it('ignores a superseded rung entirely, and lets a live rung behind it anchor', () => {
+    expect(
+      nextReminderRefetchDelay(
+        [
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'superseded' },
+          },
+        ],
+        NOW,
+      ),
+    ).toBeNull();
+    expect(
+      nextReminderRefetchDelay(
+        [
+          {
+            state: 'upcoming',
+            dueAt: '2026-07-10T11:00:00Z',
+            suppression: { reason: 'superseded' },
+          },
+          { state: 'upcoming', dueAt: '2026-07-10T12:00:30Z' },
         ],
         NOW,
       ),
@@ -842,5 +1006,230 @@ describe('RemindersPanel - Send now', () => {
     expect(
       screen.getByRole('button', { name: 'Send the Day before reminder now' }),
     ).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// EARLIER REMINDERS - the collapsed disclosure (supersession spec 3.4, S7).
+//
+// A rescheduled or converted tour leaves survivors of the generation it
+// replaced. They are history, not a promise, so they sit BEHIND a disclosure
+// that is closed by default (decision D2: out of the default view) and below
+// the current ladder - including when the current ladder is EMPTY, which is
+// exactly what a terminal tour looks like.
+// ===========================================================================
+describe('RemindersPanel - earlier reminders disclosure', () => {
+  it('renders BOTH "No reminders armed." and the disclosure when the current ladder is empty', async () => {
+    // T7.3 / acceptance 10. The empty-ladder short-circuit at the top of the
+    // Card returns a single paragraph, so a disclosure written inside that
+    // ternary would be invisible on exactly the tour that has the most to
+    // show. Asserted on the RENDER, never on a derived flag.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({ reminderId: 'e-1', kind: 'day_before' }),
+        earlierRung({ reminderId: 'e-2', kind: 'morning_of' }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+
+    await waitFor(() => expect(screen.getByText(/No reminders armed/i)).toBeInTheDocument());
+    expect(screen.getByText('Earlier reminders (2)')).toBeInTheDocument();
+  });
+
+  it('is COLLAPSED by default and reveals its rows on click', async () => {
+    // T7.4. Every other assertion in this file passes just as well against an
+    // always-open block, so the default state needs its own case.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [earlierRung({ reminderId: 'e-1', kind: 'day_before' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+
+    const summary = await screen.findByText('Earlier reminders (1)');
+    // The content is in the DOM but NOT visible - a closed <details>.
+    expect(screen.getByText('Day before')).not.toBeVisible();
+
+    fireEvent.click(summary);
+    expect(screen.getByText('Day before')).toBeVisible();
+  });
+
+  it('allowlists actions BY STATE: only a sweep-missed upcoming rung offers Cancel', async () => {
+    // T7.5 / spec 3.4's table. The current ladder's action list keys off
+    // `state` alone, so inheriting it would put Send now on an unsent earlier
+    // rung and Restore on a canceled one - resurrecting a rung into a ladder
+    // that no longer exists.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({ reminderId: 'e-sent', kind: 'confirmation', state: 'sent' }),
+        earlierRung({
+          reminderId: 'e-upcoming',
+          kind: 'day_before',
+          state: 'upcoming',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+        earlierRung({
+          reminderId: 'e-canceled',
+          kind: 'morning_of',
+          state: 'canceled',
+          sentAt: undefined,
+          canceledAt: '2026-01-01T09:00:00Z',
+        }),
+        earlierRung({
+          reminderId: 'e-skipped',
+          kind: 'en_route',
+          state: 'skipped',
+          sentAt: undefined,
+          skippedAt: '2026-01-01T09:00:00Z',
+          skipReason: 'superseded',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (4)'));
+
+    // EXACTLY ONE action in the whole disclosure, and it is the Cancel on the
+    // sweep miss - under an accessible name that cannot collide with the
+    // current ladder's own "Cancel the Day before reminder".
+    const buttons = screen.getAllByRole('button');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toHaveAccessibleName('Cancel the earlier Day before reminder');
+    // No Send now anywhere: the server refuses every one of these 409
+    // superseded.
+    expect(screen.queryByRole('button', { name: /Send the/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Restore/ })).not.toBeInTheDocument();
+  });
+
+  it('gives the earlier Cancel a name distinct from the current ladder rung of the SAME kind', async () => {
+    // G4 (research C 2.3): both aria-labels interpolate the kind, so a bare
+    // reuse would give two buttons one accessible name - a strict-mode
+    // violation for the e2e harness, and an ambiguous target for a navigator
+    // driving the panel by voice or keyboard.
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before', state: 'upcoming' })],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (1)'));
+
+    expect(
+      screen.getByRole('button', { name: 'Cancel the Day before reminder' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Cancel the earlier Day before reminder' }),
+    ).toBeInTheDocument();
+  });
+
+  it('Cancel on an earlier rung PATCHes {canceled:true} through the same handler', async () => {
+    patchTourReminder.mockResolvedValue({});
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-miss',
+          kind: 'day_before',
+          state: 'upcoming',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (1)'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel the earlier Day before reminder' }));
+    await waitFor(() =>
+      expect(patchTourReminder).toHaveBeenCalledWith('tour-1', 'e-miss', true),
+    );
+  });
+
+  it('shows the sentBody snapshot, and NO body paragraph at all when there is none', async () => {
+    // T7.7 / acceptance 11. The bodyless row must not borrow the current
+    // ladder's "Preview unavailable" sentence: nothing failed to compose here,
+    // there is simply no snapshot, and offering the failure copy would send a
+    // navigator hunting for an outage.
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-snap',
+          kind: 'day_before',
+          body: 'Your tour is tomorrow at 10:00 AM.',
+        }),
+        earlierRung({ reminderId: 'e-bare', kind: 'morning_of' }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (2)'));
+
+    expect(screen.getByText('Your tour is tomorrow at 10:00 AM.')).toBeVisible();
+    expect(screen.queryByText(/Preview unavailable/i)).not.toBeInTheDocument();
+    // ANTI-VACUITY: the bodyless rung really did render - it is the paragraph
+    // that is missing, not the row.
+    const bare = screen.getByText('4 hours before').closest('li');
+    expect(bare).not.toBeNull();
+    expect(bare?.querySelectorAll('p')).toHaveLength(0);
+  });
+
+  it('chips a sweep-missed earlier rung "Replaced" and carries its note', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [],
+      earlier: [
+        earlierRung({
+          reminderId: 'e-miss',
+          kind: 'day_before',
+          state: 'upcoming',
+          // Long past due: a fall-through would chip "sending shortly" on a
+          // rung nothing will ever claim.
+          dueAt: '2000-01-01T00:00:00Z',
+          sentAt: undefined,
+          suppression: { reason: 'superseded' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    fireEvent.click(await screen.findByText('Earlier reminders (1)'));
+
+    expect(screen.getByText('Replaced')).toBeVisible();
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Replaced . /)).toBeVisible();
+  });
+
+  it('renders no disclosure at all when the server sends no earlier rows', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Day before')).toBeInTheDocument());
+    expect(screen.queryByText(/Earlier reminders/i)).not.toBeInTheDocument();
+  });
+
+  it('a FAILED refetch clears the earlier rows alongside the ladder', async () => {
+    // G3 (research C 2.4). `earlier` lives in the same committed state object
+    // as `reminders`, and the error branch REPLACES that object. Miss it in
+    // either setState and the panel shows an error banner over a stale
+    // disclosure - rows from a tour whose ladder it just admitted it cannot
+    // read.
+    getTourReminders.mockResolvedValueOnce({
+      reminders: [],
+      earlier: [earlierRung({ reminderId: 'e-1', kind: 'day_before' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Earlier reminders (1)')).toBeInTheDocument());
+
+    getTourReminders.mockRejectedValueOnce(new ApiError(500, 'boom', 'boom'));
+    act(() => streamHandlers?.onScheduledUpdated?.({}));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.queryByText(/Earlier reminders/i)).not.toBeInTheDocument();
   });
 });

@@ -34,6 +34,17 @@ const SUPPRESSION_COPY: Readonly<
   // a person. suppressionNote leads it "No longer sent", hence a label that
   // does not repeat the phrase: "No longer sent - turned off".
   discontinued: 'turned off',
+  // TERMINAL for a different reason (supersession 2026-09-01): the KIND still
+  // sends, but this card's rung belongs to a ladder the tour has replaced.
+  // suppressionNote leads it "Replaced", so the label carries only the cause:
+  // "Replaced - the tour's reminders were set up again".
+  superseded: "the tour's reminders were set up again",
+  // TEMPORARY, unlike the two above (supersession 2026-09-01): the card's tour
+  // is mid-conversion to a placement, so the poll defers this rung and Send now
+  // refuses it - until the claim resolves, when the rung is either swept or
+  // released. suppressionNote leads it "On hold", hence a label that carries
+  // only the cause: "On hold - the tour is becoming a placement".
+  conversion_in_progress: 'the tour is becoming a placement',
 };
 
 /** The fire-time line: while the send is still in the future, "sends <relative> -
@@ -62,6 +73,20 @@ function scheduledLabel(
   // ABOVE `paused`: a discontinued rung is not waiting for a person either, and
   // "Paused" would invite a Send now the server refuses with kind_retired.
   if (item.suppression?.reason === 'discontinued') return 'No longer sent';
+  // ABOVE `paused` for the same argument, and above the fire-time fall-through
+  // for a sharper one: a superseded rung is the LONGEST-lived promise this card
+  // can tell. The poll only meets it at dueAt, so between the reschedule and
+  // the fire time nothing retires it, and the card would read "sends in 6 days"
+  // for a message from a schedule that no longer exists. Kept distinct from
+  // "No longer sent" (that says the KIND is retired) - see suppressionLead.
+  if (item.suppression?.reason === 'superseded') return 'Replaced';
+  // ABOVE the fire-time fall-through, and TEMPORARY unlike the two above it
+  // (review round NEW-3). It has to replace the time for the same reason
+  // `superseded` does - the poll will not pick this rung up before its dueAt,
+  // so "sends in 6 days" would stand for days on a rung nothing is going to
+  // attempt - but it is deliberately NOT worded like a retirement: the claim
+  // resolves, and the card must not have declared the rung dead when it does.
+  if (item.suppression?.reason === 'conversion_in_progress') return 'On hold';
   if (item.suppression?.reason === 'paused') return 'Paused';
   return fireTimeLabel(item.at, now, timezone);
 }
@@ -122,10 +147,14 @@ export function ScheduledCard({
         // related reason: it is a settled decision, not something to act on,
         // and it recurs on every pause-era rung - an always-amber timeline
         // stops reading as a warning (the RemindersPanel twin argues the same).
+        // `superseded` joins them on exactly that argument: the operator
+        // already made the change that replaced this rung, so the card is
+        // reporting a consequence of their own action, not a problem.
         <p
           className={
             item.suppression?.reason === 'quiet_hours' ||
-            item.suppression?.reason === 'discontinued'
+            item.suppression?.reason === 'discontinued' ||
+            item.suppression?.reason === 'superseded'
               ? styles.scheduledSkipMuted
               : styles.scheduledSkip
           }

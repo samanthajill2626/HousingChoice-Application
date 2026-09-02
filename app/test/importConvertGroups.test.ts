@@ -18,6 +18,7 @@ import {
   runConvertGroups,
   type ConvertGroupsOptions,
   type GroupRailEnsurer,
+  type GroupRailRequest,
   type GroupRailResult,
 } from '../src/lib/import/convertGroups.js';
 import { contactIdForPhone, conversationIdForGroup } from '../src/lib/import/ids.js';
@@ -151,13 +152,18 @@ const expectedFor = (rows: ConversationItem[]): { conversationId: string; rowKey
 /** A rail ensurer that records its calls and answers with a scripted outcome. */
 function railStub(
   answer: (conversationId: string) => GroupRailResult,
-): GroupRailEnsurer & { calls: string[] } {
+): GroupRailEnsurer & { calls: string[]; requests: GroupRailRequest[] } {
   const calls: string[] = [];
+  // The WHOLE request, not just the id: what the migration asks for is part of
+  // the contract now (the binding-propagation opt-in).
+  const requests: GroupRailRequest[] = [];
   return {
     calls,
-    async ensureGroupRail({ conversationId }) {
-      calls.push(conversationId);
-      return answer(conversationId);
+    requests,
+    async ensureGroupRail(request) {
+      calls.push(request.conversationId);
+      requests.push(request);
+      return answer(request.conversationId);
     },
   };
 }
@@ -497,6 +503,9 @@ describe('runConvertGroups', () => {
 
     expect(report.totals.refused).toBe(1);
     expect(rail.calls).toEqual([rows[0]!.conversationId]);
+    // The migration OPTS IN to the binding-propagation ladder - this is the
+    // caller where the 2026-08-13 harm was measured.
+    expect(rail.requests[0]?.awaitBindingPropagation).toBe(true);
     expect(report.rows[1]!.railReason).toContain('not attempted');
     expect(report.complete).toBe(false);
   });

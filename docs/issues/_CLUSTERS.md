@@ -192,6 +192,19 @@ Small on purpose. The high's file also flags an unfiled sweep for other
 has a dashboard half in `deliveryStatus.ts` - land the backend lineage here
 and let T-DELIVERY-CHIPS render it). **gated-on:** nothing.
 
+**AMENDED 2026-09-01 - M5 shipped as `feat/retry-counter-durable`, and did the
+OPPOSITE of that routing on both counts.** (1) The backend lineage did NOT land
+here: `relay-30003-retry-lineage` is DEFERRED to its own mission - its file
+lists nine acceptance criteria spanning a new job, a new store, webhook changes
+and dashboard rendering, and three design-review rounds failed to converge it
+while the anchor converged after one. What transferred is the PATTERN plus five
+design facts now recorded in that issue. (2) The dashboard half landed HERE, not
+in T-DELIVERY-CHIPS: with no relay retry existing, the "will retry" promise was
+false in both worlds, so stopping it was part of shipping the counter, and
+Cameron authorized editing `Timeline.tsx` on 2026-09-01. The anchor is RESOLVED;
+the sweep ran (residue: `provider-status-unenumerated-defaults`);
+`rail-binding-propagation-retry` stays open as a partial.
+
 ### M6 - Inbox Unknown tab walks the open partition
 
 **High: 1, raised on measurement** (693 contact lookups to return 17 rows;
@@ -228,13 +241,16 @@ soundness items; the e2e-under-load items are T-E2E-LOAD.
 
 | sev | issue | why it ships here |
 |---|---|---|
-| high | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | anchor - suite A latency-robust assertions, suite B retry `UpdateTable` on `InternalFailure` |
-| med | [logcallsiteguard-hook-budget-equals-its-own-cost](./logcallsiteguard-hook-budget-equals-its-own-cost.md) | a `beforeAll` budget smaller than the hook's own cost - fails on load, not on defect |
-| med | [static-smoke-fails-on-stale-dashboard-dist](./static-smoke-fails-on-stale-dashboard-dist.md) | skips on ABSENT dist, fails on STALE dist, blames the wrong thing |
+| high | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | anchor - STILL OPEN after the 2026-09-01 mission (no sighting to prove cured); the control-plane retry landed, suite A's latency remedy was struck on 13 green runs, the clean-key recipe superseded |
+| med | [logcallsiteguard-hook-budget-equals-its-own-cost](./logcallsiteguard-hook-budget-equals-its-own-cost.md) | RESOLVED 2026-09-01 - the 196s premise did not reproduce (6.5s hook, 27x headroom); budget unchanged, measured comments shipped |
+| med | [static-smoke-fails-on-stale-dashboard-dist](./static-smoke-fails-on-stale-dashboard-dist.md) | RESOLVED 2026-09-01 - split: fixture-served behaviour + tracked-source identity never skip; the dist check can only PASS or SKIP |
 
-**conflicts:** none. **gated-on:** nothing. Run its gates under a clean
-access key (`AWS_ACCESS_KEY_ID=hccleanrun001`) or the anchor's own symptom
-contaminates the verdict.
+**conflicts:** none. **gated-on:** nothing. The clean-key advice that stood
+here is SUPERSEDED (2026-09-01): under per-file keys an exported
+`AWS_ACCESS_KEY_ID` collapses every suite onto one database - the old
+regime, not a clean one. Adjudicate a red gate 2 by re-running the failing
+FILES alone plus a merge-base run, comparing failing FILES (see the anchor
+issue's rewritten first-diagnostic block).
 
 ### M8 - Who owns the conversation-to-contact link
 

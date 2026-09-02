@@ -149,19 +149,31 @@ enforces.
 
 Full setup and lane details: [`e2e/README.md`](e2e/README.md).
 
-**FIRST, if `npm test` is red on DynamoDB Local suites:** re-run under a clean
-access key before blaming anything.
+**FIRST, if `npm test` is red on DynamoDB Local suites:** adjudicate by
+re-run-and-compare. Do NOT reach for the old
+`AWS_ACCESS_KEY_ID=hccleanrun001` recipe that stood here - under per-file
+keys it does the OPPOSITE of what it said: an explicitly exported key wins
+for EVERY test file (`app/test/setup/dynamoAccessKey.ts:120`), so it
+collapses all ~53 integration suites onto ONE DynamoDB Local database and
+one write lock - the regime the per-file-keys fix removed (446-509s loaded
+vs 75-95s in the A/B that justified it) - and it stands down 2
+`dynamoAccessKeyGuard` assertions. It buys no clean database: residue is
+swept on the way IN by `globalSetup` (`sweepLedgerResidue`), so the
+2026-08-23 residue effect (607s/9 failures vs 65s/0) has nothing left to
+beat; re-measured 2026-09-01 on a fresh container the explicit-key arm was
+in fact slightly FASTER (default 231/190s vs explicit 189/165s, app
+workspace) - tracking a declining e2e neighbour across the interleave, not
+the key scheme; the supersession rests on the code reading, not on wall
+clock. Transient
+control-plane faults from a contended container (`InternalFailure`,
+`InternalServerError: ... waiting for a lock`) are retried automatically
+since 2026-09-01 (`app/src/lib/dynamoAdmin.ts`, local-endpoint gated,
+verification-hooked, 25-case acceptance suite).
 
-```
-cd app && AWS_ACCESS_KEY_ID=hccleanrun001 npx vitest run
-```
-
-A degraded database - leaked `hc-test-*` / `hc-local-<lane>-*` / `hc-hist-*`
-tables from interrupted runs, which `globalTeardown` does not drop - makes the
-app suite ~9x slower and fails ~9 files on plain timeouts and SQLite write-lock
-errors, with ZERO assertion failures. Measured 2026-08-23: 607s and 9 failures
-on a residue-carrying key, 65s and 0 failures on an empty one, same commit. If
-the clean-key run is green, the failure is environmental.
+What to do instead: (1) re-run the failing FILE alone, more than once
+(`cd app; npx vitest run test/<file>`); (2) run the full suite at the
+branch's merge base; (3) compare failing FILES, not cases, and report both
+runs.
 See [`npm-test-dynamodb-local-contention`](docs/issues/npm-test-dynamodb-local-contention.md).
 
 **There is no longer a named-flake re-run list.** Both entries that stood here

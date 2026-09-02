@@ -6,10 +6,52 @@ severity: high
 status: open
 area: app/test-infra
 created: 2026-08-05
-updated: 2026-08-21
+updated: 2026-09-01
 reopened: 2026-08-21
 refs: app/test/groupCrossCheck.test.ts, app/test/unreadIndexRepo.integration.test.ts:561, app/test/seedProfile.integration.test.ts:122, app/test/seedLive.test.ts, app/src/lib/dynamoAdmin.ts, app/scripts/db-update-gsis.ts, app/vitest.config.ts
 ---
+
+**Update (2026-09-01, npm-test-soundness mission - the issue stays OPEN).**
+The unprotected control-plane surface named below is closed: every mutating
+send in `app/src/lib/dynamoAdmin.ts` now retries `InternalFailure` /
+`InternalServerError` behind a fail-closed local-endpoint gate, with a
+verification hook for non-idempotent sends (a failed RESPONSE is not a failed
+REQUEST), a per-send 20s deadline, and a 25-case no-container acceptance
+suite (`app/test/dynamoAdminRetry.test.ts`); `db-update-gsis.ts`'s existing
+retry moved onto the same helper, and cases 15/16 prove the move did not
+disarm it. The issue itself is NOT closed: no sighting of suite B's signature
+occurred during the mission (3 contended baseline runs at `5ce9912f`: 580/
+452/463s, and 3 quiet post-fix runs at `b4ba463a`: 238/223/254s - all EXIT 0,
+zero failing files), so there is nothing to point at as cured, and the
+mission's evidence protocol forbids closing on a contended-vs-quiet pair.
+The reopen condition at the bottom stands unchanged.
+
+Suite A's remaining remedy ("make the ordering/window assertions robust to
+latency") is STRUCK - narrowly. Ten consecutive solo runs of
+`groupCrossCheck.test.ts` at `5ce9912f` (13.4-22.9s, runs 1-7 beside one
+live e2e suite) and six full runs across both arms produced 0 failures in
+all 26 cases, including both failing cases recorded below (`a filing for a
+DIFFERENT author...`, `a would-be alarm whose classic filing DID land...`)
+and the redelivery case the TTL fix was diagnosed on. The strike covers
+exactly that evidence: one afternoon, one machine, e2e-class load, no vitest
+neighbour for a whole run, no degraded container - and the loaded arm
+straddles the retry change by construction (baseline pre-change, post-fix
+runs post-change). Records:
+`docs/superpowers/reviews/2026-08-31-npm-test-soundness/measurements/`.
+
+The clean-key "first diagnostic" below is SUPERSEDED - see the rewritten
+block, and `AGENTS.md`. Also recorded there, pre-existing and out of that
+mission's scope: `db-create.ts:64`/`:76` call
+`waitUntilTableNotExists({maxWaitTime:60})` after every delete on the
+`npm test` teardown path (flat-20s second tick); the mission's gating means
+only a RETRIED delete can newly reach that waiter's slow path, and teardown
+timing showed no regression in six measured runs.
+
+WHAT THE NEXT SIGHTING MUST RECORD: `err.$metadata.httpStatusCode` and
+`err.$metadata.attempts`. No sighting in this issue's history captured either,
+so it is still unknown whether the SDK's own transient retry (5xx, 3 attempts
+by default) had already fired underneath ours - which is the difference between
+a helper attempt costing ~10s and ~30s. Two fields settle it for free.
 
 **REOPENED 2026-08-21, same day, by a run that contradicts the close below.**
 
@@ -97,13 +139,17 @@ does not mention it - so an agent who hits this has no sanctioned re-run and
 will either mis-blame their own change or re-run informally. That is exactly
 what happened on `fix/test-suite-hardening` ("green on the SECOND run").
 
-**First diagnostic for anyone who hits this:** re-run under a clean key.
-
-```
-cd app && AWS_ACCESS_KEY_ID=hccleanrun001 npx vitest run
-```
-
-If that is green, the failure is database residue, not your change.
+**First diagnostic for anyone who hits this - REWRITTEN 2026-09-01; the
+clean-key recipe that stood here is superseded.** Under per-file keys,
+exporting `AWS_ACCESS_KEY_ID` collapses ALL test files onto one database
+(`accessKeyForTestFile`, `app/test/setup/dynamoAccessKey.ts:120` - the
+explicit key wins for EVERY file), which is the OLD one-database regime this
+issue's own fix removed, not a clean database; it also stands down 2
+`dynamoAccessKeyGuard` assertions. Residue no longer accumulates to beat:
+`globalSetup` sweeps it on the way in. Instead: (1) re-run the failing FILE
+alone, more than once (`cd app; npx vitest run test/<file>`); (2) run the
+full suite at the branch's merge base; (3) compare failing FILES, not cases,
+and report both runs.
 
 ---
 

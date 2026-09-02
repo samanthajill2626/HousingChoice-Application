@@ -20,16 +20,15 @@ wrote `err.message` / `err.stack` to CloudWatch and `dispatchJob` already logged
 `jobName`. `projectErrorEvent` was a four-field PII allowlist throwing it away.
 The projection is a DISPLAY control, not a storage control.
 
-## Still owed - operator action
+## Ops - DONE
 
-`terraform plan` + `apply`, **dev AND prod**, before the deploy. The branch adds
-a scoped `SystemStatusGetLogRecord` IAM statement
-(`infra/modules/ec2/main.tf:312`, committed). **Until it is applied, "Show all"
-403s and degrades.** After applying, click "Show all" on a real dev error row to
-confirm.
+`terraform plan` + `apply` have been run on **dev AND prod**
+(operator-confirmed 2026-09-01), so the scoped `SystemStatusGetLogRecord` IAM
+statement (`infra/modules/ec2/main.tf:312`) is live and "Show all" resolves
+rather than 403ing. Nothing is owed.
 
-Also open: the feature issues one Insights query per Trace click with no spend
-fence - unmetered cost per click.
+**Still open, and not an ops item:** the feature issues one Insights query per
+Trace click with no spend fence - unmetered cost per click.
 
 ## AWS facts established here - do NOT re-derive, they cost real spike time
 

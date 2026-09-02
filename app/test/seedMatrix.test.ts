@@ -302,6 +302,131 @@ describe('seed matrix: reminder invariant (no reminders on requested tours)', ()
 });
 
 // ---------------------------------------------------------------------------
+// 8a. Ladder generation pointer (tour-reminder supersession, S4 T4.2/T4.3)
+//
+// Every seeded ladder must be identifiable as ONE generation, and its tour must
+// say which generation is CURRENT - otherwise the poll refuses the whole seeded
+// world as superseded and the read paths split each ladder across the "Earlier"
+// disclosure. Three shapes, one per tour status group:
+//   scheduled -> pointer EQUALS the ladderId every one of its rows carries, so
+//                the sent confirmation and the pending day_before stay together.
+//   terminal  -> pointer PRESENT and matching NO row. Production rotates the
+//                pointer on every terminal transition (spec 3.2), so a seeded
+//                terminal tour whose pointer matched its rows would be a state
+//                the product can no longer produce.
+//   requested -> no rows and NO pointer: the pre-migration shape (spec 3.5).
+//
+// This block reads the FULL profile, so it covers the cast ladder as well as
+// the matrix ones - cast has no suite of its own.
+// ---------------------------------------------------------------------------
+const TERMINAL_TOUR_STATUSES = ['toured', 'no_show', 'canceled', 'closed'];
+const CAST_TOURED_TOUR_ID = 'tour-cast-toured-yes-tenant';
+
+describe('seed full profile: reminder ladder generation pointer', () => {
+  const remindersFor = (tourId: string) => allReminders.filter((r) => r['tourId'] === tourId);
+
+  it('every reminder row carries a ladderId, and each tour ladder is ONE generation', () => {
+    expect(allReminders.length).toBeGreaterThan(0);
+    for (const r of allReminders) {
+      expect(
+        r['ladderId'],
+        `reminder ${r['reminderId']} must carry a ladderId`,
+      ).toEqual(expect.any(String));
+    }
+    for (const t of allTours) {
+      const rows = remindersFor(t['tourId'] as string);
+      if (rows.length === 0) continue;
+      const generations = new Set(rows.map((r) => r['ladderId'] as string));
+      expect(
+        generations.size,
+        `tour '${t['tourId']}' rows must all carry the SAME ladderId`,
+      ).toBe(1);
+    }
+  });
+
+  it('a scheduled tour points at the generation its rows carry (sent + pending stay together)', () => {
+    const scheduled = allTours.filter((t) => t['status'] === 'scheduled');
+    expect(scheduled.length, 'must have at least 2 scheduled tours').toBeGreaterThanOrEqual(2);
+    for (const t of scheduled) {
+      const tourId = t['tourId'] as string;
+      const rows = remindersFor(tourId);
+      expect(rows.length, `scheduled tour '${tourId}' must have reminder rows`).toBeGreaterThan(0);
+      // Assert the pointer is a real id BEFORE comparing rows to it: an
+      // undefined pointer equals an unstamped row and the comparison below
+      // would pass vacuously on a seed that stamps nothing.
+      expect(t['currentLadderId'], `scheduled tour '${tourId}' pointer`).toEqual(expect.any(String));
+      for (const r of rows) {
+        expect(
+          r['ladderId'],
+          `row ${r['reminderId']} must be on tour '${tourId}' CURRENT ladder`,
+        ).toBe(t['currentLadderId']);
+      }
+      // The exact pair a partial stamp would split across the disclosure.
+      expect(
+        rows.some((r) => r['kind'] === 'confirmation' && r['sentAt'] !== undefined),
+        `scheduled tour '${tourId}' must keep its SENT confirmation`,
+      ).toBe(true);
+      expect(
+        rows.some(
+          (r) =>
+            r['kind'] === 'day_before' &&
+            r['sentAt'] === undefined &&
+            r['canceledAt'] === undefined,
+        ),
+        `scheduled tour '${tourId}' must keep its PENDING day_before`,
+      ).toBe(true);
+    }
+  });
+
+  it('a terminal tour carries a ROTATED pointer that matches none of its rows', () => {
+    const terminal = allTours.filter((t) => TERMINAL_TOUR_STATUSES.includes(t['status'] as string));
+    let withRows = 0;
+    for (const t of terminal) {
+      const tourId = t['tourId'] as string;
+      const rows = remindersFor(tourId);
+      if (rows.length === 0) continue;
+      withRows++;
+      expect(t['currentLadderId'], `terminal tour '${tourId}' pointer`).toEqual(expect.any(String));
+      for (const r of rows) {
+        expect(
+          r['ladderId'],
+          `terminal tour '${tourId}' must point at a ladder NO surviving row carries`,
+        ).not.toBe(t['currentLadderId']);
+      }
+    }
+    // Census (research A section 6): 8 matrix terminal tours (toured / no_show /
+    // canceled / closed, 2 reps each) plus the ONE cast terminal ladder. If this
+    // count moves, a new seeded terminal ladder appeared and needs the same
+    // rotation.
+    expect(withRows, 'terminal tours carrying a ladder').toBe(9);
+  });
+
+  it('requested tours stay pre-migration: no rows and NO pointer', () => {
+    const requested = allTours.filter((t) => t['status'] === 'requested');
+    expect(requested.length, 'must have at least 2 requested tours').toBeGreaterThanOrEqual(2);
+    for (const t of requested) {
+      expect(remindersFor(t['tourId'] as string).length).toBe(0);
+      expect(
+        t['currentLadderId'],
+        `requested tour '${t['tourId']}' must carry NO pointer`,
+      ).toBeUndefined();
+    }
+  });
+
+  it('the cast toured ladder uses LITERAL ids (byte-stable e2e world)', () => {
+    const tour = allTours.find((t) => t['tourId'] === CAST_TOURED_TOUR_ID);
+    expect(tour, `${CAST_TOURED_TOUR_ID} must exist in the full profile`).toBeDefined();
+    const rows = remindersFor(CAST_TOURED_TOUR_ID);
+    expect(rows.length, 'the cast toured tour carries three sent rungs').toBe(3);
+    for (const r of rows) {
+      expect(r['sentAt'], `cast rung ${r['reminderId']} is history`).toBeDefined();
+      expect(r['ladderId']).toBe('ladder-cast-toured-yes-tenant');
+    }
+    expect(tour!['currentLadderId']).toBe('ladder-cast-toured-yes-tenant-rotated');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 9. All 8 consent methods appear ≥1
 // ---------------------------------------------------------------------------
 describe('seed matrix: consent method coverage', () => {

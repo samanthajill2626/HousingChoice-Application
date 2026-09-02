@@ -6,9 +6,24 @@
 // HARDER reason wins, and a discontinued rung is not something a harder reason
 // should override - and the evaluator is never built at all for a group-routed
 // tour, which is exactly where a retired kind would then read "sending shortly".
+//
+// `superseded` (supersession 2026-09-01) follows that precedent EXACTLY, and
+// for the same three reasons: it is terminal, it is CALLER knowledge (the rung's
+// ladderId against its tour's currentLadderId - lib/ladderPointer.ts, which this
+// clock-free module has no tour to compare), and the same three callers
+// short-circuit ahead of the evaluator on it. Nothing below produces it.
+//
+// `conversion_in_progress` (review round NEW-3) is the third, and the only one
+// of the three that is TEMPORARY: the tour carries an unresolved `pending:`
+// placement-conversion claim, so the poll defers its rungs and Send now answers
+// 409 - but the claim resolves, and then the rung either fires or is swept. It
+// is caller knowledge for the same reason (the sentinel lives on the TOUR) and
+// the same three callers short-circuit on it, ordered BELOW `superseded`: a
+// pointer-mismatched rung is superseded whether or not a claim is in flight.
+// Nothing below produces it.
 export type ScheduledSuppressionReason =
   | 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage'
-  | 'quiet_hours' | 'paused' | 'discontinued';
+  | 'quiet_hours' | 'paused' | 'discontinued' | 'superseded' | 'conversion_in_progress';
 export interface ScheduledSuppression { reason: ScheduledSuppressionReason; }
 
 /** kill-switch is off only on an explicit `false` (mirrors sendMessage's `=== false`). */

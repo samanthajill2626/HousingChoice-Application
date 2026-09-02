@@ -103,6 +103,7 @@ import {
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { readQuietHoursWindow } from '../jobs/tourReminders.js';
 import { isQuietTime } from '../lib/quietHours.js';
+import { isSupersededRung } from '../lib/ladderPointer.js';
 
 export interface ContactTimelineRouterDeps {
   logger?: Logger;
@@ -1039,15 +1040,43 @@ async function gatherUpcoming(params: {
           // must not chip "Will wait" on it either. The exemption is passed IN
           // rather than decided inside suppressionFor / quietFor, which the
           // placement-nudge walk above shares.
-          const suppression = DISCONTINUED_REMINDER_KINDS.has(row.kind)
-            ? ({ reason: 'discontinued' } as const)
-            : suppressionFor(
-                tenantConv,
-                false,
-                row.dueAt,
-                manualOnlyReminderKinds.has(row.kind),
-                row.kind === 'en_route',
-              );
+          //
+          // SUPERSEDED short-circuits AHEAD of both (spec 3.3, S6 T6.2). The
+          // tour is already in hand from the walk above, so the pointer compare
+          // costs no read, and it outranks the kind-level fact because it is a
+          // fact about THIS row's storage: a rung of a ladder the tour has
+          // replaced is one both send paths already refuse. This surface is the
+          // furthest from the tour - a navigator reading a contact page has no
+          // way to know the tour was rescheduled - and `listDue` only picks a
+          // row up at `dueAt <= now`, so the "sends in 3h" promise would stand
+          // for days. The compare is the SHARED one (lib/ladderPointer.ts), the
+          // same function the poll and the other two surfaces call, including
+          // its pre-migration exemption: a legacy rung on a pointerless tour is
+          // NOT superseded, or this line would retire every rung armed before
+          // the feature on its first read.
+          //
+          // CONVERSION IN FLIGHT short-circuits next (review round NEW-3), and
+          // it is the same tour this walk already holds - no extra read. While
+          // the `pending:` sentinel stands the poll defers every rung of this
+          // tour and Send now answers 409, so a live "sends in 3h" here would be
+          // a promise both send paths refuse. BELOW the two TERMINAL reasons
+          // above (this one resolves) and ABOVE the recipient-state estimate
+          // (the claim is what gates the next tick). The PREFIX is the
+          // predicate: the finalize writes a real placementId to the same field.
+          const suppression = isSupersededRung(row, tour)
+            ? ({ reason: 'superseded' } as const)
+            : DISCONTINUED_REMINDER_KINDS.has(row.kind)
+              ? ({ reason: 'discontinued' } as const)
+              : typeof tour.convertedPlacementId === 'string' &&
+                  tour.convertedPlacementId.startsWith('pending:')
+                ? ({ reason: 'conversion_in_progress' } as const)
+                : suppressionFor(
+                  tenantConv,
+                  false,
+                  row.dueAt,
+                  manualOnlyReminderKinds.has(row.kind),
+                  row.kind === 'en_route',
+                );
           return {
             kind: 'scheduled',
             id: `sched#tour_reminder#${row.reminderId}`,

@@ -86,6 +86,36 @@ describe('EmailCard (inbound)', () => {
   });
 });
 
+describe('EmailCard (outbound delivery chip)', () => {
+  // Slice 5a, the FIFTH deliveryReason call site (Timeline.tsx:1390). EmailCard
+  // takes ONLY the message - no `rosterKind`, no `media` - so the relay 30003
+  // override cannot reach it, and must not: an email is never a relay leg. The
+  // em dash is the SHIPPED separator inside the base reason, built from a
+  // codepoint so this source line stays ASCII (AGENTS.md) and so the character
+  // is never copied into new copy.
+  it('keeps the BASE 30003 copy on an outbound email failure', () => {
+    renderTimeline({
+      items: [
+        {
+          ...EMAIL_IN,
+          id: 'e-fail',
+          tsMsgId: '2026-06-08T09:15:00#EM124',
+          direction: 'outbound',
+          author: 'teammate',
+          delivery_status: 'undelivered',
+          error_code: '30003',
+          email_from: 'team@housing.example',
+          email_to: ['renter@example.com'],
+        },
+      ],
+    });
+    const emDash = String.fromCharCode(0x2014);
+    expect(
+      screen.getByText(`Undelivered - Phone unreachable ${emDash} will retry (error 30003)`),
+    ).toBeInTheDocument();
+  });
+});
+
 describe('AttachmentGallery filename labels (fix-wave R1)', () => {
   it('uses the persisted filename when present, else falls back to "Attachment N"', () => {
     renderTimeline({

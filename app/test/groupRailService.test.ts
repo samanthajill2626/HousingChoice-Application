@@ -24,6 +24,7 @@ import type {
   CreateGroupConversationInput,
   GroupConversationRef,
   GroupConversationsPort,
+  GroupParticipantFailure,
   GroupParticipantRef,
 } from '../src/adapters/groupConversations.js';
 import { GroupConversationsUnavailableError } from '../src/adapters/groupConversations.js';
@@ -659,6 +660,325 @@ describe('ensureGroupRail', () => {
     expect(row.current?.twilio_conversation_sid).toBe('CH1');
     expect(row.current?.rail_failed).toBeUndefined();
     expect(row.current?.rail_creating).toBeUndefined();
+  });
+
+  // THE DEFECT THESE PIN (rail-binding-propagation-retry; migration 2026-08-13).
+  // Twilio populates a participant's messaging BINDING asynchronously, and
+  // `buildParticipantMap` drops any participant whose binding has no address
+  // yet. A rail read milliseconds after its own create therefore reads SHORT of
+  // its roster and the code concluded damage: 81 incomplete-roster warnings, 178
+  // "participant already exists" refusals, and 2 `rail_failed` records for rails
+  // a later read showed fully bound. The ladder waits that window out at BOTH
+  // reads that can conclude damage (D14), for the three opted-in callers only
+  // (D16), and never on an ADOPTED rail, whose read-back is the only source of
+  // roster truth (D17).
+  describe('BINDING PROPAGATION LADDER (awaitBindingPropagation)', () => {
+    const FULL_MAP = { MB0: 'phone#+15551110001', MB1: 'phone#+15551110002' };
+
+    /**
+     * A rail whose SECOND member's binding lands only on the Nth participant
+     * read the service itself makes. The create returns the SHORT list, which is
+     * the whole point: a fixture that returns the full list immediately passes
+     * against no ladder at all.
+     */
+    function bindingFixture(boundOnRead: number, over: Partial<GroupConversationsPort> = {}) {
+      const short = participantsFor([MEMBERS[0]!]);
+      const full = participantsFor(MEMBERS);
+      let reads = 0;
+      const waits: number[] = [];
+      const addParticipants = vi.fn(async (): Promise<GroupParticipantFailure[]> => []);
+      const { port, created } = makePort({
+        async createConversationWithParticipants(input) {
+          return {
+            conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
+            participants: short,
+            failures: [],
+          };
+        },
+        async fetchParticipants() {
+          reads += 1;
+          return reads >= boundOnRead ? full : short;
+        },
+        addParticipants,
+        ...over,
+      });
+      const sleep = async (ms: number): Promise<void> => {
+        waits.push(ms);
+      };
+      return { port, created, addParticipants, waits, sleep, readCount: () => reads };
+    }
+
+    it('a fresh create whose bindings have not propagated resolves with NO repair and no rail_failed', async () => {
+      const { repo, row, calls } = makeRepo();
+      // The first laddered re-read sees the second binding.
+      const f = bindingFixture(1);
+
+      const result = await svc(repo, f.port, { sleep: f.sleep }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      expect(result.status).toBe('created');
+      expect(result.participantMap).toEqual(FULL_MAP);
+      // Asserted DIRECTLY, not by relying on makePort's throwing default: a
+      // ladder that emptied `missing` for the wrong reason would still pass a
+      // throw-based negative control.
+      expect(f.addParticipants).not.toHaveBeenCalled();
+      expect(calls.failures).toBe(0);
+      expect(row.current?.rail_failed).toBeUndefined();
+      expect(row.current?.twilio_participant_map).toEqual(FULL_MAP);
+      expect(row.current?.rail_creating).toBeUndefined();
+      // One rung was enough - the ladder stops as soon as `missing` empties.
+      expect(f.waits).toEqual([500]);
+    });
+
+    it('a GENUINELY unbound member still repairs once the ladder runs out of rungs', async () => {
+      const { repo, row, calls } = makeRepo();
+      let attached = participantsFor([MEMBERS[0]!]);
+      const waits: number[] = [];
+      const repairs: string[][] = [];
+      const { port } = makePort({
+        async createConversationWithParticipants(input) {
+          return {
+            conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
+            participants: attached,
+            failures: [],
+          };
+        },
+        async fetchParticipants() {
+          return attached;
+        },
+        async addParticipants(_sid, addresses) {
+          repairs.push([...addresses]);
+          attached = [
+            ...attached,
+            ...addresses.map((address, i) => ({ participantSid: `MB${i + 1}`, address })),
+          ];
+          return [];
+        },
+      });
+
+      const result = await svc(repo, port, {
+        sleep: async (ms: number) => {
+          waits.push(ms);
+        },
+      }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      // Both rungs spent, and then the repair the ladder exists to AVOID when it
+      // is not needed - never to replace.
+      expect(waits).toEqual([500, 1500]);
+      expect(repairs).toEqual([[MEMBERS[1]!.phone]]);
+      expect(result.status).toBe('created');
+      expect(result.participantMap).toEqual(FULL_MAP);
+      expect(calls.failures).toBe(0);
+      expect(row.current?.rail_failed).toBeUndefined();
+    });
+
+    it('the POST-REPAIR read ladders too - the two false rail_failed records were written after it', async () => {
+      const { repo, row, calls } = makeRepo();
+      // Reads 1-2 are the validation ladder; read 3 is the post-repair read,
+      // still unbound; read 4 is the post-repair ladder's first rung.
+      const f = bindingFixture(4);
+
+      const result = await svc(repo, f.port, { sleep: f.sleep }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      expect(f.addParticipants).toHaveBeenCalledTimes(1);
+      expect(f.readCount()).toBe(4);
+      expect(f.waits).toEqual([500, 1500, 500]);
+      expect(result.status).toBe('created');
+      expect(result.participantMap).toEqual(FULL_MAP);
+      expect(calls.failures).toBe(0);
+      expect(row.current?.rail_failed).toBeUndefined();
+    });
+
+    it('an ADOPTED rail ladders on NEITHER read - its read-back is the only roster truth there is', async () => {
+      const { repo, row, calls } = makeRepo();
+      // Never binds inside this run: if the adopt path laddered, the rail would
+      // resolve instead of failing, and the wait list would not be empty.
+      const f = bindingFixture(99, {
+        async fetchByUniqueName(uniqueName) {
+          return { conversationSid: 'CH1', uniqueName, state: 'active' };
+        },
+      });
+
+      const result = await svc(repo, f.port, { sleep: f.sleep }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      expect(f.waits).toEqual([]);
+      // Read 1 is the adopt path's own participant read, read 2 the post-repair
+      // read. A ladder at either point would add reads around them.
+      expect(f.readCount()).toBe(2);
+      expect(f.addParticipants).toHaveBeenCalledTimes(1);
+      expect(result.status).toBe('failed');
+      expect(calls.failures).toBe(1);
+      expect(row.current?.rail_failed).toBeDefined();
+    });
+
+    it('with the flag ABSENT neither read ladders, on the very create path the flag changes', async () => {
+      const { repo, row, calls } = makeRepo();
+      const f = bindingFixture(99);
+
+      // No flag: this is what the two groupSend callers still get (D16).
+      const result = await svc(repo, f.port, { sleep: f.sleep }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+      });
+
+      expect(f.waits).toEqual([]);
+      // Exactly one read - the post-repair one. This is a CREATE (wasAdopted is
+      // false), so only the flag can be suppressing the ladder.
+      expect(f.readCount()).toBe(1);
+      expect(f.addParticipants).toHaveBeenCalledTimes(1);
+      expect(result.status).toBe('failed');
+      expect(calls.failures).toBe(1);
+      expect(row.current?.rail_failed).toBeDefined();
+    });
+
+    it('a laddered re-read that THROWS is a recorded rail failure that RELEASES the claim, never an escaped throw', async () => {
+      const { repo, row, calls } = makeRepo();
+      const waits: number[] = [];
+      const addParticipants = vi.fn(async (): Promise<GroupParticipantFailure[]> => []);
+      const { port } = makePort({
+        async createConversationWithParticipants(input) {
+          return {
+            conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
+            participants: participantsFor([MEMBERS[0]!]),
+            failures: [],
+          };
+        },
+        async fetchParticipants() {
+          throw Object.assign(new Error('service unavailable'), { status: 503 });
+        },
+        addParticipants,
+      });
+
+      const ensure = svc(repo, port, {
+        sleep: async (ms: number) => {
+          waits.push(ms);
+        },
+      }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      // The ladder point sits inside NO existing try: an escaped throw would
+      // strand `rail_creating` for its full 5-minute expiry and take the thread
+      // with it. It resolves, and the claim is gone.
+      await expect(ensure).resolves.toMatchObject({ status: 'failed' });
+      expect((await ensure).reason).toContain('503');
+      expect(row.current?.rail_failed?.reason).toContain('503');
+      expect(row.current?.rail_creating).toBeUndefined();
+      expect(row.current?.twilio_conversation_sid).toBeUndefined();
+      expect(calls.failures).toBe(1);
+      // A failed read is never a reason to continue on the stale list, so the
+      // repair is not attempted on it either.
+      expect(addParticipants).not.toHaveBeenCalled();
+      expect(waits).toEqual([500]);
+    });
+
+    it('a THROWING post-repair read is still the repair catch - the ladder added no new escape', async () => {
+      const { repo, row, calls } = makeRepo();
+      const short = participantsFor([MEMBERS[0]!]);
+      const waits: number[] = [];
+      let reads = 0;
+      const { port } = makePort({
+        async createConversationWithParticipants(input) {
+          return {
+            conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
+            participants: short,
+            failures: [],
+          };
+        },
+        async fetchParticipants() {
+          reads += 1;
+          // Reads 1-2 are the validation ladder; read 3 is the post-repair read.
+          if (reads >= 3) throw Object.assign(new Error('service unavailable'), { status: 503 });
+          return short;
+        },
+        async addParticipants() {
+          return [];
+        },
+      });
+
+      const ensure = svc(repo, port, {
+        sleep: async (ms: number) => {
+          waits.push(ms);
+        },
+      }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      await expect(ensure).resolves.toMatchObject({ status: 'failed' });
+      expect((await ensure).reason).toContain('503');
+      expect(row.current?.rail_failed?.reason).toContain('503');
+      expect(row.current?.rail_creating).toBeUndefined();
+      expect(calls.failures).toBe(1);
+      expect(waits).toEqual([500, 1500]);
+    });
+
+    it('a re-read that reveals a STALE author participant still drives the author repair', async () => {
+      // The ladder reassigns the participant list the AUTHOR block reads, so a
+      // projected participant that only becomes visible on a re-read is checked
+      // exactly like one the first read carried. (`authorPresent` cannot change
+      // here: on the create path its `!wasAdopted` arm short-circuits.)
+      const { repo, row, calls } = makeRepo();
+      const removed: string[] = [];
+      const waits: number[] = [];
+      const bound = [
+        ...participantsFor(MEMBERS),
+        { participantSid: 'MBold', projectedAddress: '+15559998888' },
+      ];
+      const { port } = makePort({
+        async createConversationWithParticipants(input) {
+          return {
+            conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
+            participants: participantsFor([MEMBERS[0]!]),
+            failures: [],
+          };
+        },
+        async fetchParticipants() {
+          return bound;
+        },
+        async removeParticipant(_sid, participantSid) {
+          removed.push(participantSid);
+          return true;
+        },
+      });
+
+      const result = await svc(repo, port, {
+        sleep: async (ms: number) => {
+          waits.push(ms);
+        },
+      }).ensureGroupRail({
+        conversationId: CONV,
+        members: MEMBERS,
+        awaitBindingPropagation: true,
+      });
+
+      expect(waits).toEqual([500]);
+      expect(removed).toEqual(['MBold']);
+      // `addProjectedParticipant` throws by default, so an author ATTACH the
+      // create path must never need would surface as a rail failure here.
+      expect(result.status).toBe('created');
+      expect(result.participantMap).toEqual(FULL_MAP);
+      expect(calls.failures).toBe(0);
+      expect(row.current?.rail_failed).toBeUndefined();
+    });
   });
 
   it('RECREATION RACE: losing the fenced finalize adopts the winner rail, never overwrites it', async () => {

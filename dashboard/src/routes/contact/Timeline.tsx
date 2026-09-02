@@ -8,7 +8,7 @@
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
 // render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
 // first (roles/labels) so it's testable.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   ContactEmail,
@@ -24,6 +24,7 @@ import type {
 import { ApiError, confirmMmsMedia, presignMmsMedia, uploadToPresignedPost } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { ScheduledCard } from './ScheduledCard.js';
+import { deriveStreamAnchor, type StreamAnchor } from './streamAnchor.js';
 import {
   dayKey,
   formatDayDivider,
@@ -237,9 +238,11 @@ export interface TimelinePaging {
 export interface TimelineProps {
   status: TimelineStatus;
   items: TimelineItem[];
-  /** Not-yet-sent scheduled messages — rendered in a pinned "Upcoming" section
-   *  between the stream and the composer (shown only when non-empty). Never part
-   *  of `items`. */
+  /** Not-yet-sent scheduled messages - rendered as the LAST child of the
+   *  scrolling stream, below the newest message and above the composer (shown
+   *  only when non-empty). It scrolls with the stream rather than holding a
+   *  fixed slice of the pane, and the scroll anchor keeps it below the fold
+   *  until the operator scrolls to it. Never part of `items`. */
   upcoming?: TimelineScheduled[];
   /** The IANA zone the `upcoming` BODIES were composed in (spec D8), passed
    *  straight through to each card's fire-time label. Omitted (or from a
@@ -583,7 +586,7 @@ function recipientSummaryName(
     const who = row.name.note !== undefined ? `${row.name.label}, ${row.name.note}` : row.name.label;
     const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, nowMs);
     const legReason = leg?.isFailure === true
-      ? deliveryReason(row.slot.errorCode, { media })
+      ? deliveryReason(row.slot.errorCode, { media, relay: rosterKind === 'relay' })
       : undefined;
     const transport = includeRecipientTransport ? presentRecipientTransport(row.slot) : null;
     const details = [
@@ -873,7 +876,21 @@ function MessageBubble({
   // that path breaks is deliberately unnamed - see
   // docs/issues/mms-silent-drop-dish-textnow.md.
   const isMms = msg.type === 'mms';
+  // DELIBERATELY no `relay` flag here, and this is the one place in this
+  // component where that is a decision rather than an omission. This site reads
+  // the MESSAGE's own error_code, not a leg's. A relay source message never gets
+  // one (the relay path writes SLOTS only); the code that does reach it is the
+  // native-group-text aggregate, whose 30003 retry is real (D20). Passing
+  // `rosterKind` here would drop the promise from a group text that genuinely
+  // retries - the exact inversion D20 forbids.
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code, { media: isMms }) : undefined;
+  // The product flag for every LEG-scoped reason in this bubble: the rollup, the
+  // accessible-name recital and the per-recipient row. ONE PROP, derived twice
+  // from the same value - this flag serves the rollup and the row, and the
+  // recital recomputes `rosterKind === 'relay'` inside recipientSummaryName -
+  // so the three still cannot disagree (D21), the same argument the single
+  // `isMms` above already makes for media.
+  const isRelayLeg = rosterKind === 'relay';
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because
   // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
@@ -918,7 +935,7 @@ function MessageBubble({
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(
           recipientEntries.map(([, slot]) => slot),
-          { media: isMms, messageAtMs, nowMs: bubbleNowMs },
+          { media: isMms, relay: isRelayLeg, messageAtMs, nowMs: bubbleNowMs },
         )
       : null;
   const recipientRows = orderRecipientRows(recipientEntries, relayRoster);
@@ -1087,9 +1104,14 @@ function MessageBubble({
             // so this NEW surface would contradict the message-level chip
             // directly above it. One `isMms` feeds the rollup, this row and the
             // accessible name, so the three cannot disagree.
+            //
+            // `relay` is the second flag on exactly the same footing (D19/D21):
+            // a relay leg's 30003 keeps its carrier code and drops the "will
+            // retry" tail, because no relay retry is scheduled - while a native
+            // group text, whose 30003 retry IS real, keeps the promise.
             const legReason =
               leg?.isFailure === true
-                ? deliveryReason(row.slot.errorCode, { media: isMms })
+                ? deliveryReason(row.slot.errorCode, { media: isMms, relay: isRelayLeg })
                 : undefined;
             // Recipient slots inherit legacy compatibility from their parent.
             // Missing slot facts are unresolved only on version-1 messages.
@@ -1888,32 +1910,105 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // near) the bottom; if they've scrolled UP to read history, a new item must NOT
   // yank them — instead a "↓ New messages" pill appears so they know something
   // landed and can jump down on demand (the cell-phone convention).
+  //
+  // The Upcoming block is the LAST child of this scroller, so "the bottom" and
+  // "the newest message" are no longer the same place. A zero-height SENTINEL
+  // sits between the last cluster and the block, and everything below is
+  // expressed against it: see streamAnchor.ts for the three-value model and why
+  // one boolean could not survive the move.
   const streamRef = useRef<HTMLDivElement>(null);
-  const atBottomRef = useRef(true); // default true → open on the newest item
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const upcomingRef = useRef<HTMLElement>(null);
+  const anchorRef = useRef<StreamAnchor>('sentinel'); // default -> open on the newest message
+  // Distance from the scroller's TRUE bottom at the last observed scroll. Only
+  // the `below` branch reads it: an operator standing on the block keeps this
+  // constant across a growth, so the block does not slide under their eye.
+  const bottomGapRef = useRef(0);
   const prevCountRef = useRef(0); // item count at the last layout pass
   const prevKeyRef = useRef(resetScrollKey); // conversation identity last seen
+  // Whether the block was mounted at the last layout pass. Its appearance and
+  // its disappearance both invalidate the cached anchor - see the layout effect.
+  // Seeded with the MOUNT value so the first pass, which opens the thread on the
+  // newest message, is never treated as a change.
+  const prevHasBlockRef = useRef(upcoming !== undefined && upcoming.length > 0);
   const [hasNewBelow, setHasNewBelow] = useState(false);
+  // The block's own height changes without any item-count change (a body
+  // wrapping to a second line), and the anchor depends on it. A ResizeObserver
+  // ticks this, and the tick is a dep of the layout effect below.
+  const [blockResizeTick, setBlockResizeTick] = useState(0);
+  const hasUpcomingBlock = upcoming !== undefined && upcoming.length > 0;
 
-  const isAtBottom = (el: HTMLElement): boolean =>
-    // Within ~48px of the bottom counts as "at bottom" (slack for sub-pixel
-    // rounding and a partially-visible last row).
-    el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+  // useCallback so the layout effect can list it as a dep without re-running
+  // every render: its identity changes exactly when `hasUpcomingBlock` does,
+  // which is already a dep of that effect - no behavior change, just an honest
+  // dependency list.
+  const currentAnchor = useCallback(
+    (el: HTMLElement): StreamAnchor => {
+      const sentinel = sentinelRef.current;
+      if (!sentinel) return 'sentinel';
+      return deriveStreamAnchor({
+        sentinelBottom: sentinel.getBoundingClientRect().bottom,
+        viewportBottom: el.getBoundingClientRect().bottom,
+        hasBlock: hasUpcomingBlock,
+      });
+    },
+    [hasUpcomingBlock],
+  );
+
+  // Bring the sentinel's bottom edge to the scroller's bottom edge - i.e. land
+  // on the newest MESSAGE, with the Upcoming block just below the fold.
+  //
+  // Deliberately a rect DELTA, not `sentinel.offsetTop + offsetHeight -
+  // clientHeight`: `.stream` is not positioned, so the sentinel's offsetParent
+  // is `.streamWrap`, and offsetTop therefore carries the "Load older messages"
+  // row's height as a silent constant error that appears and disappears with
+  // that control. The delta form reads the SAME two numbers the anchor is
+  // derived from, so the write and the derivation cannot disagree.
+  //
+  // Never `scrollIntoView` - it scrolls every scrollable ANCESTOR too, which
+  // moves the page shell out from under the operator.
+  const scrollToSentinel = (el: HTMLElement): void => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) {
+      el.scrollTop = el.scrollHeight;
+    } else {
+      el.scrollTop += sentinel.getBoundingClientRect().bottom - el.getBoundingClientRect().bottom;
+    }
+    bottomGapRef.current = el.scrollHeight - el.scrollTop;
+  };
 
   const scrollToBottom = (): void => {
     const el = streamRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    atBottomRef.current = true;
+    scrollToSentinel(el);
+    anchorRef.current = 'sentinel';
     setHasNewBelow(false);
   };
 
   const handleStreamScroll = (): void => {
     const el = streamRef.current;
     if (!el) return;
-    atBottomRef.current = isAtBottom(el);
-    // Reaching the bottom clears the pill (the operator has caught up).
-    if (atBottomRef.current && hasNewBelow) setHasNewBelow(false);
+    anchorRef.current = currentAnchor(el);
+    bottomGapRef.current = el.scrollHeight - el.scrollTop;
+    // Caught up (on the newest message, or down on the block) clears the pill.
+    if (anchorRef.current !== null && hasNewBelow) setHasNewBelow(false);
   };
+
+  // Observe the BLOCK only. Keyed on the boolean, never on `upcoming` itself:
+  // GroupTextView passes a fresh `[]` literal every render, so the array's
+  // identity would re-subscribe on every pass.
+  useEffect(() => {
+    const node = upcomingRef.current;
+    // jsdom has no ResizeObserver (and neither does a very old engine).
+    if (!node || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(() => {
+      setBlockResizeTick((n) => n + 1);
+    });
+    ro.observe(node);
+    return () => {
+      ro.disconnect();
+    };
+  }, [hasUpcomingBlock]);
 
   // [R1] Armed immediately BEFORE an older page is requested, and consumed only
   // when the HOOK reports a merged older page (olderPagesLoaded changed). The
@@ -1939,17 +2034,45 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   useLayoutEffect(() => {
     const el = streamRef.current;
     if (!el) return;
+    // THE BLOCK VANISHED under the operator (review round m2). Both the cached
+    // anchor and `bottomGapRef` were derived with the block PRESENT, and a
+    // reschedule/terminal/convert emptying the bucket is this feature's
+    // commonest event. A stale `below` then restores a gap the content no
+    // longer warrants: the next growth scrolls the operator UP, away from the
+    // newest message, and clears the pill on the same line - the one situation
+    // the pill exists for. Re-derive from the DOM, which has already committed
+    // the unmount. Keyed on the BOOLEAN, never on the `upcoming` array:
+    // GroupTextView passes a fresh `[]` literal every render.
+    //
+    // ONE DIRECTION ONLY. The MOUNT flip must NOT re-derive: the block appears
+    // BELOW the sentinel, so it adds content beneath the fold and cannot
+    // invalidate a `sentinel` or `null` anchor - while the geometry it would be
+    // read against may be a scrollTop no pin has run on yet. TourConversation
+    // delivers the messages and the block in one commit, and re-deriving there
+    // read scrollTop 0, answered `null`, and let the same pass take the `grew`
+    // branch: the thread opened scrolled to the top with a "New messages" pill
+    // (live QA, lane 1). Unmount is the only flip that invalidates anything.
+    if (prevHasBlockRef.current !== hasUpcomingBlock) {
+      const vanished = prevHasBlockRef.current;
+      prevHasBlockRef.current = hasUpcomingBlock;
+      if (vanished) {
+        anchorRef.current = currentAnchor(el);
+        bottomGapRef.current = el.scrollHeight - el.scrollTop;
+      }
+    }
     const count = clusters.reduce((n, c) => n + c.items.length, 0);
     const merged = paging?.olderPagesLoaded ?? 0;
     const prepended = merged !== seenOlderPagesRef.current;
     seenOlderPagesRef.current = merged;
     if (prevKeyRef.current !== resetScrollKey) {
-      // Switched conversations → open on the newest item, no carried-over pill.
+      // Switched conversations -> open on the newest MESSAGE, no carried-over
+      // pill. Targeting `scrollHeight` here would open every thread that has a
+      // ladder scrolled onto the Upcoming block instead.
       prevKeyRef.current = resetScrollKey;
       prevCountRef.current = count;
-      atBottomRef.current = true;
+      anchorRef.current = 'sentinel';
       prependAnchorRef.current = null;
-      el.scrollTop = el.scrollHeight;
+      scrollToSentinel(el);
       setHasNewBelow(false);
       return;
     }
@@ -1970,8 +2093,15 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       // restore delta counts only the prepended content.
       prependAnchorRef.current = el.scrollHeight;
     }
-    if (atBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
+    if (anchorRef.current === 'sentinel') {
+      // On the newest message: bring the sentinel back to the fold.
+      scrollToSentinel(el);
+      setHasNewBelow(false);
+    } else if (anchorRef.current === 'below') {
+      // Down on the Upcoming block, deliberately. Everything new lands ABOVE
+      // the block, so holding the distance to the scroller's true bottom holds
+      // the block still on screen. No pill: nothing is hidden from them.
+      el.scrollTop = el.scrollHeight - bottomGapRef.current;
       setHasNewBelow(false);
     } else if (grew) {
       setHasNewBelow(true);
@@ -1979,7 +2109,15 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     // `paging?.olderPagesLoaded` MUST stay in the deps: the merge and the counter
     // bump land in the same commit, but a render where ONLY the counter changed
     // must still be able to consume the anchor.
-  }, [clusters, resetScrollKey, paging?.olderPagesLoaded]);
+    //
+    // `blockResizeTick` is here rather than in an effect of its own: the
+    // prepend-anchor re-baseline above and the pill decision below both live in
+    // THIS pass, and a standalone re-pin effect would bypass them.
+    //
+    // `hasUpcomingBlock` is here so the UNMOUNT gets a pass at all: the observer
+    // effect only disconnects, nothing ticks `blockResizeTick`, and an item-count
+    // change is not required for the block to vanish.
+  }, [clusters, resetScrollKey, paging?.olderPagesLoaded, blockResizeTick, hasUpcomingBlock, currentAnchor]);
 
   // Clear a stale anchor once the load settles. Runs after paint, so the layout
   // effect above has already had its chance to consume it.
@@ -2033,9 +2171,10 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     setDraft('');
     setAttachments([]);
     setAttachError(null);
-    // The operator just sent — pin to the bottom so their own message is in view
-    // even if they'd scrolled up while composing.
-    atBottomRef.current = true;
+    // The operator just sent - pin to the newest message so their own message is
+    // in view even if they'd scrolled up while composing. The next layout pass
+    // does the scrolling; this only says where to land.
+    anchorRef.current = 'sentinel';
     try {
       // Pass attachmentKeys only when present, so a text-only send stays a plain
       // onSend(body) call (unchanged contract for the no-attachment path).
@@ -2148,6 +2287,31 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               </div>
             ))
           : null}
+
+        {/* The scroll anchor: a zero-height boundary between the message stream
+            and the Upcoming block. Every pin targets THIS, so "the bottom" stays
+            the newest MESSAGE even with a block rendered below it. */}
+        <div ref={sentinelRef} data-testid="stream-sentinel" aria-hidden="true" />
+
+        {/* Inside the scroller, as its LAST child: the block scrolls away with
+            the history instead of holding a fixed slice of a phone-sized pane.
+            Keep the section/heading/list nesting exactly as it is - four e2e
+            sites resolve this region by role+name and then walk
+            `> div > div` to the cards, so a wrapper here breaks all four. */}
+        {upcoming && upcoming.length > 0 ? (
+          <section
+            ref={upcomingRef}
+            className={styles.upcoming}
+            aria-label="Upcoming scheduled messages"
+          >
+            <header className={styles.upcomingHead}>Upcoming ({upcoming.length})</header>
+            <div className={styles.upcomingList}>
+              {upcoming.map((sched) => (
+                <ScheduledCard key={sched.id} item={sched} timezone={upcomingTimezone} />
+              ))}
+            </div>
+          </section>
+        ) : null}
       </div>
         {hasNewBelow ? (
           <button
@@ -2160,17 +2324,6 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           </button>
         ) : null}
       </div>
-
-      {upcoming && upcoming.length > 0 ? (
-        <section className={styles.upcoming} aria-label="Upcoming scheduled messages">
-          <header className={styles.upcomingHead}>Upcoming ({upcoming.length})</header>
-          <div className={styles.upcomingList}>
-            {upcoming.map((sched) => (
-              <ScheduledCard key={sched.id} item={sched} timezone={upcomingTimezone} />
-            ))}
-          </div>
-        </section>
-      ) : null}
 
       <div className={styles.reply}>
         {/* Soft-deleted contact (deleted-contact resurfacing, 2026-08-03): the WHOLE

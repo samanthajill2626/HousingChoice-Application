@@ -3628,9 +3628,25 @@ export class Scenario {
    *   - 'canceled'  → the row shows a "Canceled" chip (struck-through);
    *   - 'next'      → the row is the next-to-fire (aria-current="step" + a "Next" tag);
    *   - 'upcoming'  -> the row is armed: not sent, not canceled, not skipped.
-   * Rows are scoped by the rung's staff label (REMINDER_KIND_LABELS); after a
-   * reschedule a label can appear twice (an old canceled row + a fresh armed one),
-   * so the state filter is what disambiguates.
+   * Rows are scoped by the rung's staff label (REMINDER_KIND_LABELS).
+   *
+   * The state filter is NOT there to disambiguate two copies of one label. It
+   * used to be: before supersession (2026-09-01) a reschedule left the old
+   * generation in place as canceled rows, so a label appeared twice. A
+   * reschedule now DELETES every never-sent rung of the old ladder, so the
+   * current list carries each label at most once. The filter survives for the
+   * states that can still coexist under one label on ONE ladder - a rung a human
+   * cancels by hand from this very panel is still `Canceled`, and `next` is a
+   * strictly narrower claim than `upcoming` - and because a filter that names
+   * the state asserts more than a bare label lookup does.
+   *
+   * SCOPE: the CURRENT ladder only. The panel also renders an `Earlier
+   * reminders (N)` disclosure holding the previous generations' SENT rungs, and
+   * those are listitems with the same labels and the same `Sent` chip. The
+   * <details> is closed by default, which already keeps them out of the
+   * accessibility tree, but the locator does not rely on that - it selects the
+   * current-ladder <ul> explicitly, so a step that opens the disclosure cannot
+   * silently widen every assertion in the suite.
    *
    * 'Skipped' is excluded from 'upcoming' because a RETIRED rung is not an armed
    * one: the past-tour gate, an unreadable roster and (with the pause lifted) the
@@ -3662,20 +3678,69 @@ export class Scenario {
   ): Promise<void> {
     const label = REMINDER_KIND_LABELS[kind];
     return step(`App: Reminders panel shows '${label}' as ${state}`, async () => {
-      const region = this.remindersCard();
-      const rows = region.getByRole('listitem').filter({ hasText: label });
-      let row;
-      if (state === 'sent') row = rows.filter({ hasText: /Sent/ });
-      else if (state === 'canceled') row = rows.filter({ hasText: 'Canceled' });
-      else if (state === 'next') row = rows.filter({ hasText: 'Next' });
-      else
-        row = rows
-          .filter({ hasNotText: 'Sent' })
-          .filter({ hasNotText: 'Canceled' })
-          .filter({ hasNotText: /Skipped/ });
+      const row = this.reminderRungRows(kind, state);
       await expect(row.first()).toBeVisible({ timeout: 10_000 });
       if (state === 'next') await expect(row.first()).toHaveAttribute('aria-current', 'step');
     });
+  }
+
+  /**
+   * [App->Team] The OPEN Reminders panel holds NO current-ladder row for `kind`
+   * - or, with `state`, none in that state.
+   *
+   * The verb supersession needed (2026-09-01): a reschedule DELETES the old
+   * generation's never-sent rungs, so the thing to assert about a retired rung
+   * is that nothing shows it, not that it shows as `Canceled`. Note the two
+   * claims a spec can make here are different: `expectReminderRungAbsent(kind)`
+   * says the label is gone entirely, which is wrong right after a re-arm (the
+   * FRESH ladder carries the same labels); `expectReminderRungAbsent(kind,
+   * 'canceled')` says no row of that label is retired, which is the honest
+   * post-sweep claim.
+   *
+   * It asserts about the PANEL, not about the table. "The row is gone from
+   * DynamoDB" is decision O7's claim and is proven in `app/test` - nothing
+   * under `e2e/` can read the table, and this scope deliberately does not open
+   * the `Earlier reminders` disclosure to look.
+   */
+  expectReminderRungAbsent(
+    kind: ReminderKind,
+    state?: 'upcoming' | 'sent' | 'canceled' | 'next',
+  ): Promise<void> {
+    const label = REMINDER_KIND_LABELS[kind];
+    const what = state === undefined ? `no '${label}' rung` : `no ${state} '${label}' rung`;
+    return step(`App: Reminders panel shows ${what}`, async () => {
+      await expect(this.reminderRungRows(kind, state)).toHaveCount(0, { timeout: 10_000 });
+    });
+  }
+
+  /** Current-ladder rung rows for `kind`, optionally narrowed to one state. The
+   *  shared resolver behind expectReminderRung / expectReminderRungAbsent, so
+   *  the two verbs can never disagree about what a state means. */
+  private reminderRungRows(
+    kind: ReminderKind,
+    state?: 'upcoming' | 'sent' | 'canceled' | 'next',
+  ): Locator {
+    const label = REMINDER_KIND_LABELS[kind];
+    const rows = this.currentLadderList().getByRole('listitem').filter({ hasText: label });
+    if (state === 'sent') return rows.filter({ hasText: /Sent/ });
+    if (state === 'canceled') return rows.filter({ hasText: 'Canceled' });
+    if (state === 'next') return rows.filter({ hasText: 'Next' });
+    if (state === 'upcoming')
+      return rows
+        .filter({ hasNotText: 'Sent' })
+        .filter({ hasNotText: 'Canceled' })
+        .filter({ hasNotText: /Skipped/ });
+    return rows;
+  }
+
+  /** The CURRENT ladder's <ul> inside the Reminders card - never the `Earlier
+   *  reminders` disclosure's list, which composes `.rows` with `.earlierRows`
+   *  (RemindersPanel.tsx). CSS modules emit `_earlierRows_<hash>`; the
+   *  `[class*="_stream_"]` selector in thread-history-paging.spec.ts is the same
+   *  idiom. Resolves to ZERO elements when the current ladder is empty ("No
+   *  reminders armed."), which is correct for an absence assertion. */
+  private currentLadderList(): Locator {
+    return this.remindersCard().locator('ul:not([class*="_earlierRows_"])');
   }
 
   /** Navigate to a contact and return the SINGLE Upcoming card whose body contains

@@ -2503,7 +2503,11 @@ export async function dismissPlacementRosterAction(
 /** GET /api/tours/:tourId/reminders — the armed reminder ladder for a tour
  *  (confirmation / day_before / morning_of / en_route / no_show_checkin), each
  *  rung's state (upcoming - sent - canceled) plus the NEXT rung to fire. Returns
- *  { reminders, next? } as-is (no unwrap). */
+ *  { reminders, next?, timezone?, earlier? } as-is (no unwrap).
+ *
+ *  `reminders` is the tour's CURRENT generation and it alone feeds `next`;
+ *  `earlier` (supersession spec 3.4) holds surviving rungs of generations the
+ *  tour has replaced, newest first, and is OMITTED when there are none. */
 export async function getTourReminders(
   tourId: string,
   signal?: AbortSignal,

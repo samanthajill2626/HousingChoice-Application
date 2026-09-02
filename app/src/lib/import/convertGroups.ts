@@ -429,6 +429,11 @@ export async function runConvertGroups(
       const outcome = await ensureRail(rail, {
         conversationId: group.conversationId,
         members: converted.members,
+        // Where the harm was measured (2026-08-13): 132 rails created in one
+        // batch, 81 of them read back short of their roster because Twilio had
+        // not bound the participants yet. A migration row can wait a second.
+        // Only the FIRST conversion benefits - a re-run adopts the rail it made.
+        awaitBindingPropagation: true,
       });
       row.rail = outcome.status;
       if (outcome.twilioConversationSid !== undefined) {

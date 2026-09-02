@@ -59,6 +59,7 @@ import {
   type TransportMutationOutcome,
 } from '../repos/messagesRepo.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
+import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
 import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
 import { SendRefusedError } from '../services/sendMessage.js';
 import {
@@ -87,7 +88,13 @@ export const MAX_FANOUT_ATTEMPTS = 3;
  */
 export const RELAY_PRESIGN_TTL_SECONDS = 3600;
 
-/** Exponential backoff for the transient-failure continuation: 5s, 10s, 20s. */
+/**
+ * Exponential backoff for the transient-failure continuation. The call site
+ * passes the CURRENT pass number, not the next one (M5 D7/D11: relay's
+ * argument differs from broadcastFanOut's deliberately and is preserved, not
+ * normalised), so the live ladder is 5s then 10s ONLY - pass 3 reaches the
+ * cap and closes instead of enqueueing, which leaves the 20s rung unreachable.
+ */
 export function fanOutBackoffMs(attempt: number): number {
   return 5_000 * 2 ** (attempt - 1);
 }
@@ -1048,6 +1055,64 @@ async function runRelayFanOutExecution(
     }
   }
 
+  let claim: FanoutClaimResult | undefined;
+
+  async function closeRelay(
+    memberKeys: string[],
+    code: string,
+    cause?: unknown,
+  ): Promise<void> {
+    for (const key of memberKeys) {
+      if (isTerminal(currentSource.delivery_recipients?.[key]?.status)) continue;
+      await persistRelayRecipientResult(
+        messages,
+        payload,
+        key,
+        { status: 'failed', errorCode: code },
+        transport,
+      );
+    }
+    const fanoutAttempt =
+      claim !== undefined && claim.outcome !== 'missing' ? claim.attempt : undefined;
+    log.error(
+      {
+        conversationId: payload.relayConversationId,
+        tsMsgId: payload.sourceTsMsgId,
+        deferred: memberKeys.length,
+        closeCode: code,
+        fanoutAttempt,
+        envelopeAttempt: payload.attempt,
+        ...(cause !== undefined && { err: cause }),
+      },
+      'relayFanOut: fan-out closed - remaining recipients marked failed',
+    );
+  }
+
+  // The continuation budget is stored on the source message. This preserves
+  // main's durable cap for both schema-absent jobs and versioned transport jobs.
+  const pending = recipients.filter(
+    (member) =>
+      !isTerminal(currentSource.delivery_recipients?.[relayMemberKey(member)]?.status),
+  );
+  if (pending.length > 0) {
+    claim = await messages.claimFanoutPass(
+      payload.relayConversationId,
+      payload.sourceTsMsgId,
+      MAX_FANOUT_ATTEMPTS,
+    );
+    if (claim.outcome === 'missing') {
+      log.warn(
+        { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId },
+        'relayFanOut: source message vanished before the pass claim - nothing relayed',
+      );
+      return;
+    }
+    if (claim.outcome === 'capped') {
+      await closeRelay(pending.map(relayMemberKey), 'transient_cap');
+      return;
+    }
+  }
+
   const transientRemaining: string[] = [];
   let sentCount = 0;
   for (const member of recipients) {
@@ -1216,41 +1281,33 @@ async function runRelayFanOutExecution(
   );
 
   if (transientRemaining.length === 0) return;
-  const nextAttempt = (payload.attempt ?? 1) + 1;
-  if (nextAttempt > MAX_FANOUT_ATTEMPTS) {
-    for (const key of transientRemaining) {
-      await persistRelayRecipientResult(
-        messages,
-        payload,
-        key,
-        { status: 'failed', errorCode: 'transient_cap' },
-        transport,
-      );
-    }
-    log.error(
-      {
-        conversationId: payload.relayConversationId,
-        deferred: transientRemaining.length,
-        attempt: payload.attempt,
-      },
-      'relayFanOut: transient retry cap reached - remaining recipients marked failed',
-    );
+  if (claim?.outcome !== 'claimed') {
+    await closeRelay(transientRemaining, 'transient_cap');
     return;
   }
-  await enqueue(
-    RELAY_FANOUT_JOB,
-    {
-      relayConversationId: payload.relayConversationId,
-      sourceTsMsgId: payload.sourceTsMsgId,
-      senderKey: payload.senderKey,
-      ...(payload.senderNameOverride !== undefined && {
-        senderNameOverride: payload.senderNameOverride,
-      }),
-      attempt: nextAttempt,
-      recipientKeys: transientRemaining,
-    } satisfies RelayFanOutPayload,
-    { runAt: new Date(Date.now() + fanOutBackoffMs(payload.attempt ?? 1)) },
-  );
+  if (claim.attempt >= MAX_FANOUT_ATTEMPTS) {
+    await closeRelay(transientRemaining, 'transient_cap');
+    return;
+  }
+  const nextAttempt = claim.attempt + 1;
+  try {
+    await enqueue(
+      RELAY_FANOUT_JOB,
+      {
+        relayConversationId: payload.relayConversationId,
+        sourceTsMsgId: payload.sourceTsMsgId,
+        senderKey: payload.senderKey,
+        ...(payload.senderNameOverride !== undefined && {
+          senderNameOverride: payload.senderNameOverride,
+        }),
+        attempt: nextAttempt,
+        recipientKeys: transientRemaining,
+      } satisfies RelayFanOutPayload,
+      { runAt: new Date(Date.now() + fanOutBackoffMs(claim.attempt)) },
+    );
+  } catch (err) {
+    await closeRelay(transientRemaining, 'enqueue_failed', err);
+  }
 }
 
 async function preflightVersionedRecipients(

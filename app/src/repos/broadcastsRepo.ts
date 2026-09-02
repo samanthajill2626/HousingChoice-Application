@@ -33,6 +33,7 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
+import type { FanoutClaimResult } from './fanoutClaim.js';
 
 /** Broadcast lifecycle status (the byCreated GSI's FilterExpression key). */
 export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
@@ -167,6 +168,10 @@ export interface BroadcastItem {
    *  review step's hand-picked additions). Independent of audience_filter. */
   seed_contact_ids?: string[];
   audience_mode?: BroadcastAudienceMode;
+  /** 1-based pass number of the fan-out CONTINUATION ladder (M5). Claimed by
+   *  claimFanoutPass; top-level so a wholesale recipient-slot write cannot erase
+   *  it. Absent on rows written before M5 (they claim at 1). */
+  fanout_attempt?: number;
   last_error?: string;
   updated_at?: string;
   [key: string]: unknown;
@@ -353,6 +358,19 @@ export interface BroadcastsRepo {
     recipient: BroadcastRecipient,
     allowedPriorStatuses?: ReadonlyArray<BroadcastRecipient['status']>,
   ): Promise<boolean>;
+  /**
+   * Claim ONE pass of the fan-out CONTINUATION ladder (M5): an atomic
+   * conditional ADD on the top-level `fanout_attempt`, refused once the count
+   * has reached `cap`.
+   *
+   * `cap` is a PARAMETER because the cap constant lives in `jobs/` and a repo
+   * must not import from there. The count is a top-level scalar deliberately:
+   * `setRecipient` rewrites a recipient slot WHOLESALE, so a counter inside one
+   * would read 1 forever and the cap-and-close branch would stay unreachable
+   * (design D2). Absent on pre-M5 rows - ADD creates it, so the first claim
+   * returns 1 with no migration (D4).
+   */
+  claimFanoutPass(broadcastId: string, cap: number): Promise<FanoutClaimResult>;
   /** Atomically add a delta to stats counters (ADD on each present field). */
   bumpStats(broadcastId: string, delta: Partial<BroadcastStats>): Promise<BroadcastItem>;
   /** Flip to `sent` (terminal). */
@@ -627,6 +645,47 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
         }
         throw err;
       }
+    },
+
+    async claimFanoutPass(broadcastId, cap) {
+      // One conditional ADD, no read first: the condition IS the cap, so two
+      // concurrent deliveries can never take the same pass number. The counter
+      // name is aliased (`#fa`) to keep the reserved-word question off the
+      // table, and UPDATED_NEW hands back only the counter rather than the whole
+      // item (which carries the recipients map).
+      let attempt: number | undefined;
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { broadcastId },
+            UpdateExpression: 'ADD #fa :one',
+            ConditionExpression:
+              'attribute_exists(broadcastId) AND (attribute_not_exists(#fa) OR #fa < :cap)',
+            ExpressionAttributeNames: { '#fa': 'fanout_attempt' },
+            ExpressionAttributeValues: { ':one': 1, ':cap': cap },
+            ReturnValues: 'UPDATED_NEW',
+          }),
+        );
+        attempt = (Attributes as { fanout_attempt?: number } | undefined)?.fanout_attempt;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // The refusal is ambiguous - missing broadcast or spent ladder - and the
+        // two demand different handling (close vs log-and-return). Only a
+        // STRONGLY consistent read separates them; getById above is eventually
+        // consistent and could report a live broadcast missing, skipping a
+        // close.
+        const { Item } = await doc.send(
+          new GetCommand({ TableName: table, Key: { broadcastId }, ConsistentRead: true }),
+        );
+        if (Item === undefined) return { outcome: 'missing' };
+        const current = (Item as BroadcastItem).fanout_attempt;
+        return { outcome: 'capped', attempt: typeof current === 'number' ? current : 0 };
+      }
+      if (typeof attempt !== 'number') {
+        throw new Error(`claimFanoutPass(${broadcastId}): UPDATED_NEW returned no fanout_attempt`);
+      }
+      return { outcome: 'claimed', attempt };
     },
 
     async bumpStats(broadcastId, delta) {

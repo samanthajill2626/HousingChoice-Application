@@ -254,6 +254,9 @@ function makeFakes(
     setRecipientTransportAggregationState: async () => 'missing',
     setRecipientActualTransport: async () => 'missing',
     applyRecipientSendResult: async () => 'missing',
+    claimFanoutPass: async () => {
+      throw new Error('claimFanoutPass: not used in this suite');
+    },
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,
     putRelaySidPointer: async () => {},

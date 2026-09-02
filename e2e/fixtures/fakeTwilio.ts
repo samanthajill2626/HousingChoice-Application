@@ -99,6 +99,51 @@ export async function postInboundSms(
   return { status: res.status(), body: await res.text() };
 }
 
+/**
+ * POST a signed provider status callback directly to the app. The optional
+ * ChannelPrefix is deliberately RCS-only: SMS/MMS status evidence comes from
+ * the provider SID and callback fields, never a fabricated channel prefix.
+ */
+export async function postStatusCallback(
+  request: APIRequestContext,
+  input: {
+    messageSid: string;
+    status: 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
+    errorCode?: string;
+    from?: string;
+    to?: string;
+    channelPrefix?: InboundChannelPrefix;
+    channelMetadata?: Record<string, unknown> | string;
+  },
+): Promise<{ status: number; body: string }> {
+  const channelPrefix = validateInboundChannelPrefix(input.channelPrefix);
+  const params: Record<string, string> = {
+    MessageSid: input.messageSid,
+    MessageStatus: input.status,
+    ApiVersion: '2010-04-01',
+    ...(input.errorCode !== undefined && { ErrorCode: input.errorCode }),
+    ...(input.from !== undefined && { From: input.from }),
+    ...(input.to !== undefined && { To: input.to }),
+    ...(channelPrefix !== undefined && { ChannelPrefix: channelPrefix }),
+    ...(input.channelMetadata !== undefined && {
+      ChannelMetadata: typeof input.channelMetadata === 'string'
+        ? input.channelMetadata
+        : JSON.stringify(input.channelMetadata),
+    }),
+  };
+  const path = '/webhooks/twilio/status';
+  const signature = signTwilio(`${APP_PUBLIC_BASE_URL}${path}`, params);
+  const res = await request.post(`${APP_URL}${path}`, {
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      'x-twilio-signature': signature,
+      'x-origin-verify': ORIGIN_SECRET,
+    },
+    form: params,
+  });
+  return { status: res.status(), body: await res.text() };
+}
+
 /** XML-unescape a TwiML text node (& < > " ').
  *  Historically the reverse of the webhook's `escapeXml` (removed with the
  *  keyword-reply path, 2026-08-12); retained because voice TwiML and other

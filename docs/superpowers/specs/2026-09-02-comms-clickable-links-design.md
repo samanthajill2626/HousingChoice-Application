@@ -1,6 +1,6 @@
 # Clickable links in communications - design specification
 
-Status: v4 - REVISED after S1 parser blocker and amendment review; pending re-review
+Status: v5 - REVISED after parser corpus adjudication; pending re-review
 Date: 2026-09-02
 Revised: 2026-09-02
 Branch: `feat/comms-clickable-links`
@@ -61,9 +61,9 @@ The following decisions were made during the approved brainstorm:
    bare domains with a valid public top-level domain. A domain remains one URL when
    followed by a port, path, query string, or fragment.
 5. Do not linkify email addresses, phone numbers, fuzzy IP addresses, bare
-   `localhost`, other bare single-label host names, or non-web schemes in this
-   mission. An explicit `http://localhost`, `https://localhost`, or
-   `//localhost` is an explicit web URL and follows the normal HTTP(S) contract.
+   `localhost`, protocol-relative `//localhost`, or other single-label host names
+   in this mission. Explicit `http://localhost` and `https://localhost` remain
+   eligible HTTP(S) URLs. Non-web schemes are never destinations.
 6. Preserve explicit `http://` and `https://` destinations. Normalize
    protocol-relative, `www`, and other bare-domain matches to `https://` before the
    final safety check.
@@ -115,17 +115,20 @@ The following decisions were made during the approved brainstorm:
 
 ## 5. Dependency decision
 
-Add `linkifyjs` 4.3.3 as the direct runtime dependency of the
+Add `autolinker` 4.1.5 as the direct runtime dependency of the
 `@housingchoice/dashboard` workspace. The install command is scoped to
 `dashboard/package.json`; the root lockfile records the resolved dependency graph.
 
-`linkifyjs` core is selected because it is a mature plain-text tokenizer with
-Unicode and international-domain support, punctuation and nested-delimiter rules,
-source offsets, browser support, an MIT license, TypeScript declarations, and no
-native component or runtime dependency. Its `find` API natively returns one URL
-match for the required fuzzy bare-domain form with port, path, query, and fragment,
-such as `example.com:8443/a?x=1#top`. Its maintained URL recognition also handles
-ordinary bare and `www` forms plus current suffixes such as `.zip`.
+`autolinker` core is selected because its URL-only `parse` API is a mature
+plain-text parser with Unicode and international-domain support, parser-owned
+punctuation and nested-delimiter rules, source offsets, browser support, an MIT
+license, and bundled TypeScript declarations. With URL matching configured
+narrowly, it natively returns one public bare-domain match for
+`example.com:8443/a?x=1#top`, includes protocol-relative public-domain URLs, and
+keeps U+3002, U+FF0C, U+3001, ASCII/full-width brackets, and ordinary sentence
+punctuation outside the match. It also recognizes current suffixes such as `.zip`
+and international domains. It has one pure-JavaScript runtime dependency,
+`tslib`, with no native or optional binary dependency.
 
 The S1 spike rejected the prior `linkify-it` 6.1.0 plus `tlds` design: under its
 required configuration it returned no match for the required bare-domain port/path
@@ -134,64 +137,61 @@ no-competing-regexp boundary, so both uncommitted dependency additions are remov
 
 `linkify-react` is not selected: this feature still needs custom URL safety, scheme
 normalization, snippet-boundary handling, and event control, so a React adapter
-would not remove the application-specific renderer. `autolinker` is not selected:
-its additional phone, email, mention, hashtag, and HTML-oriented surface is broader
-than this HTTP(S)-only requirement.
-`autolinker` is not selected: its additional phone, email, mention, hashtag, and
-HTML-oriented surface is broader than this HTTP(S)-only requirement. A small
-tokenizer plus ordinary React nodes is the narrower dependency and trust boundary.
+would not remove the application-specific renderer. `linkifyjs` core is not
+selected: its protocol-relative handling and U+3002 boundary behavior require an
+application-owned Unicode boundary grammar to satisfy the locked visible-text
+contract. The feature uses only Autolinker's match parser, never its HTML renderer,
+anchor builder, `link()` method, or replacement callback.
 
 Before the dependency commit is accepted, the build must prove:
 
 - the exact direct dependency and resolved graph in `package-lock.json`;
 - successful clean workspace installation on Windows;
 - a successful production dashboard build, which proves browser bundling and the
-  imported `linkifyjs` API shape;
+  imported `autolinker` parse/match API shape;
 - package licenses from the installed manifests; and
-- absence of install scripts or native/optional binaries, so Linux ARM64 deployment
-  has no platform-specific path to exercise.
+- absence of install scripts, native/optional binaries, and a target-architecture
+  install/import failure, so Linux ARM64 deployment has no platform-specific path
+  to exercise.
 
 No vulnerability remediation outside this dependency delta belongs to this mission.
 
 ## 6. Recognition and normalization contract
 
-Keep the `linkifyjs` core options module scoped rather than constructing a
-configuration during each React render. Call `linkify.find(text, 'url', {
-defaultProtocol: 'https' })`, then retain only results whose type is `url`. This
-keeps email addresses, phone numbers, bare single-label hosts, and fuzzy IPs outside
-the rendered-link input while preserving explicit and fuzzy web recognition.
+Keep the Autolinker URL-only options module scoped rather than constructing a
+configuration during each React render. Call `Autolinker.parse(text, {
+urls: { schemeMatches: true, tldMatches: true, ipV4Matches: false }, email: false,
+phone: false, mention: false, hashtag: false })`, then retain only results whose
+`type` is `url`. Use `getOffset()` and `getMatchedText()` as the parser-owned source
+range. This keeps email addresses, phone numbers, fuzzy IPs, bare single-label
+hosts, and protocol-relative local-only targets outside the rendered-link input.
 
 For every parser result:
 
-1. Preserve exact source characters for display using its source offsets.
-2. If the three adjacent characters immediately before a parser result are `://`,
-   leave that result as literal text. This prevents an unsupported-scheme payload
-   such as `javascript://example.com` from being recast as a protocol-relative HTTPS
-   destination.
-3. Otherwise, if the two adjacent characters immediately before a parser result are
-   `//`, widen that one parser-owned result's start offset by exactly two characters.
-   This is the only protocol-relative adjustment: it restores the source characters
-   that `linkifyjs` excludes from its own result, and is not a URL-recognition regexp.
-4. Prefix the widened protocol-relative source with `https:`. For every other parser
-   result, use the parser's own `href`, which preserves explicit HTTP(S) and applies
-   the configured HTTPS default to fuzzy `www` and bare-domain sources.
-5. Pass the resulting string through `safeHttpUrl`.
-6. Emit an anchor only when that check returns a destination. Otherwise emit the
+1. Preserve exact source characters for display using the parser-owned source range.
+2. Prefix a parser-owned source beginning with `//` with `https:`. For every other
+   URL match, use `getAnchorHref()` as the candidate: it preserves explicit HTTP(S)
+   and supplies the parser's HTTPS target for TLD/bare matches.
+3. Pass the candidate through `safeHttpUrl`.
+4. Emit an anchor only when that check returns a destination. Otherwise emit the
    original source characters as text.
 
 This makes `safeHttpUrl`, not the parser, the final destination-scheme authority.
-The unsupported-scheme token and target in `javascript:`, `data:`, `vbscript:`,
-`file:`, `ftp:`, and `mailto:` do not become destinations using those schemes.
-The parser may still independently recognize a valid bare domain after a delimiter
-inside surrounding text, such as the `example.com` after the comma in
-`data:text/html,example.com`; if so, that independent match follows the ordinary
-HTTPS normalization and safety check. Tests lock this established parser behavior
-instead of imposing a second application-authored URL grammar.
+An unsupported parsed scheme is rejected by that final boundary and remains exact
+source text. The parser may independently recognize a public bare domain after a
+delimiter in surrounding text; if so, that independent match follows the ordinary
+HTTPS normalization and safety check. Tests lock the selected parser's observed
+source ranges and safe rendered behavior rather than imposing a second
+application-authored scheme or punctuation grammar.
 
 The parser owns boundaries for ordinary sentence punctuation, balanced
-parentheses/brackets, Unicode punctuation, multiple links, ports, paths, query
-strings, and fragments. Application code must not trim punctuation with a second
-regular expression or maintain a competing suffix list.
+parentheses/brackets, U+3002, U+FF0C, U+3001, ASCII/full-width brackets, multiple
+links, ports, paths, query strings, and fragments. Application code must not trim
+punctuation with a second regular expression, maintain a competing suffix list, or
+add bespoke local-host recognition. Consequently bare `localhost`, `//localhost`,
+and other single-label/local-only targets remain text; explicit `http://localhost`
+and `https://localhost` remain eligible after `safeHttpUrl`.
+
 
 ## 7. Rendering design
 
@@ -271,18 +271,17 @@ Add pure-helper tests that establish the contract for:
 - a bare domain with port, path, query, and fragment;
 - multiple links in one body;
 - sentence punctuation, balanced parentheses, brackets, and Unicode punctuation;
-- current and international top-level domains recognized by `linkifyjs`, including
+- current and international top-level domains recognized by `autolinker`, including
   `.zip`;
 - repeated identical links with distinct source offsets;
 - email addresses, phone numbers, fuzzy IP addresses, bare `localhost`, and other
   bare single-label hosts remaining text;
-- explicit HTTP(S) and protocol-relative localhost URLs remaining eligible;
-- unsupported schemes never becoming an anchor destination, plus parser-owned
-  behavior for a valid bare domain after a delimiter in unsupported-scheme text;
-- a `scheme://` payload remaining literal rather than becoming a widened
-  protocol-relative anchor; and
-- a fuzzy URL whose path, query, or fragment contains `https://` retaining the
-  parser-supplied HTTPS destination;
+- explicit HTTP(S) localhost URLs remaining eligible while `//localhost` remains
+  literal text;
+- unsupported schemes never becoming an anchor destination, and parser-observed
+  behavior for any separately recognized public bare domain after their delimiters;
+- U+3002, U+FF0C, U+3001, and ASCII/full-width brackets remaining literal boundary
+  characters; and
 - HTML-looking content remaining escaped text;
 - HTTP(S) safety rejection degrading to the exact original text; and
 - a URL crossing the 140-character snippet boundary retaining its complete `href`

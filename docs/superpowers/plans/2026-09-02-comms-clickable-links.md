@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v5 - REVISED after S1 parser blocker and amendment review; pending re-review
+Status: v6 - REVISED after Autolinker parser-corpus adjudication; pending re-review
 Date: 2026-09-02
 Branch: `feat/comms-clickable-links`
 Worktree: `W:\\tmp\\comms-clickable-links`
@@ -14,38 +14,37 @@ communications body while preserving plain-text security, message behavior, and
 email-snippet presentation.
 
 **Architecture:** A new design-system component owns one module-scoped
-`linkifyjs` core tokenizer, converts untrusted source text into ordered text/link tokens,
+`autolinker` core parser, converts untrusted source text into ordered text/link tokens,
 normalizes inferred destinations to HTTPS, and passes every destination through
 `safeHttpUrl`. The shared Timeline adopts it for SMS/MMS/group bodies and
 plain-text email, while `UnmatchedRow` adopts it only for opened full email detail.
 
-**Tech Stack:** React 19, TypeScript ESM, CSS Modules, `linkifyjs` 4.3.3,
+**Tech Stack:** React 19, TypeScript ESM, CSS Modules, `autolinker` 4.1.5,
 Vitest/Testing Library, Playwright.
 
 **Spec:** `docs/superpowers/specs/2026-09-02-comms-clickable-links-design.md`
 
 ## Global Constraints
 
-- Add `linkifyjs` 4.3.3 only to `dashboard/package.json` runtime dependencies.
+- Add `autolinker` 4.1.5 only to `dashboard/package.json` runtime dependencies.
   Resolve its exact version in the root `package-lock.json`.
-- Call `linkify.find(text, 'url', { defaultProtocol: 'https' })`, retain only
-  `type === 'url'` results, and use its source offsets. If the three immediately
-  preceding source characters are `://`, preserve that parser result as literal text.
-  Otherwise, when the two immediately preceding source characters are `//`, widen
-  that one parser-owned result start by exactly two characters. This protocol-relative
-  adjustment is not a competing URL regexp; do not add any other URL recognition,
-  punctuation trimming, or suffix list.
-- Prefix a widened protocol-relative source with `https:`. For every other result,
-  pass the parser-supplied `href` directly to `safeHttpUrl`; that preserves explicit
-  HTTP(S), retains embedded `://` inside fuzzy paths/queries/fragments, and applies
-  the configured HTTPS default to fuzzy `www` and bare-domain sources.
+- Call `Autolinker.parse(text, { urls: { schemeMatches: true, tldMatches: true,
+  ipV4Matches: false }, email: false, phone: false, mention: false, hashtag: false
+  })`, retain only `type === 'url'` results, and use `getOffset()` plus
+  `getMatchedText()`. Never call its HTML renderer, `link()`, anchor builder, or
+  replacement callback; do not add URL recognition, punctuation trimming, a suffix
+  list, or a local-host grammar.
+- Normalize a parser-owned `//` source by prefixing `https:`. For every other URL
+  match, pass `getAnchorHref()` directly to `safeHttpUrl`; that preserves explicit
+  HTTP(S), keeps unsupported schemes rejected, and uses the parser's HTTPS target
+  for fuzzy `www` and bare-domain sources.
 - Keep communications bodies as React text nodes and anchors. Never generate HTML
   strings or use `dangerouslySetInnerHTML`.
 - Preserve explicit HTTP and HTTPS. Normalize `//` with `https:` and fuzzy `www`
   or bare-domain matches with `https://`. Pass the result through `safeHttpUrl`;
   rejection means the original matched source stays text.
-- Bare `localhost` and other bare single-label hosts remain text. Explicit
-  `http://localhost`, `https://localhost`, and `//localhost` remain eligible.
+- Bare `localhost`, `//localhost`, and other local/single-label hosts remain text.
+  Explicit `http://localhost` and `https://localhost` remain eligible.
 - Render anchors with `target="_blank"`, `rel="noopener noreferrer"`, and click
   propagation stopped. Keep visible source text unchanged.
 - Preserve Timeline email snippets as
@@ -102,7 +101,8 @@ Vitest/Testing Library, Playwright.
 **Interfaces:**
 
 - Consumes: `safeHttpUrl(url: string | null | undefined): string | null` from
-  `dashboard/src/lib/safeUrl.ts`; `linkifyjs.find` and its inferred result type.
+  `dashboard/src/lib/safeUrl.ts`; `Autolinker.parse` URL matches and their source
+  range/match methods.
 - Produces:
 
 ```ts
@@ -128,12 +128,12 @@ export function LinkifiedText(props: LinkifiedTextProps): React.JSX.Element;
 Run from the repository root:
 
 ```powershell
-npm install --save-exact --workspace @housingchoice/dashboard linkifyjs@4.3.3
+npm install --save-exact --workspace @housingchoice/dashboard autolinker@4.1.5
 ```
 
-Expected: `dashboard/package.json` contains the exact `4.3.3` dependency value and
-`package-lock.json` resolves `linkifyjs` 4.3.3 for the dashboard with no runtime
-dependency beneath it.
+Expected: `dashboard/package.json` contains the exact `4.1.5` dependency value and
+`package-lock.json` resolves `autolinker` 4.1.5 plus its pure-JavaScript runtime
+dependency `tslib` for the dashboard.
 
 - [ ] **Step 2: Prove a clean Windows install and the dependency boundary**
 
@@ -142,18 +142,20 @@ then inspect the resolved graph:
 
 ```powershell
 npm ci
-npm ls --workspace @housingchoice/dashboard linkifyjs
-node -e "const path=require('node:path'); const p=require(require.resolve('linkifyjs/package.json',{paths:[path.resolve('dashboard')]})); const lifecycle=['preinstall','install','postinstall'].filter(k=>p.scripts?.[k]); console.log('linkifyjs',p.version,p.license,lifecycle.join(',')||'no-install-scripts',p.os||'all-os',p.cpu||'all-cpu',p.optionalDependencies||'no-optional-deps')"
+npm ls --workspace @housingchoice/dashboard autolinker tslib
+node -e "const path=require('node:path'); for (const name of ['autolinker','tslib']) { const p=require(require.resolve(name + '/package.json',{paths:[path.resolve('dashboard')]})); const lifecycle=['preinstall','install','postinstall'].filter(k=>p.scripts?.[k]); console.log(name,p.version,p.license,lifecycle.join(',')||'no-install-scripts',p.os||'all-os',p.cpu||'all-cpu',p.optionalDependencies||'no-optional-deps') }"
+npm audit --omit=dev --workspace @housingchoice/dashboard
 ```
 
 Expected: bare `npm ci` exits 0 after rebuilding `node_modules` from the updated
-lockfile. Dashboard resolves `linkifyjs@4.3.3`; its package reports MIT, no install
-lifecycle scripts, no OS/CPU restriction, and no optional native dependency.
+lockfile. Dashboard resolves `autolinker@4.1.5` and `tslib`; both manifests report
+their licenses, no install lifecycle scripts, no OS/CPU restriction, and no optional
+native dependency. The audit exits 0 with zero dependency vulnerabilities.
 
 Run the target-architecture package smoke independently of the Windows tree:
 
 ```powershell
-docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact linkifyjs@4.3.3 >/dev/null && node --input-type=module -e \"import * as linkify from 'linkifyjs'; const options={defaultProtocol:'https'}; const port='example.com:8443/a?x=1#top'; const [portMatch]=linkify.find(port,'url',options); const protocolRelative='//example.com/a'; const [protocolRelativeMatch]=linkify.find(protocolRelative,'url',options); if (!portMatch || portMatch.type!=='url' || portMatch.start!==0 || portMatch.end!==port.length || !protocolRelativeMatch || protocolRelativeMatch.start!==2 || protocolRelativeMatch.end!==protocolRelative.length || linkify.find('housing.zip/path','url',options).length!==1) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
+docker run --rm --platform linux/arm64 node:24-slim sh -lc "mkdir /probe && cd /probe && npm init -y >/dev/null && npm install --ignore-scripts --save-exact autolinker@4.1.5 >/dev/null && node --input-type=module -e \"import Autolinker from 'autolinker'; const options={urls:{schemeMatches:true,tldMatches:true,ipV4Matches:false},email:false,phone:false,mention:false,hashtag:false}; const port='example.com:8443/a?x=1#top'; const [portMatch]=Autolinker.parse(port,options); const protocolRelative='//example.com/a'; const [protocolRelativeMatch]=Autolinker.parse(protocolRelative,options); if (!portMatch || portMatch.type!=='url' || portMatch.getOffset()!==0 || portMatch.getMatchedText()!==port || !protocolRelativeMatch || protocolRelativeMatch.type!=='url' || protocolRelativeMatch.getOffset()!==0 || protocolRelativeMatch.getMatchedText()!==protocolRelative || Autolinker.parse('housing.zip/path',options).length!==1) process.exit(1); console.log('linux-arm64-linkifier-ok')\""
 ```
 
 Expected: `linux-arm64-linkifier-ok`. This probe may download packages but writes
@@ -229,24 +231,24 @@ Also assert, with explicit expected token/href arrays:
   distinct offsets;
 - a trailing period/comma and balanced parentheses are excluded according to the
   parser match;
-- `[example.com/bracket/path]` links only `example.com/bracket/path`, leaving both
-  square brackets as text;
-- `example.com/unicode/path\u3002` links only `example.com/unicode/path`, leaving
-  the Unicode sentence punctuation as text;
+- `[example.com/bracket/path]` and `\uff3bexample.com/full-width-bracket/path\uff3d`
+  link only their domains/paths, leaving both bracket pairs as text;
+- `example.com/unicode/path\u3002`, `example.com/path\uff0c`, and
+  `example.com/path\u3001` link only the domain/path, leaving each Unicode sentence
+  punctuation character as text;
 - `housing.zip/path`, a current public suffix, and an international domain assembled
   with `\u` escapes are recognized by the selected parser;
 - bare `localhost`, `server`, `192.0.2.1`, `renter@example.com`, and
   `+1-555-010-0001` produce no link tokens;
-- `http://localhost:5174/a`, `https://localhost/a`, and `//localhost/a` do produce
-  safe link tokens;
-- unsupported schemes never appear in `href`; lock the selected parser behavior
-  for `javascript:example.com`, `mailto:renter@example.com`, `ftp://example.com`,
-  and the independent `example.com` match after the comma in
-  `data:text/html,example.com`;
-- `javascript://example.com/a`, `data://example.com/a`, `vbscript://example.com/a`,
-  and `foo://example.com/a` produce no link tokens, while a fuzzy URL with
-  `https://` embedded in its path, query, or fragment retains the parser-supplied
-  HTTPS destination;
+- `http://localhost:5174/a` and `https://localhost/a` do produce safe link tokens,
+  while `//localhost/a` remains text;
+- `javascript:example.com`, `mailto:renter@example.com`, `ftp://example.com`,
+  `data:text/html,example.com`, `javascript://example.com/a`,
+  `data://example.com/a`, `vbscript://example.com/a`, and `foo://example.com/a`
+  retain every source character in order and never produce an anchor whose `href`
+  uses an unsupported scheme. Assert any independently returned public bare-domain
+  token by the parser's observed source range and HTTPS destination, rather than
+  imposing an application scheme grammar;
 - rendering `<img src=x onerror=alert(1)> example.com` creates no `img`, preserves
   that literal text, and creates exactly one safe anchor;
 - rendered anchors have the original accessible name, normalized `href`,
@@ -269,7 +271,7 @@ installation first.
 Create `dashboard/src/ui/LinkifiedText.tsx` with this structure and behavior:
 
 ```tsx
-import * as linkify from 'linkifyjs';
+import Autolinker from 'autolinker';
 import { safeHttpUrl } from '../lib/safeUrl.js';
 import styles from './LinkifiedText.module.css';
 
@@ -283,16 +285,18 @@ export interface LinkifiedTextProps {
   suffix?: string;
 }
 
-const linkifyOptions = { defaultProtocol: 'https' } as const;
+const autolinkerOptions = {
+  urls: { schemeMatches: true, tldMatches: true, ipV4Matches: false },
+  email: false,
+  phone: false,
+  mention: false,
+  hashtag: false,
+};
 
-type LinkifyMatch = ReturnType<typeof linkify.find>[number];
+type AutolinkerMatch = Extract<ReturnType<typeof Autolinker.parse>[number], { type: 'url' }>;
 
-function normalizedHref(
-  match: LinkifyMatch,
-  source: string,
-  protocolRelative: boolean,
-): string | null {
-  const candidate = protocolRelative ? `https:${source}` : match.href;
+function normalizedHref(match: AutolinkerMatch, source: string): string | null {
+  const candidate = source.startsWith('//') ? `https:${source}` : match.getAnchorHref();
   return safeHttpUrl(candidate);
 }
 
@@ -304,15 +308,11 @@ export function tokenizeLinkifiedText(text: string, displayEnd?: number): Linkif
   const tokens: LinkifiedToken[] = [];
   let cursor = 0;
 
-  for (const match of linkify.find(text, 'url', linkifyOptions)) {
+  for (const match of Autolinker.parse(text, autolinkerOptions)) {
     if (match.type !== 'url') continue;
-    const precededBySchemeDelimiter =
-      match.start >= 3 && text.slice(match.start - 3, match.start) === '://';
-    const protocolRelative =
-      !precededBySchemeDelimiter &&
-      match.start >= 2 &&
-      text.slice(match.start - 2, match.start) === '//';
-    const start = protocolRelative ? match.start - 2 : match.start;
+    const start = match.getOffset();
+    const source = match.getMatchedText();
+    const matchEnd = start + source.length;
     if (start >= visibleEnd) break;
     if (cursor < start) {
       tokens.push({
@@ -323,11 +323,8 @@ export function tokenizeLinkifiedText(text: string, displayEnd?: number): Linkif
       });
     }
 
-    const end = Math.min(match.end, visibleEnd);
-    const source = text.slice(start, match.end);
-    const href = precededBySchemeDelimiter
-      ? null
-      : normalizedHref(match, source, protocolRelative);
+    const end = Math.min(matchEnd, visibleEnd);
+    const href = normalizedHref(match, source);
     const visible = text.slice(start, end);
     tokens.push(
       href === null

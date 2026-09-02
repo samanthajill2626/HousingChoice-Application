@@ -74,10 +74,10 @@ Runtime changes are confined to the shared linkifier, Timeline, unmatched-email
 renderer, Autolinker manifest/lock update, and their tests. E2E adds the
 communications-link proof. The remaining branch changes are approved spec,
 plan, review, dependency, self-QA, gate, and handback records. The original
-base-to-branch delta before this handback record was 5060 additions and 139
-deletions across 57 files, including the one-time main sync; the feature-only
-delta against the synchronized main merge base was 3924 additions and 11
-deletions across 42 files.
+base-to-branch delta is 5172 additions and 139 deletions across 59 files,
+including the one-time main sync; the feature-only delta against the
+synchronized main merge base is 4008 additions and 11 deletions across 43
+files.
 
 ## Branch condition
 

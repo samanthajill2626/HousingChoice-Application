@@ -109,6 +109,12 @@ const SKIP_REASONS = [
   'tour_already_passed',
   'kind_retired',
   'names_unavailable',
+  // Supersession (2026-09-01): the rung belonged to a ladder the tour has
+  // already replaced, so every send path refuses it.
+  'superseded',
+  // Supersession (2026-09-01): a placement conversion claimed the tour and
+  // never finished, so the rung waited past its grace window and was retired.
+  'conversion_stalled',
 ];
 
 describe('REMINDER_SKIP_REASON_LABELS', () => {
@@ -139,13 +145,34 @@ describe('SEND_NOW_ERROR_COPY', () => {
   // its existing cause-agnostic copy, because there retrying IS the right
   // advice (spec 7.2). SEND_NOW_ERROR_COPY is module-private, so this asserts
   // through the exported resolver.
-  const PERMANENT_REFUSALS = ['tour_already_passed', 'kind_retired'];
+  // `superseded` and `conversion_stalled` join them (supersession 2026-09-01):
+  // a replaced ladder never comes back, and a rung retired for a stuck
+  // conversion claim is stamped terminally - retrying changes neither.
+  const PERMANENT_REFUSALS = [
+    'tour_already_passed',
+    'kind_retired',
+    'superseded',
+    'conversion_stalled',
+  ];
   it('carries explicit copy for every permanent refusal', () => {
     for (const code of PERMANENT_REFUSALS) {
       expect(sendNowErrorMessage(code), code).not.toBe(
         "Couldn't send that just now - please try again.",
       );
     }
+  });
+
+  // RETRYABLE, and deliberately NOT in the list above (supersession review round
+  // M1): the tour is mid-conversion, so the rung's fate is undecided - the
+  // finalize is about to delete it, and a failed conversion releases the claim
+  // and leaves it sendable. The generic fallback would still be wrong, though:
+  // "please try again" says nothing about WHY, and the operator would press it
+  // again immediately. So it needs its own sentence AND its own advice.
+  it('gives the retryable conversion refusal its own sentence, not the generic one', () => {
+    const copy = sendNowErrorMessage('conversion_in_progress');
+    expect(copy).not.toBe("Couldn't send that just now - please try again.");
+    expect(copy).not.toBe(sendNowErrorMessage('conversion_stalled'));
+    expect(copy.length).toBeGreaterThan(0);
   });
 });
 
@@ -162,6 +189,15 @@ const SUPPRESSION_REASONS = [
   'quiet_hours',
   'paused',
   'discontinued',
+  // Supersession (2026-09-01). Like `discontinued` it is produced OUTSIDE the
+  // shared evaluator, by the callers that can compare the rung's generation
+  // pointer against its tour's.
+  'superseded',
+  // Supersession (2026-09-01, review round NEW-3). Produced outside the shared
+  // evaluator too, by the same three callers - they hold the tour, and the
+  // `pending:` conversion claim lives on it. The only TEMPORARY member of this
+  // list, which is why it is absent from PERMANENT_REFUSALS above.
+  'conversion_in_progress',
 ];
 
 describe('suppression copy', () => {
@@ -202,5 +238,25 @@ describe('suppression copy', () => {
     expect(note).toContain('No longer sent');
     expect(note).toContain('turned off');
     expect(note.toLowerCase().split('no longer sent').length - 1).toBe(1);
+  });
+
+  // `superseded` is terminal too, but for a DIFFERENT reason than
+  // `discontinued`: the KIND still sends, this generation of it does not. So it
+  // gets its own lead rather than borrowing "No longer sent" (which would say
+  // the rung type was retired), and certainly not "Will wait" or "Paused" -
+  // nothing releases it and no person can send it (Send now answers 409).
+  it('leads a superseded rung with "Replaced", borrowed from no other reason', () => {
+    expect(suppressionLead('superseded')).toBe('Replaced');
+    expect(suppressionLead('superseded')).not.toBe(suppressionLead('discontinued'));
+    expect(suppressionLead('superseded')).not.toBe(suppressionLead('paused'));
+    expect(suppressionLead('superseded')).not.toBe(suppressionLead('quiet_hours'));
+    // ...and not the generic drop wording either.
+    expect(suppressionLead('superseded')).not.toBe(suppressionLead('contact_opted_out'));
+  });
+
+  it('labels a superseded rung without repeating its lead', () => {
+    const note = suppressionNote('superseded', REMINDER_SUPPRESSION_LABELS['superseded']);
+    expect(note).toContain('Replaced');
+    expect(note.toLowerCase().split('replaced').length - 1).toBe(1);
   });
 });

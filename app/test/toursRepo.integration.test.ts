@@ -8,6 +8,7 @@
 // Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -439,5 +440,130 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
       tours.setRoster(tour.tourId, [{ contactId: 'c-b' }], undefined),
     ).rejects.toBeInstanceOf(RosterPlanConflictError);
     expect((await tours.get(tour.tourId))!.roster).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // currentLadderId - the generation pointer (supersession S1, T1.2/T1.3).
+  //
+  // TourItem carries `[key: string]: unknown`, so PatchTourInput collapses to an
+  // index-signature type: patch({ currentLadderId }) compiles today and so does
+  // a MISSPELLED key. Nothing in the typechecker guards this field, which is why
+  // every assertion below reads the STORED row through a raw GetCommand rather
+  // than trusting the return value's shape.
+  // -------------------------------------------------------------------------
+
+  const rawTour = async (tourId: string) => {
+    const { Item } = await doc.send(
+      new GetCommand({ TableName: tableName('tours', testEnv), Key: { tourId } }),
+    );
+    return Item;
+  };
+
+  it('currentLadderId round-trips through create and patch onto the stored row', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-ladder-1',
+      unitId: 'unit-ladder-1',
+      scheduledAt: '2026-11-01T15:00:00.000Z',
+      tourType: 'self_guided',
+      currentLadderId: 'ladder-born',
+    });
+    expect(await rawTour(tour.tourId)).toMatchObject({ currentLadderId: 'ladder-born' });
+
+    await tours.patch(tour.tourId, { currentLadderId: 'ladder-rotated' });
+    expect(await rawTour(tour.tourId)).toMatchObject({ currentLadderId: 'ladder-rotated' });
+  });
+
+  it('setLadderIdIf writes the next pointer when the stored value matches', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-cas-win',
+      unitId: 'unit-cas-win',
+      scheduledAt: '2026-11-02T15:00:00.000Z',
+      tourType: 'self_guided',
+      currentLadderId: 'ladder-rotation',
+    });
+    const before = (await rawTour(tour.tourId))!['updatedAt'];
+
+    const won = await tours.setLadderIdIf(tour.tourId, 'ladder-rotation', 'ladder-armed');
+
+    expect(won).toBe(true);
+    const stored = await rawTour(tour.tourId);
+    expect(stored).toMatchObject({ currentLadderId: 'ladder-armed' });
+    // The write bumps updatedAt like every other conditional write on this repo.
+    expect(stored!['updatedAt']).not.toBe(before);
+  });
+
+  it('setLadderIdIf returns false and leaves the row UNCHANGED when the stored value differs', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-cas-lose',
+      unitId: 'unit-cas-lose',
+      scheduledAt: '2026-11-03T15:00:00.000Z',
+      tourType: 'self_guided',
+      currentLadderId: 'ladder-somebody-elses-rotation',
+    });
+    const before = await rawTour(tour.tourId);
+
+    // A lost compare is NOT an error - the concurrent reschedule that rotated
+    // the pointer is the winner and its rotation must survive intact.
+    const won = await tours.setLadderIdIf(tour.tourId, 'ladder-my-rotation', 'ladder-armed');
+
+    expect(won).toBe(false);
+    expect(await rawTour(tour.tourId)).toEqual(before);
+  });
+
+  it('setLadderIdIf returns false when the tour has NO pointer at all (pre-migration)', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-cas-absent',
+      unitId: 'unit-cas-absent',
+      scheduledAt: '2026-11-04T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+    expect(await tours.setLadderIdIf(tour.tourId, 'ladder-rotation', 'ladder-armed')).toBe(false);
+    expect(await rawTour(tour.tourId)).not.toHaveProperty('currentLadderId');
+  });
+
+  it('setLadderIdIf returns false for a missing tour and creates NOTHING', async () => {
+    expect(
+      await tours.setLadderIdIf('tour-ghost-ladder', 'ladder-rotation', 'ladder-armed'),
+    ).toBe(false);
+    // attribute_exists(tourId) is the guard that stops UpdateItem conjuring an
+    // attribute-only stub for a tour that does not exist.
+    expect(await rawTour('tour-ghost-ladder')).toBeUndefined();
+  });
+
+  // The OPT-IN consistent read (review round NEW-5). DynamoDB's default GetItem
+  // is eventually consistent, which is exactly what broke fix-wave 1's
+  // ownership guard: a read issued one line after the write that it checks is
+  // NOT guaranteed to see it. The flag is opt-in (the contactsRepo idiom) so
+  // only the caller that must not be stale pays for it, and it is asserted on
+  // the COMMAND INPUT: a strongly consistent store cannot tell the two apart,
+  // so the only observable fact here is the request we send.
+  it('get carries ConsistentRead ONLY when the caller opts in', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-consistent',
+      unitId: 'unit-consistent',
+      scheduledAt: '2026-11-05T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+    const seen: (boolean | undefined)[] = [];
+    const spyingDoc = {
+      send: async (command: unknown) => {
+        if (command instanceof GetCommand) {
+          seen.push((command.input as { ConsistentRead?: boolean }).ConsistentRead);
+        }
+        return (doc as DynamoDBDocumentClient).send(command as never);
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const spyingRepo = createToursRepo({ doc: spyingDoc, env: testEnv, logger });
+
+    expect((await spyingRepo.get(tour.tourId))?.tourId).toBe(tour.tourId);
+    expect((await spyingRepo.get(tour.tourId, { consistentRead: true }))?.tourId).toBe(tour.tourId);
+    expect((await spyingRepo.get(tour.tourId, {}))?.tourId).toBe(tour.tourId);
+
+    // Absent by default (never `false` - the key is omitted entirely), present
+    // and true on the opt-in, absent again for an options object that does not
+    // ask for it.
+    expect(seen).toEqual([undefined, true, undefined]);
   });
 });

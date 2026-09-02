@@ -65,6 +65,13 @@ const convId = (slug: string) => `conv-cast-${slug}`;
 const unitId = (slug: string) => `unit-cast-${slug}`;
 const tourId = (slug: string) => `tour-cast-${slug}`;
 const reminderId = (slug: string, kind: string) => `reminder-cast-${slug}-${kind}`;
+// Generation ladder ids (tour-reminder supersession). LITERAL, never
+// randomUUID: cast is the byte-stable e2e world, so a random id would change
+// the seeded bytes on every reseed. `ladderRotated` is the pointer a TERMINAL
+// tour carries - production rotates on every terminal transition, so a seeded
+// terminal tour must point at a generation none of its rows carries.
+const ladderId = (slug: string) => `ladder-cast-${slug}`;
+const ladderRotated = (slug: string) => `ladder-cast-${slug}-rotated`;
 const poolNum = (slug: string) => `pool-cast-${slug}`;
 const listingSendId = (unit: string, tenant: string) => `${unitId(unit)}#${contactId(tenant)}`;
 
@@ -514,6 +521,9 @@ const searchingTenant = {
     createdAt: CQ,
     updatedAt: CQ,
     // scheduledAt MUST be ABSENT on 'requested' tours
+    // NO currentLadderId and NO stamped rows on purpose: this is the seeded
+    // PRE-MIGRATION fixture (spec 3.5 / acceptance 12) - a tour that has never
+    // armed since the deploy must render and poll exactly as it does on main.
   },
   messages1to1: [
     {
@@ -763,6 +773,11 @@ const touredYesTenant = {
     outcome: 'move_forward',
     moveForward: true,
     convertible: true,
+    // TERMINAL tour: the pointer is ROTATED away from the three sent rungs
+    // below, mirroring what a terminal transition does in production. All three
+    // therefore read as EARLIER (behind the panel's disclosure) and, since seeds
+    // write no sentBody, they render bodyless - the accepted shape, not a bug.
+    currentLadderId: ladderRotated(SLUG_TOURED_YES),
     createdAt: CW,
     updatedAt: CZ,
   },
@@ -783,6 +798,7 @@ const touredYesTenant = {
       tourId: TOUR_TOURED,
       kind: 'confirmation',
       dueAt: CW,
+      ladderId: ladderId(SLUG_TOURED_YES),
       _reminderPartition: 'reminders',
       sentAt: CW,
       createdAt: CW,
@@ -792,6 +808,7 @@ const touredYesTenant = {
       tourId: TOUR_TOURED,
       kind: 'day_before',
       dueAt: '2026-05-09T23:30:00.000Z',
+      ladderId: ladderId(SLUG_TOURED_YES),
       _reminderPartition: 'reminders',
       sentAt: '2026-05-09T23:30:00.000Z',
       createdAt: CW,
@@ -801,6 +818,7 @@ const touredYesTenant = {
       tourId: TOUR_TOURED,
       kind: 'morning_of',
       dueAt: '2026-05-10T14:00:00.000Z',
+      ladderId: ladderId(SLUG_TOURED_YES),
       _reminderPartition: 'reminders',
       sentAt: '2026-05-10T14:00:00.000Z',
       createdAt: CW,

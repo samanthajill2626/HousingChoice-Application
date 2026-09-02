@@ -2857,6 +2857,11 @@ export function createFakeWorld(): FakeWorld {
       return { ...item };
     },
     async get(tourId) {
+      // The `{ consistentRead }` option is deliberately not a parameter here:
+      // this map IS strongly consistent, so there is no weaker read to opt out
+      // of and no behaviour for a flag to select. A caller passing it gets the
+      // same answer, which is the honest mirror of the real repo's stronger
+      // half (review round NEW-5).
       const t = toursMap.get(tourId);
       return t ? { ...t } : undefined;
     },
@@ -2923,16 +2928,36 @@ export function createFakeWorld(): FakeWorld {
         });
       }
       t.convertedPlacementId = value;
+      // The claim STAMP rides the same write (review round NEW-2) - the poll's
+      // grace window measures from it, never from updatedAt.
+      t.conversionClaimedAt = new Date().toISOString();
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },
     async releaseConversionClaim(tourId, value) {
-      // Best-effort conditional REMOVE: only while our sentinel still holds.
+      // Best-effort conditional REMOVE: only while our sentinel still holds, and
+      // BOTH halves go - a stamp that outlived its sentinel would hand the next
+      // claim on this tour a stranger's clock.
       const t = toursMap.get(tourId);
       if (!t || t.convertedPlacementId !== value) return;
       delete t.convertedPlacementId;
+      delete t.conversionClaimedAt;
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
+    },
+    async setLadderIdIf(tourId, expected, next) {
+      // REAL compare semantics, or the route-level interleaving test asserts
+      // nothing. Like claimConversion above, the check-and-set is synchronous
+      // within this async tick (no internal await between them), so two
+      // concurrent callers can never both win. A stored value that differs -
+      // including ABSENT, which never equals a string - LOSES and writes
+      // nothing; the winner's rotation must survive intact.
+      const t = toursMap.get(tourId);
+      if (!t || t.currentLadderId !== expected) return false;
+      t.currentLadderId = next;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+      return true;
     },
     async setRoster(tourId, roster, expectedVersion) {
       // Mirror the conditional write: MATERIALIZE only when no plan exists AND
@@ -2983,6 +3008,12 @@ export function createFakeWorld(): FakeWorld {
           skippedAt: input.skipped.at,
           skipReason: input.skipped.reason,
         }),
+        // GENERATION POINTER (supersession S1): same scar, one field over -
+        // TourReminderItem has NO index signature, so an optional ladderId is
+        // not enforced on this hand-built literal and dropping it would
+        // typecheck green while making every route-level suite see rows that
+        // belong to no ladder. Mirrors the real repo's conditional spread.
+        ...(input.ladderId !== undefined && { ladderId: input.ladderId }),
         createdAt: now,
       };
       tourRemindersMap.set(item.reminderId, { ...item });
@@ -3044,18 +3075,25 @@ export function createFakeWorld(): FakeWorld {
       tourRemindersMap.set(reminderId, r);
       return true;
     },
-    async cancelForTour(tourId) {
-      const now = new Date().toISOString();
-      for (const r of tourRemindersMap.values()) {
-        if (
-          r.tourId === tourId &&
-          r.sentAt === undefined &&
-          r.canceledAt === undefined &&
-          r.skippedAt === undefined
-        ) {
-          r.canceledAt = now;
-          tourRemindersMap.set(r.reminderId, r);
-        }
+    async deleteSupersededForTour(tourId, expectedPointer) {
+      // Mirror the real sweep (supersession D1 + review rounds B1/R2-1/NEW-1):
+      // the filters are "never sent" - pending, operator-canceled and skipped
+      // rows all go, and every sentAt row stays (NOT the removed tour-wide
+      // cancel's triple filter, which kept canceled and skipped rows in place) -
+      // AND "not the caller's own generation".
+      //
+      // The real repo rides every delete on a TransactWriteItems whose
+      // ConditionCheck reads the TOUR's currentLadderId, so a writer that
+      // rotates the pointer mid-sweep invalidates every remaining delete. Here
+      // that is a synchronous re-check per row (this fake has no transactions
+      // and needs none - it is strongly consistent by construction), and a
+      // mismatch STOPS the sweep exactly as a canceled pointer check does.
+      const candidates = [...tourRemindersMap.values()].filter(
+        (r) => r.tourId === tourId && r.sentAt === undefined && r.ladderId !== expectedPointer,
+      );
+      for (const r of candidates) {
+        if (toursMap.get(tourId)?.currentLadderId !== expectedPointer) return;
+        tourRemindersMap.delete(r.reminderId);
       }
     },
   };

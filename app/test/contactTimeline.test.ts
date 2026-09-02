@@ -1362,6 +1362,151 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up[1]!.suppression).toEqual({ reason: 'contact_opted_out' });
   });
 
+  // SUPERSEDED rungs (spec 3.3, S6 T6.2). The SECOND preview surface, and the
+  // one furthest from the tour: a navigator reading a contact page has no way
+  // to know the tour was rescheduled, so a rung of a replaced ladder promising
+  // "sends in 3h" here is the lie in its purest form. Same shared predicate as
+  // the poll and the panel (lib/ladderPointer.ts) - the three cannot disagree.
+  // CONVERSION IN FLIGHT (review round NEW-3), the same surface one reason
+  // further down the ladder. A contact page has even less context than the
+  // panel: nothing on it says the tour is being converted, so "sends in 3h" here
+  // is a promise the poll is actively deferring and Send now refuses.
+  it('marks a claim-in-flight rung `conversion_in_progress` on the timeline', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600061';
+    world.contacts.push({ contactId: 'ct-cip', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-cip', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-cip',
+      unitId: 'u-cip',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-tl-cip' });
+    // A LIVE kind on the current generation: a discontinued kind or a pointer
+    // mismatch would both outrank the claim and pass this for the wrong reason.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+      ladderId: 'ladder-tl-cip',
+    });
+    await world.toursRepo.claimConversion(tour.tourId, 'pending:tl-cip-claim');
+
+    const res = await request(app).get('/api/contacts/ct-cip/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toEqual({ reason: 'conversion_in_progress' });
+  });
+
+  it('marks a pointer-mismatched pending rung `superseded` on the timeline', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600051';
+    world.contacts.push({ contactId: 'ct-sup', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-sup', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-sup',
+      unitId: 'u-sup',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-tl-new' });
+    // LIVE kinds on both rungs: a discontinued kind would outrank the pointer
+    // check (it is tested ahead of it) and make this pass for the wrong reason.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+      ladderId: 'ladder-tl-old',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2099-01-09T10:00:00.000Z',
+      ladderId: 'ladder-tl-new',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-sup/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(2);
+    expect(up[0]!.reminderKind).toBe('day_before');
+    expect(up[0]!.suppression).toEqual({ reason: 'superseded' });
+    // ANTI-VACUITY: the current generation beside it still promises its send.
+    expect(up[1]!.reminderKind).toBe('morning_of');
+    expect(up[1]!.suppression).toBeUndefined();
+  });
+
+  it('FIXTURE B (acceptance 5): after a CLEAN sweep the bucket holds only the current generation, because the rows are gone', async () => {
+    // The twin of the pointer-mismatch test above, on the other side of the
+    // spec's A/B split (the round-5 contradiction): Fixture A is a sweep MISS
+    // rendered suppressed; Fixture B is the sweep WORKING, and the bucket must
+    // come back clean because the superseded rows no longer EXIST - not because
+    // a read-side filter hid them.
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600053';
+    world.contacts.push({ contactId: 'ct-swept', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-swept', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-swept',
+      unitId: 'u-swept',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.toursRepo.patch(tour.tourId, { currentLadderId: 'ladder-swept-new' });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+      ladderId: 'ladder-swept-old',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2099-01-09T10:00:00.000Z',
+      ladderId: 'ladder-swept-new',
+    });
+    await world.tourRemindersRepo.deleteSupersededForTour(tour.tourId, 'ladder-swept-new');
+
+    // DELETED, not filtered: the table itself holds one row now.
+    const remaining = await world.tourRemindersRepo.listByTour(tour.tourId);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]!.ladderId).toBe('ladder-swept-new');
+
+    const res = await request(app).get('/api/contacts/ct-swept/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.reminderKind).toBe('morning_of');
+    expect(up[0]!.suppression).toBeUndefined();
+  });
+
+  it('LEGACY: a pre-migration pair (no pointer, no ladderId) is NOT suppressed here either', async () => {
+    // Acceptance 12, on the surface with the most legacy rows behind it.
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600052';
+    world.contacts.push({ contactId: 'ct-sup-legacy', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-sup-legacy', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-sup-legacy',
+      unitId: 'u-sup-legacy',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-sup-legacy/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toBeUndefined();
+  });
+
   it('marks a paused NUDGE rung `paused` under the PRODUCTION hold-back', async () => {
     // The other ladder, held back since 2026-08-18. Its cards had the same
     // "sending shortly" lie until the tour pause brought the machinery in.

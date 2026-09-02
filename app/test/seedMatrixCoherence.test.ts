@@ -491,6 +491,62 @@ describe('matrix coherence: the load-bearing live-fire invariant', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The ladder generation pointer (tour-reminder supersession, review round m3).
+//
+// seedMatrix.test.ts asserts the pointer SHAPE per status group. What was
+// missing is the pairing itself, walked from the ROW side: an edit to the
+// pointer derivation in matrix.ts could otherwise make the whole seeded world
+// read as superseded - every panel splitting into "Earlier reminders", every
+// poll refusing - with no test failing.
+// ---------------------------------------------------------------------------
+describe('matrix coherence: the reminder ladder generation pointer', () => {
+  const tourById = new Map(TOURS.map((t) => [t['tourId'] as string, t]));
+
+  it('every seeded row pairs with its tour pointer in a DELIBERATE state', () => {
+    expect(TOUR_REMINDERS.length).toBeGreaterThanOrEqual(1);
+    for (const r of TOUR_REMINDERS) {
+      const tourId = r['tourId'] as string;
+      const tour = tourById.get(tourId);
+      expect(tour, `reminder ${r['reminderId']} must belong to a seeded tour`).toBeDefined();
+      // BOTH halves must be real ids before they are compared: undefined equals
+      // undefined, so a seed that stamped nothing at all would pass vacuously.
+      expect(r['ladderId'], `reminder ${r['reminderId']} ladderId`).toEqual(expect.any(String));
+      expect(tour!['currentLadderId'], `tour ${tourId} currentLadderId`).toEqual(
+        expect.any(String),
+      );
+      const current = r['ladderId'] === tour!['currentLadderId'];
+      // Current ladder <-> live tour; rotated pointer <-> terminal tour. Any
+      // other combination is an ACCIDENTAL mismatch.
+      expect(
+        current,
+        `reminder ${r['reminderId']} is ${current ? 'CURRENT' : 'superseded'} on a ` +
+          `${tourStatusOf(tour!)} tour`,
+      ).toBe(!PAST_TOUR.has(tourStatusOf(tour!)));
+    }
+  });
+
+  it('a canceled tour keeps its SENT rungs and no canceled ones', () => {
+    // The terminal transition hard-DELETES every never-sent rung of the ladder
+    // it retires (routes/tours.ts, spec 3.2), so a rung that is superseded and
+    // canceled at once is a shape production can no longer produce - seeding it
+    // would teach operators and e2e authors to expect a "Canceled" chip inside
+    // `Earlier reminders` that the real product erases.
+    const canceled = TOURS.filter((t) => tourStatusOf(t) === 'canceled');
+    expect(canceled.length, 'expected >= 2 canceled tours').toBeGreaterThanOrEqual(2);
+    for (const t of canceled) {
+      const rows = remindersOf(t['tourId'] as string);
+      expect(rows.length, `canceled ${t['tourId']} must keep its sent history`).toBeGreaterThan(0);
+      for (const r of rows) {
+        expect(r['canceledAt'], `canceled ${t['tourId']} rung ${r['reminderId']}`).toBeUndefined();
+        expect(r['sentAt'], `canceled ${t['tourId']} rung ${r['reminderId']}`).toEqual(
+          expect.any(String),
+        );
+      }
+    }
+  });
+});
+
 describe('matrix coherence: convertible representation is consistent (toured ↔ closed)', () => {
   it('toured/closed set outcome+moveForward; toured mirrors convertible; closed is never convertible', () => {
     const decided = TOURS.filter((t) => tourStatusOf(t) === 'toured' || tourStatusOf(t) === 'closed');

@@ -1,20 +1,29 @@
 // Tour reminders repo — durable reminder rows for the tour-reminder poll job.
 //
-// Each row: { reminderId, tourId, kind, dueAt (ISO), sentAt?, canceledAt? }
+// Each row: { reminderId, tourId, kind, dueAt (ISO), ladderId?, sentAt?,
+// canceledAt? }. `ladderId` names the GENERATION that armed the rung; the
+// tour's `currentLadderId` names the live one, and the pair is what every send
+// and read path compares (lib/ladderPointer.ts).
 //
 // GSI byDueAt: hash='reminders' (fixed partition key _reminderPartition),
 // range=dueAt (ISO) — allows the poll to query "due now" with dueAt <= now.
 //
-// GSI byTour: hash=tourId — allows bulk cancel on reschedule/cancel.
+// GSI byTour: hash=tourId - backs the per-tour read AND the bulk DELETE of a
+// superseded generation (deleteSupersededForTour). The tour-wide bulk CANCEL it
+// used to back was removed with the supersession feature: a retired rung is now
+// deleted, never stamped canceled.
 //
 // PII: never log a phone number. Log only reminderId/tourId/tenantId/kind.
 import { randomUUID } from 'node:crypto';
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
-  GetCommand,
+  ConditionalCheckFailedException,
+  TransactionCanceledException,
+} from '@aws-sdk/client-dynamodb';
+import {
   PutCommand,
   QueryCommand,
   type QueryCommandInput,
+  TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
@@ -89,7 +98,23 @@ export type ReminderSkipReason =
   /** Phase B (ledger item 7): name resolution kept THROWING for more than
    *  ROSTER_UNAVAILABLE_GRACE_MS past dueAt - the bounded twin of
    *  roster_unavailable, decided at both unclaimed-return sites. */
-  | 'names_unavailable';
+  | 'names_unavailable'
+  /** SUPERSESSION (2026-09-01): this rung's `ladderId` does not match its
+   *  tour's `currentLadderId` - a later arm replaced the whole ladder, so this
+   *  rung's copy belongs to a schedule that no longer exists. Distinct from
+   *  `quiet_hours_superseded`, which is one rung of the CURRENT ladder losing
+   *  its slot to a later rung of the same ladder. Poll-only: the human path
+   *  refuses with the same token rather than retiring the rung. Pre-migration
+   *  pairs (no pointer, no ladderId) are EXEMPT and never stamped this. */
+  | 'superseded'
+  /** SUPERSESSION (2026-09-01): the tour carries a placement-conversion claim
+   *  (`pending:` sentinel) that never resolved. Inside the grace window the
+   *  poll DEFERS such a rung unclaimed; past CONVERSION_CLAIM_GRACE_MS from its
+   *  dueAt it is retired VISIBLY with this token - the bounded-wait twin of
+   *  roster_unavailable, for the same reason (a rung that re-lists forever is
+   *  never sent and never says so). NOT `superseded`: the ladder is intact and
+   *  the operator's remedy is to finish or clear the conversion. */
+  | 'conversion_stalled';
 
 export interface TourReminderItem {
   /** PK */
@@ -117,6 +142,12 @@ export interface TourReminderItem {
    *  (docs/issues/tour-reminder-unclaimed-skip-no-conversation.md). */
   skippedAt?: string;
   skipReason?: ReminderSkipReason;
+  /** GENERATION POINTER (supersession, 2026-09-01): the id of the armTourReminders
+   *  CALL that wrote this row. A rung is CURRENT only while this matches its
+   *  tour's `currentLadderId`; a mismatch means a later arm superseded it and
+   *  every send path refuses it. ABSENT means pre-migration - the row predates
+   *  the feature and is judged by the pre-migration rules instead. */
+  ladderId?: string;
   createdAt: string;
 }
 
@@ -130,6 +161,10 @@ export interface TourRemindersRepo {
     kind: ReminderKind;
     dueAt: string;
     skipped?: { at: string; reason: ReminderSkipReason };
+    /** The arming call's generation id (see TourReminderItem.ladderId). Omitted
+     *  leaves the attribute ABSENT - the pre-migration shape, never written
+     *  empty. */
+    ladderId?: string;
   }): Promise<TourReminderItem>;
   listByTour(tourId: string): Promise<TourReminderItem[]>;
   /** Returns pending reminders due at or before `now` (no sentAt, no canceledAt). */
@@ -137,7 +172,7 @@ export interface TourRemindersRepo {
   /**
    * Atomically claim a reminder row BEFORE sending (claim-before-send pattern).
    * Sets `sentAt` with a condition that neither `sentAt` NOR `canceledAt` already
-   * exists — so a concurrent poll tick or a race with cancelForTour both lose.
+   * exists - so a concurrent poll tick and a race with an operator cancel both lose.
    * Returns `true` if this call won the claim, `false` if already claimed/canceled
    * (benign no-op; caller skips the send).
    *
@@ -179,8 +214,45 @@ export interface TourRemindersRepo {
    * shortly" is then honest.
    */
   uncancel(reminderId: string): Promise<boolean>;
-  /** Cancel all pending (not yet sent, canceled, or skipped) reminders for this tour. */
-  cancelForTour(tourId: string): Promise<void>;
+  /**
+   * HARD-DELETE every never-sent rung of this tour (supersession D1): pending,
+   * operator-canceled and skipped alike. Only rows carrying `sentAt` survive -
+   * a send is a fact and its history is never erased.
+   *
+   * This REPLACED a tour-wide cancel (removed 2026-09-01) whose filter kept
+   * canceled and skipped rows - exactly the rows a superseded ladder must stop
+   * showing: an operator who canceled a rung of a ladder that no longer exists
+   * is looking at debris, not at a decision. `cancel` above is the per-rung
+   * operator action and is now the ONLY writer of `canceledAt`.
+   *
+   * GENERATION-SCOPED AND TRANSACTIONAL (spec 3.2 step 4, review rounds
+   * B1/R2-1/NEW-1). `expectedPointer` is REQUIRED and is the ladder the CALLER
+   * just pointed the tour at. Two things follow from it:
+   *
+   *   - Candidates are the unsent rows whose `ladderId` is NOT that pointer, so
+   *     the caller's own freshly armed ladder can never be swept.
+   *   - Every delete rides a `TransactWriteItems` pairing a `ConditionCheck`
+   *     that the TOUR's `currentLadderId` STILL equals `expectedPointer` with
+   *     the delete itself. A concurrent writer that rotates the pointer
+   *     invalidates every in-flight sweep of an older generation atomically, so
+   *     no interleaving can delete a row while the pointer names another
+   *     generation. This REPLACED a check-then-act ownership read, which failed
+   *     twice: DynamoDB's default GetItem is eventually consistent, and the
+   *     terminal caller never got the read at all.
+   *
+   * Cancellation handling:
+   *   - the POINTER check failed -> a newer writer owns the ladder and its own
+   *     sweep is responsible. Log at info and STOP the remaining sweep.
+   *   - only the DELETE condition failed -> the row gained `sentAt` between the
+   *     list and the delete. A send is a fact: keep it, log at debug, continue.
+   *   - anything else -> log at error and continue; a partially swept tour
+   *     still beats an aborted one, and the rotation already refuses what is
+   *     left.
+   *
+   * Never throws for any of the three. Inherits listByTour's UNPAGINATED 1 MB
+   * read (spec R5, non-goal 5).
+   */
+  deleteSupersededForTour(tourId: string, expectedPointer: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +262,10 @@ export interface TourRemindersRepo {
 export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('tourReminders', deps.env);
+  // The TOURS table, read ONLY by deleteSupersededForTour's ConditionCheck.
+  // This repo owns no tour write - the check is the generation guard, and it
+  // has to name the table the pointer lives in.
+  const toursTable = tableName('tours', deps.env);
   const log = deps.logger ?? defaultLogger;
 
   return {
@@ -205,6 +281,7 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
           skippedAt: input.skipped.at,
           skipReason: input.skipped.reason,
         }),
+        ...(input.ladderId !== undefined && { ladderId: input.ladderId }),
         createdAt: now,
       };
       await doc.send(
@@ -288,8 +365,16 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
             UpdateExpression: setBody
               ? 'SET #sentAt = :sentAt, #sentBody = :sentBody'
               : 'SET #sentAt = :sentAt',
+            // attribute_exists(reminderId) FIRST: UpdateItem CREATES a missing
+            // item, and every attribute_not_exists below HOLDS on one - so a
+            // DELETED row would claim clean and resurrect as an attribute-only
+            // stub with no tourId/kind/dueAt, which the poll would then send.
+            // Supersession deletes rows as a matter of course. Bare key name,
+            // no alias (it is not a reserved word) - the form at
+            // app/scripts/retire-paused-tour-reminders.ts:205-207.
             ConditionExpression:
-              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+              'attribute_exists(reminderId) AND attribute_not_exists(#sentAt) AND ' +
+              'attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#sentAt': 'sentAt',
               '#canceledAt': 'canceledAt',
@@ -325,8 +410,11 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
             TableName: table,
             Key: { reminderId },
             UpdateExpression: 'SET #skippedAt = :skippedAt, #skipReason = :reason',
+            // attribute_exists(reminderId): see claimSend - without it a DELETED
+            // row is resurrected as an attribute-only stub.
             ConditionExpression:
-              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+              'attribute_exists(reminderId) AND attribute_not_exists(#sentAt) AND ' +
+              'attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#sentAt': 'sentAt',
               '#canceledAt': 'canceledAt',
@@ -348,17 +436,21 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
     },
 
     async cancel(reminderId, canceledAt) {
-      // The per-rung twin of cancelForTour's row update — same atomic
-      // no-terminal condition, so a race with claimSend/claimSkip resolves to
-      // exactly one outcome.
+      // The operator "Cancel" action, and the only writer of canceledAt since
+      // the tour-wide cancel was removed (2026-09-01) - same atomic no-terminal
+      // condition as claimSend/claimSkip, so a race resolves to exactly one
+      // outcome.
       try {
         await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { reminderId },
             UpdateExpression: 'SET #canceledAt = :canceledAt',
+            // attribute_exists(reminderId): see claimSend - without it a DELETED
+            // row is resurrected as an attribute-only stub.
             ConditionExpression:
-              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+              'attribute_exists(reminderId) AND attribute_not_exists(#sentAt) AND ' +
+              'attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#canceledAt': 'canceledAt',
               '#sentAt': 'sentAt',
@@ -407,46 +499,82 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
       }
     },
 
-    async cancelForTour(tourId) {
+    async deleteSupersededForTour(tourId, expectedPointer) {
       const rows = await this.listByTour(tourId);
-      const pending = rows.filter(
-        (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
+      // TWO FILTERS. "Never sent" - deliberately not the removed tour-wide
+      // cancel's triple (no sentAt AND no canceledAt AND no skippedAt): canceled
+      // and skipped rows are exactly what a superseded ladder must stop showing.
+      // And "not the caller's own generation", which is what makes the sweep
+      // safe to run AFTER an arm as well as before one.
+      const candidates = rows.filter(
+        (r) => r.sentAt === undefined && r.ladderId !== expectedPointer,
       );
-      const canceledAt = new Date().toISOString();
-      // Promise.allSettled so one lost conditional-update race (e.g., the poll
-      // claimed sentAt between listByTour and now) does not abort the remaining
-      // cancellations.
-      const results = await Promise.allSettled(
-        pending.map((r) =>
-          doc.send(
-            new UpdateCommand({
-              TableName: table,
-              Key: { reminderId: r.reminderId },
-              UpdateExpression: 'SET #canceledAt = :canceledAt',
-              ConditionExpression:
-                'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
-              ExpressionAttributeNames: {
-                '#canceledAt': 'canceledAt',
-                '#sentAt': 'sentAt',
-                '#skippedAt': 'skippedAt',
-              },
-              ExpressionAttributeValues: { ':canceledAt': canceledAt },
+      // SEQUENTIAL, not Promise.allSettled: a lost pointer check must stop the
+      // remaining rows, and ladders are five rungs at most.
+      let deleted = 0;
+      for (const r of candidates) {
+        try {
+          await doc.send(
+            new TransactWriteCommand({
+              TransactItems: [
+                {
+                  // ITEM 0 - the generation check. Its position is load-bearing:
+                  // CancellationReasons comes back positionally, and item 0 is
+                  // how the catch below tells "a newer writer owns the ladder"
+                  // from "this one row was claimed".
+                  ConditionCheck: {
+                    TableName: toursTable,
+                    Key: { tourId },
+                    ConditionExpression: '#cl = :expected',
+                    ExpressionAttributeNames: { '#cl': 'currentLadderId' },
+                    ExpressionAttributeValues: { ':expected': expectedPointer },
+                  },
+                },
+                {
+                  // ITEM 1 - the delete, with the same race guard it always
+                  // carried: a rung that GAINED sentAt since the list is a real
+                  // send and must survive - deleting it would erase history for
+                  // a message the tenant already has.
+                  Delete: {
+                    TableName: table,
+                    Key: { reminderId: r.reminderId },
+                    ConditionExpression: 'attribute_not_exists(#sentAt)',
+                    ExpressionAttributeNames: { '#sentAt': 'sentAt' },
+                  },
+                },
+              ],
             }),
-          ),
-        ),
-      );
-      // Log per-row races as debug (benign no-ops); rethrow unexpected errors.
-      let canceled = 0;
-      for (const result of results) {
-        if (result.status === 'fulfilled') {
-          canceled++;
-        } else if (result.reason instanceof ConditionalCheckFailedException) {
-          log.debug({ tourId }, 'tour reminder cancel: row already claimed/canceled — skipping');
-        } else {
-          log.error({ err: result.reason, tourId }, 'tour reminder cancel: unexpected error on row');
+          );
+          deleted++;
+        } catch (err) {
+          if (err instanceof TransactionCanceledException) {
+            const reasons = err.CancellationReasons ?? [];
+            if (reasons[0]?.Code === 'ConditionalCheckFailed') {
+              // A NEWER GENERATION owns this tour. Its own sweep is responsible
+              // for what is left, and continuing would delete rows against a
+              // pointer that no longer names them. Info, not error: this is the
+              // design working.
+              log.info(
+                { tourId, expectedPointer, deleted },
+                'tour reminder sweep: a newer generation owns this tour - stopping',
+              );
+              break;
+            }
+            if (reasons[1]?.Code === 'ConditionalCheckFailed') {
+              log.debug(
+                { tourId, reminderId: r.reminderId },
+                'tour reminder sweep: row was sent since the list - keeping',
+              );
+              continue;
+            }
+          }
+          log.error(
+            { err, tourId, reminderId: r.reminderId },
+            'tour reminder sweep: unexpected error on row',
+          );
         }
       }
-      log.info({ tourId, canceled }, 'tour reminders canceled for tour');
+      log.info({ tourId, expectedPointer, deleted }, 'superseded tour reminders deleted');
     },
   };
 }

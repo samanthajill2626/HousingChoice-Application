@@ -1130,6 +1130,26 @@ export function createFakeWorld(): FakeWorld {
         // Manual-retry lineage: preserve retry_of so the timeline serializer can
         // emit it (mirrors the real repo's append passthrough).
         ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
+        // Relay 30003 retry lineage (spec D11/D12): preserve the six values the
+        // real repo persists (messagesRepo.ts:2218-2233). Without them a claim
+        // written through this fake reads back with NO lineage at all, and the
+        // retry job throws on the row it was handed.
+        ...(message.relayRetryOf !== undefined && { relay_retry_of: message.relayRetryOf }),
+        ...(message.relayRetryMemberKey !== undefined && {
+          relay_retry_member_key: message.relayRetryMemberKey,
+        }),
+        ...(message.relayRetryAttempt !== undefined && {
+          relay_retry_attempt: message.relayRetryAttempt,
+        }),
+        ...(message.relayRetryDestDigest !== undefined && {
+          relay_retry_dest_digest: message.relayRetryDestDigest,
+        }),
+        ...(message.relayRetryOriginDirection !== undefined && {
+          relay_retry_origin_direction: message.relayRetryOriginDirection,
+        }),
+        ...(message.relayRetryLegBody !== undefined && {
+          relay_retry_leg_body: message.relayRetryLegBody,
+        }),
         // Voice call (M1.9a): preserve the metadata-only call fields so tests
         // can assert masked/CallSid-idempotent/forward-only behavior.
         ...(message.callStatus !== undefined && { call_status: message.callStatus }),

@@ -758,38 +758,47 @@ describe('relay.retryLeg (30003 ladder)', () => {
     expect(errorLogs().some((l) => l['closeCode'] !== undefined)).toBe(false);
   });
 
-  // Code review R1, F7 - the ONE exception to S2's "write nothing". The gate and
-  // `sendOneRelayLeg` both ask `isMemberSuppressed`; if the answer flips between
-  // them the extraction stamps `contact_opted_out`, which
-  // `presentRelayDelivery` filters out of the denominator - on a one-member
+  // Code review R1 F7, REPLACED by R2 W4. The gate and `sendOneRelayLeg` used to
+  // ask `isMemberSuppressed` independently; if the answer flipped between them
+  // the extraction stamped `contact_opted_out` on the retry row, which
+  // `presentRelayDelivery` filters out of its denominator - on a one-member
   // relay group the rollup returns null and the leg vanishes from the surface.
-  it('re-stamps a suppressed retry leg as retry_opted_out, never contact_opted_out', async () => {
+  //
+  // Fix wave 1 re-stamped the slot afterwards, which was INERT on the shape
+  // every relay source now takes: on a VERSIONED row `applyRecipientSendResult`
+  // preserves the FIRST terminal code, so the write was refused. The fix is to
+  // stop asking twice - and this case uses the REAL `sendOneRelayLeg` (NO
+  // `legSend.override`, which replaces the writer and is why the old test could
+  // pass on a versioned row without exercising the bug) on the DEFAULT versioned
+  // seed, so it reproduces R2's finding exactly.
+  it('sends the leg when the suppression answer flips after the gate, on a VERSIONED row', async () => {
     seedRelay(world);
     const row = seedRetryRow(world);
-    // The race the gate cannot see: the extraction answers `suppressed` after
-    // the gate above already answered "not suppressed".
-    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
-      kind: 'suppressed',
-      errorCode: 'contact_opted_out',
-    });
+    expect(row.transport_schema_version).toBe(TRANSPORT_SCHEMA_VERSION);
+    world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: false });
+    // THE FLIP: read 1 (the D9 gate) answers "not suppressed"; any read after it
+    // would answer "suppressed".
+    let reads = 0;
+    const realGetById = world.contactsRepo.getById.bind(world.contactsRepo);
+    world.contactsRepo.getById = async (contactId) => {
+      const contact = await realGetById(contactId);
+      if (contactId !== BOB_KEY || contact === undefined) return contact;
+      reads += 1;
+      return { ...contact, sms_opt_out: reads > 1 };
+    };
     register();
 
     await runHandler(payloadFor(row));
 
-    expect(slotOf(row.tsMsgId)).toMatchObject({
-      status: 'failed',
-      errorCode: 'retry_opted_out',
-    });
-    expect(slotOf(row.tsMsgId)?.errorCode).not.toBe('contact_opted_out');
-    // The terminal ERROR still fires, and now names the code the job wrote.
-    expect(errorLogs()).toContainEqual(
-      expect.objectContaining({
-        event: 'relay_retry_leg',
-        retryClaim: 'gate_refused',
-        legOutcome: 'suppressed',
-        closeCode: 'retry_opted_out',
-      }),
-    );
+    // The unit did NOT ask a second time - which is the whole fix, and the one
+    // assertion that fails the moment the duplicate read comes back.
+    expect(reads).toBe(1);
+    expect(world.sent).toHaveLength(1);
+    // So the leg SENT, and its slot never carries the code that would delete the
+    // rollup this feature exists to keep truthful.
+    expect(slotOf(row.tsMsgId)?.errorCode).toBeUndefined();
+    expect(slotOf(row.tsMsgId)?.status).not.toBe('failed');
+    expect(errorLogs()).toHaveLength(0);
   });
 
   it('leaves a carrier-filtered leg at 30007 and reports code_not_retryable', async () => {
@@ -895,14 +904,20 @@ describe('relay.retryLeg (30003 ladder)', () => {
 
 describe('relay.retryLeg backoff seam (E2E_RELAY_RETRY_BACKOFF_MS)', () => {
   const ENV_KEY = 'E2E_RELAY_RETRY_BACKOFF_MS';
+  /** The TOPOLOGY discriminator (code review R2, W3): set in every deployed
+   *  environment, unset in the hermetic lane and local dev. */
+  const QUEUE_KEY = 'JOBS_QUEUE_URL';
   let outbound: InProcessOutboundQueueAdapter;
   let saved: string | undefined;
+  let savedQueueUrl: string | undefined;
 
   beforeEach(() => {
     _resetForTests();
     _resetRelayRetryLegForTests();
     saved = process.env[ENV_KEY];
+    savedQueueUrl = process.env[QUEUE_KEY];
     delete process.env[ENV_KEY];
+    delete process.env[QUEUE_KEY];
     const logger = createLogger({ destination: createLogCapture().stream });
     configureJobsLogger(logger);
     configureScheduler(new InMemorySchedulerAdapter());
@@ -913,6 +928,8 @@ describe('relay.retryLeg backoff seam (E2E_RELAY_RETRY_BACKOFF_MS)', () => {
   afterEach(() => {
     if (saved === undefined) delete process.env[ENV_KEY];
     else process.env[ENV_KEY] = saved;
+    if (savedQueueUrl === undefined) delete process.env[QUEUE_KEY];
+    else process.env[QUEUE_KEY] = savedQueueUrl;
     _resetForTests();
     _resetRelayRetryLegForTests();
   });
@@ -991,4 +1008,44 @@ describe('relay.retryLeg backoff seam (E2E_RELAY_RETRY_BACKOFF_MS)', () => {
     expect(outbound.delayed[0]!.delaySeconds).toBe(11);
   });
 
+  // Code review R2, W3. F5 was right to resolve the override one way for both
+  // topologies, and in doing so it deleted the property that made the variable
+  // safe: with the parse only at registration, the app process (which registers
+  // nothing) could never read it. Afterwards it read it on EVERY rung, so
+  // `E2E_RELAY_RETRY_BACKOFF_MS=1` in a deployed environment would have fired
+  // all three rungs within milliseconds - texting a member three times.
+  // `JOBS_QUEUE_URL` restores the guard structurally: setting it IS what makes
+  // the app a producer-only process, and it is unset in the one topology where
+  // a lane exists.
+  it('IGNORES the override in production topology - the free enqueue', async () => {
+    process.env[ENV_KEY] = '9000';
+    process.env[QUEUE_KEY] = 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-prod-jobs';
+    expect(await delaysForRungs()).toEqual([60, 120, 240]);
+  });
+
+  it('IGNORES the override in production topology - through the handler too', async () => {
+    process.env[ENV_KEY] = '9000';
+    process.env[QUEUE_KEY] = 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-prod-jobs';
+    registerThroughTheSeam();
+    expect(await delaysForRungs()).toEqual([60, 120, 240]);
+  });
+
+  // The MIRROR, so the two cases above are proven to be a GUARD rather than a
+  // value that never arrives: the same env, the queue URL unset, and the lane
+  // gets its shortened rung. (The handler-path mirror is the "shortens EVERY
+  // rung on a valid positive value" case above, which registers with the queue
+  // URL deleted by this describe's beforeEach.)
+  it('honors the SAME override with JOBS_QUEUE_URL unset', async () => {
+    process.env[ENV_KEY] = '9000';
+    expect(await delaysForRungs()).toEqual([9, 9, 9]);
+  });
+
+  // An EMPTY queue URL is not a deployed topology: `.env` files and shells
+  // routinely carry an unset value as the empty string, and treating that as
+  // "production" would silently take the lane's override away.
+  it('treats an EMPTY JOBS_QUEUE_URL as unset', async () => {
+    process.env[ENV_KEY] = '9000';
+    process.env[QUEUE_KEY] = '';
+    expect(await delaysForRungs()).toEqual([9, 9, 9]);
+  });
 });

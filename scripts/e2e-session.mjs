@@ -253,10 +253,13 @@ const childEnv = {
   EVENT_BRIDGE_URL: `http://127.0.0.1:${ports.app}`,
   // Relay 30003 retry ladder (spec Sec 7): shorten rung 1 from 60s to 10s so the
   // browser proof can watch a leg go retrying and then deliver inside its budget.
-  // LANE-ONLY - never set in dev or prod, and absent from every .env*.example.
-  // Read by app/src/jobs/relayRetryLeg.ts (resolveRelayRetryBackoff), which
-  // ignores anything that does not parse to a positive integer, so production
-  // keeps 60/120/240. This is CONFIGURATION, not structural absence: the seam
+  // LANE-ONLY, and STRUCTURALLY so - never set in dev or prod, and absent from
+  // every .env*.example. Read by app/src/jobs/relayRetryLeg.ts
+  // (laneBackoffOverride), which ignores it outright whenever JOBS_QUEUE_URL is
+  // set - i.e. in every deployed environment, which is also the only topology
+  // where no lane exists - and otherwise ignores anything that does not parse to
+  // a positive integer. So production keeps 60/120/240 whatever anyone puts in
+  // its environment. This is CONFIGURATION, not structural absence: the seam
   // ships, the value does not.
   //
   // TEN seconds, not three (code review R1, F6). This value IS the observation

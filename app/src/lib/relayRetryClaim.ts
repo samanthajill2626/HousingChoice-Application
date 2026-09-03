@@ -53,7 +53,26 @@ export type RelayRetryClaimOutcome =
   | 'to_missing'
   | 'to_malformed'
   | 'source_unreadable'
+  /**
+   * The member slot is ABSENT, or it is neither delivered nor terminal after
+   * this callback's own write. An internal ANOMALY of the `source_unreadable`
+   * class - the pointer resolved, the leg really did end terminally on 30003,
+   * and yet the row it must be recorded on is missing or is not in a state any
+   * callback should have left it in. ERROR, with its own message.
+   *
+   * Split out of the old catch-all by code review R2 (W1): whitelisting the
+   * whole outcome at WARN also silenced these two shapes, which is the same
+   * class of mistake the whitelist was correcting, pointed the other way.
+   */
   | 'slot_ineligible'
+  /**
+   * The slot EXISTS and its own end state is already settled: it reads
+   * `delivered` (the reordering `ALLOWED_PRIOR` correctly refused), or it is
+   * terminal on a code other than 30003 - which was logged at ITS own severity
+   * when it landed. WARN: this leg did NOT end on 30003, so a later
+   * contradictory 30003 is not a new dead end. Code review R2 (W1).
+   */
+  | 'slot_settled'
   | 'code_not_retryable'
   | 'enqueue_failed'
   /**
@@ -63,6 +82,9 @@ export type RelayRetryClaimOutcome =
    * ERROR, and it takes its own message: nothing about the CARRIER failed, so a
    * line reading like an unreachable handset would misattribute ours as theirs.
    * Added by code review R1 (F2), which is also what stops the throw skipping
-   * the webhook tail's failure marker, SSE and placement escalation.
+   * the webhook tail's failure marker, SSE and placement escalation. The
+   * captured error is then RETHROWN after that tail (code review R2, W2), so
+   * the callback still 5xxs and Twilio's redelivery can re-claim under D8's
+   * state gate - the recovery the catch alone would have traded away.
    */
   | 'claim_failed';

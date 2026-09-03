@@ -1187,6 +1187,9 @@ describe('relay delivery-failure severity (D23)', () => {
       rung?: number;
       /** The member's slot as the fan-out left it, BEFORE this callback. */
       slot?: { status: 'sent' | 'delivered' | 'undelivered' | 'failed'; errorCode?: string };
+      /** No slot for this member at all - the `relaysid#` pointer resolves and
+       *  the map has no entry (code review R2, W1's anomaly case). */
+      noSlot?: boolean;
     } = {},
   ): Promise<void> {
     world.conversations.set(RELAY_CONV, {
@@ -1213,7 +1216,9 @@ describe('relay delivery-failure severity (D23)', () => {
       deliveryStatus: 'delivered',
       relaySenderKey: opts.senderKey ?? 'c-alice',
       body: 'is the unit still available?',
-      deliveryRecipients: { [RELAY_MEMBER_KEY]: opts.slot ?? { status: 'sent' } },
+      deliveryRecipients: opts.noSlot === true
+        ? {}
+        : { [RELAY_MEMBER_KEY]: opts.slot ?? { status: 'sent' } },
       ...(opts.rung !== undefined && {
         relayRetryOf: RELAY_ROOT_KEY,
         relayRetryMemberKey: RELAY_MEMBER_KEY,
@@ -1337,11 +1342,13 @@ describe('relay delivery-failure severity (D23)', () => {
     expect(line!['msg']).not.toBe('twilio relay-recipient delivery failed (undelivered/failed)');
   });
 
-  // Code review R1, F1: a leg whose slot already reads `delivered` did NOT end
-  // on 30003. This is the reordering ALLOWED_PRIOR exists to absorb - the slot
-  // write correctly refuses the regression - and on main the same callback is a
-  // WARN. ERRORing it would make the shipped alarm set strictly larger than the
-  // approved one, in the direction of false positives.
+  // Code review R1 F1, NARROWED by R2 W1: a leg whose slot already reads
+  // `delivered` did NOT end on 30003. This is the reordering ALLOWED_PRIOR
+  // exists to absorb - the slot write correctly refuses the regression - and on
+  // main the same callback is a WARN. ERRORing it would make the shipped alarm
+  // set strictly larger than the approved one, in the direction of false
+  // positives. The OUTCOME is `slot_settled`, which is the half of the old
+  // catch-all that carries that argument.
   it('keeps a 30003 replayed onto an already-DELIVERED slot at WARN', async () => {
     const { app, world, capture } = makeWebhookHarness();
     await seedRelayLeg(world, { slot: { status: 'delivered' } });
@@ -1350,7 +1357,7 @@ describe('relay delivery-failure severity (D23)', () => {
 
     expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
     expect(relayFailureLines(capture, WARN)).toContainEqual(
-      expect.objectContaining({ retryClaim: 'slot_ineligible', errorCode: '30003' }),
+      expect.objectContaining({ retryClaim: 'slot_settled', errorCode: '30003' }),
     );
     // The slot itself is untouched - the leg really did deliver.
     const src = await world.messagesRepo.getByProviderSid(RELAY_SOURCE_SID);
@@ -1368,10 +1375,47 @@ describe('relay delivery-failure severity (D23)', () => {
 
     expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
     expect(relayFailureLines(capture, WARN)).toContainEqual(
-      expect.objectContaining({ retryClaim: 'slot_ineligible', errorCode: '30003' }),
+      expect.objectContaining({ retryClaim: 'slot_settled', errorCode: '30003' }),
     );
     const src = await world.messagesRepo.getByProviderSid(RELAY_SOURCE_SID);
     expect(src?.delivery_recipients?.[RELAY_MEMBER_KEY]?.errorCode).toBe('30007');
+  });
+
+  // THE OTHER TWO PRODUCERS of the old catch-all, which fix wave 1 silenced
+  // along with the two above (code review R2, W1 / R2 2.1). Both are internal
+  // ANOMALIES on a leg that DID end terminally on 30003 with no ladder running,
+  // which is the `source_unreadable` class - so both ERROR, and both take the
+  // anomaly's own message rather than the carrier-shaped one.
+  it('ERRORs a 30003 whose member slot is ABSENT, with the anomalys own message', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    // The `relaysid#` pointer resolves; the slot map has no entry for the member.
+    await seedRelayLeg(world, { noSlot: true });
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, WARN)).toHaveLength(0);
+    const line = relayFailureLines(capture, ERROR).find(
+      (l) => l['retryClaim'] === 'slot_ineligible',
+    );
+    expect(line).toBeDefined();
+    expect(line!['errorCode']).toBe('30003');
+    expect(line!['msg']).not.toBe('twilio relay-recipient delivery failed (undelivered/failed)');
+    expect(String(line!['msg'])).toContain('delivery slot is missing');
+  });
+
+  it('ERRORs a 30003 whose slot write was REFUSED and still reads sent', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world, { slot: { status: 'sent' } });
+    // The repo's own refusal path: the transition is declined and the slot is
+    // left exactly as it was, so the claim's consistent re-read sees `sent`.
+    world.messagesRepo.updateRecipientDeliveryStatus = async () => false;
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, WARN)).toHaveLength(0);
+    expect(relayFailureLines(capture, ERROR)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'slot_ineligible', errorCode: '30003' }),
+    );
   });
 
   // Sec 7 intention 14 names "the 1:1 AND native-group-text paths"; only the 1:1

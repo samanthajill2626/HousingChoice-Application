@@ -48,7 +48,7 @@ describe('RelayRetryClaimOutcome', () => {
   // retryClaim log field and the job's own close paths. A Record keyed by the
   // union is exhaustive in BOTH directions - a missing member and an extra key
   // are each a compile error - so this list cannot drift from the type.
-  it('enumerates exactly the twelve claim outcomes', () => {
+  it('enumerates exactly the thirteen claim outcomes', () => {
     const outcomes: Record<RelayRetryClaimOutcome, true> = {
       claimed: true,
       already_claimed: true,
@@ -58,7 +58,11 @@ describe('RelayRetryClaimOutcome', () => {
       to_missing: true,
       to_malformed: true,
       source_unreadable: true,
+      // Code review R2, W1: the old catch-all split in two. They decline the
+      // claim for opposite reasons and log at opposite severities - an anomaly
+      // (ERROR) and an already-settled leg (WARN).
       slot_ineligible: true,
+      slot_settled: true,
       code_not_retryable: true,
       enqueue_failed: true,
       // Code review R1, F2: an internal fault WHILE claiming - the helper threw.
@@ -75,6 +79,7 @@ describe('RelayRetryClaimOutcome', () => {
         'fenced_announcement',
         'gate_refused',
         'slot_ineligible',
+        'slot_settled',
         'source_unreadable',
         'to_malformed',
         'to_missing',

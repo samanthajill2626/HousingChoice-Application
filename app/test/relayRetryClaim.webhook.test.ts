@@ -391,12 +391,13 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     await seedSource({ bobSlot: { status: 'failed', errorCode: '30007' } });
     await postRootFailure();
     expect(retryRows()).toHaveLength(0);
-    // WARN, not ERROR (code review R1, F1): this leg ended on 30007 and was
-    // logged at 30007's own severity when it did. The contradictory 30003 is not
-    // a second dead end - the severity battery in twilioStatusWebhook.test.ts
-    // owns that rule; here the point is the OUTCOME.
+    // WARN, not ERROR (code review R1 F1, narrowed by R2 W1): this leg ended on
+    // 30007 and was logged at 30007's own severity when it did. The
+    // contradictory 30003 is not a second dead end - the severity battery in
+    // twilioStatusWebhook.test.ts owns that rule; here the point is the OUTCOME,
+    // which is `slot_settled` and NOT the anomaly value beside it.
     expect(failureLines(WARN)).toContainEqual(
-      expect.objectContaining({ retryClaim: 'slot_ineligible' }),
+      expect.objectContaining({ retryClaim: 'slot_settled' }),
     );
     expect(failureLines(ERROR)).toHaveLength(0);
   });
@@ -610,14 +611,9 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
 
   // --- a THROW inside the claim --------------------------------------------
 
-  // Code review R1, F2. The helper cannot RETURN out of the handler, but it can
-  // THROW - `append` rethrows a condition failure, and every read it makes can
-  // time out. Unguarded, the rejection would 500 the callback and skip the whole
-  // tail; on Twilio's redelivery nothing transitions, so the placement
-  // escalation would be lost for that leg for good.
-  it('reaches the tail with claim_failed when the claim itself throws', async () => {
-    await seedSource();
-    await seedPlacement();
+  /** Reject `messages.append` exactly ONCE, then let it work. Returns a probe
+   *  for whether the rejection was actually consumed. */
+  function rejectAppendOnce(): () => boolean {
     let rejected = false;
     const realAppend = world.messagesRepo.append.bind(world.messagesRepo);
     world.messagesRepo.append = async (message) => {
@@ -627,26 +623,40 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
       }
       return realAppend(message);
     };
+    return () => rejected;
+  }
 
-    await postRootFailure();
+  // Code review R1 F2, CORRECTED by R2 W2. The helper cannot RETURN out of the
+  // handler, but it can THROW - `append` rethrows a condition failure, and every
+  // read it makes can time out. Unguarded, the rejection would skip the whole
+  // tail; on Twilio's redelivery nothing transitions, so the placement
+  // escalation would be lost for that leg for good. So the tail runs FIRST and
+  // the error is rethrown AFTER it - the 5xx is what makes Twilio redeliver, and
+  // the redelivery is the ladder's only recovery (the next case).
+  it('runs the whole tail and then REJECTS when the claim itself throws', async () => {
+    await seedSource();
+    await seedPlacement();
+    const wasRejected = rejectAppendOnce();
 
-    expect(rejected).toBe(true);
+    // The route 5xxs rather than acking: D8's state gate re-claims on the
+    // redelivery, and acking 200 here would lose the member's message for good.
+    const res = await signedTwilioPost(app, STATUS_PATH, failureParams());
+    expect(res.status).toBe(500);
+
+    expect(wasRejected()).toBe(true);
     expect(retryRows()).toHaveLength(0);
-    // The failure marker still fires, names the internal fault, and ERRORs -
-    // this is a terminal 30003 with no retry running.
-    expect(failureLines(ERROR)).toContainEqual(
-      expect.objectContaining({ retryClaim: 'claim_failed' }),
-    );
+    // ONE ERROR line, carrying the event (so it still counts as a delivery
+    // failure), the outcome, the cause and no phone number - not the two lines
+    // fix wave 1 emitted, one of which had no `event` at all.
     expect(failureLines(WARN)).toHaveLength(0);
+    const markers = failureLines(ERROR).filter((l) => l['retryClaim'] === 'claim_failed');
+    expect(markers).toHaveLength(1);
+    const marker = markers[0]!;
     // Its own message, like `source_unreadable`: nothing about the carrier failed.
-    const marker = failureLines(ERROR).find((l) => l['retryClaim'] === 'claim_failed')!;
     expect(marker['msg']).not.toBe('twilio relay-recipient delivery failed (undelivered/failed)');
-    // A separate diagnostic ERROR carries the cause itself, and no phone.
-    const detail = capture
-      .atLevel(ERROR)
-      .find((l) => l['retryClaim'] === 'claim_failed' && l['event'] !== 'delivery_failed');
-    expect(detail).toBeDefined();
-    expect(JSON.stringify(detail)).not.toContain(BOB);
+    expect(marker['err']).toBeDefined();
+    expect(JSON.stringify(marker)).toContain('dynamodb throttled');
+    expect(JSON.stringify(marker)).not.toContain(BOB);
     // The EXISTING SSE still fires (the slot did transition), and the escalation
     // still runs exactly once - the two things the tail exists for.
     expect(
@@ -657,6 +667,63 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
       ),
     ).toHaveLength(1);
     expect(escalations()).toHaveLength(1);
+  });
+
+  // THE RECOVERY the 5xx buys, and the reason the rethrow is worth its cost.
+  // Twilio redelivers on a 5xx; D8 gates the claim on the SLOT'S POST-WRITE
+  // STATE, which the first callback already wrote, so the redelivered callback
+  // reads terminal-plus-30003 and claims. Fix wave 1 acked 200 here and a test
+  // pinned `retryRows()` at zero - i.e. specified the loss.
+  it('CLAIMS on the redelivery that the rejection triggered', async () => {
+    await seedSource();
+    await seedPlacement();
+    rejectAppendOnce();
+    expect((await signedTwilioPost(app, STATUS_PATH, failureParams())).status).toBe(500);
+    expect(retryRows()).toHaveLength(0);
+
+    // Twilio's redelivery of the SAME callback.
+    await postRootFailure();
+
+    expect(retryRows()).toHaveLength(1);
+    expect(scheduledRetryJobs()).toHaveLength(1);
+    // And the escalation does NOT double-fire: it is gated on `transitioned`,
+    // which is false the second time round.
+    expect(escalations()).toHaveLength(1);
+  });
+
+  // Code review R2, W2 / R2 2.6. The enqueue-failure CLOSE runs inside the
+  // enqueue's own catch; when it throws too, the claim has still DECIDED and a
+  // retry row exists, so the outcome must stay `enqueue_failed`. Reporting
+  // `claim_failed` ("threw before deciding - no retry claimed") described the
+  // opposite state, and would now also 5xx a callback whose row already exists.
+  it('keeps enqueue_failed when the enqueue-failure close throws as well', async () => {
+    await seedSource();
+    outbound.enqueue = async () => {
+      throw new Error('queue down');
+    };
+    // The LEGACY close path is `setRecipientDelivery`; the root leg's own write
+    // above goes through `updateRecipientDeliveryStatus` and is untouched.
+    world.messagesRepo.setRecipientDelivery = async () => {
+      throw new Error('close failed too');
+    };
+
+    // Still a 200: a row exists and nothing is recoverable by redelivering.
+    await postRootFailure();
+
+    const rows = retryRows();
+    expect(rows).toHaveLength(1);
+    const line = failureLines(ERROR).find((l) => l['retryClaim'] === 'enqueue_failed');
+    expect(line).toBeDefined();
+    // The claim decided, so this is NOT the claim_failed shape...
+    expect(failureLines(ERROR).some((l) => l['retryClaim'] === 'claim_failed')).toBe(false);
+    // ...and the diagnostic line names the close failure while claiming NO
+    // close code, because nothing was written.
+    const detail = capture
+      .atLevel(ERROR)
+      .find((l) => l['retryClaim'] === 'enqueue_failed' && l['retryTsMsgId'] !== undefined)!;
+    expect(detail['closeErr']).toBeDefined();
+    expect(detail['closeCode']).toBeUndefined();
+    expect(JSON.stringify(detail)).not.toContain(BOB);
   });
 
   // --- the SSE on claim ----------------------------------------------------

@@ -332,8 +332,10 @@ const STATUS_UNKNOWN_SID_RETRY_DELAY_MS = 2_500;
 //     where a fix belongs; do not "fix" it by widening this set.
 //   - RELAY: this set no longer decides relay severity at all. The relay branch
 //     reads isTerminalRelayLegFailure below, which is attempt-aware - WARN while
-//     a rung is actually claimed or the leg never ended on 30003 at all
-//     (slot_ineligible), ERROR once the ladder is a real dead end.
+//     a rung is actually claimed or the leg's own slot is already SETTLED on
+//     some other end state (slot_settled), ERROR once the ladder is a real dead
+//     end - including the internal anomaly where the slot is missing or was
+//     never written (slot_ineligible).
 //
 // The set's VALUES are unchanged, and the 1:1 path they still govern is the one
 // path where the promise holds.
@@ -363,6 +365,25 @@ const RELAY_RETRY_TRIGGER_CODE = '30003';
  */
 const RELAY_ANONYMOUS_SENDER_LABEL = 'A member';
 
+/**
+ * The relay failure marker's message, for the outcomes that are OURS rather
+ * than the carrier's. Every other outcome takes the shared carrier-shaped line;
+ * these three would be misread as one more unreachable handset, which is
+ * exactly the misattribution D23's `retryClaim` field exists to prevent.
+ *
+ * A PARTIAL record on purpose - `Object.prototype` is not reachable here (the
+ * key is our own closed union, never wire data), and the caller's `??` supplies
+ * the shared message for everything absent.
+ */
+const RELAY_ANOMALY_FAILURE_MESSAGES: Partial<Record<RelayRetryClaimOutcome, string>> = {
+  source_unreadable:
+    'twilio relay-recipient delivery failed - source message row unreadable, no retry claimed',
+  claim_failed:
+    'twilio relay-recipient delivery failed - the retry claim itself threw, no retry claimed',
+  slot_ineligible:
+    'twilio relay-recipient delivery failed - the member delivery slot is missing or was never written, no retry claimed',
+};
+
 /** What the claim decided, plus the rung it claimed (for the failure log). */
 interface RelayRetryClaimResult {
   outcome: RelayRetryClaimOutcome;
@@ -384,20 +405,27 @@ interface RelayRetryClaimResult {
  *     claimed for a relay intro, member-added, group-closed or tour-reminder
  *     rung, so "ERROR whenever no retry was claimed" would alarm every one of
  *     them - unrequested blast radius from a mission that fences that file out.
- *   - `slot_ineligible` stays WARN (code review R1, F1). The founder approved
- *     ERROR for a leg that "ends terminally on 30003", and this outcome is
- *     exactly the leg that did NOT: the slot already reads `delivered` (a
- *     duplicate or out-of-order callback that `ALLOWED_PRIOR` correctly
- *     refused), or it already reads another terminal code such as 30007 - which
- *     was logged at ITS own severity when it landed. A later contradictory
- *     30003 is not a new dead end, and today's main logs the same callback at
- *     WARN. Alarming it makes the shipped set strictly larger than the approved
- *     one, in the direction of false positives.
+ *   - `slot_settled` stays WARN (code review R1 F1, NARROWED by R2 W1). The
+ *     founder approved ERROR for a leg that "ends terminally on 30003", and this
+ *     outcome is exactly the leg that did NOT: the slot already reads
+ *     `delivered` (a duplicate or out-of-order callback that `ALLOWED_PRIOR`
+ *     correctly refused), or it already reads another terminal code such as
+ *     30007 - which was logged at ITS own severity when it landed. A later
+ *     contradictory 30003 is not a new dead end, and today's main logs the same
+ *     callback at WARN. Alarming it makes the shipped set strictly larger than
+ *     the approved one, in the direction of false positives.
+ *
+ *     ONLY those two shapes. The first fix wave whitelisted the whole
+ *     `slot_ineligible` value, which ALSO covered an ABSENT slot and a slot
+ *     whose write was refused and still reads `sent` - two internal anomalies
+ *     on a leg that DID end terminally on 30003, silenced on a brand-new alarm.
+ *     They are a separate outcome now and they ERROR.
  *   - Every OTHER terminal 30003 on a fan-out or team leg is ERROR, whether the
  *     ladder ran to its cap, was refused at a gate, or was never claimed at all
- *     (`to_missing`, `to_malformed`, `source_unreadable`, `enqueue_failed`,
- *     `claim_failed`). What matters is the PRODUCT the leg belongs to, not
- *     whether the ladder happened to start - that whole set is what was approved.
+ *     (`to_missing`, `to_malformed`, `source_unreadable`, `slot_ineligible`,
+ *     `enqueue_failed`, `claim_failed`). What matters is the PRODUCT the leg
+ *     belongs to, not whether the ladder happened to start - that whole set is
+ *     what was approved.
  *
  * This function is the relay branch's ONLY severity reader; the shared set above
  * still decides the 1:1 and native-group-text paths, which are fenced.
@@ -412,7 +440,7 @@ function isTerminalRelayLegFailure(
     claim !== 'claimed' &&
     claim !== 'already_claimed' &&
     claim !== 'fenced_announcement' &&
-    claim !== 'slot_ineligible'
+    claim !== 'slot_settled'
   );
 }
 
@@ -2703,13 +2731,24 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // The slot's own code must still be 30003 or ABSENT: absent is the reachable
       // code-less-`canceled`-landed-first case, and a slot already reading 30007
       // is the one real contradiction this keeps closed.
+      //
+      // TWO OUTCOMES, not one (code review R2, W1). Both decline the claim; they
+      // differ in what they MEAN, and therefore in severity. `slot_settled` is a
+      // leg whose own end state is already recorded - `delivered`, or terminal
+      // on another code - so this 30003 is a duplicate or a contradiction and
+      // nothing new failed. `slot_ineligible` is an ANOMALY: the pointer
+      // resolved and the leg really did end terminally on 30003, and yet the
+      // slot is absent, or is still `queued`/`sent` after this callback's own
+      // write was refused. Nothing should leave a slot in that state, so it
+      // alarms with its own message (see `isTerminalRelayLegFailure`).
       const slot = src.delivery_recipients?.[ptr.memberKey];
       if (slot === undefined) return { outcome: 'slot_ineligible' };
+      if (slot.status === 'delivered') return { outcome: 'slot_settled' };
       if (slot.status !== 'failed' && slot.status !== 'undelivered') {
         return { outcome: 'slot_ineligible' };
       }
       if (slot.errorCode !== undefined && slot.errorCode !== RELAY_RETRY_TRIGGER_CODE) {
-        return { outcome: 'slot_ineligible' };
+        return { outcome: 'slot_settled' };
       }
 
       // 6. Attempt arithmetic (D6). Every rung points at the ROOT, so rung 2
@@ -2810,25 +2849,44 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         // when none did. The close goes through the exported transport-aware
         // path so a legacy row still takes the whole-slot write.
         outcome = 'enqueue_failed';
-        await closeRetryLegEnqueueFailed(
-          ptr.conversationId,
-          retryTsMsgId,
-          ptr.memberKey,
-          versioned,
-          requestedTransport,
-        );
+        // The close is guarded SEPARATELY (code review R2, W2). Unguarded, a
+        // throw from it escaped to the outer catch and reported
+        // `claim_failed` - "threw before deciding, no retry claimed" - about a
+        // claim that HAD decided and whose row exists, stranded at `queued`
+        // with no close code. The outcome stays `enqueue_failed` because a row
+        // is what the operator has to go and look at; the close's own failure
+        // rides the same line so the missing close code is diagnosable.
+        let closeErr: unknown;
+        try {
+          await closeRetryLegEnqueueFailed(
+            ptr.conversationId,
+            retryTsMsgId,
+            ptr.memberKey,
+            versioned,
+            requestedTransport,
+          );
+        } catch (e) {
+          closeErr = e;
+        }
         log.error(
           {
             err,
+            // `summarizeError`, not the raw value: only `err`/`error`/`cause`/
+            // `reason` get the safe serializer, and a second raw Error under any
+            // other key serialises to `{}`.
+            ...(closeErr !== undefined && { closeErr: summarizeError(closeErr) }),
             conversationId: ptr.conversationId,
             retryTsMsgId,
             rootTsMsgId,
             attempt,
             memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
             retryClaim: 'enqueue_failed',
-            closeCode: 'enqueue_failed',
+            // `closeCode` appears only where a close was actually WRITTEN.
+            ...(closeErr === undefined && { closeCode: 'enqueue_failed' as const }),
           },
-          'relay retry claim: enqueueing the rung failed - retry leg closed',
+          closeErr === undefined
+            ? 'relay retry claim: enqueueing the rung failed - retry leg closed'
+            : 'relay retry claim: enqueueing the rung failed and the close failed too - retry leg left open',
         );
       }
 
@@ -2905,27 +2963,36 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // F2). The helper cannot RETURN out of this function, but it can THROW:
       // it performs a consistent read, a roster read and an `append` that
       // rethrows a condition failure, and any of the three can fail on a
-      // DynamoDB throttle or timeout. An escaping rejection would give Twilio a
-      // 500 and skip the whole tail - and on the redelivery nothing transitions,
-      // so `flagPlacementAttention` would never run for that leg again. A failed
+      // DynamoDB throttle or timeout. A rejection escaping HERE would skip the
+      // whole tail - and on Twilio's redelivery nothing transitions, so
+      // `flagPlacementAttention` would never run for that leg again. A failed
       // relay leg on a placement-linked thread would silently lose its
       // escalation to a human, which is precisely what the M1.10c comment above
       // says must not happen.
+      //
+      // BUT THE CATCH DOES NOT SWALLOW IT (code review R2, W2). The captured
+      // error is RETHROWN after the tail, so the callback still 5xxs and Twilio
+      // still redelivers. That redelivery is the ladder's only recovery: D8
+      // gates the claim on the SLOT'S POST-WRITE STATE rather than on
+      // `transitioned` precisely so a redelivered callback - which transitions
+      // nothing - still reads terminal-plus-30003 and claims. Acking 200 here
+      // would trade that away, and a single DynamoDB throttle on the consistent
+      // read, the roster read or the `append` would lose the member's message
+      // for good.
+      //
+      // WHAT IS TRADED FOR IT: the tail runs on EVERY redelivery, so the
+      // failure marker and the SSE repeat while the fault lasts. Both are
+      // idempotent-by-shape (one more log line, one more refresh of the same
+      // state) and the escalation is not repeated at all - it is gated on
+      // `transitioned`, which is false on a redelivery of a callback that
+      // already wrote the slot. Losing the send is the strictly worse failure.
       let retryClaim: RelayRetryClaimResult;
+      let claimError: unknown;
       try {
         retryClaim = await claimRelayRetry(ptr, mapped);
       } catch (err) {
         retryClaim = { outcome: 'claim_failed' };
-        log.error(
-          {
-            err,
-            providerSid: MessageSid,
-            errorCode: ErrorCode,
-            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
-            retryClaim: 'claim_failed',
-          },
-          'relay retry claim: threw before deciding - no retry claimed',
-        );
+        claimError = err;
       }
       log.info(
         {
@@ -2942,8 +3009,20 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // undelivered/failed is a countable failed delivery. Severity follows the
       // taxonomy — a terminal failure is an ERROR (feeds the error-logs alarm +
       // Recent Errors panel); a transient-retrying / opt-out leg stays WARN. The
-      // `event` field is unchanged either way, so the DeliveryFailures count
-      // metric (which keys on `event`, not level) is unaffected. IDs/codes only.
+      // `event` field is unchanged either way, so this SEVERITY change does not
+      // move the DeliveryFailures count metric, which keys on `event` and not on
+      // level. IDs/codes only.
+      //
+      // THE FEATURE DOES MOVE THAT METRIC, and the old comment here said
+      // otherwise (code review R2, W9c). Every rung's own send writes its own
+      // `relaysid#` pointer, so every rung's failed callback re-enters this
+      // handler and emits its own `delivery_failed` - up to FOUR per relayed
+      // message per permanently dead handset (root + three rungs) where main
+      // emitted one. That is the relay ladder now counting the way the 1:1
+      // ladder already does. `hc-<env>-delivery-failures` is a raw Sum over a
+      // single 5-minute period, and root/rung1/rung2 land inside about three
+      // minutes, so the threshold is a decision the human owes (open question
+      // Q4). Nothing on this branch changes the metric or the alarm.
       if (mapped === 'undelivered' || mapped === 'failed') {
         const failure = {
           event: 'delivery_failed',
@@ -2951,6 +3030,16 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           errorCode: ErrorCode,
           providerStatus: MessageStatus,
           relay: true,
+          // The claim's own fault rides THIS line rather than a second one
+          // (code review R2, W2/2.5): a diagnostic ERROR with no `event` fed
+          // `ErrorLogs` but not `DeliveryFailures`, so one throttled claim
+          // contributed two datapoints to the alarm that pages on three
+          // consecutive buckets, one of them unclassifiable. One line, one
+          // `event`, the cause attached.
+          ...(claimError !== undefined && {
+            err: claimError,
+            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
+          }),
           // D23: WHY no retry is running. This is the difference between an
           // operator diagnosing a carrier problem and diagnosing ours - an ERROR
           // reading `source_unreadable` is an internal fault and says so, one
@@ -2960,15 +3049,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           retryClaim: retryClaim.outcome,
           ...(retryClaim.attempt !== undefined && { retryAttempt: retryClaim.attempt }),
         };
-        // The two INTERNAL faults take their own message rather than the shared
-        // carrier-shaped one, so each alarm names its own cause instead of
-        // reading as one more unreachable handset.
+        // The three INTERNAL ANOMALIES take their own message rather than the
+        // shared carrier-shaped one, so each alarm names its own cause instead
+        // of reading as one more unreachable handset. `slot_ineligible` joined
+        // them in code review R2 (W1): it is the same class as
+        // `source_unreadable` - the pointer resolved, the leg ended terminally
+        // on 30003, and the row it belongs on is missing or was never written.
         const failureMsg =
-          retryClaim.outcome === 'source_unreadable'
-            ? 'twilio relay-recipient delivery failed - source message row unreadable, no retry claimed'
-            : retryClaim.outcome === 'claim_failed'
-              ? 'twilio relay-recipient delivery failed - the retry claim itself threw, no retry claimed'
-              : 'twilio relay-recipient delivery failed (undelivered/failed)';
+          RELAY_ANOMALY_FAILURE_MESSAGES[retryClaim.outcome] ??
+          'twilio relay-recipient delivery failed (undelivered/failed)';
         if (isTerminalRelayLegFailure(ErrorCode, retryClaim.outcome)) log.error(failure, failureMsg);
         else log.warn(failure, failureMsg);
       }
@@ -3014,6 +3103,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           }
         }
       }
+      // LAST, and only after the whole tail has run (code review R2, W2). The
+      // rethrow gives Twilio a 5xx so it redelivers, and D8's state gate claims
+      // on that redelivery; the tail above has already emitted the marker, the
+      // SSE and - once - the escalation, which is what F2 existed to guarantee.
+      // Both halves, in the only order that gets both.
+      if (claimError !== undefined) throw claimError;
     };
 
     // Context recovery by lookup (doc §9): status callbacks cannot carry the

@@ -1232,6 +1232,10 @@ export interface RelayLegSendOutcome {
  * parameters and each `continue` becoming a returned outcome. A send error that
  * is neither a refusal, nor 30007, nor transient still THROWS out of here, as
  * it did out of the loop.
+ *
+ * `suppressionChecked` (optional, default false) is the one behavioural knob,
+ * and the fan-out never passes it - see its own doc below for why a caller that
+ * has just run the same check must not let this unit run it a second time.
  */
 export async function sendOneRelayLeg(args: {
   messages: MessagesRepo;
@@ -1258,6 +1262,27 @@ export async function sendOneRelayLeg(args: {
   legBody: string;
   sourceMedia: MediaAttachment[];
   transport: RelayTransportMode;
+  /**
+   * The CALLER already asked `isMemberSuppressed` for this member, moments ago,
+   * and it answered NO - so skip the duplicate read (code review R2, W4).
+   *
+   * This exists because the two reads must not be able to DISAGREE. The 30003
+   * retry job runs the same check as its own D9 gate and then calls this unit;
+   * if the answer flips in between, this unit stamps `contact_opted_out` on the
+   * retry row's slot - a code `presentRelayDelivery` filters out of its
+   * denominator (`deliveryStatus.ts`, the `fanned` filter), so a one-member
+   * relay group loses its whole rollup and the row reads "Not sent - opted out"
+   * about a leg that WAS sent. Re-stamping afterwards cannot fix it: on a
+   * VERSIONED row - which is every relay source written today -
+   * `applyRecipientSendResult` deliberately preserves the FIRST terminal code.
+   * Not reading twice is the only fix that works on the live shape.
+   *
+   * DEFAULT FALSE, and the fan-out passes nothing: its own behaviour, and the
+   * 186 tests over it, are unchanged by construction. The window this trades
+   * away is the sub-second one between the caller's gate and this call, on a
+   * ladder whose gate refusal is itself the D9 answer.
+   */
+  suppressionChecked?: boolean;
 }): Promise<RelayLegSendOutcome> {
   const {
     messages,
@@ -1274,6 +1299,7 @@ export async function sendOneRelayLeg(args: {
     legBody,
     sourceMedia,
     transport,
+    suppressionChecked = false,
   } = args;
   const hasMedia = sourceMedia.length > 0;
 
@@ -1281,7 +1307,7 @@ export async function sendOneRelayLeg(args: {
   const priorSlot = currentSource.delivery_recipients?.[key];
   if (isTerminal(priorSlot?.status)) return { kind: 'skipped_terminal' };
 
-  if (await isMemberSuppressed(contacts, conversations, member)) {
+  if (!suppressionChecked && (await isMemberSuppressed(contacts, conversations, member))) {
     if (transport.kind === 'versioned') {
       await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
     }

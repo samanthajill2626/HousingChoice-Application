@@ -156,7 +156,32 @@ export function _resetRelayRetryLegForTests(): void {
  *  stray value cannot silently shorten a real ladder. */
 const RELAY_RETRY_BACKOFF_ENV_KEY = 'E2E_RELAY_RETRY_BACKOFF_MS';
 
+/**
+ * The lane's override, and the TOPOLOGY GUARD that makes "lane-only" structural
+ * again (code review R2, W3).
+ *
+ * The adversarial review recorded, as a property that REDUCED the concern, that
+ * this variable set in a deployed environment has no effect on the ladder -
+ * because the parse lived at handler registration and the app process registers
+ * none. F5 moved the parse into the shared resolution chain, which was right for
+ * correctness and deleted that property: in production `registeredBackoffMs` is
+ * undefined at the only call site, so the chain fell straight through to the env
+ * on every rung, and `E2E_RELAY_RETRY_BACKOFF_MS=1` in the app's environment
+ * would have fired all three rungs within milliseconds - texting a member three
+ * times.
+ *
+ * `JOBS_QUEUE_URL` is the discriminator because it IS the topology: production
+ * sets it (Terraform's jobs module), and setting it is exactly what makes the
+ * app process register no handlers and hand every job to the worker over SQS.
+ * The hermetic lane and local `npm run dev` leave it unset and run one process,
+ * which is the only topology in which a lane exists at all. Read from
+ * `process.env` rather than `config` deliberately: this module is a leaf on the
+ * enqueue path and must not pull config validation into it, and the value is
+ * only ever tested for presence.
+ */
 function laneBackoffOverride(): ((attempt: number) => number) | undefined {
+  const queueUrl = process.env['JOBS_QUEUE_URL'];
+  if (typeof queueUrl === 'string' && queueUrl.length > 0) return undefined;
   const parsed = Number.parseInt(process.env[RELAY_RETRY_BACKOFF_ENV_KEY] ?? '', 10);
   if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
   return () => parsed;
@@ -173,6 +198,10 @@ function laneBackoffOverride(): ((attempt: number) => number) | undefined {
  * resolves once and stores the result, so the in-process lane reads the env a
  * single time; the app process, which registers nothing, resolves it per
  * enqueue. Exported so a test can assert the chain directly.
+ *
+ * The third link is topology-guarded (see `laneBackoffOverride`): production
+ * sets `JOBS_QUEUE_URL`, so the env override cannot reshape a real ladder even
+ * though this chain now runs on production's hot enqueue path.
  */
 export function resolveRelayRetryBackoff(
   deps?: Pick<RelayRetryLegJobDeps, 'backoffMs'>,
@@ -489,6 +518,14 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       legBody,
       sourceMedia,
       transport,
+      // The D9 gate above just asked `isMemberSuppressed` for this same member
+      // (code review R2, W4). Letting the unit ask again opens a window in which
+      // the two answers DISAGREE, and the losing side stamps `contact_opted_out`
+      // on this retry row - which `presentRelayDelivery` filters out of its
+      // denominator, so a one-member relay group loses its rollup entirely and
+      // the row reads "Not sent - opted out" for a leg that was sent. One read,
+      // one answer, no window.
+      suppressionChecked: true,
     });
 
     // 6. The outcome.
@@ -561,34 +598,31 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     // `refused`, `suppressed` and `filtered`: the extracted unit ALREADY wrote a
     // terminal slot carrying that arm's specific error code (adjudication S2).
     // Writing one here would replace a precise code with a vaguer one, so this
-    // job only emits D23's terminal ERROR.
+    // job only emits D23's terminal ERROR, and NO close code - it wrote nothing.
     //
-    // ONE exception, and it is the reason `RelayRetryCloseCode`'s docblock
-    // excludes `contact_opted_out` (code review R1, F7). The gate above and
-    // `sendOneRelayLeg` both ask `isMemberSuppressed`; if the answer FLIPS
-    // between the two reads, the extraction stamps `contact_opted_out` on a
-    // retry row - and `presentRelayDelivery` filters that code out of the
-    // denominator (`deliveryStatus.ts:408`), so on a one-member relay group the
-    // whole rollup returns null and the leg reads "Not sent - opted out" for a
-    // leg that WAS sent and rejected by the carrier. `retry_opted_out` says the
-    // same thing and stays on the surface. Written through the transport-aware
-    // path so a legacy row still takes the whole-slot write. NOTE the bound: on
-    // a VERSIONED row the extraction's own terminal code is already durable, and
-    // `applyRecipientSendResult` deliberately preserves the FIRST terminal code
-    // (`messagesRepo.ts`, `terminalCurrent && statusSame`), so the re-stamp
-    // lands on the legacy shape - the ordinary one, since every relay source
-    // written before 2026-09-02 is legacy.
-    if (outcome.kind === 'suppressed') await closeTerminally('retry_opted_out');
+    // `suppressed` IS UNREACHABLE from this job (code review R2, W4). The send
+    // above passes `suppressionChecked: true`, so the unit no longer runs the
+    // suppression read at all and cannot take that arm; the D9 gate is the only
+    // place this ladder decides an opt-out, and it closes with
+    // `retry_opted_out`. The arm stays as a defensive ERROR because the outcome
+    // union still admits it and a silent fall-through would be worse than a line
+    // nobody expects to see.
+    //
+    // WHAT WAS HERE BEFORE, and why it went: fix wave 1 re-stamped this slot as
+    // `retry_opted_out` after the fact, because `contact_opted_out` is filtered
+    // out of `presentRelayDelivery`'s denominator (`deliveryStatus.ts:449`, the
+    // `fanned` filter) and a one-member relay group would lose its whole rollup.
+    // That re-stamp was INERT on the shape every relay source now takes: on a
+    // VERSIONED row `applyRecipientSendResult` preserves the FIRST terminal code
+    // (`messagesRepo.ts`, `terminalCurrent && statusSame`), so the write was
+    // refused and the log still reported a `closeCode` nothing had written.
+    // Closing the read window is what actually fixes it.
     log.error(
       {
         ...memberLog,
         retryClaim: outcome.kind === 'filtered' ? 'code_not_retryable' : 'gate_refused',
         errorCode: outcome.errorCode,
         legOutcome: outcome.kind,
-        // Only the suppressed arm writes a slot on this path, so only it names a
-        // close code - the file's contract is that `closeCode` appears where the
-        // JOB wrote one.
-        ...(outcome.kind === 'suppressed' && { closeCode: 'retry_opted_out' as const }),
       },
       'relayRetryLeg: retry leg ended terminally at the send',
     );

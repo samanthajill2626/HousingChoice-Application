@@ -1299,6 +1299,13 @@ describe('presentLegDelivery - retry states on one recipient row (D19)', () => {
   const rowTextOf = (p: DeliveryPresentation | null): string | undefined =>
     p === null ? undefined : p.reason !== undefined ? `${p.label} - ${p.reason}` : p.label;
 
+  /** A leg clock a MINUTE old - well inside the staleness budget, so `isStaleLeg`
+   *  answers NO for it whatever clock it is read against. The `unconfirmed`
+   *  cases below use it deliberately: the join has already judged the ladder
+   *  quiet against the retry ROW's clock, and this function must not re-derive
+   *  that from the leg's own. */
+  const FRESH = new Date(Date.parse('2026-09-02T10:00:00.000Z') - 60_000).toISOString();
+
   it.each([
     ['retrying', 'Retrying - Phone unreachable (error 30003)'],
     ['delivered-on-retry', 'Delivered on retry'],
@@ -1346,18 +1353,52 @@ describe('presentLegDelivery - retry states on one recipient row (D19)', () => {
     ).toBe('Retrying - Not retried - group closed');
   });
 
-  it.each([['terminal'], ['unconfirmed']] as Array<[RelayRetryState]>)(
-    'falls through to the logic shipped today for %s',
-    (retryState) => {
-      expect(
-        presentLegDelivery({ status: 'undelivered', errorCode: '30003', retryState }, 'relay'),
-      ).toEqual({ label: 'Undelivered', tone: 'danger', isFailure: true });
-    },
-  );
+  it('falls through to the logic shipped today for terminal', () => {
+    expect(
+      presentLegDelivery(
+        { status: 'undelivered', errorCode: '30003', retryState: 'terminal' },
+        'relay',
+      ),
+    ).toEqual({ label: 'Undelivered', tone: 'danger', isFailure: true });
+  });
+
+  // D19's second table: an `unconfirmed` leg recites today's NOT-CONFIRMED row
+  // copy. It is decided here rather than by `isStaleLeg`, because the quiet
+  // clock lives on the retry ROW and the leg-level staleness test cannot see it
+  // (D18). The projection overlays the quiet rung's own status, so these two
+  // shapes are what actually arrive - the two halves of `unconfirmed`, told
+  // apart the same way the leg-level stale labels are.
+  it('reads a stranded (queued) unconfirmed rung as Queued - not confirmed', () => {
+    expect(presentLegDelivery({ status: 'queued', retryState: 'unconfirmed' }, 'relay')).toEqual({
+      label: 'Queued - not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+  });
+
+  it('reads a sent-but-unacknowledged unconfirmed rung as Sent - not confirmed', () => {
+    expect(
+      presentLegDelivery({ status: 'sent', sentAt: FRESH, retryState: 'unconfirmed' }, 'relay'),
+    ).toEqual({ label: 'Sent - not confirmed', tone: 'danger', isFailure: false });
+  });
+
+  // NO CLOCK is required, and that is the point: the join already made the
+  // time-derived judgement against a clock this function is never given. The
+  // fresh `sentAt` above is exactly the shape `isStaleLeg` would answer NO to.
+  it('does not re-derive an unconfirmed legs staleness from its own clock', () => {
+    expect(
+      presentLegDelivery(
+        { status: 'sent', sentAt: FRESH, retryState: 'unconfirmed' },
+        'relay',
+        undefined,
+        undefined,
+      )?.label,
+    ).toBe('Sent - not confirmed');
+  });
 
   // The FENCED product must not move: a native group-text leg is untouched by
   // any retryState, because a relay retry row can never appear in that thread.
-  it.each([['retrying'], ['delivered-on-retry']] as Array<[RelayRetryState]>)(
+  it.each([['retrying'], ['delivered-on-retry'], ['unconfirmed']] as Array<[RelayRetryState]>)(
     'leaves a native group-text leg carrying %s untouched',
     (retryState) => {
       expect(
@@ -1368,6 +1409,21 @@ describe('presentLegDelivery - retry states on one recipient row (D19)', () => {
       ).toEqual({ label: 'Undelivered', tone: 'danger', isFailure: true });
     },
   );
+
+  // The FENCED product, on the shape the new `unconfirmed` clause actually
+  // matches: a `queued` group-text leg with no clock must stay silent, not pick
+  // up "Queued - not confirmed" from a state that can never reach it.
+  it('leaves a queued native group-text leg carrying unconfirmed untouched', () => {
+    // Compared against the SAME leg with no state rather than against a copied
+    // literal: the shipped label carries a real U+2026 and this assertion is
+    // about the two being identical, not about what the string spells.
+    expect(
+      presentLegDelivery({ status: 'queued', retryState: 'unconfirmed' }, 'group_text'),
+    ).toEqual(presentLegDelivery({ status: 'queued' }, 'group_text'));
+    expect(
+      presentLegDelivery({ status: 'queued', retryState: 'unconfirmed' }, 'group_text'),
+    ).toMatchObject({ tone: 'neutral', isFailure: false });
+  });
 
   it('leaves a native group-text leg with no retryState untouched', () => {
     expect(presentLegDelivery({ status: 'undelivered' }, 'group_text')).toMatchObject({

@@ -213,6 +213,56 @@ export function isRetryRungLive(row: RelayRetryRow, nowMs: number | undefined): 
   return !isQuietSince(rungStalenessClockMs(row), nowMs);
 }
 
+/**
+ * Overlay the DECIDING rung's own leg onto the original slot.
+ *
+ * A retried leg's per-attempt facts belong to the ATTEMPT that decided it, not
+ * to the first one: the original slot's `sentAt`, `sid` and `actualTransport`
+ * describe a send that failed, so leaving them in place makes the row recite the
+ * FAILED attempt's clock and transport beside a state derived from a later one.
+ * The row's own time comes straight off this slot (`recipientRowTime` in
+ * Timeline.tsx), which is why the overlay is a REPLACEMENT rather than a
+ * fill-in: a rung that never sent must clear the original's `sentAt` instead of
+ * inheriting it, or the row times a send this attempt never made.
+ *
+ * `errorCode` is CLEARED. The original's carrier code belongs to the attempt
+ * that earned it; a code beside a deciding rung that delivered - or that is
+ * merely quiet - is a contradiction the four independent reason sites read.
+ *
+ * `requestedTransport` is PRESERVED from the original, and it is the one field
+ * that must be: an inbound retry row never carries a message-level
+ * `requestedTransport` (D2), so taking the rung's absent value would drop the
+ * transport line to `Unknown` on exactly the inbound source whose rows are the
+ * only delivery information a screen-reader user gets. Every other field the
+ * spread does not name survives too.
+ */
+function withDecidingRung(
+  slot: RelayRecipientDelivery,
+  leg: RelayRecipientDelivery,
+): RelayRecipientDelivery {
+  const {
+    errorCode: _clearedWithTheFailedAttempt,
+    status: _statusIsTheRungs,
+    sid: _sidIsTheRungs,
+    sentAt: _sentAtIsTheRungs,
+    deliveredAt: _deliveredAtIsTheRungs,
+    actualTransport: _actualTransportIsTheRungs,
+    transportAggregationState: _aggregationStateIsTheRungs,
+    ...preserved
+  } = slot;
+  return {
+    ...preserved,
+    status: leg.status,
+    ...(leg.sid !== undefined && { sid: leg.sid }),
+    ...(leg.sentAt !== undefined && { sentAt: leg.sentAt }),
+    ...(leg.deliveredAt !== undefined && { deliveredAt: leg.deliveredAt }),
+    ...(leg.actualTransport !== undefined && { actualTransport: leg.actualTransport }),
+    ...(leg.transportAggregationState !== undefined && {
+      transportAggregationState: leg.transportAggregationState,
+    }),
+  };
+}
+
 /** Resolve one leg against its own rungs. See `projectRelayLegs`. */
 function projectOneLeg(
   slot: RelayRecipientDelivery,
@@ -224,16 +274,26 @@ function projectOneLeg(
 
   // 1. DELIVERED WINS PERMANENTLY. A rung that reached the member cannot be
   //    un-reached by a sibling rung reporting failure afterwards, whatever
-  //    order the callbacks land in. The original's carrier code goes with it:
-  //    an effective status of `delivered` beside a live 30003 is a
-  //    contradiction, and the row copy for this state carries no reason.
+  //    order the callbacks land in. The DELIVERING rung's own leg is overlaid
+  //    (see `withDecidingRung`), so the row's time and transport line describe
+  //    the send that actually landed rather than the one that failed. The
+  //    original's carrier code goes with it: an effective status of `delivered`
+  //    beside a live 30003 is a contradiction, and the row copy for this state
+  //    carries no reason.
   //    (An `excluded` slot carrying a code would drop out of
   //    `includedRecipientEntries` if its code were removed - unreachable here,
   //    because a leg must have been ATTEMPTED to earn a carrier failure, and a
   //    leg that was never attempted has no retry row.)
-  if (rungs.some((rung) => rung.leg.status === 'delivered')) {
-    const { errorCode: _supersededByDelivery, ...withoutCode } = slot;
-    return { ...withoutCode, status: 'delivered', retryState: 'delivered-on-retry' };
+  const delivering = rungs.filter((rung) => rung.leg.status === 'delivered').at(-1);
+  if (delivering !== undefined) {
+    return {
+      ...withDecidingRung(slot, delivering.leg),
+      // Restated rather than inherited: `presentRelayDelivery` counts a
+      // `delivered-on-retry` leg through `status === 'delivered'` alone, so the
+      // one field that arithmetic depends on is visible at this branch.
+      status: 'delivered',
+      retryState: 'delivered-on-retry',
+    };
   }
 
   // 2. ANY live rung inside the budget is `retrying`. The original's `status`
@@ -248,8 +308,18 @@ function projectOneLeg(
   // 3. A rung past EITHER horizon with no terminal outcome is `unconfirmed`.
   //    Reachable only with a clock: without one every non-terminal rung is live
   //    at step 2, so `unconfirmed` is never asserted on a guess.
-  if (rungs.some((rung) => !isRetryRungTerminal(rung))) {
-    return { ...slot, retryState: 'unconfirmed' };
+  //
+  //    The QUIET RUNG's own leg is overlaid, which is what lets the row and the
+  //    recital recite today's not-confirmed copy (D19's second table). The
+  //    original slot's status is TERMINAL - that is why a ladder exists at all -
+  //    and a terminal status can never present as not-confirmed, so leaving it
+  //    in place would render `Undelivered` on the row beside a chip counting
+  //    the same leg under "not confirmed". `status` still carries only values
+  //    the closed `DeliveryStatus` union admits: a non-terminal rung is
+  //    `queued` or `sent` by construction.
+  const quiet = rungs.filter((rung) => !isRetryRungTerminal(rung)).at(-1);
+  if (quiet !== undefined) {
+    return { ...withDecidingRung(slot, quiet.leg), retryState: 'unconfirmed' };
   }
 
   // 4. Otherwise every rung ended and none delivered. The close code comes from
@@ -269,11 +339,19 @@ function projectOneLeg(
  * TIME-DERIVED half - MUST be recomputed against `nowMs`.
  *
  * Projects one message's recipient ENTRIES into effective legs. Each entry's
- * ORIGINAL slot is SPREAD and only what this module decides is overlaid -
- * `status`, `errorCode` and `retryState`. Everything else survives untouched,
- * `deliveredAt` included: a delivering rung's receipt clock belongs to the
- * retry ROW (readable through `retries`), and copying it onto a slot that never
- * delivered would mix two rows' clocks from two different sources.
+ * ORIGINAL slot is SPREAD and only what this module decides is overlaid, and
+ * WHICH fields those are depends on the state:
+ *
+ *  - `retrying` and `terminal` touch the slot's OWN facts not at all. The
+ *    original leg is still the one being described: `retrying` recites its
+ *    carrier reason ("Retrying - Phone unreachable (error 30003)") and
+ *    `terminal` only replaces `errorCode` when the last rung carries a close
+ *    code of its own.
+ *  - `delivered-on-retry` and `unconfirmed` overlay the DECIDING rung's leg -
+ *    `status`, `sid`, `sentAt`, `deliveredAt`, `actualTransport`,
+ *    `transportAggregationState` - and clear `errorCode`. See
+ *    `withDecidingRung` for why that is a replacement rather than a fill-in,
+ *    and why `requestedTransport` is the field it must preserve.
  *
  * A member with no retry rows gets a copy of its slot and NO `retryState`, so a
  * thread that has never had a retry projects to exactly what it started with.

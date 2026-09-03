@@ -631,9 +631,18 @@ export function presentLegDelivery(
   // offering one while a rung is in flight is the double-send this feature
   // exists to prevent.
   //
-  // `terminal` and `unconfirmed` fall THROUGH to the logic below: a terminal
-  // leg's projected close code reaches the caller through `deliveryReason`, and
-  // an unconfirmed one reads as today's not-confirmed row.
+  // `terminal` falls THROUGH to the logic below: its projected close code
+  // reaches the caller through `deliveryReason` on the ordinary failure path.
+  //
+  // `unconfirmed` is decided HERE and never by `isStaleLeg`. The join has
+  // already judged this ladder quiet, against the QUIET RUNG's clock on the
+  // retry ROW - a clock the leg-level staleness test cannot see, because it
+  // reads one clock per bubble and this state is computed from one row's and
+  // rendered on another's (D18). Routing it back through the staleness path
+  // would ask a second, weaker question about the wrong row, and it would drag
+  // `stalenessClockMs` - shared with the FENCED native group-text product -
+  // into a decision that is not its own. Same two labels, same reasoning, so
+  // the chip's "not confirmed" count and the row's copy still say one thing.
   if (rosterKind === 'relay') {
     if (slot.retryState === 'retrying') {
       // The reason rides the presentation rather than the caller's own
@@ -653,6 +662,15 @@ export function presentLegDelivery(
       // No reason: the leg's original carrier code is history the moment it
       // landed, and the projection has already dropped it.
       return { label: 'Delivered on retry', tone: 'success', isFailure: false };
+    }
+    if (slot.retryState === 'unconfirmed') {
+      // The projection overlaid the quiet rung's own status, so this reads
+      // `queued` on a stranded claim and `sent` on a rung that got no receipt -
+      // the two halves of D18, told apart the same way the leg-level stale
+      // labels are. Anything else is a shape the join cannot produce (a
+      // non-terminal rung is `queued` or `sent`), and it takes the `sent` twin
+      // rather than inventing a third label.
+      return slot.status === 'queued' ? STALE_QUEUED_PRESENTATION : STALE_SENT_PRESENTATION;
     }
   }
   if (isStaleLeg(slot, messageAtMs, nowMs)) {

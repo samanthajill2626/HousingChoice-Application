@@ -269,24 +269,86 @@ describe('projectRelayLegs - the four end states', () => {
 });
 
 describe('projectRelayLegs - what it must not touch', () => {
-  // Six fields the join did not decide. `requestedTransport` and
-  // `actualTransport` are the two the narrower slot type would have dropped:
-  // `presentRecipientTransport` renders `Unknown` when both are absent.
-  // `deliveredAt` is deliberately NOT taken from the delivering rung - that
-  // receipt clock belongs to the retry ROW and comes from a different source.
-  it('preserves every slot field it did not decide', () => {
+  // THE TWO NON-OVERLAY STATES. `retrying` and `terminal` still describe the
+  // ORIGINAL leg, so every one of its own facts survives byte for byte -
+  // including `requestedTransport` and `actualTransport`, the two the narrower
+  // slot type would have dropped (`presentRecipientTransport` renders `Unknown`
+  // when both are absent).
+  it('preserves every slot field on a RETRYING leg', () => {
+    const legs = project([retryItem({ attempt: 1, leg: queuedLeg(), atMs: NOW - 1_000 })], NOW);
+
+    expect(legs).toEqual({ ...ORIGINAL, retryState: 'retrying' });
+  });
+
+  it('preserves every slot field on a TERMINAL leg but the close code', () => {
+    const legs = project(
+      [retryItem({ attempt: 1, leg: failedLeg('retry_number_changed'), atMs: NOW - 60_000 })],
+      NOW,
+    );
+
+    expect(legs).toEqual({
+      ...ORIGINAL,
+      errorCode: 'retry_number_changed',
+      retryState: 'terminal',
+    });
+  });
+
+  // THE TWO OVERLAY STATES. The DECIDING rung owns the per-attempt facts: the
+  // row's time comes straight off this slot, so a delivered-on-retry leg that
+  // kept the failed attempt's `sentAt` would time the send that did NOT land.
+  // `requestedTransport` is the one field the rung must never take over - an
+  // inbound retry row carries none (D2), and losing it drops the transport line
+  // to `Unknown`.
+  it('takes the DELIVERING rungs own leg, keeping the requested transport', () => {
     const legs = project([retryItem({ attempt: 1, leg: deliveredLeg(NOW - 60_000) })], NOW);
 
     expect(legs).toEqual({
-      sid: 'SMoriginalleg',
-      sentAt: '2026-09-02T10:00:01.000Z',
-      requestedTransport: 'sms',
-      actualTransport: 'mms',
-      transportAggregationState: 'attempted',
       status: 'delivered',
       retryState: 'delivered-on-retry',
+      sid: 'SMrungdelivered',
+      sentAt: iso(NOW - 62_000),
+      deliveredAt: iso(NOW - 60_000),
+      actualTransport: 'sms',
+      transportAggregationState: 'attempted',
+      // The original's, not the rung's.
+      requestedTransport: 'sms',
     });
-    expect(legs?.deliveredAt).toBeUndefined();
+    expect(legs).not.toHaveProperty('errorCode');
+  });
+
+  it('takes the QUIET rungs own leg, clearing what the failed attempt left behind', () => {
+    const legs = project(
+      [retryItem({ attempt: 1, leg: queuedLeg(), atMs: NOW - STALE_SENT_AFTER_MS - 1 })],
+      NOW,
+    );
+
+    // A rung that never sent has no clock, no sid and no actual transport, so
+    // the original's are CLEARED rather than inherited: the row must not time a
+    // send this attempt never made.
+    expect(legs).toEqual({
+      status: 'queued',
+      retryState: 'unconfirmed',
+      transportAggregationState: 'attempted',
+      requestedTransport: 'sms',
+    });
+    expect(legs).not.toHaveProperty('errorCode');
+    expect(legs).not.toHaveProperty('sentAt');
+    expect(legs).not.toHaveProperty('sid');
+  });
+
+  it('carries a QUIET SENT rungs clock, so the row times the attempt that stalled', () => {
+    const sentAtMs = NOW - STALE_SENT_AFTER_MS - 1;
+    const legs = project(
+      [retryItem({ attempt: 1, leg: sentLeg(sentAtMs), atMs: sentAtMs - 5_000 })],
+      NOW,
+    );
+
+    expect(legs).toMatchObject({
+      status: 'sent',
+      retryState: 'unconfirmed',
+      sid: 'SMrungsent',
+      sentAt: iso(sentAtMs),
+    });
   });
 
   it('leaves a leg with no retry rows completely untouched', () => {

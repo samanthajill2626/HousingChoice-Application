@@ -1795,6 +1795,41 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     return items.filter((i) => {
       if (commsOnly && i.kind === 'milestone') return false;
       if (i.kind === 'message' && supersededIds.has(i.tsMsgId)) return false;
+      // RELAY RETRY ROWS (D20), a SECOND and separate rule. The one above hides a
+      // PREDECESSOR; this one hides the ROW ITSELF, so they are deliberately not
+      // fused.
+      //
+      // "A retry row renders ONLY when its leg delivered AND its original was
+      // outbound", both read from the retry row's own stored lineage so the
+      // predicate never depends on the original being loaded (D22 - paging is
+      // newest-first). A failed attempt records durably but earns no bubble: the
+      // thread shows what reached someone, and a failed retry reached no one.
+      //
+      // WARNING, the inversion: a relay retry row must NEVER carry `retry_of`.
+      // That is the natural field to reach for and the relay projector already
+      // forwards it - but stamping it would add the ORIGINAL to `supersededIds`
+      // above and DELETE the original bubble, inverting the contract exactly.
+      // The lineage lives in `relay_retry_of` and nowhere else.
+      //
+      // Narrowed on `kind === 'message'` first, like the rule above, because the
+      // tour host feeds this memo a MILESTONE-MERGED list and a milestone has no
+      // tsMsgId, no delivery_recipients and no lineage.
+      if (i.kind === 'message' && i.relay_retry_of !== undefined) {
+        // An `undefined` or out-of-union origin direction HIDES. The relay
+        // projector drops a direction outside the union, so this branch is what
+        // an orphaned-or-corrupt row lands in, and default-HIDE is the safe side:
+        // default-render is the duplicate member message D20 exists to prevent,
+        // while a hidden row is still recorded durably server-side.
+        if (i.relay_retry_origin_direction !== 'outbound') return false;
+        const memberKey = i.relay_retry_member_key;
+        if (memberKey === undefined) return false;
+        // The row's OWN single-entry slot, never the join: `visible` is memoized
+        // on `items` and must stay a pure function of the row, or the memo would
+        // freeze the join's time-derived half. A prototype-shaped member key
+        // reads `undefined` here and therefore hides, which is the safe side
+        // again.
+        if (i.delivery_recipients?.[memberKey]?.status !== 'delivered') return false;
+      }
       return true;
     });
   }, [items, commsOnly]);

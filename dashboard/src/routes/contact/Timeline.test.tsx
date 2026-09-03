@@ -3227,3 +3227,151 @@ describe('Timeline email cards - alignment', () => {
     expect(cards[1]?.className).toContain('itemOut');
   });
 });
+
+// D20 (relay 30003 retry lineage). A relay retry is a NEW source row, not a
+// promotion of the failed leg, so the thread would otherwise carry up to three
+// extra bubbles per failed leg. INERT until the server starts appending those
+// rows: no production row carries `relay_retry_of` yet.
+describe('Timeline - relay retry rows that earn no bubble (D20)', () => {
+  const ROSTER = [
+    { contactId: 'c1', phone: '+14045550111', name: 'Keisha Kane' },
+    { contactId: 'c2', phone: '+14045550112', name: 'Lars Landlord' },
+  ];
+
+  const BODY = 'Tour is confirmed for Tuesday';
+  const ORIGINAL_MARKER = 'Team reply the original carries';
+
+  // The ORIGINAL: c2's leg took a 30003, which is what a ladder is claimed for.
+  const OUTBOUND_ORIGINAL: TimelineItem = {
+    kind: 'message',
+    id: 'r1',
+    at: '2026-06-08T09:20:00',
+    conversationId: 'g1',
+    tsMsgId: 'r1',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    delivery_status: 'queued',
+    body: BODY,
+    relay_sender_key: 'team',
+    delivery_recipients: {
+      c1: { status: 'delivered' },
+      c2: { status: 'undelivered', errorCode: '30003' },
+    },
+  };
+
+  // D2: the retry row MIRRORS the original's direction, author and sender key,
+  // and carries the RAW body - which is exactly why an unfiltered one reads as a
+  // duplicate send.
+  function retryRow(over: Partial<Extract<TimelineItem, { kind: 'message' }>>): TimelineItem {
+    return {
+      kind: 'message',
+      id: 'r1-retry-1',
+      at: '2026-06-08T09:21:00',
+      conversationId: 'g1',
+      tsMsgId: 'r1-retry-1',
+      direction: 'outbound',
+      author: 'teammate',
+      type: 'sms',
+      delivery_status: 'queued',
+      body: BODY,
+      relay_sender_key: 'team',
+      relay_retry_of: 'r1',
+      relay_retry_member_key: 'c2',
+      relay_retry_attempt: 1,
+      relay_retry_origin_direction: 'outbound',
+      delivery_recipients: { c2: { status: 'delivered' } },
+      ...over,
+    };
+  }
+
+  const DELIVERED_RETRY = retryRow({});
+
+  it('renders a delivered retry of an outbound original', () => {
+    renderTimeline({ items: [OUTBOUND_ORIGINAL, DELIVERED_RETRY], relayRoster: ROSTER });
+    expect(screen.getAllByText(BODY)).toHaveLength(2);
+  });
+
+  it.each([
+    [
+      'a failed retry',
+      retryRow({
+        delivery_recipients: { c2: { status: 'undelivered', errorCode: '30003' } },
+      }),
+    ],
+    ['a queued retry', retryRow({ delivery_recipients: { c2: { status: 'queued' } } })],
+    [
+      'a retry of an INBOUND original',
+      retryRow({ relay_retry_origin_direction: 'inbound' }),
+    ],
+    // D7 / slice C: the relay projector DROPS an out-of-union direction, so the
+    // predicate never sees a third case - it sees `undefined`, and the safe side
+    // is HIDE. Default-render is the duplicate-member-message defect D20 exists
+    // to prevent; a hidden row costs a bubble that records durably anyway.
+    [
+      'a retry whose origin direction is missing',
+      retryRow({ relay_retry_origin_direction: undefined }),
+    ],
+    // The member key is what names the row's OWN slot. Without it the row cannot
+    // prove it delivered, so it does not render.
+    ['a retry with no member key', retryRow({ relay_retry_member_key: undefined })],
+  ])('renders no second bubble for %s', (_name, row) => {
+    renderTimeline({ items: [OUTBOUND_ORIGINAL, row], relayRoster: ROSTER });
+    expect(screen.getAllByText(BODY)).toHaveLength(1);
+  });
+
+  it('never hides the original', () => {
+    // D20's inversion: stamping `retry_of` on the retry row would add the
+    // ORIGINAL to supersededIds and delete it. The retry row carries
+    // `relay_retry_of` and NEVER `retry_of`.
+    const original: TimelineItem = { ...OUTBOUND_ORIGINAL, body: ORIGINAL_MARKER };
+    renderTimeline({ items: [original, DELIVERED_RETRY], relayRoster: ROSTER });
+    expect(screen.getByText(ORIGINAL_MARKER)).toBeVisible();
+  });
+
+  it('renders an orphaned delivered retry', () => {
+    // D22: thread history pages newest-first, so a retry can render before its
+    // original has loaded. The predicate reads the retry row's OWN lineage.
+    renderTimeline({ items: [DELIVERED_RETRY], relayRoster: ROSTER });
+    expect(screen.getByText(BODY)).toBeVisible();
+  });
+
+  it('leaves the existing retry_of collapse untouched', () => {
+    // The 1:1 chain is FENCED. This rule hides a PREDECESSOR; D20's hides the
+    // row itself, and the two must not be fused.
+    const failed: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail',
+      tsMsgId: 'm-fail',
+      delivery_status: 'failed',
+      error_code: '30007',
+      body: 'One to one body',
+    };
+    const retry: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-retry',
+      tsMsgId: 'm-retry',
+      at: '2026-06-08T09:25:00',
+      delivery_status: 'delivered',
+      retry_of: 'm-fail',
+      body: 'One to one body',
+    };
+    renderTimeline({ items: [failed, retry] });
+    expect(screen.getAllByText('One to one body')).toHaveLength(1);
+  });
+
+  it('filters a hidden retry row out of a MILESTONE-MERGED list without throwing', () => {
+    // The tour host feeds `visible` a milestone-merged list
+    // (TourConversation.tsx withMilestones), and a milestone has no tsMsgId, no
+    // delivery_recipients and no lineage at all - so the predicate must narrow on
+    // kind === 'message' FIRST, exactly as the supersededIds rule does.
+    const hidden = retryRow({ delivery_recipients: { c2: { status: 'queued' } } });
+    renderTimeline({
+      items: [MILESTONE, OUTBOUND_ORIGINAL, hidden, NUMBER_ADDED],
+      relayRoster: ROSTER,
+    });
+    expect(screen.getAllByText(BODY)).toHaveLength(1);
+    expect(screen.getByText('Placement opened - 1450 Joseph Blvd')).toBeInTheDocument();
+    expect(screen.getByText('Now also texting from (470) 555-0148')).toBeInTheDocument();
+  });
+});

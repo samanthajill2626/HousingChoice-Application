@@ -182,7 +182,10 @@ export function isRetryRungTerminal(row: RelayRetryRow): boolean {
  * ordinary missing-receipt window. Without one, the rung never left the claim
  * and the budget runs from the RETRY ROW's own `at` - the stranded-claim half.
  * A `sent` rung whose `sentAt` will not parse falls back to the row clock,
- * which is earlier, so it ages sooner rather than never.
+ * which is earlier, so it ages sooner rather than never - it is still judged by
+ * half two's rule, off the only clock left. Only when BOTH are gone is the rung
+ * UNDATABLE; `canRetryRungGoQuiet` is that question, and `isRetryRungLive`
+ * resolves such a rung to not-live rather than to a permanent `retrying`.
  */
 function rungStalenessClockMs(row: RelayRetryRow): number | undefined {
   const leg = row.leg;
@@ -199,11 +202,23 @@ function rungStalenessClockMs(row: RelayRetryRow): number | undefined {
  * then reads live and can never be called `unconfirmed`, because calling a
  * ladder dead needs a clock and the alternative - guessing - is the indefinite
  * promise this design removed.
+ *
+ * WITH a reading clock, a rung this module cannot DATE is not live either. That
+ * is the other half of the same argument: `isQuietSince` reads "no clock" as
+ * "not quiet", so without this the undatable rung would answer true on every
+ * tick for ever and project `retrying` for the life of the mount - the
+ * indefinite promise again, one level down and wearing the word this design
+ * exists to make true. `unconfirmed` is the honest reading: a ladder we cannot
+ * date is not a ladder we can confirm. See `canRetryRungGoQuiet` for how such a
+ * rung is reached, and note the split - the CLOCK we are missing decides which
+ * way it falls. No reading clock at all is our own blindness (live); a rung
+ * whose own clocks did not parse is the ROW being unreadable (unconfirmed).
  */
 export function isRetryRungLive(row: RelayRetryRow, nowMs: number | undefined): boolean {
   if (row.leg === undefined) return false;
   if (isRetryRungTerminal(row)) return false;
   if (nowMs === undefined) return true;
+  if (!canRetryRungGoQuiet(row)) return false;
   // The module's ONLY staleness budget, reused through its own predicate so the
   // two horizons cannot drift apart from the leg-level one (D18). This
   // deliberately does NOT route through `stalenessClockMs`: that helper is
@@ -277,11 +292,13 @@ function withDecidingRung(
  * and a non-ISO `tsMsgId`, which parses to nothing. A `queued` rung on such a
  * row has neither clock.
  *
- * WHAT THIS DOES NOT DO, and it is a disclosed trade in the same shape as
- * `canEverGoStale`'s: it does not change how such a rung PROJECTS. With no clock
- * to age from, `isRetryRungLive` still answers true and the leg still reads
- * `retrying`. The ticker simply stops paying for a re-render that could never
- * change the answer.
+ * IT ALSO DECIDES THE PROJECTION, through `isRetryRungLive`, which asks this
+ * question before it consults the budget. So an undatable rung is not live, and
+ * `projectOneLeg` resolves its leg to `unconfirmed` rather than promising
+ * `retrying` for ever. The ticker half and the copy half therefore terminate on
+ * the SAME predicate, which is the point: an earlier draft armed nothing while
+ * still displaying `retrying`, so the interval stopped paying for a re-render
+ * that could never change an answer that was already wrong.
  */
 export function canRetryRungGoQuiet(row: RelayRetryRow): boolean {
   const clock = rungStalenessClockMs(row);
@@ -330,9 +347,12 @@ function projectOneLeg(
     return { ...slot, retryState: 'retrying' };
   }
 
-  // 3. A rung past EITHER horizon with no terminal outcome is `unconfirmed`.
-  //    Reachable only with a clock: without one every non-terminal rung is live
-  //    at step 2, so `unconfirmed` is never asserted on a guess.
+  // 3. A rung past EITHER horizon with no terminal outcome is `unconfirmed`,
+  //    and so is a rung this module cannot DATE at all (see `isRetryRungLive`):
+  //    both are ladders we cannot confirm, and the second reads `retrying` for
+  //    ever if it is left at step 2.
+  //    Reachable only with a READING clock: without one every non-terminal rung
+  //    is live at step 2, so `unconfirmed` is never asserted on a guess.
   //
   //    The QUIET RUNG's own leg is overlaid, which is what lets the row and the
   //    recital recite today's not-confirmed copy (D19's second table). The

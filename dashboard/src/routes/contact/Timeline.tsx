@@ -859,6 +859,13 @@ function hasTickableLeg(
     // rung is judged against the BUBBLE's clock - the same value the projection
     // below is computed with, and undefined on an imported row, which returned
     // false above.
+    //
+    // `canRetryRungGoQuiet` is now REDUNDANT here - `isRetryRungLive` asks it
+    // itself whenever it has a reading clock, which is exactly this call. Kept
+    // deliberately: it is the arming half of the pair, it mirrors the
+    // `canEverGoStale(...) && !isStaleLeg(...)` shape beside it, and it keeps
+    // this clause terminating on its own terms if the `bubbleNowMs === undefined`
+    // guard above ever moves.
     const rungs = retries.get(relayRetryKey(msg.tsMsgId, memberKey));
     if (
       rungs !== undefined &&
@@ -1043,6 +1050,12 @@ function MessageBubble({
             messageAtMs,
             nowMs: bubbleNowMs,
             retryAware: isRelayLeg,
+            // D22. Read off the ROW, not off the projection: the join buckets
+            // rungs under the ROOT id, so this bubble's own leg carries no
+            // retryState and its chip would otherwise read the shared
+            // `Delivered 1/1` - a phantom second send beside the original, and
+            // an unexplained one when the original has not paged in.
+            retryRow: msg.relay_retry_of !== undefined,
           },
         )
       : null;

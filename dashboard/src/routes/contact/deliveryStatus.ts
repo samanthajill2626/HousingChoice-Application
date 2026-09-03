@@ -384,6 +384,16 @@ export interface RelayDeliveryOptions extends DeliveryReasonOptions {
    *  broadcasts routes - exactly where it is. Only the relay Timeline sets it,
    *  and only once it has a thread-level projection to pass. */
   retryAware?: boolean;
+  /** This bubble IS a retry row - D22's phantom-second-send guard. Read ONLY
+   *  under `retryAware`, and it exists because the join cannot supply this from
+   *  the leg: rungs bucket under the ROOT id, so a retry row's own projection is
+   *  the identity and its rollup would take the shared `Delivered N/N`. On a
+   *  bubble that renders BESIDE its original (D20 renders only a delivered one)
+   *  that label reads as a second, independent send, and an orphaned retry -
+   *  history pages 50 newest-first, so the original may not have loaded - has
+   *  nothing beside it to correct the reading. The `on retry` suffix is what
+   *  ties the two together (D19's first table, D22). */
+  retryRow?: boolean;
 }
 
 /**
@@ -525,6 +535,19 @@ export function presentRelayDelivery(
     return { label: composed, tone: 'danger', isFailure: false };
   }
   if (delivered === total) {
+    // D22 FIRST, and only inside this branch: a retry row that has NOT delivered
+    // is not rendered at all (the D20 filter), so no other branch can be reached
+    // by one. The suffix is written on the WHOLE count rather than as a "1 on
+    // retry" category because every leg on this bubble is the retry - there is
+    // exactly one, addressed to the one member the ladder was claimed for (D1) -
+    // so a category count would state a proportion of nothing.
+    if (opts.retryAware === true && opts.retryRow === true) {
+      return {
+        label: `delivered ${total}/${total} on retry`,
+        tone: 'success',
+        isFailure: false,
+      };
+    }
     // The shared all-delivered label, CAPITAL D, is emitted ONLY when no leg is
     // on retry: it also serves native group text and the broadcasts routes, and
     // it means "finalized clean". A ladder that had to run says so in lowercase,

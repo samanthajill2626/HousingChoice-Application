@@ -1291,6 +1291,59 @@ describe('presentRelayDelivery - retry-aware arithmetic (D19)', () => {
       reason: 'Not retried - opted out',
     });
   });
+
+  // D22 - the RETRY ROW'S OWN chip. The join buckets rungs under the ROOT id, so
+  // this bubble's projection is the identity and its leg carries no `retryState`
+  // at all; without an explicit flag the rollup takes the shared `Delivered 1/1`
+  // and reads as a phantom second send beside the original - or, when history
+  // has paged the original out, as an unexplained one.
+  it('reads a delivered retry rows own chip as delivered-on-retry', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }], { ...RETRY_OPTS, retryRow: true }),
+    ).toEqual({
+      label: 'delivered 1/1 on retry',
+      tone: 'success',
+      isFailure: false,
+    });
+  });
+
+  // The flag is read ONLY under `retryAware`, the same gate every other D19
+  // behaviour sits behind - so a caller that has not opted into the retry
+  // arithmetic cannot be surprised by retry copy.
+  it('ignores retryRow entirely without the retry-aware flag', () => {
+    expect(presentRelayDelivery([{ status: 'delivered' }], { relay: true, retryRow: true })).toEqual(
+      {
+        label: 'Delivered 1/1',
+        tone: 'success',
+        isFailure: false,
+      },
+    );
+  });
+
+  // `retryRow: false` is what EVERY non-retry bubble passes (Timeline derives it
+  // from `msg.relay_retry_of !== undefined`), so it must be indistinguishable
+  // from omitting it - across the success branch it guards AND the branches it
+  // does not.
+  it('leaves every chip untouched when retryRow is false', () => {
+    const cases: RetryAwareRelayLeg[][] = [
+      [{ status: 'delivered' }],
+      [{ status: 'delivered' }, { status: 'delivered' }],
+      legsWith('delivered-on-retry'),
+      legsWith('retrying'),
+      legsWith('terminal'),
+      legsWith('unconfirmed'),
+      [{ status: 'delivered' }, { status: 'sent' }],
+    ];
+    for (const legs of cases) {
+      expect(presentRelayDelivery(legs, { ...RETRY_OPTS, retryRow: false })).toEqual(
+        presentRelayDelivery(legs, RETRY_OPTS),
+      );
+    }
+    // ...and the labels are the ones shipped, not merely equal to each other.
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }], { ...RETRY_OPTS, retryRow: false })?.label,
+    ).toBe('Delivered 1/1');
+  });
 });
 
 describe('presentLegDelivery - retry states on one recipient row (D19)', () => {

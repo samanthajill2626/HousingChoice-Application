@@ -267,6 +267,42 @@ describe('projectRelayLegs - the four end states', () => {
     expect(project(stranded, undefined)).toMatchObject({ retryState: 'retrying' });
     expect(project(stranded, NOW)).toMatchObject({ retryState: 'unconfirmed' });
   });
+
+  // THE UNDATABLE RUNG. `isQuietSince` reads "no clock" as "not quiet", so a
+  // rung with neither a parseable `sentAt` nor a parseable row `at` used to
+  // answer live on every tick and promise `retrying` for the life of the mount -
+  // the indefinite promise M5 removed, wearing the word this design exists to
+  // make true. Reachable, not defensive: `messageInstant` answers `''` for a row
+  // with no provider_ts and a non-ISO tsMsgId.
+  //
+  // The two clocks are NOT symmetric, and that is the whole ruling: no READING
+  // clock is our own blindness and stays `retrying`; a rung whose OWN clocks did
+  // not parse is the row being unreadable, and `unconfirmed` is the honest word.
+  it('is unconfirmed for a rung it cannot date, rather than retrying for ever', () => {
+    const undatable = [{ ...retryItem({ attempt: 1, leg: queuedLeg() }), at: '' }];
+
+    expect(project(undatable, NOW)).toMatchObject({ retryState: 'unconfirmed' });
+    expect(project(undatable, undefined)).toMatchObject({ retryState: 'retrying' });
+  });
+
+  // ...and ONE surviving clock is enough. A `sent` rung whose `sentAt` will not
+  // parse is still datable: `rungStalenessClockMs` falls back to the retry ROW's
+  // own `at`, which is EARLIER, so half two's budget runs off it and the rung
+  // ages sooner rather than never. It must not be swept up by the clause above.
+  it('dates a sent rung with an unparseable sentAt off the retry rows own clock', () => {
+    const badSentAt = (atMs: number) => [
+      {
+        ...retryItem({ attempt: 1, leg: { ...sentLeg(NOW), sentAt: 'not-a-date' }, atMs }),
+      },
+    ];
+
+    // Row clock fresh -> still live, exactly as before this clause existed.
+    expect(project(badSentAt(NOW - 1_000), NOW)).toMatchObject({ retryState: 'retrying' });
+    // Row clock past the horizon -> quiet, on the row clock alone.
+    expect(project(badSentAt(NOW - STALE_SENT_AFTER_MS - 1), NOW)).toMatchObject({
+      retryState: 'unconfirmed',
+    });
+  });
 });
 
 describe('projectRelayLegs - what it must not touch', () => {
@@ -535,22 +571,28 @@ describe('rung predicates', () => {
     expect(isRetryRungLive(rung(queuedLeg(), NOW - STALE_SENT_AFTER_MS)!, NOW)).toBe(false);
   });
 
-  // THE TICKER'S OTHER HALF. `isRetryRungLive` answers TRUE for ever on a rung
-  // with no clock to age from - `isQuietSince` reads "no clock" as "not quiet" -
-  // so a predicate built on it alone would keep the interval armed for the life
-  // of the mount. Reachable, not hypothetical: `messageInstant` answers `''` for
-  // a row with no provider_ts and a non-ISO tsMsgId.
-  it('refuses a rung with no clock to age from, so the ticker can terminate', () => {
+  // THE TICKER'S OTHER HALF, and now the COPY's too. `isQuietSince` reads "no
+  // clock" as "not quiet", so a rung with no clock to age from would answer live
+  // on every tick: an interval armed for the life of the mount, and beside it a
+  // leg promising `retrying` for ever. Reachable, not hypothetical:
+  // `messageInstant` answers `''` for a row with no provider_ts and a non-ISO
+  // tsMsgId.
+  //
+  // This case previously asserted `isRetryRungLive(clockless, NOW) === true` -
+  // the disclosed trade slice E left open, and exactly what ruling B5 reverses.
+  it('refuses a rung with no clock to age from, so the ticker and the copy can terminate', () => {
     const clockless = indexRelayRetries([
       { ...retryItem({ attempt: 1, leg: queuedLeg() }), at: '' },
     ]).get(relayRetryKey(ROOT, MEMBER))?.[0];
 
     expect(clockless).toBeDefined();
-    // Still LIVE - the projection is unchanged and the leg still reads
-    // `retrying`. The ticker just stops paying for a re-render that could never
-    // change the answer.
-    expect(isRetryRungLive(clockless!, NOW)).toBe(true);
     expect(canRetryRungGoQuiet(clockless!)).toBe(false);
+    // NOT live against a reading clock - so `projectOneLeg` resolves it to
+    // `unconfirmed` rather than to a permanent `retrying`.
+    expect(isRetryRungLive(clockless!, NOW)).toBe(false);
+    // With NO reading clock the rule is unchanged: no time-derived judgement is
+    // available at all, and calling a ladder dead needs a clock.
+    expect(isRetryRungLive(clockless!, undefined)).toBe(true);
   });
 
   it('accepts a rung ageing from either clock', () => {

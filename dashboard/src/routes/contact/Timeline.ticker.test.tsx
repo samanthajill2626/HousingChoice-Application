@@ -826,6 +826,35 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
     expect(spies.set).not.toHaveBeenCalled();
   });
 
+  // THE UNDATABLE RUNG, both halves in one place. Its row `at` does not parse
+  // and its leg never reached `sent`, so there is no clock to age it from -
+  // `messageInstant` answers `''` for a row with no provider_ts and a non-ISO
+  // tsMsgId, so this is a real row shape and not a defensive one. Slice E
+  // stopped the interval arming for it; ruling B5 fixes the COPY, which was the
+  // half that still promised `retrying` for the life of the mount.
+  it('neither arms nor promises retrying for a rung with no clock at all - observable: window.setInterval was never called and the chip reads not confirmed on the FIRST render', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [
+        originalWithNoLiveLeg(t0),
+        { ...retryRow(t0, { status: 'queued' }), at: '' } as unknown as TimelineMessage,
+      ],
+    });
+
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(screen.queryByText(/retrying/)).not.toBeInTheDocument();
+    expect(spies.set).not.toHaveBeenCalled();
+
+    // And no amount of clock movement can change either answer - which is what
+    // makes disarming honest rather than merely cheap.
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).not.toHaveBeenCalled();
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+  });
+
   it('CLEARS the interval once the retry resolves - observable: window.clearInterval with the ticker id after a rerender that delivers the rung', () => {
     const t0 = startFakeClock();
     const spies = spyOnIntervals();

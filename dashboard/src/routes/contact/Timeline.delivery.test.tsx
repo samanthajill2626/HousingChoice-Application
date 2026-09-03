@@ -888,6 +888,43 @@ describe('Timeline relay retry states - the chip, the recital and the row togeth
     ).toBeInTheDocument();
   });
 
+  // D22 - THE RETRY BUBBLE'S OWN CHIP, the one position the join cannot reach:
+  // it buckets rungs under the ROOT id, so this row's projection is the identity
+  // and its leg carries no retryState. Left alone the chip reads the shared
+  // `Delivered 1/1`, which beside the original is a phantom SECOND send, and
+  // which - when history has paged the original out (thread history pages 50
+  // newest-first) - is a claim with nothing to correct it. The `on retry` suffix
+  // is the whole of what ties the two bubbles together.
+  it('reads the retry bubbles own chip as delivered-on-retry, beside the originals', () => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'delivered', sentAt: iso(FRESH_MS), deliveredAt: iso(FRESH_MS + 2_000) },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    const chips = screen.getAllByRole('img');
+    expect(chips).toHaveLength(2);
+    const [rollup, retryChip] = chips as [HTMLElement, HTMLElement];
+    // The ORIGINAL still states the whole fan-out with the suffix as a CATEGORY
+    // count, because only one of its two legs took the ladder...
+    expect(rollup).toHaveTextContent('delivered 2/2 - 1 on retry');
+    // ...while the retry row is ALL ladder - one leg, addressed to the one member
+    // it was claimed for (D1) - so the suffix is written on the whole count.
+    expect(retryChip).toHaveTextContent('delivered 1/1 on retry');
+    expect(retryChip).not.toHaveTextContent('Delivered 1/1');
+    // And the spoken headline is the SAME string, so the recital cannot state a
+    // second send the visible chip does not. `speakDeliveryText` expands `1/1`;
+    // the label itself carries no ` - `, so nothing else moves.
+    expect(retryChip).toHaveAccessibleName(/^delivered 1 of 1 on retry\./);
+    expect(retryChip).toHaveAccessibleName(/Lars Landlord: Delivered/);
+  });
+
   // Sec 2 + D18: an INBOUND source renders NO rollup chip - that gate is FENCED
   // - but it does render the rows and `inboundRecipientName`'s hidden semantic
   // group, and both carry the new states.

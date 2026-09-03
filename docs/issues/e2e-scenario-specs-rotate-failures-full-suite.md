@@ -18,6 +18,7 @@ time. No scenario file failed twice.
 | branch run 1 | `docs/media-cache-risk-accepted` | `tenant-onboarding.spec.ts` (3 cases), `tours.spec.ts:277` (1) |
 | merge base | `main` @ d4298abe | none |
 | branch run 2 | `docs/media-cache-risk-accepted` | `approval-and-move-in.spec.ts` (2 cases) |
+| relay-30003 gate 4 (2026-09-02, `feat/relay-30003-retry-lineage` @ 17bf49a7, main @ f82c149c merged) | none - the run's only red was `outbound-mms.spec.ts:517` with the trigger-not-visible signature, which passed alone twice on the same code | (a fourth data point: zero scenario failures this run; the pass-alone / fail-in-suite shape held on a NON-scenario file) |
 
 Observed messages were absent-element assertions - e.g. a contact link filtered
 by phone number never appearing in the Unknown tab

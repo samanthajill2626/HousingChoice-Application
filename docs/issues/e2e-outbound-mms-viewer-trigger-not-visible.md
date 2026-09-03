@@ -46,10 +46,22 @@ produces. That also means it cannot be diagnosed by re-running the file.
 | branch run 1 | `docs/media-cache-risk-accepted` | 5 failed / 261 passed | FAILED, this signature |
 | merge base | `main` @ d4298abe | 1 failed / 265 passed | FAILED, this signature |
 | branch run 2 | `docs/media-cache-risk-accepted` | 3 failed / 263 passed | FAILED, this signature |
+| relay-30003 gate 4 | `feat/relay-30003-retry-lineage` @ 17bf49a7 (main @ f82c149c merged in) | 1 failed / 266 passed (17.7m) | FAILED, this signature (`:591`, byte-identical) |
 
 The branch carried a one-header change to an unrelated route, so the base run is
 the load-bearing row: **main alone reproduces it.** 3/3 full runs, 0/1 isolated
 runs.
+
+**Sighting 4 (2026-09-02, `feat/relay-30003-retry-lineage`).** The same case
+was the ONLY red in that branch's full battery, with this exact signature, and
+the file then passed alone twice on the same code (`6 passed (59.9s)` and
+`6 passed (41.0s)`, both via `npm run e2e -- tests/dashboard-next/outbound-mms.spec.ts`
+from the e2e workspace, lane 9, no orphaned listener). That branch touches the
+relay delivery presenter and the shared Timeline, but every one of its hunks is
+gated on relay-only fields (`relay_retry_of`, a relay roster kind) that a 1:1
+composer send never sets, and its earlier checkpoint run at the pre-sync base
+showed the CLOSED scroll-offset signature instead - so this is now 4/4 full
+runs on three different trees, 0/3 isolated. Not attributable to that branch.
 
 **Suggested fix.** Diagnose why the trigger goes non-visible between
 `scrollIntoViewIfNeeded()` and `evaluate()` - a re-render/re-anchor of the

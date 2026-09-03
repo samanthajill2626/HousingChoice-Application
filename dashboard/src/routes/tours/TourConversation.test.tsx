@@ -28,7 +28,13 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Contact, ContactTimelinePage, TimelineItem, Tour } from '../../api/index.js';
+import type {
+  Contact,
+  ContactTimelinePage,
+  TimelineItem,
+  TimelineMilestone,
+  Tour,
+} from '../../api/index.js';
 import {
   installImageViewerResizeObserver,
   loadViewerImage,
@@ -40,6 +46,15 @@ const getAllConversations = vi.fn();
 const getConversationMessages = vi.fn();
 const sendMessage = vi.fn();
 const ensureContactConversation = vi.fn();
+// The three reads the GROUP pane makes (TourConversation.tsx:430, :435;
+// useRelayThread.ts:332). Left unmocked they fell through to `importActual` and
+// were swallowed by the best-effort handlers, so the roster was always [] here
+// and the accessible-name recital collapsed to its headline - which made this
+// host untestable for anything per-member. Mirrors
+// PlacementConversation.test.tsx:42-44.
+const getConversationScheduled = vi.fn();
+const getConversation = vi.fn();
+const getConversationMembers = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -48,6 +63,9 @@ vi.mock('../../api/index.js', async () => {
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
+    getConversationScheduled: (...a: unknown[]) => getConversationScheduled(...a),
+    getConversation: (...a: unknown[]) => getConversation(...a),
+    getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
     ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
     // No SSE in unit tests (the timeline hook subscribes).
@@ -197,6 +215,14 @@ beforeEach(() => {
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
   getAllConversations.mockResolvedValue([]);
   getConversationMessages.mockResolvedValue([]);
+  getConversationScheduled.mockResolvedValue({ scheduled: [] });
+  getConversation.mockResolvedValue({
+    conversationId: 'g1',
+    type: 'relay_group',
+    status: 'open',
+    participants: [],
+  });
+  getConversationMembers.mockResolvedValue([]);
   sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
   ensureContactConversation.mockResolvedValue('c-new');
 });
@@ -815,5 +841,137 @@ describe('TourConversation - 1:1 mark-read gates', () => {
       expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7),
     );
     expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
+  });
+});
+
+// THE TOUR HOST'S OWN GATE for the relay retry display (plan Task 10). All
+// three hosts feed the same shared <Timeline>, so nothing here is a second
+// implementation - but this host passes a MILESTONE-MERGED item list
+// (TourConversation.tsx:94-100, :421-424) rather than `thread.items`, and a
+// milestone carries no tsMsgId, no delivery_recipients and no lineage. The D20
+// filter and the thread-level join therefore have to be correct against a MIXED
+// list, which no other host exercises.
+//
+// Rows go in RAW, as snake_case wire `Message`s through getConversationMessages,
+// because that is this host's actual input path (buildRelayItems ->
+// toTimelineMessage). A TimelineItem fixture would skip the projector and prove
+// nothing about it.
+describe('TourConversation - relay retry rendering on the milestone-merged list', () => {
+  const ROOT_TS = '2026-08-27T12:00:00.000Z#SMroot';
+  const RELAY_BODY = 'Reminder for the group';
+  /** Inside STALE_SENT_AFTER_MS of the pinned clock is irrelevant here - every
+   *  rung below is TERMINAL, so no case depends on a horizon. */
+  const RETRY_AT = '2026-08-27T12:01:00.000Z';
+
+  const ROSTER = [
+    { contactId: 'tenant-1', phone: '+14045550111', name: 'Ann Tenant' },
+    { contactId: 'landlord-1', phone: '+14045550222', name: 'Lon Landlord' },
+  ];
+
+  const MILESTONES: TimelineMilestone[] = [
+    {
+      kind: 'milestone',
+      id: 'ms-scheduled',
+      at: '2026-08-27T11:00:00.000Z',
+      type: 'tour_scheduled',
+      label: 'Tour scheduled',
+    },
+    {
+      kind: 'milestone',
+      id: 'ms-took-place',
+      at: '2026-08-27T13:00:00.000Z',
+      type: 'tour_took_place',
+      label: 'Tour took place',
+    },
+  ];
+
+  /** The ORIGINAL relay source: the tenant's leg landed, the landlord's was
+   *  rejected 30003. */
+  const rootRow = {
+    conversationId: 'g1',
+    tsMsgId: ROOT_TS,
+    provider_sid: 'SMroot',
+    provider_ts: '2026-08-27T12:00:00.000Z',
+    created_at: '2026-08-27T12:00:00.000Z',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    body: RELAY_BODY,
+    delivery_status: 'sent',
+    relay_sender_key: 'team',
+    delivery_recipients: {
+      'tenant-1': { status: 'delivered' },
+      'landlord-1': { status: 'undelivered', errorCode: '30003' },
+    },
+  };
+
+  /** A RETRY ROW on the wire. It mirrors the original's direction, author and
+   *  RAW body (D2/D12) and never carries `retry_of`. */
+  const retryWireRow = (leg: Record<string, unknown>) => ({
+    conversationId: 'g1',
+    tsMsgId: `${RETRY_AT}#relayretry-1`,
+    provider_sid: 'relayretry-deadbeef-1',
+    provider_ts: RETRY_AT,
+    created_at: RETRY_AT,
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    body: RELAY_BODY,
+    delivery_status: 'queued',
+    relay_sender_key: 'team',
+    relay_retry_of: ROOT_TS,
+    relay_retry_member_key: 'landlord-1',
+    relay_retry_attempt: 1,
+    relay_retry_origin_direction: 'outbound',
+    delivery_recipients: { 'landlord-1': leg },
+  });
+
+  /** The Group pane only mounts once the channel resolves a conversation id -
+   *  the default stub leaves it null and renders the empty state (:154). */
+  const groupProps = () =>
+    baseProps({
+      channels: makeChannels({ group: { conversationId: 'g1', unread: 0 } }),
+      tourMilestones: MILESTONES,
+    });
+
+  it('renders delivered-on-retry in the tour transcript, beside the milestones', async () => {
+    getConversationMembers.mockResolvedValue(ROSTER);
+    getConversationMessages.mockResolvedValue([
+      rootRow,
+      retryWireRow({
+        status: 'delivered',
+        sentAt: RETRY_AT,
+        deliveredAt: '2026-08-27T12:01:02.000Z',
+      }),
+    ]);
+
+    renderConvo(groupProps());
+
+    // The original's rollup is the first of the two on the page (D20 renders a
+    // DELIVERED retry of an OUTBOUND original as its own bubble).
+    await waitFor(() => expect(screen.getAllByRole('img').length).toBeGreaterThan(0));
+    const rollup = screen.getAllByRole('img')[0] as HTMLElement;
+    expect(rollup).toHaveTextContent('delivered 2/2 - 1 on retry');
+    // The merged milestones still render, and the mixed list threw nothing.
+    expect(screen.getByText('Tour scheduled')).toBeInTheDocument();
+    expect(screen.getByText('Tour took place')).toBeInTheDocument();
+    // Now that the roster read is mocked, the recital NAMES the member instead
+    // of collapsing to the headline (recipientSummaryName's case-3 clause).
+    expect(rollup).toHaveAccessibleName(/Lon Landlord: Delivered on retry/);
+  });
+
+  it('hides a failed retry among merged milestone items, so the body renders once', async () => {
+    getConversationMembers.mockResolvedValue(ROSTER);
+    getConversationMessages.mockResolvedValue([
+      rootRow,
+      retryWireRow({ status: 'failed', errorCode: 'retry_number_changed' }),
+    ]);
+
+    renderConvo(groupProps());
+
+    await waitFor(() => expect(screen.getAllByText(RELAY_BODY)).toHaveLength(1));
+    const rollup = screen.getAllByRole('img')[0] as HTMLElement;
+    expect(rollup).toHaveTextContent('1 failed - Not retried - number changed since');
+    expect(screen.getByText('Tour scheduled')).toBeInTheDocument();
   });
 });

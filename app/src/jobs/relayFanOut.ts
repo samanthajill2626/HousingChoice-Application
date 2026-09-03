@@ -1521,7 +1521,13 @@ async function readVersionedSource(
   return source;
 }
 
-async function setVersionedAggregationState(
+/**
+ * EXPORTED for the 30003 retry job (spec D9/D10): its gate refusals mirror this
+ * unit's `suppressed` arm - aggregation state `excluded`, then the failed slot -
+ * and `closeRelay` (the fan-out's own close) is a nested closure it cannot
+ * reach. Mechanical export; no logic change.
+ */
+export async function setVersionedAggregationState(
   messages: MessagesRepo,
   payload: RelayLegPayload,
   memberKey: string,
@@ -1543,7 +1549,14 @@ async function setVersionedAggregationState(
   throw new Error(`relayFanOut: v1 preflight aggregation failed: ${outcome}`);
 }
 
-async function persistRelayRecipientResult(
+/**
+ * EXPORTED for the 30003 retry job (spec D9/D10/D14): every close it writes -
+ * a gate refusal, `transient_cap`, `enqueue_failed` - goes through THIS
+ * transport-aware path, so a legacy retry row keeps taking `markRecipient`'s
+ * whole-slot write and a versioned one keeps taking `applyRecipientSendResult`.
+ * Mechanical export; no logic change.
+ */
+export async function persistRelayRecipientResult(
   messages: MessagesRepo,
   payload: RelayLegPayload,
   memberKey: string,

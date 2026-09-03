@@ -14,6 +14,7 @@
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import { registerRetrySendJobHandler } from './retrySend.js';
 import { registerRelayFanOutJobHandler } from './relayFanOut.js';
+import { registerRelayRetryLegJobHandler } from './relayRetryLeg.js';
 import { registerBroadcastSendJobHandler } from './broadcastFanOut.js';
 import { registerMissedCallAutoTextJobHandler } from './missedCallAutoText.js';
 import { registerVoiceTranscriptJobHandlers } from './voiceTranscript.js';
@@ -29,7 +30,8 @@ export interface RegisterJobHandlersDeps {
 
 /**
  * Register every job handler. Job names produced: `messaging.retrySend`,
- * `relay.fanOut` + `relay.intro` (both from the relay registrar), `broadcast.send`,
+ * `relay.fanOut` + `relay.intro` (both from the relay registrar), `relay.retryLeg`,
+ * `broadcast.send`,
  * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`,
  * `relay.warmNumber`, `relay.numberReady`, `groupRail.ensure`, `media.mirror`.
  * retrySend is a single low-volume send and is intentionally not throttled; the
@@ -44,6 +46,22 @@ export interface RegisterJobHandlersDeps {
 export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerRetrySendJobHandler();
   registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket });
+  // relay.retryLeg (the 30003 ladder): one backed-off rung per failed relay leg,
+  // metered by the same shared bucket - it is a real outbound SMS.
+  //
+  // The lane shortens the ladder so a browser test does not wait 60s for rung 1.
+  // Ignored unless the value parses to a positive integer, so a stray env var
+  // cannot silently shorten a real ladder. This is CONFIGURATION, not structural
+  // absence: production reads nothing here and keeps 60/120/240.
+  const relayRetryBackoffOverride = Number.parseInt(
+    process.env['E2E_RELAY_RETRY_BACKOFF_MS'] ?? '',
+    10,
+  );
+  registerRelayRetryLegJobHandler(
+    Number.isInteger(relayRetryBackoffOverride) && relayRetryBackoffOverride > 0
+      ? { tokenBucket: deps.tokenBucket, backoffMs: () => relayRetryBackoffOverride }
+      : { tokenBucket: deps.tokenBucket },
+  );
   registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket });
   registerMissedCallAutoTextJobHandler({ tokenBucket: deps.tokenBucket });
   registerVoiceTranscriptJobHandlers();

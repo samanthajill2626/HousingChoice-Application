@@ -2906,6 +2906,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       return { outcome, attempt };
     };
 
+    // The claim error the relay branch rethrows below, kept where its CALL SITE
+    // can recognise it (code review R3, X1). The call site answers the 5xx
+    // itself, and it must answer only for THIS error: an unrelated fault out of
+    // the same branch - a throttled slot write, a throttled roster read - emits
+    // no marker of its own, so it still has to reach the generic Express handler
+    // and be logged there. Identity is the discriminator because the rethrow is
+    // `throw claimError` unchanged (W2), and a request runs this branch at most
+    // once.
+    let relayClaimError: unknown;
     // Per-recipient relay handling (doc §9): a relay-group fan-out sends N
     // outbound provider messages but persists NONE as their own message — each
     // leg lives as a delivery_recipients slot on the source message, found via
@@ -2972,13 +2981,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       //
       // BUT THE CATCH DOES NOT SWALLOW IT (code review R2, W2). The captured
       // error is RETHROWN after the tail, so the callback still 5xxs and Twilio
-      // still redelivers. That redelivery is the ladder's only recovery: D8
-      // gates the claim on the SLOT'S POST-WRITE STATE rather than on
-      // `transitioned` precisely so a redelivered callback - which transitions
-      // nothing - still reads terminal-plus-30003 and claims. Acking 200 here
-      // would trade that away, and a single DynamoDB throttle on the consistent
-      // read, the roster read or the `append` would lose the member's message
-      // for good.
+      // still redelivers - the call site catches the rethrow and answers 500
+      // itself (code review R3, X1), which changes no status code and costs the
+      // generic handler's second, unattributable ERROR line. That redelivery is
+      // the ladder's only recovery: D8 gates the claim on the SLOT'S POST-WRITE
+      // STATE rather than on `transitioned` precisely so a redelivered callback
+      // - which transitions nothing - still reads terminal-plus-30003 and
+      // claims. Acking 200 here would trade that away, and a single DynamoDB
+      // throttle on the consistent read, the roster read or the `append` would
+      // lose the member's message for good.
       //
       // WHAT IS TRADED FOR IT: the tail runs on EVERY redelivery, so the
       // failure marker and the SSE repeat while the fault lasts. Both are
@@ -3023,6 +3034,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // single 5-minute period, and root/rung1/rung2 land inside about three
       // minutes, so the threshold is a decision the human owes (open question
       // Q4). Nothing on this branch changes the metric or the alarm.
+      //
+      // ONE MORE MULTIPLIER, on top of the four (code review R3, X2): this
+      // marker sits BEFORE the claim's rethrow, so a callback whose claim throws
+      // emits it on the 5xx AND again on the redelivery that the 5xx triggers,
+      // once per redelivery for as long as the fault lasts. That is not new with
+      // this branch - a redelivered failure callback has always re-entered this
+      // handler and re-emitted `delivery_failed` - but Q4's number is per
+      // MESSAGE, and this is the term that makes it unbounded rather than four.
       if (mapped === 'undelivered' || mapped === 'failed') {
         const failure = {
           event: 'delivery_failed',
@@ -3036,6 +3055,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           // contributed two datapoints to the alarm that pages on three
           // consecutive buckets, one of them unclassifiable. One line, one
           // `event`, the cause attached.
+          //
+          // THAT IS TRUE ONLY BECAUSE THE CALL SITE ANSWERS THE 5xx (code
+          // review R3, X1). W2 folded this line and then rethrew, and the
+          // rethrow reached `createExpressErrorHandler`, which logged its own
+          // generic ERROR - so the count was two again, with the second the
+          // less attributable of the pair. The catch at the call site is what
+          // makes "one line" a property of the code rather than a claim about
+          // it; it is pinned by a test that counts EVERY ERROR line in the
+          // capture, not only the markers.
           ...(claimError !== undefined && {
             err: claimError,
             memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
@@ -3108,7 +3136,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // on that redelivery; the tail above has already emitted the marker, the
       // SSE and - once - the escalation, which is what F2 existed to guarantee.
       // Both halves, in the only order that gets both.
-      if (claimError !== undefined) throw claimError;
+      //
+      // The CALL SITE catches it and answers the 5xx (code review R3, X1);
+      // publishing it here is what lets that catch tell this error apart from
+      // any other fault out of this branch.
+      if (claimError !== undefined) {
+        relayClaimError = claimError;
+        throw claimError;
+      }
     };
 
     // Context recovery by lookup (doc §9): status callbacks cannot carry the
@@ -3139,7 +3174,28 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       if (!message && !relayPtr) systemMarker = await messages.getSystemSidMarker(MessageSid);
     }
     if (relayPtr) {
-      await handleRelayRecipientStatus(relayPtr);
+      try {
+        await handleRelayRecipientStatus(relayPtr);
+      } catch (err) {
+        // A thrown claim answers its own 5xx HERE (code review R3, X1) instead
+        // of travelling to `createExpressErrorHandler`, which would log a SECOND
+        // ERROR - one with no `event`, no `retryClaim` and no `memberKey`, so it
+        // fed the ErrorLogs alarm exactly like the marker while being strictly
+        // harder to attribute. The marker the branch already emitted is the one
+        // ERROR line, and nothing new is logged here.
+        //
+        // The RESPONSE is unchanged in the only way that matters: Twilio
+        // redelivers on ANY 5xx, and D8's state gate re-claims on that
+        // redelivery (the slot is already terminal-plus-30003), which is the
+        // whole reason W2 rethrows rather than acking.
+        //
+        // Anything else that escapes this branch is NOT ours to swallow: it
+        // emitted no marker, so it keeps travelling and the generic handler logs
+        // it, exactly as before.
+        if (err !== relayClaimError) throw err;
+        res.status(500).end();
+        return;
+      }
       res.status(200).end();
       return;
     }

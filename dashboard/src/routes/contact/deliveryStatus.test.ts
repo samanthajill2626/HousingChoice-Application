@@ -1253,6 +1253,51 @@ describe('presentRelayDelivery - retry-aware arithmetic (D19)', () => {
     ).toEqual({ label: 'delivered 1/2 - 1 not confirmed', tone: 'danger', isFailure: false });
   });
 
+  // Code review R3, X3. J is a UNION - the retry `unconfirmed` legs AND every
+  // plain `isStaleLeg` leg, including legs with no ladder anywhere - and that
+  // second half CAN carry a code: the fan-out writes
+  // `{ status: 'queued', errorCode: <transient> }`, and `deliveryReason` renders
+  // an unmapped code as "Delivery failed (error N)". Reading it here made the
+  // chip assert a failure about a leg the same call reports `isFailure: false`
+  // and whose ROW says nothing of the kind. The reason is fenced to the retry
+  // states; the case above ("no code") pins only the half that was already safe.
+  it('takes NO reason from a stale leg that is not on a ladder', () => {
+    const chip = presentRelayDelivery(
+      [{ status: 'delivered' }, { status: 'queued', sentAt: QUIET, errorCode: '30022' }],
+      { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW },
+    );
+    expect(chip).toEqual({
+      label: 'delivered 1/2 - 1 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+  });
+
+  // The other side of the fence: narrowing it must not cost the state W5 added.
+  it('still names the carrier failure on an unconfirmed RETRY leg', () => {
+    const chip = presentRelayDelivery(
+      [{ status: 'delivered' }, { status: 'queued', errorCode: '30003', retryState: 'unconfirmed' }],
+      { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW },
+    );
+    expect(chip?.label).toBe('delivered 1/2 - 1 not confirmed');
+    expect(chip?.reason).toBe('Phone unreachable (error 30003)');
+  });
+
+  // Both halves of J on one bubble: they COUNT together and they always did,
+  // but only the ladder half speaks.
+  it('names ONLY the retry legs reason when both halves of J meet', () => {
+    const chip = presentRelayDelivery(
+      [
+        { status: 'delivered' },
+        { status: 'queued', sentAt: QUIET, errorCode: '30022' },
+        { status: 'queued', errorCode: '30003', retryState: 'unconfirmed' },
+      ],
+      { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW },
+    );
+    expect(chip?.label).toBe('delivered 1/3 - 2 not confirmed');
+    expect(chip?.reason).toBe('Phone unreachable (error 30003)');
+  });
+
   // Distinct codes across the two categories are joined by the SAME rule the
   // failed branch uses, and a repeat collapses to one.
   it('joins distinct retrying and unconfirmed reasons, collapsing repeats', () => {

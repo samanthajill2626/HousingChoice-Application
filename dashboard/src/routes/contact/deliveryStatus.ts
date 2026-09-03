@@ -547,11 +547,27 @@ export function presentRelayDelivery(
     // AND IT CARRIES A REASON TOO (code review R2, W5). This branch had none, so
     // a leg whose ladder went quiet named its carrier failure NOWHERE - the join
     // had already cleared the code, and this was the only channel left. Built
-    // from the R and J legs by the same helper the failed branch uses, so the
-    // two cannot phrase the same code differently. Legs that carry no code -
-    // the pre-existing staleness half of J - simply contribute nothing, which is
-    // what keeps every "1 not confirmed" assertion shipped today byte-identical.
-    const reason = joinReasons([...retryingLegs, ...notConfirmedLegs]);
+    // from the RETRY legs by the same helper the failed branch uses, so the two
+    // cannot phrase the same code differently.
+    //
+    // FENCED TO THE RETRY STATES, not the whole J union (code review R3, X3). J
+    // is a union: the `unconfirmed` retry legs AND every plain `isStaleLeg` leg,
+    // including legs with no ladder anywhere. Reading a code off that half made
+    // the chip assert "Delivery failed (error 30022)" about a leg the same call
+    // reports `isFailure: false` and whose own ROW says nothing of the kind (the
+    // stale branch below adds no reason) - chip and row disagreeing, on a leg
+    // outside this feature. A non-terminal leg CAN carry a transient code: the
+    // fan-out writes `{ status: 'queued', errorCode: <transient> }`
+    // (`app/src/jobs/relayFanOut.ts`), and `deliveryReason` renders any unmapped
+    // code as a failure sentence. So only `retrying` and `unconfirmed` legs
+    // contribute, which also leaves the staleness half BYTE-IDENTICAL rather
+    // than nearly so - and with `retryAware` off `retryStateOf` is undefined for
+    // every leg, so this branch reverts to the no-reason presentation it shipped
+    // with.
+    const unconfirmedRetryLegs = notConfirmedLegs.filter(
+      (s) => retryStateOf(s) === 'unconfirmed',
+    );
+    const reason = joinReasons([...retryingLegs, ...unconfirmedRetryLegs]);
     return {
       label: composed,
       tone: 'danger',

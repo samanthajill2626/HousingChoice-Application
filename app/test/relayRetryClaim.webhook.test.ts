@@ -645,9 +645,14 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
 
     expect(wasRejected()).toBe(true);
     expect(retryRows()).toHaveLength(0);
-    // ONE ERROR line, carrying the event (so it still counts as a delivery
-    // failure), the outcome, the cause and no phone number - not the two lines
-    // fix wave 1 emitted, one of which had no `event` at all.
+    // ONE ERROR LINE IN THE WHOLE CAPTURE - counted over every line at ERROR,
+    // not over the markers (code review R3, X1 / R3 finding 1.1). Fix wave 2
+    // counted markers and so could not see the SECOND line it had introduced:
+    // the rethrow reached `createExpressErrorHandler`, whose generic
+    // `unhandled error while handling request` carries no `event`, no
+    // `retryClaim` and no `memberKey` yet feeds the same ErrorLogs alarm. The
+    // route now answers the 500 itself, so this count is the whole claim.
+    expect(capture.atLevel(ERROR)).toHaveLength(1);
     expect(failureLines(WARN)).toHaveLength(0);
     const markers = failureLines(ERROR).filter((l) => l['retryClaim'] === 'claim_failed');
     expect(markers).toHaveLength(1);
@@ -689,6 +694,30 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     // And the escalation does NOT double-fire: it is gated on `transitioned`,
     // which is false the second time round.
     expect(escalations()).toHaveLength(1);
+  });
+
+  // Code review R3, X1. The catch at the call site is NARROW: it answers the
+  // 500 only for the claim's own rethrow, which it recognises by IDENTITY. Any
+  // OTHER fault out of this branch emitted no failure marker, so swallowing it
+  // would leave a 500 with no ERROR line anywhere - strictly worse than the two
+  // lines X1 exists to reduce to one. This case is what makes that a property
+  // rather than an intention.
+  it('lets an UNRELATED relay fault keep the generic handlers ERROR line', async () => {
+    await seedSource();
+    world.messagesRepo.updateRecipientDeliveryStatus = async () => {
+      throw new Error('slot write down');
+    };
+
+    const res = await signedTwilioPost(app, STATUS_PATH, failureParams());
+    expect(res.status).toBe(500);
+
+    // No marker at all - the tail never ran - so the generic line is the ONLY
+    // record this fault has, and it must survive.
+    expect(failureLines(ERROR)).toHaveLength(0);
+    const errors = capture.atLevel(ERROR);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!['msg']).toContain('unhandled error while handling request');
+    expect(JSON.stringify(errors[0])).toContain('slot write down');
   });
 
   // Code review R2, W2 / R2 2.6. The enqueue-failure CLOSE runs inside the

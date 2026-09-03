@@ -804,10 +804,18 @@ function bubbleClocks(
  *     item changes - and `retrying` would be computed once and never again.
  *     That is the indefinite promise M5 removed, one level down. Closed by the
  *     retry clause below, which TERMINATES for the same reason the leg-level
- *     pair does: `canRetryRungGoQuiet` drops a rung with no clock to age from,
- *     and `isRetryRungLive` goes false the moment the rung delivers, closes
+ *     pair does: `canRetryRungGoQuiet` drops a rung this module cannot date -
+ *     one with no clock to age from, AND one dated more than a budget into the
+ *     future, which `isQuietSince` would otherwise call not-quiet for ever - and
+ *     `isRetryRungLive` goes false the moment the rung delivers, closes
  *     terminally, or crosses either `unconfirmed` horizon - and the tick that
  *     carries it across both flips the copy and disarms the interval.
+ *
+ *     The futurity half was missing until the parent's plan-blind review at
+ *     handback: the predicate took no reading clock at all, so it mirrored only
+ *     half of `canEverGoStale`. It needs no server fault to reach - the reading
+ *     clock is the VIEWER's, so a browser more than a budget slow puts every
+ *     fresh rung in the future and pinned `Retrying` with a live interval.
  *
  * `canEverGoStale` and `isStaleLeg` derive their clock from one shared private
  * helper inside the presenter, so they cannot disagree about which clock a slot
@@ -877,7 +885,10 @@ function hasTickableLeg(
     const rungs = retries.get(relayRetryKey(msg.tsMsgId, memberKey));
     if (
       rungs !== undefined &&
-      rungs.some((rung) => canRetryRungGoQuiet(rung) && isRetryRungLive(rung, bubbleNowMs))
+      rungs.some(
+        (rung) =>
+          canRetryRungGoQuiet(rung, bubbleNowMs) && isRetryRungLive(rung, bubbleNowMs),
+      )
     ) {
       return true;
     }

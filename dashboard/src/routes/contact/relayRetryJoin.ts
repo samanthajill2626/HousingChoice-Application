@@ -24,7 +24,11 @@
 // overloaded `status: 'retrying'` would render as no state at all AND drop the
 // leg from both the delivered and the failed bucket.
 import type { DeliveryStatus, RelayRecipientDelivery, TimelineItem } from '../../api/index.js';
-import { isQuietSince, type RelayDeliverySlot } from './deliveryStatus.js';
+import {
+  isQuietSince,
+  STALE_SENT_AFTER_MS,
+  type RelayDeliverySlot,
+} from './deliveryStatus.js';
 
 /** The four end states of a retried leg (D19).
  *  - `retrying`          a claimed rung is still plausibly in flight
@@ -218,7 +222,7 @@ export function isRetryRungLive(row: RelayRetryRow, nowMs: number | undefined): 
   if (row.leg === undefined) return false;
   if (isRetryRungTerminal(row)) return false;
   if (nowMs === undefined) return true;
-  if (!canRetryRungGoQuiet(row)) return false;
+  if (!canRetryRungGoQuiet(row, nowMs)) return false;
   // The module's ONLY staleness budget, reused through its own predicate so the
   // two horizons cannot drift apart from the leg-level one (D18). This
   // deliberately does NOT route through `stalenessClockMs`: that helper is
@@ -308,10 +312,23 @@ function withDecidingRung(
  * the SAME predicate, which is the point: an earlier draft armed nothing while
  * still displaying `retrying`, so the interval stopped paying for a re-render
  * that could never change an answer that was already wrong.
+ *
+ * THE FUTURITY BOUND IS THE SECOND HALF, and it is why this takes a reading
+ * clock. `isQuietSince` reads a FUTURE clock as "not quiet", exactly as it reads
+ * a missing one - so a rung dated more than one budget ahead answers live on
+ * every tick for ever, which is the same non-termination an undatable rung
+ * causes, reached by the opposite route. `canEverGoStale`
+ * (`deliveryStatus.ts:350-364`) bounds its leg-level twin for this reason and
+ * this must mirror it, inclusive at exactly one budget ahead. Reachable without
+ * any server fault: the clock is the VIEWER's `Date.now()` and the timestamps
+ * are the server's, so a browser clock behind the server's by more than the
+ * budget puts every fresh rung in the future.
  */
-export function canRetryRungGoQuiet(row: RelayRetryRow): boolean {
+export function canRetryRungGoQuiet(row: RelayRetryRow, nowMs: number | undefined): boolean {
+  if (nowMs === undefined) return false;
   const clock = rungStalenessClockMs(row);
-  return clock !== undefined && Number.isFinite(clock);
+  if (clock === undefined || !Number.isFinite(clock)) return false;
+  return clock - nowMs <= STALE_SENT_AFTER_MS;
 }
 
 /** Resolve one leg against its own rungs. See `projectRelayLegs`. */

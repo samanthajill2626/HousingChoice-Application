@@ -605,7 +605,7 @@ describe('rung predicates', () => {
     ]).get(relayRetryKey(ROOT, MEMBER))?.[0];
 
     expect(clockless).toBeDefined();
-    expect(canRetryRungGoQuiet(clockless!)).toBe(false);
+    expect(canRetryRungGoQuiet(clockless!, NOW)).toBe(false);
     // NOT live against a reading clock - so `projectOneLeg` resolves it to
     // `unconfirmed` rather than to a permanent `retrying`.
     expect(isRetryRungLive(clockless!, NOW)).toBe(false);
@@ -616,10 +616,36 @@ describe('rung predicates', () => {
 
   it('accepts a rung ageing from either clock', () => {
     // The leg's own sentAt...
-    expect(canRetryRungGoQuiet(rung(sentLeg(NOW - 1_000), NOW - 2_000)!)).toBe(true);
+    expect(canRetryRungGoQuiet(rung(sentLeg(NOW - 1_000), NOW - 2_000)!, NOW)).toBe(true);
     // ...or, failing that, the retry ROW's own `at`.
-    expect(canRetryRungGoQuiet(rung(queuedLeg(), NOW - 2_000)!)).toBe(true);
+    expect(canRetryRungGoQuiet(rung(queuedLeg(), NOW - 2_000)!, NOW)).toBe(true);
     // A malformed rung has no leg, so it has no clock either.
-    expect(canRetryRungGoQuiet(rung(undefined, NOW - 2_000)!)).toBe(false);
+    expect(canRetryRungGoQuiet(rung(undefined, NOW - 2_000)!, NOW)).toBe(false);
+  });
+
+  // THE FUTURITY BOUND. Found by the parent's plan-blind adversarial review at
+  // handback: this predicate had no reading clock at all, so it mirrored only
+  // HALF of `canEverGoStale` (deliveryStatus.ts:350-364).
+  //
+  // `isQuietSince` reads a FUTURE clock as "not quiet", exactly as it reads a
+  // missing one - so a rung dated past the horizon answered live on every tick
+  // for ever: a permanent `Retrying` and an interval that never disarms. That is
+  // the same non-termination the no-clock case causes, reached from the opposite
+  // direction, and it needs no server fault to happen: the reading clock is the
+  // VIEWER's `Date.now()` against the server's timestamps, so a browser running
+  // more than fifteen minutes slow puts EVERY fresh rung in the future.
+  it('refuses a rung dated past the horizon, so a skewed browser clock cannot pin Retrying', () => {
+    const future = rung(sentLeg(NOW + STALE_SENT_AFTER_MS + 60_000), NOW)!;
+    expect(canRetryRungGoQuiet(future, NOW)).toBe(false);
+    expect(isRetryRungLive(future, NOW)).toBe(false);
+  });
+
+  it('is inclusive at exactly one budget ahead, mirroring canEverGoStale', () => {
+    expect(canRetryRungGoQuiet(rung(sentLeg(NOW + STALE_SENT_AFTER_MS), NOW)!, NOW)).toBe(true);
+    expect(canRetryRungGoQuiet(rung(sentLeg(NOW + STALE_SENT_AFTER_MS + 1), NOW)!, NOW)).toBe(false);
+  });
+
+  it('answers false with no reading clock, like its leg-level twin', () => {
+    expect(canRetryRungGoQuiet(rung(sentLeg(NOW - 1_000), NOW - 2_000)!, undefined)).toBe(false);
   });
 });

@@ -56,11 +56,29 @@ is the same collision one layer up, in the open-preview join
 than merging delivery outcomes. Fixing the delivery key does not fix the preview
 key, and vice versa.
 
-[`relay-30003-retry-lineage`](./relay-30003-retry-lineage.md) is constrained by
-both halves and works AROUND them rather than fixing them, on the founder's
-2026-09-02 ruling that the keying change is separate work: its retry records key
-on the destination PHONE rather than the member key so a retry is never
-ambiguous about which leg it is retrying, and it records the destination on the
-leg at send time so a retry can refuse when the number has changed since. Those
-two guards are scoped to the retry path only - every other relay send still
-carries both defects.
+[`relay-30003-retry-lineage`](./relay-30003-retry-lineage.md) (RESOLVED
+2026-09-02) is constrained by both halves and works AROUND them rather than
+fixing them, on the founder's 2026-09-02 ruling that the keying change is
+separate work. Two guards, and both are scoped to the retry path only:
+
+- **The ladder's IDENTITY is the destination handset, not the member key** (its
+  spec D5). A retry's atomic claim is the create of a `sid#` pointer under the
+  synthetic provider SID `relayretry-<digest>-<attempt>` (D3), where `<digest>`
+  is `relayRetryDigest` (`app/src/lib/relayRetryClaim.ts`): the first 16 hex
+  chars of SHA-256 of `<root tsMsgId>|<destination E164>`. Two handsets sharing
+  one collapsed slot therefore run two SEPARATE, non-colliding ladders, and a
+  retry is never ambiguous about which leg it is retrying. It is hashed rather
+  than raw because the value ends up inside a sort key, where a phone number
+  must never appear. The DISPLAY join still keys on the member key the retry row
+  records, so the collapse is unchanged on screen.
+- **Nothing is recorded on the LEG.** `RelayRecipientDelivery` is deliberately
+  not changed (its spec D17), which is what keeps the promise that a failed slot
+  is never rewritten. The digest above is stored on the retry ROW as
+  `relay_retry_dest_digest`, and before sending, the retry job
+  (`app/src/jobs/relayRetryLeg.ts`) recomputes it from the member's CURRENT
+  roster number and refuses on any mismatch, closing the leg
+  `retry_number_changed`. So an old message is never silently redirected to a
+  number that changed during the backoff - but the second half of this issue, no
+  durable record of where an ORDINARY leg was sent, is untouched.
+
+Every other relay send still carries both defects.

@@ -3,10 +3,11 @@ id: relay-30003-retry-lineage
 title: Relay 30003 needs retry lineage and one effective dashboard status
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/messaging-relay
 created: 2026-08-28
-updated: 2026-09-01
+updated: 2026-09-02
+resolved: 2026-09-02
 refs: app/src/routes/webhooks/twilio.ts:2348, app/src/routes/webhooks/twilio.ts:2433, app/src/routes/webhooks/twilio.ts:2553, app/src/jobs/retrySend.ts:27, app/src/repos/messagesRepo.ts:118, dashboard/src/routes/contact/deliveryStatus.ts:543, dashboard/src/routes/contact/Timeline.tsx:1670
 ---
 
@@ -118,6 +119,133 @@ Twilio references:
 
 - [30003: Unreachable destination handset](https://www.twilio.com/docs/api/errors/30003)
 - [Outbound Message Status in Status Callbacks](https://www.twilio.com/docs/messaging/guides/outbound-message-status-in-status-callbacks)
+
+**Resolution (2026-09-02, feat/relay-30003-retry-lineage).** Spec
+`docs/superpowers/specs/2026-09-02-relay-30003-retry-lineage-design.md`
+(revision 6, approved 2026-09-02 after four adversarial review rounds); plan
+`docs/superpowers/plans/2026-09-02-relay-30003-retry-lineage.md`; mission
+records under `docs/superpowers/reviews/2026-09-02-relay-30003-retry-lineage/`.
+
+**The architecture, in two sentences.** A retry is a NEW source message row
+addressed to the failed member alone - never a promotion of the failed leg - and
+the create of that row's `sid#` pointer, under the deterministic synthetic SID
+`relayretry-<digest>-<attempt>` (`app/src/lib/relayRetryClaim.ts`), IS the
+atomic claim, so the failed slot is never rewritten and no exception to
+`ALLOWED_PRIOR` is created. Nothing stores an effective status: the dashboard
+derives a per-member `retryState` at THREAD level by joining the original's
+recipient entries forward to those rows
+(`dashboard/src/routes/contact/relayRetryJoin.ts`), which is what lets a
+delivered rung win over an `undelivered` slot the forward-only status machine
+forbids overwriting.
+
+**The nine acceptance criteria, and what proves each.**
+
+1. **Met.** Task 12 (`71181d79`) claims inside the relay branch of
+   `POST /webhooks/twilio/status`: a consistent source re-read, a positive
+   fan-out/team fence, a slot-state gate, the append, then the enqueue. The
+   decision yields exactly one of eleven `RelayRetryClaimOutcome` values.
+   `app/test/relayRetryClaim.webhook.test.ts` (27 tests), starting with "claims
+   exactly one retry for a forward 30003 on a relay leg".
+2. **Met, by two independent guards, tested separately.** A duplicate or
+   concurrent CALLBACK loses the pointer create and stops - Task 12's "claims
+   nothing twice for a duplicate callback, and says so on the line"
+   (`already_claimed`). A duplicate JOB DELIVERY is stopped by
+   `putJobExecutionMarker` - Task 11's "sends nothing on a redelivered job (the
+   execution marker)" in `app/test/relayRetryLeg.test.ts`. The second guard is
+   unit-proven only: the hermetic lane's in-process queue runs a job once and
+   cannot redeliver, so a green e2e is not evidence for it.
+3. **Met, and the policy MATCHES 1:1 rather than differing.** The attempt lives
+   on the retry ROW (`relay_retry_attempt`, Task 1 `814f2997`), one durable row
+   per rung, so no slot write can lose it; the cap is
+   `MAX_RELAY_RETRY_ATTEMPTS = 3`. A failed enqueue still reaches a terminal
+   state - Task 12 closes the leg `enqueue_failed` from the webhook ("closes the
+   retry leg enqueue_failed when the enqueue throws", plus its versioned twin).
+   `relayRetryBackoffMs` is 60/120/240 s, mirroring `app/src/jobs/retrySend.ts`,
+   asserted by "matches the 1:1 ladder policy" in
+   `app/test/relayRetryClaim.test.ts`.
+4. **Met.** Task 12's "never sends to any other member, on any rung" and Task 11
+   (`64773ab3`) "sends to the failed member ONLY - never to the rest of the
+   roster". Confirmed in a browser by Task 14 (`a97884f5`) counting the fake's
+   outbound threads: the retried member has exactly 2 legs
+   (`undelivered` with `errorCode 30003`, then `delivered`), the reachable
+   member exactly 1, and no third leg exists.
+5. **Met.** Each rung is its own row carrying its own provider SID, and the
+   carrier's real `SM...` for that leg is mapped onto the rung's single-entry
+   slot by a `relaysid#` pointer - two pointer families, no collision - so every
+   physical attempt stays durable and auditable by SID, status, error code and
+   timestamps (Task 1, `app/test/messagesRepoRetryLineage.integration.test.ts`).
+   A delivered attempt wins permanently at the join (Task 6, `6332843b`):
+   `relayRetryJoin.test.ts` covers "is delivered-on-retry once any rung
+   delivered", "keeps delivered-on-retry when an older rung reports failure
+   afterwards" and "keeps delivered-on-retry when a later rung is still queued".
+6. **Met in substance; the "one bubble" wording was SUPERSEDED, not satisfied
+   literally.** Tasks 7, 8 and 9 (`5d2feb14`, `e4e8b533`, `bbe58487`, with
+   `51b12e13` and `845cfa54`) render `retrying`, `delivered-on-retry`,
+   `terminal` and `unconfirmed` from ONE derived value at every position that
+   exists - the rollup chip, its accessible-name recital, the inbound
+   `inboundRecipientName` recital and the per-recipient row - so the three
+   cannot disagree (`dashboard/src/routes/contact/deliveryStatus.test.ts`,
+   `Timeline.delivery.test.tsx`, `Timeline.ticker.test.tsx`,
+   `Timeline.test.tsx`; all three hosts re-proved by Task 10 (`65bed580`) in
+   `TourConversation.test.tsx` and `PlacementConversation.test.tsx`). The
+   physical attempts are never shown as conflicting duplicate sends: Task 7's
+   filter hides every retry row that earns no bubble. But the founder approved a
+   display contract (spec Sec 5) in which a DELIVERED retry of an OUTBOUND
+   original renders a SECOND bubble reading `delivered 1/1 on retry` - that
+   permission is what made the new-row architecture available at all. Every
+   other retry row - failed, still queued, or any retry of an inbound original -
+   renders none.
+7. **Met.** Task 1 splits the body: the ROW keeps the raw body and
+   `relay_retry_leg_body` keeps the exact composed leg copy, which every rung
+   sends verbatim - Task 11's "sends exactly one leg, the stored leg copy
+   verbatim, after a sender rename". MMS attachments are re-presigned per
+   attempt through the extracted `sendOneRelayLeg` (Task 3, `b2b35e81`), proved
+   by Task 11's "re-presigns attachments on every attempt". A retry row writes
+   NO media-pointer rows, so the gallery index does not grow per attempt while
+   the durable s3Keys still ride the row (Task 1, "writes no media-pointer rows
+   for a retry row").
+8. **Met.** Task 11 re-runs four gates before any send, each writing its own
+   close code: `retry_group_closed`, `retry_member_removed`,
+   `retry_number_changed` and `retry_opted_out`. The changed-number gate
+   compares the stored `relay_retry_dest_digest` against a digest of the
+   member's CURRENT number, so an old message can never be silently redirected.
+   The `it.each(gateCases)` battery in `app/test/relayRetryLeg.test.ts` asserts
+   zero sends, the slot closed with that code, nothing further scheduled on
+   either ladder, and exactly one terminal ERROR carrying
+   `retryClaim: 'gate_refused'`.
+9. **Met.** Backend: `app/test/relayRetryClaim.test.ts`,
+   `app/test/messagesRepoRetryLineage.integration.test.ts`,
+   `app/test/conversationsRepoActivityBump.integration.test.ts`,
+   `app/test/relayRetryLeg.test.ts` (37), `app/test/relayRetryClaim.webhook.test.ts`
+   (27), `app/test/twilioStatusWebhook.test.ts` (40 -> 47) and
+   `app/test/registerHandlers.test.ts`. Dashboard:
+   `dashboard/src/routes/contact/relayRetryJoin.test.ts`,
+   `deliveryStatus.test.ts`, `Timeline.test.tsx`, `Timeline.delivery.test.tsx`,
+   `Timeline.ticker.test.tsx`,
+   `dashboard/src/routes/conversation/useRelayThread.test.tsx`, plus the two host
+   suites. Browser: `e2e/tests/dashboard-next/relay-30003-retry.spec.ts` (Task
+   14, the rename and rewrite of this issue's pinning spec) proves one failed
+   relay leg retries to delivered without duplicating - chip, accessible name,
+   row and send counts.
+
+**Residuals, recorded not fixed (spec Sec 9).** A crash between the claim and
+the enqueue strands a retry: the row exists, nothing sends, and the leg settles
+to `unconfirmed` rather than a permanent `retrying`, but no ERROR is emitted
+because nobody observes it - closing that needs the reconciliation sweep this
+issue puts out of scope. The relay member-key collapse is worked AROUND, not
+fixed; see
+[`relay-member-key-collapses-two-phones-one-contact`](./relay-member-key-collapses-two-phones-one-contact.md),
+which stays OPEN and records the two retry-path guards. And every attempt
+appends a real row while almost none of them render, so hidden rows dilute
+thread paging - bounded at three hidden rows per failed leg. Two neighbours stay
+OPEN by the founder's 2026-09-02 ruling:
+[`relay-inbound-source-has-no-delivery-rollup`](./relay-inbound-source-has-no-delivery-rollup.md)
+(an inbound source still shows no visible chip, though its rows and recital now
+carry the retry states) and
+[`quiet-hours-ungated-automated-paths`](./quiet-hours-ungated-automated-paths.md),
+whose item 3 now names the relay ladder under its existing recommendation.
+[`relay-30003-classified-transient-retrying`](./relay-30003-classified-transient-retrying.md),
+the server-side half of the same contradiction, is closed with this one.
 
 ## Design knowledge from M5 (2026-09-01)
 

@@ -57,9 +57,19 @@ override (`Timeline.tsx:879-885`), and that an inbound bubble's visual language 
 currently "received", so a danger-toned chip on it is a new visual state.
 
 **Related.**
-[`relay-30003-retry-lineage`](./relay-30003-retry-lineage.md) - the mission that
-found this; its retry works for inbound sources but renders nothing for them, by
-design.
+[`relay-30003-retry-lineage`](./relay-30003-retry-lineage.md) (RESOLVED
+2026-09-02) - the mission that found this. Correcting what an earlier draft of
+this line claimed: its retry runs for inbound sources AND renders on them - just
+not as a chip, because there is no chip here to move. The gap this issue
+describes is therefore unchanged. But the two positions that DO exist on an
+inbound bubble - the per-recipient rows (`:948-951`) and the
+`inboundRecipientName` recital - carry the new retry states exactly as they
+carry today's: `Retrying - Phone unreachable (error 30003)`,
+`Delivered on retry`, and the gate-refusal prose (`Not retried - group closed`,
+`Not retried - no longer in this group`, `Not retried - number changed since`,
+`Not retried - opted out`). Leaving them out would have shipped a recital that
+recites `Undelivered - Phone unreachable (error 30003)` for ever on a leg whose
+retry delivered - strictly worse than today.
 [`relay-hub-message-delivery-status-never-terminal`](./relay-hub-message-delivery-status-never-terminal.md)
 - the adjacent complaint that a relay source's MESSAGE-level status never
 advances.

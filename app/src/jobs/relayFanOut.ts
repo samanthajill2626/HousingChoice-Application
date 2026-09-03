@@ -53,6 +53,7 @@ import {
   createMessagesRepo,
   mediaAttachmentsOf,
   relayMemberKey,
+  type MediaAttachment,
   type MessageItem,
   type MessagesRepo,
   type RelayRecipientDelivery,
@@ -954,7 +955,13 @@ interface RelayFanOutExecutionDeps {
   log: Logger;
 }
 
-type RelayTransportMode =
+/**
+ * Which transport contract a relay send runs under. EXPORTED because the 30003
+ * retry job resolves the mode from the ORIGINAL source row (spec D2 - every
+ * relay source written before 2026-09-02 is legacy) and hands it to
+ * `sendOneRelayLeg`, so its own job signature has to name this type.
+ */
+export type RelayTransportMode =
   | { kind: 'legacy' }
   | { kind: 'versioned'; intent: MessageTransportIntent };
 
@@ -1116,156 +1123,27 @@ async function runRelayFanOutExecution(
   const transientRemaining: string[] = [];
   let sentCount = 0;
   for (const member of recipients) {
-    const key = relayMemberKey(member);
-    const priorSlot = currentSource.delivery_recipients?.[key];
-    if (isTerminal(priorSlot?.status)) continue;
-
-    if (await isMemberSuppressed(contacts, conversations, member)) {
-      if (transport.kind === 'versioned') {
-        await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
-      }
-      await persistRelayRecipientResult(messages, payload, key, {
-        status: 'failed',
-        errorCode: 'contact_opted_out',
-      }, transport);
-      try {
-        await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
-          ...(member.contactId !== undefined &&
-            member.contactId.length > 0 && { contactId: member.contactId }),
-          phone: member.phone,
-          ...(member.name !== undefined && { name: member.name }),
-          at: new Date().toISOString(),
-        });
-      } catch (err) {
-        log.error(
-          {
-            err,
-            conversationId: payload.relayConversationId,
-            memberKey: logSafeMemberKey(member),
-          },
-          'relayFanOut: annotating conversation with member opt-out failed - continuing',
-        );
-      }
-      log.info(
-        {
-          conversationId: payload.relayConversationId,
-          memberKey: logSafeMemberKey(member),
-        },
-        'relayFanOut: recipient opted out (sms_opt_out) - skipped, not sent',
-      );
-      continue;
-    }
-
-    await deps.tokenBucket?.acquire(1);
-    let legMediaUrls: string[] | undefined;
-    if (hasMedia && mediaStore) {
-      legMediaUrls = await Promise.all(
-        sourceMedia.map((attachment) =>
-          mediaStore.presign(attachment.s3Key, RELAY_PRESIGN_TTL_SECONDS),
-        ),
-      );
-    }
-    const params: SendMessageParams = {
-      to: member.phone,
-      from: poolNumber,
-      body: relayBody,
-      ...(legMediaUrls !== undefined && { mediaUrls: legMediaUrls }),
-    };
-    const prepared =
-      transport.kind === 'versioned'
-        ? adapter.prepareMessageSend(transport.intent, params)
-        : undefined;
-
-    if (transport.kind === 'versioned') {
-      await setVersionedAggregationState(messages, payload, key, 'attempted', ['attempted']);
-    }
-
-    let result;
-    try {
-      result =
-        transport.kind === 'versioned'
-          ? await adapter.sendPreparedMessage(prepared!)
-          : await adapter.sendMessage(params);
-    } catch (err) {
-      if (err instanceof SendRefusedError) {
-        await persistRelayRecipientResult(
-          messages,
-          payload,
-          key,
-          { status: 'failed', errorCode: err.code },
-          transport,
-        );
-        log.warn(
-          {
-            conversationId: payload.relayConversationId,
-            memberKey: logSafeMemberKey(member),
-            refusal: err.code,
-          },
-          'relayFanOut: send refused for recipient - marked failed, continuing',
-        );
-        continue;
-      }
-      const code = errorCodeOf(err);
-      if (code === CARRIER_FILTERED_CODE) {
-        await persistRelayRecipientResult(
-          messages,
-          payload,
-          key,
-          { status: 'failed', errorCode: code },
-          transport,
-        );
-        log.error(
-          {
-            conversationId: payload.relayConversationId,
-            memberKey: logSafeMemberKey(member),
-            errorCode: code,
-          },
-          'relayFanOut: carrier filtering (30007) - recipient failed, NOT retried',
-        );
-        continue;
-      }
-      if (code !== undefined && TRANSIENT_CODES.has(code)) {
-        await persistRelayRecipientResult(
-          messages,
-          payload,
-          key,
-          { status: 'queued', errorCode: code },
-          transport,
-        );
-        transientRemaining.push(key);
-        log.warn(
-          {
-            conversationId: payload.relayConversationId,
-            memberKey: logSafeMemberKey(member),
-            errorCode: code,
-            attempt: payload.attempt,
-          },
-          'relayFanOut: transient send error - deferring recipient to continuation',
-        );
-        continue;
-      }
-      throw err;
-    }
-
-    await persistRelayRecipientResult(
+    const outcome = await sendOneRelayLeg({
       messages,
+      conversations,
+      contacts,
+      adapter,
+      mediaStore,
+      log,
+      tokenBucket: deps.tokenBucket,
       payload,
-      key,
-      {
-        status: result.status === 'queued' ? 'queued' : 'sent',
-        sid: result.providerSid,
-        sentAt: result.providerTs,
-        ...(transport.kind === 'versioned' &&
-          result.actualTransport !== undefined && { actualTransport: result.actualTransport }),
-      },
+      member,
+      currentSource,
+      poolNumber,
+      legBody: relayBody,
+      sourceMedia,
       transport,
-    );
-    await messages.putRelaySidPointer(result.providerSid, {
-      conversationId: payload.relayConversationId,
-      tsMsgId: payload.sourceTsMsgId,
-      memberKey: key,
     });
-    sentCount += 1;
+    // The two bindings the loop body used to mutate in place. They feed the
+    // completion log below and the transient continuation after it, so the
+    // counts must stay exactly what the inlined body produced.
+    if (outcome.kind === 'transient') transientRemaining.push(relayMemberKey(member));
+    if (outcome.kind === 'sent') sentCount += 1;
   }
 
   log.info(
@@ -1308,6 +1186,246 @@ async function runRelayFanOutExecution(
   } catch (err) {
     await closeRelay(transientRemaining, 'enqueue_failed', err);
   }
+}
+
+/**
+ * The source-row coordinates every relay slot write is addressed by, plus the
+ * envelope attempt the transient log line reports. Narrowed from
+ * `RelayFanOutPayload` so a caller that is NOT a fan-out job - the 30003 retry
+ * ladder, which addresses its own single-recipient retry row (spec D10) - can
+ * drive the per-leg unit without inventing a `senderKey` it has no use for.
+ * Purely a type narrowing: every existing call site still passes a whole
+ * `RelayFanOutPayload`, which satisfies this shape structurally.
+ */
+export type RelayLegPayload = Pick<
+  RelayFanOutPayload,
+  'relayConversationId' | 'sourceTsMsgId' | 'attempt'
+>;
+
+/**
+ * How one relay leg ended. `kind` mirrors the fan-out loop body's five early
+ * exits plus its success fall-through, so a caller can rebuild the two counters
+ * the loop used to mutate in place: `transient` re-defers the member to the
+ * continuation, `sent` counts toward the completion log. `providerSid` is
+ * present on `sent` only; `errorCode` carries the code that was persisted to
+ * the member's slot on `suppressed`, `refused`, `filtered` and `transient`.
+ */
+export interface RelayLegSendOutcome {
+  kind: 'sent' | 'skipped_terminal' | 'suppressed' | 'refused' | 'filtered' | 'transient';
+  providerSid?: string;
+  errorCode?: string;
+}
+
+/**
+ * Send ONE relay leg to ONE member and record the result on the source row.
+ *
+ * THIS UNIT ALREADY PERSISTS - callers must not repeat either write. On the
+ * success path it writes the member's delivery slot (sent/queued, sid, sentAt,
+ * actualTransport) AND the `relaysid#` pointer the per-recipient status
+ * callback resolves through. On `suppressed`, `refused` and `filtered` it has
+ * already written a TERMINAL slot carrying that arm's specific error code, so
+ * re-closing the slot afterwards would only overwrite it with a vaguer one.
+ *
+ * Extracted verbatim from the fan-out loop body (spec D10) so the 30003 retry
+ * job reuses the transport-fidelity machinery instead of forking code that is
+ * hours old. Behavior-preserving: the only edits were closure captures becoming
+ * parameters and each `continue` becoming a returned outcome. A send error that
+ * is neither a refusal, nor 30007, nor transient still THROWS out of here, as
+ * it did out of the loop.
+ */
+export async function sendOneRelayLeg(args: {
+  messages: MessagesRepo;
+  conversations: ConversationsRepo;
+  contacts: ContactsRepo;
+  /** Intersection, not `MessagingAdapter` alone: the prepare/send split and
+   *  `classifyMessageTransport` live on `CarrierMessageSender`. */
+  adapter: MessagingAdapter & CarrierMessageSender;
+  mediaStore?: MediaStore;
+  log: Logger;
+  tokenBucket?: TokenBucket;
+  payload: RelayLegPayload;
+  member: ConversationParticipant;
+  /** The source row as last read - its `delivery_recipients` map is what the
+   *  terminal-slot skip is decided from. */
+  currentSource: MessageItem;
+  poolNumber: string;
+  /**
+   * The COMPOSED leg copy - `composeRelayBody(senderName, body)` - NEVER the
+   * source row's raw body. A caller that passes the raw body double-prefixes
+   * the message (design Sec 10, the reason fan-out reuse was rejected); the
+   * retry job passes the stored `relay_retry_leg_body` here.
+   */
+  legBody: string;
+  sourceMedia: MediaAttachment[];
+  transport: RelayTransportMode;
+}): Promise<RelayLegSendOutcome> {
+  const {
+    messages,
+    conversations,
+    contacts,
+    adapter,
+    mediaStore,
+    log,
+    tokenBucket,
+    payload,
+    member,
+    currentSource,
+    poolNumber,
+    legBody,
+    sourceMedia,
+    transport,
+  } = args;
+  const hasMedia = sourceMedia.length > 0;
+
+  const key = relayMemberKey(member);
+  const priorSlot = currentSource.delivery_recipients?.[key];
+  if (isTerminal(priorSlot?.status)) return { kind: 'skipped_terminal' };
+
+  if (await isMemberSuppressed(contacts, conversations, member)) {
+    if (transport.kind === 'versioned') {
+      await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
+    }
+    await persistRelayRecipientResult(messages, payload, key, {
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+    }, transport);
+    try {
+      await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
+        ...(member.contactId !== undefined &&
+          member.contactId.length > 0 && { contactId: member.contactId }),
+        phone: member.phone,
+        ...(member.name !== undefined && { name: member.name }),
+        at: new Date().toISOString(),
+      });
+    } catch (err) {
+      log.error(
+        {
+          err,
+          conversationId: payload.relayConversationId,
+          memberKey: logSafeMemberKey(member),
+        },
+        'relayFanOut: annotating conversation with member opt-out failed - continuing',
+      );
+    }
+    log.info(
+      {
+        conversationId: payload.relayConversationId,
+        memberKey: logSafeMemberKey(member),
+      },
+      'relayFanOut: recipient opted out (sms_opt_out) - skipped, not sent',
+    );
+    return { kind: 'suppressed', errorCode: 'contact_opted_out' };
+  }
+
+  await tokenBucket?.acquire(1);
+  let legMediaUrls: string[] | undefined;
+  if (hasMedia && mediaStore) {
+    legMediaUrls = await Promise.all(
+      sourceMedia.map((attachment) =>
+        mediaStore.presign(attachment.s3Key, RELAY_PRESIGN_TTL_SECONDS),
+      ),
+    );
+  }
+  const params: SendMessageParams = {
+    to: member.phone,
+    from: poolNumber,
+    body: legBody,
+    ...(legMediaUrls !== undefined && { mediaUrls: legMediaUrls }),
+  };
+  const prepared =
+    transport.kind === 'versioned'
+      ? adapter.prepareMessageSend(transport.intent, params)
+      : undefined;
+
+  if (transport.kind === 'versioned') {
+    await setVersionedAggregationState(messages, payload, key, 'attempted', ['attempted']);
+  }
+
+  let result;
+  try {
+    result =
+      transport.kind === 'versioned'
+        ? await adapter.sendPreparedMessage(prepared!)
+        : await adapter.sendMessage(params);
+  } catch (err) {
+    if (err instanceof SendRefusedError) {
+      await persistRelayRecipientResult(
+        messages,
+        payload,
+        key,
+        { status: 'failed', errorCode: err.code },
+        transport,
+      );
+      log.warn(
+        {
+          conversationId: payload.relayConversationId,
+          memberKey: logSafeMemberKey(member),
+          refusal: err.code,
+        },
+        'relayFanOut: send refused for recipient - marked failed, continuing',
+      );
+      return { kind: 'refused', errorCode: err.code };
+    }
+    const code = errorCodeOf(err);
+    if (code === CARRIER_FILTERED_CODE) {
+      await persistRelayRecipientResult(
+        messages,
+        payload,
+        key,
+        { status: 'failed', errorCode: code },
+        transport,
+      );
+      log.error(
+        {
+          conversationId: payload.relayConversationId,
+          memberKey: logSafeMemberKey(member),
+          errorCode: code,
+        },
+        'relayFanOut: carrier filtering (30007) - recipient failed, NOT retried',
+      );
+      return { kind: 'filtered', errorCode: code };
+    }
+    if (code !== undefined && TRANSIENT_CODES.has(code)) {
+      await persistRelayRecipientResult(
+        messages,
+        payload,
+        key,
+        { status: 'queued', errorCode: code },
+        transport,
+      );
+      log.warn(
+        {
+          conversationId: payload.relayConversationId,
+          memberKey: logSafeMemberKey(member),
+          errorCode: code,
+          attempt: payload.attempt,
+        },
+        'relayFanOut: transient send error - deferring recipient to continuation',
+      );
+      return { kind: 'transient', errorCode: code };
+    }
+    throw err;
+  }
+
+  await persistRelayRecipientResult(
+    messages,
+    payload,
+    key,
+    {
+      status: result.status === 'queued' ? 'queued' : 'sent',
+      sid: result.providerSid,
+      sentAt: result.providerTs,
+      ...(transport.kind === 'versioned' &&
+        result.actualTransport !== undefined && { actualTransport: result.actualTransport }),
+    },
+    transport,
+  );
+  await messages.putRelaySidPointer(result.providerSid, {
+    conversationId: payload.relayConversationId,
+    tsMsgId: payload.sourceTsMsgId,
+    memberKey: key,
+  });
+  return { kind: 'sent', providerSid: result.providerSid };
 }
 
 async function preflightVersionedRecipients(
@@ -1391,7 +1509,7 @@ function canReopenExcludedSlot(slot: RelayRecipientDelivery): boolean {
 
 async function readVersionedSource(
   messages: MessagesRepo,
-  payload: RelayFanOutPayload,
+  payload: RelayLegPayload,
 ): Promise<MessageItem> {
   const source = await messages.getByTsMsgId(
     payload.relayConversationId,
@@ -1405,7 +1523,7 @@ async function readVersionedSource(
 
 async function setVersionedAggregationState(
   messages: MessagesRepo,
-  payload: RelayFanOutPayload,
+  payload: RelayLegPayload,
   memberKey: string,
   next: NonNullable<RelayRecipientDelivery['transportAggregationState']>,
   acceptableStates: NonNullable<RelayRecipientDelivery['transportAggregationState']>[],
@@ -1427,7 +1545,7 @@ async function setVersionedAggregationState(
 
 async function persistRelayRecipientResult(
   messages: MessagesRepo,
-  payload: RelayFanOutPayload,
+  payload: RelayLegPayload,
   memberKey: string,
   delivery: RelayRecipientDelivery,
   transport: RelayTransportMode,
@@ -1450,7 +1568,7 @@ async function persistRelayRecipientResult(
 /** Persist one recipient's delivery slot on the source message. */
 async function markRecipient(
   messages: MessagesRepo,
-  payload: RelayFanOutPayload,
+  payload: RelayLegPayload,
   memberKey: string,
   delivery: RelayRecipientDelivery,
 ): Promise<void> {

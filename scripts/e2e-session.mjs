@@ -251,6 +251,13 @@ const childEnv = {
   // debounce, the worker polls real time - a fast cadence would let the worker
   // race tick-driven specs for due rows (tick.processed assertions).
   EVENT_BRIDGE_URL: `http://127.0.0.1:${ports.app}`,
+  // Relay 30003 retry ladder (spec Sec 7): shorten rung 1 from 60s to 3s so the
+  // browser proof can watch a leg go retrying and then deliver inside its budget.
+  // LANE-ONLY - never set in dev or prod, and absent from every .env*.example.
+  // Read by app/src/jobs/registerHandlers.ts, which ignores anything that does
+  // not parse to a positive integer, so production keeps 60/120/240. This is
+  // CONFIGURATION, not structural absence: the seam ships, the value does not.
+  E2E_RELAY_RETRY_BACKOFF_MS: '3000',
   // Pass the lane to child processes so they can self-identify if needed.
   E2E_LANE: String(lane),
 };

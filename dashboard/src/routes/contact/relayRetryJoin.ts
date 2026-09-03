@@ -263,6 +263,31 @@ function withDecidingRung(
   };
 }
 
+/**
+ * COULD this rung ever go quiet? The ticker's retry clause is
+ * `canRetryRungGoQuiet(rung) && isRetryRungLive(rung, nowMs)` - deliberately the
+ * same shape as the leg-level `canEverGoStale(...) && !isStaleLeg(...)` beside
+ * it, and for the same reason: a rung that can never age would answer "live" on
+ * every tick for ever, and the interval that exists to re-render it would never
+ * terminate.
+ *
+ * Reachable, not defensive. A rung ages from its leg's `sentAt` or, failing
+ * that, from the retry ROW's own `at` - and `messageInstant`
+ * (conversation/useRelayThread.ts) answers `''` for a row with no `provider_ts`
+ * and a non-ISO `tsMsgId`, which parses to nothing. A `queued` rung on such a
+ * row has neither clock.
+ *
+ * WHAT THIS DOES NOT DO, and it is a disclosed trade in the same shape as
+ * `canEverGoStale`'s: it does not change how such a rung PROJECTS. With no clock
+ * to age from, `isRetryRungLive` still answers true and the leg still reads
+ * `retrying`. The ticker simply stops paying for a re-render that could never
+ * change the answer.
+ */
+export function canRetryRungGoQuiet(row: RelayRetryRow): boolean {
+  const clock = rungStalenessClockMs(row);
+  return clock !== undefined && Number.isFinite(clock);
+}
+
 /** Resolve one leg against its own rungs. See `projectRelayLegs`. */
 function projectOneLeg(
   slot: RelayRecipientDelivery,

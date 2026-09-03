@@ -4,6 +4,7 @@ import type { RelayRecipientDelivery, TimelineItem, TimelineMessage } from '../.
 // apart; the fixtures below are built off it rather than off a literal.
 import { STALE_SENT_AFTER_MS } from './deliveryStatus.js';
 import {
+  canRetryRungGoQuiet,
   indexRelayRetries,
   isRetryRungLive,
   isRetryRungTerminal,
@@ -532,5 +533,32 @@ describe('rung predicates', () => {
     // millisecond is still live.
     expect(isRetryRungLive(rung(queuedLeg(), NOW - STALE_SENT_AFTER_MS + 1)!, NOW)).toBe(true);
     expect(isRetryRungLive(rung(queuedLeg(), NOW - STALE_SENT_AFTER_MS)!, NOW)).toBe(false);
+  });
+
+  // THE TICKER'S OTHER HALF. `isRetryRungLive` answers TRUE for ever on a rung
+  // with no clock to age from - `isQuietSince` reads "no clock" as "not quiet" -
+  // so a predicate built on it alone would keep the interval armed for the life
+  // of the mount. Reachable, not hypothetical: `messageInstant` answers `''` for
+  // a row with no provider_ts and a non-ISO tsMsgId.
+  it('refuses a rung with no clock to age from, so the ticker can terminate', () => {
+    const clockless = indexRelayRetries([
+      { ...retryItem({ attempt: 1, leg: queuedLeg() }), at: '' },
+    ]).get(relayRetryKey(ROOT, MEMBER))?.[0];
+
+    expect(clockless).toBeDefined();
+    // Still LIVE - the projection is unchanged and the leg still reads
+    // `retrying`. The ticker just stops paying for a re-render that could never
+    // change the answer.
+    expect(isRetryRungLive(clockless!, NOW)).toBe(true);
+    expect(canRetryRungGoQuiet(clockless!)).toBe(false);
+  });
+
+  it('accepts a rung ageing from either clock', () => {
+    // The leg's own sentAt...
+    expect(canRetryRungGoQuiet(rung(sentLeg(NOW - 1_000), NOW - 2_000)!)).toBe(true);
+    // ...or, failing that, the retry ROW's own `at`.
+    expect(canRetryRungGoQuiet(rung(queuedLeg(), NOW - 2_000)!)).toBe(true);
+    // A malformed rung has no leg, so it has no clock either.
+    expect(canRetryRungGoQuiet(rung(undefined, NOW - 2_000)!)).toBe(false);
   });
 });

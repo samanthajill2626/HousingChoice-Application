@@ -126,6 +126,14 @@ function makeFakes(
       if (previewText !== undefined) conversation.last_message_preview = previewText;
       return conversation;
     },
+    // D16's status-preserving twin. Deliberately NOT recorded in
+    // `fakes.touched`: that ledger belongs to touchLastActivity, and this
+    // suite's assertions read it as "the send bumped the thread".
+    touchLastActivityPreservingStatus: async (_id, preview, at) => {
+      conversation.last_activity_at = at;
+      if (preview !== undefined) conversation.last_message_preview = preview;
+      return conversation;
+    },
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,

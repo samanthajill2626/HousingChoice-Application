@@ -540,6 +540,25 @@ export function createFakeWorld(): FakeWorld {
       if (preview !== undefined) conv.last_message_preview = preview;
       return conv;
     },
+    async touchLastActivityPreservingStatus(conversationId, previewText, at) {
+      const conv = conversations.get(conversationId);
+      if (!conv) {
+        throw conditionalCheckFailed(
+          `touchLastActivityPreservingStatus: no conversation ${conversationId}`,
+        );
+      }
+      // D16: this sibling NEVER writes `status` - not for a group_text thread,
+      // not for a relay group closed during a retry backoff, not for anything.
+      // Modelled here rather than aliased to the method above, because "the
+      // closed group stayed closed" is the assertion the retry ladder rests on.
+      // Deliberately NOT recorded in `touches`: that array is the
+      // touchLastActivity ledger and conflating the two would make a status
+      // write and a status-preserving bump indistinguishable to an assertion.
+      conv.last_activity_at = at;
+      const preview = toPreview(previewText);
+      if (preview !== undefined) conv.last_message_preview = preview;
+      return conv;
+    },
     async setParticipantsIfAbsent(conversationId, participants) {
       const conv = conversations.get(conversationId);
       if (!conv) throw new Error(`setParticipantsIfAbsent: conversation not found: ${conversationId}`);

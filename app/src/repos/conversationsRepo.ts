@@ -648,6 +648,38 @@ export interface ConversationsRepo {
     ts: string,
   ): Promise<ConversationItem>;
   /**
+   * D16 (relay 30003 retry ladder). The same activity bump WITHOUT the status
+   * write - never `status`, on any row type.
+   *
+   * `touchLastActivity` sets `status = 'open'` on any non-group-text row
+   * (:1531-1560), and a relay retry's bump lands 60-240 seconds AFTER its own
+   * open-group gate. Bumping through that method would therefore resurrect a
+   * group closed during the backoff, contradicting the "this group chat is now
+   * closed" message already sent and re-arming every open-gated path. The
+   * status-free command inside the sibling is not reachable for this: it is the
+   * CATCH branch, entered only when the group-text condition fails.
+   *
+   * The intended, observable effect on a closed group is a re-sort WITHIN the
+   * `closed` partition of the byLastActivity GSI - hash `status`, range
+   * `last_activity_at` (`lib/tables.ts:166-171`) - not a move to `open`.
+   *
+   * `preview` may be undefined, and the retry job passes undefined
+   * deliberately: D16 is about ORDERING, while the preview belongs to the
+   * thread's NEWEST message, which a retry is not whenever anything arrived
+   * during the backoff (and when nothing did, the preview already reads this
+   * body). An undefined preview omits the SET entirely and leaves the stored
+   * one alone. Preview text is shaped by `toPreview`, exactly as the sibling
+   * shapes it.
+   *
+   * Like the sibling, a missing row throws ConditionalCheckFailedException -
+   * no phantom upsert.
+   */
+  touchLastActivityPreservingStatus(
+    conversationId: string,
+    preview: string | undefined,
+    at: string,
+  ): Promise<ConversationItem>;
+  /**
    * Atomically claim the participants link IFF none exists yet — the M1.2
    * auto-capture race anchor (the conversation row is unique per phone; the
    * contacts byPhone GSI is NOT trustworthy mid-race). True when THIS call
@@ -1586,6 +1618,31 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         );
         return Attributes as ConversationItem;
       }
+    },
+
+    async touchLastActivityPreservingStatus(conversationId, preview, at) {
+      const shapedPreview = toPreview(preview);
+      // D16: NO `#s = :open` clause and no `#type` guard - this command never
+      // touches `status`, so there is no group_text partition to protect and
+      // nothing to fall back to. `attribute_exists(conversationId)` keeps the
+      // sibling's no-phantom-upsert contract: a missing row throws.
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression:
+            shapedPreview !== undefined
+              ? 'SET last_activity_at = :ts, last_message_preview = :preview'
+              : 'SET last_activity_at = :ts',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeValues: {
+            ':ts': at,
+            ...(shapedPreview !== undefined && { ':preview': shapedPreview }),
+          },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      return Attributes as ConversationItem;
     },
 
     async setParticipantsIfAbsent(conversationId, participants) {

@@ -171,6 +171,14 @@ function makeSendFakes(
       if (previewText !== undefined) conversation.last_message_preview = previewText;
       return conversation;
     },
+    // D16's status-preserving twin. This fake never modelled the status write
+    // in the first place, so the body is the same; it exists so the literal
+    // still satisfies ConversationsRepo.
+    touchLastActivityPreservingStatus: async (_id, preview, at) => {
+      conversation.last_activity_at = at;
+      if (preview !== undefined) conversation.last_message_preview = preview;
+      return conversation;
+    },
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,

@@ -49,3 +49,26 @@ Distinct from
 [`e2e-outbound-mms-viewer-trigger-not-visible`](e2e-outbound-mms-viewer-trigger-not-visible.md),
 which fails in 3/3 full runs INCLUDING on main and is therefore deterministic,
 not rotating.
+
+**Sighting 2026-09-03, `feat/relay-30003-retry-lineage` (planner's independent
+final battery).** Two cases in `e2e/tests/scenarios/scheduled-visibility.spec.ts`
+(`:104` and `:179`) failed in a full `npm run e2e`, alongside the separate
+`outbound-mms` red. **The same file passed ALONE minutes later on the same
+commit: `5 passed (40.0s)`, EXIT 0.**
+
+Two things this adds to the shape recorded above:
+
+- **A fourth scenario file joins the rotation.** The entry lists
+  `tenant-onboarding`, `tours` and `approval-and-move-in`;
+  `scheduled-visibility` had not failed before, and the rotation still holds -
+  no file has now failed twice.
+- **The signature matches the absent-element class, not a slow render.**
+  `getByRole('region', {name: 'Communications and activity'}).getByText(/would
+  like to tour/i)` timed out with "element(s) not found" - an inbound message
+  that never appeared, exactly like the Unknown-tab contact link already
+  recorded, rather than a render that arrived late.
+
+Not the closed `tour-reminders-panel-e2e-flake` signature, which was a rung row
+invisible inside its own 10s budget; this is a message missing from the comms
+region entirely. The branch fences `jobs/tourReminders.ts` and touches no tour
+path, and its own relay retry spec passed in the same run (#137, 19.1s).

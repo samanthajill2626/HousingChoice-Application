@@ -213,10 +213,13 @@ function rungStalenessClockMs(row: RelayRetryRow): number | undefined {
  * tick for ever and project `retrying` for the life of the mount - the
  * indefinite promise again, one level down and wearing the word this design
  * exists to make true. `unconfirmed` is the honest reading: a ladder we cannot
- * date is not a ladder we can confirm. See `canRetryRungGoQuiet` for how such a
- * rung is reached, and note the split - the CLOCK we are missing decides which
- * way it falls. No reading clock at all is our own blindness (live); a rung
- * whose own clocks did not parse is the ROW being unreadable (unconfirmed).
+ * date is not a ladder we can confirm. See `canRetryRungGoQuiet` for the three
+ * ways a rung is undatable, and note the split - WHOSE clock is missing decides
+ * which way it falls. No reading clock at all is our own blindness, and that
+ * alone reads LIVE. The other two read `unconfirmed`: a rung whose own clocks
+ * did not parse (the ROW is unreadable), and a rung dated more than a budget
+ * ahead of us - where our clock is the faulty one, but we cannot tell that from
+ * here and must not promise `retrying` on the strength of it.
  */
 export function isRetryRungLive(row: RelayRetryRow, nowMs: number | undefined): boolean {
   if (row.leg === undefined) return false;
@@ -293,7 +296,7 @@ function withDecidingRung(
 
 /**
  * COULD this rung ever go quiet? The ticker's retry clause is
- * `canRetryRungGoQuiet(rung) && isRetryRungLive(rung, nowMs)` - deliberately the
+ * `canRetryRungGoQuiet(rung, nowMs) && isRetryRungLive(rung, nowMs)` - the
  * same shape as the leg-level `canEverGoStale(...) && !isStaleLeg(...)` beside
  * it, and for the same reason: a rung that can never age would answer "live" on
  * every tick for ever, and the interval that exists to re-render it would never

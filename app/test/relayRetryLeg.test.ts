@@ -23,6 +23,7 @@ import {
   InProcessOutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
 import type { SendMessageParams } from '../src/adapters/messaging.js';
+import { createMediaStore } from '../src/adapters/mediaStore.js';
 import {
   _resetForTests,
   configureJobsLogger,
@@ -572,6 +573,42 @@ describe('relay.retryLeg (30003 ladder)', () => {
     });
   });
 
+  // Code review R1, F4: the fan-out logs this ERROR (relayFanOut.ts:1015-1024)
+  // precisely because the degradation is otherwise invisible - `hasForwardableMedia`
+  // folds "no store" into the transport intent and an MMS retry silently
+  // re-sends text only.
+  it('ERRORs when the retry row carries media and no MediaStore is configured', async () => {
+    // The seam under test is the LAZY build: with no explicit store the handler
+    // calls createMediaStore(), which returns undefined with MEDIA_BUCKET unset.
+    // Asserted so this fails loudly rather than silently if that ever changes.
+    expect(createMediaStore()).toBeUndefined();
+    seedRelay(world);
+    const row = seedRetryRow(world, {
+      media: [{ s3Key: 'relay/photo.jpg', contentType: 'image/jpeg' }],
+    });
+    register({ mediaStore: undefined });
+
+    await runHandler(payloadFor(row));
+
+    const line = errorLogs().find((l) => l['mediaCount'] === 1);
+    expect(line).toMatchObject({ event: 'relay_retry_leg', relay: true, mediaCount: 1 });
+    expect(String(line!['msg'])).toContain('media dropped');
+    // The ERROR records the degradation; it does not stop the rung.
+    expect(world.sent).toHaveLength(1);
+    // No PII on the new line, as on every other one.
+    expect(JSON.stringify(capture.lines)).not.toContain(BOB);
+  });
+
+  it('logs no media-without-store ERROR when the row carries no media', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    register({ mediaStore: undefined });
+
+    await runHandler(payloadFor(row));
+
+    expect(errorLogs()).toHaveLength(0);
+  });
+
   it('addresses the RETRY row, never the root, and passes the transient pass number', async () => {
     seedRelay(world);
     const row = seedRetryRow(world);
@@ -719,6 +756,40 @@ describe('relay.retryLeg (30003 ladder)', () => {
     );
     // No close code: the job wrote no slot on this path.
     expect(errorLogs().some((l) => l['closeCode'] !== undefined)).toBe(false);
+  });
+
+  // Code review R1, F7 - the ONE exception to S2's "write nothing". The gate and
+  // `sendOneRelayLeg` both ask `isMemberSuppressed`; if the answer flips between
+  // them the extraction stamps `contact_opted_out`, which
+  // `presentRelayDelivery` filters out of the denominator - on a one-member
+  // relay group the rollup returns null and the leg vanishes from the surface.
+  it('re-stamps a suppressed retry leg as retry_opted_out, never contact_opted_out', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    // The race the gate cannot see: the extraction answers `suppressed` after
+    // the gate above already answered "not suppressed".
+    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+      kind: 'suppressed',
+      errorCode: 'contact_opted_out',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(slotOf(row.tsMsgId)).toMatchObject({
+      status: 'failed',
+      errorCode: 'retry_opted_out',
+    });
+    expect(slotOf(row.tsMsgId)?.errorCode).not.toBe('contact_opted_out');
+    // The terminal ERROR still fires, and now names the code the job wrote.
+    expect(errorLogs()).toContainEqual(
+      expect.objectContaining({
+        event: 'relay_retry_leg',
+        retryClaim: 'gate_refused',
+        legOutcome: 'suppressed',
+        closeCode: 'retry_opted_out',
+      }),
+    );
   });
 
   it('leaves a carrier-filtered leg at 30007 and reports code_not_retryable', async () => {
@@ -892,6 +963,25 @@ describe('relay.retryLeg backoff seam (E2E_RELAY_RETRY_BACKOFF_MS)', () => {
   it('falls back to 60/120/240 with no registration at all', async () => {
     expect(await delaysForRungs()).toEqual([60, 120, 240]);
   });
+
+  // Code review R1, F5 - PRODUCTION'S topology, which no case covered. The app
+  // process registers NO handlers when JOBS_QUEUE_URL is set (`index.ts`), yet
+  // it is where the status webhook enqueues every rung, so the module-scope
+  // store is empty at the only call site. Before F5 the env was read solely at
+  // registration, so a backoff supplied that way was silently ignored exactly
+  // where the ladder is scheduled.
+  it('reads the override on the FREE enqueue when nothing registered', async () => {
+    process.env[ENV_KEY] = '9000';
+    expect(await delaysForRungs()).toEqual([9, 9, 9]);
+  });
+
+  it.each(['abc', '0', '-5', '', '  '])(
+    'ignores the malformed value %j on the free enqueue too',
+    async (value) => {
+      process.env[ENV_KEY] = value;
+      expect(await delaysForRungs()).toEqual([60, 120, 240]);
+    },
+  );
 
   it('lets an explicit deps.backoffMs win over the registered one', async () => {
     process.env[ENV_KEY] = '3000';

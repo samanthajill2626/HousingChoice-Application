@@ -36,10 +36,10 @@ export function relayRetryProviderSid(digest: string, attempt: number): string {
 
 /**
  * Why no retry is running - the shared vocabulary of D23's `retryClaim` log
- * field, extended by adjudication S2a to the eleven outcomes that rule actually
- * has to describe. It lives HERE, in the pure module, so the webhook (which
- * claims) and the retry job (which closes) cannot disagree about the name of an
- * outcome, and so neither has to import the other.
+ * field, extended by adjudication S2a to the outcomes that rule actually has to
+ * describe and by code review R1 (F2) to one more. It lives HERE, in the pure
+ * module, so the webhook (which claims) and the retry job (which closes) cannot
+ * disagree about the name of an outcome, and so neither has to import the other.
  *
  * `claimed` and `already_claimed` mean a ladder is (or already was) running;
  * every other value is a decline or a terminal close.
@@ -55,4 +55,14 @@ export type RelayRetryClaimOutcome =
   | 'source_unreadable'
   | 'slot_ineligible'
   | 'code_not_retryable'
-  | 'enqueue_failed';
+  | 'enqueue_failed'
+  /**
+   * An internal fault WHILE claiming - the claim helper threw (a DynamoDB
+   * throttle or timeout on the consistent read, the roster read behind the leg
+   * copy, or the retry row's own `append`, which rethrows a condition failure).
+   * ERROR, and it takes its own message: nothing about the CARRIER failed, so a
+   * line reading like an unreachable handset would misattribute ours as theirs.
+   * Added by code review R1 (F2), which is also what stops the throw skipping
+   * the webhook tail's failure marker, SSE and placement escalation.
+   */
+  | 'claim_failed';

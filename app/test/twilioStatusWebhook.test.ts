@@ -1182,7 +1182,12 @@ describe('relay delivery-failure severity (D23)', () => {
    */
   async function seedRelayLeg(
     world: FakeWorld,
-    opts: { senderKey?: string; rung?: number } = {},
+    opts: {
+      senderKey?: string;
+      rung?: number;
+      /** The member's slot as the fan-out left it, BEFORE this callback. */
+      slot?: { status: 'sent' | 'delivered' | 'undelivered' | 'failed'; errorCode?: string };
+    } = {},
   ): Promise<void> {
     world.conversations.set(RELAY_CONV, {
       conversationId: RELAY_CONV,
@@ -1208,7 +1213,7 @@ describe('relay delivery-failure severity (D23)', () => {
       deliveryStatus: 'delivered',
       relaySenderKey: opts.senderKey ?? 'c-alice',
       body: 'is the unit still available?',
-      deliveryRecipients: { [RELAY_MEMBER_KEY]: { status: 'sent' } },
+      deliveryRecipients: { [RELAY_MEMBER_KEY]: opts.slot ?? { status: 'sent' } },
       ...(opts.rung !== undefined && {
         relayRetryOf: RELAY_ROOT_KEY,
         relayRetryMemberKey: RELAY_MEMBER_KEY,
@@ -1330,6 +1335,88 @@ describe('relay delivery-failure severity (D23)', () => {
     );
     expect(line).toBeDefined();
     expect(line!['msg']).not.toBe('twilio relay-recipient delivery failed (undelivered/failed)');
+  });
+
+  // Code review R1, F1: a leg whose slot already reads `delivered` did NOT end
+  // on 30003. This is the reordering ALLOWED_PRIOR exists to absorb - the slot
+  // write correctly refuses the regression - and on main the same callback is a
+  // WARN. ERRORing it would make the shipped alarm set strictly larger than the
+  // approved one, in the direction of false positives.
+  it('keeps a 30003 replayed onto an already-DELIVERED slot at WARN', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world, { slot: { status: 'delivered' } });
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
+    expect(relayFailureLines(capture, WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'slot_ineligible', errorCode: '30003' }),
+    );
+    // The slot itself is untouched - the leg really did deliver.
+    const src = await world.messagesRepo.getByProviderSid(RELAY_SOURCE_SID);
+    expect(src?.delivery_recipients?.[RELAY_MEMBER_KEY]?.status).toBe('delivered');
+  });
+
+  // The other half of the same outcome (D8's one real contradiction): the leg
+  // ended on 30007, which was logged at 30007's OWN severity when it landed. A
+  // later contradictory 30003 is not a second dead end.
+  it('keeps a 30003 landing on a slot that already reads 30007 at WARN', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world, { slot: { status: 'undelivered', errorCode: '30007' } });
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
+    expect(relayFailureLines(capture, WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'slot_ineligible', errorCode: '30003' }),
+    );
+    const src = await world.messagesRepo.getByProviderSid(RELAY_SOURCE_SID);
+    expect(src?.delivery_recipients?.[RELAY_MEMBER_KEY]?.errorCode).toBe('30007');
+  });
+
+  // Sec 7 intention 14 names "the 1:1 AND native-group-text paths"; only the 1:1
+  // half had a case (code review R1, F3). A group leg resolves as a MESSAGE, not
+  // through a relaysid pointer, so it never reaches the relay branch at all: the
+  // shared set decides it, 30003 is still a carve-out there, and no retryClaim
+  // is attached to anything.
+  it('leaves a native group-text 30003 receipt unchanged', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+    const group = await world.conversationsRepo.createGroupTextThread({
+      conversationId: 'gt-30003-severity',
+      members: [
+        { contactId: 'contact-T', phone: TENANT_PHONE },
+        { contactId: 'contact-O', phone: '+15550100009' },
+      ],
+    });
+    await world.messagesRepo.append({
+      conversationId: group.item.conversationId,
+      providerSid: 'SMgroup30003',
+      providerTs: '2026-06-12T10:00:00.000Z',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'group body',
+      deliveryStatus: 'queued',
+    });
+
+    await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({
+        MessageSid: 'SMgroup30003',
+        MessageStatus: 'undelivered',
+        ErrorCode: '30003',
+      }),
+    );
+
+    expect(capture.atLevel(ERROR).filter((l) => l['event'] === 'delivery_failed')).toHaveLength(0);
+    const warn = capture
+      .atLevel(WARN)
+      .find((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMgroup30003');
+    expect(warn).toBeDefined();
+    expect(warn!['relay']).toBeUndefined();
+    expect(warn!['retryClaim']).toBeUndefined();
   });
 
   // The 1:1 and native-group-text paths are FENCED and must not move: they still

@@ -49,19 +49,15 @@ export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   // relay.retryLeg (the 30003 ladder): one backed-off rung per failed relay leg,
   // metered by the same shared bucket - it is a real outbound SMS.
   //
-  // The lane shortens the ladder so a browser test does not wait 60s for rung 1.
-  // Ignored unless the value parses to a positive integer, so a stray env var
-  // cannot silently shorten a real ladder. This is CONFIGURATION, not structural
-  // absence: production reads nothing here and keeps 60/120/240.
-  const relayRetryBackoffOverride = Number.parseInt(
-    process.env['E2E_RELAY_RETRY_BACKOFF_MS'] ?? '',
-    10,
-  );
-  registerRelayRetryLegJobHandler(
-    Number.isInteger(relayRetryBackoffOverride) && relayRetryBackoffOverride > 0
-      ? { tokenBucket: deps.tokenBucket, backoffMs: () => relayRetryBackoffOverride }
-      : { tokenBucket: deps.tokenBucket },
-  );
+  // NO backoff is passed here, and that is the point (code review R1, F5). The
+  // lane's `E2E_RELAY_RETRY_BACKOFF_MS` is read inside relayRetryLeg.ts, by the
+  // one chain BOTH the registration and the free `enqueueRelayRetryLeg` resolve
+  // through. Parsing it here instead would reach only the process that
+  // registers - and in production that is the WORKER, while every rung is
+  // enqueued by the status webhook in the APP process, which registers nothing
+  // (`index.ts`, `if (!config.jobsQueueUrl)`). The hermetic lane runs both in
+  // one process, which is why the seam works there either way.
+  registerRelayRetryLegJobHandler({ tokenBucket: deps.tokenBucket });
   registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket });
   registerMissedCallAutoTextJobHandler({ tokenBucket: deps.tokenBucket });
   registerVoiceTranscriptJobHandlers();

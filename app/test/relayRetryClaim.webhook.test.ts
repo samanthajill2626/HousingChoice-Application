@@ -391,9 +391,14 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     await seedSource({ bobSlot: { status: 'failed', errorCode: '30007' } });
     await postRootFailure();
     expect(retryRows()).toHaveLength(0);
-    expect(failureLines(ERROR)).toContainEqual(
+    // WARN, not ERROR (code review R1, F1): this leg ended on 30007 and was
+    // logged at 30007's own severity when it did. The contradictory 30003 is not
+    // a second dead end - the severity battery in twilioStatusWebhook.test.ts
+    // owns that rule; here the point is the OUTCOME.
+    expect(failureLines(WARN)).toContainEqual(
       expect.objectContaining({ retryClaim: 'slot_ineligible' }),
     );
+    expect(failureLines(ERROR)).toHaveLength(0);
   });
 
   // D7: the fence is POSITIVE. A negative one ("not system") passes on an
@@ -601,6 +606,57 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
       errorCode: 'enqueue_failed',
       transportAggregationState: 'excluded',
     });
+  });
+
+  // --- a THROW inside the claim --------------------------------------------
+
+  // Code review R1, F2. The helper cannot RETURN out of the handler, but it can
+  // THROW - `append` rethrows a condition failure, and every read it makes can
+  // time out. Unguarded, the rejection would 500 the callback and skip the whole
+  // tail; on Twilio's redelivery nothing transitions, so the placement
+  // escalation would be lost for that leg for good.
+  it('reaches the tail with claim_failed when the claim itself throws', async () => {
+    await seedSource();
+    await seedPlacement();
+    let rejected = false;
+    const realAppend = world.messagesRepo.append.bind(world.messagesRepo);
+    world.messagesRepo.append = async (message) => {
+      if (!rejected) {
+        rejected = true;
+        throw new Error('dynamodb throttled');
+      }
+      return realAppend(message);
+    };
+
+    await postRootFailure();
+
+    expect(rejected).toBe(true);
+    expect(retryRows()).toHaveLength(0);
+    // The failure marker still fires, names the internal fault, and ERRORs -
+    // this is a terminal 30003 with no retry running.
+    expect(failureLines(ERROR)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'claim_failed' }),
+    );
+    expect(failureLines(WARN)).toHaveLength(0);
+    // Its own message, like `source_unreadable`: nothing about the carrier failed.
+    const marker = failureLines(ERROR).find((l) => l['retryClaim'] === 'claim_failed')!;
+    expect(marker['msg']).not.toBe('twilio relay-recipient delivery failed (undelivered/failed)');
+    // A separate diagnostic ERROR carries the cause itself, and no phone.
+    const detail = capture
+      .atLevel(ERROR)
+      .find((l) => l['retryClaim'] === 'claim_failed' && l['event'] !== 'delivery_failed');
+    expect(detail).toBeDefined();
+    expect(JSON.stringify(detail)).not.toContain(BOB);
+    // The EXISTING SSE still fires (the slot did transition), and the escalation
+    // still runs exactly once - the two things the tail exists for.
+    expect(
+      world.emitted.filter(
+        (e) =>
+          e.event === 'message.persisted' &&
+          (e.payload as { tsMsgId?: string }).tsMsgId === rootKey,
+      ),
+    ).toHaveLength(1);
+    expect(escalations()).toHaveLength(1);
   });
 
   // --- the SSE on claim ----------------------------------------------------

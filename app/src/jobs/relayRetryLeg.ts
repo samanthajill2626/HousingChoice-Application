@@ -122,13 +122,25 @@ export interface RelayRetryLegJobDeps {
 }
 
 /**
- * Registration-scoped backoffs, kept at MODULE scope on purpose.
+ * Registration-scoped backoffs, kept at MODULE scope on purpose - and, since
+ * code review R1 (F5), NOT the only place the ladder override can come from.
  *
- * Rung 1 is enqueued by the status WEBHOOK, which holds no deps object, so a
- * backoff that lived only inside the handler closure would never reach it and
- * the lane override would shorten rungs 2-3 while rung 1 still waited 60s.
- * `enqueueRelayRetryLeg` therefore resolves explicit deps first, then whatever
- * registration stored, then the shared default.
+ * There are TWO topologies and the resolution has to be right in both:
+ *
+ *   - PRODUCTION. `JOBS_QUEUE_URL` is set, so the app process registers NO
+ *     handlers (`index.ts:42`, "Production never registers handlers in the
+ *     app") - yet the app process is exactly where `enqueueRelayRetryLeg` runs,
+ *     because the status webhook enqueues every rung of the ladder. This store
+ *     is therefore EMPTY at the only call site. Nothing was broken by that (the
+ *     fallback equals production's 60/120/240), but a backoff handed to
+ *     `registerRelayRetryLegJobHandler` would have been silently ignored in
+ *     production while appearing to work locally.
+ *   - THE HERMETIC LANE (and local `npm run dev`). One process registers the
+ *     handler and serves the webhook, so the store IS populated at the call
+ *     site and carries the lane's shortened rung to rung 1.
+ *
+ * `resolveRelayRetryBackoff` below is the single chain both use, which is why
+ * the env override is read HERE rather than only at the registration site.
  */
 let registeredBackoffMs: ((attempt: number) => number) | undefined;
 let registeredTransientBackoffMs: ((pass: number) => number) | undefined;
@@ -137,6 +149,35 @@ let registeredTransientBackoffMs: ((pass: number) => number) | undefined;
 export function _resetRelayRetryLegForTests(): void {
   registeredBackoffMs = undefined;
   registeredTransientBackoffMs = undefined;
+}
+
+/** The lane's ladder override. LANE-ONLY: never set in dev or prod and absent
+ *  from every `.env*`, and ignored unless it parses to a positive integer, so a
+ *  stray value cannot silently shorten a real ladder. */
+const RELAY_RETRY_BACKOFF_ENV_KEY = 'E2E_RELAY_RETRY_BACKOFF_MS';
+
+function laneBackoffOverride(): ((attempt: number) => number) | undefined {
+  const parsed = Number.parseInt(process.env[RELAY_RETRY_BACKOFF_ENV_KEY] ?? '', 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+  return () => parsed;
+}
+
+/**
+ * The retry ladder's backoff, resolved ONE way for every producer:
+ *
+ *   explicit deps  ??  what registration stored  ??  the lane env override  ??
+ *   the shared 60/120/240 default
+ *
+ * Both `registerRelayRetryLegJobHandler` and the free `enqueueRelayRetryLeg`
+ * call it, which is what makes the two topologies above agree. Registration
+ * resolves once and stores the result, so the in-process lane reads the env a
+ * single time; the app process, which registers nothing, resolves it per
+ * enqueue. Exported so a test can assert the chain directly.
+ */
+export function resolveRelayRetryBackoff(
+  deps?: Pick<RelayRetryLegJobDeps, 'backoffMs'>,
+): (attempt: number) => number {
+  return deps?.backoffMs ?? registeredBackoffMs ?? laneBackoffOverride() ?? relayRetryBackoffMs;
 }
 
 /**
@@ -149,7 +190,7 @@ export async function enqueueRelayRetryLeg(
   attempt: number,
   deps?: Pick<RelayRetryLegJobDeps, 'backoffMs'>,
 ): Promise<void> {
-  const backoff = deps?.backoffMs ?? registeredBackoffMs ?? relayRetryBackoffMs;
+  const backoff = resolveRelayRetryBackoff(deps);
   await enqueue(RELAY_RETRY_LEG_JOB, payload, {
     runAt: new Date(Date.now() + backoff(attempt)),
   });
@@ -215,7 +256,12 @@ function readRetryLineage(row: MessageItem, retryTsMsgId: string): RetryRowLinea
 
 export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {}): void {
   const log = deps.logger ?? defaultLogger;
-  registeredBackoffMs = deps.backoffMs ?? relayRetryBackoffMs;
+  // Resolved ONCE, through the same chain the free enqueue uses, and stored so
+  // rung 1 - which the status WEBHOOK enqueues with no deps object - gets the
+  // identical function in the in-process topology. `_resetRelayRetryLegForTests`
+  // clears the store between registrations (`defineJobHandler` throws on a
+  // second registration of the same name anyway).
+  registeredBackoffMs = resolveRelayRetryBackoff(deps);
   registeredTransientBackoffMs = deps.transientBackoffMs ?? fanOutBackoffMs;
   const transientBackoff = registeredTransientBackoffMs;
 
@@ -410,6 +456,20 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       return;
     }
 
+    // The fan-out's media-without-store ERROR, twinned (code review R1, F4).
+    // `hasForwardableMedia` above folds "no store" into the transport intent, so
+    // without this line an MMS retry silently degrades to text - and on a
+    // versioned row the seeded `requestedTransport: 'mms'` then sits beside an
+    // SMS send with nothing anywhere saying why. Config-dependent (MEDIA_BUCKET
+    // unset) and absent from dev and prod, which is exactly why the fan-out logs
+    // it: the failure is otherwise invisible. IDs and a count only, no PII.
+    if (sourceMedia.length > 0 && store === undefined) {
+      log.error(
+        { ...memberLog, mediaCount: sourceMedia.length },
+        'relayRetryLeg: retry row has media but no MediaStore - resending body only, media dropped',
+      );
+    }
+
     // 5. The send. This unit presigns per attempt (spec D13), writes the
     // delivery slot AND the `relaysid#` pointer - neither is written again here
     // - and sends the STORED leg copy verbatim (spec D12), so a sender renamed
@@ -502,12 +562,33 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     // terminal slot carrying that arm's specific error code (adjudication S2).
     // Writing one here would replace a precise code with a vaguer one, so this
     // job only emits D23's terminal ERROR.
+    //
+    // ONE exception, and it is the reason `RelayRetryCloseCode`'s docblock
+    // excludes `contact_opted_out` (code review R1, F7). The gate above and
+    // `sendOneRelayLeg` both ask `isMemberSuppressed`; if the answer FLIPS
+    // between the two reads, the extraction stamps `contact_opted_out` on a
+    // retry row - and `presentRelayDelivery` filters that code out of the
+    // denominator (`deliveryStatus.ts:408`), so on a one-member relay group the
+    // whole rollup returns null and the leg reads "Not sent - opted out" for a
+    // leg that WAS sent and rejected by the carrier. `retry_opted_out` says the
+    // same thing and stays on the surface. Written through the transport-aware
+    // path so a legacy row still takes the whole-slot write. NOTE the bound: on
+    // a VERSIONED row the extraction's own terminal code is already durable, and
+    // `applyRecipientSendResult` deliberately preserves the FIRST terminal code
+    // (`messagesRepo.ts`, `terminalCurrent && statusSame`), so the re-stamp
+    // lands on the legacy shape - the ordinary one, since every relay source
+    // written before 2026-09-02 is legacy.
+    if (outcome.kind === 'suppressed') await closeTerminally('retry_opted_out');
     log.error(
       {
         ...memberLog,
         retryClaim: outcome.kind === 'filtered' ? 'code_not_retryable' : 'gate_refused',
         errorCode: outcome.errorCode,
         legOutcome: outcome.kind,
+        // Only the suppressed arm writes a slot on this path, so only it names a
+        // close code - the file's contract is that `closeCode` appears where the
+        // JOB wrote one.
+        ...(outcome.kind === 'suppressed' && { closeCode: 'retry_opted_out' as const }),
       },
       'relayRetryLeg: retry leg ended terminally at the send',
     );

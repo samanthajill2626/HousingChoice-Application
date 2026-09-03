@@ -43,6 +43,9 @@ work map's (T1-T15 = plan Tasks 1-15).
   21610 stays WARN, `fenced_announcement` stays WARN, `claimed` is WARN, and
   every terminal 30003 on a fan-out/team leg is ERROR - exactly the set the
   founder approved.
+  **AMENDED by code-review-r1 F1: the WARN outcomes are `claimed`,
+  `already_claimed`, `fenced_announcement` and `slot_ineligible`** - a leg whose
+  slot already reads `delivered` or another terminal code did not end on 30003.
 - **S3 (M) the post-send bump overwrites the inbox preview backwards.** ACCEPT.
   `touchLastActivityPreservingStatus(conversationId, preview: string |
   undefined, at)` and the retry job passes `undefined`: the founder's D16

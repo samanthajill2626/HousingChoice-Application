@@ -47,6 +47,7 @@ produces. That also means it cannot be diagnosed by re-running the file.
 | merge base | `main` @ d4298abe | 1 failed / 265 passed | FAILED, this signature |
 | branch run 2 | `docs/media-cache-risk-accepted` | 3 failed / 263 passed | FAILED, this signature |
 | relay-30003 gate 4 | `feat/relay-30003-retry-lineage` @ 17bf49a7 (main @ f82c149c merged in) | 1 failed / 266 passed (17.7m) | FAILED, this signature (`:591`, byte-identical) |
+| relay-30003 final battery | `feat/relay-30003-retry-lineage` @ cce7e752 (same merge base) | 1 failed / 266 passed (19.7m) | FAILED, this signature; the file alone on the same commit: `6 passed (52.1s)` |
 
 The branch carried a one-header change to an unrelated route, so the base run is
 the load-bearing row: **main alone reproduces it.** 3/3 full runs, 0/1 isolated

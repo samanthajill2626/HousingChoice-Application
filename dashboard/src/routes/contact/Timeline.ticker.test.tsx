@@ -728,6 +728,13 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
 
   const ROOT = 'r1';
 
+  /** The chip text for this fixture in each retry state. The trailing reason is
+   *  the ORIGINAL leg's own 30003, which the projection now carries into both
+   *  danger states (code review R2, W5) - so these are full, exact strings and
+   *  not substrings. */
+  const RETRYING_CHIP = 'delivered 1/2 - 1 retrying - Phone unreachable (error 30003)';
+  const NOT_CONFIRMED_CHIP = 'delivered 1/2 - 1 not confirmed - Phone unreachable (error 30003)';
+
   /** The ORIGINAL, with NO tickable leg of its own: one delivered, one hard
    *  failed. Both are terminal, so anything the interval does here is the retry
    *  clause's doing and nothing else's. */
@@ -770,7 +777,7 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
     // The control: the same original ALONE schedules nothing (the SILENT_CASES
     // table above proves that shape), so this call is the retry clause's.
     expect(spies.set).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('delivered 1/2 - 1 retrying')).toBeInTheDocument();
+    expect(screen.getByText(RETRYING_CHIP)).toBeInTheDocument();
   });
 
   it('flips retrying to not confirmed as the clock passes the budget - observable: the rendered chip text, with no refetch and no item change', () => {
@@ -778,13 +785,13 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
     renderTimeline({
       items: [originalWithNoLiveLeg(t0), retryRow(t0, { status: 'queued' })],
     });
-    expect(screen.getByText('delivered 1/2 - 1 retrying')).toBeInTheDocument();
+    expect(screen.getByText(RETRYING_CHIP)).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
     });
 
-    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
   });
 
   it('STOPS on its own horizon - observable: window.clearInterval with the ticker id, and setInterval never runs a second time', () => {
@@ -817,7 +824,7 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
       items: [originalWithNoLiveLeg(t0), retryRow(strandedSince, { status: 'queued' })],
     });
 
-    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
     expect(spies.set).not.toHaveBeenCalled();
 
     act(() => {
@@ -842,7 +849,7 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
       ],
     });
 
-    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
     expect(screen.queryByText(/retrying/)).not.toBeInTheDocument();
     expect(spies.set).not.toHaveBeenCalled();
 
@@ -852,7 +859,37 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
       vi.advanceTimersByTime(A_LONG_WHILE_MS);
     });
     expect(spies.set).not.toHaveBeenCalled();
-    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
+  });
+
+  // Code review R2, W8. The two halves of D18 must share ONE gate. The
+  // PROJECTION is fenced on `rosterKind === 'relay'`; the ticker clause was not,
+  // so a native group text carrying a row with `relay_retry_of` armed an
+  // interval whose re-renders could change no pixel - the projection that would
+  // read the state is not running in that product. Inert today (nothing outside
+  // a relay conversation carries the field), which is what makes this a fence:
+  // the row below is illegitimate ON PURPOSE.
+  it('does NOT arm for a retry row on a native GROUP TEXT roster - observable: window.setInterval was never called', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [originalWithNoLiveLeg(t0), retryRow(t0, { status: 'queued' })],
+      rosterKind: 'group_text',
+    });
+
+    // The CONTROL: the identical item set on a relay roster arms exactly once
+    // ("ARMS for a live retry with no other activity" above), so this zero is
+    // the roster gate's doing and nothing else's.
+    expect(spies.set).not.toHaveBeenCalled();
+    // ...and no amount of clock movement changes that.
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).not.toHaveBeenCalled();
+    // The bubble reads the fenced product's own answer: no retry state at all,
+    // so the failed leg is still simply failed and neither retry word appears.
+    expect(screen.queryByText(/retrying/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not confirmed/)).not.toBeInTheDocument();
   });
 
   it('CLEARS the interval once the retry resolves - observable: window.clearInterval with the ticker id after a rerender that delivers the rung', () => {

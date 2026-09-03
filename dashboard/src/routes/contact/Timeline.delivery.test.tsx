@@ -1017,19 +1017,38 @@ describe('Timeline relay retry states - the chip, the recital and the row togeth
   // projection overlays the quiet rung's own status, which is what lets the row
   // say it at all: the ORIGINAL's status is terminal, and a terminal status can
   // never present as not-confirmed.
-  it('reads a stranded claim as not confirmed on the row as well as the chip', () => {
+  //
+  // AND IT NAMES THE CARRIER FAILURE, at all three positions (code review R2,
+  // W5). This is the stranded-claim state - the one R2's finding 1.1 composed:
+  // no alarm, no Retry affordance, and, before this, no carrier code anywhere on
+  // the bubble either. The LABEL is unchanged; the code rides the `reason`
+  // channel `Retrying` already used.
+  it('reads a stranded claim as not confirmed, with the carrier reason, at all three positions', () => {
     renderTimeline({
       items: [original(), retryRow({ attempt: 1, atMs: QUIET_MS, leg: { status: 'queued' } })],
       relayRoster: RELAY_ROSTER,
     });
 
     const rollup = screen.getByRole('img');
-    expect(rollup).toHaveTextContent('delivered 1/2 - 1 not confirmed');
-    expect(rollup).toHaveAccessibleName(/Lars Landlord: Queued, not confirmed/);
+    // POSITION 1 - the rollup chip, label then reason.
+    expect(rollup).toHaveTextContent(
+      'delivered 1/2 - 1 not confirmed - Phone unreachable (error 30003)',
+    );
+    // POSITION 2 - the accessible-name recital.
+    expect(rollup).toHaveAccessibleName(
+      /Lars Landlord: Queued, not confirmed, Phone unreachable \(error 30003\)/,
+    );
+    // POSITION 3 - the per-recipient row. `getByText` is EXACT, so this asserts
+    // the whole rendered string rather than a substring of it.
     revealOriginal();
     expect(
-      within(screen.getByRole('list', { name: LIST_NAME })).getByText('Queued - not confirmed'),
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(
+        'Queued - not confirmed - Phone unreachable (error 30003)',
+      ),
     ).toBeInTheDocument();
+    // The promise is still ours to make, not the carrier's - D20's rule holds
+    // for this state exactly as it does for `Retrying`.
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
   });
 
   // THE IDENTITY CASE, and it is the one protecting every relay thread in the

@@ -599,17 +599,19 @@ function recipientSummaryName(
   if (rows.length === 0 || anonymous) return spoken;
   const recital = rows.map((row) => {
     const who = row.name.note !== undefined ? `${row.name.label}, ${row.name.note}` : row.name.label;
-    const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, nowMs);
-    // A presentation that carries its OWN reason wins. `Retrying` is the one
-    // that does (D19): its reason has to ride the presentation because the
-    // fallback below fires only on `isFailure`, and `Retrying` deliberately is
-    // not one - `isFailure` is what offers a Retry action, and offering one
-    // while a rung is in flight is the double-send this feature prevents.
+    // The SAME reason options this recital's own fallback uses, handed to the
+    // presenter so its baked-in reasons cannot be derived a different way (R2,
+    // W6): one `{ media, relay }` for the presentation and for the fallback.
+    const reasonOpts = { media, relay: rosterKind === 'relay' };
+    const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, nowMs, reasonOpts);
+    // A presentation that carries its OWN reason wins. `Retrying` and
+    // `unconfirmed` are the two that do (D19, R2 W5): their reason has to ride
+    // the presentation because the fallback below fires only on `isFailure`, and
+    // neither deliberately is one - `isFailure` is what offers a Retry action,
+    // and offering one while a rung is in flight, or while a ladder may still
+    // have landed, is the double-send this feature prevents.
     const legReason =
-      leg?.reason ??
-      (leg?.isFailure === true
-        ? deliveryReason(row.slot.errorCode, { media, relay: rosterKind === 'relay' })
-        : undefined);
+      leg?.reason ?? (leg?.isFailure === true ? deliveryReason(row.slot.errorCode, reasonOpts) : undefined);
     const transport = includeRecipientTransport ? presentRecipientTransport(row.slot) : null;
     const details = [
       leg === null ? null : chipText(leg, legReason),
@@ -840,6 +842,12 @@ function bubbleClocks(
  * `items`), and it is REQUIRED for the same reason `tickNow` is: an omitted one
  * would silently disable the retry half of the escalation rather than fail.
  */
+/** The retry index a NON-relay roster gets: empty, and the SAME object every
+ *  time, so the memo that produces it and the ticker memo that reads it both
+ *  stay referentially stable. Every reader below is read-only (`.get`), which is
+ *  what makes one shared instance safe. */
+const EMPTY_RETRY_INDEX: Map<string, RelayRetryRow[]> = new Map();
+
 function hasTickableLeg(
   msg: TimelineMessage,
   tickNow: number,
@@ -1227,7 +1235,17 @@ function MessageBubble({
       {showRecipients && revealed ? (
         <ul className={styles.recipientList} aria-label={RECIPIENT_LIST_LABEL}>
           {recipientRows.map((row) => {
-            const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, bubbleNowMs);
+            // ONE options bag for the presenter's baked-in reasons and for this
+            // row's own fallback (R2, W6) - see the identical pairing in
+            // `recipientSummaryName`.
+            const rowReasonOpts = { media: isMms, relay: isRelayLeg };
+            const leg = presentLegDelivery(
+              row.slot,
+              rosterKind,
+              messageAtMs,
+              bubbleNowMs,
+              rowReasonOpts,
+            );
             // A reason renders only when THIS row's own presentation isFailure,
             // mirroring the message-level rule. An errorCode does NOT imply
             // failure: the fan-out writes a transient carrier code onto a leg it
@@ -1245,17 +1263,16 @@ function MessageBubble({
             // retry" tail, because no relay retry is scheduled - while a native
             // group text, whose 30003 retry IS real, keeps the promise.
             //
-            // A presentation carrying its OWN reason wins over both, and today
-            // exactly one does: `Retrying` (D19). Its reason cannot come from
-            // the call below, which fires only on `isFailure` - and `Retrying`
-            // deliberately is not one, because `isFailure` is what offers a
-            // Retry action and offering one mid-rung is the double-send this
-            // feature exists to prevent.
+            // A presentation carrying its OWN reason wins over both, and two do:
+            // `Retrying` (D19) and the `unconfirmed` state (R2, W5). Neither
+            // reason can come from the call below, which fires only on
+            // `isFailure` - and neither state deliberately is one, because
+            // `isFailure` is what offers a Retry action and offering one
+            // mid-rung, or on a ladder that may yet have landed, is the
+            // double-send this feature exists to prevent.
             const legReason =
               leg?.reason ??
-              (leg?.isFailure === true
-                ? deliveryReason(row.slot.errorCode, { media: isMms, relay: isRelayLeg })
-                : undefined);
+              (leg?.isFailure === true ? deliveryReason(row.slot.errorCode, rowReasonOpts) : undefined);
             // Recipient slots inherit legacy compatibility from their parent.
             // Missing slot facts are unresolved only on version-1 messages.
             const recipientTransport =
@@ -2004,7 +2021,22 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // It is threaded down rather than derived per bubble because a bubble cannot
   // see its own retry rows: they are not in `visible`, and they are separate
   // items rather than fields on the original.
-  const retryIndex = useMemo(() => indexRelayRetries(items), [items]);
+  //
+  // ROSTER-GATED, exactly as the projection is (code review R2, W8). Both halves
+  // of D18 read this index and they must share ONE gate: the projection is
+  // already fenced on `isRelayLeg`, so on a native group text an index built
+  // here could only feed the TICKER - arming an interval whose every re-render
+  // is a no-op, because nothing downstream of it consults a retryState in that
+  // product. Inert today (nothing outside a relay conversation carries
+  // `relay_retry_of`), which is why this is a fence and not a fix.
+  //
+  // `EMPTY_RETRY_INDEX` is a module constant so the memo's identity is stable
+  // for a group text and the `tickerArmed` memo below does not recompute on
+  // every render.
+  const retryIndex = useMemo(
+    () => (rosterKind === 'relay' ? indexRelayRetries(items) : EMPTY_RETRY_INDEX),
+    [items, rosterKind],
+  );
 
   // THE STALENESS TICKER (spec S7 / plan D-c). ONE interval per THREAD, not one
   // per bubble, bumping the `tickNow` every MessageBubble already reads.

@@ -240,9 +240,16 @@ export function isRetryRungLive(row: RelayRetryRow, nowMs: number | undefined): 
  * fill-in: a rung that never sent must clear the original's `sentAt` instead of
  * inheriting it, or the row times a send this attempt never made.
  *
- * `errorCode` is CLEARED. The original's carrier code belongs to the attempt
- * that earned it; a code beside a deciding rung that delivered - or that is
- * merely quiet - is a contradiction the four independent reason sites read.
+ * `errorCode` is CLEARED ON THE DELIVERED PATH ONLY, and that asymmetry is the
+ * whole of `keepErrorCode` (code review R2, W5 - this AMENDS build ruling B1,
+ * which cleared it on both). A rung that DELIVERED makes the original's carrier
+ * code history: an effective `delivered` beside a live 30003 is a contradiction
+ * the four independent reason sites read. A rung that merely went QUIET makes it
+ * nothing of the kind - the leg still failed 30003, that is why a ladder exists
+ * at all, and the retry we cannot confirm has not un-failed it. Clearing it
+ * there left the stranded-claim state with NO carrier code at any position: not
+ * on the row, not in the recital, not on the chip. D19's LABELS are untouched -
+ * this is the presentation's `reason` channel, which `Retrying` already uses.
  *
  * `requestedTransport` is PRESERVED from the original, and it is the one field
  * that must be: an inbound retry row never carries a message-level
@@ -254,6 +261,7 @@ export function isRetryRungLive(row: RelayRetryRow, nowMs: number | undefined): 
 function withDecidingRung(
   slot: RelayRecipientDelivery,
   leg: RelayRecipientDelivery,
+  keepErrorCode = false,
 ): RelayRecipientDelivery {
   const {
     errorCode: _clearedWithTheFailedAttempt,
@@ -267,6 +275,7 @@ function withDecidingRung(
   } = slot;
   return {
     ...preserved,
+    ...(keepErrorCode && slot.errorCode !== undefined && { errorCode: slot.errorCode }),
     status: leg.status,
     ...(leg.sid !== undefined && { sid: leg.sid }),
     ...(leg.sentAt !== undefined && { sentAt: leg.sentAt }),
@@ -362,9 +371,15 @@ function projectOneLeg(
   //    the same leg under "not confirmed". `status` still carries only values
   //    the closed `DeliveryStatus` union admits: a non-terminal rung is
   //    `queued` or `sent` by construction.
+  //
+  //    THE ORIGINAL'S CARRIER CODE SURVIVES THIS ONE (code review R2, W5). The
+  //    leg still failed 30003 and a retry we cannot confirm has not un-failed
+  //    it, so the code is still the truth about this leg - and without it the
+  //    stranded-claim state named no carrier failure at any position, on the
+  //    surface this feature exists to make truthful. Only `delivered` clears it.
   const quiet = rungs.filter((rung) => !isRetryRungTerminal(rung)).at(-1);
   if (quiet !== undefined) {
-    return { ...withDecidingRung(slot, quiet.leg), retryState: 'unconfirmed' };
+    return { ...withDecidingRung(slot, quiet.leg, true), retryState: 'unconfirmed' };
   }
 
   // 4. Otherwise every rung ended and none delivered. The close code comes from
@@ -394,9 +409,11 @@ function projectOneLeg(
  *    code of its own.
  *  - `delivered-on-retry` and `unconfirmed` overlay the DECIDING rung's leg -
  *    `status`, `sid`, `sentAt`, `deliveredAt`, `actualTransport`,
- *    `transportAggregationState` - and clear `errorCode`. See
- *    `withDecidingRung` for why that is a replacement rather than a fill-in,
- *    and why `requestedTransport` is the field it must preserve.
+ *    `transportAggregationState`. `delivered-on-retry` also clears `errorCode`;
+ *    `unconfirmed` KEEPS the original's (code review R2, W5 - a ladder we
+ *    cannot confirm has not un-failed the leg). See `withDecidingRung` for why
+ *    the overlay is a replacement rather than a fill-in, and why
+ *    `requestedTransport` is the field it must preserve.
  *
  * A member with no retry rows gets a copy of its slot and NO `retryState`, so a
  * thread that has never had a retry projects to exactly what it started with.

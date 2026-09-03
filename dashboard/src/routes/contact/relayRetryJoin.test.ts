@@ -362,15 +362,34 @@ describe('projectRelayLegs - what it must not touch', () => {
     // A rung that never sent has no clock, no sid and no actual transport, so
     // the original's are CLEARED rather than inherited: the row must not time a
     // send this attempt never made.
+    //
+    // `errorCode` is the ONE exception (code review R2, W5, amending build
+    // ruling B1). The leg really did fail 30003 and a ladder we cannot confirm
+    // has not un-failed it, so the code stays - it is the only thing that lets
+    // the row, the recital and the chip name a carrier failure in this state at
+    // all. Contrast the DELIVERED overlay above, which still clears it.
     expect(legs).toEqual({
       status: 'queued',
       retryState: 'unconfirmed',
+      errorCode: '30003',
       transportAggregationState: 'attempted',
       requestedTransport: 'sms',
     });
-    expect(legs).not.toHaveProperty('errorCode');
     expect(legs).not.toHaveProperty('sentAt');
     expect(legs).not.toHaveProperty('sid');
+  });
+
+  // The same rule on the OTHER half of `unconfirmed` - a rung that did send and
+  // got no receipt. Stated separately because the two halves overlay different
+  // rung shapes and only one of them has a clock of its own.
+  it('keeps the originals carrier code on a QUIET SENT rung too', () => {
+    const sentAtMs = NOW - STALE_SENT_AFTER_MS - 1;
+    const legs = project(
+      [retryItem({ attempt: 1, leg: sentLeg(sentAtMs), atMs: sentAtMs - 5_000 })],
+      NOW,
+    );
+
+    expect(legs).toMatchObject({ retryState: 'unconfirmed', errorCode: '30003' });
   });
 
   it('carries a QUIET SENT rungs clock, so the row times the attempt that stalled', () => {

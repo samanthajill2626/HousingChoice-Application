@@ -319,6 +319,23 @@ const STATUS_UNKNOWN_SID_RETRY_DELAY_MS = 2_500;
 // stay WARN: a transient code we're still auto-retrying (not yet terminal), and a
 // provider-side opt-out (21610 = correctly honoring STOP — the platform working,
 // not a failure). See docs/GLOSSARY / the error-vs-warn decision rule.
+//
+// READ THIS BEFORE TRUSTING THE 30003 CARVE-OUT. "still auto-retrying" is a
+// claim about the path the leg is on, and it is NOT true on every path:
+//
+//   - NATIVE GROUP TEXT: the 30003 arm below enqueues messaging.retrySend, whose
+//     handler goes through sendMessage, which REFUSES a group_text conversation
+//     outright (GroupTextSendNotSupportedError, services/sendMessage.ts:298-300).
+//     The retry is enqueued and never sends, so the WARN records a promise the
+//     repo already disproves. Tracked, unverified end to end, in
+//     docs/issues/group-text-30003-leg-retry-promise-unverified.md - which is
+//     where a fix belongs; do not "fix" it by widening this set.
+//   - RELAY: this set no longer decides relay severity at all. The relay branch
+//     reads isTerminalRelayLegFailure below, which is attempt-aware - WARN while
+//     a rung is actually claimed, ERROR once the ladder is a real dead end.
+//
+// The set's VALUES are unchanged, and the 1:1 path they still govern is the one
+// path where the promise holds.
 const TRANSIENT_RETRYING_DELIVERY_CODES = new Set(['30003']);
 const EXPECTED_NONFAILURE_DELIVERY_CODES = new Set(['21610']);
 

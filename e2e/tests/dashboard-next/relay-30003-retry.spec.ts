@@ -57,11 +57,12 @@ import { expectTodayReady } from '../../support/today.js';
 // original leg, so the next message to that handset runs the normal
 // queued -> sent -> delivered progression. The settle pattern is relay-open-stop's.
 //
-// THE LANE SHORTENS THE LADDER. `E2E_RELAY_RETRY_BACKOFF_MS` (set to 3000 in
-// scripts/e2e-session.mjs's childEnv, read in app/src/jobs/registerHandlers.ts)
+// THE LANE SHORTENS THE LADDER. `E2E_RELAY_RETRY_BACKOFF_MS` (set to 10000 in
+// scripts/e2e-session.mjs's childEnv, read in app/src/jobs/relayRetryLeg.ts)
 // replaces the 60/120/240 production ladder for this lane only, so rung 1 fires
-// three seconds after the claim instead of sixty. It is configuration, not
-// structural absence: production reads nothing and keeps its ladder.
+// ten seconds after the claim instead of sixty. It is configuration, not
+// structural absence: production reads nothing and keeps its ladder. That value
+// is also this file's OBSERVATION WINDOW - see the poll below.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 // The settle barrier for the create-time intro fan-out: a substring of
@@ -216,11 +217,14 @@ test('a failed relay leg retries to delivered without duplicating: chip, accessi
       {
         timeout: 30_000,
         // A TIGHT, FLAT CADENCE, deliberately. The retrying window is exactly as
-        // long as the lane's backoff (3s) minus the SSE round trip, and the
-        // default schedule has already widened to 1s intervals by the time the
-        // claim lands - about three samples inside the window, fewer on a slow
-        // machine. 250ms costs ~120 cheap evaluates at the ceiling and buys an
-        // order of magnitude more chances to observe a state that is REAL.
+        // long as the lane's backoff (10s since code review R1's F6, up from 3s)
+        // minus the SSE round trip, and the default schedule has already widened
+        // to 1s intervals by the time the claim lands. 250ms costs ~120 cheap
+        // evaluates at the ceiling and buys an order of magnitude more chances
+        // to observe a state that is REAL. If this ever goes flaky the fix is to
+        // raise the lane backoff again, NEVER to weaken or delete the assertion:
+        // without it the spec passes on a build that pushes nothing at claim
+        // time, which is the whole content of D16.
         intervals: [250],
         message:
           'the rollup chip never read "1 retrying" - the claim must emit its own SSE (D16), ' +

@@ -251,13 +251,22 @@ const childEnv = {
   // debounce, the worker polls real time - a fast cadence would let the worker
   // race tick-driven specs for due rows (tick.processed assertions).
   EVENT_BRIDGE_URL: `http://127.0.0.1:${ports.app}`,
-  // Relay 30003 retry ladder (spec Sec 7): shorten rung 1 from 60s to 3s so the
+  // Relay 30003 retry ladder (spec Sec 7): shorten rung 1 from 60s to 10s so the
   // browser proof can watch a leg go retrying and then deliver inside its budget.
   // LANE-ONLY - never set in dev or prod, and absent from every .env*.example.
-  // Read by app/src/jobs/registerHandlers.ts, which ignores anything that does
-  // not parse to a positive integer, so production keeps 60/120/240. This is
-  // CONFIGURATION, not structural absence: the seam ships, the value does not.
-  E2E_RELAY_RETRY_BACKOFF_MS: '3000',
+  // Read by app/src/jobs/relayRetryLeg.ts (resolveRelayRetryBackoff), which
+  // ignores anything that does not parse to a positive integer, so production
+  // keeps 60/120/240. This is CONFIGURATION, not structural absence: the seam
+  // ships, the value does not.
+  //
+  // TEN seconds, not three (code review R1, F6). This value IS the observation
+  // window for the spec's D16 assertion: the chip reads `1 retrying` only
+  // between the claim's SSE and the rung landing, and the window is this number
+  // MINUS the SSE round trip and the dashboard's debounced refetch. At 3000 the
+  // one real assertion in the file was racing render latency of the same order;
+  // at 10000 the window dwarfs it. It costs the suite about seven seconds, and
+  // the spec's own 60s settle budget absorbed a 3.3s reality with room to spare.
+  E2E_RELAY_RETRY_BACKOFF_MS: '10000',
   // Pass the lane to child processes so they can self-identify if needed.
   E2E_LANE: String(lane),
 };

@@ -232,7 +232,10 @@ forbids overwriting.
 the enqueue strands a retry: the row exists, nothing sends, and the leg settles
 to `unconfirmed` rather than a permanent `retrying`, but no ERROR is emitted
 because nobody observes it - closing that needs the reconciliation sweep this
-issue puts out of scope. The relay member-key collapse is worked AROUND, not
+issue puts out of scope. That window now has its own OPEN issue, with the
+interleaving, the `dueRow` fix and the duplicate-send trap written out:
+[`relay-retry-stranded-claim-window`](./relay-retry-stranded-claim-window.md).
+The relay member-key collapse is worked AROUND, not
 fixed; see
 [`relay-member-key-collapses-two-phones-one-contact`](./relay-member-key-collapses-two-phones-one-contact.md),
 which stays OPEN and records the two retry-path guards. And every attempt

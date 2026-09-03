@@ -1354,6 +1354,12 @@ export function createFakeWorld(): FakeWorld {
       const out: MediaPointer[] = [];
       for (const m of messages) {
         if (m.conversationId !== conversationId) continue;
+        // D13: a relay RETRY row indexes NOTHING - the real `append` skips the
+        // pointer writes for it (`messagesRepo.ts`, the `!isRelayRetryRow`
+        // guard). The fake derives the index from stored rows instead of
+        // writing pointers, so without this the fake would answer the OPPOSITE
+        // of production for a retry row carrying media.
+        if (typeof m.relay_retry_of === 'string' && m.relay_retry_of.length > 0) continue;
         mediaAttachmentsOf(m).forEach((a, index) => {
           const sortKey = mediaPointerSk(m.tsMsgId, index);
           if (before !== undefined && !(sortKey < before)) return;

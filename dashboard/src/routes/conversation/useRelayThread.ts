@@ -127,8 +127,9 @@ export function toTimelineMessage(m: Message): TimelineMessage | TimelineCall | 
     // a lineage value that is not named here is dropped before render even
     // though the raw row carried it across the wire - `imported_from` below is
     // the precedent for adding one. The thread-level join (relayRetryJoin.ts)
-    // reads these four; the destination digest and the composed leg copy are
-    // stored server-side and never sent, so there is nothing to forward.
+    // reads these four. The destination digest and the composed leg copy DO
+    // arrive - GET /conversations/:id/messages returns the stored row as-is
+    // (D11) - and are deliberately not projected: neither has a client use.
     ...(typeof m.relay_retry_of === 'string' && { relay_retry_of: m.relay_retry_of }),
     ...(typeof m.relay_retry_member_key === 'string' && {
       relay_retry_member_key: m.relay_retry_member_key,

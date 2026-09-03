@@ -380,9 +380,11 @@ export interface RelayDeliveryOptions extends DeliveryReasonOptions {
   /** D19's retry-aware arithmetic and copy. OFF by default, and the default is
    *  load-bearing: absent or false, this presenter IGNORES `retryState` entirely
    *  and is byte-identical to its pre-retry self, which is what keeps the shared
-   *  `Delivered N/N` success label - also serving native group text and the
-   *  broadcasts routes - exactly where it is. Only the relay Timeline sets it,
-   *  and only once it has a thread-level projection to pass. */
+   *  `Delivered N/N` success label exactly where it is. Its other consumer is
+   *  the SAME Timeline rendered with `rosterKind='group_text'` - not the
+   *  broadcasts routes, which import `presentDeliveryStatus` and
+   *  `deliveryReason` only. Only the relay Timeline sets this flag, and only
+   *  once it has a thread-level projection to pass. */
   retryAware?: boolean;
   /** This bubble IS a retry row - D22's phantom-second-send guard. Read ONLY
    *  under `retryAware`, and it exists because the join cannot supply this from
@@ -549,8 +551,9 @@ export function presentRelayDelivery(
       };
     }
     // The shared all-delivered label, CAPITAL D, is emitted ONLY when no leg is
-    // on retry: it also serves native group text and the broadcasts routes, and
-    // it means "finalized clean". A ladder that had to run says so in lowercase,
+    // on retry: it also serves native group text (this same presenter, called
+    // from the Timeline with `rosterKind='group_text'`), and it means
+    // "finalized clean". A ladder that had to run says so in lowercase,
     // still success-toned, because every leg did in the end deliver.
     return onRetrySuffix === undefined
       ? { label: `Delivered ${total}/${total}`, tone: 'success', isFailure: false }

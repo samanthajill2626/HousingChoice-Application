@@ -730,7 +730,9 @@ export interface NewMessage {
   // --- Relay 30003 retry lineage (spec D11/D12) -----------------------------
   // A relay retry is a NEW source row addressed to ONE member, not a promotion
   // of the failed leg (D1), so it carries its own lineage back to the leg it
-  // retries. Six values stored; four reach the wire (D11). Absent on every
+  // retries. Six values stored; the dashboard PROJECTS four (D11). All six
+  // reach the browser - GET /conversations/:id/messages returns the row as-is -
+  // so "projected" is the honest word and "on the wire" is not. Absent on every
   // other message - a row carrying relayRetryOf IS a retry row.
   /** D11: the root source row's tsMsgId - the key the thread-level join buckets on. */
   relayRetryOf?: string;

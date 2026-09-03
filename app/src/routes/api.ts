@@ -2294,6 +2294,17 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // what tells the browser the recording is SEEKABLE. Without it the native
     // scrubber renders but refuses to move - the whole bug this route had.
     res.setHeader('Accept-Ranges', 'bytes');
+    // SAME declared posture as the MMS media route below (Cameron, 2026-09-02):
+    // immutable per CallSid, `private` so only this session's browser holds it
+    // and no shared proxy/CDN ever does. Declared rather than left to browser
+    // heuristics - an authenticated PII response should never have an UNSTATED
+    // caching policy, and a scrubbed-through recording is re-requested by range
+    // constantly, so a cacheable window is what makes playback usable at all.
+    // The accepted residual (a one-hour local-machine reuse window) and the
+    // reasoning behind accepting it are recorded in
+    // docs/issues/authenticated-mms-media-browser-cache.md - the two routes are
+    // deliberately kept in lockstep, so change them together or not at all.
+    res.setHeader('Cache-Control', 'private, max-age=3600');
     if (object.contentLength !== undefined) {
       res.setHeader('Content-Length', String(object.contentLength));
     }
@@ -2383,7 +2394,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     if (object.contentLength !== undefined) {
       res.setHeader('Content-Length', String(object.contentLength));
     }
-    // Immutable per (MessageSid, idx); private so only this session's browser caches it.
+    // Immutable per (MessageSid, idx); private so only this session's browser
+    // caches it and no shared proxy/CDN ever does. The accepted residual - a
+    // one-hour reuse window on an already-signed-in machine, which `private`
+    // does NOT key to the session cookie - is recorded with its reasoning in
+    // docs/issues/authenticated-mms-media-browser-cache.md. The call-recording
+    // route above declares the SAME header deliberately; change them together.
     res.setHeader('Cache-Control', 'private, max-age=3600');
     log.info({ providerSid, mediaIndex: idx, tier: resolved.tier }, 'streaming inbound MMS media to the dashboard');
     object.body.on('error', (err) => {

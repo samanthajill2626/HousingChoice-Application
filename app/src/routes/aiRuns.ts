@@ -62,9 +62,8 @@ function contactDisplay(contact: ContactDisplayItem): AiRunContactDisplay {
  * load-bearing half: a fractional or non-positive limit used to floor to 0,
  * and the repo's `opts.limit ?? DEFAULT` does not replace 0, so DynamoDB got
  * Limit: 0 and answered a ValidationException. Modeled on inbox.ts parseLimit,
- * then hardened: inbox's copy still parses `?limit=` to a ONE-row page
- * (docs/issues/inbox-parselimit-empty-one-row.md) - do not "re-sync" this
- * function back to it.
+ * then hardened; inbox's copy adopted the same predicate on 2026-09-02
+ * (docs/issues/inbox-parselimit-empty-one-row.md), so the two now agree.
  *
  * An EMPTY or whitespace value is ABSENT, exactly as `optionalParam` reads
  * before/from/to: `Number('')` and `Number(' ')` are both 0, which IS an

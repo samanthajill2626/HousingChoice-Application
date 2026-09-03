@@ -2,12 +2,30 @@
 id: unknown-queue-status-flip-duplicates-across-pages
 title: A mid-walk `status` write duplicates or skips an Unknown-tab row across pages, because the cursor carries a position and not a seen-set
 type: bug
-severity: med
+severity: low
 status: open
 area: app/inbox
 created: 2026-08-26
+updated: 2026-09-02
 refs: app/src/routes/inbox.ts, app/src/lib/unknownQueue.ts, app/src/repos/contactsRepo.ts, dashboard/src/routes/inbox/useInbox.ts, app/test/inboxUnknownTab.test.ts
 ---
+
+**Downgraded med -> low, 2026-09-02 (human ruling, mission M6 rescope). The
+documented acceptance (option 3 below) STANDS; the snapshot predicate is NOT
+to be built.** Reachability, restated so the severity reads against it: the
+defect needs a queue longer than ONE dashboard page (30 live rows with an open
+non-relay thread) AND an operator status write in the gap between two Load
+more clicks. The live partitions were 16 unknown contacts in dev and 7 in prod
+on 2026-08-25, and the hermetic `lean` lane measured 0 on 2026-09-02
+(`--audit-triage-partition --no-status-narrow`), so no multi-page walk exists
+anywhere today and condition 1 is unmet. The mechanism is real and proved (the
+probes below), which is why this stays OPEN rather than closing as wontfix. The
+sibling page-head defect, which shared this cursor's "position and nothing
+else" root, was closed 2026-09-02 by giving the cursor a deferral marker
+([`unknown-queue-page-head-drop-after-filled-page`](unknown-queue-page-head-drop-after-filled-page.md));
+that marker names one row and does not carry a seen-set, so it changes nothing
+here. The reopen trigger below is unchanged: escalate when the live partition
+exceeds one page.
 
 **Problem.** The Unknown tab pages the `(type='unknown')` byTypeStatus partition
 as an ordered sequence of `(type, status)` BLOCKS - `needs_review` first, then

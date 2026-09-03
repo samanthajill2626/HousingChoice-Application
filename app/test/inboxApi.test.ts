@@ -270,7 +270,7 @@ describe('GET /api/inbox (C8)', () => {
   // RENAMED 2026-08-26 (fix wave 2, F6). The old name was "400 on
   // filter=unknown with any cursor (the unknown feed mints none)", and BOTH
   // claims died when the feed became paged: minting cursors is now that feed's
-  // whole purpose, and a valid `{q,b,k}` cursor returns 200 (the real-index
+  // whole purpose, and a valid `{q,b,k,d}` cursor returns 200 (the real-index
   // paged walk in test/inbox.integration.test.ts). The assertion itself was
   // always about a FOREIGN cursor - `{idx:0}` is the `all` feed's shape - so
   // the test was passing under a name that told a grepper the opposite.
@@ -279,6 +279,50 @@ describe('GET /api/inbox (C8)', () => {
     const foreign = Buffer.from(JSON.stringify({ idx: 0 }), 'utf8').toString('base64url');
     const res = await auth(request(app).get(`/api/inbox?filter=unknown&cursor=${foreign}`));
     expect(res.status).toBe(400);
+  });
+
+  // --- ?limit= parsing (docs/issues/inbox-parselimit-empty-one-row.md) -------
+  describe('?limit= that is empty, whitespace, zero or negative serves the DEFAULT page, not one row', () => {
+    // Three rows is enough to tell a default-sized page (all three, no cursor)
+    // from the one-row page the old floor served. `limit=1` is the control
+    // that proves the fixture CAN page.
+    function seedThree(world: World): void {
+      for (let i = 1; i <= 3; i += 1) {
+        seedContact(world, { contactId: `c-lim-${i}`, type: 'tenant', firstName: `T${i}`, phone: `+1555000010${i}` });
+        seedConversation(world, `conv-lim-${i}`, {
+          participant_phone: `+1555000010${i}`,
+          last_activity_at: `2026-06-1${i}T10:00:00.000Z`,
+        });
+      }
+    }
+
+    it.each([
+      ['empty', 'limit='],
+      ['whitespace', 'limit=%20'],
+      ['zero', 'limit=0'],
+      ['negative', 'limit=-5'],
+    ])('%s -> the default page', async (_label, query) => {
+      const { app, world } = makeWebhookHarness();
+      seedThree(world);
+      const res = await auth(request(app).get(`/api/inbox?${query}`));
+      expect(res.status).toBe(200);
+      expect(res.body.rows).toHaveLength(3);
+      expect(res.body.nextCursor).toBeNull();
+    });
+
+    it('limit=1 (the control) serves ONE row; limit=1000 clamps rather than 400ing', async () => {
+      const { app, world } = makeWebhookHarness();
+      seedThree(world);
+      // The harness's conversations fake mints no LastEvaluatedKey, so only
+      // the row count is asserted here; the cursor contract is pinned by the
+      // real-index walks in test/inbox.integration.test.ts.
+      const one = await auth(request(app).get('/api/inbox?limit=1'));
+      expect(one.status).toBe(200);
+      expect(one.body.rows).toHaveLength(1);
+      const big = await auth(request(app).get('/api/inbox?limit=1000'));
+      expect(big.status).toBe(200);
+      expect(big.body.rows).toHaveLength(3);
+    });
   });
 
   // --- S4: the native group-text filter -------------------------------------

@@ -326,6 +326,10 @@ describe('filter=unknown - the contact-side read', () => {
         'a wrong type',
         { q: 1, b: 0, k: { type: 'tenant', status: 'needs_review', contactId: 'a1' } },
       ],
+      // THE PROVENANCE FIELD (2026-09-02). `d` never reaches DynamoDB, but it
+      // LICENSES a row drop, so a malformed one is refused, not ignored.
+      ['a deferral marker that is not a contactId', { q: 1, b: 0, d: 7 }],
+      ['an empty deferral marker', { q: 1, b: 0, d: '' }],
     ];
     for (const [, payload] of tampered) {
       const cursor = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -343,6 +347,14 @@ describe('filter=unknown - the contact-side read', () => {
     ).toString('base64url');
     await expect(
       aggregateInbox({ filter: 'unknown', limit: 25, cursor: honest }, deps),
+    ).resolves.toMatchObject({ rows: [] });
+    // ...with or without a deferral marker.
+    const honestDeferred = Buffer.from(
+      JSON.stringify({ q: 1, b: 0, d: 'c-x' }),
+      'utf8',
+    ).toString('base64url');
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: honestDeferred }, deps),
     ).resolves.toMatchObject({ rows: [] });
     // THE OTHER DIRECTION: an unknown cursor replayed under `all` would hand
     // the 'open' partition Query a byTypeStatus key.
@@ -463,17 +475,24 @@ describe('filter=unknown - the contact-side read', () => {
     // The failure is its OWN code path: the specific WARN with the contactId...
     const failLine = warn.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'));
     expect(failLine?.[0]).toMatchObject({ contactId: 'c-q2-broken' });
-    // ...and its OWN drop reason, distinct from the empty-thread-set drop. A
-    // build that routes this through the best-effort contactConversations seam
-    // (which returns [] for both) collapses these two counters into one and
-    // goes red here.
+    // ...and its OWN tally, distinct from the empty-thread-set drop. A build
+    // that routes this through the best-effort contactConversations seam
+    // (which returns [] for both) collapses the two into one drop and goes red
+    // here. A DEFERRAL IS NOT A DROP (2026-09-02, adversarial R2-5): the row is
+    // re-read next request, so `drops` must NOT carry the thread-read key on
+    // this page - only the step-over counts it. The failure is visible on the
+    // top-level `threadReadFailures` field instead.
     const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
-    expect(assembled?.drops).toMatchObject({ unknownThreadReadFailed: 1 });
+    expect(assembled?.drops?.unknownThreadReadFailed).toBeUndefined();
     expect(assembled?.threadReadFailures).toBe(1);
     // c-q3-empty is BEHIND the failed row and was never consumed, so its
     // no-open-thread drop has not happened yet. That is the point: the page
-    // stopped rather than reading past the failure.
-    expect(assembled?.drops).not.toHaveProperty('unknownNoOpenThread');
+    // stopped rather than reading past the failure. (With the deferral no
+    // longer counted, this page has NO drops at all, so the `drops` field is
+    // absent from the line - which is the contract: absence means nothing
+    // was dropped.)
+    expect(assembled?.drops?.unknownNoOpenThread).toBeUndefined();
+    expect(assembled?.drops).toBeUndefined();
   });
 
   it('a TRANSIENT thread-read failure costs a SHORT PAGE, not a lost row: the retry serves it', async () => {
@@ -536,7 +555,10 @@ describe('filter=unknown - the contact-side read', () => {
     // readUnknownQueue THROWS to outlaw one file over ("a Load more that never
     // advances and never ends", unknownQueue.ts's budget guard).
     //
-    // So the retry is capped at ONE. THE CAP NOW REQUIRES A CURSOR, and this pin
+    // So the retry is capped at ONE. THE CAP REQUIRES A DEFERRAL CURSOR NAMING
+    // THIS ROW (since 2026-09-02; from 2026-08-26 to then it required only that
+    // a cursor exist, which gave the first row after a filled page zero retries
+    // - see the two FILLED-page pins further down), and this pin
     // was REWRITTEN on 2026-08-26 (phase-6 review) because the version that
     // stood here asserted the cap firing on request ONE - a request that had
     // retried nothing, because there was no previous request to have retried it.
@@ -600,8 +622,9 @@ describe('filter=unknown - the contact-side read', () => {
     // COMPLETE (`nextCursor: null`), on the tab whose entire purpose is that
     // nothing rots unseen.
     //
-    // THE MUTATION PROBE: delete `resume !== undefined` from the page-head guard
-    // in app/src/routes/inbox.ts and this goes RED on the FIRST assertion below
+    // THE MUTATION PROBE: replace the page-head guard's first clause
+    // (`resume?.deferredContactId === contact.contactId`) in
+    // app/src/routes/inbox.ts with `true` and this goes RED on the FIRST assertion below
     // - request one drops c-p1-broken, serves the rows behind it and ends the
     // walk `nextCursor: null`, so the union of every page is missing a row while
     // the feed claims to be complete.
@@ -679,6 +702,103 @@ describe('filter=unknown - the contact-side read', () => {
     }
     expect(cursor).toBeNull();
     expect(seen.sort()).toEqual(['c-r1', 'c-r2', 'c-r4']);
+  });
+
+  it('the first row after a FILLED page gets its ONE retry too: a transient fault there is DEFERRED, never dropped', async () => {
+    // docs/issues/unknown-queue-page-head-drop-after-filled-page.md, closed
+    // 2026-09-02. The page-head cap used to fire on `resume !== undefined`,
+    // and a cursor minted by the page-FULL exit satisfied that just as well as
+    // one minted by a deferral - so the first row consumed after every filled
+    // page had ZERO retries: one transient fault and the walk stepped over it
+    // and reported itself complete. The cursor now carries WHY it was minted
+    // (`d`: the contactId a deferral stopped at), and only that row, failing
+    // again, is stepped over.
+    //
+    // THE MUTATION PROBE: change the guard in app/src/routes/inbox.ts back to
+    // `resume !== undefined` and request two below DROPS c-f3 (ERROR, rows
+    // [c-f4], walk ends) - the first `expect(second.rows).toEqual([])` goes red.
+    const seeds = [
+      queueContact('c-f1', 'needs_review', 120, '2026-06-12T01:00:00.000Z'),
+      queueContact('c-f2', 'needs_review', 121, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-f3-flaky', 'needs_review', 122, '2026-06-12T03:00:00.000Z'),
+      queueContact('c-f4', 'needs_review', 123, '2026-06-12T04:00:00.000Z'),
+    ];
+    const healthy: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+    };
+    const flaky: Seed = { ...healthy, threadLookupErrorPhone: seeds[2]!.contact.phone! };
+
+    // Page one FILLS at limit 2 and mints a page-full cursor.
+    const first = await aggregateInbox({ filter: 'unknown', limit: 2 }, makeDeps(healthy));
+    expect(first.rows.map((r) => r.contactId).sort()).toEqual(['c-f1', 'c-f2']);
+    expect(first.nextCursor).not.toBeNull();
+
+    // Request two: the fault lands on the FIRST row consumed after the fill.
+    const warn = vi.fn();
+    const error = vi.fn();
+    const second = await aggregateInbox(
+      { filter: 'unknown', limit: 2, cursor: first.nextCursor! },
+      makeDeps(flaky, emptyCalls(), { info: vi.fn(), warn, error }),
+    );
+    // DEFERRED: an empty page carrying a cursor AT the row, a WARN, no ERROR.
+    expect(second.rows).toEqual([]);
+    expect(second.nextCursor).not.toBeNull();
+    expect(warn.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'))?.[0])
+      .toMatchObject({ contactId: 'c-f3-flaky' });
+    expect(error.mock.calls.filter((c) => String(c[1]).includes('thread read FAILED'))).toEqual([]);
+
+    // The fault clears; the deferred row is SERVED and the walk completes.
+    const seen = [...first.rows.map((r) => r.contactId!)];
+    let cursor: string | null = second.nextCursor;
+    for (let pages = 0; pages < 8 && cursor !== null; pages += 1) {
+      const next: Awaited<ReturnType<typeof aggregateInbox>> = await aggregateInbox(
+        { filter: 'unknown', limit: 2, cursor },
+        makeDeps(healthy),
+      );
+      seen.push(...next.rows.map((r) => r.contactId!));
+      cursor = next.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    // NOT ONE ROW SHORT, from any page.
+    expect([...seen].sort()).toEqual(['c-f1', 'c-f2', 'c-f3-flaky', 'c-f4']);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('a PERMANENT fault after a filled page is deferred ONCE, then stepped over - the walk still terminates', async () => {
+    // The other half of the provenance change: the cap has to keep its
+    // termination guarantee. The deferred cursor NAMES the row, so the second
+    // failure on that same row is the one - and the only one - stepped over.
+    const seeds = [
+      queueContact('c-g1', 'needs_review', 130, '2026-06-12T01:00:00.000Z'),
+      queueContact('c-g2', 'needs_review', 131, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-g3-broken', 'needs_review', 132, '2026-06-12T03:00:00.000Z'),
+      queueContact('c-g4', 'needs_review', 133, '2026-06-12T04:00:00.000Z'),
+    ];
+    const seed: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+      threadLookupErrorPhone: seeds[2]!.contact.phone!,
+    };
+    const first = await aggregateInbox({ filter: 'unknown', limit: 2 }, makeDeps(seed));
+    expect(first.rows.map((r) => r.contactId).sort()).toEqual(['c-g1', 'c-g2']);
+
+    // Request two defers (WARN); request three drops (ERROR) and moves on.
+    const second = await aggregateInbox(
+      { filter: 'unknown', limit: 2, cursor: first.nextCursor! },
+      makeDeps(seed),
+    );
+    expect(second.rows).toEqual([]);
+    expect(second.nextCursor).not.toBeNull();
+    const error = vi.fn();
+    const third = await aggregateInbox(
+      { filter: 'unknown', limit: 2, cursor: second.nextCursor! },
+      makeDeps(seed, emptyCalls(), { info: vi.fn(), warn: vi.fn(), error }),
+    );
+    expect(third.rows.map((r) => r.contactId)).toEqual(['c-g4']);
+    expect(third.nextCursor).toBeNull();
+    expect(error.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'))?.[0])
+      .toMatchObject({ contactId: 'c-g3-broken' });
   });
 
   it('class b: a contact whose only threads are closed or relay_group yields no row', async () => {

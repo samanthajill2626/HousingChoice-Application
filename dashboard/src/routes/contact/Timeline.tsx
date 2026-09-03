@@ -6,8 +6,8 @@
 // never inline content - esp. relay-group content). A "Comms only" toggle hides
 // milestones; a reply box notes the target number and sends to the resolved
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
-// render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
-// first (roles/labels) so it's testable.
+// render as React text nodes and safety-checked anchors - never dangerouslySetInnerHTML.
+// Accessibility-first (roles/labels) so it's testable.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
@@ -22,7 +22,7 @@ import type {
   TimelineScheduled,
 } from '../../api/index.js';
 import { ApiError, confirmMmsMedia, presignMmsMedia, uploadToPresignedPost } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { LinkifiedText, Spinner } from '../../ui/index.js';
 import { ScheduledCard } from './ScheduledCard.js';
 import { deriveStreamAnchor, type StreamAnchor } from './streamAnchor.js';
 import {
@@ -1163,7 +1163,11 @@ function MessageBubble({
           Sent to the closed group chat
         </Link>
       ) : null}
-      {msg.body ? <div className={styles.body}>{msg.body}</div> : null}
+      {msg.body ? (
+        <div className={styles.body}>
+          <LinkifiedText text={msg.body} />
+        </div>
+      ) : null}
       <AttachmentGallery msg={msg} />
       <div className={styles.meta}>
         <span className={styles.metaText}>{meta}</span>
@@ -1599,8 +1603,8 @@ function CallCard({
  *  tag, a semibold subject, a ~140-char snippet, a from/to line (the sender on
  *  inbound), a "New address" chip on a first-seen inbound address, and a delivery
  *  chip on outbound; a "View full email" <details> discloses the full plain-text
- *  body, any Cc, and attachments. Message text always renders as TEXT (React
- *  escapes) - NEVER dangerouslySetInnerHTML. An inbound mail that carries
+ *  body, any Cc, and attachments. Message text renders as React text nodes and
+ *  safety-checked anchors - NEVER dangerouslySetInnerHTML. An inbound mail that carries
  *  sanitized HTML also gets a "View original formatting" <details> that LAZILY
  *  mounts the CSP-framed sandboxed EmailHtmlFrame (only once opened). */
 const EMAIL_SNIPPET_CHARS = 140;
@@ -1615,7 +1619,9 @@ function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
   const subject = msg.subject && msg.subject.trim().length > 0 ? msg.subject : '(no subject)';
   const bodyText = msg.body ?? '';
   const truncated = bodyText.length > EMAIL_SNIPPET_CHARS;
-  const snippet = truncated ? `${bodyText.slice(0, EMAIL_SNIPPET_CHARS).trimEnd()}...` : bodyText;
+  const snippetEnd = truncated
+    ? bodyText.slice(0, EMAIL_SNIPPET_CHARS).trimEnd().length
+    : bodyText.length;
   const cc = msg.email_cc ?? [];
   const fromTo = [
     msg.email_from ? `from ${msg.email_from}` : null,
@@ -1636,12 +1642,20 @@ function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
         <span className={styles.emailTime}>{formatTime(msg.at)}</span>
       </div>
       {fromTo ? <div className={styles.emailAddrLine}>{fromTo}</div> : null}
-      {snippet ? <div className={styles.emailSnippet}>{snippet}</div> : null}
+      {bodyText ? (
+        <div className={styles.emailSnippet}>
+          <LinkifiedText text={bodyText} displayEnd={snippetEnd} suffix={truncated ? '...' : undefined} />
+        </div>
+      ) : null}
       {hasMore ? (
         <details className={styles.emailDetails}>
           <summary className={styles.emailToggle}>View full email</summary>
           {cc.length > 0 ? <div className={styles.emailAddrLine}>cc {cc.join(', ')}</div> : null}
-          {bodyText ? <p className={styles.emailBody}>{bodyText}</p> : null}
+          {bodyText ? (
+            <p className={styles.emailBody}>
+              <LinkifiedText text={bodyText} />
+            </p>
+          ) : null}
           <AttachmentGallery msg={msg} />
         </details>
       ) : null}

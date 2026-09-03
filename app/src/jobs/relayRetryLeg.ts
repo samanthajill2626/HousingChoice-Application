@@ -32,6 +32,7 @@ import {
 } from '../adapters/messaging.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
+import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
@@ -105,6 +106,13 @@ export interface RelayRetryLegJobDeps {
   mediaStore?: MediaStore;
   /** Shared A2P pacing bucket - one token per real outbound SMS. */
   tokenBucket?: TokenBucket;
+  /**
+   * The live-update bus (D16's SSE, extended to the job's terminal closes).
+   * Injected for tests exactly as `jobs/voiceTranscript.ts` does it; the
+   * singleton is the default, and in the worker process `attachEventBridge`
+   * (`worker.ts`) forwards every emit to the app's SSE clients.
+   */
+  events?: EventBus;
   logger?: Logger;
   /**
    * The RETRY ladder's backoff (spec D6): 60s / 120s / 240s. Injected so the
@@ -304,10 +312,12 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
   // separate init flag drives the lazy build (not `??=`, which would rebuild).
   let mediaStore = deps.mediaStore;
   let mediaStoreInit = deps.mediaStore !== undefined;
+  let events = deps.events;
 
   defineJobHandler(RELAY_RETRY_LEG_JOB, async (rawPayload) => {
     const payload = parseRelayRetryLegPayload(rawPayload);
     adapter ??= createMessagingAdapter({ logger: deps.logger });
+    events ??= appEvents;
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
     contacts ??= createContactsRepo({ logger: deps.logger });
@@ -322,6 +332,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     const contactsRepo = contacts;
     const messagingAdapter = adapter;
     const store = mediaStore;
+    const eventBus = events;
 
     const conversationId = payload.relayConversationId;
     const retryTsMsgId = payload.retryTsMsgId;
@@ -359,6 +370,9 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     // add a close path for a row nothing else on this path needs.
     const { rootTsMsgId, memberKey, destDigest, legBody } = readRetryLineage(row, retryTsMsgId);
     const ladder = { ...base, rootTsMsgId, attempt: row.relay_retry_attempt };
+    // Read HERE, where `row` is narrowed: the nested close helpers below cannot
+    // see that narrowing (the same reason the repo/adapter locals above exist).
+    const rowDirection = row.direction;
 
     // 3. Transport MODE from the RETRY ROW itself (spec D2). `sendOneRelayLeg`
     // writes THIS row, whose own schema is what `applyRecipientSendResult`
@@ -387,6 +401,50 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       attempt: transientPass,
     };
 
+    /**
+     * D16's SSE, extended to the closes that happen INSIDE this job (self-QA
+     * finding P1, verified live 2026-09-02).
+     *
+     * D16 put an emit on the CLAIM because the chip would otherwise read a
+     * false terminal state for a whole backoff interval. The mirror-image hole
+     * is at the other end: every terminal close this job writes - the four D9
+     * gate refusals, `transient_cap`, the job's own `enqueue_failed`, and the
+     * `refused`/`filtered`/`suppressed` slots the extracted send unit wrote -
+     * used to change the row and announce NOTHING. A refused ladder therefore
+     * kept reading `retrying` until some unrelated SSE in some other
+     * conversation happened to arrive, and then aged into `not confirmed` at 15
+     * minutes - never the refusal reason the job had already stored. D16's own
+     * words apply unchanged: a false state, for minutes, on the surface this
+     * feature exists to make truthful.
+     *
+     * ALWAYS the ROOT, never `retryTsMsgId` (adjudication S4's reasoning, at
+     * the job end): the ladder's rollup hangs off the root, and on rungs 2-3
+     * the retry row's own key addresses a bubble no one is watching. Being the
+     * root also makes this emit IDENTICAL in shape to the claim's, which is
+     * what lets a client treat the two ends of a ladder the same way. The id is
+     * for HONESTY, not routing - the dashboard's consumer is a debounced full
+     * refetch that reads no payload field - so a mis-addressed emit would still
+     * "work" and would still be wrong.
+     *
+     * `deliveryStatus: 'failed'` mirrors what the webhook's relay emit passes on
+     * a failure; every close routed through here writes a `failed` slot.
+     * `direction` comes off the retry ROW, which the claim wrote as a mirror of
+     * the original (D2), so it equals the root's direction transitively.
+     *
+     * NOT called on `sent` (the rung's own Twilio callbacks reach the webhook's
+     * emit), on a transient RE-ENQUEUE (nothing terminal happened), or on
+     * `skipped_terminal` (the slot was already terminal before this job ran -
+     * whoever wrote it announced it then).
+     */
+    function announceRootClose(): void {
+      eventBus.emit('message.persisted', {
+        conversationId,
+        tsMsgId: rootTsMsgId,
+        direction: rowDirection,
+        deliveryStatus: 'failed',
+      });
+    }
+
     /** A pre-send gate refusal: mirrors the extracted unit's `suppressed` arm. */
     async function refuseGate(code: RelayRetryCloseCode): Promise<void> {
       if (transport.kind === 'versioned') {
@@ -402,6 +460,10 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
         { status: 'failed', errorCode: code },
         transport,
       );
+      // AFTER the durable write, on both close helpers: a client woken by this
+      // emit refetches immediately, and it must read the closed slot rather
+      // than race the write that closed it.
+      announceRootClose();
     }
 
     /** A POST-send terminal close: mirrors the fan-out's `closeRelay`, which
@@ -414,6 +476,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
         { status: 'failed', errorCode: code },
         transport,
       );
+      announceRootClose();
     }
 
     // 4. The gates (spec D9), in order. Each refusal writes its OWN close code,
@@ -626,5 +689,10 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       },
       'relayRetryLeg: retry leg ended terminally at the send',
     );
+    // The third terminal-close site (finding P1). The slot is closed and this
+    // job wrote none of it - which is exactly why the emit cannot live in the
+    // two close helpers alone. `sendOneRelayLeg` returned only after its own
+    // durable write, so this is still after it.
+    announceRootClose();
   });
 }

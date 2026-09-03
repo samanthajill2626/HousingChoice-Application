@@ -238,6 +238,8 @@ describe('relay.retryLeg (30003 ladder)', () => {
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
       mediaStore: world.mediaStore,
+      // The harness bus, whose every emission lands in `world.emitted`.
+      events: world.events,
       logger,
       ...overrides,
     });
@@ -264,6 +266,21 @@ describe('relay.retryLeg (30003 ladder)', () => {
   const errorLogs = (): Record<string, unknown>[] => capture.atLevel(50);
   const warnLogs = (): Record<string, unknown>[] => capture.atLevel(40);
   const infoLogs = (): Record<string, unknown>[] => capture.atLevel(30);
+
+  /**
+   * Every `message.persisted` the JOB raised (finding P1). Nothing else on this
+   * path emits - neither `persistRelayRecipientResult` nor `sendOneRelayLeg`
+   * takes a bus - so the count IS the job's own announcement count.
+   */
+  const persistedEmits = (): { event: string; payload: unknown }[] =>
+    world.emitted.filter((e) => e.event === 'message.persisted');
+  /** The payload of the single emit expected after a terminal close. */
+  const ROOT_CLOSE_EMIT = {
+    conversationId: CONV,
+    tsMsgId: ROOT_TS_MSG_ID,
+    direction: 'inbound',
+    deliveryStatus: 'failed',
+  };
 
   // --- D4: the marker, not the claim, is what defeats a duplicate DELIVERY ---
 
@@ -346,6 +363,13 @@ describe('relay.retryLeg (30003 ladder)', () => {
         rootTsMsgId: ROOT_TS_MSG_ID,
         attempt: 1,
       });
+      // Finding P1: the close ANNOUNCES, once, for the ROOT. Without it the
+      // refusal is durable but invisible - the chip keeps reading `retrying`
+      // until an unrelated SSE arrives, then ages into `not confirmed`.
+      // Length 1 over ALL message.persisted emits is what pins "for the ROOT":
+      // an emit addressed to `row.tsMsgId` would be a second entry here.
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
     },
   );
 
@@ -833,6 +857,79 @@ describe('relay.retryLeg (30003 ladder)', () => {
     expect(bumps).toHaveLength(0);
     expect(errorLogs()).toHaveLength(0);
     expect(slotOf(row.tsMsgId)?.status).toBe('delivered');
+    // No announcement either: the slot was terminal BEFORE this job ran, so
+    // whoever closed it announced then. This job observed no close.
+    expect(persistedEmits()).toHaveLength(0);
+  });
+
+  // --- Finding P1: every terminal close the JOB observes announces the ROOT ---
+  //
+  // D16 put an SSE on the CLAIM so the chip could not read a false terminal
+  // state for a whole backoff interval. The same hole sat at the other end: the
+  // job's closes changed the row and told nobody, so a refused ladder read
+  // `retrying` until an unrelated SSE arrived and then `not confirmed` at 15
+  // minutes - never the reason the job had stored. Observed live 2026-09-02.
+
+  it('announces the ROOT once when the transient pass budget is spent', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { fanoutAttempt: 3 });
+    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+      kind: 'transient',
+      errorCode: '429',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(slotOf(row.tsMsgId)?.errorCode).toBe('transient_cap');
+    expect(persistedEmits()).toHaveLength(1);
+    expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+  });
+
+  it('announces the ROOT once on a refused leg the extraction closed', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    world.adapter.sendPreparedMessage = async () => {
+      throw new SendRefusedError('breaker open', 'breaker_open');
+    };
+    register();
+
+    await runHandler(payloadFor(row));
+
+    // The job wrote NO slot here (the extracted send unit did), which is exactly
+    // why the emit cannot live only in the two close helpers.
+    expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'breaker_open' });
+    expect(persistedEmits()).toHaveLength(1);
+    expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+  });
+
+  it('announces NOTHING when the leg sent - the rung has its own callbacks', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent).toHaveLength(1);
+    // A sent rung reaches the webhook's own emit through its Twilio callbacks.
+    // Announcing here as well would report `failed` for a leg in flight.
+    expect(persistedEmits()).toHaveLength(0);
+  });
+
+  it('announces NOTHING on a transient re-enqueue - nothing terminal happened', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+      kind: 'transient',
+      errorCode: '429',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(outbound.delayed).toHaveLength(1);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(persistedEmits()).toHaveLength(0);
   });
 
   // --- Malformed input is a programming error, not a gate refusal ---

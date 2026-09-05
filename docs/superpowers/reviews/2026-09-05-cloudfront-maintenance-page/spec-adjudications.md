@@ -13,3 +13,9 @@ Reviewer A returned no findings. Reviewer B returned two HIGH findings and one M
 | B3 MEDIUM: deploy only uses an origin-local probe | REJECT the factual claim; clarify wording | `scripts/deploy.mjs:552` does probe locally, but lines 652-658 separately gate through CloudFront and explicitly distinguish success of the instance-side health check. The original status-retention requirement is valid for that second gate. Section 2 and section 5 now name both stages to prevent ambiguity. | No. |
 
 Round 1 changes one design decision. Continue reviewer B for a broad R2 review, including the revised copy/status contract and the rejected finding's evidence. No implementation or AWS action has been performed.
+
+## Round 2 - terminal
+
+Continued reviewer B reviewed the revised spec and adjudications, including the other review and planner finding. `spec-r2-reviewer-b.md` reports no actionable findings, confirms the 503 regression is avoided and hosted body proof is explicit, and concedes B3 after checking the separate CloudFront deploy gate.
+
+No design decision changed in round 2. The review has converged under the mission stop rule. The spec is ready for the human's written-spec review gate. No plan, implementation, completion gates, merge, or AWS action has been performed.

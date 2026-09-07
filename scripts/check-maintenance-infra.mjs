@@ -52,10 +52,71 @@ function requireBothMockRuns(label, output, outcomes) {
   }
 }
 
+function stripHclComments(source) {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+
+    if (inString) {
+      result += character;
+      if (escaped) {
+        escaped = false;
+      } else if (character === '\\') {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (lineComment) {
+      if (character === '\r' || character === '\n') {
+        lineComment = false;
+        result += character;
+      }
+      continue;
+    }
+
+    if (blockComment) {
+      if (character === '*' && next === '/') {
+        blockComment = false;
+        index += 1;
+      } else if (character === '\r' || character === '\n') {
+        result += character;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+      result += character;
+    } else if (character === '#') {
+      lineComment = true;
+    } else if (character === '/' && next === '/') {
+      lineComment = true;
+      index += 1;
+    } else if (character === '/' && next === '*') {
+      blockComment = true;
+      index += 1;
+    } else {
+      result += character;
+    }
+  }
+
+  return result;
+}
+
 function defaultForwardingSourceContract(label, source, expectedMarker) {
-  const blocks = source.match(/  default_cache_behavior \{[\s\S]*?\n  \}/g) ?? [];
-  const expectedLine = 'origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id';
-  const valid = blocks.length === 1 && blocks[0].split(expectedLine).length === 2;
+  const uncommentedSource = stripHclComments(source);
+  const blocks = uncommentedSource.match(/  default_cache_behavior \{[\s\S]*?\n  \}/g) ?? [];
+  const expectedAssignment = /^\s*origin_request_policy_id\s*=\s*data\.aws_cloudfront_origin_request_policy\.all_viewer_except_host\.id\s*$/gm;
+  const valid = blocks.length === 1 && (blocks[0].match(expectedAssignment) ?? []).length === 1;
   const output = valid
     ? 'source assertion passed (in-process check): default cache behavior preserves the app origin request policy.\n'
     : 'source assertion failed (in-process check): HC_MAINTENANCE_APP_PARITY: default cache behavior must preserve the app origin request policy.\n';
@@ -69,6 +130,32 @@ function defaultForwardingSourceContract(label, source, expectedMarker) {
     throw new Error(label + ': default cache behavior source contract failed; see ' + artifactDir);
   } else {
     process.stdout.write(label + ': expected result (in-process source assertion passed)\n');
+  }
+}
+
+function requireDefaultForwardingSourceFixtures(main, defaultBlock) {
+  const expectedLine = 'origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id';
+  const quotedLiteral = '"quoted # // /* */ /api/* \\"still quoted\\""';
+  const validCommentedSource = `${main}\nlocals {\n  source_guard_fixture = ${quotedLiteral}\n}\n# ${expectedLine}\n/* ${expectedLine} */\n`;
+  const fixtures = [
+    ['default-forwarding-comment-hash', replaceOne(main, defaultBlock,
+      replaceOne(defaultBlock, expectedLine, `origin_request_policy_id = null # ${expectedLine}`)),
+      'HC_MAINTENANCE_APP_PARITY'],
+    ['default-forwarding-comment-block', replaceOne(main, defaultBlock,
+      replaceOne(defaultBlock, expectedLine, `origin_request_policy_id = null /* ${expectedLine} */`)),
+      'HC_MAINTENANCE_APP_PARITY'],
+    ['default-forwarding-null-expression', replaceOne(main, defaultBlock,
+      replaceOne(defaultBlock, expectedLine,
+        'origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id == "" ? null : null')),
+      'HC_MAINTENANCE_APP_PARITY'],
+    ['default-forwarding-commented-quoted-strings', validCommentedSource, undefined],
+  ];
+
+  if (!stripHclComments(validCommentedSource).includes(quotedLiteral)) {
+    throw new Error('Source fixture lost quoted or escaped comment markers');
+  }
+  for (const [label, source, expectedMarker] of fixtures) {
+    defaultForwardingSourceContract(label, source, expectedMarker);
   }
 }
 
@@ -118,7 +205,7 @@ try {
   if (!block504) throw new Error('No unique 504 block available for fault tests');
   const defaultBlock = main.match(/  default_cache_behavior \{[^{}]*\}/)?.[0];
   if (!defaultBlock) throw new Error('No default behavior block available for fault tests');
-  const mutations = [
+  const terraformFaults = [
     ['missing-504', mainPath, replaceOne(main, block504, ''), 'HC_MAINTENANCE_MAPPINGS'],
     ['extra-503', mainPath, replaceOne(main, block504, block504 + '\n' + block504.replaceAll('504', '503')), 'HC_MAINTENANCE_MAPPINGS'],
     ['false-success', mainPath, replaceOne(main, block504, block504.replace(/response_code\s*=\s*504\b/, 'response_code = 200')), 'HC_MAINTENANCE_MAPPINGS'],
@@ -127,28 +214,26 @@ try {
       '"${aws_s3_bucket.maintenance.arn}/*"'), 'HC_MAINTENANCE_POLICY'],
     ['media-oac-removed', mainPath, replaceOne(main,
       'aws_cloudfront_origin_access_control.media[0].id', 'null'), 'HC_MAINTENANCE_MEDIA_PARITY'],
-    ['default-forwarding-removed', mainPath, replaceOne(main, defaultBlock,
-      replaceOne(defaultBlock, 'data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id', 'null')),
-      'HC_MAINTENANCE_APP_PARITY'],
   ];
+  const defaultForwardingFault = replaceOne(main, defaultBlock,
+    replaceOne(defaultBlock, 'data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id', 'null'));
+  requireDefaultForwardingSourceFixtures(main, defaultBlock);
   defaultForwardingSourceContract('baseline-default-forwarding-source', main);
   requireBothMockRuns('baseline', terraform('baseline', testArgs), {
     maintenance_contract: true,
     media_stays_independent: true,
   });
-  for (const [label, target, changed, marker] of mutations) {
+  for (const [label, target, changed, marker] of terraformFaults) {
     writeFileSync(mainPath, main, 'utf8');
     writeFileSync(maintenancePath, maintenance, 'utf8');
     writeFileSync(target, changed, 'utf8');
-    if (label === 'default-forwarding-removed') {
-      defaultForwardingSourceContract(label, changed, marker);
-    } else {
-      requireBothMockRuns(label, terraform(label, testArgs, marker), {
-        maintenance_contract: label === 'media-oac-removed',
-        media_stays_independent: label === 'media-oac-removed' ? false : true,
-      });
-    }
+    requireBothMockRuns(label, terraform(label, testArgs, marker), {
+      maintenance_contract: label === 'media-oac-removed',
+      media_stays_independent: label === 'media-oac-removed' ? false : true,
+    });
   }
+  defaultForwardingSourceContract('default-forwarding-removed', defaultForwardingFault,
+    'HC_MAINTENANCE_APP_PARITY');
   writeFileSync(mainPath, main, 'utf8');
   writeFileSync(maintenancePath, maintenance, 'utf8');
   defaultForwardingSourceContract('restored-baseline-default-forwarding-source', main);
@@ -172,7 +257,7 @@ try {
     terraform(environment + '-init', initArgs, undefined, root);
     terraform(environment + '-validate', ['validate', '-no-color'], undefined, root);
   }
-  process.stdout.write('Maintenance HCL, both root compositions, mock contracts and all six fault probes passed. Logs: ' + artifactDir + '\n');
+  process.stdout.write('Maintenance HCL, both root compositions, five mocked Terraform fault probes and in-process source fixtures passed. Logs: ' + artifactDir + '\n');
 } finally {
   const resolved = path.resolve(scratch);
   if (path.dirname(resolved) !== tempRoot || !path.basename(resolved).startsWith('hc-maintenance-infra-')) {

@@ -23,6 +23,12 @@ Counts: 6 findings accepted (5 distinct concerns after overlap); 0 rejected; 0 d
 - Current dev/prod main.tf values confirm the documented canonical hostnames; stack.tf files are byte-identical and both instantiate ../../modules/cloudfront. Existing source remains unchanged.
 - The initial plan passed ASCII and placeholder scans. S1-S4 cover the spec's page/copy, independent infrastructure, preserved status contracts, navigation, and operator proof/rollback. Subsequent review corrections are subject to R2; no implementation or cloud action has started.
 
-## R2
+## R2 - terminal
 
-Pending independent review of the revised plan and these adjudications.
+- B1 MEDIUM - ACCEPT as precision. The test oracle previously read expected brand/title/body/action from the catalog under test. S1 now asserts the full literal five-key object already required by the approved spec, then retains the rendering assertions. This does not change what gets built, add/remove a surface, or move an invariant; it makes the existing exact-copy requirement explicit in its test oracle.
+
+R1's corrections were reviewed and no remaining R1 defect was reported. R2 changes no design or implementation decision, so this precision-only round is terminal under the feature-mission stop rule. The canonical-object assertion is folded into the plan. No further review round is required by that rule.
+
+Totals across plan rounds: 7 findings accepted (6 distinct concerns after overlap), 0 rejected, 0 deferred. No unresolved finding remains. The plan is ready for the explicit AUTO/MANUAL launch gate; no build, merge, deployment, AWS mutation or cleanup has been performed.
+
+The revised R1 HCL snippets also parsed with terraform fmt and the revised checker passed node --check in a disposable syntax-probe directory; all five snippet checks exited 0. The R2 precision correction is a literal TypeScript expected-value object and was checked for copy/spec identity and ASCII. These remain plan feasibility checks, not feature completion gates.

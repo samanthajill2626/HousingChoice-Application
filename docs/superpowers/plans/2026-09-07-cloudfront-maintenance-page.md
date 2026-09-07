@@ -13,6 +13,7 @@
 **Worktree:** W:\tmp\cloudfront-maintenance-page
 **Branch:** codex/cloudfront-maintenance-page
 **Planning base:** 114bf0f6; main f82c149cf8523cbdb2f6d6ff3bdedc6583951ab4.
+**Status:** Independently reviewed through R2; final precision correction included; awaiting explicit build launch mode. Not implemented or deployed.
 
 ## Global Constraints
 
@@ -63,7 +64,13 @@ import { readMaintenanceCopy, renderMaintenancePage } from './maintenancePage.js
 describe('maintenance page template', () => {
   it('renders the canonical copy with no executable or app asset dependency', () => {
     const copy = readMaintenanceCopy();
-    expect(Object.keys(copy).sort()).toEqual(['action', 'body', 'brand', 'heading', 'title']);
+    expect(copy).toEqual({
+      brand: 'HousingChoice',
+      title: 'HousingChoice - Temporarily unavailable',
+      heading: 'Temporarily unavailable',
+      body: 'HousingChoice is temporarily unavailable. Please try again shortly.',
+      action: 'Try again',
+    });
     const html = renderMaintenancePage();
     expect(html).toContain('<html lang="en">');
     expect(html).toContain('data-hc-maintenance="1"');
@@ -960,11 +967,11 @@ npm run e2e
 
 ## Plan self-review checklist
 
-- [ ] Map each spec section to S1-S4: page/copy/escaping -> S1; origin/security/mappings/preservation -> S2; navigation/API behavior -> S3; rollout, rollback and full proof -> S4.
-- [ ] Confirm no app service, data model, seed, job, deployment script, environment secret or existing 503 reader is changed.
-- [ ] Confirm helpers and task imports use the exact S1 interfaces; production Terraform depends only on template/catalog, not Node.
-- [ ] Confirm mocked Terraform, browser fulfillment and direct page access are never described as live edge-substitution evidence.
-- [ ] Record independent plan findings and adjudications before the mission launch gate.
+- [x] Map each spec section to S1-S4: page/copy/escaping -> S1; origin/security/mappings/preservation -> S2; navigation/API behavior -> S3; rollout, rollback and full proof -> S4.
+- [x] Confirm no app service, data model, seed, job, deployment script, environment secret or existing 503 reader is changed.
+- [x] Confirm helpers and task imports use the exact S1 interfaces; production Terraform depends only on template/catalog, not Node.
+- [x] Confirm mocked Terraform, browser fulfillment and direct page access are never described as live edge-substitution evidence.
+- [x] Record independent plan findings and adjudications before the mission launch gate.
 
 ## Primary references for implementation checks
 

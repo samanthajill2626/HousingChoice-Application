@@ -18,4 +18,3 @@ source. No app suite, live port, Terraform cloud action, or AWS action was used.
    Assert readMaintenanceCopy() equals one explicit five-key canonical object
    before rendering; keep the current rendering assertions to prove that exact
    catalog reaches the page. This changes test coverage only.
-

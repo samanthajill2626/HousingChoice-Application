@@ -58,4 +58,3 @@ artifact was read for this round.
    site, would bypass the stated security proof. Use hostile values for all five
    fields and assert escaped text/no executable markup for every rendered site.
    This changes the focused security test, not the static-page design.
-

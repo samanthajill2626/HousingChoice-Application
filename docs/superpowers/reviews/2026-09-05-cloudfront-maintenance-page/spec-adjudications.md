@@ -19,3 +19,7 @@ Round 1 changes one design decision. Continue reviewer B for a broad R2 review, 
 Continued reviewer B reviewed the revised spec and adjudications, including the other review and planner finding. `spec-r2-reviewer-b.md` reports no actionable findings, confirms the 503 regression is avoided and hosted body proof is explicit, and concedes B3 after checking the separate CloudFront deploy gate.
 
 No design decision changed in round 2. The review has converged under the mission stop rule. The spec is ready for the human's written-spec review gate. No plan, implementation, completion gates, merge, or AWS action has been performed.
+
+## Human spec approval
+
+On 2026-09-07, Cameron answered the explicit spec-approval question with "Ok please continue". The spec is approved and implementation planning/review may proceed. No build mode, merge, live AWS mutation, deployment, or cleanup authorization is inferred from that answer.

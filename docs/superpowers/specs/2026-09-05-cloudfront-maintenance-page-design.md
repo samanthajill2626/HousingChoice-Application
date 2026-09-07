@@ -1,7 +1,7 @@
 # CloudFront maintenance page
 
 Date: 2026-09-05
-Status: Independently reviewed through R2; awaiting human spec approval; not implemented or deployed.
+Status: Independently reviewed through R2; approved by Cameron on 2026-09-07; implementation planning authorized; not implemented or deployed.
 Worktree: W:\tmp\cloudfront-maintenance-page
 Branch: codex/cloudfront-maintenance-page
 Base: main at f82c149cf8523cbdb2f6d6ff3bdedc6583951ab4

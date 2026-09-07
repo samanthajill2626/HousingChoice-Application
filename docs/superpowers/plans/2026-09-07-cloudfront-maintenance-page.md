@@ -13,7 +13,7 @@
 **Worktree:** W:\tmp\cloudfront-maintenance-page
 **Branch:** codex/cloudfront-maintenance-page
 **Planning base:** 114bf0f6; main f82c149cf8523cbdb2f6d6ff3bdedc6583951ab4.
-**Status:** Independently reviewed through R2; final precision correction included; awaiting explicit build launch mode. Not implemented or deployed.
+**Status:** Independently reviewed through R2; final precision correction included. Cameron authorized AUTO build with 15-minute check-ins on 2026-09-07. Implementation may proceed; merge and live activation remain separate actions.
 
 ## Global Constraints
 

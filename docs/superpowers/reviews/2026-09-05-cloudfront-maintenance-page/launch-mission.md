@@ -1,6 +1,6 @@
 # Maintenance page build launch
 
-Prepared 2026-09-07. Spec approved; implementation plan independently reviewed through R2. Awaiting the human's explicit AUTO/MANUAL launch choice. No builder is active and no infrastructure action is authorized by this document.
+Prepared 2026-09-07. Spec approved; implementation plan independently reviewed through R2. Cameron authorized AUTO on 2026-09-07: "Lets use auto mode, with a 15 minute checkin timer". Build and supervision are authorized; merge and live infrastructure activation remain separate actions.
 
 AUTO: dispatch and supervise the build-orchestrator in this task. MANUAL: provide the same mission with its operating-manual instruction for a separate human-managed task. Merge and live AWS activation remain separate actions.
 
@@ -31,6 +31,7 @@ Watch items:
 - Local mocked/error-document proof is not hosted substitution proof. No AWS writes, live plan/apply, outage induction, deploy changes, merge or cleanup.
 - Terraform >=1.15 is required for local tests; no new npm or production dependency. Do not skip a missing tool or replace the real template renderer.
 - Coordinate shared DynamoDB and worktree ownership; no competing suites during self-QA. Commit records as produced, explicit paths and model coauthor trailer.
+- AUTO supervision uses a 15-minute check-in timer per Cameron. This is a liveness/progress check, never a deadline or automatic termination of healthy work. Report actionable questions or failures promptly.
 
 Gates (bare, from this worktree):
 npm run typecheck

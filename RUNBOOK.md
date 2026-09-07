@@ -40,6 +40,24 @@ now uses the assigned inbound-voice-line holder's verified cell). Bypass with `-
 correct — e.g. `.env.<env>` isn't on this machine. To clear a real drift, just
 `npm run secrets:push -- <env>` then re-run the deploy.
 
+### CloudFront maintenance fallback (502/504)
+
+The shared CloudFront module serves an independent private-S3 HTML document when CloudFront returns 502 or 504. It keeps the failure status. It takes effect after the failure/timeout; it does not eliminate deployment downtime or the wait before a 504. All other status codes, including typed 503 responses, keep their existing bodies. Already-open dashboards retain their API error handling.
+
+The error configuration is distribution-wide: an API, webhook, public/auth POST, script or photo request can receive the HTML body for 502/504. The action on the document performs a fresh GET of the app home, without replaying a form submission. The normal deployment process is unchanged.
+
+Provisioning is a separate operator task after review and merge. Keep the application healthy and avoid concurrent deployments during the first apply: the distribution must exist before its exact-ARN S3 policy can be installed. The fallback is not established until both the apply and propagation complete.
+
+1. From the repository root, run `npm run plan -- dev`. Review the proposed dedicated bucket/object/OAC/policy and the two CloudFront mappings. Resolve unrelated drift separately.
+2. Run `npm run apply -- dev` using the repository account guard and its normal confirmation. Wait for the distribution deployment and S3 policy propagation.
+3. Verify `https://dev.app.housingchoice.org/maintenance/index.html` returns 200, `Content-Type: text/html; charset=utf-8`, `Cache-Control: no-store, max-age=0`, and the expected page containing `data-hc-maintenance="1"`. Verify normal `/health` and the application still respond successfully.
+4. Actual substitution proof requires a separately authorized dev deployment or dev-only failure exercise. Capture an application URL OTHER THAN `/maintenance/index.html` returning 502 or 504, `text/html`, and `data-hc-maintenance="1"` in the same response. After recovery, prove that same URL returns its healthy application response. Record the exact status witnessed; one status does not prove the other. Do not induce a production outage for this check.
+5. After dev acceptance, repeat `npm run plan -- prod`, review, then `npm run apply -- prod`. Verify the direct page, `/health`, and application at `https://app.housingchoice.org`. No app redeploy is required by this feature.
+
+A direct maintenance-page 200 proves object access only. Until the separately authorized application-error observation is recorded, report "configured; hosted substitution unverified." Record environment, UTC time, URL, status, content type, marker presence and subsequent healthy response; do not store credentials or request bodies.
+
+Rollback: remove ONLY the 502 and 504 `custom_error_response` blocks from `infra/modules/cloudfront/main.tf`, then plan/apply the target environment using the same guarded commands. Keep the maintenance origin, exact behavior, object, OAC, policy and bucket. This restores the normal CloudFront error screen without deleting infrastructure. Full resource removal is separately authorized cleanup.
+
 ### Dev modes (npm run dev): live / --mock / --local
 
 `npm run dev` runs the local app + worker (and the dashboard on :5174) against a

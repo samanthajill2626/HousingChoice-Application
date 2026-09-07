@@ -10,11 +10,12 @@ Run these once from the repo root:
 
 1. **Docker** must be running (DynamoDB Local is a container).
 2. **Install deps:** `npm ci` (or `npm install`) — pulls in `@playwright/test`.
-3. **Install the bundled browser** the suite uses (no admin needed):
+3. **Terraform >=1.15** must be on `PATH` for maintenance template tests.
+4. **Install the bundled browser** the suite uses (no admin needed):
    ```
    npx playwright install chromium
    ```
-4. **Verify:** `npm run e2e` — should boot the stack and pass. You're set for the
+5. **Verify:** `npm run e2e` - should boot the stack and pass. You're set for the
    suite and for headed/UI runs (`npm run e2e -- --headed`, `npx playwright test --ui`).
 
 ### Interactive driving via the Playwright MCP (optional)
@@ -56,6 +57,20 @@ Helpers (session mode):
 
 On Windows, profiler lifecycle ownership checks invoke `powershell.exe`; it must
 be available on `PATH` for hermetic profiler startup and cleanup.
+
+### Maintenance-page verification
+
+Terraform >=1.15 must be on PATH for maintenance template tests. The renderer runs `terraform console` in an empty temporary directory, reads the actual module template and JSON copy, and deletes only that owned temporary directory. It requires no provider initialization, backend, AWS credentials, app build or cloud access. Missing Terraform fails the test instead of silently skipping it.
+
+From the repository root:
+
+- `npm run test -w @housingchoice/e2e -- support/maintenancePage.test.ts`
+- `npm run e2e -- tests/dashboard-next/maintenance-page.spec.ts`
+- `node scripts/check-maintenance-infra.mjs`
+
+The browser command uses the ordinary hermetic harness and tests both GET- and POST-originated 502/504 documents, safe GET-home recovery, keyboard focus, narrow/desktop layout and text enlargement. It does not induce an outage or prove AWS substitution.
+
+The infrastructure command initializes locked providers in owned disposable configuration mirrors, validates HCL and executes only `mock_provider` tests in the CloudFront module. It requires six deliberately broken module copies to fail named assertions. It also compares the shared dev/prod composition and runs backend-disabled init/validate in copies of both roots with their respective lockfiles; no root plan, apply, test or provisioner runs. Provider installation may need network access; an existing filesystem mirror containing the locked AWS/random providers can be supplied as the sole argument. Logs are under `.superpowers/maintenance-infra/`. It never loads live environment state or invokes a live plan/apply.
 
 ## Page performance profiler (on demand)
 

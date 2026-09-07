@@ -38,7 +38,7 @@
 | Task | Owned files | Deliverable |
 | --- | --- | --- |
 | S1 | app/src/messages/edgeMaintenance.json; infra/modules/cloudfront/templates/maintenance.html.tftpl; e2e/support/maintenancePage.ts; e2e/support/maintenancePage.test.ts | Canonical copy, self-contained page and actual-template renderer proof |
-| S2 | infra/modules/cloudfront/maintenance.tf; infra/modules/cloudfront/main.tf; infra/modules/cloudfront/tests/maintenance.tftest.hcl; scripts/check-maintenance-infra.mjs | Restrictive independent origin, status-preserving mappings, mocked Terraform and four fault probes |
+| S2 | infra/modules/cloudfront/maintenance.tf; infra/modules/cloudfront/main.tf; infra/modules/cloudfront/tests/maintenance.tftest.hcl; scripts/check-maintenance-infra.mjs | Restrictive independent origin, status-preserving mappings, mocked Terraform, six fault probes and both root validations |
 | S3 | e2e/tests/dashboard-next/maintenance-page.spec.ts; dashboard/src/api/client.maintenance.test.ts | Browser GET/POST recovery, layout and API failure proof |
 | S4 | RUNBOOK.md; e2e/README.md; mission records | Reproducible verification, operator activation/rollback instructions, gates and handback |
 
@@ -69,6 +69,8 @@ describe('maintenance page template', () => {
     expect(html).toContain('data-hc-maintenance="1"');
     expect(html).toContain('<h1>Temporarily unavailable</h1>');
     expect(html).toContain(copy.body);
+    expect(html).toContain('<p class="brand">' + copy.brand + '</p>');
+    expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
     expect(html).toContain('href="/"');
     expect(html).toContain("default-src 'none'");
     expect(html).not.toMatch(/<(script|img|iframe|form|link)\b/i);
@@ -81,6 +83,8 @@ describe('maintenance page template', () => {
     const special = '& <script> "quote" \'apostrophe\' ${not_code} %{not_code}';
     const html = renderMaintenancePage({
       ...readMaintenanceCopy(),
+      brand: special,
+      action: special,
       heading: special,
       body: special,
       title: special,
@@ -88,6 +92,13 @@ describe('maintenance page template', () => {
     expect(html).toContain('&amp; &lt;script&gt; &quot;quote&quot; &#39;apostrophe&#39;');
     expect(html).toContain('${not_code} %{not_code}');
     expect(html).not.toContain('<script>');
+    const escaped = '&amp; &lt;script&gt; &quot;quote&quot; &#39;apostrophe&#39; ${not_code} %{not_code}';
+    for (const [open, close] of [
+      ['<title>', '</title>'], ['<p class="brand">', '</p>'], ['<h1>', '</h1>'],
+      ['<p class="message">', '</p>'], ['<a class="action" href="/">', '</a>'],
+    ]) {
+      expect(html).toContain(open + escaped + close);
+    }
   });
 
   it('rejects missing, additional, non-string, empty or non-ASCII copy', () => {
@@ -378,6 +389,8 @@ run "maintenance_contract" {
       alltrue([for b in aws_cloudfront_distribution.this.ordered_cache_behavior :
         b.target_origin_id == local.origin_id &&
         toset(b.allowed_methods) == toset(["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]) &&
+        toset(b.cached_methods) == toset(["GET", "HEAD"]) &&
+        b.viewer_protocol_policy == "redirect-to-https" && b.compress &&
         b.cache_policy_id == data.aws_cloudfront_cache_policy.caching_disabled.id &&
         b.origin_request_policy_id == data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
         if contains(["/api/*", "/webhooks/*", "/auth/*", "/public/*"], b.path_pattern)
@@ -385,7 +398,27 @@ run "maintenance_contract" {
       toset([for b in aws_cloudfront_distribution.this.ordered_cache_behavior : b.path_pattern]) ==
         toset(["/api/*", "/webhooks/*", "/auth/*", "/public/*", "/maintenance/index.html"]) &&
       aws_cloudfront_distribution.this.default_cache_behavior[0].target_origin_id == local.origin_id &&
-      toset(aws_cloudfront_distribution.this.default_cache_behavior[0].allowed_methods) == toset(["GET", "HEAD", "OPTIONS"])
+      toset(aws_cloudfront_distribution.this.default_cache_behavior[0].allowed_methods) == toset(["GET", "HEAD", "OPTIONS"]) &&
+      toset(aws_cloudfront_distribution.this.default_cache_behavior[0].cached_methods) == toset(["GET", "HEAD"]) &&
+      aws_cloudfront_distribution.this.default_cache_behavior[0].viewer_protocol_policy == "redirect-to-https" &&
+      aws_cloudfront_distribution.this.default_cache_behavior[0].compress &&
+      aws_cloudfront_distribution.this.default_cache_behavior[0].cache_policy_id == data.aws_cloudfront_cache_policy.caching_disabled.id &&
+      aws_cloudfront_distribution.this.default_cache_behavior[0].origin_request_policy_id == data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id &&
+      length([for o in aws_cloudfront_distribution.this.origin : o if o.origin_id == local.origin_id]) == 1 &&
+      alltrue([for o in aws_cloudfront_distribution.this.origin :
+        o.domain_name == var.origin_domain_name &&
+        length(o.custom_header) == 1 &&
+        one(o.custom_header).name == "x-origin-verify" &&
+        one(o.custom_header).value == var.origin_secret &&
+        length(o.custom_origin_config) == 1 &&
+        one(o.custom_origin_config).http_port == var.origin_http_port &&
+        one(o.custom_origin_config).https_port == 443 &&
+        one(o.custom_origin_config).origin_protocol_policy == "http-only" &&
+        toset(one(o.custom_origin_config).origin_ssl_protocols) == toset(["TLSv1.2"]) &&
+        one(o.custom_origin_config).origin_read_timeout == 30 &&
+        one(o.custom_origin_config).origin_keepalive_timeout == 5
+        if o.origin_id == local.origin_id
+      ])
     )
     error_message = "HC_MAINTENANCE_APP_PARITY: existing app paths and methods must survive."
   }
@@ -403,12 +436,25 @@ run "media_stays_independent" {
       aws_cloudfront_cache_policy.unit_media[0].min_ttl == 1 &&
       aws_cloudfront_cache_policy.unit_media[0].default_ttl == 604800 &&
       aws_cloudfront_cache_policy.unit_media[0].max_ttl == 604800 &&
+      length([for o in aws_cloudfront_distribution.this.origin : o if o.origin_id == local.media_origin_id]) == 1 &&
+      alltrue([for o in aws_cloudfront_distribution.this.origin :
+        o.domain_name == var.media_origin_domain_name &&
+        o.origin_access_control_id == aws_cloudfront_origin_access_control.media[0].id &&
+        length(o.custom_header) == 0 && length(o.custom_origin_config) == 0
+        if o.origin_id == local.media_origin_id
+      ]) &&
+      aws_cloudfront_origin_access_control.media[0].origin_access_control_origin_type == "s3" &&
+      aws_cloudfront_origin_access_control.media[0].signing_behavior == "always" &&
+      aws_cloudfront_origin_access_control.media[0].signing_protocol == "sigv4" &&
       length([for b in aws_cloudfront_distribution.this.ordered_cache_behavior : b if b.path_pattern == "/unit-media/*"]) == 1 &&
       alltrue([for b in aws_cloudfront_distribution.this.ordered_cache_behavior :
         b.target_origin_id == local.media_origin_id &&
         b.cache_policy_id == aws_cloudfront_cache_policy.unit_media[0].id &&
         b.response_headers_policy_id == aws_cloudfront_response_headers_policy.unit_media[0].id &&
-        toset(b.allowed_methods) == toset(["GET", "HEAD"])
+        toset(b.allowed_methods) == toset(["GET", "HEAD"]) &&
+        toset(b.cached_methods) == toset(["GET", "HEAD"]) &&
+        b.viewer_protocol_policy == "redirect-to-https" && b.compress &&
+        (b.origin_request_policy_id == null || b.origin_request_policy_id == "")
         if b.path_pattern == "/unit-media/*"
       ])
     )
@@ -417,11 +463,11 @@ run "media_stays_independent" {
 }
 ```
 
-- [ ] Create scripts/check-maintenance-infra.mjs. It makes a disposable mirror, initializes only the locked AWS provider there, validates real HCL, executes mocked tests, then requires each deliberately broken configuration to fail its named contract. No live environment root or Terraform state is loaded. Provider initialization can download the already-locked provider; it never authenticates to AWS. Optional argument is an existing provider mirror directory.
+- [ ] Create scripts/check-maintenance-infra.mjs. It makes disposable configuration mirrors, initializes the locked providers there, validates real HCL, executes mocked module tests, then requires each deliberately broken configuration to fail its named contract. It also compares shared dev/prod composition files and runs backend-disabled init/validate in both copied roots, each with its own lockfile. It never runs tests, plan, apply or provisioners in those environment roots. No live environment root or Terraform state is loaded. Provider initialization can download the already-locked AWS/random providers; it never authenticates to AWS. Optional argument is an existing provider mirror directory containing both locked providers.
 
 ```js
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -437,9 +483,15 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
 Object.assign(env, { TF_INPUT: '0', TF_IN_AUTOMATION: '1', AWS_EC2_METADATA_DISABLED: 'true' });
 let sequence = 0;
 
-function terraform(label, args, expectedMarker) {
+function includeConfig(source) {
+  const name = path.basename(source);
+  if (name === '.terraform' || name.includes('tfstate')) return false;
+  return statSync(source).isDirectory() || /\.(tf|tftpl|hcl|json)$/.test(name);
+}
+
+function terraform(label, args, expectedMarker, cwd = moduleDir) {
   const result = spawnSync('terraform', args, {
-    cwd: moduleDir, env, shell: false, encoding: 'utf8',
+    cwd, env, shell: false, encoding: 'utf8',
     timeout: 300_000, maxBuffer: 8 * 1024 * 1024,
   });
   const output = result.stdout + result.stderr;
@@ -464,8 +516,7 @@ function replaceOne(source, before, after) {
 try {
   cpSync(path.join(repo, 'infra/modules/cloudfront'), moduleDir, {
     recursive: true,
-    filter: (source) => !['.terraform', '.terraform.lock.hcl'].includes(path.basename(source)) &&
-      !path.basename(source).includes('tfstate'),
+    filter: (source) => path.basename(source) !== '.terraform.lock.hcl' && includeConfig(source),
   });
   const copyDir = path.join(scratch, 'app/src/messages');
   mkdirSync(copyDir, { recursive: true });
@@ -488,6 +539,8 @@ try {
   const blocks = main.match(/  custom_error_response \{[^{}]*\}/g) ?? [];
   const block504 = blocks.find((block) => /error_code\s*=\s*504\b/.test(block));
   if (!block504) throw new Error('No unique 504 block available for fault tests');
+  const defaultBlock = main.match(/  default_cache_behavior \{[^{}]*\}/)?.[0];
+  if (!defaultBlock) throw new Error('No default behavior block available for fault tests');
   const mutations = [
     ['missing-504', mainPath, replaceOne(main, block504, ''), 'HC_MAINTENANCE_MAPPINGS'],
     ['extra-503', mainPath, replaceOne(main, block504, block504 + '\n' + block504.replaceAll('504', '503')), 'HC_MAINTENANCE_MAPPINGS'],
@@ -495,6 +548,11 @@ try {
     ['wide-s3-read', maintenancePath, replaceOne(maintenance,
       '"${aws_s3_bucket.maintenance.arn}/${aws_s3_object.maintenance.key}"',
       '"${aws_s3_bucket.maintenance.arn}/*"'), 'HC_MAINTENANCE_POLICY'],
+    ['media-oac-removed', mainPath, replaceOne(main,
+      'aws_cloudfront_origin_access_control.media[0].id', 'null'), 'HC_MAINTENANCE_MEDIA_PARITY'],
+    ['default-forwarding-removed', mainPath, replaceOne(main, defaultBlock,
+      replaceOne(defaultBlock, 'data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id', 'null')),
+      'HC_MAINTENANCE_APP_PARITY'],
   ];
   for (const [label, target, changed, marker] of mutations) {
     writeFileSync(mainPath, main, 'utf8');
@@ -505,7 +563,23 @@ try {
   writeFileSync(mainPath, main, 'utf8');
   writeFileSync(maintenancePath, maintenance, 'utf8');
   terraform('restored-baseline', testArgs);
-  process.stdout.write('Maintenance HCL, mock contracts and all four fault probes passed. Logs: ' + artifactDir + '\n');
+  const compositionRoot = path.join(scratch, 'compositions');
+  cpSync(path.join(repo, 'infra'), path.join(compositionRoot, 'infra'), {
+    recursive: true,
+    filter: includeConfig,
+  });
+  cpSync(copyDir, path.join(compositionRoot, 'app/src/messages'), { recursive: true });
+  for (const file of ['stack.tf', 'outputs.tf']) {
+    const dev = readFileSync(path.join(compositionRoot, 'infra/envs/dev', file), 'utf8');
+    const prod = readFileSync(path.join(compositionRoot, 'infra/envs/prod', file), 'utf8');
+    if (dev !== prod) throw new Error('Dev/prod composition differs: ' + file);
+  }
+  for (const environment of ['dev', 'prod']) {
+    const root = path.join(compositionRoot, 'infra/envs', environment);
+    terraform(environment + '-init', initArgs, undefined, root);
+    terraform(environment + '-validate', ['validate', '-no-color'], undefined, root);
+  }
+  process.stdout.write('Maintenance HCL, both root compositions, mock contracts and all six fault probes passed. Logs: ' + artifactDir + '\n');
 } finally {
   const resolved = path.resolve(scratch);
   if (path.dirname(resolved) !== tempRoot || !path.basename(resolved).startsWith('hc-maintenance-infra-')) {
@@ -663,9 +737,9 @@ resource "aws_s3_bucket_policy" "maintenance" {
 The response path refers to aws_s3_object.maintenance.key, so the distribution waits for the uploaded object. The bucket policy refers to the distribution ARN, so it follows distribution creation. Do not add a distribution dependency on that policy. The direct private-object access check belongs after policy propagation, as specified in S4.
 
 - [ ] Run `terraform fmt infra/modules/cloudfront/main.tf infra/modules/cloudfront/maintenance.tf infra/modules/cloudfront/tests/maintenance.tftest.hcl`, then `terraform fmt -check infra/modules/cloudfront/main.tf infra/modules/cloudfront/maintenance.tf infra/modules/cloudfront/tests/maintenance.tftest.hcl`.
-- [ ] Run `node scripts/check-maintenance-infra.mjs` for GREEN. Baseline and restored baseline must exit 0; four faulty copies must fail their named assertions. A syntax failure, provider error or missing field is never accepted as fault detection. Run `node --check scripts/check-maintenance-infra.mjs` because the repository ESLint config does not cover .mjs rules.
+- [ ] Run `node scripts/check-maintenance-infra.mjs` for GREEN. Baseline, restored baseline and both dev/prod root validations must exit 0; six faulty copies must fail their named assertions. A syntax failure, provider error or missing field is never accepted as fault detection. Run `node --check scripts/check-maintenance-infra.mjs` because the repository ESLint config does not cover .mjs rules.
 - [ ] Run `npm run test -w @housingchoice/app -- test/cloudfrontBehaviors.test.ts` to preserve the existing app-prefix guard.
-- [ ] Review the diff and module graph for only this object read grant, no application IAM/CORS/versioning resources, no distribution-policy cycle and unchanged existing security/header/caching blocks. Terraform validate plus mocked apply must be green. Record dev/prod module instantiation paths in the S2 report to establish source composition, without calling their live backends.
+- [ ] Review the diff and module graph for only this object read grant, no application IAM/CORS/versioning resources, no distribution-policy cycle and unchanged existing security/header/caching blocks. Terraform validate plus mocked apply must be green. Record both copied dev/prod root init/validate exits, shared composition equality and module instantiation paths in the S2 report, without calling their live backends.
 - [ ] Commit the four S2 files and the S2 evidence report. These tests establish configuration semantics locally; they do not prove that AWS has propagated the configuration.
 
 ## S3: Browser recovery and API failure contracts
@@ -726,6 +800,7 @@ This is a characterization test: it should pass against the existing client beca
 import { expect, test } from '@playwright/test';
 import { readMaintenanceCopy, renderMaintenancePage } from '../../support/maintenancePage.js';
 import { dashboardUrl } from '../../support/urls.js';
+import { expectNoHorizontalOverflow } from '../../support/viewport.js';
 
 const parsed = new URL(dashboardUrl);
 if (!process.env['E2E_LANE'] || !process.env['E2E_DASHBOARD_URL'] ||
@@ -783,14 +858,12 @@ test.describe('CloudFront maintenance document', () => {
           const action = page.getByRole('link', { name: copy.action, exact: true });
           await expect(action).toHaveAttribute('href', '/');
           await expect(action).toBeVisible();
-          expect(await page.evaluate(() =>
-            document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+          await expectNoHorizontalOverflow(page, 'maintenance document at ' + width);
 
           // Text enlargement is a reflow check; actual browser zoom is also inspected during self-QA.
           await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
           await expect(action).toBeVisible();
-          expect(await page.evaluate(() =>
-            document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+          await expectNoHorizontalOverflow(page, 'maintenance document with enlarged text at ' + width);
           expect(dependencies).toEqual([]);
           expect(failures).toEqual([{
             method, body: method === 'POST' ? 'submission=once' : null,
@@ -865,7 +938,7 @@ From the repository root:
 
 The browser command uses the ordinary hermetic harness and tests both GET- and POST-originated 502/504 documents, safe GET-home recovery, keyboard focus, narrow/desktop layout and text enlargement. It does not induce an outage or prove AWS substitution.
 
-The infrastructure command initializes the locked provider in an owned disposable module mirror, validates HCL and executes only `mock_provider` Terraform tests. It then requires four deliberately broken copies to fail named assertions. Provider installation may need network access; an existing filesystem provider mirror can be supplied as the sole argument. Logs are under `.superpowers/maintenance-infra/`. It never loads live environment state or invokes a live plan/apply.
+The infrastructure command initializes locked providers in owned disposable configuration mirrors, validates HCL and executes only `mock_provider` tests in the CloudFront module. It requires six deliberately broken module copies to fail named assertions. It also compares the shared dev/prod composition and runs backend-disabled init/validate in copies of both roots with their respective lockfiles; no root plan, apply, test or provisioner runs. Provider installation may need network access; an existing filesystem mirror containing the locked AWS/random providers can be supplied as the sole argument. Logs are under `.superpowers/maintenance-infra/`. It never loads live environment state or invokes a live plan/apply.
 ```
 
 - [ ] State the full-feature lane and exact checks before running final validation. Check live main drift and synchronize main ONCE before final gates. If synchronization conflicts with active work, ask before proceeding; never change HEAD in the shared main checkout. Record the resulting branch SHA and current main SHA.
@@ -900,4 +973,3 @@ npm run e2e
 - Terraform mocked providers: https://developer.hashicorp.com/terraform/language/tests/mocking
 - AWS custom error responses: https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_CustomErrorResponse.html
 - AWS error caching: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/HTTPStatusCodes.html
-

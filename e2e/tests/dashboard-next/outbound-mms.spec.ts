@@ -776,6 +776,10 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     // Small Ctrl-wheel deltas model trackpad pinch separately from discrete wheel.
     await openedTrigger.click();
     await expect(dialog).toBeVisible();
+    expect(
+      await readNamedViewerScrollOffsets(page),
+      'reopening for Ctrl-wheel moved a scroll owner',
+    ).toEqual(expectedScroll);
     await expect(page.locator('[data-image-viewer-scale]')).toHaveAttribute(
       'data-image-viewer-scale',
       '1.000',
@@ -812,9 +816,15 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     await dispatchCtrlWheel(ctrlSurface, 1, ctrlPoint);
     await expect.poll(() => readViewerScale(page)).toBe(1);
     await expectRecordedScalesWithinBounds(page, 'desktop Ctrl-wheel');
+    expect(
+      await readNamedViewerScrollOffsets(page),
+      'Ctrl-wheel zoom moved a scroll owner',
+    ).toEqual(expectedScroll);
 
     await close.click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(openedTrigger).toBeFocused();
+    await expect.poll(() => readNamedViewerScrollOffsets(page)).toEqual(expectedScroll);
     await trigger.click();
     await expect(dialog).toBeVisible();
     await expect(page.locator('[data-image-viewer-scale]')).toHaveAttribute(

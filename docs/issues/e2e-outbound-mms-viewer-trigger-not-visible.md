@@ -3,10 +3,11 @@ id: e2e-outbound-mms-viewer-trigger-not-visible
 title: outbound-MMS viewer setup hid its trigger with populated history
 type: bug
 severity: med
-status: in-progress
+status: resolved
 area: e2e
 created: 2026-09-02
 updated: 2026-09-07
+resolved: 2026-09-07
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:591, docs/issues/e2e-image-viewer-scroll-flake.md
 ---
 
@@ -32,6 +33,20 @@ shared harness code changes are needed.
 
 Diagnosis, RED/GREEN evidence, review, and final check records are under
 `docs/superpowers/reviews/2026-09-07-outbound-mms-scroll-recheck/`.
+
+## Resolution (2026-09-07)
+
+Implemented in `f8d72a2e`, with the review follow-up adding exact owner checks
+for Ctrl-wheel reopen, zoom, and Close. After main sync and review fixes, both
+MMS files passed together: 8 passed, exit 0, 51.8s. E2E workspace typecheck and
+68 relevant viewer/Timeline unit tests passed. Re-review found the accepted P2
+fully addressed. The raw lint command remains exit 1 solely for the identical
+pre-existing unused `DIANA_ID` error; no new lint errors were added.
+
+No full suite was run in this small-fix lane. Closure rests on reproducing the
+original failure with a three-test sequence, reproducing it in the isolated
+case with the permanent fixture, and making both pass without weakening the
+scroll contract. Unrelated rotating scenario failures remain a separate issue.
 
 ## Historical sightings and pre-diagnosis hypotheses
 

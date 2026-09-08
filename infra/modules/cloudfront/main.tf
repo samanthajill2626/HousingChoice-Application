@@ -6,7 +6,7 @@
 # port and stamps the secret x-origin-verify header (value lives in Parameter
 # Store via the params module). App middleware rejects any request missing the
 # header (GET /health exempt), so the instance only ever serves CloudFront.
-# Custom error pages: deliberately NONE (spec: custom error responses OFF).
+# Custom error pages: independent S3 document for 502/504; status codes preserved.
 #
 # The Host header does NOT reach the origin (Managed-AllViewerExceptHostHeader),
 # so the alias is transparent to the app — the origin secret, /api/* + /webhooks/*
@@ -121,6 +121,12 @@ resource "aws_cloudfront_distribution" "this" {
     }
   }
 
+  origin {
+    origin_id                = local.maintenance_origin_id
+    domain_name              = aws_s3_bucket.maintenance.bucket_regional_domain_name
+    origin_access_control_id = aws_cloudfront_origin_access_control.maintenance.id
+  }
+
   # Media bucket origin (unit-media-cloudfront design 2026-07-21): private
   # bucket read via OAC sigv4 signing - no custom_origin_config and no
   # x-origin-verify header (that is an app-origin concern).
@@ -180,6 +186,16 @@ resource "aws_cloudfront_distribution" "this" {
     }
   }
 
+  ordered_cache_behavior {
+    path_pattern           = local.maintenance_path
+    target_origin_id       = local.maintenance_origin_id
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+    cache_policy_id        = data.aws_cloudfront_cache_policy.caching_disabled.id
+  }
+
   # Default behavior: same origin, also CachingDisabled FOR NOW — since M1.3
   # the app serves the built dashboard from here (DASHBOARD_DIST_DIR static +
   # SPA fallback). Tiny asset set, so CachingDisabled stays correct-first;
@@ -192,6 +208,20 @@ resource "aws_cloudfront_distribution" "this" {
     compress                 = true
     cache_policy_id          = data.aws_cloudfront_cache_policy.caching_disabled.id
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
+  }
+
+  custom_error_response {
+    error_code            = 502
+    response_code         = 502
+    response_page_path    = local.maintenance_path
+    error_caching_min_ttl = 0
+  }
+
+  custom_error_response {
+    error_code            = 504
+    response_code         = 504
+    response_page_path    = local.maintenance_path
+    error_caching_min_ttl = 0
   }
 
   restrictions {

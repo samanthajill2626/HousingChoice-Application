@@ -1,16 +1,22 @@
 ---
 id: e2e-image-viewer-scroll-flake
-title: outbound-MMS viewer scroll baseline raced the terminal delivery re-anchor
+title: outbound-MMS viewer scroll setup and lifecycle checkpoints
 type: bug
 severity: med
-status: resolved
+status: in-progress
 area: e2e
 created: 2026-08-31
-resolved: 2026-09-02
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts, docs/superpowers/reviews/2026-09-02-outbound-mms-scroll-flake/diagnostic-and-fix.md
 ---
 
 ## Symptom
+
+Reopened 2026-09-07: the same desktop test now fails before opening the viewer
+with `trigger is not visible` when earlier MMS tests populate the Timeline.
+The three-test reproducer and measured setup geometry are documented in
+`docs/superpowers/reviews/2026-09-07-outbound-mms-scroll-recheck/diagnosis.md`.
+The 2026-09-02 delivery re-anchor fix below remains valid for its measured
+512-to-500 signature; it did not fix this populated-history setup failure.
 
 The desktop image-viewer case in `outbound-mms.spec.ts` intermittently observed
 different Timeline or AppFrame offsets while the modal was open. Two full-suite

@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-08).** This document describes how
+> this work was designed/planned at the time of writing. The work shipped to the main line and
+> its feature branch + worktree were deleted during cleanup. This file is NOT current
+> documentation and the live code may have drifted from it. For current truth read the code
+> and the CloudFront maintenance section in `RUNBOOK.md`. The operator confirmation and
+> remaining manual zoom check are recorded in
+> `docs/superpowers/reviews/2026-09-05-cloudfront-maintenance-page/README.md`.
+> Kept only as a point-in-time record of intent; the original body below is unchanged.
+
 # CloudFront Maintenance Page Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.

@@ -1,3 +1,8 @@
+> **Closeout update (2026-09-08):** Merged and retired; Cameron confirmed the hosted
+> maintenance page appeared during an app deployment. See [README.md](README.md)
+> for evidence preservation and the remaining native browser-zoom check. The
+> original handback below is the point-in-time verification record.
+
 # Parent final handback: CloudFront maintenance page
 
 Date: 2026-09-07

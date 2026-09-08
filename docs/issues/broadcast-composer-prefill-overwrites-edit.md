@@ -3,9 +3,10 @@ id: broadcast-composer-prefill-overwrites-edit
 title: Pending broadcast prefill can overwrite a hand-edited message
 type: bug
 severity: med
-status: in-progress
+status: resolved
 area: dashboard/broadcasts
 created: 2026-09-08
+resolved: 2026-09-08
 refs: dashboard/src/routes/broadcasts/BroadcastComposer.tsx, dashboard/src/routes/broadcasts/BroadcastComposer.prefill.test.tsx, e2e/tests/dashboard-next/a2p-compliance.spec.ts
 ---
 
@@ -23,11 +24,19 @@ hand-edited flag became true while the text became the default. Both the
 single-recipient and multi-recipient effects had this unsafe update. A
 deterministic component regression reproduces that ordering and wrong value.
 
-**Fix in progress.** Store text and edit ownership together. Functional prefill
+**Resolution (2026-09-08).** Store text and edit ownership together. Functional prefill
 updates inspect the latest ownership and preserve edited messages. Explicit,
 confirmed resets still clear both fields. The consent E2E checks the editor's
 exact value after the draft settles, before leaving compose; its provider-body
 assertion and 30-second delivery budget remain unchanged.
+
+Implemented in `4fd63c90` on `codex/a2p-consent-e2e-fix`, left unmerged.
+Adversarial review found no blockers; its one-draft regression strengthening
+was accepted. Final targeted unit tests passed 44/44, the consent scenario
+passed three traced repetitions, and five related browser cases passed.
+Dashboard and E2E typechecks passed. See the
+[handback](../superpowers/reviews/2026-09-08-a2p-consent-e2e-fix/handback.md)
+for exact commands, raw lint attribution, and evidence paths.
 
 Investigation, evidence, focused proof, and review records:
 [adjudication](../superpowers/reviews/2026-09-08-a2p-consent-e2e-fix/adjudication.md).

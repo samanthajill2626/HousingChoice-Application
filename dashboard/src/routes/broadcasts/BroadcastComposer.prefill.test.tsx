@@ -68,6 +68,7 @@ it.each(['', '&contactId=tenant-0001'])(
     );
     await waitFor(() => expect(screen.getByLabelText('Message')).toHaveValue(edit));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
+    expect(api.createBroadcast).toHaveBeenCalledTimes(1);
     expect(api.createBroadcast).toHaveBeenLastCalledWith(expect.objectContaining({ body_template: edit }));
     expect(screen.getByLabelText('Message')).toHaveValue(edit);
   },

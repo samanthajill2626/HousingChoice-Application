@@ -365,6 +365,9 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     await page.getByLabel('Message').fill(body);
     const previewBtn = page.getByRole('button', { name: 'Preview recipients' });
     await expect(previewBtn).toBeEnabled({ timeout: 15_000 });
+    // Assert after the draft settles: a late prefill must not replace the edit
+    // and turn the provider-body assertion below into a misleading timeout.
+    await expect(page.getByLabel('Message')).toHaveValue(body);
     await previewBtn.click();
     await expect(page.getByRole('heading', { name: 'Review recipients' })).toBeVisible();
 
@@ -397,19 +400,8 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
           const t = threads.find((x) => x.partyNumber === consented.phone);
           return t?.messages.some((m) => m.direction === 'outbound' && (m.body ?? '').includes(body)) ?? false;
         },
-        // 30s, not 15s: this observes a JOB, not a render. The send is deferred
-        // into the in-process queue (JOBS_QUEUE_URL is unset locally, so every
-        // handler runs on the app's own loop) before the leg reaches the fake
-        // thread store, and that latency is decided by the machine. 15s fired
-        // twice on this exact assertion under heavy suite load - 2026-08-25 at
-        // 1.96x and 2026-08-26 at 1.87x - each time with the test itself having
-        // used only ~20s of its 60s cap, i.e. an inner budget expiring while
-        // the test was nowhere near its ceiling. Matches the sizing already
-        // applied to manual-extraction-trigger's suggestion wait.
-        //
-        // NOT the same shape as relay-late-text-1to1-badge-not-visible, which
-        // fails at 1.1x-1.34x and is therefore a delivery bug rather than a
-        // budget - do not "fix" that one this way.
+        // Keep the existing asynchronous delivery budget. A timeout here is
+        // not proof of resource pressure: inspect the draft and provider body.
         { timeout: 30_000 },
       )
       .toBe(true);
@@ -424,9 +416,11 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     });
     expect(patch2.ok()).toBeTruthy();
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
-    await page.getByLabel('Message').fill(`Re-include ${stamp}`);
+    const reincludedBody = `Re-include ${stamp}`;
+    await page.getByLabel('Message').fill(reincludedBody);
     const previewBtn2 = page.getByRole('button', { name: 'Preview recipients' });
     await expect(previewBtn2).toBeEnabled({ timeout: 15_000 });
+    await expect(page.getByLabel('Message')).toHaveValue(reincludedBody);
     await previewBtn2.click();
     await expect(page.getByRole('heading', { name: 'Review recipients' })).toBeVisible();
     const reListRow = page

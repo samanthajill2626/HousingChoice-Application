@@ -74,11 +74,12 @@ export function BroadcastComposer(): React.JSX.Element {
   // [TenantName] kept - or fully resolved in single-recipient mode). ?draftId=
   // must stay empty regardless (a non-empty body would recreate the draft and
   // DELETE the one being resumed).
-  const [bodyTemplate, setBodyTemplate] = useState('');
-  // Whether the staff user has hand-edited the message. Only textarea keystrokes
-  // flip this (NOT the programmatic auto-seed below), so the resolved default can
-  // keep re-seeding until the operator takes the pen.
-  const [bodyEdited, setBodyEdited] = useState(false);
+  // Keep text and edit ownership atomic: a pending prefill effect must check
+  // the latest ownership when its update applies, not its render's old flag.
+  const [{ body: bodyTemplate, edited: bodyEdited }, setMessage] = useState({
+    body: '',
+    edited: false,
+  });
   // Seeded entry starts seeds-only: the audience filters are hidden until the
   // operator opts in ("Add more tenants by filters" - a one-way flip).
   const [audienceEnabled, setAudienceEnabled] = useState(seedContactIds.length === 0);
@@ -179,15 +180,18 @@ export function BroadcastComposer(): React.JSX.Element {
   // resolved mode, only with a property attached (no unit -> leave the body
   // alone until the operator types or picks one), and only while the operator
   // has not hand-edited it. Re-seeds on unit/tenant/flyer change. Written via
-  // setBodyTemplate directly (NOT the edit-tracking onChange) so it never marks
+  // a guarded state update (NOT the edit-tracking onChange) so it never marks
   // the body as edited. The flyer prefers the server's flyerUrl, falling back to
   // the same-origin funnel until the first draft exists.
   useEffect(() => {
     if (!resolvedMode || unit === null || bodyEdited) return;
     const flyer =
       draft.flyerUrl ?? (effectiveUnitId !== undefined ? flyerLinkFor(effectiveUnitId) : undefined);
-    setBodyTemplate(
-      resolveTemplateForTenant(DEFAULT_SEND_TEMPLATE, unit, seedContact?.firstName, flyer),
+    setMessage((current) =>
+      current.edited ? current : {
+        body: resolveTemplateForTenant(DEFAULT_SEND_TEMPLATE, unit, seedContact?.firstName, flyer),
+        edited: false,
+      },
     );
   }, [resolvedMode, unit, bodyEdited, draft.flyerUrl, effectiveUnitId, seedContact]);
 
@@ -201,7 +205,12 @@ export function BroadcastComposer(): React.JSX.Element {
     if (resolvedMode || unit === null || bodyEdited || resumeDraftId !== undefined) return;
     const flyer =
       draft.flyerUrl ?? (effectiveUnitId !== undefined ? flyerLinkFor(effectiveUnitId) : undefined);
-    setBodyTemplate(resolveTemplateForUnit(DEFAULT_SEND_TEMPLATE, unit, flyer));
+    setMessage((current) =>
+      current.edited ? current : {
+        body: resolveTemplateForUnit(DEFAULT_SEND_TEMPLATE, unit, flyer),
+        edited: false,
+      },
+    );
   }, [resolvedMode, unit, bodyEdited, resumeDraftId, draft.flyerUrl, effectiveUnitId]);
 
   // Pre-fill the voucher size from the property's beds (overridable), only while
@@ -245,8 +254,7 @@ export function BroadcastComposer(): React.JSX.Element {
   // A textarea keystroke (as opposed to the programmatic auto-seed): take the
   // operator's edit AND latch bodyEdited so the auto-seed stops overwriting it.
   function onBodyChange(next: string): void {
-    setBodyEdited(true);
-    setBodyTemplate(next);
+    setMessage({ body: next, edited: true });
   }
 
   // "Add more tenants by filters" - the one-way flip out of seeds-only. Leaving
@@ -265,8 +273,7 @@ export function BroadcastComposer(): React.JSX.Element {
         );
         if (!ok) return;
       }
-      setBodyTemplate('');
-      setBodyEdited(false);
+      setMessage({ body: '', edited: false });
     }
     setAudienceEnabled(true);
   }
@@ -281,8 +288,7 @@ export function BroadcastComposer(): React.JSX.Element {
       );
       if (!ok) return;
     }
-    setBodyTemplate('');
-    setBodyEdited(false);
+    setMessage({ body: '', edited: false });
     setUnitPick({ label: '' });
   }
 

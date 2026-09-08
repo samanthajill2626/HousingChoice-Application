@@ -525,9 +525,14 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     });
     const token = `mms-1to1-${Date.now()}`;
 
-    // Establish an open 1:1 conversation (an inbound from the tenant), exactly as
-    // the comms round-trip spec does, so the composer has a single send target.
-    await sendAsParty(request, { from: TASHA, body: `starting a thread ${token}` });
+    // Establish an open 1:1 conversation with enough real history to overflow
+    // even the enlarged route used below. This catches the setup regression in
+    // isolation, without depending on attachments left by mms-transcode.spec.ts.
+    const history = [
+      `starting a thread ${token}`,
+      ...Array.from({ length: 70 }, (_, index) => `History line ${index + 1}`),
+    ].join('\n');
+    await sendAsParty(request, { from: TASHA, body: history });
 
     await devLogin(page);
     await page.goto(`${NEXT}/contacts/${TASHA_ID}`);
@@ -603,17 +608,22 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
       if (timelineStream === null || timelineStream === appFrame) {
         throw new Error('Timeline stream not found');
       }
-      if (timelineStream.scrollHeight <= timelineStream.clientHeight) {
-        timelineStream.style.maxHeight = '180px';
-      }
+      // Cap even an already-scrollable stream: enlarging the route can make it
+      // taller than the viewport when earlier messages/media fill the history.
+      timelineStream.style.maxHeight = '180px';
       if (timelineStream.scrollHeight <= timelineStream.clientHeight) {
         throw new Error('Timeline stream could not be made scrollable');
       }
 
       appFrame.dataset.viewerTestAppframe = 'true';
       timelineStream.dataset.viewerTestTimeline = 'true';
-      element.scrollIntoView({ block: 'center' });
       appFrame.scrollTop = Math.min(20, appFrame.scrollHeight - appFrame.clientHeight);
+      // Center within this owner only. scrollIntoView also scrolls AppFrame and
+      // the document, invalidating the deliberately arranged outer offset.
+      const triggerBox = element.getBoundingClientRect();
+      const streamBox = timelineStream.getBoundingClientRect();
+      timelineStream.scrollTop +=
+        triggerBox.top - streamBox.top - (timelineStream.clientHeight - triggerBox.height) / 2;
       timelineStream.scrollTop = Math.min(
         Math.max(10, timelineStream.scrollTop),
         timelineStream.scrollHeight - timelineStream.clientHeight,

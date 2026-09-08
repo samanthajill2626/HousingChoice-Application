@@ -123,6 +123,23 @@ export function toTimelineMessage(m: Message): TimelineMessage | TimelineCall | 
     ...(m.error_code !== undefined && { error_code: m.error_code }),
     ...(retryOf !== undefined && { retry_of: retryOf }),
     ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
+    // Relay 30003 retry lineage (D11/D17). This spread is a FIXED field list, so
+    // a lineage value that is not named here is dropped before render even
+    // though the raw row carried it across the wire - `imported_from` below is
+    // the precedent for adding one. The thread-level join (relayRetryJoin.ts)
+    // reads these four. The destination digest and the composed leg copy DO
+    // arrive - GET /conversations/:id/messages returns the stored row as-is
+    // (D11) - and are deliberately not projected: neither has a client use.
+    ...(typeof m.relay_retry_of === 'string' && { relay_retry_of: m.relay_retry_of }),
+    ...(typeof m.relay_retry_member_key === 'string' && {
+      relay_retry_member_key: m.relay_retry_member_key,
+    }),
+    ...(typeof m.relay_retry_attempt === 'number' &&
+      Number.isFinite(m.relay_retry_attempt) && { relay_retry_attempt: m.relay_retry_attempt }),
+    ...((m.relay_retry_origin_direction === 'inbound' ||
+      m.relay_retry_origin_direction === 'outbound') && {
+      relay_retry_origin_direction: m.relay_retry_origin_direction,
+    }),
     ...(typeof m.relay_sender_key === 'string' && { relay_sender_key: m.relay_sender_key }),
     // A converted carrier group text carries pre-go-live history. The importer
     // stamps `imported_from` on the stored row and GET /conversations/:id/messages

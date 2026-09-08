@@ -8,6 +8,12 @@
 //     OUTBOUND only. A row with no stored status (seed/legacy) shows NO chip
 //     (returns null) rather than a misleading "Sending…".
 import type { DeliveryStatus, RelayRecipientDelivery } from '../../api/index.js';
+// TYPE-ONLY, and it must stay that way. `relayRetryJoin.ts` imports VALUES from
+// this module (`STALE_SENT_AFTER_MS`, `isQuietSince`), so a value import back
+// would be a real runtime cycle; a type import is erased by the compiler and
+// leaves the module graph acyclic. If that ever has to change, move the union
+// here and re-export it from `relayRetryJoin.ts` under the same name.
+import type { RelayRetryState } from './relayRetryJoin.js';
 import {
   includedRecipientEntries,
   isRecipientExcludedFromPresentation,
@@ -154,6 +160,22 @@ export interface RelayDeliverySlot {
   sentAt?: string;
   deliveredAt?: string;
   transportAggregationState?: RelayRecipientDelivery['transportAggregationState'];
+}
+
+/** A relay leg as the RETRY-AWARE presenters see it: the wire slot, plus the
+ *  per-member retry state derived once at thread level by `projectRelayLegs`
+ *  (D18/D19). Structurally the supertype of `EffectiveRelayLeg`.
+ *
+ *  `retryState` is a SEPARATE field and is NEVER smuggled into `status`.
+ *  `DeliveryStatus` is a closed union and `presentDeliveryStatus` returns null
+ *  outside it, so an overloaded `status: 'retrying'` would render NO state at
+ *  all on the row and the recital, while the rollup's counters would match
+ *  neither `delivered` nor `failed` and silently drop the leg from both -
+ *  a neutral "delivered 3/4" that looks like a message still in flight.
+ *
+ *  Optional, so every pre-retry caller still passes a bare `RelayDeliverySlot`. */
+export interface RetryAwareRelayLeg extends RelayDeliverySlot {
+  retryState?: RelayRetryState;
 }
 
 /** Parse an ISO clock string off the wire, or undefined when it is absent or
@@ -355,6 +377,25 @@ export interface RelayDeliveryOptions extends DeliveryReasonOptions {
   /** The READING clock. Withholding it turns staleness off entirely; see the
    *  WITHHELD-CLOCK convention on `isStaleLeg`. */
   nowMs?: number;
+  /** D19's retry-aware arithmetic and copy. OFF by default, and the default is
+   *  load-bearing: absent or false, this presenter IGNORES `retryState` entirely
+   *  and is byte-identical to its pre-retry self, which is what keeps the shared
+   *  `Delivered N/N` success label exactly where it is. Its other consumer is
+   *  the SAME Timeline rendered with `rosterKind='group_text'` - not the
+   *  broadcasts routes, which import `presentDeliveryStatus` and
+   *  `deliveryReason` only. Only the relay Timeline sets this flag, and only
+   *  once it has a thread-level projection to pass. */
+  retryAware?: boolean;
+  /** This bubble IS a retry row - D22's phantom-second-send guard. Read ONLY
+   *  under `retryAware`, and it exists because the join cannot supply this from
+   *  the leg: rungs bucket under the ROOT id, so a retry row's own projection is
+   *  the identity and its rollup would take the shared `Delivered N/N`. On a
+   *  bubble that renders BESIDE its original (D20 renders only a delivered one)
+   *  that label reads as a second, independent send, and an orphaned retry -
+   *  history pages 50 newest-first, so the original may not have loaded - has
+   *  nothing beside it to correct the reading. The `on retry` suffix is what
+   *  ties the two together (D19's first table, D22). */
+  retryRow?: boolean;
 }
 
 /**
@@ -392,7 +433,7 @@ export interface RelayDeliveryOptions extends DeliveryReasonOptions {
  * rather than accidentally re-armed by argument-position drift.
  */
 export function presentRelayDelivery(
-  slots: RelayDeliverySlot[],
+  slots: readonly RetryAwareRelayLeg[],
   opts: RelayDeliveryOptions = {},
 ): DeliveryPresentation | null {
   const { messageAtMs, nowMs } = opts;
@@ -407,53 +448,159 @@ export function presentRelayDelivery(
   const included = includedRecipientEntries(slots).map(([, slot]) => slot);
   const fanned = included.filter((s) => s.errorCode !== 'contact_opted_out');
   if (fanned.length === 0) return null;
-  const delivered = fanned.filter((s) => s.status === 'delivered').length;
-  const failed = fanned.filter(
-    (s) => s.status === 'failed' || s.status === 'undelivered',
-  ).length;
+  // THE RETRY-AWARE ARITHMETIC (D19), and the gate that keeps it invisible until
+  // asked for. `retryAware` OFF reads every leg's `retryState` as undefined, so
+  // all four counts below collapse to exactly the two this function shipped with
+  // and every pre-existing assertion in deliveryStatus.test.ts still holds. That
+  // is the ONLY proof available that the shared labels did not move: there is no
+  // way to import a `main` build.
+  const retryStateOf = (s: RetryAwareRelayLeg): RelayRetryState | undefined =>
+    opts.retryAware === true ? s.retryState : undefined;
+  const isHardFailed = (s: RetryAwareRelayLeg): boolean =>
+    s.status === 'failed' || s.status === 'undelivered';
+
+  /** The distinct reasons a set of legs carries, in first-seen order, joined the
+   *  way the failed branch has always joined them. Extracted (code review R2,
+   *  W5) so the danger branch below builds its reason exactly as the failure
+   *  branch does rather than a second way. */
+  const joinReasons = (legs: readonly RetryAwareRelayLeg[]): string | undefined => {
+    const reasons = Array.from(
+      new Set(
+        legs.map((s) => deliveryReason(s.errorCode, opts)).filter((r): r is string => r !== undefined),
+      ),
+    );
+    return reasons.length > 0 ? reasons.join('; ') : undefined;
+  };
+
   const total = fanned.length;
-  const stale = fanned.filter((s) => isStaleLeg(s, messageAtMs, nowMs)).length;
+  // `delivered-on-retry` needs no clause here: the thread-level projection has
+  // already overlaid `status: 'delivered'` on that leg, so it counts itself.
+  const delivered = fanned.filter((s) => s.status === 'delivered').length;
+  // K. A hard-failed leg stays failed only while NO ladder is live for it -
+  // `terminal` (the cap, a refused gate, a failed enqueue) or no ladder at all.
+  // `if (failed > 0)` is the FIRST branch below, so a leg left unsubtracted here
+  // wins over every state D19 adds.
+  const failedLegs = fanned.filter((s) => {
+    if (!isHardFailed(s)) return false;
+    const state = retryStateOf(s);
+    return state === undefined || state === 'terminal';
+  });
+  const failed = failedLegs.length;
+  // R.
+  const retryingLegs = fanned.filter((s) => retryStateOf(s) === 'retrying');
+  const retrying = retryingLegs.length;
+  // The `on retry` SUFFIX, not a category: it qualifies the delivered count
+  // rather than joining K/R/J, so it composes independently of all three.
+  const onRetry = fanned.filter((s) => retryStateOf(s) === 'delivered-on-retry').length;
+  // J. The retry `unconfirmed` and the pre-existing staleness "not confirmed"
+  // share ONE label slot, so this is a UNION and a leg that is both counts once.
+  // A leg with a live or delivered ladder is excluded outright: it belongs to R
+  // or to the suffix, and counting it here too would inflate the total.
+  const notConfirmedLegs = fanned.filter((s) => {
+    const state = retryStateOf(s);
+    if (state === 'unconfirmed') return true;
+    if (state === 'retrying' || state === 'delivered-on-retry') return false;
+    return isStaleLeg(s, messageAtMs, nowMs);
+  });
+  const notConfirmed = notConfirmedLegs.length;
+
+  // K, R and J are DISJOINT by construction and the composed label adds them, so
+  // that disjointness is load-bearing and asserted in the tests: K requires a
+  // state of `terminal`-or-none, R requires `retrying`, and J's second arm
+  // excludes both live states while `isStaleLeg` is already false for every
+  // terminal status. THE ORDER IS FIXED - failed, retrying, not confirmed -
+  // with zero-count categories omitted, so two bubbles holding the same three
+  // counts always read the same way round.
+  const onRetrySuffix = onRetry > 0 ? `${onRetry} on retry` : undefined;
+  const parts = [
+    // First, adjacent to the delivered count it qualifies.
+    onRetrySuffix,
+    failed > 0 ? `${failed} failed` : undefined,
+    retrying > 0 ? `${retrying} retrying` : undefined,
+    notConfirmed > 0 ? `${notConfirmed} not confirmed` : undefined,
+  ].filter((p): p is string => p !== undefined);
+  const composed = `delivered ${delivered}/${total} - ${parts.join(', ')}`;
+
   if (failed > 0) {
     // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
     // relay-group bug read as a bare "0/2 - 2 failed" with no code). Distinct
     // reasons joined; a repeated code collapses to one.
-    const reasons = Array.from(
-      new Set(
-        fanned
-          .filter((s) => s.status === 'failed' || s.status === 'undelivered')
-          .map((s) => deliveryReason(s.errorCode, opts))
-          .filter((r): r is string => r !== undefined),
-      ),
-    );
+    const reason = joinReasons(failedLegs);
     return {
       // The reason is appended INLINE after this label by the bubble, so the
       // counts come first and the reason last: it belongs to the FAILED legs
       // only, and putting it between the two counts would attach it to the
       // unconfirmed ones instead.
-      label:
-        stale > 0
-          ? `delivered ${delivered}/${total} - ${failed} failed, ${stale} not confirmed`
-          : `delivered ${delivered}/${total} - ${failed} failed`,
+      label: composed,
       tone: 'danger',
       isFailure: true,
-      ...(reasons.length > 0 && { reason: reasons.join('; ') }),
+      ...(reason !== undefined && { reason }),
     };
   }
-  if (stale > 0) {
+  if (retrying > 0 || notConfirmed > 0) {
     // Danger so it draws the eye, but deliberately NOT isFailure: no receipt is
     // not proof of failure, and isFailure is what offers a Retry that could
     // double-send a message that actually landed. Same reasoning as
-    // STALE_SENT_PRESENTATION.
+    // STALE_SENT_PRESENTATION - and it holds twice over for `retrying`, where a
+    // rung is in flight at this very moment.
+    //
+    // AND IT CARRIES A REASON TOO (code review R2, W5). This branch had none, so
+    // a leg whose ladder went quiet named its carrier failure NOWHERE - the join
+    // had already cleared the code, and this was the only channel left. Built
+    // from the RETRY legs by the same helper the failed branch uses, so the two
+    // cannot phrase the same code differently.
+    //
+    // FENCED TO THE RETRY STATES, not the whole J union (code review R3, X3). J
+    // is a union: the `unconfirmed` retry legs AND every plain `isStaleLeg` leg,
+    // including legs with no ladder anywhere. Reading a code off that half made
+    // the chip assert "Delivery failed (error 30022)" about a leg the same call
+    // reports `isFailure: false` and whose own ROW says nothing of the kind (the
+    // stale branch below adds no reason) - chip and row disagreeing, on a leg
+    // outside this feature. A non-terminal leg CAN carry a transient code: the
+    // fan-out writes `{ status: 'queued', errorCode: <transient> }`
+    // (`app/src/jobs/relayFanOut.ts`), and `deliveryReason` renders any unmapped
+    // code as a failure sentence. So only `retrying` and `unconfirmed` legs
+    // contribute, which also leaves the staleness half BYTE-IDENTICAL rather
+    // than nearly so - and with `retryAware` off `retryStateOf` is undefined for
+    // every leg, so this branch reverts to the no-reason presentation it shipped
+    // with.
+    const unconfirmedRetryLegs = notConfirmedLegs.filter(
+      (s) => retryStateOf(s) === 'unconfirmed',
+    );
+    const reason = joinReasons([...retryingLegs, ...unconfirmedRetryLegs]);
     return {
-      label: `delivered ${delivered}/${total} - ${stale} not confirmed`,
+      label: composed,
       tone: 'danger',
       isFailure: false,
+      ...(reason !== undefined && { reason }),
     };
   }
   if (delivered === total) {
-    return { label: `Delivered ${total}/${total}`, tone: 'success', isFailure: false };
+    // D22 FIRST, and only inside this branch: a retry row that has NOT delivered
+    // is not rendered at all (the D20 filter), so no other branch can be reached
+    // by one. The suffix is written on the WHOLE count rather than as a "1 on
+    // retry" category because every leg on this bubble is the retry - there is
+    // exactly one, addressed to the one member the ladder was claimed for (D1) -
+    // so a category count would state a proportion of nothing.
+    if (opts.retryAware === true && opts.retryRow === true) {
+      return {
+        label: `delivered ${total}/${total} on retry`,
+        tone: 'success',
+        isFailure: false,
+      };
+    }
+    // The shared all-delivered label, CAPITAL D, is emitted ONLY when no leg is
+    // on retry: it also serves native group text (this same presenter, called
+    // from the Timeline with `rosterKind='group_text'`), and it means
+    // "finalized clean". A ladder that had to run says so in lowercase,
+    // still success-toned, because every leg did in the end deliver.
+    return onRetrySuffix === undefined
+      ? { label: `Delivered ${total}/${total}`, tone: 'success', isFailure: false }
+      : { label: composed, tone: 'success', isFailure: false };
   }
-  return { label: `delivered ${delivered}/${total}`, tone: 'neutral', isFailure: false };
+  return onRetrySuffix === undefined
+    ? { label: `delivered ${delivered}/${total}`, tone: 'neutral', isFailure: false }
+    : { label: composed, tone: 'neutral', isFailure: false };
 }
 
 /**
@@ -504,12 +651,26 @@ const STALE_QUEUED_PRESENTATION: DeliveryPresentation = {
  *
  * Returns null for an unrecognised status: the row then shows the member's name
  * and NO state chip, never a blank row and never an invented state.
+ *
+ * `reasonOpts` is the CALLER'S `DeliveryReasonOptions` (code review R2, W6),
+ * used for the two retry states that bake a reason into the presentation. It is
+ * not a convenience: this function used to reconstruct `{ relay: true }`
+ * internally, with `media` hard-coded absent, so a `Retrying` leg derived its
+ * reason with different options from the row, the recital and the chip beside
+ * it - all three of which pass `{ media, relay }`. The maps are disjoint today
+ * (media holds 30005/30006, relay holds 30003), which is precisely why
+ * `deliveryReason`'s own docblock calls its order load-bearing "because nothing
+ * observable depends on it today". The moment a media override for 30003 lands,
+ * an MMS relay leg would read the media hedge at three positions and the plain
+ * relay copy at `Retrying`, on the same leg. Defaulting to `{ relay: true }`
+ * keeps every existing caller and test byte-identical.
  */
 export function presentLegDelivery(
-  slot: RelayDeliverySlot,
+  slot: RetryAwareRelayLeg,
   rosterKind: LegRosterKind,
   messageAtMs?: number,
   nowMs?: number,
+  reasonOpts?: DeliveryReasonOptions,
 ): DeliveryPresentation | null {
   // Keyed on the CODE ALONE, exactly as the rollup's denominator filter is, so a
   // leg excluded from N/M and a leg labelled "not sent" are always the same set.
@@ -538,6 +699,70 @@ export function presentLegDelivery(
     };
   }
   if (isRecipientExcludedFromPresentation(slot)) return null;
+  // THE RETRY STATES (D19's second table), RELAY ONLY. A native group-text leg
+  // is untouched by any `retryState` - the relay ladder cannot reach that
+  // product (a retry row lives in a relay conversation) and Sec 2 fences it out.
+  //
+  // These two states cannot be expressed by the delegate at all:
+  // `presentDeliveryStatus` is exhaustive over the CLOSED `DeliveryStatus`
+  // union, which is exactly why `retryState` is a separate field. Both are
+  // deliberately NOT failures - `isFailure` is what offers a Retry action, and
+  // offering one while a rung is in flight is the double-send this feature
+  // exists to prevent.
+  //
+  // `terminal` falls THROUGH to the logic below: its projected close code
+  // reaches the caller through `deliveryReason` on the ordinary failure path.
+  //
+  // `unconfirmed` is decided HERE and never by `isStaleLeg`. The join has
+  // already judged this ladder quiet, against the QUIET RUNG's clock on the
+  // retry ROW - a clock the leg-level staleness test cannot see, because it
+  // reads one clock per bubble and this state is computed from one row's and
+  // rendered on another's (D18). Routing it back through the staleness path
+  // would ask a second, weaker question about the wrong row, and it would drag
+  // `stalenessClockMs` - shared with the FENCED native group-text product -
+  // into a decision that is not its own. Same two labels, same reasoning, so
+  // the chip's "not confirmed" count and the row's copy still say one thing.
+  if (rosterKind === 'relay') {
+    if (slot.retryState === 'retrying') {
+      // The reason rides the presentation rather than the caller's own
+      // `deliveryReason` call, because that call fires only on `isFailure`.
+      // Relay-flagged so a 30003 reads "Phone unreachable" with no retry promise
+      // attached to the CARRIER's behaviour - the promise here is ours, and the
+      // label is what makes it. The caller's own options when it has them (W6).
+      const reason = deliveryReason(slot.errorCode, reasonOpts ?? { relay: true });
+      return {
+        label: 'Retrying',
+        tone: 'danger',
+        isFailure: false,
+        ...(reason !== undefined && { reason }),
+      };
+    }
+    if (slot.retryState === 'delivered-on-retry') {
+      // No reason: the leg's original carrier code is history the moment it
+      // landed, and the projection has already dropped it.
+      return { label: 'Delivered on retry', tone: 'success', isFailure: false };
+    }
+    if (slot.retryState === 'unconfirmed') {
+      // The projection overlaid the quiet rung's own status, so this reads
+      // `queued` on a stranded claim and `sent` on a rung that got no receipt -
+      // the two halves of D18, told apart the same way the leg-level stale
+      // labels are. Anything else is a shape the join cannot produce (a
+      // non-terminal rung is `queued` or `sent`), and it takes the `sent` twin
+      // rather than inventing a third label.
+      //
+      // PLUS THE ORIGINAL'S CARRIER REASON (code review R2, W5). The LABEL is
+      // unchanged - D19's second table stands and the founder needs to see no
+      // new copy - but the leg did fail 30003 and a retry that went quiet has
+      // not un-failed it, so the code rides the same `reason` channel `Retrying`
+      // uses. Without it this state named the carrier failure at no position at
+      // all. The projection now carries the code through the quiet-rung overlay
+      // (relayRetryJoin's `withDecidingRung`); on the DELIVERED path it is still
+      // cleared, so this cannot fire there.
+      const base = slot.status === 'queued' ? STALE_QUEUED_PRESENTATION : STALE_SENT_PRESENTATION;
+      const reason = deliveryReason(slot.errorCode, reasonOpts ?? { relay: true });
+      return reason === undefined ? base : { ...base, reason };
+    }
+  }
   if (isStaleLeg(slot, messageAtMs, nowMs)) {
     return slot.status === 'queued' ? STALE_QUEUED_PRESENTATION : STALE_SENT_PRESENTATION;
   }
@@ -689,6 +914,24 @@ const INTERNAL_CODE_REASONS: Record<string, string> = {
   contact_opted_out: 'Everyone here has opted out - nothing was sent',
   transient_cap: 'Sending gave up after repeated carrier deferrals',
   enqueue_failed: 'Sending could not be scheduled',
+  // The four RELAY RETRY gate refusals (D15). Each is re-checked immediately
+  // before every attempt, 60-240s after the failure that claimed the ladder, so
+  // the world can genuinely have changed underneath it. They exist as separate
+  // codes because an operator whose retry was refused because the number changed
+  // must not read the same string as one whose cap simply ran out.
+  //
+  // `retry_opted_out` is deliberately NOT `contact_opted_out`, which would be
+  // the natural reuse: that code is filtered out of the rollup's denominator, so
+  // one refused member would return null for the WHOLE chip and the bubble would
+  // lose every other leg's state with it.
+  //
+  // "since" in the number-changed copy is doing real work: the retry is refused
+  // because the roster's number no longer matches the one this ladder was
+  // claimed against, not because the number is invalid.
+  retry_group_closed: 'Not retried - group closed',
+  retry_member_removed: 'Not retried - no longer in this group',
+  retry_number_changed: 'Not retried - number changed since',
+  retry_opted_out: 'Not retried - opted out',
 };
 
 /**

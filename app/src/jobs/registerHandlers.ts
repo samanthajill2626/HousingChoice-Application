@@ -14,6 +14,7 @@
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import { registerRetrySendJobHandler } from './retrySend.js';
 import { registerRelayFanOutJobHandler } from './relayFanOut.js';
+import { registerRelayRetryLegJobHandler } from './relayRetryLeg.js';
 import { registerBroadcastSendJobHandler } from './broadcastFanOut.js';
 import { registerMissedCallAutoTextJobHandler } from './missedCallAutoText.js';
 import { registerVoiceTranscriptJobHandlers } from './voiceTranscript.js';
@@ -29,7 +30,8 @@ export interface RegisterJobHandlersDeps {
 
 /**
  * Register every job handler. Job names produced: `messaging.retrySend`,
- * `relay.fanOut` + `relay.intro` (both from the relay registrar), `broadcast.send`,
+ * `relay.fanOut` + `relay.intro` (both from the relay registrar), `relay.retryLeg`,
+ * `broadcast.send`,
  * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`,
  * `relay.warmNumber`, `relay.numberReady`, `groupRail.ensure`, `media.mirror`.
  * retrySend is a single low-volume send and is intentionally not throttled; the
@@ -44,6 +46,18 @@ export interface RegisterJobHandlersDeps {
 export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerRetrySendJobHandler();
   registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket });
+  // relay.retryLeg (the 30003 ladder): one backed-off rung per failed relay leg,
+  // metered by the same shared bucket - it is a real outbound SMS.
+  //
+  // NO backoff is passed here, and that is the point (code review R1, F5). The
+  // lane's `E2E_RELAY_RETRY_BACKOFF_MS` is read inside relayRetryLeg.ts, by the
+  // one chain BOTH the registration and the free `enqueueRelayRetryLeg` resolve
+  // through. Parsing it here instead would reach only the process that
+  // registers - and in production that is the WORKER, while every rung is
+  // enqueued by the status webhook in the APP process, which registers nothing
+  // (`index.ts`, `if (!config.jobsQueueUrl)`). The hermetic lane runs both in
+  // one process, which is why the seam works there either way.
+  registerRelayRetryLegJobHandler({ tokenBucket: deps.tokenBucket });
   registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket });
   registerMissedCallAutoTextJobHandler({ tokenBucket: deps.tokenBucket });
   registerVoiceTranscriptJobHandlers();

@@ -2296,6 +2296,22 @@ export interface Message extends MessageTransportFields {
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message
    *  (keyed by member key). Present on relay-thread messages; absent on 1:1. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  // --- Relay 30003 retry lineage (spec D11) --------------------------------
+  // The stored twins of messagesRepo's MessageItem.relay_retry_*, declared here
+  // because the endpoint returns stored rows as-is. Only these FOUR of the six
+  // stored values are DECLARED - `relay_retry_dest_digest` (the claim identity)
+  // and `relay_retry_leg_body` (the composed leg copy) have no client use, so
+  // nothing here names them. That is a projection claim, not a transport one:
+  // GET /conversations/:id/messages returns the row as-is (D11 says so), so both
+  // arrive in the JSON either way and an interface is not a wire boundary.
+  /** D11: the ROOT source row's tsMsgId this retry row chains to. */
+  relay_retry_of?: string;
+  /** D11: the member key of the leg being retried. */
+  relay_retry_member_key?: string;
+  /** D11: 1-based rung of this ladder (capped at three, D6). */
+  relay_retry_attempt?: number;
+  /** D11: the ORIGINAL's direction, carried so D20's predicate is self-contained. */
+  relay_retry_origin_direction?: 'inbound' | 'outbound';
   // --- Email channel v1 - present only on a type:'email' entry (A4) --------
   /** Subject line (email only). */
   subject?: string;
@@ -2476,6 +2492,27 @@ export interface TimelineMessage extends TimelineBase, MessageTransportFields {
   /** tsMsgId of the FAILED message this one supersedes (a retry). The timeline
    *  hides the superseded predecessor so a delivered retry replaces it. */
   retry_of?: string;
+  // --- Relay 30003 retry lineage (spec D11/D17) -----------------------------
+  // The four of the six stored lineage values this client PROJECTS. A relay
+  // retry is a NEW source row addressed to one member, and these are its
+  // lineage back to the leg it retries. NOT `retry_of`: that field supersedes
+  // its predecessor, and stamping it here would DELETE the original the retry
+  // is meant to render beside (D20).
+  //
+  // `relay_retry_dest_digest` and `relay_retry_leg_body` are simply not
+  // projected - neither has a client use (D11). They DO reach the browser:
+  // GET /conversations/:id/messages returns the stored row as-is (D11), so both
+  // are in the JSON on every relay thread load whether or not any interface
+  // declares them. Withholding them here keeps them out of the rendered model,
+  // which is a different and smaller claim than keeping them off the wire.
+  /** D11: the ROOT source row's tsMsgId - the key the thread-level join buckets on. */
+  relay_retry_of?: string;
+  /** D11: the member key of the leg being retried; it matches the ORIGINAL's slot map, which is what the join keys on. */
+  relay_retry_member_key?: string;
+  /** D11: 1-based rung of this ladder (capped at three, D6). */
+  relay_retry_attempt?: number;
+  /** D11: the ORIGINAL's direction, carried because D20's render predicate needs it and the original may not be loaded (D22). */
+  relay_retry_origin_direction?: 'inbound' | 'outbound';
   /** Pre-go-live history carried in by the importer rather than sent by us.
    *  Present ONLY when true. The bubble suppresses the age-derived
    *  "Sent - not confirmed" cue on it - see the Timeline call site. */

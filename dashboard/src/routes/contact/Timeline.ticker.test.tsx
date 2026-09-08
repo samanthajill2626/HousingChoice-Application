@@ -47,9 +47,14 @@ const ROSTER = [
   { contactId: 'c2', phone: '+14045550112', name: 'Lars Landlord' },
 ];
 
-function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = {}) {
+/** The ELEMENT, not the render: RTL's `rerender` takes a JSX element, never a
+ *  props bag, so a test that re-renders with a changed item set needs this
+ *  half on its own. Precedent: `imageTimeline` in Timeline.test.tsx. */
+function timelineElement(
+  props: Partial<React.ComponentProps<typeof Timeline>> = {},
+): React.JSX.Element {
   const items: TimelineItem[] = props.items ?? [];
-  return render(
+  return (
     <MemoryRouter>
       <Timeline
         status="ready"
@@ -62,8 +67,12 @@ function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = 
         relayRoster={ROSTER}
         {...props}
       />
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = {}) {
+  return render(timelineElement(props));
 }
 
 /** An outbound relay bubble whose `at` is derived from the fixture's own clock.
@@ -697,5 +706,216 @@ describe('Timeline staleness ticker - termination table', () => {
       relayRoster: undefined,
     });
     expect(spies.set).not.toHaveBeenCalled();
+  });
+});
+
+// D18's ticker clause. Severing the retry state from `stalenessClockMs` also
+// severed it from the ONLY clock advance there is: the original's failed leg is
+// terminal and can never arm the interval, and D20 keeps the retry ROW out of
+// `visible` entirely. Without an explicit clause `tickNow` freezes in exactly
+// the case this state exists for - a stranded claim, where no SSE arrives and no
+// item changes - and `retrying` is computed once and never again. That is the
+// indefinite promise M5 removed, one level down.
+//
+// The clause must also TERMINATE, and that is a SEPARATE assertion from
+// "unconfirmed eventually appears": a predicate that arms for ever still shows
+// the right string.
+describe('Timeline staleness ticker - the relay retry clause', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const ROOT = 'r1';
+
+  /** The chip text for this fixture in each retry state. The trailing reason is
+   *  the ORIGINAL leg's own 30003, which the projection now carries into both
+   *  danger states (code review R2, W5) - so these are full, exact strings and
+   *  not substrings. */
+  const RETRYING_CHIP = 'delivered 1/2 - 1 retrying - Phone unreachable (error 30003)';
+  const NOT_CONFIRMED_CHIP = 'delivered 1/2 - 1 not confirmed - Phone unreachable (error 30003)';
+
+  /** The ORIGINAL, with NO tickable leg of its own: one delivered, one hard
+   *  failed. Both are terminal, so anything the interval does here is the retry
+   *  clause's doing and nothing else's. */
+  function originalWithNoLiveLeg(atMs: number): TimelineMessage {
+    return outboundAt(atMs, {
+      c1: { status: 'delivered' },
+      c2: { status: 'undelivered', errorCode: '30003' },
+    });
+  }
+
+  /** A retry ROW for member c2 of that original. Never carries `retry_of`. */
+  function retryRow(atMs: number, leg: RelayRecipientDelivery): TimelineMessage {
+    return {
+      kind: 'message',
+      id: 'retry-1',
+      at: new Date(atMs).toISOString(),
+      conversationId: 'g1',
+      tsMsgId: 'retry-1',
+      direction: 'outbound',
+      author: 'teammate',
+      type: 'sms',
+      delivery_status: 'queued',
+      body: BODY,
+      relay_sender_key: 'team',
+      relay_retry_of: ROOT,
+      relay_retry_member_key: 'c2',
+      relay_retry_attempt: 1,
+      relay_retry_origin_direction: 'outbound',
+      delivery_recipients: { c2: leg },
+    } as unknown as TimelineMessage;
+  }
+
+  it('ARMS for a live retry with no other activity - observable: window.setInterval called once on a thread whose every rendered leg is terminal', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [originalWithNoLiveLeg(t0), retryRow(t0, { status: 'queued' })],
+    });
+
+    // The control: the same original ALONE schedules nothing (the SILENT_CASES
+    // table above proves that shape), so this call is the retry clause's.
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(RETRYING_CHIP)).toBeInTheDocument();
+  });
+
+  it('flips retrying to not confirmed as the clock passes the budget - observable: the rendered chip text, with no refetch and no item change', () => {
+    const t0 = startFakeClock();
+    renderTimeline({
+      items: [originalWithNoLiveLeg(t0), retryRow(t0, { status: 'queued' })],
+    });
+    expect(screen.getByText(RETRYING_CHIP)).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
+  });
+
+  it('STOPS on its own horizon - observable: window.clearInterval with the ticker id, and setInterval never runs a second time', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [originalWithNoLiveLeg(t0), retryRow(t0, { status: 'queued' })],
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
+
+    // And it does NOT re-arm: `unconfirmed` is an END state, so the tick that
+    // crossed the horizon both flipped the copy and disarmed the interval.
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('schedules NOTHING for a rung ALREADY past its horizon - observable: window.setInterval was never called, and the state is on the FIRST render', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    const strandedSince = t0 - PAST_THE_BOUNDARY_MS;
+    renderTimeline({
+      items: [originalWithNoLiveLeg(t0), retryRow(strandedSince, { status: 'queued' })],
+    });
+
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
+    expect(spies.set).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).not.toHaveBeenCalled();
+  });
+
+  // THE UNDATABLE RUNG, both halves in one place. Its row `at` does not parse
+  // and its leg never reached `sent`, so there is no clock to age it from -
+  // `messageInstant` answers `''` for a row with no provider_ts and a non-ISO
+  // tsMsgId, so this is a real row shape and not a defensive one. Slice E
+  // stopped the interval arming for it; ruling B5 fixes the COPY, which was the
+  // half that still promised `retrying` for the life of the mount.
+  it('neither arms nor promises retrying for a rung with no clock at all - observable: window.setInterval was never called and the chip reads not confirmed on the FIRST render', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [
+        originalWithNoLiveLeg(t0),
+        { ...retryRow(t0, { status: 'queued' }), at: '' } as unknown as TimelineMessage,
+      ],
+    });
+
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
+    expect(screen.queryByText(/retrying/)).not.toBeInTheDocument();
+    expect(spies.set).not.toHaveBeenCalled();
+
+    // And no amount of clock movement can change either answer - which is what
+    // makes disarming honest rather than merely cheap.
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).not.toHaveBeenCalled();
+    expect(screen.getByText(NOT_CONFIRMED_CHIP)).toBeInTheDocument();
+  });
+
+  // Code review R2, W8. The two halves of D18 must share ONE gate. The
+  // PROJECTION is fenced on `rosterKind === 'relay'`; the ticker clause was not,
+  // so a native group text carrying a row with `relay_retry_of` armed an
+  // interval whose re-renders could change no pixel - the projection that would
+  // read the state is not running in that product. Inert today (nothing outside
+  // a relay conversation carries the field), which is what makes this a fence:
+  // the row below is illegitimate ON PURPOSE.
+  it('does NOT arm for a retry row on a native GROUP TEXT roster - observable: window.setInterval was never called', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [originalWithNoLiveLeg(t0), retryRow(t0, { status: 'queued' })],
+      rosterKind: 'group_text',
+    });
+
+    // The CONTROL: the identical item set on a relay roster arms exactly once
+    // ("ARMS for a live retry with no other activity" above), so this zero is
+    // the roster gate's doing and nothing else's.
+    expect(spies.set).not.toHaveBeenCalled();
+    // ...and no amount of clock movement changes that.
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).not.toHaveBeenCalled();
+    // The bubble reads the fenced product's own answer: no retry state at all,
+    // so the failed leg is still simply failed and neither retry word appears.
+    expect(screen.queryByText(/retrying/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not confirmed/)).not.toBeInTheDocument();
+  });
+
+  it('CLEARS the interval once the retry resolves - observable: window.clearInterval with the ticker id after a rerender that delivers the rung', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    const items = [originalWithNoLiveLeg(t0), retryRow(t0, { status: 'queued' })];
+    const { rerender } = renderTimeline({ items });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    // The RESOLUTION, not the horizon: the rung delivered, which is the other
+    // way this clause has to terminate.
+    rerender(
+      timelineElement({
+        items: [
+          originalWithNoLiveLeg(t0),
+          retryRow(t0, { status: 'delivered', deliveredAt: new Date(t0 + 1_000).toISOString() }),
+        ],
+      }),
+    );
+
+    expect(screen.getByText('delivered 2/2 - 1 on retry')).toBeInTheDocument();
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
   });
 });

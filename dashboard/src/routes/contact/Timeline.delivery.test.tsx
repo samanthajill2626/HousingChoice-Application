@@ -775,3 +775,302 @@ describe('Timeline per-recipient delivery - the chip that carries the accessible
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
   });
 });
+
+// ---- Slice E: the relay RETRY states at every position that exists (D18-D21) -
+//
+// D21's whole content is that the rollup, its accessible-name recital and the
+// per-recipient row cannot disagree - so every case below asserts the positions
+// that EXIST for that source direction, never the chip alone. An OUTBOUND source
+// has all three; an INBOUND one has two (the rows and `inboundRecipientName`),
+// which is the only delivery information a screen-reader user gets from that
+// bubble, and leaving them stale would be strictly worse than today.
+describe('Timeline relay retry states - the chip, the recital and the row together', () => {
+  /** The pinned clock (src/test/setup.ts) as an instant, so every fixture below
+   *  states its own age rather than hardcoding a string. */
+  const NOW_MS = Date.parse('2026-07-01T12:00:00Z');
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  /** Comfortably inside STALE_SENT_AFTER_MS (15 minutes) - a rung this fresh is
+   *  still plausibly in flight. */
+  const FRESH_MS = NOW_MS - 60_000;
+  /** Comfortably past it: the two `unconfirmed` horizons both run off that one
+   *  budget, so one constant serves the stranded claim and the missing receipt. */
+  const QUIET_MS = NOW_MS - 30 * 60 * 1000;
+  /** The original leg's own send clock, an hour old. */
+  const ORIGINAL_SENT = iso(NOW_MS - 3_600_000);
+
+  const ROOT = 'r-retry-root';
+  const RETRY_BODY = 'relay note the group needs';
+
+  /** The ORIGINAL: c1 landed, c2 was rejected 30003. The failed leg is what a
+   *  ladder gets claimed for. */
+  const original = (over: Partial<TimelineItem> = {}): TimelineItem =>
+    ({
+      ...RELAY_OUT,
+      id: ROOT,
+      tsMsgId: ROOT,
+      body: RETRY_BODY,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'undelivered', errorCode: '30003', sentAt: ORIGINAL_SENT },
+      },
+      ...over,
+    }) as TimelineItem;
+
+  /** A RETRY ROW as the relay projector hands it over: it mirrors the original's
+   *  direction, author, sender key and RAW body (D2/D12), carries the lineage in
+   *  `relay_retry_*`, and NEVER carries `retry_of` - that field would add the
+   *  ORIGINAL to `supersededIds` and delete the bubble this row exists to
+   *  correct. */
+  const retryRow = (opts: {
+    attempt: number;
+    atMs: number;
+    leg: Record<string, unknown>;
+    direction?: 'inbound' | 'outbound';
+  }): TimelineItem =>
+    ({
+      kind: 'message',
+      id: `retry-${String(opts.attempt)}`,
+      at: iso(opts.atMs),
+      conversationId: 'g1',
+      tsMsgId: `retry-${String(opts.attempt)}`,
+      direction: opts.direction ?? 'outbound',
+      author: 'teammate',
+      type: 'sms',
+      delivery_status: 'queued',
+      body: RETRY_BODY,
+      relay_sender_key: 'team',
+      relay_retry_of: ROOT,
+      relay_retry_member_key: 'c2',
+      relay_retry_attempt: opts.attempt,
+      relay_retry_origin_direction: opts.direction ?? 'outbound',
+      delivery_recipients: { c2: opts.leg },
+    }) as unknown as TimelineItem;
+
+  /** The original's body renders on the retry bubble too (D12 stores the RAW
+   *  body on both), so a DELIVERED retry puts two copies on the page. Reveal the
+   *  FIRST, which is the original's. */
+  function revealOriginal(): void {
+    fireEvent.click(screen.getAllByText(RETRY_BODY)[0] as HTMLElement);
+  }
+
+  // THE THREE-POSITION TEST. Patch the chip alone and the recital and the row
+  // keep reciting "Undelivered - Phone unreachable (error 30003)" beside a chip
+  // that says otherwise.
+  it('shows delivered-on-retry at the chip, the recital AND the row', () => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'delivered', sentAt: iso(FRESH_MS), deliveredAt: iso(FRESH_MS + 2_000) },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    // D20 renders a DELIVERED retry of an OUTBOUND original as its own bubble,
+    // so the page carries two rollups; the original's is the first.
+    const chips = screen.getAllByRole('img');
+    expect(chips).toHaveLength(2);
+    const rollup = chips[0] as HTMLElement;
+    // POSITION 1 - the rollup chip. The failed leg now counts as delivered with
+    // an `on retry` suffix, and the danger reason went with it.
+    expect(rollup).toHaveTextContent('delivered 2/2 - 1 on retry');
+    expect(rollup).not.toHaveTextContent('30003');
+    // POSITION 2 - the accessible-name recital, computed with no reveal.
+    expect(rollup).toHaveAccessibleName(/Lars Landlord: Delivered on retry/);
+    expect(rollup).not.toHaveAccessibleName(/Undelivered/);
+    // POSITION 3 - the per-recipient row.
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(/Delivered on retry/),
+    ).toBeInTheDocument();
+  });
+
+  // D22 - THE RETRY BUBBLE'S OWN CHIP, the one position the join cannot reach:
+  // it buckets rungs under the ROOT id, so this row's projection is the identity
+  // and its leg carries no retryState. Left alone the chip reads the shared
+  // `Delivered 1/1`, which beside the original is a phantom SECOND send, and
+  // which - when history has paged the original out (thread history pages 50
+  // newest-first) - is a claim with nothing to correct it. The `on retry` suffix
+  // is the whole of what ties the two bubbles together.
+  it('reads the retry bubbles own chip as delivered-on-retry, beside the originals', () => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'delivered', sentAt: iso(FRESH_MS), deliveredAt: iso(FRESH_MS + 2_000) },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    const chips = screen.getAllByRole('img');
+    expect(chips).toHaveLength(2);
+    const [rollup, retryChip] = chips as [HTMLElement, HTMLElement];
+    // The ORIGINAL still states the whole fan-out with the suffix as a CATEGORY
+    // count, because only one of its two legs took the ladder...
+    expect(rollup).toHaveTextContent('delivered 2/2 - 1 on retry');
+    // ...while the retry row is ALL ladder - one leg, addressed to the one member
+    // it was claimed for (D1) - so the suffix is written on the whole count.
+    expect(retryChip).toHaveTextContent('delivered 1/1 on retry');
+    expect(retryChip).not.toHaveTextContent('Delivered 1/1');
+    // And the spoken headline is the SAME string, so the recital cannot state a
+    // second send the visible chip does not. `speakDeliveryText` expands `1/1`;
+    // the label itself carries no ` - `, so nothing else moves.
+    expect(retryChip).toHaveAccessibleName(/^delivered 1 of 1 on retry\./);
+    expect(retryChip).toHaveAccessibleName(/Lars Landlord: Delivered/);
+  });
+
+  // Sec 2 + D18: an INBOUND source renders NO rollup chip - that gate is FENCED
+  // - but it does render the rows and `inboundRecipientName`'s hidden semantic
+  // group, and both carry the new states.
+  it('updates the inbound recital when a member-originated leg recovers', () => {
+    renderTimeline({
+      items: [
+        original({ direction: 'inbound', relay_sender_key: 'c1', author: 'tenant' }),
+        // An INBOUND original's retry renders no bubble of its own (D20), which
+        // is what stops it appearing as a duplicate member message.
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          direction: 'inbound',
+          leg: { status: 'delivered', sentAt: iso(FRESH_MS), deliveredAt: iso(FRESH_MS + 2_000) },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(screen.getAllByText(RETRY_BODY)).toHaveLength(1);
+    // NAMED, like the shipped inbound assertion in Timeline.ticker.test.tsx:
+    // the composer carries a `group` of its own, so a bare getByRole is
+    // ambiguous. The headline is RECIPIENT_LIST_LABEL.
+    const recital = screen.getByRole('group', { name: /Delivery by recipient/ });
+    expect(recital).toHaveAccessibleName(/Lars Landlord: Delivered on retry/);
+    expect(recital).not.toHaveAccessibleName(/Undelivered/);
+  });
+
+  it('shows a live ladder as retrying, with the carrier reason, at all three positions', () => {
+    renderTimeline({
+      items: [original(), retryRow({ attempt: 1, atMs: FRESH_MS, leg: { status: 'queued' } })],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    // A failed-or-unfinished retry earns no bubble (D20), so there is exactly
+    // one chip on the page.
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent('delivered 1/2 - 1 retrying');
+    // The carrier code SURVIVES the state: the leg really did fail 30003 and a
+    // rung is in flight about it. What must not survive is "will retry" as a
+    // claim about the CARRIER - the promise here is ours, and the label is what
+    // makes it.
+    expect(rollup).toHaveAccessibleName(
+      /Lars Landlord: Retrying, Phone unreachable \(error 30003\)/,
+    );
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(
+        'Retrying - Phone unreachable (error 30003)',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+
+  // D15/D19: a refused gate's close code must render as PROSE at the row and in
+  // the chip's reason. Without the projection an operator whose retry was
+  // refused because the number changed reads exactly the same string as one
+  // whose cap ran out.
+  it('projects a terminal close code onto the row and the chip reason', () => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: QUIET_MS,
+          leg: { status: 'failed', errorCode: 'retry_number_changed' },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    const rollup = screen.getByRole('img');
+    // A terminal ladder LEAVES the leg in the failed count - that is D19's whole
+    // point about `terminal` - and the reason is the close code, not the carrier
+    // one it replaced.
+    expect(rollup).toHaveTextContent(
+      'delivered 1/2 - 1 failed - Not retried - number changed since',
+    );
+    expect(rollup).not.toHaveTextContent('30003');
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(
+        'Undelivered - Not retried - number changed since',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // D19's second table: `unconfirmed` recites today's NOT-CONFIRMED copy. The
+  // projection overlays the quiet rung's own status, which is what lets the row
+  // say it at all: the ORIGINAL's status is terminal, and a terminal status can
+  // never present as not-confirmed.
+  //
+  // AND IT NAMES THE CARRIER FAILURE, at all three positions (code review R2,
+  // W5). This is the stranded-claim state - the one R2's finding 1.1 composed:
+  // no alarm, no Retry affordance, and, before this, no carrier code anywhere on
+  // the bubble either. The LABEL is unchanged; the code rides the `reason`
+  // channel `Retrying` already used.
+  it('reads a stranded claim as not confirmed, with the carrier reason, at all three positions', () => {
+    renderTimeline({
+      items: [original(), retryRow({ attempt: 1, atMs: QUIET_MS, leg: { status: 'queued' } })],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    const rollup = screen.getByRole('img');
+    // POSITION 1 - the rollup chip, label then reason.
+    expect(rollup).toHaveTextContent(
+      'delivered 1/2 - 1 not confirmed - Phone unreachable (error 30003)',
+    );
+    // POSITION 2 - the accessible-name recital.
+    expect(rollup).toHaveAccessibleName(
+      /Lars Landlord: Queued, not confirmed, Phone unreachable \(error 30003\)/,
+    );
+    // POSITION 3 - the per-recipient row. `getByText` is EXACT, so this asserts
+    // the whole rendered string rather than a substring of it.
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(
+        'Queued - not confirmed - Phone unreachable (error 30003)',
+      ),
+    ).toBeInTheDocument();
+    // The promise is still ours to make, not the carrier's - D20's rule holds
+    // for this state exactly as it does for `Retrying`.
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+
+  // THE IDENTITY CASE, and it is the one protecting every relay thread in the
+  // product today: no retry row exists anywhere, so the projection is the
+  // identity and the bubble renders byte for byte what it rendered before this
+  // slice. The two strings are lifted from the shipped three-position test
+  // above rather than rewritten.
+  it('renders a bubble with NO retry rows exactly as it did before', () => {
+    renderTimeline({ items: [original()], relayRoster: RELAY_ROSTER });
+
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent('delivered 1/2 - 1 failed - Phone unreachable (error 30003)');
+    expect(rollup).toHaveAccessibleName(
+      'delivered 1 of 2, 1 failed, Phone unreachable (error 30003). ' +
+        'Keisha Kane: Delivered. Lars Landlord: Undelivered, Phone unreachable (error 30003), ' +
+        `${formatTime(ORIGINAL_SENT)}.`,
+    );
+    revealOriginal();
+    const failedRow = rows()[1] as HTMLElement;
+    expect(
+      within(failedRow).getByText('Undelivered - Phone unreachable (error 30003)'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+});

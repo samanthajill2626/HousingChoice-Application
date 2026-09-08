@@ -295,6 +295,52 @@ describe('messagesRepo.append relay external caller metadata', () => {
   });
 });
 
+describe('messagesRepo point-get consistency (fake document client)', () => {
+  function createGetHarness() {
+    const gets: GetCommand[] = [];
+    const fakeDoc = {
+      send: async (cmd: unknown) => {
+        if (cmd instanceof GetCommand) {
+          gets.push(cmd);
+          return {};
+        }
+        throw new Error(`unexpected command: ${String(cmd)}`);
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    return {
+      repo: createMessagesRepo({
+        doc: fakeDoc,
+        env: { TABLE_PREFIX: 'hc-fake-' } as NodeJS.ProcessEnv,
+        logger: createLogger({ destination: createLogCapture().stream }),
+      }),
+      gets,
+    };
+  }
+
+  // The relay 30003 claim path re-reads its source CONSISTENTLY (spec D7/D8):
+  // a partition lag reporting a row absent turns a fail-closed fence into a
+  // permanently lost retry, and a stale slot read drops the claim silently and
+  // load-dependently. The FLAG is the whole contract, so the flag is what this
+  // asserts - a round-trip against DynamoDB Local passes either way.
+  it('sets ConsistentRead on the consistent read and not on the plain one', async () => {
+    const { repo, gets } = createGetHarness();
+
+    await repo.getByTsMsgIdConsistent('conv-1', '2026-09-02T10:00:00.000Z#SM1');
+    expect(gets.at(-1)?.input).toMatchObject({
+      Key: { conversationId: 'conv-1', tsMsgId: '2026-09-02T10:00:00.000Z#SM1' },
+      ConsistentRead: true,
+    });
+
+    // D7 scopes the change deliberately: getByTsMsgId runs on EVERY relay
+    // status callback and only needs requestedTransport, so making IT
+    // consistent would double a hot-path read to fix a rare one.
+    await repo.getByTsMsgId('conv-1', '2026-09-02T10:00:00.000Z#SM1');
+    expect(gets.at(-1)?.input.ConsistentRead).toBeUndefined();
+    expect(gets).toHaveLength(2);
+  });
+});
+
 describe('breaker minute bucketing', () => {
   it('buckets to the UTC minute', () => {
     expect(minuteBucket(new Date('2026-06-12T15:04:59.999Z'))).toBe('2026-06-12T15:04');

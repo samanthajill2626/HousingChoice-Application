@@ -565,3 +565,96 @@ describe('PlacementConversation - 1:1 mark-read gates', () => {
     expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
   });
 });
+
+// THE PLACEMENT HOST'S GATE for the relay retry display (plan Task 10). The same
+// two assertions the tour host makes, on the OTHER shape: this page injects no
+// milestones on any tab, so its Group pane feeds `thread.items` RAW. All three
+// hosts mount the same shared <Timeline>, so this is a verification, not a
+// second implementation - and it is here to catch a difference in the INPUT
+// path, which is the only thing that differs between them.
+describe('PlacementConversation - relay retry rendering on the raw thread', () => {
+  const ROOT_TS = '2026-07-01T10:00:00.000Z#SMroot';
+  const RELAY_BODY = 'Inspection window for the group';
+  const RETRY_AT = '2026-07-01T10:01:00.000Z';
+
+  const ROSTER = [
+    { contactId: 'tenant-1', phone: '+14045550111', name: 'Ann Tenant' },
+    { contactId: 'landlord-1', phone: '+14045550222', name: 'Lon Landlord' },
+  ];
+
+  const rootRow = {
+    conversationId: 'g1',
+    tsMsgId: ROOT_TS,
+    provider_sid: 'SMroot',
+    provider_ts: '2026-07-01T10:00:00.000Z',
+    created_at: '2026-07-01T10:00:00.000Z',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    body: RELAY_BODY,
+    delivery_status: 'sent',
+    relay_sender_key: 'team',
+    delivery_recipients: {
+      'tenant-1': { status: 'delivered' },
+      'landlord-1': { status: 'undelivered', errorCode: '30003' },
+    },
+  };
+
+  const retryWireRow = (leg: Record<string, unknown>) => ({
+    conversationId: 'g1',
+    tsMsgId: `${RETRY_AT}#relayretry-1`,
+    provider_sid: 'relayretry-deadbeef-1',
+    provider_ts: RETRY_AT,
+    created_at: RETRY_AT,
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    body: RELAY_BODY,
+    delivery_status: 'queued',
+    relay_sender_key: 'team',
+    relay_retry_of: ROOT_TS,
+    relay_retry_member_key: 'landlord-1',
+    relay_retry_attempt: 1,
+    relay_retry_origin_direction: 'outbound',
+    delivery_recipients: { 'landlord-1': leg },
+  });
+
+  const groupProps = () =>
+    baseProps({
+      placement: makePlacement({ group_thread: 'g1' }),
+      channels: makeChannels({ group: { conversationId: 'g1', unread: 0 } }),
+    });
+
+  it('renders delivered-on-retry at the chip and names the member in the recital', async () => {
+    getConversationMembers.mockResolvedValue(ROSTER);
+    getConversationMessages.mockResolvedValue([
+      rootRow,
+      retryWireRow({
+        status: 'delivered',
+        sentAt: RETRY_AT,
+        deliveredAt: '2026-07-01T10:01:02.000Z',
+      }),
+    ]);
+
+    renderConvo(groupProps());
+
+    await waitFor(() => expect(screen.getAllByRole('img').length).toBeGreaterThan(0));
+    const rollup = screen.getAllByRole('img')[0] as HTMLElement;
+    expect(rollup).toHaveTextContent('delivered 2/2 - 1 on retry');
+    expect(rollup).toHaveAccessibleName(/Lon Landlord: Delivered on retry/);
+  });
+
+  it('hides a failed retry, so the body renders once and the reason is the close code', async () => {
+    getConversationMembers.mockResolvedValue(ROSTER);
+    getConversationMessages.mockResolvedValue([
+      rootRow,
+      retryWireRow({ status: 'failed', errorCode: 'retry_number_changed' }),
+    ]);
+
+    renderConvo(groupProps());
+
+    await waitFor(() => expect(screen.getAllByText(RELAY_BODY)).toHaveLength(1));
+    const rollup = screen.getAllByRole('img')[0] as HTMLElement;
+    expect(rollup).toHaveTextContent('1 failed - Not retried - number changed since');
+  });
+});

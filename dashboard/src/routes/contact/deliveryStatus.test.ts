@@ -9,7 +9,13 @@ import {
   presentLegDelivery,
   STALE_SENT_AFTER_MS,
 } from './deliveryStatus.js';
-import type { RelayDeliverySlot } from './deliveryStatus.js';
+import type {
+  DeliveryPresentation,
+  RelayDeliveryOptions,
+  RelayDeliverySlot,
+  RetryAwareRelayLeg,
+} from './deliveryStatus.js';
+import type { RelayRetryState } from './relayRetryJoin.js';
 import type { DeliveryStatus } from '../../api/index.js';
 
 /** Every `Object.prototype` member name a wire `delivery_status` could collide
@@ -1109,5 +1115,554 @@ describe('presentLegDelivery - one recipient row', () => {
       expect(presentLegDelivery(offWire, 'relay', MSG_AT, NOW)).toBeNull();
       expect(presentLegDelivery(offWire, 'group_text', MSG_AT, undefined)).toBeNull();
     }
+  });
+});
+
+// D19 / D15 (relay 30003 retry lineage). Everything here is INERT until the
+// server appends retry rows and Timeline passes the projected legs: no
+// production caller sets `retryAware`, and no wire slot carries `retryState`.
+// The proof that the SHARED labels did not move is that every pre-existing case
+// above still passes unchanged - `presentDeliveryStatus` and `deliveryReason`
+// also serve the broadcasts routes and EmailCard, neither of which passes a
+// relay option.
+describe('presentRelayDelivery - retry-aware arithmetic (D19)', () => {
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  const V0 = Date.parse('2026-09-02T10:00:00.000Z');
+  const NOW = V0 + STALE_SENT_AFTER_MS * 4;
+  /** Quiet for four thresholds. */
+  const QUIET = iso(V0);
+  const MSG_AT = NOW - 60_000;
+
+  const RETRY_OPTS: RelayDeliveryOptions = { relay: true, retryAware: true };
+
+  /** The ORIGINAL's failed slot, as the join hands it back per state. Only
+   *  `delivered-on-retry` rewrites `status`; the other three leave the leg's own
+   *  `{status, errorCode}` alone and move it by `retryState` instead (D19 -
+   *  retryState is NEVER smuggled into `status`). */
+  function legWithState(retryState: RelayRetryState): RetryAwareRelayLeg {
+    return retryState === 'delivered-on-retry'
+      ? { status: 'delivered', retryState }
+      : { status: 'undelivered', errorCode: '30003', retryState };
+  }
+
+  /** Four members: three plain delivered, one carrying the ladder. */
+  function legsWith(retryState: RelayRetryState): RetryAwareRelayLeg[] {
+    return [
+      { status: 'delivered' },
+      { status: 'delivered' },
+      { status: 'delivered' },
+      legWithState(retryState),
+    ];
+  }
+
+  it.each([
+    ['retrying', 'delivered 3/4 - 1 retrying'],
+    ['delivered-on-retry', 'delivered 4/4 - 1 on retry'],
+    ['unconfirmed', 'delivered 3/4 - 1 not confirmed'],
+  ] as Array<[RelayRetryState, string]>)('renders %s as %s', (retryState, label) => {
+    expect(presentRelayDelivery(legsWith(retryState), RETRY_OPTS)?.label).toBe(label);
+  });
+
+  it('keeps the exact string shipped today when the cap is exhausted', () => {
+    const chip = presentRelayDelivery(legsWith('terminal'), RETRY_OPTS);
+    expect(`${chip?.label} - ${chip?.reason}`).toBe(
+      'delivered 3/4 - 1 failed - Phone unreachable (error 30003)',
+    );
+    expect(chip?.tone).toBe('danger');
+    expect(chip?.isFailure).toBe(true);
+  });
+
+  // The FIRST branch is `failed > 0` (:416), so an unsubtracted leg wins over
+  // every new state. With the flag OFF the subtraction must not happen at all.
+  it('ignores retryState entirely without the retry-aware flag', () => {
+    const legs: RetryAwareRelayLeg[] = [
+      { status: 'delivered' },
+      { status: 'undelivered', errorCode: '30003', retryState: 'retrying' },
+    ];
+    expect(presentRelayDelivery(legs, { relay: true })).toEqual({
+      label: 'delivered 1/2 - 1 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Phone unreachable (error 30003)',
+    });
+  });
+
+  it('composes a failed leg and a retrying leg in one label', () => {
+    const legs: RetryAwareRelayLeg[] = [
+      { status: 'delivered' },
+      { status: 'delivered' },
+      { status: 'undelivered', errorCode: '30003', retryState: 'terminal' },
+      { status: 'undelivered', errorCode: '30003', retryState: 'retrying' },
+    ];
+    expect(presentRelayDelivery(legs, RETRY_OPTS)?.label).toBe(
+      'delivered 2/4 - 1 failed, 1 retrying',
+    );
+  });
+
+  // FIXED ORDER: failed, retrying, not confirmed. A bubble can hold all three at
+  // once - three members can fail one message down three different roads.
+  it('composes all three categories in the fixed order', () => {
+    const legs: RetryAwareRelayLeg[] = [
+      { status: 'delivered' },
+      { status: 'undelivered', errorCode: 'retry_number_changed', retryState: 'terminal' },
+      { status: 'undelivered', errorCode: '30003', retryState: 'retrying' },
+      { status: 'undelivered', errorCode: '30003', retryState: 'unconfirmed' },
+    ];
+    const chip = presentRelayDelivery(legs, RETRY_OPTS);
+    expect(chip?.label).toBe('delivered 1/4 - 1 failed, 1 retrying, 1 not confirmed');
+    expect(chip?.tone).toBe('danger');
+    // The reason belongs to the FAILED legs only.
+    expect(chip?.reason).toBe('Not retried - number changed since');
+  });
+
+  // Code review R2, W5. The danger branch (`retrying || notConfirmed`) had NO
+  // reason channel at all, so a one-member relay group whose ladder went quiet
+  // read "delivered 0/1 - 1 not confirmed" with the carrier code nowhere on the
+  // bubble - not on the chip, not in the recital, not on the row.
+  it('names the carrier failure on an unconfirmed chip', () => {
+    const chip = presentRelayDelivery(
+      [{ status: 'queued', errorCode: '30003', retryState: 'unconfirmed' }],
+      RETRY_OPTS,
+    );
+    expect(chip?.label).toBe('delivered 0/1 - 1 not confirmed');
+    expect(chip?.reason).toContain('30003');
+    // Still not a failure: the ladder may have landed, and isFailure is what
+    // offers the Retry that would double-send it.
+    expect(chip).toMatchObject({ tone: 'danger', isFailure: false });
+  });
+
+  it('names the carrier failure on a retrying chip', () => {
+    const chip = presentRelayDelivery(
+      [{ status: 'undelivered', errorCode: '30003', retryState: 'retrying' }],
+      RETRY_OPTS,
+    );
+    expect(chip?.label).toBe('delivered 0/1 - 1 retrying');
+    expect(chip?.reason).toBe('Phone unreachable (error 30003)');
+  });
+
+  // The pre-existing staleness half of J carries no code, and must not acquire
+  // one - this is what keeps every "1 not confirmed" assertion shipped today
+  // byte-identical rather than merely still-passing.
+  it('adds no reason when the not-confirmed legs carry no code', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: QUIET }], {
+        ...RETRY_OPTS,
+        messageAtMs: MSG_AT,
+        nowMs: NOW,
+      }),
+    ).toEqual({ label: 'delivered 1/2 - 1 not confirmed', tone: 'danger', isFailure: false });
+  });
+
+  // Code review R3, X3. J is a UNION - the retry `unconfirmed` legs AND every
+  // plain `isStaleLeg` leg, including legs with no ladder anywhere - and that
+  // second half CAN carry a code: the fan-out writes
+  // `{ status: 'queued', errorCode: <transient> }`, and `deliveryReason` renders
+  // an unmapped code as "Delivery failed (error N)". Reading it here made the
+  // chip assert a failure about a leg the same call reports `isFailure: false`
+  // and whose ROW says nothing of the kind. The reason is fenced to the retry
+  // states; the case above ("no code") pins only the half that was already safe.
+  it('takes NO reason from a stale leg that is not on a ladder', () => {
+    const chip = presentRelayDelivery(
+      [{ status: 'delivered' }, { status: 'queued', sentAt: QUIET, errorCode: '30022' }],
+      { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW },
+    );
+    expect(chip).toEqual({
+      label: 'delivered 1/2 - 1 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+  });
+
+  // The other side of the fence: narrowing it must not cost the state W5 added.
+  it('still names the carrier failure on an unconfirmed RETRY leg', () => {
+    const chip = presentRelayDelivery(
+      [{ status: 'delivered' }, { status: 'queued', errorCode: '30003', retryState: 'unconfirmed' }],
+      { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW },
+    );
+    expect(chip?.label).toBe('delivered 1/2 - 1 not confirmed');
+    expect(chip?.reason).toBe('Phone unreachable (error 30003)');
+  });
+
+  // Both halves of J on one bubble: they COUNT together and they always did,
+  // but only the ladder half speaks.
+  it('names ONLY the retry legs reason when both halves of J meet', () => {
+    const chip = presentRelayDelivery(
+      [
+        { status: 'delivered' },
+        { status: 'queued', sentAt: QUIET, errorCode: '30022' },
+        { status: 'queued', errorCode: '30003', retryState: 'unconfirmed' },
+      ],
+      { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW },
+    );
+    expect(chip?.label).toBe('delivered 1/3 - 2 not confirmed');
+    expect(chip?.reason).toBe('Phone unreachable (error 30003)');
+  });
+
+  // Distinct codes across the two categories are joined by the SAME rule the
+  // failed branch uses, and a repeat collapses to one.
+  it('joins distinct retrying and unconfirmed reasons, collapsing repeats', () => {
+    const chip = presentRelayDelivery(
+      [
+        { status: 'undelivered', errorCode: '30003', retryState: 'retrying' },
+        { status: 'queued', errorCode: '30003', retryState: 'unconfirmed' },
+        { status: 'queued', errorCode: '30005', retryState: 'unconfirmed' },
+      ],
+      RETRY_OPTS,
+    );
+    expect(chip?.reason).toBe('Phone unreachable (error 30003); Number is invalid (error 30005)');
+  });
+
+  // The retry `unconfirmed` and the pre-existing staleness "not confirmed" share
+  // one label slot; they must stay DISJOINT counts, never double-counted.
+  it('counts a stale ORIGINAL leg and an unconfirmed RETRY leg once each', () => {
+    const legs: RetryAwareRelayLeg[] = [
+      { status: 'delivered' },
+      { status: 'delivered' },
+      { status: 'sent', sentAt: QUIET },
+      { status: 'undelivered', errorCode: '30003', retryState: 'unconfirmed' },
+    ];
+    expect(
+      presentRelayDelivery(legs, { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW })?.label,
+    ).toBe('delivered 2/4 - 2 not confirmed');
+  });
+
+  it('counts a leg that is BOTH stale and unconfirmed exactly once', () => {
+    const legs: RetryAwareRelayLeg[] = [
+      { status: 'delivered' },
+      { status: 'sent', sentAt: QUIET, retryState: 'unconfirmed' },
+    ];
+    expect(presentRelayDelivery(legs, { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW })).toEqual({
+      label: 'delivered 1/2 - 1 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+  });
+
+  // D19: the shared success label serves native group text and the broadcasts
+  // routes and must not move.
+  it('leaves the all-delivered label untouched without a retry', () => {
+    const allDelivered: RetryAwareRelayLeg[] = [
+      { status: 'delivered' },
+      { status: 'delivered' },
+      { status: 'delivered' },
+      { status: 'delivered' },
+    ];
+    expect(presentRelayDelivery(allDelivered, RETRY_OPTS)?.label).toBe('Delivered 4/4');
+  });
+
+  // ...and it is emitted ONLY when no leg is on retry. Every leg delivered here,
+  // so the tone stays SUCCESS - the ladder worked. The lowercase `delivered` is
+  // what distinguishes it from the finalized-clean label.
+  it('renders all-delivered-with-one-on-retry as a lowercase success chip', () => {
+    expect(presentRelayDelivery(legsWith('delivered-on-retry'), RETRY_OPTS)).toEqual({
+      label: 'delivered 4/4 - 1 on retry',
+      tone: 'success',
+      isFailure: false,
+    });
+  });
+
+  it('keeps the on-retry suffix on an in-flight chip', () => {
+    const legs: RetryAwareRelayLeg[] = [
+      { status: 'delivered', retryState: 'delivered-on-retry' },
+      { status: 'sent' },
+    ];
+    expect(presentRelayDelivery(legs, RETRY_OPTS)).toEqual({
+      label: 'delivered 1/2 - 1 on retry',
+      tone: 'neutral',
+      isFailure: false,
+    });
+  });
+
+  // D19 / adjudication: the refusal code is `retry_opted_out`, NEVER
+  // `contact_opted_out` - the latter is filtered out of the denominator at :408
+  // and a single refused member would null the WHOLE rollup.
+  it('keeps a retry_opted_out leg in the rollup rather than nulling it', () => {
+    const legs: RetryAwareRelayLeg[] = [
+      { status: 'delivered' },
+      { status: 'undelivered', errorCode: 'retry_opted_out', retryState: 'terminal' },
+    ];
+    expect(presentRelayDelivery(legs, RETRY_OPTS)).toEqual({
+      label: 'delivered 1/2 - 1 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Not retried - opted out',
+    });
+  });
+
+  // D22 - the RETRY ROW'S OWN chip. The join buckets rungs under the ROOT id, so
+  // this bubble's projection is the identity and its leg carries no `retryState`
+  // at all; without an explicit flag the rollup takes the shared `Delivered 1/1`
+  // and reads as a phantom second send beside the original - or, when history
+  // has paged the original out, as an unexplained one.
+  it('reads a delivered retry rows own chip as delivered-on-retry', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }], { ...RETRY_OPTS, retryRow: true }),
+    ).toEqual({
+      label: 'delivered 1/1 on retry',
+      tone: 'success',
+      isFailure: false,
+    });
+  });
+
+  // The flag is read ONLY under `retryAware`, the same gate every other D19
+  // behaviour sits behind - so a caller that has not opted into the retry
+  // arithmetic cannot be surprised by retry copy.
+  it('ignores retryRow entirely without the retry-aware flag', () => {
+    expect(presentRelayDelivery([{ status: 'delivered' }], { relay: true, retryRow: true })).toEqual(
+      {
+        label: 'Delivered 1/1',
+        tone: 'success',
+        isFailure: false,
+      },
+    );
+  });
+
+  // `retryRow: false` is what EVERY non-retry bubble passes (Timeline derives it
+  // from `msg.relay_retry_of !== undefined`), so it must be indistinguishable
+  // from omitting it - across the success branch it guards AND the branches it
+  // does not.
+  it('leaves every chip untouched when retryRow is false', () => {
+    const cases: RetryAwareRelayLeg[][] = [
+      [{ status: 'delivered' }],
+      [{ status: 'delivered' }, { status: 'delivered' }],
+      legsWith('delivered-on-retry'),
+      legsWith('retrying'),
+      legsWith('terminal'),
+      legsWith('unconfirmed'),
+      [{ status: 'delivered' }, { status: 'sent' }],
+    ];
+    for (const legs of cases) {
+      expect(presentRelayDelivery(legs, { ...RETRY_OPTS, retryRow: false })).toEqual(
+        presentRelayDelivery(legs, RETRY_OPTS),
+      );
+    }
+    // ...and the labels are the ones shipped, not merely equal to each other.
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }], { ...RETRY_OPTS, retryRow: false })?.label,
+    ).toBe('Delivered 1/1');
+  });
+});
+
+describe('presentLegDelivery - retry states on one recipient row (D19)', () => {
+  /** Slice E renders `label - reason` whenever a reason is present; this is the
+   *  row text those two positions will read. */
+  const rowTextOf = (p: DeliveryPresentation | null): string | undefined =>
+    p === null ? undefined : p.reason !== undefined ? `${p.label} - ${p.reason}` : p.label;
+
+  /** A leg clock a MINUTE old - well inside the staleness budget, so `isStaleLeg`
+   *  answers NO for it whatever clock it is read against. The `unconfirmed`
+   *  cases below use it deliberately: the join has already judged the ladder
+   *  quiet against the retry ROW's clock, and this function must not re-derive
+   *  that from the leg's own. */
+  const FRESH = new Date(Date.parse('2026-09-02T10:00:00.000Z') - 60_000).toISOString();
+
+  it.each([
+    ['retrying', 'Retrying - Phone unreachable (error 30003)'],
+    ['delivered-on-retry', 'Delivered on retry'],
+  ] as Array<[RelayRetryState, string]>)(
+    'renders the per-recipient row for %s',
+    (retryState, text) => {
+      const leg: RetryAwareRelayLeg =
+        retryState === 'delivered-on-retry'
+          ? { status: 'delivered', retryState }
+          : { status: 'undelivered', errorCode: '30003', retryState };
+      expect(rowTextOf(presentLegDelivery(leg, 'relay'))).toBe(text);
+    },
+  );
+
+  it('marks a retrying row danger but NOT a failure - a ladder is already running', () => {
+    // isFailure is what offers a Retry action, and a second manual send while a
+    // rung is in flight is the double-send this whole feature exists to avoid.
+    expect(
+      presentLegDelivery(
+        { status: 'undelivered', errorCode: '30003', retryState: 'retrying' },
+        'relay',
+      ),
+    ).toEqual({
+      label: 'Retrying',
+      tone: 'danger',
+      isFailure: false,
+      reason: 'Phone unreachable (error 30003)',
+    });
+  });
+
+  it('renders a delivered-on-retry row as success with no reason', () => {
+    expect(
+      presentLegDelivery({ status: 'delivered', retryState: 'delivered-on-retry' }, 'relay'),
+    ).toEqual({ label: 'Delivered on retry', tone: 'success', isFailure: false });
+  });
+
+  it('carries a projected close code as the retrying row reason', () => {
+    expect(
+      rowTextOf(
+        presentLegDelivery(
+          { status: 'undelivered', errorCode: 'retry_group_closed', retryState: 'retrying' },
+          'relay',
+        ),
+      ),
+    ).toBe('Retrying - Not retried - group closed');
+  });
+
+  it('falls through to the logic shipped today for terminal', () => {
+    expect(
+      presentLegDelivery(
+        { status: 'undelivered', errorCode: '30003', retryState: 'terminal' },
+        'relay',
+      ),
+    ).toEqual({ label: 'Undelivered', tone: 'danger', isFailure: true });
+  });
+
+  // D19's second table: an `unconfirmed` leg recites today's NOT-CONFIRMED row
+  // copy. It is decided here rather than by `isStaleLeg`, because the quiet
+  // clock lives on the retry ROW and the leg-level staleness test cannot see it
+  // (D18). The projection overlays the quiet rung's own status, so these two
+  // shapes are what actually arrive - the two halves of `unconfirmed`, told
+  // apart the same way the leg-level stale labels are.
+  it('reads a stranded (queued) unconfirmed rung as Queued - not confirmed', () => {
+    expect(presentLegDelivery({ status: 'queued', retryState: 'unconfirmed' }, 'relay')).toEqual({
+      label: 'Queued - not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+  });
+
+  it('reads a sent-but-unacknowledged unconfirmed rung as Sent - not confirmed', () => {
+    expect(
+      presentLegDelivery({ status: 'sent', sentAt: FRESH, retryState: 'unconfirmed' }, 'relay'),
+    ).toEqual({ label: 'Sent - not confirmed', tone: 'danger', isFailure: false });
+  });
+
+  // Code review R2, W5. The LABEL is D19's, unchanged; what was missing is the
+  // carrier code, which the join now carries through the quiet-rung overlay. Both
+  // halves of `unconfirmed`, because the stranded claim and the missing receipt
+  // are the two shapes an operator actually meets.
+  it.each([
+    [
+      'stranded (queued)',
+      { status: 'queued', errorCode: '30003', retryState: 'unconfirmed' },
+      'Queued - not confirmed - Phone unreachable (error 30003)',
+    ],
+    [
+      'sent with no receipt',
+      { status: 'sent', sentAt: FRESH, errorCode: '30003', retryState: 'unconfirmed' },
+      'Sent - not confirmed - Phone unreachable (error 30003)',
+    ],
+  ] as Array<[string, RetryAwareRelayLeg, string]>)(
+    'names the carrier failure on an unconfirmed %s rung',
+    (_label, leg, text) => {
+      expect(rowTextOf(presentLegDelivery(leg, 'relay'))).toBe(text);
+    },
+  );
+
+  // ...and it is still NOT a failure. The reason must not smuggle in a Retry
+  // action: a ladder we cannot confirm may well have landed, and offering a
+  // manual resend there is the double-send this feature exists to prevent.
+  it('keeps an unconfirmed rung carrying a reason out of isFailure', () => {
+    expect(
+      presentLegDelivery({ status: 'queued', errorCode: '30003', retryState: 'unconfirmed' }, 'relay'),
+    ).toMatchObject({ tone: 'danger', isFailure: false });
+  });
+
+  // Code review R2, W6. The two baked-in reasons used to reconstruct
+  // `{ relay: true }` internally, with `media` hard-coded ABSENT, while the row,
+  // the recital and the chip beside them all pass `{ media, relay }`. Pinned by
+  // comparing against `deliveryReason` DIRECTLY rather than against a literal:
+  // the maps are disjoint today, so a literal would encode today's answer and
+  // pass whatever the options did.
+  it.each([['retrying'], ['unconfirmed']] as Array<[RelayRetryState]>)(
+    'derives a %s legs reason with the CALLERS options',
+    (retryState) => {
+      const leg: RetryAwareRelayLeg = { status: 'queued', errorCode: '30005', retryState };
+      const opts = { media: true, relay: true };
+      expect(presentLegDelivery(leg, 'relay', undefined, undefined, opts)?.reason).toBe(
+        deliveryReason('30005', opts),
+      );
+      // And the media hedge really is a DIFFERENT string from the default, so
+      // this case would still be an assertion if the maps ever overlap.
+      expect(deliveryReason('30005', opts)).not.toBe(deliveryReason('30005', { relay: true }));
+    },
+  );
+
+  // NO CLOCK is required, and that is the point: the join already made the
+  // time-derived judgement against a clock this function is never given. The
+  // fresh `sentAt` above is exactly the shape `isStaleLeg` would answer NO to.
+  it('does not re-derive an unconfirmed legs staleness from its own clock', () => {
+    expect(
+      presentLegDelivery(
+        { status: 'sent', sentAt: FRESH, retryState: 'unconfirmed' },
+        'relay',
+        undefined,
+        undefined,
+      )?.label,
+    ).toBe('Sent - not confirmed');
+  });
+
+  // The FENCED product must not move: a native group-text leg is untouched by
+  // any retryState, because a relay retry row can never appear in that thread.
+  it.each([['retrying'], ['delivered-on-retry'], ['unconfirmed']] as Array<[RelayRetryState]>)(
+    'leaves a native group-text leg carrying %s untouched',
+    (retryState) => {
+      expect(
+        presentLegDelivery(
+          { status: 'undelivered', errorCode: '30003', retryState },
+          'group_text',
+        ),
+      ).toEqual({ label: 'Undelivered', tone: 'danger', isFailure: true });
+    },
+  );
+
+  // The FENCED product, on the shape the new `unconfirmed` clause actually
+  // matches: a `queued` group-text leg with no clock must stay silent, not pick
+  // up "Queued - not confirmed" from a state that can never reach it.
+  it('leaves a queued native group-text leg carrying unconfirmed untouched', () => {
+    // Compared against the SAME leg with no state rather than against a copied
+    // literal: the shipped label carries a real U+2026 and this assertion is
+    // about the two being identical, not about what the string spells.
+    expect(
+      presentLegDelivery({ status: 'queued', retryState: 'unconfirmed' }, 'group_text'),
+    ).toEqual(presentLegDelivery({ status: 'queued' }, 'group_text'));
+    expect(
+      presentLegDelivery({ status: 'queued', retryState: 'unconfirmed' }, 'group_text'),
+    ).toMatchObject({ tone: 'neutral', isFailure: false });
+  });
+
+  it('leaves a native group-text leg with no retryState untouched', () => {
+    expect(presentLegDelivery({ status: 'undelivered' }, 'group_text')).toMatchObject({
+      label: 'Undelivered',
+      isFailure: true,
+    });
+  });
+
+  // The opted-out short-circuit runs BEFORE the retry states, and must: a member
+  // who opted out was never sent to, so no ladder was ever claimed for them.
+  it('keeps the opted-out short-circuit ahead of any retry state', () => {
+    expect(
+      presentLegDelivery(
+        { status: 'failed', errorCode: 'contact_opted_out', retryState: 'retrying' },
+        'relay',
+      ),
+    ).toEqual({ label: 'Not sent - opted out', tone: 'neutral', isFailure: false });
+  });
+});
+
+describe('deliveryReason - the four retry close codes (D15)', () => {
+  const RETRY_CODES: Array<[string, string]> = [
+    ['retry_group_closed', 'Not retried - group closed'],
+    ['retry_member_removed', 'Not retried - no longer in this group'],
+    ['retry_number_changed', 'Not retried - number changed since'],
+    ['retry_opted_out', 'Not retried - opted out'],
+  ];
+
+  it.each(RETRY_CODES)('renders %s as prose with no (error N) tail', (code, copy) => {
+    expect(deliveryReason(code, { relay: true })).toBe(copy);
+    expect(deliveryReason(code, { relay: true })).not.toContain('(error ');
+  });
+
+  // INTERNAL codes are keyed on the code ALONE and short-circuit before any
+  // product map, so they read identically wherever they land - the relay rollup,
+  // the recital, one member's row, and a broadcast's results badge.
+  it.each(RETRY_CODES)('renders %s the same with no product options at all', (code, copy) => {
+    expect(deliveryReason(code)).toBe(copy);
+    expect(deliveryReason(code, { media: true })).toBe(copy);
   });
 });

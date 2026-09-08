@@ -186,6 +186,7 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     // Unused by the capture service:
     createOrGetByParticipantPhone: async () => conversation,
     touchLastActivity: async () => conversation,
+    touchLastActivityPreservingStatus: async () => conversation,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
     setUnread: async () => conversation,

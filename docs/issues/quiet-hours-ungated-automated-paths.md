@@ -6,7 +6,8 @@ severity: med
 status: open
 area: app
 created: 2026-08-03
-refs: app/src/jobs/relayNumberReady.ts:171, app/src/services/relayQueuedMessages.ts, app/src/jobs/retrySend.ts:73
+updated: 2026-09-02
+refs: app/src/jobs/relayNumberReady.ts:171, app/src/services/relayQueuedMessages.ts, app/src/jobs/retrySend.ts:73, app/src/jobs/relayRetryLeg.ts
 ---
 
 **Problem.** The quiet-hours feature
@@ -35,6 +36,19 @@ and none of them is gated:
    backoff 60s/120s/240s with max 3 attempts, so a retry lands at most ~7
    minutes after the original send - it only enters quiet hours when the
    original fired at ~20:55.
+
+   **2026-09-02 (feat/relay-30003-retry-lineage): a SECOND automatic retry path
+   now exists and inherits this item unchanged.** A relay fan-out leg rejected
+   with 30003 is retried to that member alone by `app/src/jobs/relayRetryLeg.ts`,
+   claimed from the relay branch of `app/src/routes/webhooks/twilio.ts` on the
+   failed delivery-status callback. It is deliberately NOT separately gated, and
+   the ~7-minute bound still holds exactly: its ladder matches the 1:1 policy
+   value for value - 60s/120s/240s, max 3 attempts (spec D6,
+   `relayRetryBackoffMs` in `app/src/lib/relayRetryClaim.ts` mirroring
+   `retrySend.ts`). The recommendation below therefore transfers with no change
+   of reasoning; read "automatic delivery retries" as covering both paths. Note
+   the retry job also carries a short TRANSIENT sub-ladder (5s then 10s) inside
+   one rung, which does not extend the bound.
 
 None of these is a regression from the quiet-hours build (its exempt-files rule
 was honored; zero diff on all of them). This issue records the DECISION owed:

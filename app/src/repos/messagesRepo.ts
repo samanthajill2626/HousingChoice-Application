@@ -727,6 +727,32 @@ export interface NewMessage {
    */
   retryOf?: string;
 
+  // --- Relay 30003 retry lineage (spec D11/D12) -----------------------------
+  // A relay retry is a NEW source row addressed to ONE member, not a promotion
+  // of the failed leg (D1), so it carries its own lineage back to the leg it
+  // retries. Six values stored; the dashboard PROJECTS four (D11). All six
+  // reach the browser - GET /conversations/:id/messages returns the row as-is -
+  // so "projected" is the honest word and "on the wire" is not. Absent on every
+  // other message - a row carrying relayRetryOf IS a retry row.
+  /** D11: the root source row's tsMsgId - the key the thread-level join buckets on. */
+  relayRetryOf?: string;
+  /** D11: the member key of the leg being retried - it must match the ORIGINAL's slot map, because that is what the presenter joins on. */
+  relayRetryMemberKey?: string;
+  /** D11: 1-based rung of this ladder, capped at MAX_RELAY_RETRY_ATTEMPTS (D6). */
+  relayRetryAttempt?: number;
+  /** D11: digest of `<root tsMsgId>|<destination E164>` (relayRetryDigest) - the claim identity and the changed-number gate; the raw handset is never stored (D5). */
+  relayRetryDestDigest?: string;
+  /** D11: the ORIGINAL's direction, stored because D20's render predicate needs it and the original may not be loaded (D22). */
+  relayRetryOriginDirection?: 'inbound' | 'outbound';
+  /**
+   * D12: the exact COMPOSED leg copy ("<SenderName>: <body>"), sent verbatim on
+   * every rung. The ROW body stays RAW - the sender prefix belongs to the
+   * outbound leg only (relayAnnouncements.ts:122-143), and persisting it would
+   * rewrite the inbox preview - so this field is what keeps a sender renamed
+   * between attempts from rewriting what was already sent.
+   */
+  relayRetryLegBody?: string;
+
   // --- Voice calls (M1.9a) -------------------------------------------------
   // A `type:'call'` message is a metadata-only timeline entry for a masked
   // (pool-number) call. `providerSid` carries the Twilio CallSid (the dedupe
@@ -968,6 +994,22 @@ export interface MessageItem {
   retry_of?: string;
   /** 1-based retry attempt number (caps the 30003 retry chain, doc §7.1). */
   retry_attempt?: number;
+  // --- Relay 30003 retry lineage (spec D11/D12) -----------------------------
+  // The stored twins of NewMessage.relayRetry*. NOT `retry_of`: that field
+  // supersedes a 1:1 bubble, and stamping it here would DELETE the original
+  // the retry is meant to render beside (D20).
+  /** D11: the root source row's tsMsgId - the key the thread-level join buckets on. */
+  relay_retry_of?: string;
+  /** D11: the member key of the leg being retried - it must match the ORIGINAL's slot map, because that is what the presenter joins on. */
+  relay_retry_member_key?: string;
+  /** D11: 1-based rung of this ladder, capped at MAX_RELAY_RETRY_ATTEMPTS (D6). */
+  relay_retry_attempt?: number;
+  /** D11: digest of `<root tsMsgId>|<destination E164>` - the claim identity and the changed-number gate; the raw handset is never stored (D5). */
+  relay_retry_dest_digest?: string;
+  /** D11: the ORIGINAL's direction, stored because D20's render predicate needs it and the original may not be loaded (D22). */
+  relay_retry_origin_direction?: 'inbound' | 'outbound';
+  /** D12: the composed leg copy sent verbatim on every rung; the ROW body above stays RAW, so the inbox preview and the timeline show one string for one logical message. */
+  relay_retry_leg_body?: string;
   /** 1-based pass number of the relay fan-out CONTINUATION ladder (M5) - a
    *  sibling of the 1:1 retry ladder above, never shared with it: a continuation
    *  would otherwise silently consume the retry budget. Claimed by
@@ -1337,6 +1379,19 @@ export interface MessagesRepo {
    * and char count still prove what was sent.
    */
   getByTsMsgId(conversationId: string, tsMsgId: string): Promise<MessageItem | undefined>;
+  /**
+   * The same point-get with ConsistentRead (spec D7/D8) - for a caller that
+   * must read its OWN just-written state, or must not mistake a partition lag
+   * for an absent row. The relay 30003 claim path is the caller: a stale slot
+   * read drops the claim silently and load-dependently, and a lagged miss on a
+   * fail-closed fence loses the retry permanently.
+   *
+   * Deliberately a SECOND method rather than a flag on `getByTsMsgId`: that one
+   * runs on every relay status callback (`webhooks/twilio.ts`) and only needs
+   * `requestedTransport`, so making it consistent would double a hot-path read
+   * to fix a rare one.
+   */
+  getByTsMsgIdConsistent(conversationId: string, tsMsgId: string): Promise<MessageItem | undefined>;
   /**
    * BATCH point-get for a whole window (up to MAX_TRANSCRIPT_MESSAGES ids),
    * keyed by tsMsgId. Chunked at the BatchGetItem 100-key limit, with an
@@ -2159,6 +2214,25 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         // new message carries its lineage atomically — no annotate-after race. The
         // 30003 auto-retry still annotates post-send (it also needs retry_attempt).
         ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
+        // Relay 30003 retry lineage (D11/D12): a retry is a NEW source row, so
+        // its lineage back to the leg it retries is stamped AT APPEND, in the
+        // same transaction as the sid# pointer that IS the claim (D3).
+        ...(message.relayRetryOf !== undefined && { relay_retry_of: message.relayRetryOf }),
+        ...(message.relayRetryMemberKey !== undefined && {
+          relay_retry_member_key: message.relayRetryMemberKey,
+        }),
+        ...(message.relayRetryAttempt !== undefined && {
+          relay_retry_attempt: message.relayRetryAttempt,
+        }),
+        ...(message.relayRetryDestDigest !== undefined && {
+          relay_retry_dest_digest: message.relayRetryDestDigest,
+        }),
+        ...(message.relayRetryOriginDirection !== undefined && {
+          relay_retry_origin_direction: message.relayRetryOriginDirection,
+        }),
+        ...(message.relayRetryLegBody !== undefined && {
+          relay_retry_leg_body: message.relayRetryLegBody,
+        }),
         // Voice call (M1.9a): metadata-only fields on a type:'call' item. The
         // same sid#<CallSid> pointer the append already writes lets the status
         // callback recover context via getByProviderSid(CallSid). Masked calls
@@ -2207,6 +2281,9 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.attachments_truncated === true && { attachments_truncated: true }),
         ...(message.headers_truncated === true && { headers_truncated: true }),
       };
+      // D13: a row carrying relay_retry_of IS a relay retry row (D11) - the one
+      // discriminator the media-pointer guard below needs.
+      const isRelayRetryRow = message.relayRetryOf !== undefined;
       try {
         await doc.send(
           new TransactWriteCommand({
@@ -2283,7 +2360,17 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
               // gallery. LAST in the list, so the SID pointer stays at index 1
               // (the dedupe attribution below depends on that). No condition:
               // a redelivery cancels on the SID pointer before these matter.
-              ...(item.media_attachments !== undefined
+              // D13: a relay RETRY row writes NONE of them. It re-sends
+              // attachments its ORIGINAL already indexed, and this write is
+              // UNCONDITIONED, so a three-rung ladder would add three more
+              // index rows per failed leg - durable garbage whether or not a
+              // reader ever reaches them. (The single reader today,
+              // GET /api/contacts/:id/media, excludes relay threads BY NAME at
+              // routes/contacts.ts:1374-1379 - by name, so reversibly, which is
+              // why the suppression is built rather than deferred.) The durable
+              // s3Keys still ride the row, which is what the retry re-presigns
+              // from.
+              ...(item.media_attachments !== undefined && !isRelayRetryRow
                 ? mediaPointerItems(message.conversationId, tsMsgId, item.media_attachments).map((ptr) => ({
                     Put: { TableName: table, Item: ptr },
                   }))
@@ -2963,6 +3050,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       );
       return Item as MessageItem | undefined;
     },
+
+    // D7: the interface half of the private getMessageConsistent six sibling
+    // mutators already use - the SAME closure, never a second GetCommand, so
+    // the two cannot drift apart.
+    getByTsMsgIdConsistent: getMessageConsistent,
 
     async getManyByTsMsgIds(conversationId, tsMsgIds) {
       const out = new Map<string, MessageItem>();

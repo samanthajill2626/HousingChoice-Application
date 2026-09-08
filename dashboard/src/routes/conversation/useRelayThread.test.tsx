@@ -87,6 +87,70 @@ describe('toTimelineMessage - transport facts', () => {
   });
 });
 
+describe('toTimelineMessage - relay retry lineage', () => {
+  // The projectors spread a FIXED field list, so an unlisted field is dropped
+  // before render even though it crossed the wire. `imported_from` (the
+  // provenance describe above) is the precedent for adding one. These four are
+  // what the thread-level retry join reads; the destination digest and the
+  // composed leg copy are stored server-side and never reach the wire (D11).
+  const base = {
+    conversationId: 'c1',
+    tsMsgId: '2026-09-02T10:05:00.000Z#relayretry-abc-1',
+    provider_sid: 'relayretry-abc-1',
+    provider_ts: '2026-09-02T10:05:00.000Z',
+    created_at: '2026-09-02T10:05:00.000Z',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    body: 'the raw body',
+    delivery_status: 'queued',
+  };
+
+  it('projects the four retry lineage fields', () => {
+    const item = toTimelineMessage({
+      ...base,
+      relay_retry_of: '2026-09-02T10:00:00.000Z#SM1',
+      relay_retry_member_key: 'contact-1',
+      relay_retry_attempt: 2,
+      relay_retry_origin_direction: 'outbound',
+    } as unknown as Message);
+
+    expect(item).toMatchObject({
+      kind: 'message',
+      relay_retry_of: '2026-09-02T10:00:00.000Z#SM1',
+      relay_retry_member_key: 'contact-1',
+      relay_retry_attempt: 2,
+      relay_retry_origin_direction: 'outbound',
+    });
+  });
+
+  // An ordinary relay row must not acquire a default lineage: the join buckets
+  // on `relay_retry_of`, so any placeholder value would make every original
+  // look like a retry of something.
+  it('leaves all four ABSENT on a row that carries no lineage', () => {
+    const item = toTimelineMessage(base as unknown as Message);
+
+    expect(item).not.toHaveProperty('relay_retry_of');
+    expect(item).not.toHaveProperty('relay_retry_member_key');
+    expect(item).not.toHaveProperty('relay_retry_attempt');
+    expect(item).not.toHaveProperty('relay_retry_origin_direction');
+  });
+
+  // D20's render predicate branches on the direction, so a value outside the
+  // union must not reach it - a bad string would otherwise fall through the
+  // predicate's `=== 'outbound'` test as an unhandled third case.
+  it('drops a lineage direction outside the union', () => {
+    const item = toTimelineMessage({
+      ...base,
+      relay_retry_of: '2026-09-02T10:00:00.000Z#SM1',
+      relay_retry_origin_direction: 'sideways',
+    } as unknown as Message);
+
+    expect(item).toMatchObject({ relay_retry_of: '2026-09-02T10:00:00.000Z#SM1' });
+    expect(item).not.toHaveProperty('relay_retry_origin_direction');
+  });
+});
+
 describe('toTimelineMessage - masked relay calls', () => {
   it('maps safe call metadata instead of dropping the call or forwarding media', () => {
     const call = {

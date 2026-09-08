@@ -80,7 +80,11 @@ import {
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { resolveRelayInbound } from '../../services/relayInboundResolution.js';
-import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
+import {
+  isMemberSuppressed,
+  logSafeMemberKey,
+  SYSTEM_SENDER_KEY,
+} from '../../services/relayAnnouncements.js';
 import { applyNumberSuppression } from '../../services/numberSuppression.js';
 import {
   hasOtherRecipientsBeyondCap,
@@ -122,7 +126,24 @@ import {
   mediaMirrorBackoffMs,
   type MediaMirrorPayload,
 } from '../../jobs/mediaMirror.js';
-import { RELAY_FANOUT_JOB } from '../../jobs/relayFanOut.js';
+import {
+  composeRelayBody,
+  persistRelayRecipientResult,
+  RELAY_FANOUT_JOB,
+  setVersionedAggregationState,
+  TEAM_SENDER_KEY,
+  TEAM_SENDER_LABEL,
+  type RelayLegPayload,
+  type RelayTransportMode,
+} from '../../jobs/relayFanOut.js';
+import { enqueueRelayRetryLeg } from '../../jobs/relayRetryLeg.js';
+import {
+  MAX_RELAY_RETRY_ATTEMPTS,
+  relayRetryDigest,
+  relayRetryProviderSid,
+  type RelayRetryClaimOutcome,
+} from '../../lib/relayRetryClaim.js';
+import { resolveMessage } from '../../messages/index.js';
 
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
@@ -298,6 +319,26 @@ const STATUS_UNKNOWN_SID_RETRY_DELAY_MS = 2_500;
 // stay WARN: a transient code we're still auto-retrying (not yet terminal), and a
 // provider-side opt-out (21610 = correctly honoring STOP — the platform working,
 // not a failure). See docs/GLOSSARY / the error-vs-warn decision rule.
+//
+// READ THIS BEFORE TRUSTING THE 30003 CARVE-OUT. "still auto-retrying" is a
+// claim about the path the leg is on, and it is NOT true on every path:
+//
+//   - NATIVE GROUP TEXT: the 30003 arm below enqueues messaging.retrySend, whose
+//     handler goes through sendMessage, which REFUSES a group_text conversation
+//     outright (GroupTextSendNotSupportedError, services/sendMessage.ts:298-300).
+//     The retry is enqueued and never sends, so the WARN records a promise the
+//     repo already disproves. Tracked, unverified end to end, in
+//     docs/issues/group-text-30003-leg-retry-promise-unverified.md - which is
+//     where a fix belongs; do not "fix" it by widening this set.
+//   - RELAY: this set no longer decides relay severity at all. The relay branch
+//     reads isTerminalRelayLegFailure below, which is attempt-aware - WARN while
+//     a rung is actually claimed or the leg's own slot is already SETTLED on
+//     some other end state (slot_settled), ERROR once the ladder is a real dead
+//     end - including the internal anomaly where the slot is missing or was
+//     never written (slot_ineligible).
+//
+// The set's VALUES are unchanged, and the 1:1 path they still govern is the one
+// path where the promise holds.
 const TRANSIENT_RETRYING_DELIVERY_CODES = new Set(['30003']);
 const EXPECTED_NONFAILURE_DELIVERY_CODES = new Set(['21610']);
 
@@ -311,6 +352,106 @@ export function isTerminalDeliveryFailure(errorCode: string | undefined): boolea
   if (errorCode !== undefined && EXPECTED_NONFAILURE_DELIVERY_CODES.has(errorCode)) return false;
   if (errorCode !== undefined && TRANSIENT_RETRYING_DELIVERY_CODES.has(errorCode)) return false;
   return true;
+}
+
+/** The one carrier code that claims a relay retry (spec D8, global constraint). */
+const RELAY_RETRY_TRIGGER_CODE = '30003';
+
+/**
+ * `relayFanOut.ts`'s own anonymous-sender label (`:109`), mirrored here because
+ * it is module-private there and the claim path has to reproduce a leg copy
+ * BYTE FOR BYTE (spec D12). Kept beside the composition it belongs to so a
+ * change on either side is visible as a diff on the other.
+ */
+const RELAY_ANONYMOUS_SENDER_LABEL = 'A member';
+
+/**
+ * The relay failure marker's message, for the outcomes that are OURS rather
+ * than the carrier's. Every other outcome takes the shared carrier-shaped line;
+ * these three would be misread as one more unreachable handset, which is
+ * exactly the misattribution D23's `retryClaim` field exists to prevent.
+ *
+ * A PARTIAL record on purpose - `Object.prototype` is not reachable here (the
+ * key is our own closed union, never wire data), and the caller's `??` supplies
+ * the shared message for everything absent.
+ */
+const RELAY_ANOMALY_FAILURE_MESSAGES: Partial<Record<RelayRetryClaimOutcome, string>> = {
+  source_unreadable:
+    'twilio relay-recipient delivery failed - source message row unreadable, no retry claimed',
+  claim_failed:
+    'twilio relay-recipient delivery failed - the retry claim itself threw, no retry claimed',
+  slot_ineligible:
+    'twilio relay-recipient delivery failed - the member delivery slot is missing or was never written, no retry claimed',
+};
+
+/** What the claim decided, plus the rung it claimed (for the failure log). */
+interface RelayRetryClaimResult {
+  outcome: RelayRetryClaimOutcome;
+  /** The 1-based rung, present only where a retry ROW exists for it. */
+  attempt?: number;
+}
+
+/**
+ * The RELAY branch's own severity call (spec D23), attempt-aware ON TOP of the
+ * shared carve-outs rather than instead of them. A relay leg logs WARN while a
+ * retry is actually claimed and ERROR once the chain is a real dead end.
+ *
+ * Four properties are load-bearing and none is obvious:
+ *
+ *   - 21610 keeps its carve-out. A purely attempt-aware rule would alarm on the
+ *     platform correctly honoring STOP, which is a strictly larger increase than
+ *     the one the founder approved.
+ *   - An ANNOUNCEMENT leg (`fenced_announcement`) stays WARN. No retry is ever
+ *     claimed for a relay intro, member-added, group-closed or tour-reminder
+ *     rung, so "ERROR whenever no retry was claimed" would alarm every one of
+ *     them - unrequested blast radius from a mission that fences that file out.
+ *   - `slot_settled` stays WARN (code review R1 F1, NARROWED by R2 W1). The
+ *     founder approved ERROR for a leg that "ends terminally on 30003", and this
+ *     outcome is exactly the leg that did NOT: the slot already reads
+ *     `delivered` (a duplicate or out-of-order callback that `ALLOWED_PRIOR`
+ *     correctly refused), or it already reads another terminal code such as
+ *     30007 - which was logged at ITS own severity when it landed. A later
+ *     contradictory 30003 is not a new dead end, and today's main logs the same
+ *     callback at WARN. Alarming it makes the shipped set strictly larger than
+ *     the approved one, in the direction of false positives.
+ *
+ *     ONLY those two shapes. The first fix wave whitelisted the whole
+ *     `slot_ineligible` value, which ALSO covered an ABSENT slot and a slot
+ *     whose write was refused and still reads `sent` - two internal anomalies
+ *     on a leg that DID end terminally on 30003, silenced on a brand-new alarm.
+ *     They are a separate outcome now and they ERROR.
+ *   - Every OTHER terminal 30003 on a fan-out or team leg is ERROR, whether the
+ *     ladder ran to its cap, was refused at a gate, or was never claimed at all
+ *     (`to_missing`, `to_malformed`, `source_unreadable`, `slot_ineligible`,
+ *     `enqueue_failed`, `claim_failed`). What matters is the PRODUCT the leg
+ *     belongs to, not whether the ladder happened to start - that whole set is
+ *     what was approved.
+ *
+ * This function is the relay branch's ONLY severity reader; the shared set above
+ * still decides the 1:1 and native-group-text paths, which are fenced.
+ */
+function isTerminalRelayLegFailure(
+  errorCode: string | undefined,
+  claim: RelayRetryClaimOutcome,
+): boolean {
+  if (isTerminalDeliveryFailure(errorCode)) return true;
+  if (errorCode !== RELAY_RETRY_TRIGGER_CODE) return false;
+  return (
+    claim !== 'claimed' &&
+    claim !== 'already_claimed' &&
+    claim !== 'fenced_announcement' &&
+    claim !== 'slot_settled'
+  );
+}
+
+/**
+ * PII (doc S9): the log-safe rendering of a STORED relay member key.
+ * `relayMemberKey` falls back to `phone#<E164>` for a contact-less member, so
+ * the raw stored key can carry a handset. The twin of `logSafeMemberKey`, taking
+ * the string rather than a roster member - the claim path has no member object.
+ */
+function logSafeStoredRelayMemberKey(memberKey: string): string {
+  return memberKey.startsWith('phone#') ? 'phone-only-member' : memberKey;
 }
 
 /**
@@ -431,6 +572,89 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     } catch (err) {
       log.error({ err, conversationId }, 'placement escalation: flagging attention failed (non-fatal)');
     }
+  }
+
+  /**
+   * The EXACT outbound leg copy a retry must resend (spec D12), composed ONCE at
+   * rung 1 and then stored verbatim on the row so no later rung re-resolves a
+   * sender whose display name changed between attempts.
+   *
+   * It mirrors `relayFanOut`'s own three-arm composition rather than only its
+   * text arm: a MEDIA-ONLY relay leg was sent as the catalog's media-only
+   * sentence, and composing `"<name>: "` for one would resend a different -
+   * empty - message than the one that failed. The sender resolves the way the
+   * fan-out resolves it: the TEAM sentinel takes the neutral team label (the
+   * only value any caller ever passes as `senderNameOverride`), and a member
+   * sender takes the roster name for its key.
+   */
+  async function composeRelayLegCopy(
+    conversationId: string,
+    senderKey: string,
+    rawBody: string,
+    mediaCount: number,
+  ): Promise<string> {
+    let senderName: string | undefined;
+    if (senderKey === TEAM_SENDER_KEY) {
+      senderName = TEAM_SENDER_LABEL;
+    } else {
+      const conv = await conversations.getById(conversationId);
+      const roster = (conv?.participants ?? []) as ConversationParticipant[];
+      senderName = roster.find((member) => relayMemberKey(member) === senderKey)?.name;
+    }
+    if (rawBody.length > 0) return composeRelayBody(senderName, rawBody);
+    if (mediaCount > 0) {
+      const label =
+        senderName !== undefined && senderName.trim().length > 0
+          ? senderName
+          : RELAY_ANONYMOUS_SENDER_LABEL;
+      return resolveMessage('relay.media_only', { name: label });
+    }
+    // Unreachable in practice: a source with neither text nor media relays
+    // nothing, so no leg exists to fail. Composed anyway so the field is always
+    // a string (the retry job throws on a non-string leg body).
+    return composeRelayBody(senderName, rawBody);
+  }
+
+  /**
+   * D14: close a just-claimed retry leg terminally when its rung could not be
+   * enqueued. `enqueue_failed`, never the cap's `transient_cap` - one code for
+   * both would tell an operator retries ran when none did. The write goes
+   * through the fan-out's EXPORTED transport-aware persist path, so a legacy
+   * retry row still takes `markRecipient`'s whole-slot write while a versioned
+   * one takes `applyRecipientSendResult`; the pre-send shape (aggregation
+   * `excluded`, then the failed slot) mirrors the extraction's own refusal arm.
+   */
+  async function closeRetryLegEnqueueFailed(
+    conversationId: string,
+    retryTsMsgId: string,
+    memberKey: string,
+    versioned: boolean,
+    requestedTransport: MessageTransport | undefined,
+  ): Promise<void> {
+    const legPayload: RelayLegPayload = {
+      relayConversationId: conversationId,
+      sourceTsMsgId: retryTsMsgId,
+      attempt: 1,
+    };
+    // `intent` is structurally required by RelayTransportMode but is never READ
+    // on this path (`persistRelayRecipientResult` branches on `kind` alone), so
+    // the slot's own requested transport is the honest value to carry.
+    const transport: RelayTransportMode = versioned
+      ? { kind: 'versioned', intent: { requestedTransport: requestedTransport ?? 'sms' } }
+      : { kind: 'legacy' };
+    if (transport.kind === 'versioned') {
+      await setVersionedAggregationState(messages, legPayload, memberKey, 'excluded', [
+        'excluded',
+        'attempted',
+      ]);
+    }
+    await persistRelayRecipientResult(
+      messages,
+      legPayload,
+      memberKey,
+      { status: 'failed', errorCode: 'enqueue_failed' },
+      transport,
+    );
   }
   const captureContact = createContactCapture({
     contactsRepo: contacts,
@@ -2434,6 +2658,263 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       return;
     }
 
+    /**
+     * Claim ONE rung of the 30003 retry ladder for the relay leg this callback
+     * is about (spec D3/D5/D6/D7/D8/D12/D13/D14/D16).
+     *
+     * A retry is a NEW single-recipient source row, never a promotion of the
+     * failed slot (D1), and the row's `sid#<providerSid>` pointer create IS the
+     * atomic claim - a duplicate, redelivered or concurrent callback loses that
+     * create and claims nothing.
+     *
+     * THIS FUNCTION NEVER RETURNS OUT OF ITS CALLER. It reports an outcome and
+     * control always falls through to the handler's tail, because that tail
+     * carries three things a claim must not skip: the delivery-failure marker,
+     * the existing SSE emit and the placement escalation. An early `return` on
+     * the `fenced_announcement` exit alone would stop an announcement leg
+     * escalating on a placement-linked thread, which it does today, and no test
+     * in this plan could see it.
+     */
+    const claimRelayRetry = async (
+      ptr: { conversationId: string; tsMsgId: string; memberKey: string },
+      mapped: DeliveryStatus,
+    ): Promise<RelayRetryClaimResult> => {
+      // 1. The trigger is narrow: a FAILURE callback carrying 30003, and only
+      // 30003. Every other relay failure line still gets a cause, which is what
+      // makes the alarm self-describing (D23 / adjudication S2a).
+      if (mapped !== 'undelivered' && mapped !== 'failed') return { outcome: 'code_not_retryable' };
+      if (ErrorCode !== RELAY_RETRY_TRIGGER_CODE) return { outcome: 'code_not_retryable' };
+
+      // 2. Re-read the source CONSISTENTLY (D7), AFTER the slot write above, so
+      // step 5 sees the POST-write slot. `updateRecipientDeliveryStatus` returns
+      // a bare boolean and `getByTsMsgId` is eventually consistent, so a naive
+      // re-read intermittently sees the PRE-write slot and drops the retry -
+      // silently, load-dependently, and past any test. This is deliberately NOT
+      // the read at the top of the handler: that one runs on every relay status
+      // callback and only needs `requestedTransport`.
+      const src = await messages.getByTsMsgIdConsistent(ptr.conversationId, ptr.tsMsgId);
+      if (!src) {
+        // Fail-CLOSED, permanently (Sec 9). After the consistent read an absent
+        // row is genuinely absent - a real internal anomaly - so it alarms with
+        // its own cause and its own message rather than as a carrier failure.
+        return { outcome: 'source_unreadable' };
+      }
+
+      // 3. The fence is POSITIVE (D7): present, carrying a sender key, and that
+      // key is not the system value. A NEGATIVE fence ("not system") passes on
+      // an unreadable source and would claim a retry against a tour-reminder
+      // rung. `SYSTEM_SENDER_KEY` has ONE writer - the single append behind all
+      // four announcement callers - so this cleanly separates fan-out and team
+      // legs from announcement legs.
+      const senderKey = src.relay_sender_key;
+      if (typeof senderKey !== 'string' || senderKey.length === 0) {
+        return { outcome: 'fenced_announcement' };
+      }
+      if (senderKey === SYSTEM_SENDER_KEY) return { outcome: 'fenced_announcement' };
+
+      // 4. The ladder is keyed on the DESTINATION handset (D5), not on the
+      // member key: one contact on two numbers collapses into one slot, and a
+      // retry must stay unambiguous about which handset it is retrying. Missing
+      // or malformed means DO NOT CLAIM - a silently different digest would mint
+      // a parallel ladder.
+      const rawTo = params['To'];
+      if (rawTo === undefined || rawTo.length === 0) return { outcome: 'to_missing' };
+      const toE164 = normalizeToE164(rawTo);
+      if (toE164 === undefined) return { outcome: 'to_malformed' };
+
+      // 5. The gate is the slot's POST-WRITE STATE, never whether THIS callback
+      // transitioned it (D8). A transition gate is wrong twice over: its
+      // justification does not exist (a leg the fan-out closed without sending
+      // has no provider SID, so no callback can ever resolve to it), and it makes
+      // a crash between the slot write and the claim permanently unrecoverable -
+      // the redelivered callback transitions nothing and would refuse for ever.
+      // The slot's own code must still be 30003 or ABSENT: absent is the reachable
+      // code-less-`canceled`-landed-first case, and a slot already reading 30007
+      // is the one real contradiction this keeps closed.
+      //
+      // TWO OUTCOMES, not one (code review R2, W1). Both decline the claim; they
+      // differ in what they MEAN, and therefore in severity. `slot_settled` is a
+      // leg whose own end state is already recorded - `delivered`, or terminal
+      // on another code - so this 30003 is a duplicate or a contradiction and
+      // nothing new failed. `slot_ineligible` is an ANOMALY: the pointer
+      // resolved and the leg really did end terminally on 30003, and yet the
+      // slot is absent, or is still `queued`/`sent` after this callback's own
+      // write was refused. Nothing should leave a slot in that state, so it
+      // alarms with its own message (see `isTerminalRelayLegFailure`).
+      const slot = src.delivery_recipients?.[ptr.memberKey];
+      if (slot === undefined) return { outcome: 'slot_ineligible' };
+      if (slot.status === 'delivered') return { outcome: 'slot_settled' };
+      if (slot.status !== 'failed' && slot.status !== 'undelivered') {
+        return { outcome: 'slot_ineligible' };
+      }
+      if (slot.errorCode !== undefined && slot.errorCode !== RELAY_RETRY_TRIGGER_CODE) {
+        return { outcome: 'slot_settled' };
+      }
+
+      // 6. Attempt arithmetic (D6). Every rung points at the ROOT, so rung 2
+      // chains to the original and not to rung 1 - the thread-level join buckets
+      // on that key.
+      const prior = typeof src.relay_retry_attempt === 'number' ? src.relay_retry_attempt : 0;
+      const attempt = prior + 1;
+      if (attempt > MAX_RELAY_RETRY_ATTEMPTS) return { outcome: 'cap_exhausted' };
+      const rootTsMsgId =
+        typeof src.relay_retry_of === 'string' && src.relay_retry_of.length > 0
+          ? src.relay_retry_of
+          : ptr.tsMsgId;
+
+      // 7. The claim itself. `providerTs` is a WALL CLOCK, never derived from the
+      // root (D3): at an identical timestamp `<ts>#relayretry-...` sorts BELOW
+      // `<ts>#team-...` and would land inside the fan-out's five-row window.
+      const destDigest = relayRetryDigest(rootTsMsgId, toE164);
+      const providerSid = relayRetryProviderSid(destDigest, attempt);
+      const providerTs = new Date().toISOString();
+      const versioned = src.transport_schema_version === TRANSPORT_SCHEMA_VERSION;
+      const requestedTransport = slot.requestedTransport;
+      const sourceMedia = mediaAttachmentsOf(src);
+      const rawBody = typeof src.body === 'string' ? src.body : '';
+      const legBody =
+        typeof src.relay_retry_leg_body === 'string'
+          ? // Rungs 2+ copy the stored copy VERBATIM (D12): a sender renamed
+            // mid-ladder must not change the wording of what is being retried.
+            src.relay_retry_leg_body
+          : await composeRelayLegCopy(ptr.conversationId, senderKey, rawBody, sourceMedia.length);
+      const appended = await messages.append({
+        conversationId: ptr.conversationId,
+        providerSid,
+        providerTs,
+        // D2: MIRROR the original's shape. A team original yields an outbound
+        // retry row, a member-originated one an inbound row; both shapes already
+        // exist in the product. `type` follows the original so the transport
+        // assertions see a carrier message. Rungs 2+ read the previous retry row,
+        // which mirrored the root - transitively identical.
+        type: src.type === 'mms' ? 'mms' : 'sms',
+        direction: src.direction === 'inbound' ? 'inbound' : 'outbound',
+        author: src.author,
+        relaySenderKey: senderKey,
+        deliveryStatus: 'queued',
+        // The MODE follows the original, which is usually LEGACY - every relay
+        // source written before 2026-09-02 is. A versioned slot on a legacy row
+        // would drive `markRecipient`'s blind whole-slot write and erase the
+        // `planned` state the very first send needs. NOTE the distinction: the
+        // inbound prohibition is on the MESSAGE's requestedTransport, never on
+        // the SLOT's, which is permitted and required.
+        ...(versioned && { transportSchemaVersion: TRANSPORT_SCHEMA_VERSION }),
+        deliveryRecipients: {
+          [ptr.memberKey]: versioned
+            ? {
+                status: 'queued' as const,
+                ...(requestedTransport !== undefined && { requestedTransport }),
+                // `attempted` is reachable ONLY from `planned`, so a slot seeded
+                // without it throws on the first retry send.
+                transportAggregationState: 'planned' as const,
+              }
+            : { status: 'queued' as const },
+        },
+        // The RAW body on the row, the composed leg copy beside it (D12): the row
+        // body is what is persisted, previewed and inherited by the inbox
+        // preview, while the sender prefix belongs to the outbound LEG only.
+        ...(rawBody.length > 0 && { body: rawBody }),
+        // Durable s3Keys, re-presigned per attempt (D13). `append` suppresses the
+        // media-POINTER rows for a retry row itself.
+        ...(sourceMedia.length > 0 && { mediaAttachments: sourceMedia }),
+        relayRetryOf: rootTsMsgId,
+        relayRetryMemberKey: ptr.memberKey,
+        relayRetryAttempt: attempt,
+        relayRetryDestDigest: destDigest,
+        relayRetryOriginDirection:
+          src.relay_retry_origin_direction ?? (src.direction === 'inbound' ? 'inbound' : 'outbound'),
+        relayRetryLegBody: legBody,
+        // DELIBERATELY no `retryOf`: stamping it would add the ORIGINAL to the
+        // timeline's supersededIds and DELETE the bubble this retry is meant to
+        // render beside - the display contract, inverted.
+      });
+      if (appended.deduped) {
+        // A sibling callback won the create. The ladder is running; claim nothing
+        // further and do not re-emit for it.
+        return { outcome: 'already_claimed', attempt };
+      }
+
+      // 8. Hand the rung to the queue. The claim defeats duplicate CALLBACKS;
+      // the job's own execution marker defeats duplicate DELIVERIES.
+      const retryTsMsgId = appended.tsMsgId;
+      let outcome: RelayRetryClaimOutcome = 'claimed';
+      try {
+        await enqueueRelayRetryLeg(
+          { relayConversationId: ptr.conversationId, retryTsMsgId },
+          attempt,
+        );
+      } catch (err) {
+        // D14: close the retry leg with `enqueue_failed`, NOT the cap's
+        // `transient_cap` - one code for both would tell an operator retries ran
+        // when none did. The close goes through the exported transport-aware
+        // path so a legacy row still takes the whole-slot write.
+        outcome = 'enqueue_failed';
+        // The close is guarded SEPARATELY (code review R2, W2). Unguarded, a
+        // throw from it escaped to the outer catch and reported
+        // `claim_failed` - "threw before deciding, no retry claimed" - about a
+        // claim that HAD decided and whose row exists, stranded at `queued`
+        // with no close code. The outcome stays `enqueue_failed` because a row
+        // is what the operator has to go and look at; the close's own failure
+        // rides the same line so the missing close code is diagnosable.
+        let closeErr: unknown;
+        try {
+          await closeRetryLegEnqueueFailed(
+            ptr.conversationId,
+            retryTsMsgId,
+            ptr.memberKey,
+            versioned,
+            requestedTransport,
+          );
+        } catch (e) {
+          closeErr = e;
+        }
+        log.error(
+          {
+            err,
+            // `summarizeError`, not the raw value: only `err`/`error`/`cause`/
+            // `reason` get the safe serializer, and a second raw Error under any
+            // other key serialises to `{}`.
+            ...(closeErr !== undefined && { closeErr: summarizeError(closeErr) }),
+            conversationId: ptr.conversationId,
+            retryTsMsgId,
+            rootTsMsgId,
+            attempt,
+            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
+            retryClaim: 'enqueue_failed',
+            // `closeCode` appears only where a close was actually WRITTEN.
+            ...(closeErr === undefined && { closeCode: 'enqueue_failed' as const }),
+          },
+          closeErr === undefined
+            ? 'relay retry claim: enqueueing the rung failed - retry leg closed'
+            : 'relay retry claim: enqueueing the rung failed and the close failed too - retry leg left open',
+        );
+      }
+
+      // 9. SSE on the CLAIM, not only after the send (D16). The row exists on
+      // both paths, and without this the chip reads "1 failed" for the whole
+      // first backoff interval - a false terminal state, for at least 60 seconds,
+      // on the surface this feature exists to make truthful. The payload
+      // addresses the ROOT (adjudication S4): the existing emit below carries
+      // `ptr.tsMsgId`, which on rungs 2-3 is a retry row, and does not fire at
+      // all in the crash-recovery case where nothing transitioned.
+      events.emit('message.persisted', {
+        conversationId: ptr.conversationId,
+        tsMsgId: rootTsMsgId,
+        direction: 'inbound',
+        deliveryStatus: mapped,
+      });
+      return { outcome, attempt };
+    };
+
+    // The claim error the relay branch rethrows below, kept where its CALL SITE
+    // can recognise it (code review R3, X1). The call site answers the 5xx
+    // itself, and it must answer only for THIS error: an unrelated fault out of
+    // the same branch - a throttled slot write, a throttled roster read - emits
+    // no marker of its own, so it still has to reach the generic Express handler
+    // and be logged there. Identity is the discriminator because the rethrow is
+    // `throw claimError` unchanged (W2), and a request runs this branch at most
+    // once.
+    let relayClaimError: unknown;
     // Per-recipient relay handling (doc §9): a relay-group fan-out sends N
     // outbound provider messages but persists NONE as their own message — each
     // leg lives as a delivery_recipients slot on the source message, found via
@@ -2480,6 +2961,50 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             )
           : undefined;
       const transportUpdated = transportOutcome === 'updated';
+      // The 30003 retry claim (spec D8) sits HERE, after the slot write and the
+      // transport write and BEFORE the failure marker, for two reasons: its
+      // consistent re-read must see the POST-write slot, and the marker below
+      // has to be able to carry the outcome as its cause and its severity. It
+      // returns a value and never returns out of this function - the tail runs
+      // on every path.
+      //
+      // The try/catch closes the other half of that promise (code review R1,
+      // F2). The helper cannot RETURN out of this function, but it can THROW:
+      // it performs a consistent read, a roster read and an `append` that
+      // rethrows a condition failure, and any of the three can fail on a
+      // DynamoDB throttle or timeout. A rejection escaping HERE would skip the
+      // whole tail - and on Twilio's redelivery nothing transitions, so
+      // `flagPlacementAttention` would never run for that leg again. A failed
+      // relay leg on a placement-linked thread would silently lose its
+      // escalation to a human, which is precisely what the M1.10c comment above
+      // says must not happen.
+      //
+      // BUT THE CATCH DOES NOT SWALLOW IT (code review R2, W2). The captured
+      // error is RETHROWN after the tail, so the callback still 5xxs and Twilio
+      // still redelivers - the call site catches the rethrow and answers 500
+      // itself (code review R3, X1), which changes no status code and costs the
+      // generic handler's second, unattributable ERROR line. That redelivery is
+      // the ladder's only recovery: D8 gates the claim on the SLOT'S POST-WRITE
+      // STATE rather than on `transitioned` precisely so a redelivered callback
+      // - which transitions nothing - still reads terminal-plus-30003 and
+      // claims. Acking 200 here would trade that away, and a single DynamoDB
+      // throttle on the consistent read, the roster read or the `append` would
+      // lose the member's message for good.
+      //
+      // WHAT IS TRADED FOR IT: the tail runs on EVERY redelivery, so the
+      // failure marker and the SSE repeat while the fault lasts. Both are
+      // idempotent-by-shape (one more log line, one more refresh of the same
+      // state) and the escalation is not repeated at all - it is gated on
+      // `transitioned`, which is false on a redelivery of a callback that
+      // already wrote the slot. Losing the send is the strictly worse failure.
+      let retryClaim: RelayRetryClaimResult;
+      let claimError: unknown;
+      try {
+        retryClaim = await claimRelayRetry(ptr, mapped);
+      } catch (err) {
+        retryClaim = { outcome: 'claim_failed' };
+        claimError = err;
+      }
       log.info(
         {
           providerSid: MessageSid,
@@ -2495,8 +3020,28 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // undelivered/failed is a countable failed delivery. Severity follows the
       // taxonomy — a terminal failure is an ERROR (feeds the error-logs alarm +
       // Recent Errors panel); a transient-retrying / opt-out leg stays WARN. The
-      // `event` field is unchanged either way, so the DeliveryFailures count
-      // metric (which keys on `event`, not level) is unaffected. IDs/codes only.
+      // `event` field is unchanged either way, so this SEVERITY change does not
+      // move the DeliveryFailures count metric, which keys on `event` and not on
+      // level. IDs/codes only.
+      //
+      // THE FEATURE DOES MOVE THAT METRIC, and the old comment here said
+      // otherwise (code review R2, W9c). Every rung's own send writes its own
+      // `relaysid#` pointer, so every rung's failed callback re-enters this
+      // handler and emits its own `delivery_failed` - up to FOUR per relayed
+      // message per permanently dead handset (root + three rungs) where main
+      // emitted one. That is the relay ladder now counting the way the 1:1
+      // ladder already does. `hc-<env>-delivery-failures` is a raw Sum over a
+      // single 5-minute period, and root/rung1/rung2 land inside about three
+      // minutes, so the threshold is a decision the human owes (open question
+      // Q4). Nothing on this branch changes the metric or the alarm.
+      //
+      // ONE MORE MULTIPLIER, on top of the four (code review R3, X2): this
+      // marker sits BEFORE the claim's rethrow, so a callback whose claim throws
+      // emits it on the 5xx AND again on the redelivery that the 5xx triggers,
+      // once per redelivery for as long as the fault lasts. That is not new with
+      // this branch - a redelivered failure callback has always re-entered this
+      // handler and re-emitted `delivery_failed` - but Q4's number is per
+      // MESSAGE, and this is the term that makes it unbounded rather than four.
       if (mapped === 'undelivered' || mapped === 'failed') {
         const failure = {
           event: 'delivery_failed',
@@ -2504,9 +3049,44 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           errorCode: ErrorCode,
           providerStatus: MessageStatus,
           relay: true,
+          // The claim's own fault rides THIS line rather than a second one
+          // (code review R2, W2/2.5): a diagnostic ERROR with no `event` fed
+          // `ErrorLogs` but not `DeliveryFailures`, so one throttled claim
+          // contributed two datapoints to the alarm that pages on three
+          // consecutive buckets, one of them unclassifiable. One line, one
+          // `event`, the cause attached.
+          //
+          // THAT IS TRUE ONLY BECAUSE THE CALL SITE ANSWERS THE 5xx (code
+          // review R3, X1). W2 folded this line and then rethrew, and the
+          // rethrow reached `createExpressErrorHandler`, which logged its own
+          // generic ERROR - so the count was two again, with the second the
+          // less attributable of the pair. The catch at the call site is what
+          // makes "one line" a property of the code rather than a claim about
+          // it; it is pinned by a test that counts EVERY ERROR line in the
+          // capture, not only the markers.
+          ...(claimError !== undefined && {
+            err: claimError,
+            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
+          }),
+          // D23: WHY no retry is running. This is the difference between an
+          // operator diagnosing a carrier problem and diagnosing ours - an ERROR
+          // reading `source_unreadable` is an internal fault and says so, one
+          // reading `cap_exhausted` is a genuine unreachable handset, and
+          // without the field both render as the same "relay leg undelivered,
+          // 30003" with the internal fault the one nobody expects.
+          retryClaim: retryClaim.outcome,
+          ...(retryClaim.attempt !== undefined && { retryAttempt: retryClaim.attempt }),
         };
-        const failureMsg = 'twilio relay-recipient delivery failed (undelivered/failed)';
-        if (isTerminalDeliveryFailure(ErrorCode)) log.error(failure, failureMsg);
+        // The three INTERNAL ANOMALIES take their own message rather than the
+        // shared carrier-shaped one, so each alarm names its own cause instead
+        // of reading as one more unreachable handset. `slot_ineligible` joined
+        // them in code review R2 (W1): it is the same class as
+        // `source_unreadable` - the pointer resolved, the leg ended terminally
+        // on 30003, and the row it belongs on is missing or was never written.
+        const failureMsg =
+          RELAY_ANOMALY_FAILURE_MESSAGES[retryClaim.outcome] ??
+          'twilio relay-recipient delivery failed (undelivered/failed)';
+        if (isTerminalRelayLegFailure(ErrorCode, retryClaim.outcome)) log.error(failure, failureMsg);
         else log.warn(failure, failureMsg);
       }
       if (transitioned || transportUpdated) {
@@ -2522,9 +3102,47 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       if (transitioned) {
         // (M1.10c) A failed relay leg is a failed send on the placement
         // (the relay thread carries conversation.placementId) → escalate.
+        //
+        // ONCE per failed leg, on the ROOT's callback only. Every rung of a retry
+        // ladder re-enters this same handler, so leaving it alone is NOT
+        // "unchanged behavior": a three-rung ladder would escalate FOUR times,
+        // and each call rewrites `attention.at`, re-emits `placement.updated`
+        // and logs another `placement_escalation` - so the triage clock a human
+        // reads would reset at +60s, +180s and +420s and the leg would look
+        // newly failed each time. Deferring instead until the chain is terminal
+        // would DELETE the escalation for three of the four terminal outcomes
+        // (gate refusal, enqueue failure and the transient cap all end inside the
+        // JOB, which cannot reach this closure).
+        //
+        // The discriminator is the SOURCE ROW, not the thread: "any retry row in
+        // this conversation" would silently swallow a SECOND member's failure.
+        // It reads the EVENTUALLY-consistent `source` above deliberately - that
+        // read runs on every failure path, while the claim's consistent re-read
+        // only runs on 30003. Two properties make that safe: a read miss leaves
+        // `source` undefined, so the condition is false and the leg still
+        // escalates (it fails OPEN), and `relay_retry_of` is written at append
+        // time, so an eventually-consistent read cannot lose it on a row old
+        // enough to have a delivery callback. It is also false for every row
+        // written before this branch, which makes "unchanged for everything
+        // shipped today" structural rather than empirical.
         if (mapped === 'undelivered' || mapped === 'failed') {
-          await flagPlacementAttention(ptr.conversationId, 'send_failed');
+          if (source?.relay_retry_of === undefined) {
+            await flagPlacementAttention(ptr.conversationId, 'send_failed');
+          }
         }
+      }
+      // LAST, and only after the whole tail has run (code review R2, W2). The
+      // rethrow gives Twilio a 5xx so it redelivers, and D8's state gate claims
+      // on that redelivery; the tail above has already emitted the marker, the
+      // SSE and - once - the escalation, which is what F2 existed to guarantee.
+      // Both halves, in the only order that gets both.
+      //
+      // The CALL SITE catches it and answers the 5xx (code review R3, X1);
+      // publishing it here is what lets that catch tell this error apart from
+      // any other fault out of this branch.
+      if (claimError !== undefined) {
+        relayClaimError = claimError;
+        throw claimError;
       }
     };
 
@@ -2556,7 +3174,28 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       if (!message && !relayPtr) systemMarker = await messages.getSystemSidMarker(MessageSid);
     }
     if (relayPtr) {
-      await handleRelayRecipientStatus(relayPtr);
+      try {
+        await handleRelayRecipientStatus(relayPtr);
+      } catch (err) {
+        // A thrown claim answers its own 5xx HERE (code review R3, X1) instead
+        // of travelling to `createExpressErrorHandler`, which would log a SECOND
+        // ERROR - one with no `event`, no `retryClaim` and no `memberKey`, so it
+        // fed the ErrorLogs alarm exactly like the marker while being strictly
+        // harder to attribute. The marker the branch already emitted is the one
+        // ERROR line, and nothing new is logged here.
+        //
+        // The RESPONSE is unchanged in the only way that matters: Twilio
+        // redelivers on ANY 5xx, and D8's state gate re-claims on that
+        // redelivery (the slot is already terminal-plus-30003), which is the
+        // whole reason W2 rethrows rather than acking.
+        //
+        // Anything else that escapes this branch is NOT ours to swallow: it
+        // emitted no marker, so it keeps travelling and the generic handler logs
+        // it, exactly as before.
+        if (err !== relayClaimError) throw err;
+        res.status(500).end();
+        return;
+      }
       res.status(200).end();
       return;
     }

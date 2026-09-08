@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${replace(replace(replace(replace(replace(copy.title, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;"), "'", "&#39;")}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      padding: 24px; background: #f7f8fa; color: #1a1d23;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+    }
+    main {
+      width: 100%; max-width: 480px; padding: 40px 32px;
+      background: #ffffff; border: 1px solid #e2e5ea; border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(16, 24, 40, 0.06);
+      overflow-wrap: anywhere;
+    }
+    .brand { margin: 0 0 24px; color: #1f6feb; font-size: 1rem; font-weight: 700; }
+    h1 { margin: 0 0 12px; font-size: 1.75rem; line-height: 1.2; }
+    .message { margin: 0 0 28px; color: #5b6472; }
+    .action {
+      display: inline-block; padding: 12px 20px; border-radius: 8px;
+      background: #1f6feb; color: #ffffff; font-weight: 600;
+      text-decoration: none;
+    }
+    .action:hover { background: #1a5fd0; }
+    .action:focus-visible { outline: 3px solid #1a1d23; outline-offset: 4px; }
+    @media (max-width: 360px) {
+      body { padding: 16px; }
+      main { padding: 28px 20px; }
+      h1 { font-size: 1.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <main data-hc-maintenance="1">
+    <p class="brand">${replace(replace(replace(replace(replace(copy.brand, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;"), "'", "&#39;")}</p>
+    <h1>${replace(replace(replace(replace(replace(copy.heading, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;"), "'", "&#39;")}</h1>
+    <p class="message">${replace(replace(replace(replace(replace(copy.body, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;"), "'", "&#39;")}</p>
+    <a class="action" href="/">${replace(replace(replace(replace(replace(copy.action, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;"), "'", "&#39;")}</a>
+  </main>
+</body>
+</html>

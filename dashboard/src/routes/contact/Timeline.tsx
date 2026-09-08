@@ -43,6 +43,14 @@ import {
   presentRelayDelivery,
 } from './deliveryStatus.js';
 import type { DeliveryPresentation, DeliveryTone } from './deliveryStatus.js';
+import {
+  canRetryRungGoQuiet,
+  indexRelayRetries,
+  isRetryRungLive,
+  projectRelayLegs,
+  relayRetryKey,
+} from './relayRetryJoin.js';
+import type { EffectiveRelayLeg, RelayRetryRow } from './relayRetryJoin.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
 import { presentRelayExternalCaller } from './presentRelayExternalCaller.js';
@@ -474,7 +482,14 @@ const RECIPIENT_LIST_LABEL = 'Delivery by recipient';
 interface RecipientRow {
   /** The delivery_recipients map key - contactId, or `phone#<E164>`. */
   key: string;
-  slot: RelayRecipientDelivery;
+  /** The PROJECTED leg (D18/D19), never the raw wire slot: an `EffectiveRelayLeg`
+   *  IS a `RelayRecipientDelivery`, plus the per-member `retryState` the join
+   *  derived at thread level. Typed here rather than erased to the wire shape so
+   *  the row, the recital and the rollup provably read ONE derived set - the
+   *  whole content of D21 is that those three cannot disagree. A bubble with no
+   *  retry rows projects to a copy of its own slots and no state, so this is the
+   *  identity for every message in the product today. */
+  slot: EffectiveRelayLeg;
   /** Who this row names (lib/recipientLabel) - never blank, and silent about
    *  membership unless the roster actually supports the claim. */
   name: RecipientLabel;
@@ -518,7 +533,7 @@ function recipientRowTime(slot: RelayRecipientDelivery): string {
  * as one.
  */
 function orderRecipientRows(
-  entries: Array<[string, RelayRecipientDelivery]>,
+  entries: Array<[string, EffectiveRelayLeg]>,
   roster: ConversationParticipant[] | undefined,
 ): RecipientRow[] {
   const members = Array.isArray(roster) ? roster : [];
@@ -584,10 +599,19 @@ function recipientSummaryName(
   if (rows.length === 0 || anonymous) return spoken;
   const recital = rows.map((row) => {
     const who = row.name.note !== undefined ? `${row.name.label}, ${row.name.note}` : row.name.label;
-    const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, nowMs);
-    const legReason = leg?.isFailure === true
-      ? deliveryReason(row.slot.errorCode, { media, relay: rosterKind === 'relay' })
-      : undefined;
+    // The SAME reason options this recital's own fallback uses, handed to the
+    // presenter so its baked-in reasons cannot be derived a different way (R2,
+    // W6): one `{ media, relay }` for the presentation and for the fallback.
+    const reasonOpts = { media, relay: rosterKind === 'relay' };
+    const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, nowMs, reasonOpts);
+    // A presentation that carries its OWN reason wins. `Retrying` and
+    // `unconfirmed` are the two that do (D19, R2 W5): their reason has to ride
+    // the presentation because the fallback below fires only on `isFailure`, and
+    // neither deliberately is one - `isFailure` is what offers a Retry action,
+    // and offering one while a rung is in flight, or while a ladder may still
+    // have landed, is the double-send this feature prevents.
+    const legReason =
+      leg?.reason ?? (leg?.isFailure === true ? deliveryReason(row.slot.errorCode, reasonOpts) : undefined);
     const transport = includeRecipientTransport ? presentRecipientTransport(row.slot) : null;
     const details = [
       leg === null ? null : chipText(leg, legReason),
@@ -746,8 +770,9 @@ function bubbleClocks(
  * outbound leg that CAN still go stale but has not yet?
  *
  * It is a PREDICATE over the presenter's own two functions, never a shape test.
- * Four distinct non-terminations have been shipped-and-caught behind this one
- * line, and each is closed by a specific clause here:
+ * FIVE distinct non-terminations have been shipped-and-caught behind this one
+ * line and a SIXTH was designed out before it could ship - six in total, each
+ * closed by a specific clause here:
  *
  *  1. "any non-terminal leg" - a STALE leg stays non-terminal for ever, so the
  *     interval would run permanently on exactly the threads this feature
@@ -770,6 +795,27 @@ function bubbleClocks(
  *     skew eligible (so the escalation is late, never missed) and drops a clock
  *     more than one whole staleness budget ahead. Read that function's doc
  *     before touching the bound.
+ *  6. a FROZEN RETRY STATE (D18) - the one that never shipped, because severing
+ *     the retry state from `stalenessClockMs` also severed it from the only
+ *     clock advance there is. The original's failed leg is terminal and can
+ *     never arm this predicate, and D20 keeps the retry ROW out of `visible`
+ *     entirely, so without the clause below `tickNow` freezes in exactly the
+ *     case the state exists for - a stranded claim, where no SSE arrives and no
+ *     item changes - and `retrying` would be computed once and never again.
+ *     That is the indefinite promise M5 removed, one level down. Closed by the
+ *     retry clause below, which TERMINATES for the same reason the leg-level
+ *     pair does: `canRetryRungGoQuiet` drops a rung this module cannot date -
+ *     one with no clock to age from, AND one dated more than a budget into the
+ *     future, which `isQuietSince` would otherwise call not-quiet for ever - and
+ *     `isRetryRungLive` goes false the moment the rung delivers, closes
+ *     terminally, or crosses either `unconfirmed` horizon - and the tick that
+ *     carries it across both flips the copy and disarms the interval.
+ *
+ *     The futurity half was missing until the parent's plan-blind review at
+ *     handback: the predicate took no reading clock at all, so it mirrored only
+ *     half of `canEverGoStale`. It needs no server fault to reach - the reading
+ *     clock is the VIEWER's, so a browser more than a budget slow puts every
+ *     fresh rung in the future and pinned `Retrying` with a live interval.
  *
  * `canEverGoStale` and `isStaleLeg` derive their clock from one shared private
  * helper inside the presenter, so they cannot disagree about which clock a slot
@@ -778,7 +824,7 @@ function bubbleClocks(
  * boundary - never back.
  *
  * The gate mirrors what the bubble actually RENDERS: a leg nothing presents
- * cannot change any pixel, so it must not buy an interval. FIVE clauses carry
+ * cannot change any pixel, so it must not buy an interval. SIX clauses carry
  * that mirror, and each one names a real rendering decision made elsewhere:
  *
  *  - OUTBOUND or an inbound multi-party source, and a non-empty filtered
@@ -794,8 +840,27 @@ function bubbleClocks(
  *    out of its counts and `presentLegDelivery` short-circuits on the code
  *    BEFORE any staleness test, so neither the chip nor the row can ever change
  *    for such a leg however long it sits there.
+ *  - a LIVE RETRY RUNG for one of those legs, which the bubble renders at three
+ *    positions (the rollup, its recital and the row) even though the rung's own
+ *    row is hidden. It is the THREAD-level index that carries it: `hasTickableLeg`
+ *    walks `visible`, and D20 has already filtered the retry rows out of that
+ *    set, so a bubble cannot find its own retries from its props.
+ *
+ * `retries` is that index (`indexRelayRetries`, thread level, memoized on
+ * `items`), and it is REQUIRED for the same reason `tickNow` is: an omitted one
+ * would silently disable the retry half of the escalation rather than fail.
  */
-function hasTickableLeg(msg: TimelineMessage, tickNow: number): boolean {
+/** The retry index a NON-relay roster gets: empty, and the SAME object every
+ *  time, so the memo that produces it and the ticker memo that reads it both
+ *  stay referentially stable. Every reader below is read-only (`.get`), which is
+ *  what makes one shared instance safe. */
+const EMPTY_RETRY_INDEX: Map<string, RelayRetryRow[]> = new Map();
+
+function hasTickableLeg(
+  msg: TimelineMessage,
+  tickNow: number,
+  retries: Map<string, RelayRetryRow[]>,
+): boolean {
   if (msg.type === 'email') return false;
   if (msg.delivery_status === 'queued_pending') return false;
   if (msg.direction !== 'outbound' && msg.relay_sender_key === undefined) return false;
@@ -803,18 +868,41 @@ function hasTickableLeg(msg: TimelineMessage, tickNow: number): boolean {
   if (recipientEntries.length === 0) return false;
   const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
   if (bubbleNowMs === undefined) return false;
-  return recipientEntries.some(
-    ([, slot]) =>
-      slot.errorCode !== 'contact_opted_out' &&
-      canEverGoStale(slot, messageAtMs, bubbleNowMs) &&
-      !isStaleLeg(slot, messageAtMs, bubbleNowMs),
-  );
+  return recipientEntries.some(([memberKey, slot]) => {
+    if (slot.errorCode === 'contact_opted_out') return false;
+    // D18's clause, asked through the join's OWN predicates so the ticker and
+    // the chip can never disagree about whether a ladder is still running. The
+    // rung is judged against the BUBBLE's clock - the same value the projection
+    // below is computed with, and undefined on an imported row, which returned
+    // false above.
+    //
+    // `canRetryRungGoQuiet` is now REDUNDANT here - `isRetryRungLive` asks it
+    // itself whenever it has a reading clock, which is exactly this call. Kept
+    // deliberately: it is the arming half of the pair, it mirrors the
+    // `canEverGoStale(...) && !isStaleLeg(...)` shape beside it, and it keeps
+    // this clause terminating on its own terms if the `bubbleNowMs === undefined`
+    // guard above ever moves.
+    const rungs = retries.get(relayRetryKey(msg.tsMsgId, memberKey));
+    if (
+      rungs !== undefined &&
+      rungs.some(
+        (rung) =>
+          canRetryRungGoQuiet(rung, bubbleNowMs) && isRetryRungLive(rung, bubbleNowMs),
+      )
+    ) {
+      return true;
+    }
+    return (
+      canEverGoStale(slot, messageAtMs, bubbleNowMs) && !isStaleLeg(slot, messageAtMs, bubbleNowMs)
+    );
+  });
 }
 
 function MessageBubble({
   msg,
   onRetry,
   relayRoster,
+  retryIndex,
   rosterKind = 'relay',
   tickNow,
 }: {
@@ -827,6 +915,12 @@ function MessageBubble({
    *  relay keeps its prior no-line rendering, invariant 6) and by the per-leg
    *  presenter, whose opted-out copy is product-aware for the same reason the
    *  opt-out note below is. */
+  /** The THREAD-level relay retry index (D18): every retry row in the thread,
+   *  bucketed by `<root tsMsgId>|<member key>`. Computed once for the whole
+   *  timeline because D20 filters the retry rows OUT of the rendered set, so a
+   *  bubble cannot reach its own retries from `msg` alone. Required, like
+   *  `tickNow`: an omitted one reads as "no ladder ever ran" on every leg. */
+  retryIndex: Map<string, RelayRetryRow[]>;
   rosterKind?: RosterKind;
   /** The TIMELINE's clock, hosted once per thread and ALWAYS a number. It is not
    *  read directly: see `bubbleNowMs` below, which is the value this bubble
@@ -920,6 +1014,35 @@ function MessageBubble({
   // condition walks - so a bubble and the interval that exists to re-render it
   // can never disagree about this message's clocks.
   const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
+  // THE PROJECTION (D18/D19) - the TIME-DERIVED half of the join, and the ONE
+  // derived set the rollup, both recitals and the rows all read. Projecting once
+  // is not a convenience: the original's failure reason is derived independently
+  // at four live positions, and patching the chip alone leaves the row and the
+  // recital reciting "Undelivered - Phone unreachable (error 30003)" beside a
+  // chip that says otherwise - M5's D21 violation exactly, and on an INBOUND
+  // source the recital is the only position there is.
+  //
+  // DELIBERATELY NOT MEMOIZED. The two `unconfirmed` horizons are read against
+  // this bubble's clock, so the projection must recompute whenever `tickNow`
+  // moves; a `useMemo` keyed on the items alone would freeze exactly the half
+  // the ticker clause above exists to drive, while still looking correct in
+  // every test that asserts a final state. The entries and rows beside it are
+  // recomputed per render too. Only the LINEAGE half is memoized, on `items`,
+  // one level up.
+  //
+  // RELAY ONLY. The fenced native group-text product never sees a retry row (a
+  // retry lives in a relay conversation), and gating here means its slots are
+  // not even copied - byte-identical, by construction rather than by argument.
+  const projectedEntries: Array<[string, EffectiveRelayLeg]> = isRelayLeg
+    ? [
+        ...projectRelayLegs({
+          entries: recipientEntries,
+          rootTsMsgId: msg.tsMsgId,
+          retries: retryIndex,
+          nowMs: bubbleNowMs,
+        }),
+      ]
+    : recipientEntries;
   // The filtered entries retain the KEYS because they identify who each leg went
   // to. Roster ordering and all downstream counts consume this same set.
   // Relay group (M1.7): a message carrying a delivery_recipients map is a relayed
@@ -934,11 +1057,30 @@ function MessageBubble({
   const deliveredSummary =
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(
-          recipientEntries.map(([, slot]) => slot),
-          { media: isMms, relay: isRelayLeg, messageAtMs, nowMs: bubbleNowMs },
+          // POSITION 1 (D19): the PROJECTED legs, with the retry-aware
+          // arithmetic switched on. `retryAware` is off by default and only the
+          // relay Timeline sets it, which is what keeps the shared
+          // `Delivered N/N` label - also serving native group text and the
+          // broadcasts routes - exactly where it is.
+          projectedEntries.map(([, slot]) => slot),
+          {
+            media: isMms,
+            relay: isRelayLeg,
+            messageAtMs,
+            nowMs: bubbleNowMs,
+            retryAware: isRelayLeg,
+            // D22. Read off the ROW, not off the projection: the join buckets
+            // rungs under the ROOT id, so this bubble's own leg carries no
+            // retryState and its chip would otherwise read the shared
+            // `Delivered 1/1` - a phantom second send beside the original, and
+            // an unexplained one when the original has not paged in.
+            retryRow: msg.relay_retry_of !== undefined,
+          },
         )
       : null;
-  const recipientRows = orderRecipientRows(recipientEntries, relayRoster);
+  // POSITIONS 2, 3 and 4 all read these rows: the rollup's accessible-name
+  // recital, the inbound recital, and the per-recipient row list itself.
+  const recipientRows = orderRecipientRows(projectedEntries, relayRoster);
   // THE LIST'S GATE - ONE predicate, evaluated INDEPENDENTLY of the rollup's
   // value. Deliberately NOT `deliveredSummary !== null`: presentRelayDelivery
   // returns null for an ALL-OPTED-OUT map as well as an empty one, so gating on
@@ -975,6 +1117,14 @@ function MessageBubble({
   // The branch-0 half of the S6 rule. `showRecipients && deliveredSummary === null`
   // is exactly "a non-empty map, outbound, not a queued_pending hold, and the
   // rollup still came back null" - which only happens when every leg opted out.
+  //
+  // D19 names this the FIFTH reason site and keeps it OUT of the projection, so
+  // its HEADLINE is untouched here: it reads `msg.error_code`, which a relay
+  // source never carries (the relay path writes SLOTS only). Its recital shares
+  // `recipientRows` with the other three because D21's whole content is that
+  // they cannot disagree - and it is inert either way, since this branch is
+  // reached only when every leg opted out, and an opted-out leg was never sent
+  // to, so no ladder was ever claimed for it.
   const messageChipName =
     showRecipients && deliveredSummary === null && delivery !== null
       ? recipientSummaryName(
@@ -1096,7 +1246,17 @@ function MessageBubble({
       {showRecipients && revealed ? (
         <ul className={styles.recipientList} aria-label={RECIPIENT_LIST_LABEL}>
           {recipientRows.map((row) => {
-            const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, bubbleNowMs);
+            // ONE options bag for the presenter's baked-in reasons and for this
+            // row's own fallback (R2, W6) - see the identical pairing in
+            // `recipientSummaryName`.
+            const rowReasonOpts = { media: isMms, relay: isRelayLeg };
+            const leg = presentLegDelivery(
+              row.slot,
+              rosterKind,
+              messageAtMs,
+              bubbleNowMs,
+              rowReasonOpts,
+            );
             // A reason renders only when THIS row's own presentation isFailure,
             // mirroring the message-level rule. An errorCode does NOT imply
             // failure: the fan-out writes a transient carrier code onto a leg it
@@ -1113,10 +1273,17 @@ function MessageBubble({
             // a relay leg's 30003 keeps its carrier code and drops the "will
             // retry" tail, because no relay retry is scheduled - while a native
             // group text, whose 30003 retry IS real, keeps the promise.
+            //
+            // A presentation carrying its OWN reason wins over both, and two do:
+            // `Retrying` (D19) and the `unconfirmed` state (R2, W5). Neither
+            // reason can come from the call below, which fires only on
+            // `isFailure` - and neither state deliberately is one, because
+            // `isFailure` is what offers a Retry action and offering one
+            // mid-rung, or on a ladder that may yet have landed, is the
+            // double-send this feature exists to prevent.
             const legReason =
-              leg?.isFailure === true
-                ? deliveryReason(row.slot.errorCode, { media: isMms, relay: isRelayLeg })
-                : undefined;
+              leg?.reason ??
+              (leg?.isFailure === true ? deliveryReason(row.slot.errorCode, rowReasonOpts) : undefined);
             // Recipient slots inherit legacy compatibility from their parent.
             // Missing slot facts are unresolved only on version-1 messages.
             const recipientTransport =
@@ -1553,12 +1720,17 @@ function StreamItem({
   item,
   onRetry,
   relayRoster,
+  retryIndex,
   rosterKind,
   tickNow,
 }: {
   item: TimelineItem;
   onRetry?: (msg: TimelineMessage) => void;
   relayRoster?: ConversationParticipant[];
+  /** The thread-level relay retry index, passed straight through to
+   *  MessageBubble. Required for the same reason `tickNow` is - see its prop
+   *  there. */
+  retryIndex: Map<string, RelayRetryRow[]>;
   rosterKind?: RosterKind;
   /** The timeline's clock, passed straight through to MessageBubble. Required,
    *  not optional: an undefined clock means "staleness off" downstream, so a
@@ -1575,6 +1747,7 @@ function StreamItem({
           msg={item}
           onRetry={onRetry}
           tickNow={tickNow}
+          retryIndex={retryIndex}
           {...(relayRoster !== undefined && { relayRoster })}
           {...(rosterKind !== undefined && { rosterKind })}
         />
@@ -1809,15 +1982,79 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     return items.filter((i) => {
       if (commsOnly && i.kind === 'milestone') return false;
       if (i.kind === 'message' && supersededIds.has(i.tsMsgId)) return false;
+      // RELAY RETRY ROWS (D20), a SECOND and separate rule. The one above hides a
+      // PREDECESSOR; this one hides the ROW ITSELF, so they are deliberately not
+      // fused.
+      //
+      // "A retry row renders ONLY when its leg delivered AND its original was
+      // outbound", both read from the retry row's own stored lineage so the
+      // predicate never depends on the original being loaded (D22 - paging is
+      // newest-first). A failed attempt records durably but earns no bubble: the
+      // thread shows what reached someone, and a failed retry reached no one.
+      //
+      // WARNING, the inversion: a relay retry row must NEVER carry `retry_of`.
+      // That is the natural field to reach for and the relay projector already
+      // forwards it - but stamping it would add the ORIGINAL to `supersededIds`
+      // above and DELETE the original bubble, inverting the contract exactly.
+      // The lineage lives in `relay_retry_of` and nowhere else.
+      //
+      // Narrowed on `kind === 'message'` first, like the rule above, because the
+      // tour host feeds this memo a MILESTONE-MERGED list and a milestone has no
+      // tsMsgId, no delivery_recipients and no lineage.
+      if (i.kind === 'message' && i.relay_retry_of !== undefined) {
+        // An `undefined` or out-of-union origin direction HIDES. The relay
+        // projector drops a direction outside the union, so this branch is what
+        // an orphaned-or-corrupt row lands in, and default-HIDE is the safe side:
+        // default-render is the duplicate member message D20 exists to prevent,
+        // while a hidden row is still recorded durably server-side.
+        if (i.relay_retry_origin_direction !== 'outbound') return false;
+        const memberKey = i.relay_retry_member_key;
+        if (memberKey === undefined) return false;
+        // The row's OWN single-entry slot, never the join: `visible` is memoized
+        // on `items` and must stay a pure function of the row, or the memo would
+        // freeze the join's time-derived half. A prototype-shaped member key
+        // reads `undefined` here and therefore hides, which is the safe side
+        // again.
+        if (i.delivery_recipients?.[memberKey]?.status !== 'delivered') return false;
+      }
       return true;
     });
   }, [items, commsOnly]);
 
+  // THE LINEAGE HALF of the relay retry join (D18), and it is deliberately built
+  // from `items` rather than from `visible`: the rule directly above has just
+  // hidden almost every retry row, and those hidden rows ARE the evidence. This
+  // half changes only when the item set changes, so it may be memoized exactly
+  // like `visible`. The TIME-DERIVED half - the two `unconfirmed` horizons - is
+  // computed per bubble against that bubble's own clock and must NOT be
+  // memoized on `items`; see the projection in MessageBubble.
+  //
+  // It is threaded down rather than derived per bubble because a bubble cannot
+  // see its own retry rows: they are not in `visible`, and they are separate
+  // items rather than fields on the original.
+  //
+  // ROSTER-GATED, exactly as the projection is (code review R2, W8). Both halves
+  // of D18 read this index and they must share ONE gate: the projection is
+  // already fenced on `isRelayLeg`, so on a native group text an index built
+  // here could only feed the TICKER - arming an interval whose every re-render
+  // is a no-op, because nothing downstream of it consults a retryState in that
+  // product. Inert today (nothing outside a relay conversation carries
+  // `relay_retry_of`), which is why this is a fence and not a fix.
+  //
+  // `EMPTY_RETRY_INDEX` is a module constant so the memo's identity is stable
+  // for a group text and the `tickerArmed` memo below does not recompute on
+  // every render.
+  const retryIndex = useMemo(
+    () => (rosterKind === 'relay' ? indexRelayRetries(items) : EMPTY_RETRY_INDEX),
+    [items, rosterKind],
+  );
+
   // THE STALENESS TICKER (spec S7 / plan D-c). ONE interval per THREAD, not one
   // per bubble, bumping the `tickNow` every MessageBubble already reads.
   //
-  // ARMED ONLY while some RENDERED leg can still cross the 15-minute boundary -
-  // see `hasTickableLeg` for the four non-terminations that predicate closes.
+  // ARMED ONLY while some RENDERED leg can still cross the 15-minute boundary,
+  // or while a LIVE RETRY RUNG for one of those legs can still resolve (D18) -
+  // see `hasTickableLeg` for the six non-terminations that predicate closes.
   // `visible` (not `items`) is what the stream actually renders, and `tickNow` is
   // in the deps precisely so that the moment the last eligible leg goes stale the
   // condition flips false, the effect cleans up, and the interval STOPS. That
@@ -1862,8 +2099,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     });
   }, [visible]);
   const tickerArmed = useMemo(
-    () => visible.some((i) => i.kind === 'message' && hasTickableLeg(i, tickNow)),
-    [visible, tickNow],
+    () => visible.some((i) => i.kind === 'message' && hasTickableLeg(i, tickNow, retryIndex)),
+    [visible, tickNow, retryIndex],
   );
   useEffect(() => {
     if (!tickerArmed) return undefined;
@@ -2294,6 +2531,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                     item={item}
                     onRetry={onRetrySurfaced}
                     tickNow={tickNow}
+                    retryIndex={retryIndex}
                     {...(relayRoster !== undefined && { relayRoster })}
                     rosterKind={rosterKind}
                   />

@@ -27,6 +27,7 @@ describe('registerAllJobHandlers', () => {
         'relay.intro',
         'relay.memberAdded',
         'relay.numberReady',
+        'relay.retryLeg',
         'relay.warmNumber',
         'voice.createTranscript',
         'voice.reconcileTranscript',

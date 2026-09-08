@@ -540,6 +540,25 @@ export function createFakeWorld(): FakeWorld {
       if (preview !== undefined) conv.last_message_preview = preview;
       return conv;
     },
+    async touchLastActivityPreservingStatus(conversationId, previewText, at) {
+      const conv = conversations.get(conversationId);
+      if (!conv) {
+        throw conditionalCheckFailed(
+          `touchLastActivityPreservingStatus: no conversation ${conversationId}`,
+        );
+      }
+      // D16: this sibling NEVER writes `status` - not for a group_text thread,
+      // not for a relay group closed during a retry backoff, not for anything.
+      // Modelled here rather than aliased to the method above, because "the
+      // closed group stayed closed" is the assertion the retry ladder rests on.
+      // Deliberately NOT recorded in `touches`: that array is the
+      // touchLastActivity ledger and conflating the two would make a status
+      // write and a status-preserving bump indistinguishable to an assertion.
+      conv.last_activity_at = at;
+      const preview = toPreview(previewText);
+      if (preview !== undefined) conv.last_message_preview = preview;
+      return conv;
+    },
     async setParticipantsIfAbsent(conversationId, participants) {
       const conv = conversations.get(conversationId);
       if (!conv) throw new Error(`setParticipantsIfAbsent: conversation not found: ${conversationId}`);
@@ -1111,6 +1130,26 @@ export function createFakeWorld(): FakeWorld {
         // Manual-retry lineage: preserve retry_of so the timeline serializer can
         // emit it (mirrors the real repo's append passthrough).
         ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
+        // Relay 30003 retry lineage (spec D11/D12): preserve the six values the
+        // real repo persists (messagesRepo.ts:2218-2233). Without them a claim
+        // written through this fake reads back with NO lineage at all, and the
+        // retry job throws on the row it was handed.
+        ...(message.relayRetryOf !== undefined && { relay_retry_of: message.relayRetryOf }),
+        ...(message.relayRetryMemberKey !== undefined && {
+          relay_retry_member_key: message.relayRetryMemberKey,
+        }),
+        ...(message.relayRetryAttempt !== undefined && {
+          relay_retry_attempt: message.relayRetryAttempt,
+        }),
+        ...(message.relayRetryDestDigest !== undefined && {
+          relay_retry_dest_digest: message.relayRetryDestDigest,
+        }),
+        ...(message.relayRetryOriginDirection !== undefined && {
+          relay_retry_origin_direction: message.relayRetryOriginDirection,
+        }),
+        ...(message.relayRetryLegBody !== undefined && {
+          relay_retry_leg_body: message.relayRetryLegBody,
+        }),
         // Voice call (M1.9a): preserve the metadata-only call fields so tests
         // can assert masked/CallSid-idempotent/forward-only behavior.
         ...(message.callStatus !== undefined && { call_status: message.callStatus }),
@@ -1283,6 +1322,11 @@ export function createFakeWorld(): FakeWorld {
     async getByTsMsgId(conversationId, tsMsgId) {
       return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
     },
+    // The same in-memory lookup: an array has no eventual consistency to model,
+    // so the fake cannot distinguish the two reads and must not pretend to.
+    async getByTsMsgIdConsistent(conversationId, tsMsgId) {
+      return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+    },
     async getManyByTsMsgIds(conversationId, tsMsgIds) {
       const wanted = new Set(tsMsgIds);
       return new Map(
@@ -1310,6 +1354,12 @@ export function createFakeWorld(): FakeWorld {
       const out: MediaPointer[] = [];
       for (const m of messages) {
         if (m.conversationId !== conversationId) continue;
+        // D13: a relay RETRY row indexes NOTHING - the real `append` skips the
+        // pointer writes for it (`messagesRepo.ts`, the `!isRelayRetryRow`
+        // guard). The fake derives the index from stored rows instead of
+        // writing pointers, so without this the fake would answer the OPPOSITE
+        // of production for a retry row carrying media.
+        if (typeof m.relay_retry_of === 'string' && m.relay_retry_of.length > 0) continue;
         mediaAttachmentsOf(m).forEach((a, index) => {
           const sortKey = mediaPointerSk(m.tsMsgId, index);
           if (before !== undefined && !(sortKey < before)) return;

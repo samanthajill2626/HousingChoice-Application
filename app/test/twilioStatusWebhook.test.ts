@@ -29,7 +29,7 @@ import { buildTsMsgId } from '../src/repos/messagesRepo.js';
 import type { BroadcastItem } from '../src/repos/broadcastsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { loadConfig } from '../src/lib/config.js';
-import { createLogCapture } from './helpers/logCapture.js';
+import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -1139,5 +1139,347 @@ describe('messaging.retrySend job (worker side)', () => {
 
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('original message not found'));
     expect(warn).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The attempt-aware relay severity taxonomy (plan Task 13, spec D23 +
+// adjudication S2a). A relay fan-out or team leg logs WARN while a retry rung is
+// actually claimed and ERROR once the chain is a real dead end, ON TOP of the
+// existing carve-outs rather than instead of them - so 21610 and every
+// announcement leg stay WARN, and the 1:1 and native-group-text paths, which the
+// shared set still governs, do not move.
+//
+// Every case builds its OWN harness, and therefore its own log collector: a
+// shared one makes `expect(errorLines()).toHaveLength(0)` order-dependent.
+// ---------------------------------------------------------------------------
+describe('relay delivery-failure severity (D23)', () => {
+  const RELAY_CONV = 'conv-relay-severity';
+  const RELAY_POOL = '+15550109000';
+  const RELAY_SENDER = '+15550100001';
+  const RELAY_MEMBER = '+15550100002';
+  const RELAY_MEMBER_KEY = 'c-bob';
+  const RELAY_LEG_SID = 'SMleg-severity-01';
+  const RELAY_SOURCE_SID = 'SMrelay-src-severity';
+  const RELAY_SOURCE_TS = '2026-09-01T12:00:00.000Z';
+  const RELAY_ROOT_KEY = '2026-09-01T12:00:00.000Z#SMrelay-root-severity';
+
+  beforeEach(() => {
+    configureScheduler(new InMemorySchedulerAdapter());
+    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    configureJobsLogger(createLogger({ destination: createLogCapture().stream }));
+  });
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  /**
+   * One relay source with one failed-member slot and the `relaysid#` pointer the
+   * callback resolves through. `rung` (when given) makes the source itself a
+   * RETRY row at that attempt number, which is how the cap case is reached
+   * without walking a whole ladder - the ladder walk lives in
+   * relayRetryClaim.webhook.test.ts.
+   */
+  async function seedRelayLeg(
+    world: FakeWorld,
+    opts: {
+      senderKey?: string;
+      rung?: number;
+      /** The member's slot as the fan-out left it, BEFORE this callback. */
+      slot?: { status: 'sent' | 'delivered' | 'undelivered' | 'failed'; errorCode?: string };
+      /** No slot for this member at all - the `relaysid#` pointer resolves and
+       *  the map has no entry (code review R2, W1's anomaly case). */
+      noSlot?: boolean;
+    } = {},
+  ): Promise<void> {
+    world.conversations.set(RELAY_CONV, {
+      conversationId: RELAY_CONV,
+      participant_phone: RELAY_POOL,
+      pool_number: RELAY_POOL,
+      status: 'open',
+      last_activity_at: RELAY_SOURCE_TS,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: 'c-alice', phone: RELAY_SENDER, name: 'Alice' },
+        { contactId: RELAY_MEMBER_KEY, phone: RELAY_MEMBER, name: 'Bob' },
+      ],
+      created_at: RELAY_SOURCE_TS,
+    });
+    const appended = await world.messagesRepo.append({
+      conversationId: RELAY_CONV,
+      providerSid: RELAY_SOURCE_SID,
+      providerTs: RELAY_SOURCE_TS,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      relaySenderKey: opts.senderKey ?? 'c-alice',
+      body: 'is the unit still available?',
+      deliveryRecipients: opts.noSlot === true
+        ? {}
+        : { [RELAY_MEMBER_KEY]: opts.slot ?? { status: 'sent' } },
+      ...(opts.rung !== undefined && {
+        relayRetryOf: RELAY_ROOT_KEY,
+        relayRetryMemberKey: RELAY_MEMBER_KEY,
+        relayRetryAttempt: opts.rung,
+        relayRetryDestDigest: 'deadbeefdeadbeef',
+        relayRetryOriginDirection: 'inbound' as const,
+        relayRetryLegBody: 'Alice: is the unit still available?',
+      }),
+    });
+    await world.messagesRepo.putRelaySidPointer(RELAY_LEG_SID, {
+      conversationId: RELAY_CONV,
+      tsMsgId: appended.tsMsgId,
+      memberKey: RELAY_MEMBER_KEY,
+    });
+  }
+
+  function relayFailureParams(over: Record<string, string> = {}): Record<string, string> {
+    return {
+      MessageSid: RELAY_LEG_SID,
+      MessageStatus: 'undelivered',
+      ErrorCode: '30003',
+      To: RELAY_MEMBER,
+      From: RELAY_POOL,
+      ApiVersion: '2010-04-01',
+      ...over,
+    };
+  }
+
+  function relayFailureLines(capture: LogCapture, level: number): Record<string, unknown>[] {
+    return capture
+      .atLevel(level)
+      .filter((l) => l['event'] === 'delivery_failed' && l['relay'] === true);
+  }
+
+  it('logs WARN while a retry is claimed and ERROR once the ladder is exhausted', async () => {
+    const claimed = makeWebhookHarness();
+    await seedRelayLeg(claimed.world);
+    await signedTwilioPost(claimed.app, STATUS_PATH, relayFailureParams());
+    expect(relayFailureLines(claimed.capture, WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'claimed', errorCode: '30003' }),
+    );
+    expect(relayFailureLines(claimed.capture, ERROR)).toHaveLength(0);
+
+    // The last rung's own leg failing: next would be 4, past the cap, so the
+    // chain is terminal and the alarm says which dead end it is.
+    const exhausted = makeWebhookHarness();
+    await seedRelayLeg(exhausted.world, { rung: 3 });
+    await signedTwilioPost(exhausted.app, STATUS_PATH, relayFailureParams());
+    expect(relayFailureLines(exhausted.capture, ERROR)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'cap_exhausted', errorCode: '30003' }),
+    );
+    expect(relayFailureLines(exhausted.capture, WARN)).toHaveLength(0);
+  });
+
+  // D23: the 21610 carve-out survives. A purely attempt-aware predicate would
+  // alarm on the platform correctly honoring STOP - a strictly larger increase
+  // than the one the founder approved.
+  it('keeps 21610 at WARN on a relay leg', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world);
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams({ ErrorCode: '21610' }));
+    expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
+    expect(relayFailureLines(capture, WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'code_not_retryable', errorCode: '21610' }),
+    );
+  });
+
+  // D23: announcement legs keep WARN. They reach this same severity site through
+  // the same pointers and no retry is ever claimed for them, so "ERROR whenever
+  // no retry was claimed" would alarm every relay intro, member-added,
+  // group-closed and tour-reminder rung - blast radius from a mission that
+  // fences that file out.
+  it('keeps an announcement leg at WARN', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world, { senderKey: 'system' });
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+    expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
+    expect(relayFailureLines(capture, WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'fenced_announcement' }),
+    );
+  });
+
+  // A terminal 30003 on a fan-out or team leg is a real dead end for a real
+  // tenant, and nothing else surfaces it.
+  it('ERRORs a 30003 whose claim was declined for a missing destination', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world);
+    const params = relayFailureParams();
+    delete params['To'];
+    await signedTwilioPost(app, STATUS_PATH, params);
+    expect(relayFailureLines(capture, ERROR)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'to_missing' }),
+    );
+  });
+
+  // 30005 follows TODAY's rule (terminal, ERROR) and still carries a cause -
+  // that is what stops an operator reading an internal fault and a genuine
+  // unreachable handset as the same line.
+  it('keeps a 30005 relay leg at ERROR, with code_not_retryable as its cause', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world);
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams({ ErrorCode: '30005' }));
+    expect(relayFailureLines(capture, ERROR)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'code_not_retryable', errorCode: '30005' }),
+    );
+  });
+
+  // The `source_unreadable` case is an INTERNAL fault and takes its own message
+  // rather than the shared carrier-shaped one, so the alarm is self-describing.
+  it('ERRORs an unreadable source with its own message', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world);
+    world.messagesRepo.getByTsMsgIdConsistent = async () => undefined;
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    const line = relayFailureLines(capture, ERROR).find(
+      (l) => l['retryClaim'] === 'source_unreadable',
+    );
+    expect(line).toBeDefined();
+    expect(line!['msg']).not.toBe('twilio relay-recipient delivery failed (undelivered/failed)');
+  });
+
+  // Code review R1 F1, NARROWED by R2 W1: a leg whose slot already reads
+  // `delivered` did NOT end on 30003. This is the reordering ALLOWED_PRIOR
+  // exists to absorb - the slot write correctly refuses the regression - and on
+  // main the same callback is a WARN. ERRORing it would make the shipped alarm
+  // set strictly larger than the approved one, in the direction of false
+  // positives. The OUTCOME is `slot_settled`, which is the half of the old
+  // catch-all that carries that argument.
+  it('keeps a 30003 replayed onto an already-DELIVERED slot at WARN', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world, { slot: { status: 'delivered' } });
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
+    expect(relayFailureLines(capture, WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'slot_settled', errorCode: '30003' }),
+    );
+    // The slot itself is untouched - the leg really did deliver.
+    const src = await world.messagesRepo.getByProviderSid(RELAY_SOURCE_SID);
+    expect(src?.delivery_recipients?.[RELAY_MEMBER_KEY]?.status).toBe('delivered');
+  });
+
+  // The other half of the same outcome (D8's one real contradiction): the leg
+  // ended on 30007, which was logged at 30007's OWN severity when it landed. A
+  // later contradictory 30003 is not a second dead end.
+  it('keeps a 30003 landing on a slot that already reads 30007 at WARN', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world, { slot: { status: 'undelivered', errorCode: '30007' } });
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, ERROR)).toHaveLength(0);
+    expect(relayFailureLines(capture, WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'slot_settled', errorCode: '30003' }),
+    );
+    const src = await world.messagesRepo.getByProviderSid(RELAY_SOURCE_SID);
+    expect(src?.delivery_recipients?.[RELAY_MEMBER_KEY]?.errorCode).toBe('30007');
+  });
+
+  // THE OTHER TWO PRODUCERS of the old catch-all, which fix wave 1 silenced
+  // along with the two above (code review R2, W1 / R2 2.1). Both are internal
+  // ANOMALIES on a leg that DID end terminally on 30003 with no ladder running,
+  // which is the `source_unreadable` class - so both ERROR, and both take the
+  // anomaly's own message rather than the carrier-shaped one.
+  it('ERRORs a 30003 whose member slot is ABSENT, with the anomalys own message', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    // The `relaysid#` pointer resolves; the slot map has no entry for the member.
+    await seedRelayLeg(world, { noSlot: true });
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, WARN)).toHaveLength(0);
+    const line = relayFailureLines(capture, ERROR).find(
+      (l) => l['retryClaim'] === 'slot_ineligible',
+    );
+    expect(line).toBeDefined();
+    expect(line!['errorCode']).toBe('30003');
+    expect(line!['msg']).not.toBe('twilio relay-recipient delivery failed (undelivered/failed)');
+    expect(String(line!['msg'])).toContain('delivery slot is missing');
+  });
+
+  it('ERRORs a 30003 whose slot write was REFUSED and still reads sent', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedRelayLeg(world, { slot: { status: 'sent' } });
+    // The repo's own refusal path: the transition is declined and the slot is
+    // left exactly as it was, so the claim's consistent re-read sees `sent`.
+    world.messagesRepo.updateRecipientDeliveryStatus = async () => false;
+
+    await signedTwilioPost(app, STATUS_PATH, relayFailureParams());
+
+    expect(relayFailureLines(capture, WARN)).toHaveLength(0);
+    expect(relayFailureLines(capture, ERROR)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'slot_ineligible', errorCode: '30003' }),
+    );
+  });
+
+  // Sec 7 intention 14 names "the 1:1 AND native-group-text paths"; only the 1:1
+  // half had a case (code review R1, F3). A group leg resolves as a MESSAGE, not
+  // through a relaysid pointer, so it never reaches the relay branch at all: the
+  // shared set decides it, 30003 is still a carve-out there, and no retryClaim
+  // is attached to anything.
+  it('leaves a native group-text 30003 receipt unchanged', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+    const group = await world.conversationsRepo.createGroupTextThread({
+      conversationId: 'gt-30003-severity',
+      members: [
+        { contactId: 'contact-T', phone: TENANT_PHONE },
+        { contactId: 'contact-O', phone: '+15550100009' },
+      ],
+    });
+    await world.messagesRepo.append({
+      conversationId: group.item.conversationId,
+      providerSid: 'SMgroup30003',
+      providerTs: '2026-06-12T10:00:00.000Z',
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'group body',
+      deliveryStatus: 'queued',
+    });
+
+    await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({
+        MessageSid: 'SMgroup30003',
+        MessageStatus: 'undelivered',
+        ErrorCode: '30003',
+      }),
+    );
+
+    expect(capture.atLevel(ERROR).filter((l) => l['event'] === 'delivery_failed')).toHaveLength(0);
+    const warn = capture
+      .atLevel(WARN)
+      .find((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMgroup30003');
+    expect(warn).toBeDefined();
+    expect(warn!['relay']).toBeUndefined();
+    expect(warn!['retryClaim']).toBeUndefined();
+  });
+
+  // The 1:1 and native-group-text paths are FENCED and must not move: they still
+  // read the shared set, where 30003 is still a carve-out, and their failure line
+  // carries no retryClaim at all.
+  it('leaves the 1:1 severity unchanged', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await seedOutbound(world, 'SMout0001');
+    await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+    );
+    expect(capture.atLevel(ERROR).filter((l) => l['event'] === 'delivery_failed')).toHaveLength(0);
+    const warn = capture
+      .atLevel(WARN)
+      .find((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMout0001');
+    expect(warn).toBeDefined();
+    expect(warn!['relay']).toBeUndefined();
+    expect(warn!['retryClaim']).toBeUndefined();
   });
 });

@@ -40,6 +40,12 @@ contention diagnosis. One Playwright worker reproduces it in three tests.
 The earlier `e06b133c` Delivered checkpoint fixes a different demonstrated
 failure (512 to 500 after delivery re-anchoring). Keep that lifecycle wait.
 
+Main sync subsequently brought in the separately filed
+`e2e-outbound-mms-viewer-trigger-not-visible` issue. It is canonical for this
+visibility failure. Restore the older scroll-offset issue to its resolved
+state and keep its existing duplicate pointer; do not conflate mechanisms.
+The initial reopening in this branch is superseded by that issue reconciliation.
+
 ## Fix and validation plan
 
 1. Bound the arranged Timeline consistently, regardless of existing overflow.

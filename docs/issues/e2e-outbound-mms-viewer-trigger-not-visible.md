@@ -1,13 +1,42 @@
 ---
 id: e2e-outbound-mms-viewer-trigger-not-visible
-title: outbound-mms viewer case fails in EVERY full-suite run on main - "trigger is not visible" (not the closed scroll flake)
+title: outbound-MMS viewer setup hid its trigger with populated history
 type: bug
 severity: med
-status: open
+status: in-progress
 area: e2e
 created: 2026-09-02
+updated: 2026-09-07
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:591, docs/issues/e2e-image-viewer-scroll-flake.md
 ---
+
+## Measured diagnosis (2026-09-07)
+
+The failure does not require the full suite, concurrent workers, or a render race.
+Running only the two `mms-transcode` tests followed by the exact outbound-MMS
+case reproduces it: 2 passed / 1 failed. A real 70-line inbound history fixture
+also reproduces it in the outbound case alone against the old setup.
+
+Geometry diagnostics identify movement INSIDE the setup evaluate, not between
+Playwright calls: enlarging the route grows the Timeline from 623px to 1171px.
+With prior attachments it still overflows, so the conditional 180px cap is
+skipped. Centering the trigger scrolls AppFrame to 548 and the document to 251.
+Forcing AppFrame back to 20 moves the trigger below the viewport (y=976).
+The viewer has not opened at any point during the failure.
+
+The fix caps the arranged stream regardless of existing overflow and centers
+within that owner only. The regression fixture supplies real history, so an
+isolated run no longer misses this case. The Delivered wait and exact equality
+assertions across open, wheel, pans, and Escape remain intact. No product or
+shared harness code changes are needed.
+
+Diagnosis, RED/GREEN evidence, review, and final check records are under
+`docs/superpowers/reviews/2026-09-07-outbound-mms-scroll-recheck/`.
+
+## Historical sightings and pre-diagnosis hypotheses
+
+The observations below are retained as history. The former full-suite-only and
+lifecycle-race hypotheses are superseded by the measured diagnosis above.
 
 **Problem.** `outbound-mms.spec.ts:517` ("(a) attach + send an image: the fake
 records media AND the timeline renders it") fails in EVERY full-suite run

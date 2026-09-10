@@ -655,6 +655,19 @@ export interface RelayFanOutJobDeps {
   mediaStore?: MediaStore;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
+  /**
+   * The instant the owner-routed copy's "is the tour past / is it TODAY" tests
+   * are made against, forwarded to `resolveRelayComposeInputs`. Absent at
+   * runtime, which is every production caller, that resolver reads the real
+   * clock exactly as before.
+   *
+   * The seam exists so a test can drive the REAL job at a pinned instant. A
+   * scenario that seeds a fixed tour date and reads the wall clock is running
+   * on two timelines, and it stays green only until the fixed date goes past -
+   * which is how this file's TOUR_AT scenario went red on 2026-09-09 having
+   * been written as a "far-future" constant.
+   */
+  nowIso?: string;
   logger?: Logger;
 }
 
@@ -709,6 +722,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         unitsRepo: units,
         ...(contacts !== undefined && { contactsRepo: contacts }),
         settingsRepo: settings,
+        ...(deps.nowIso !== undefined && { nowIso: deps.nowIso }),
         ...(deps.logger !== undefined && { logger: deps.logger }),
       },
       addedContactId,

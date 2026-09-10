@@ -2160,6 +2160,11 @@ describe('relay.intro / relay.memberAdded on an OWNED group', () => {
       toursRepo: world.toursRepo,
       placementsRepo: world.placementsRepo,
       settingsRepo: world.settingsRepo,
+      // ONE CLOCK for the whole scenario. The tour below is seeded at a fixed
+      // instant, so the resolver has to be asked about that same timeline
+      // rather than the wall clock - otherwise the tour silently becomes past
+      // and the dated variant degrades to the naked one.
+      nowIso: DAY_BEFORE_NOW,
       logger,
     });
     outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
@@ -2182,13 +2187,16 @@ describe('relay.intro / relay.memberAdded on an OWNED group', () => {
       created_at: '2026-07-01T00:00:00.000Z',
       updated_at: '2026-07-01T00:00:00.000Z',
     } as never);
-    // A FIXED far-future instant, so "today" is deterministic whatever day the
-    // suite runs: the dated variant, never the today one.
+    // The SAME instant the compose-level tests above pin, paired with the
+    // handler's `nowIso: DAY_BEFORE_NOW`: the tour is future (so not naked) and
+    // on a different local day (so not the today variant), at every wall-clock
+    // time. This used to be a bare literal called "far-future", which stopped
+    // being far-future on 2026-09-08 and took the scenario red with it.
     world.toursMap.set('tour-owned', {
       tourId: 'tour-owned',
       tenantId: 'c-tenant',
       unitId: 'unit-owned',
-      scheduledAt: '2026-09-08T19:00:00.000Z',
+      scheduledAt: TOUR_AT,
       status: 'scheduled',
       tourType: 'landlord_led',
       created_at: '2026-07-01T00:00:00.000Z',

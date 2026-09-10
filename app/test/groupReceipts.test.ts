@@ -500,7 +500,7 @@ describe('the SSE push that makes the rollup live', () => {
     expect(f.actualTransportWrites).toEqual([]);
   });
 
-  it('logs safe conflicting channel evidence without overwriting authoritative MMS', async () => {
+  it('does not warn when a receipt channel SID disagrees with the authoritative rail', async () => {
     const f = makeFakes({
       message: outboundGroupMessage({
         transport_schema_version: 1,
@@ -517,24 +517,24 @@ describe('the SSE push that makes the rollup live', () => {
         },
       }),
     });
-    const conflictingSid = `SM${'d'.repeat(32)}`;
+    // Conversations creates every native-group leg as an SM Message resource,
+    // so this SID disagrees with the authoritative MMS rail on EVERY healthy
+    // send - 104 warnings across two prod days, one per member per send, with
+    // nothing wrong. Spec section 7.3: the receipt service must not derive
+    // transport from the channel message SID.
+    const legSid = `SM${'d'.repeat(32)}`;
 
     await f.service.applyReceipt({
       messageSid: 'IMposted1',
       participantSid: 'MBann',
       status: 'delivered',
-      channelMessageSid: conflictingSid,
+      channelMessageSid: legSid,
     });
 
     expect(slot(f, ANN_KEY)?.actualTransport).toBe('mms');
-    const warning = f.capture.lines.find((line) => line['event'] === 'group_receipt_transport_evidence_conflict');
-    expect(warning).toMatchObject({
-      evidenceSource: 'message-sid',
-      observedTransport: 'sms',
-      authoritativeTransport: 'mms',
-    });
-    expect(warning).not.toHaveProperty('channelMessageSid');
-    expect(JSON.stringify(warning)).not.toContain(conflictingSid);
+    expect(
+      f.capture.lines.find((line) => line['event'] === 'group_receipt_transport_evidence_conflict'),
+    ).toBeUndefined();
   });
 
   it('emits when a PARKED receipt finally drains - the late path pushes too', async () => {

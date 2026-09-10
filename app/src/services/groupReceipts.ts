@@ -52,7 +52,6 @@ import { summarizeError } from '../lib/errors.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
-import { normalizeTwilioTransportEvidence } from '../adapters/twilioMessageTransport.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
@@ -391,45 +390,19 @@ export function createGroupReceiptsService(
       return { outcome: 'dropped', reason: 'unknown_participant' };
     }
 
-    // The source row carries the group adapter's authoritative rail fact. A
-    // receipt ChannelMessageSid can corroborate that fact or raise a safe
-    // conflict warning, but it can never create or replace it.
-    if (
-      input.channelMessageSid !== undefined &&
-      message.requested_transport !== undefined &&
-      message.actual_transport !== undefined
-    ) {
-      const channelEvidence = normalizeTwilioTransportEvidence({
-        direction: 'outbound',
-        requestedTransport: message.requested_transport,
-        messageSid: input.channelMessageSid,
-        authenticatedProviderTraffic: true,
-      });
-      if (
-        channelEvidence.kind === 'conflict' ||
-        (channelEvidence.kind === 'observed' &&
-          channelEvidence.transport !== message.actual_transport)
-      ) {
-        log.warn(
-          {
-            event: 'group_receipt_transport_evidence_conflict',
-            providerSid: input.messageSid,
-            requestedTransport: message.requested_transport,
-            authoritativeTransport: message.actual_transport,
-            ...(channelEvidence.kind === 'observed'
-              ? {
-                  observedTransport: channelEvidence.transport,
-                  evidenceSource: channelEvidence.source,
-                }
-              : {
-                  evidenceSource: channelEvidence.source,
-                  ...channelEvidence.safeFacts,
-                }),
-          },
-          'group receipt channel evidence conflicted with the authoritative native-group rail',
-        );
-      }
-    }
+    // NO TRANSPORT JUDGEMENT FROM THE RECEIPT SID. Spec section 7.3 states it
+    // directly: "The receipt service must not derive transport from the channel
+    // message SID." An earlier build did exactly that and compared the result
+    // against the source row's rail fact.
+    //
+    // It could only ever fire falsely. Conversations creates every native-group
+    // leg as an `SM` Message resource whatever the rail is, and
+    // `normalizeTwilioTransportEvidence`'s own docblock says SM/MM classify
+    // Message-resource CREATION rather than delivery transport - so the
+    // comparison flagged a conflict on every healthy send. Prod carried 104 of
+    // these across the two days after the 2026-09-08 deploy, one per member per
+    // send, at a uniform requested=mms/authoritative=mms/observed=sms. The
+    // authoritative rail fact on the source row stands on its own.
 
     const actualOutcome =
       message.actual_transport === undefined

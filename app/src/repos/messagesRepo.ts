@@ -15,7 +15,11 @@
 // listByConversation never sees them.
 //
 // PII: message bodies must NEVER be logged (doc §9) — IDs and lengths only.
-import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import {
+  ConditionalCheckFailedException,
+  TransactionCanceledException,
+  TransactionInProgressException,
+} from '@aws-sdk/client-dynamodb';
 import {
   BatchGetCommand,
   DeleteCommand,
@@ -1902,10 +1906,55 @@ function parkedSk(eventType: string): string {
   return `parked#${eventType}`;
 }
 
+/** Total append-transaction attempts, including the first. */
+const APPEND_TRANSACTION_ATTEMPTS = 3;
+/** Backoff before retry N, multiplied by the attempt number. */
+const APPEND_TRANSACTION_RETRY_BASE_MS = 25;
+
 export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('messages', deps.env);
   const log = deps.logger ?? defaultLogger;
+
+  /**
+   * Send the append transaction, retrying a transient overlap.
+   *
+   * DynamoDB rejects a transaction that overlaps one still running with
+   * `TransactionInProgressException`. Re-sending is safe here because every Put
+   * in this transaction is conditioned on `attribute_not_exists(tsMsgId)` and
+   * the sort key derives from the PROVIDER result, so a retry rebuilds a
+   * byte-identical request: a first attempt that actually landed loses its
+   * condition and falls into the dedupe branch instead of double-writing.
+   *
+   * Not optional politeness. `sendMessage` posts to the provider (step 3)
+   * BEFORE it appends (step 4), so an unretried transient fault here loses the
+   * row for a message the recipient already received - and the status callbacks
+   * that follow then resolve to nothing. Prod 2026-09-09: a delivered
+   * missed-call auto-text with no message row and three dropped callbacks.
+   */
+  async function sendAppendTransaction(
+    command: TransactWriteCommand,
+    context: { conversationId: string; providerSid: string },
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await doc.send(command);
+        return;
+      } catch (err) {
+        if (!(err instanceof TransactionInProgressException) || attempt >= APPEND_TRANSACTION_ATTEMPTS) {
+          throw err;
+        }
+        // COUNTABLE, not silent. A recovered fault that logs nothing makes a
+        // contended table indistinguishable from a healthy one, which is the
+        // same trap `dynamoAdmin`'s retry warning exists to avoid.
+        log.warn(
+          { event: 'message_append_transaction_retry', ...context, attempt },
+          'message append transaction overlapped one still in progress - retrying the same conditioned write',
+        );
+        await new Promise((resolve) => setTimeout(resolve, APPEND_TRANSACTION_RETRY_BASE_MS * attempt));
+      }
+    }
+  }
 
   /** Read the SID pointer item: where the persisted message actually lives. */
   async function getSidPointer(
@@ -2285,7 +2334,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       // discriminator the media-pointer guard below needs.
       const isRelayRetryRow = message.relayRetryOf !== undefined;
       try {
-        await doc.send(
+        await sendAppendTransaction(
           new TransactWriteCommand({
             TransactItems: [
               {
@@ -2377,6 +2426,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                 : []),
             ],
           }),
+          { conversationId: message.conversationId, providerSid: message.providerSid },
         );
       } catch (err) {
         if (err instanceof TransactionCanceledException) {

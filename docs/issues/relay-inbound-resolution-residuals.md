@@ -27,7 +27,9 @@ Recorded here so the next person does not have to rediscover them:
 2. Membership is the raw `participant.phone === From` walk. It ignores
    `ever_member_phones`, so a REMOVED member's inbound cannot be attributed to
    the group they were removed from (lands as non_member on the newest open
-   group instead), and it does not use `rosterMembers()` (the declared
+   group instead - see
+   [relay-non-member-inbound-filed-in-unrelated-group](relay-non-member-inbound-filed-in-unrelated-group.md)
+   for why that pick is arbitrary), and it does not use `rosterMembers()` (the declared
    canonical roster walk in services/relayGroupDuplicates.ts, which excludes
    blank-phone rows). Harmless today (From is never blank; both channels
    match), but the definitions should converge if either ever changes.

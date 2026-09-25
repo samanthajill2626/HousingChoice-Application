@@ -38,18 +38,22 @@
 // readable); and in bulk mode without --include-breaker-tripped the write
 // ALSO requires the counter to be absent, so a trip that lands between the
 // Scan and the write loses the condition too (`skippedOnCondition`).
-// Every enable appends a `mode_changed` audit event (manual -> auto) whose
-// reason tells a bulk enable (`bulk_enable`) from a resume (`operator_resume`).
-// The switch write and the audit write are two operations: if the audit write
-// fails AFTER the switch landed, the row is on and a re-run would report it
-// `alreadyOn`, so that case is NAMED at ERROR (conversationId + "audit NOT
-// written"), counted `auditFailed`, and the run exits 1 - the operator
-// backfills the event from the log line (spec I6: every change audited, and
-// never silently not).
+//
+// ONE TRANSACTION PER ROW: the switch and its `mode_changed` audit event
+// (manual -> auto; reason `bulk_enable` for a bulk enable, `operator_resume`
+// for a single resume) are ONE TransactWriteItems - the conditional Update
+// plus the audit Put that auditRepo.transactPut builds (the same item
+// `append` writes, never overwriting an event) - so both land or neither: no
+// row is ever switched on without its event, even if the process dies
+// mid-apply (spec I6 by construction). A cancellation whose FIRST reason is
+// the row's ConditionalCheckFailed is `skippedOnCondition`; anything else
+// aborts the run (below).
 //
 // FAILURE HANDLING mirrors retire-paused-tour-reminders.ts: a row that cannot
-// be PLANNED is stepped over and counted `failed` (exit 1); a SWITCH write
-// failure other than the conditional check ABORTS with a PARTIAL report.
+// be PLANNED is stepped over and counted `failed` (exit 1); a WRITE (the
+// transaction) failing for any reason but the row's condition ABORTS with a
+// PARTIAL report - nothing was written for that row, and re-running after the
+// fix is safe (idempotent).
 //
 // TARGET: `--env local|dev|prod` through scripts/lib/stageClient.ts (dev/prod:
 // account guard first, client bound to the housingchoice profile). DRY RUN IS
@@ -63,8 +67,8 @@
 //   npx tsx app/scripts/enable-conversation-automation.ts --env dev --apply --include-breaker-tripped
 //
 // PII: logs counts and conversation ids only. Never a name, phone or body.
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { GetCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { GetCommand, ScanCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
 import { isOneToOneBucket } from '../src/lib/unreadFeed.js';
@@ -90,14 +94,17 @@ export interface EnableResult {
   breakerTrippedExcluded: number;
   /** Rows the run decided to enable (dry run: would enable). */
   planned: number;
-  /** Rows actually switched on (apply only). */
+  /** Rows actually switched on, each with its audit event (apply only). */
   enabled: number;
-  /** Planned rows by type ('(none)' for a typeless row). */
+  /**
+   * By type ('(none)' for a typeless row): on an APPLY, the rows actually
+   * switched on (sums to `enabled`); on a DRY RUN, the rows that would be
+   * (sums to `planned`).
+   */
   byType: Record<string, number>;
-  /** Writes whose condition failed because the row moved under the run. */
+  /** Writes whose condition failed because the row changed under the run (or,
+   *  in bulk mode, now carries the breaker's send counter); nothing written. */
   skippedOnCondition: number;
-  /** Rows switched on whose audit event could NOT be written (named at ERROR). */
-  auditFailed: number;
   /** Rows the run could not PLAN (a read that threw); nothing written for them. */
   failed: number;
 }
@@ -147,7 +154,6 @@ export async function enableConversationAutomation(opts: EnableOpts): Promise<En
     enabled: 0,
     byType: {},
     skippedOnCondition: 0,
-    auditFailed: 0,
     failed: 0,
   };
   try {
@@ -174,7 +180,10 @@ async function run(opts: EnableOpts, result: EnableResult, log: Logger): Promise
     single !== undefined ? `${SCRIPT_NAME} - single mode: targeting one conversation` : `${SCRIPT_NAME} - bulk mode`,
   );
 
-  const enable = async (row: ConversationItem, reason: EnableReason): Promise<void> => {
+  /** One transaction: the conditional switch + its audit event. True = both
+   *  landed; false = the row's condition failed (nothing written). Any other
+   *  failure throws and aborts the run. */
+  const enable = async (row: ConversationItem, reason: EnableReason): Promise<boolean> => {
     // BULK without --include-breaker-tripped: the write also requires the
     // breaker's send counter to be absent - the last line of defense for a
     // trip that lands between the Scan and this write (a trip writes
@@ -183,55 +192,66 @@ async function run(opts: EnableOpts, result: EnableResult, log: Logger): Promise
     const guardSendCounter = reason === 'bulk_enable' && opts.includeBreakerTripped !== true;
     try {
       await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { conversationId: row.conversationId },
-          UpdateExpression: 'SET ai_mode = :auto',
-          // Still a one-to-one conversation (negative type test, typeless rows
-          // included) AND still switched off: a row switched on, deleted or
-          // turned into a group thread since the Scan loses the condition, and
-          // a pointer item can never match (no ai_mode).
-          ConditionExpression:
-            'attribute_exists(conversationId) AND ai_mode = :manual AND ' +
-            '(attribute_not_exists(#type) OR NOT #type IN (:relay, :groupText))' +
-            (guardSendCounter ? ' AND attribute_not_exists(outbound_minute_bucket)' : ''),
-          ExpressionAttributeNames: { '#type': 'type' },
-          ExpressionAttributeValues: {
-            ':auto': 'auto',
-            ':manual': 'manual',
-            ':relay': 'relay_group',
-            ':groupText': 'group_text',
-          },
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              // ITEM 0 - the switch. Its position is load-bearing:
+              // CancellationReasons come back positionally, and item 0
+              // failing its condition is how the catch below tells "the row
+              // changed" from every other failure.
+              Update: {
+                TableName: table,
+                Key: { conversationId: row.conversationId },
+                UpdateExpression: 'SET ai_mode = :auto',
+                // Still a one-to-one conversation (negative type test, typeless
+                // rows included) AND still switched off: a row switched on,
+                // deleted or turned into a group thread since the Scan loses
+                // the condition, and a pointer item can never match (no ai_mode).
+                ConditionExpression:
+                  'attribute_exists(conversationId) AND ai_mode = :manual AND ' +
+                  '(attribute_not_exists(#type) OR NOT #type IN (:relay, :groupText))' +
+                  (guardSendCounter ? ' AND attribute_not_exists(outbound_minute_bucket)' : ''),
+                ExpressionAttributeNames: { '#type': 'type' },
+                ExpressionAttributeValues: {
+                  ':auto': 'auto',
+                  ':manual': 'manual',
+                  ':relay': 'relay_group',
+                  ':groupText': 'group_text',
+                },
+              },
+            },
+            {
+              // ITEM 1 - its audit event, built by auditRepo (the one place the
+              // item shape lives). Both land or neither.
+              Put: audit.transactPut(`conversations#${row.conversationId}`, 'mode_changed', {
+                from: 'manual',
+                to: 'auto',
+                reason,
+                script: SCRIPT_NAME,
+              }),
+            },
+          ],
         }),
       );
     } catch (err) {
-      if (!(err instanceof ConditionalCheckFailedException)) throw err;
-      result.skippedOnCondition += 1;
-      log.info(
-        { conversationId: row.conversationId },
-        guardSendCounter
-          ? `${SCRIPT_NAME} - the row changed under the run, or it carries the breaker's send counter (a trip since the scan); skipped, nothing written`
-          : `${SCRIPT_NAME} - the row changed under the run; skipped, nothing written`,
-      );
-      return;
+      if (err instanceof TransactionCanceledException && err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed') {
+        result.skippedOnCondition += 1;
+        log.info(
+          { conversationId: row.conversationId },
+          guardSendCounter
+            ? `${SCRIPT_NAME} - the row changed under the run, or it carries the breaker's send counter (a trip since the scan); skipped, nothing written`
+            : `${SCRIPT_NAME} - the row changed under the run; skipped, nothing written`,
+        );
+        return false;
+      }
+      // Anything else - the audit half refused, a transaction conflict,
+      // throttling, permissions - aborts the run: nothing landed for this row.
+      throw err;
     }
-    // The switch is ON from here. Whatever happens to the audit write, say so.
+    // Both landed: the switch is on AND its event is written.
     result.enabled += 1;
     log.info({ conversationId: row.conversationId, reason }, `${SCRIPT_NAME} - conversation switched on`);
-    try {
-      await audit.append(`conversations#${row.conversationId}`, 'mode_changed', {
-        from: 'manual',
-        to: 'auto',
-        reason,
-        script: SCRIPT_NAME,
-      });
-    } catch (err) {
-      result.auditFailed += 1;
-      log.error(
-        { err, conversationId: row.conversationId, reason },
-        `${SCRIPT_NAME} - switched on but audit NOT written: append the mode_changed event for this conversation by hand (a re-run will report it alreadyOn)`,
-      );
-    }
+    return true;
   };
 
   const consider = async (row: ConversationItem, reason: EnableReason): Promise<void> => {
@@ -279,9 +299,13 @@ async function run(opts: EnableOpts, result: EnableResult, log: Logger): Promise
       case 'enable': {
         result.planned += 1;
         const typeKey = typeof row.type === 'string' ? row.type : '(none)';
-        result.byType[typeKey] = (result.byType[typeKey] ?? 0) + 1;
-        if (apply) await enable(row, reason);
-        else log.info({ conversationId: row.conversationId, type: typeKey }, `${SCRIPT_NAME} - DRY RUN: would switch on`);
+        // byType: an apply counts what it SWITCHED ON; a dry run, what it would.
+        if (apply) {
+          if (await enable(row, reason)) result.byType[typeKey] = (result.byType[typeKey] ?? 0) + 1;
+        } else {
+          result.byType[typeKey] = (result.byType[typeKey] ?? 0) + 1;
+          log.info({ conversationId: row.conversationId, type: typeKey }, `${SCRIPT_NAME} - DRY RUN: would switch on`);
+        }
         return;
       }
     }
@@ -312,13 +336,13 @@ async function run(opts: EnableOpts, result: EnableResult, log: Logger): Promise
   } while (exclusiveStartKey !== undefined);
 }
 
-/** The end-of-run report and the exit code it earns (failed or auditFailed > 0 exits 1). */
+/** The end-of-run report and the exit code it earns (failed > 0 exits 1). */
 export function reportEnableRun(result: EnableResult, apply: boolean, log: Logger = defaultLogger): 0 | 1 {
   const suffix = apply ? '' : ' (DRY RUN - nothing written)';
-  if (result.failed > 0 || result.auditFailed > 0) {
+  if (result.failed > 0) {
     log.warn(
       { ...result, apply },
-      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${result.failed} row(s) could not be planned, ${result.auditFailed} switched on without an audit event (see the ERROR lines naming them). Investigate, then re-run (idempotent).`,
+      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${result.failed} row(s) could not be planned and were stepped over, nothing written for them (see the ERROR lines naming them). Investigate, then re-run (idempotent).`,
     );
     return 1;
   }

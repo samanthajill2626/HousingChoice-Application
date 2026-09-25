@@ -1,11 +1,13 @@
 // The fix script (spec D2) against DynamoDB Local: dry run writes nothing;
 // apply enables only one-to-one `manual` rows (typeless included, group rows
-// and pointer items never); breaker-tripped rows are skipped unless included;
-// single mode refuses a group thread or an unknown id as a USAGE error; a
-// re-run changes nothing; every change is audited, and a lost audit write is
-// named and counted; the conditional write loses to a concurrent change.
+// and pointer items never); breaker-tripped rows - by audit event OR by the
+// breaker's send counter - are skipped unless included; single mode refuses a
+// group thread or an unknown id as a USAGE error; a re-run changes nothing;
+// every change is audited, and a lost audit write is named and counted; the
+// conditional write loses to a row switched on elsewhere and, in bulk mode, to
+// a breaker trip landing between the Scan and the write.
 import { randomUUID } from 'node:crypto';
-import { GetCommand, PutCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -13,6 +15,7 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
+import { createConversationsRepo, minuteBucket } from '../src/repos/conversationsRepo.js';
 import {
   enableConversationAutomation,
   reportEnableRun,
@@ -56,6 +59,10 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     await put({ conversationId: 'c-typeless', participant_phone: '+15550000002', status: 'open', last_activity_at: NOW, ai_mode: 'manual', created_at: NOW });
     await put({ conversationId: 'c-breaker', participant_phone: '+15550000003', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', created_at: NOW });
     await createAuditRepo({ doc, env }).append('conversations#c-breaker', 'mode_changed', { from: 'auto', to: 'manual', reason: 'breaker_trip' });
+    // A trip with NO audit event (its append failed, or is not readable yet):
+    // `manual` plus the breaker's send counter, which only an automated send on
+    // a switched-on row stamps - so it is a trip, audited or not.
+    await put({ conversationId: 'c-counter', participant_phone: '+15550000006', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', outbound_minute_bucket: '2026-09-25T11:59', outbound_minute_count: 11, created_at: NOW });
     await put({ conversationId: 'c-auto', participant_phone: '+15550000004', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'auto', created_at: NOW });
     await put({ conversationId: 'c-unset', participant_phone: '+15550000005', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', created_at: NOW });
     await put({ conversationId: 'c-relay', status: 'open', relay_status: 'relay_group#open', last_activity_at: NOW, type: 'relay_group', ai_mode: 'manual', pool_number: '+15550009001', participant_phone: '+15550009001', created_at: NOW });
@@ -70,16 +77,18 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     return { env, mode, modeEvents };
   }
 
-  it('dry run: plans the one-to-one manual rows (breaker-tripped excluded) and writes NOTHING', async () => {
+  it('dry run: plans the one-to-one manual rows (breaker-tripped excluded, by audit event or send counter) and writes NOTHING', async () => {
     const w = await seedWorld();
-    const result = await enableConversationAutomation({ doc, env: w.env, now: NOW });
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const result = await enableConversationAutomation({ doc, env: w.env, now: NOW, logger: log });
     expect(result).toMatchObject({
-      scanned: 8,
+      scanned: 9,
       pointerRows: 1,
       groupRows: 2,
       alreadyOn: 1,
       unset: 1,
-      breakerTrippedExcluded: 1,
+      breakerTrippedExcluded: 2,
       planned: 2,
       enabled: 0,
       skippedOnCondition: 0,
@@ -87,6 +96,15 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
       failed: 0,
     });
     expect(result.byType).toEqual({ unknown_1to1: 1, '(none)': 1 });
+    // Each excluded row is named with the evidence that excluded it.
+    const excluded = capture
+      .atLevel(30)
+      .filter((l) => String(l['msg']).includes('breaker-tripped row excluded'))
+      .map((l) => [l['conversationId'], l['evidence']]);
+    expect(excluded.sort()).toEqual([
+      ['c-breaker', 'audit_event'],
+      ['c-counter', 'send_counter'],
+    ]);
     // The Scan paging loop: two rows a page walks every page to the same plan.
     expect(await enableConversationAutomation({ doc, env: w.env, now: NOW, scanLimit: 2 })).toEqual(result);
     expect(await w.mode('c-import')).toBe('manual');
@@ -98,11 +116,13 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
   it('apply: enables exactly the planned rows with an audit event each; a SECOND run is a no-op', async () => {
     const w = await seedWorld();
     const first = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true });
-    expect(first).toMatchObject({ planned: 2, enabled: 2, breakerTrippedExcluded: 1, skippedOnCondition: 0, auditFailed: 0, failed: 0 });
+    expect(first).toMatchObject({ planned: 2, enabled: 2, breakerTrippedExcluded: 2, skippedOnCondition: 0, auditFailed: 0, failed: 0 });
     expect(await w.mode('c-import')).toBe('auto');
     expect(await w.mode('c-typeless')).toBe('auto');
-    // Untouched: breaker-tripped, already-on, unset, group threads, pointer.
+    // Untouched: breaker-tripped (audited, and by send counter only), already-on,
+    // unset, group threads, pointer.
     expect(await w.mode('c-breaker')).toBe('manual');
+    expect(await w.mode('c-counter')).toBe('manual');
     expect(await w.mode('c-auto')).toBe('auto');
     expect(await w.mode('c-unset')).toBeUndefined();
     expect(await w.mode('c-relay')).toBe('manual');
@@ -121,11 +141,13 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     expect(await w.modeEvents('c-import')).toHaveLength(1);
   }, 120_000);
 
-  it('apply with --include-breaker-tripped also enables the tripped row, with the same reason', async () => {
+  it('apply with --include-breaker-tripped also enables the tripped rows (audited and send-counter), with the same reason', async () => {
     const w = await seedWorld();
     const result = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, includeBreakerTripped: true });
-    expect(result).toMatchObject({ planned: 3, enabled: 3, breakerTrippedExcluded: 0 });
+    expect(result).toMatchObject({ planned: 4, enabled: 4, breakerTrippedExcluded: 0 });
     expect(await w.mode('c-breaker')).toBe('auto');
+    expect(await w.mode('c-counter')).toBe('auto');
+    expect((await w.modeEvents('c-counter')).map((e) => (e.payload as { reason: string }).reason)).toEqual(['bulk_enable']);
   }, 120_000);
 
   it('single mode: resumes ONE conversation with the operator_resume reason and names it; refuses a group thread and an unknown id as usage errors', async () => {
@@ -144,6 +166,12 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     // Already on: nothing written, reported as alreadyOn.
     const again = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-breaker' });
     expect(again).toMatchObject({ planned: 0, enabled: 0, alreadyOn: 1 });
+    // A trip known only by its send counter resumes the same way: single mode
+    // is the path FOR tripped rows, whatever the evidence.
+    const counterResume = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-counter' });
+    expect(counterResume).toMatchObject({ planned: 1, enabled: 1, breakerTrippedExcluded: 0, skippedOnCondition: 0 });
+    expect(await w.mode('c-counter')).toBe('auto');
+    expect((await w.modeEvents('c-counter')).map((e) => (e.payload as { reason: string }).reason)).toEqual(['operator_resume']);
     await expect(
       enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-relay' }),
     ).rejects.toBeInstanceOf(UsageError);
@@ -153,10 +181,11 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     expect(await w.mode('c-relay')).toBe('manual');
   }, 120_000);
 
-  it('a row the breaker switches OFF again mid-run keeps the runtime outcome: the conditional write loses and is counted', async () => {
+  it('a row switched ON elsewhere mid-run (another run, or a resume) loses the conditional write and is counted - no second audit event', async () => {
     const w = await seedWorld();
-    // Between the Scan and the write, flip c-import to a state the condition
-    // rejects (auto here stands in for "the runtime moved it").
+    // Between the Scan and the write, another writer switches c-import on
+    // (a concurrent run or an operator resume). The condition requires the
+    // switch still OFF, so this run writes nothing for it.
     let raced = false;
     const racingDoc = {
       send: async (command: unknown) => {
@@ -181,6 +210,49 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     expect(result.skippedOnCondition).toBe(1);
     expect(result.enabled).toBe(1); // c-typeless still landed
     expect(await w.modeEvents('c-import')).toHaveLength(0); // no audit for a lost write
+  }, 120_000);
+
+  it('a breaker trip that lands between the Scan and the write loses the conditional write: the bulk write requires no send counter', async () => {
+    const w = await seedWorld();
+    const conversations = createConversationsRepo({ doc, env: w.env });
+    const audit = createAuditRepo({ doc, env: w.env });
+    // A trip WRITES `manual`, so the switch condition alone cannot see one.
+    // The only way a trip reaches a row the Scan saw `manual` without a
+    // counter: it is switched on elsewhere, counts automated sends, and the
+    // breaker trips it - replayed with the breaker's REAL writes, setMode
+    // first and the audit append second (sendMessage.ts). The append lands
+    // AFTER this run's trip Query for the row, so planning cannot see the
+    // trip; only the write's send-counter clause can.
+    let scanned = false;
+    let appended = false;
+    const racingDoc = {
+      send: async (command: unknown) => {
+        const out = await (doc as DynamoDBDocumentClient).send(command as never);
+        if (command instanceof ScanCommand && !scanned) {
+          scanned = true;
+          await conversations.setMode('c-import', 'auto');
+          await conversations.incrementAutomatedSendCount('c-import', minuteBucket(new Date(NOW)));
+          await conversations.setMode('c-import', 'manual');
+        }
+        if (
+          command instanceof QueryCommand &&
+          command.input.ExpressionAttributeValues?.[':e'] === 'conversations#c-import' &&
+          !appended
+        ) {
+          appended = true;
+          await audit.append('conversations#c-import', 'mode_changed', { from: 'auto', to: 'manual', reason: 'breaker_trip' });
+        }
+        return out;
+      },
+      destroy: () => {},
+    } as unknown as DynamoDBDocumentClient;
+    const result = await enableConversationAutomation({ doc: racingDoc, env: w.env, apply: true });
+    expect(scanned && appended).toBe(true);
+    expect(result).toMatchObject({ planned: 2, enabled: 1, skippedOnCondition: 1 });
+    expect(await w.mode('c-import')).toBe('manual');
+    expect(await w.mode('c-typeless')).toBe('auto');
+    // The trip's own event only: no bulk_enable for the row that stayed off.
+    expect((await w.modeEvents('c-import')).map((e) => (e.payload as { reason: string }).reason)).toEqual(['breaker_trip']);
   }, 120_000);
 
   it('a lost AUDIT write is named at ERROR, counted, and exits 1 - the switch stays on (I6 is reported, never hidden)', async () => {

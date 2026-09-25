@@ -6,12 +6,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
+import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
 import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createPlacementNudgesRepo } from '../src/repos/placementNudgesRepo.js';
-import { runConversationAutomationCensus } from '../scripts/conversation-automation-census.js';
+import { reportCensus, runConversationAutomationCensus } from '../scripts/conversation-automation-census.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -61,6 +63,9 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     await put('conversations', { conversationId: 'c-breaker', participant_phone: '+15550000002', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', imported_from: 'quo-airtable-import', created_at: NOW });
     await audit.append('conversations#c-breaker', 'message_sent', { automated: true });
     await audit.append('conversations#c-breaker', 'mode_changed', { from: 'auto', to: 'manual', reason: 'breaker_trip' });
+    // A trip with NO audit event: `manual` plus the breaker's send counter
+    // (stamped only by an automated send on a switched-on row).
+    await put('conversations', { conversationId: 'c-counter', participant_phone: '+15550000007', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', outbound_minute_bucket: '2026-09-25T11:59', outbound_minute_count: 11, created_at: NOW });
     await put('conversations', { conversationId: 'c-other-manual', participant_phone: '+15550000003', status: 'open', last_activity_at: NOW, type: 'landlord_1to1', ai_mode: 'manual', created_at: NOW });
     await put('conversations', { conversationId: 'c-auto', participant_phone: '+15550000004', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'auto', created_at: NOW });
     await put('conversations', { conversationId: 'c-unset', participant_phone: '+15550000005', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', created_at: NOW });
@@ -78,11 +83,13 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     await put('contacts', { contactId: 'ten-off', type: 'tenant', status: 'searching', phone: '+15550000001', firstName: 'A', lastName: 'B', created_at: NOW });
     await put('contacts', { contactId: 'ten-trip', type: 'tenant', status: 'searching', phone: '+15550000002', firstName: 'T', lastName: 'R', created_at: NOW });
     await put('contacts', { contactId: 'ten-on', type: 'tenant', status: 'searching', phone: '+15550000004', firstName: 'C', lastName: 'D', created_at: NOW });
+    await put('contacts', { contactId: 'ten-counter', type: 'tenant', status: 'searching', phone: '+15550000007', firstName: 'E', lastName: 'F', created_at: NOW });
     const tours = createToursRepo({ doc, env });
     const reminders = createTourRemindersRepo({ doc, env });
     const offTour = await tours.create({ tenantId: 'ten-off', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
     const tripTour = await tours.create({ tenantId: 'ten-trip', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
     const onTour = await tours.create({ tenantId: 'ten-on', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
+    const counterTour = await tours.create({ tenantId: 'ten-counter', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
     const groupTour = await tours.create({ tenantId: 'ten-off', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'landlord_led' });
     await tours.patch(groupTour.tourId, { groupThreadId: 'c-relay' });
     const fallbackTour = await tours.create({ tenantId: 'ten-off', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'landlord_led' });
@@ -93,6 +100,7 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     await reminders.create({ tourId: offTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: tripTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: onTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
+    await reminders.create({ tourId: counterTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: groupTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: fallbackTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: pastTour.tourId, kind: 'day_before', dueAt: '2026-08-31T23:00:00.000Z' });
@@ -117,16 +125,18 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     expect(census.pointerRows).toBe(3);
     expect(census.byType).toEqual({
       unknown_1to1: { auto: 0, manual: 1, unset: 0 },
-      tenant_1to1: { auto: 1, manual: 1, unset: 1 },
+      tenant_1to1: { auto: 1, manual: 2, unset: 1 },
       landlord_1to1: { auto: 0, manual: 1, unset: 0 },
       '(none)': { auto: 0, manual: 1, unset: 0 },
       relay_group: { auto: 0, manual: 2, unset: 0 },
       group_text: { auto: 0, manual: 1, unset: 0 },
     });
-    // Cause precedence: group thread, then breaker trip, then imported, then other.
-    expect(census.manualByCause).toEqual({ groupThread: 3, breakerTrip: 1, imported: 1, other: 2 });
-    expect(census.breakerTripped).toEqual([
-      { conversationId: 'c-breaker', type: 'tenant_1to1', trippedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) },
+    // Cause precedence: group thread, then breaker trip (an audit event OR the
+    // send counter), then imported, then other.
+    expect(census.manualByCause).toEqual({ groupThread: 3, breakerTrip: 2, imported: 1, other: 2 });
+    expect([...census.breakerTripped].sort((a, b) => a.conversationId.localeCompare(b.conversationId))).toEqual([
+      { conversationId: 'c-breaker', type: 'tenant_1to1', trippedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), evidence: 'audit_event' },
+      { conversationId: 'c-counter', type: 'tenant_1to1', trippedAt: '2026-09-25T11:59', evidence: 'send_counter' },
     ]);
     expect(census.importClaimMismatches).toBe(1);
     // The job's own routing, replayed: usable group -> group; unusable group ->
@@ -134,7 +144,7 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     // fix script leaves those rows alone.
     expect(census.pendingTourRungs).toEqual({
       oneToOneSwitchedOff: 2, // offTour + fallbackTour (closed group -> tenant 1:1)
-      oneToOneBreakerTripped: 1, // tripTour
+      oneToOneBreakerTripped: 2, // tripTour + counterTour (a send-counter trip holds its rungs too)
       oneToOneSwitchedOn: 1, // onTour
       groupRouted: 1, // groupTour (usable relay group)
       tourPast: 1,
@@ -143,6 +153,12 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
       unresolvable: 0,
     });
     expect(census.pendingNudgesHeldManualOnly).toBe(2);
+
+    // The done line tells the operator how many trips have NO audit event.
+    const capture = createLogCapture();
+    expect(reportCensus(census, createLogger({ level: 'info', destination: capture.stream }))).toBe(0);
+    const done = capture.lines.find((l) => String(l['msg']).startsWith('conversation-automation-census - done'));
+    expect(done).toMatchObject({ breakerTripped: 2, breakerTrippedUnaudited: 1 });
 
     // The Scan paging loop: two rows a page walks every page to the same answer
     // (a real table spans many 1 MB pages; a dropped ExclusiveStartKey would

@@ -8,8 +8,10 @@
 //     rows with no type reported as their own group);
 //   - switched-off rows by cause, in this precedence: group thread (off by
 //     design), breaker trip (a `mode_changed` audit event with reason
-//     `breaker_trip`), imported (the import stamp), other;
-//   - the breaker-tripped rows, individually;
+//     `breaker_trip`, OR the breaker's send counter on the manual row - see
+//     hasBreakerSendCounter), imported (the import stamp), other;
+//   - the breaker-tripped rows, individually, each with its evidence
+//     (`audit_event`, or `send_counter` for a trip whose event is missing);
 //   - pending tour-reminder rungs, routed the way the reminder job routes them
 //     (jobs/tourReminders.ts resolveReminderTarget): discontinued kinds, tours
 //     already started and superseded ladders retire without sending; a
@@ -45,7 +47,7 @@ import {
 import { tableName } from '../src/lib/config.js';
 import { queryAll } from '../src/lib/dynamoPaging.js';
 import { isSupersededRung } from '../src/lib/ladderPointer.js';
-import { createLogger, logger } from '../src/lib/logger.js';
+import { createLogger, logger, type Logger } from '../src/lib/logger.js';
 import { isOneToOneBucket } from '../src/lib/unreadFeed.js';
 import type { AuditEvent } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
@@ -65,12 +67,27 @@ const FAR_FUTURE = '9999-12-31T00:00:00.000Z';
 
 export type SwitchState = 'auto' | 'manual' | 'unset';
 
+/** How a trip is known: its `mode_changed` audit event, or - when that event is
+ *  missing - the breaker's send counter on the manual row (hasBreakerSendCounter). */
+export type TripEvidence = 'audit_event' | 'send_counter';
+
+export interface BreakerTrippedRow {
+  conversationId: string;
+  type: string;
+  /** audit_event: the event's ISO instant. send_counter: the counter's minute
+   *  bucket (`YYYY-MM-DDTHH:mm`, UTC) - the last counted minute, the trip's
+   *  best available time. */
+  trippedAt: string;
+  evidence: TripEvidence;
+}
+
 export interface AutomationCensus {
   scannedRows: number;
   pointerRows: number;
   byType: Record<string, Record<SwitchState, number>>;
+  /** breakerTrip counts BOTH evidence kinds (breakerTripped lists which). */
   manualByCause: { groupThread: number; breakerTrip: number; imported: number; other: number };
-  breakerTripped: Array<{ conversationId: string; type: string; trippedAt: string }>;
+  breakerTripped: BreakerTrippedRow[];
   pendingTourRungs: {
     /** Would send once the bulk fix script runs. */
     oneToOneSwitchedOff: number;
@@ -97,6 +114,33 @@ export function switchStateOf(row: Pick<ConversationItem, 'ai_mode'>): SwitchSta
 
 export function isPointerRow(conversationId: string): boolean {
   return POINTER_PREFIXES.some((p) => conversationId.startsWith(p));
+}
+
+/**
+ * THE BREAKER'S SEND COUNTER IS TRIP EVIDENCE on a `manual` one-to-one row,
+ * whether or not the trip's audit event exists. Why it is proof:
+ *   - `outbound_minute_bucket` is written ONLY by
+ *     conversationsRepo.incrementAutomatedSendCount, which sendMessage.ts
+ *     reaches only for an AUTOMATED send on a row that is NOT manual (the
+ *     manual refusal precedes the counter), and nothing ever removes it;
+ *   - the ONLY runtime writer of `manual` is the breaker (setMode, called from
+ *     sendMessage.ts): runtime creation writes one-to-one rows `auto`, and the
+ *     import sets a switch only when it creates the row (`if_not_exists`;
+ *     every import-created row has carried one since the importer's first
+ *     commit), so it never switches off a row that has counted a send.
+ * So `manual` + counter = the breaker switched it off. The breaker writes
+ * setMode FIRST and its audit event SECOND, so the event can be unreadable
+ * for a moment - or missing for good if that append failed; the counter
+ * covers both.
+ *
+ * INVARIANT this rests on: the breaker is the sole writer of `manual` on a
+ * row that can count a send. A future writer of `manual` - Work Package 2's
+ * per-conversation switch (docs/issues/ai-mode-switch-gates-all-automation.md)
+ * - MUST revisit this rule: a staff switch-off on a row with an old counter
+ * would read as a trip here, and in enable-conversation-automation.ts.
+ */
+export function hasBreakerSendCounter(row: Pick<ConversationItem, 'outbound_minute_bucket'>): boolean {
+  return typeof row.outbound_minute_bucket === 'string';
 }
 
 /** The breaker trip on record for a conversation, newest first, or undefined.
@@ -187,15 +231,18 @@ export async function runConversationAutomationCensus(opts: CensusOpts): Promise
         census.manualByCause.groupThread += 1;
         continue;
       }
+      // A trip on record (its audit event) is preferred for its exact time; a
+      // manual row with the breaker's send counter and NO event is a trip too
+      // (hasBreakerSendCounter), listed so the operator sees the missing event.
       const trip = await findBreakerTrip(doc, env, raw.conversationId);
-      if (trip !== undefined) {
+      if (trip !== undefined || hasBreakerSendCounter(raw)) {
         census.manualByCause.breakerTrip += 1;
         breakerTrippedIds.add(raw.conversationId);
-        census.breakerTripped.push({
-          conversationId: raw.conversationId,
-          type: typeKey,
-          trippedAt: trip.ts.split('#')[0] ?? trip.ts,
-        });
+        census.breakerTripped.push(
+          trip !== undefined
+            ? { conversationId: raw.conversationId, type: typeKey, trippedAt: trip.ts.split('#')[0] ?? trip.ts, evidence: 'audit_event' }
+            : { conversationId: raw.conversationId, type: typeKey, trippedAt: String(raw.outbound_minute_bucket), evidence: 'send_counter' },
+        );
         continue;
       }
       if (imported) census.manualByCause.imported += 1;
@@ -281,14 +328,17 @@ export async function runConversationAutomationCensus(opts: CensusOpts): Promise
 }
 
 /** Log the census (counts + the breaker list) and return the exit code. */
-export function reportCensus(census: AutomationCensus): 0 {
-  logger.info({ ...census, breakerTripped: undefined }, 'conversation-automation-census - counts');
+export function reportCensus(census: AutomationCensus, log: Logger = logger): 0 {
+  log.info({ ...census, breakerTripped: undefined }, 'conversation-automation-census - counts');
   for (const trip of census.breakerTripped) {
-    logger.info(trip, 'conversation-automation-census - breaker-tripped conversation (review before enabling)');
+    log.info(trip, 'conversation-automation-census - breaker-tripped conversation (review before enabling)');
   }
-  logger.info(
+  log.info(
     {
       breakerTripped: census.breakerTripped.length,
+      // Trips known only by the send counter: the breaker's audit event is
+      // missing (or not yet readable) for these - see hasBreakerSendCounter.
+      breakerTrippedUnaudited: census.breakerTripped.filter((t) => t.evidence === 'send_counter').length,
       rungsReleasedByBulkEnable: census.pendingTourRungs.oneToOneSwitchedOff,
       rungsHeldByBreakerTrips: census.pendingTourRungs.oneToOneBreakerTripped,
       pendingNudgesHeldManualOnly: census.pendingNudgesHeldManualOnly,

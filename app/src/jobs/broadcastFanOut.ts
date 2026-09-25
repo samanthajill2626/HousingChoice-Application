@@ -6,8 +6,9 @@
 // not a relay fan-out from a pool number. Per recipient:
 //   - resolve the broadcast's recipient slot; skip if already TERMINAL
 //     (sent/delivered/failed/skipped) — the per-recipient idempotency layer;
-//   - re-check the contact's opt-out/unreachable flags → SKIP (bump
-//     skipped_opted_out, NO token spent, NO send) — the TCPA second fence;
+//   - re-check the contact's opt-out/unreachable flags -> SKIP with its reason
+//     recorded (opted_out bumps skipped_opted_out, unreachable bumps
+//     skipped_other; NO token spent, NO send) - the TCPA second fence;
 //   - render the body for this recipient (merge fields) and sendMessage into
 //     the tenant's 1:1 conversation, STAMPED with broadcast_id so the delivery
 //     callback can roll delivered/failed into the broadcast stats;
@@ -22,8 +23,9 @@
 //     continuation job never double-sends.
 //
 // Error handling per recipient (mirrors relay):
-//   - SendRefusedError (opt-out/breaker/manual) → recipient 'skipped' (bump
-//     skipped_opted_out), continue (a by-design refusal, not a failure);
+//   - SendRefusedError (opt-out/breaker/manual) -> recipient 'skipped' with its
+//     code; bump the bucket its code selects: consent, opt-out, or other
+//     (share-skip-fix D7); continue (a by-design refusal, not a failure);
 //   - 429 / 30022 (transient) → leave the slot 'queued' + add to the
 //     continuation's remaining list (capped at MAX_BROADCAST_ATTEMPTS);
 //   - 30007 (carrier filtering) → recipient 'failed', NEVER retried;
@@ -41,8 +43,11 @@ import { buildUnitMergeContext, renderBody } from '../lib/mergeFields.js';
 import {
   createBroadcastsRepo,
   deriveBroadcastStats,
+  isNoConsentCode,
+  isOptedOutCode,
   type BroadcastItem,
   type BroadcastRecipient,
+  type BroadcastStats,
   type BroadcastsRepo,
 } from '../repos/broadcastsRepo.js';
 import {
@@ -377,13 +382,24 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       }
 
       // TCPA first fence: skip opted-out / unreachable here (NO token spent, NO
-      // send). sendMessage's opt-out gate is the second fence.
-      if (contact.sms_opt_out === true || contact.sms_unreachable === true) {
-        await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped' });
+      // send). sendMessage's opt-out gate is the second fence. Each skip records
+      // its REASON (share-skip-fix D7): opt-out wins when both flags are set.
+      if (contact.sms_opt_out === true) {
+        await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: 'opted_out' });
         emitBroadcastProgress(
           events,
           payload.broadcastId,
           await broadcasts.bumpStats(payload.broadcastId, { skipped_opted_out: 1, queued: -1 }),
+        );
+        skippedCount += 1;
+        continue;
+      }
+      if (contact.sms_unreachable === true) {
+        await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: 'unreachable' });
+        emitBroadcastProgress(
+          events,
+          payload.broadcastId,
+          await broadcasts.bumpStats(payload.broadcastId, { skipped_other: 1, queued: -1 }),
         );
         skippedCount += 1;
         continue;
@@ -493,10 +509,15 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           // Treat as a skip (no token "wasted" on a real send; the recipient is
           // simply not reachable for this automated broadcast).
           await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: err.code });
+          const bucket: keyof BroadcastStats = isNoConsentCode(err.code)
+            ? 'skipped_no_consent'
+            : isOptedOutCode(err.code)
+              ? 'skipped_opted_out'
+              : 'skipped_other';
           emitBroadcastProgress(
             events,
             payload.broadcastId,
-            await broadcasts.bumpStats(payload.broadcastId, { skipped_opted_out: 1, queued: -1 }),
+            await broadcasts.bumpStats(payload.broadcastId, { [bucket]: 1, queued: -1 }),
           );
           skippedCount += 1;
           log.warn({ broadcastId: payload.broadcastId, contactKey, refusal: err.code }, 'broadcastFanOut: send refused — recipient skipped, continuing');
@@ -694,8 +715,22 @@ async function finalize(
   // S2/S4: the terminal emit carries DERIVED disjoint stats (not the persisted
   // cumulative counters), so the final chips reconcile to the recipients map.
   emitBroadcastProgress(events, broadcastId, finalItem);
+  // share-skip-fix D7: the line reports the DERIVED stats - the persisted
+  // counters are cumulative and, on a legacy row, lack skipped_other, while
+  // every other surface (SSE, results, list) already reads the derived buckets.
+  const derived = deriveBroadcastStats(finalItem);
   log.info(
-    { broadcastId, status: finalItem.status, sent: finalItem.stats.sent, failed: finalItem.stats.failed, skipped: finalItem.stats.skipped_opted_out },
+    {
+      broadcastId,
+      status: finalItem.status,
+      sent: derived.sent,
+      sending: derived.sending ?? 0,
+      delivered: derived.delivered,
+      failed: derived.failed,
+      skipped_opted_out: derived.skipped_opted_out,
+      skipped_no_consent: derived.skipped_no_consent,
+      skipped_other: derived.skipped_other ?? 0,
+    },
     'broadcast send finalized',
   );
 }

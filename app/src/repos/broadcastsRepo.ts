@@ -91,7 +91,8 @@ export interface BroadcastStats {
   delivered: number;
   /** Sends that failed (carrier filter / invalid number / cap). */
   failed: number;
-  /** Recipients skipped at send time for opt-out/unreachable (no token spent). */
+  /** Recipients skipped at send time for opt-out (no token spent), plus legacy
+   *  reason-less skips (opt-out or unreachable, recorded before 2026-09-25). */
   skipped_opted_out: number;
   /**
    * A2P/CTIA (spec §4): recipients skipped because they have NO recorded SMS
@@ -100,6 +101,15 @@ export interface BroadcastStats {
    * (which re-includes them on a re-send).
    */
   skipped_no_consent: number;
+  /**
+   * share-skip-fix D7: every OTHER skip - the switch off (`manual_mode`), the
+   * breaker, a deleted contact, an unreachable number, the kill switch, any
+   * future refusal code. Kept apart from `skipped_opted_out` so an opt-out is
+   * an opt-out and nothing else is filed under it. Optional because persisted
+   * stats rows written before the field existed lack it (readers default 0;
+   * the fan-out's ADD creates it on such a row).
+   */
+  skipped_other?: number;
   /** Recipients still queued ON OUR BOX (pre-send seed / awaiting the paced
    *  fan-out / transient deferral awaiting a retry continuation). */
   queued: number;
@@ -188,6 +198,18 @@ export interface ListBroadcastsOpts {
   exclusiveStartKey?: Record<string, unknown>;
 }
 
+/** The two consent refusal codes: the fan-out's own fence and the send wrapper's JIT gate. */
+export function isNoConsentCode(code: string | undefined): boolean {
+  return code === 'no_consent' || code === 'contact_no_consent';
+}
+
+/** The opt-out codes, plus NO code: a skipped slot recorded before 2026-09-25
+ *  carried no reason and was an opt-out or an unreachable number - filed under
+ *  opted-out, as it always was. */
+export function isOptedOutCode(code: string | undefined): boolean {
+  return code === undefined || code === 'opted_out' || code === 'contact_opted_out';
+}
+
 /**
  * S4 (broadcast live progress): the SINGLE SOURCE OF TRUTH for the disjoint stat
  * buckets, derived from the recipients map so a recipient is counted in EXACTLY
@@ -205,8 +227,12 @@ export interface ListBroadcastsOpts {
  *     sent      = status 'sent' AND carrierSentAt (carrier-confirmed)
  *     delivered = slots with status 'delivered'
  *     failed    = slots with status 'failed'
- *     skipped_no_consent = 'skipped' slots with errorCode 'no_consent'
- *     skipped_opted_out  = every remaining 'skipped' slot
+ *     skipped_no_consent = 'skipped' slots with errorCode no_consent | contact_no_consent
+ *     skipped_opted_out  = 'skipped' slots with errorCode opted_out | contact_opted_out,
+ *                          or NO errorCode (a legacy first-fence skip: opt-out or
+ *                          unreachable, recorded without a reason before 2026-09-25)
+ *     skipped_other      = every remaining 'skipped' slot (manual_mode, breaker_open,
+ *                          contact_deleted, unreachable, sms_sending_disabled, ...)
  *   queued/sending stay separate so a stuck send is diagnosable: stuck on our
  *   box vs stuck at the carrier are different failures.
  *   Legacy cumulative persisted stats are IGNORED when the map is present, so
@@ -226,6 +252,7 @@ export function deriveBroadcastStats(
   let failed = 0;
   let skipped_no_consent = 0;
   let skipped_opted_out = 0;
+  let skipped_other = 0;
   for (const key of keys) {
     const slot = recipients[key]!;
     switch (slot.status) {
@@ -247,8 +274,9 @@ export function deriveBroadcastStats(
         failed += 1;
         break;
       case 'skipped':
-        if (slot.errorCode === 'no_consent') skipped_no_consent += 1;
-        else skipped_opted_out += 1;
+        if (isNoConsentCode(slot.errorCode)) skipped_no_consent += 1;
+        else if (isOptedOutCode(slot.errorCode)) skipped_opted_out += 1;
+        else skipped_other += 1;
         break;
     }
   }
@@ -261,6 +289,7 @@ export function deriveBroadcastStats(
     failed,
     skipped_opted_out,
     skipped_no_consent,
+    skipped_other,
   };
 }
 
@@ -273,6 +302,7 @@ export function zeroStats(): BroadcastStats {
     failed: 0,
     skipped_opted_out: 0,
     skipped_no_consent: 0,
+    skipped_other: 0,
     queued: 0,
     sending: 0,
   };

@@ -1220,6 +1220,7 @@ describe('share-broadcast API (M1.8a)', () => {
       failed: 0,
       skipped_no_consent: 1,
       skipped_opted_out: 1,
+      skipped_other: 0,
       queued: 0,
       sending: 0,
     });

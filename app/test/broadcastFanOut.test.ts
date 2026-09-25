@@ -295,7 +295,51 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.stats.sent).toBe(1);
     expect(bcast.stats.skipped_opted_out).toBe(1);
     expect(bcast.recipients['c-stop']?.status).toBe('skipped');
+    expect(bcast.recipients['c-stop']?.errorCode).toBe('opted_out'); // share-skip-fix D7: a recorded reason
     expect(bcast.status).toBe('sent'); // sent ones succeeded
+  });
+
+  it('share-skip-fix D7: an UNREACHABLE recipient is skipped with its own reason and counted skipped_other, NO token, NO send', async () => {
+    const ok = seedTenant(world, { contactId: 'c-ok', firstName: 'Ok', phone: '+15550100001' });
+    const dead = seedTenant(world, { contactId: 'c-dead', sms_unreachable: true, phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [ok, dead]);
+    const acquire = vi.fn(async () => {});
+    wireHandler(world, logger, { acquire } as unknown as TokenBucket);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.recipients['c-dead']).toEqual({ status: 'skipped', errorCode: 'unreachable' });
+    expect(bcast.stats.skipped_other).toBe(1);
+    expect(bcast.stats.skipped_opted_out).toBe(0);
+  });
+
+  it('share-skip-fix D7: a manual-mode refusal is skipped with reason manual_mode and counted skipped_other, not opted_out', async () => {
+    const ok = seedTenant(world, { contactId: 'c-ok', firstName: 'Ok', phone: '+15550100001' });
+    const off = seedTenant(world, { contactId: 'c-off', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [ok, off]); // an AUTOMATED share (no created_via) - Task 7 covers the staff path
+    const offConv = await world.conversationsRepo.createOrGetByParticipantPhone(off.phone!, 'tenant_1to1');
+    await world.conversationsRepo.setMode(offConv.conversationId, 'manual');
+    const { capture, logger: log } = capturingLogger(); // the file's own helper (line ~159)
+    wireHandler(world, log);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.recipients['c-off']).toEqual({ status: 'skipped', errorCode: 'manual_mode' });
+    expect(bcast.stats.skipped_other).toBe(1);
+    expect(bcast.stats.skipped_opted_out).toBe(0);
+    // The finalize log line reports every skip from the DERIVED stats (info = 30).
+    const done = capture.atLevel(30).find((l) => String(l['msg']).includes('broadcast send finalized'));
+    expect(done).toBeDefined();
+    expect(done!['skipped_other']).toBe(1);
   });
 
   it('A2P/CTIA (spec §4): skips a NO-CONSENT recipient (skipped_no_consent++), NO token, NO send', async () => {
@@ -907,7 +951,8 @@ describe('broadcast.send (M1.8a)', () => {
         s.delivered +
         s.failed +
         s.skipped_opted_out +
-        s.skipped_no_consent ===
+        s.skipped_no_consent +
+        (s.skipped_other ?? 0) ===
       s.audience
     );
   }

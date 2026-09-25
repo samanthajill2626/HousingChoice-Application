@@ -1223,6 +1223,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
         failed: 1,
         skipped_opted_out: 1,
         skipped_no_consent: 2,
+        skipped_other: 0,
         queued: 0,
       },
       recipients: {
@@ -1244,7 +1245,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
         excludeUnreachable: false,
       },
       body_template: 'Hi {firstName}! A 2BR in DeKalb is now available — text back if interested.',
-      stats: { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      stats: { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, skipped_other: 0, queued: 0 },
       recipients: {},
     },
   ];

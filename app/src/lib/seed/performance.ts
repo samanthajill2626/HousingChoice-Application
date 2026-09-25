@@ -1005,6 +1005,7 @@ function statsForRecipients(
     failed: status === 'failed' ? recipientCount : 0,
     skipped_opted_out: 0,
     skipped_no_consent: 0,
+    skipped_other: 0,
   };
 }
 

@@ -4,8 +4,8 @@
 // reinforcement only. "Recipients" is the resolved audience (stats.audience);
 // the remaining buckets are disjoint and sum to it (Queued + Sending + Sent +
 // Delivered + Failed + Skipped == Recipients), so the row visibly balances.
-// "Skipped" folds both skip reasons (opted out + no consent) into one neutral
-// count.
+// "Skipped" folds all three skip buckets (opted out + no consent + other) into
+// one neutral count.
 //
 // The two in-flight buckets stay SEPARATE so a stuck send is diagnosable at a
 // glance (founder ask, 2026-07-16 - proving out the Twilio infrastructure):
@@ -31,7 +31,7 @@ export function StatChips({ stats }: { stats: BroadcastStats }): React.JSX.Eleme
     { label: 'Sending', value: stats.sending ?? 0 },
     { label: 'Queued', value: stats.queued },
     { label: 'Failed', value: stats.failed, tone: 'danger' },
-    { label: 'Skipped', value: stats.skipped_opted_out + stats.skipped_no_consent },
+    { label: 'Skipped', value: stats.skipped_opted_out + stats.skipped_no_consent + (stats.skipped_other ?? 0) },
   ];
   return (
     <dl className={styles.chips} aria-label="Delivery stats">

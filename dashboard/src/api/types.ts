@@ -2887,9 +2887,10 @@ export type BroadcastMergeField = (typeof BROADCAST_MERGE_FIELDS)[number];
 export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
 
 /** The delivery rollup carried on a summary / results row. Disjoint buckets:
- *  queued + sent + delivered + failed + skipped_opted_out + skipped_no_consent
- *  == audience (the server derives these from the recipients map). MIRRORS
- *  app/src/repos/broadcastsRepo.ts BroadcastStats - keep in sync. */
+ *  queued + sending + sent + delivered + failed + skipped_opted_out +
+ *  skipped_no_consent + skipped_other == audience (the server derives these
+ *  from the recipients map). MIRRORS app/src/repos/broadcastsRepo.ts
+ *  BroadcastStats - keep in sync. */
 export interface BroadcastStats {
   /** The resolved audience size at send time. */
   audience: number;
@@ -2900,6 +2901,9 @@ export interface BroadcastStats {
   skipped_opted_out: number;
   /** Recipients fenced out for missing SMS consent (staff can record consent). */
   skipped_no_consent: number;
+  /** Every other skip (switch off, breaker, deleted, unreachable, kill switch).
+   *  Optional: persisted stats written before 2026-09-25 lack it - default 0. */
+  skipped_other?: number;
   /** Still on OUR box: awaiting the paced fan-out or a deferred retry. */
   queued: number;
   /** Dispatched to Twilio, carrier not yet confirmed (no carrierSentAt).

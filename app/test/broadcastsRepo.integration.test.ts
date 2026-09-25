@@ -144,6 +144,33 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
     expect(after?.stats.delivered).toBe(1);
   });
 
+  it('share-skip-fix D7: bumpStats ADDs skipped_other onto a persisted stats map that predates the field (a share mid-send at deploy)', async () => {
+    const created = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'Hi [TenantName]',
+    });
+    await broadcasts.markSending(created.broadcastId, { 'c-1': { status: 'queued' } });
+    // Simulate the pre-deploy shape: the field is absent from the stored map.
+    await doc.send(
+      new UpdateCommand({
+        TableName: broadcastsTable,
+        Key: { broadcastId: created.broadcastId },
+        UpdateExpression: 'REMOVE stats.skipped_other',
+      }),
+    );
+    // Precondition: the stored map really lacks the key, so the ADD below
+    // exercises the absent-nested-counter path (not an ADD onto a seeded 0).
+    const { Item: stored } = await doc.send(
+      new GetCommand({ TableName: broadcastsTable, Key: { broadcastId: created.broadcastId }, ConsistentRead: true }),
+    );
+    expect((stored as { stats: Record<string, unknown> }).stats).not.toHaveProperty('skipped_other');
+    expect((stored as { stats: Record<string, unknown> }).stats).toHaveProperty('queued', 1);
+    const bumped = await broadcasts.bumpStats(created.broadcastId, { skipped_other: 1, queued: -1 });
+    expect(bumped.stats.skipped_other).toBe(1);
+    expect(bumped.stats.queued).toBe(0);
+  });
+
   // --- messages relay delivery_recipients (latent overlap-bug site) ---------
 
   it('relay inbound source: seed delivery_recipients {} → setRecipientDelivery → updateRecipientDeliveryStatus forward-only — no ValidationException', async () => {

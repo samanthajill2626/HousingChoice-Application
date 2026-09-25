@@ -93,6 +93,13 @@ describe('StatChips', () => {
     expect(chipValue(list, 'Sending')).toContain('0');
     expect(chipValue(list, 'Queued')).toContain('3');
   });
+
+  it('share-skip-fix D7: the Skipped chip also sums skipped_other, defaulting 0 for legacy rows without it', () => {
+    const { rerender } = render(<StatChips stats={stats({ skipped_opted_out: 2, skipped_no_consent: 3, skipped_other: 4 })} />);
+    expect(chipValue(screen.getByLabelText('Delivery stats'), 'Skipped')).toContain('9');
+    rerender(<StatChips stats={stats({ skipped_opted_out: 2, skipped_no_consent: 3 })} />);
+    expect(chipValue(screen.getByLabelText('Delivery stats'), 'Skipped')).toContain('5');
+  });
 });
 
 describe('DeliveryBadge', () => {

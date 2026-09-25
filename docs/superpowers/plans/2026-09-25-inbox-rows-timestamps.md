@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v4 - revised after adversarial plan review round 3 (precision outside Task 7b); review closed; Task 7b awaits Cameron's ruling at the launch gate
+Status: v5 - review closed after round 3; Task 7b DROPPED per Cameron's ruling of 2026-09-25 (only back/history navigations restore; every forward navigation opens at the top)
 Date: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
 Worktree: `W:\tmp\inbox-rows-timestamps`
@@ -3463,264 +3463,6 @@ git commit -m "feat(inbox): page-size param, auto-load sentinel, refresh banner,
 Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
-### Task 7b: In-app "Back to inbox" behaves as back
-
-Pending Cameron's ruling at the launch gate (spec 5.8, section 10). Build
-it unless the mission block says to drop it; dropping it is deleting this
-task, nothing else depends on it.
-
-**Files:**
-- Create: `dashboard/src/routes/inbox/backToInbox.ts`
-- Create: `dashboard/src/routes/inbox/backToInbox.test.tsx`
-- Modify: `dashboard/src/routes/inbox/InboxRow.tsx` (the row link carries
-  `state={{ fromInbox: true }}`)
-- Modify: `dashboard/src/routes/conversation/ConversationDetail.tsx:398`
-- Modify: `dashboard/src/routes/conversation/GroupTextView.tsx:319`
-- Modify: `dashboard/src/routes/contact/ContactDetail.tsx:399` (the
-  mark-unread navigation)
-- Modify: `dashboard/src/routes/conversation/ThreadUnreadToggle.tsx:189`
-  (the mark-unread navigation)
-- Modify: `dashboard/src/app/NavContents.tsx` (the sidebar's Inbox link)
-- Modify: `e2e/tests/dashboard-next/inbox-mark-unread-header.spec.ts:215`
-  (the post-mark-unread URL assertion)
-
-**Interfaces:**
-- Produces:
-  ```ts
-  export const FROM_INBOX_STATE = { fromInbox: true } as const;
-  export function cameFromInbox(state: unknown): boolean;   // reads location.state
-  export function useBackToInbox(): () => void;            // navigate(-1) when it came from the inbox, else navigate('/inbox')
-  export function isPlainLeftClick(e: React.MouseEvent): boolean;
-  ```
-  A row opened from the inbox pushes history state `{ fromInbox: true }`.
-  The thread and contact pages' "back" actions call `useBackToInbox()`: with
-  that state they go BACK in history (a POP, so spec 5.8's restore applies);
-  without it (a deep link, a badge click into a thread) they push `/inbox`
-  as today. The `<Link to="/inbox">` elements keep their href for semantics
-  and intercept the click.
-
-- [ ] **Step 1: Write the failing tests**
-
-Create `dashboard/src/routes/inbox/backToInbox.test.tsx`:
-
-```tsx
-import { render, screen, fireEvent } from '@testing-library/react';
-import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
-import { FROM_INBOX_STATE, cameFromInbox, useBackToInbox } from './backToInbox.js';
-
-function Thread(): React.JSX.Element {
-  const back = useBackToInbox();
-  const location = useLocation();
-  return (
-    <div>
-      <span data-testid="from">{String(cameFromInbox(location.state))}</span>
-      <button onClick={back}>back</button>
-    </div>
-  );
-}
-function InboxStub(): React.JSX.Element {
-  const location = useLocation();
-  return <div data-testid="inbox">inbox {location.search}</div>;
-}
-// The inbox stub carries a row-shaped link: the test CLICKS it (no
-// auto-navigation, which would re-fire when the inbox remounts after the POP).
-function InboxWithRow(): React.JSX.Element {
-  return (
-    <div>
-      <InboxStub />
-      <Link to="/conversations/x" state={FROM_INBOX_STATE}>
-        open row
-      </Link>
-    </div>
-  );
-}
-
-describe('backToInbox', () => {
-  it('cameFromInbox reads the state the inbox row sets', () => {
-    expect(cameFromInbox(FROM_INBOX_STATE)).toBe(true);
-    expect(cameFromInbox(null)).toBe(false);
-    expect(cameFromInbox({ other: true })).toBe(false);
-  });
-
-  it('goes BACK in history when the thread was opened from the inbox', () => {
-    render(
-      <MemoryRouter initialEntries={['/inbox?limit=7']}>
-        <Routes>
-          <Route path="/inbox" element={<InboxWithRow />} />
-          <Route path="/conversations/:id" element={<Thread />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    fireEvent.click(screen.getByRole('link', { name: 'open row' }));
-    expect(screen.getByTestId('from')).toHaveTextContent('true');
-    fireEvent.click(screen.getByRole('button', { name: 'back' }));
-    // Back to the SAME entry, query and all (a POP; the inbox restores).
-    expect(screen.getByTestId('inbox')).toHaveTextContent('inbox ?limit=7');
-  });
-
-  it('pushes /inbox when the thread was reached any other way', () => {
-    render(
-      <MemoryRouter initialEntries={['/conversations/x']}>
-        <Routes>
-          <Route path="/inbox" element={<InboxStub />} />
-          <Route path="/conversations/:id" element={<Thread />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    expect(screen.getByTestId('from')).toHaveTextContent('false');
-    fireEvent.click(screen.getByRole('button', { name: 'back' }));
-    expect(screen.getByTestId('inbox')).toHaveTextContent('inbox');
-  });
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-```
-npx vitest run src/routes/inbox/backToInbox.test.tsx --root dashboard
-```
-
-Expected: FAIL - "Failed to resolve import "./backToInbox.js"".
-
-- [ ] **Step 3: Write the helper**
-
-Create `dashboard/src/routes/inbox/backToInbox.ts`:
-
-```ts
-// backToInbox - the in-app way back from a thread or contact page (spec 5.8).
-// A row opened FROM the inbox pushes { fromInbox: true } as history state; a
-// page's "Back to inbox" action then goes BACK in history, which is a POP
-// arrival at /inbox and restores the list and the scroll position. Reached any
-// other way (a deep link, the badge, a quick-reply link) it pushes /inbox as
-// before. On an installed phone app (standalone display) these in-app actions
-// can be the only way back, which is why they must not be forward navigations.
-import { useCallback } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-
-export const FROM_INBOX_STATE = { fromInbox: true } as const;
-
-export function cameFromInbox(state: unknown): boolean {
-  return typeof state === 'object' && state !== null && (state as { fromInbox?: unknown }).fromInbox === true;
-}
-
-export function useBackToInbox(): () => void {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const from = cameFromInbox(location.state);
-  return useCallback(() => {
-    if (from) navigate(-1);
-    else navigate('/inbox');
-  }, [from, navigate]);
-}
-
-/** For a `<Link to="/inbox">` that should behave as back: intercept only a
- *  plain left click (react-router's own Link lets modified clicks - ctrl,
- *  cmd, shift, alt, middle button - open a new tab or window; so do we). */
-export function isPlainLeftClick(e: React.MouseEvent): boolean {
-  return e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
-}
-```
-
-- [ ] **Step 4: Wire the row and the four back actions**
-
-In `dashboard/src/routes/inbox/InboxRow.tsx`, import
-`FROM_INBOX_STATE` from `./backToInbox.js` and give the row link the state:
-
-```tsx
-        <Link className={styles.main} to={hrefFor(row)} state={FROM_INBOX_STATE} onClick={() => onOpen(row)}>
-```
-
-In `dashboard/src/routes/conversation/ConversationDetail.tsx` the back link
-lives in the `RelayGroupView` component (about line 176 for the component,
-398 for the link), NOT in the top-level `ConversationDetail`; in
-`dashboard/src/routes/conversation/GroupTextView.tsx` it is in the
-component that renders the header (about line 319). In each of those two
-components import `isPlainLeftClick`, `useBackToInbox` from
-`../inbox/backToInbox.js`, call `const backToInbox = useBackToInbox();` in
-that component's body (with its other hooks, before any early return), and
-change the back link to:
-
-```tsx
-        <Link
-          to="/inbox"
-          className={styles.backBtn}
-          aria-label="Back to inbox"
-          onClick={(e) => {
-            if (!isPlainLeftClick(e)) return; // modified clicks keep Link's own behavior
-            e.preventDefault();
-            backToInbox();
-          }}
-        >
-```
-
-(the arrow glyph child stays as it is in each file). Keyboard activation
-(Enter on the focused link) dispatches a plain click and takes the back
-path.
-
-THE SIDEBAR'S INBOX LINK follows the same rule, because contact and unknown
-rows (the main path) open `/contacts/...`, which has no back arrow of its
-own; on the installed phone app the sidebar link can be the only way back
-from a contact. In `dashboard/src/app/NavContents.tsx`, where the leaf
-`NavLink` is rendered (about lines 51-64; the same element is used for
-child links at 97-107), give the link whose `item.to === '/inbox'` (and the
-child whose `child.to === '/inbox'`, if the inbox is ever nested) an
-`onClick` that runs the existing `onNavigate` (the drawer close) AND, when
-`cameFromInbox(location.state)` and `isPlainLeftClick(e)`, prevents the
-default and calls `backToInbox()`; `NavContents` calls `useBackToInbox()`
-and `useLocation()` once at its top for that. A badge click or an Inbox
-click from any page NOT opened from an inbox row carries no state and keeps
-today's forward navigation (top of the list, spec 5.8).
-
-In `dashboard/src/routes/contact/ContactDetail.tsx` (the mark-unread
-success path, `navigate('/inbox')` at line 399) and
-`dashboard/src/routes/conversation/ThreadUnreadToggle.tsx` (line 189),
-import `useBackToInbox`, call it in the component body, and replace the
-`navigate('/inbox')` call with `backToInbox()`; add `backToInbox` to the
-enclosing `useCallback`'s dependency array where the call sits inside one
-(ContactDetail: the array that currently lists `navigate`).
-
-- [ ] **Step 5: Run the tests, the dashboard suite and typecheck**
-
-```
-npx vitest run src/routes/inbox/backToInbox.test.tsx src/routes/inbox/InboxRow.test.tsx --root dashboard
-npm run test -w @housingchoice/dashboard
-npm run typecheck
-```
-
-Expected: PASS; exit 0; exit 0. If an existing ConversationDetail /
-GroupTextView / ContactDetail / NavContents test asserts the exact
-`navigate` call or the link's onClick, update its expectation to the
-helper's behavior (a POP when `fromInbox` state is present, else `/inbox`) -
-that is the spec change, not a regression.
-
-ONE EXISTING PLAYWRIGHT SPEC CHANGES WITH THIS TASK (the exception to
-"existing inbox specs run unchanged", spec 4.1):
-`e2e/tests/dashboard-next/inbox-mark-unread-header.spec.ts` opens the group
-thread from `/inbox?filter=groups` and, after the header's mark-unread,
-asserts `toHaveURL(/\/inbox$/)` (about line 215). Under this task the
-mark-unread goes BACK to the entry it came from, `/inbox?filter=groups`.
-Change that assertion to `toHaveURL(/\/inbox\?filter=groups$/)` and leave
-the rest of the spec alone; its later assertions read the Groups filter
-anyway.
-
-If Cameron DROPS this task, also remove: the in-app back step at the end of
-Task 9's test 3, the second sentence of Task 11's self-QA item 4, and the
-"Then the in-app way back" sentence in spec 7.3 test 3.
-
-- [ ] **Step 6: Commit**
-
-Read bare `git status`, confirm no `MERGE_HEAD`, then:
-
-```
-git add dashboard/src/routes/inbox/backToInbox.ts dashboard/src/routes/inbox/backToInbox.test.tsx dashboard/src/routes/inbox/InboxRow.tsx dashboard/src/routes/conversation/ConversationDetail.tsx dashboard/src/routes/conversation/GroupTextView.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/conversation/ThreadUnreadToggle.tsx dashboard/src/app/NavContents.tsx e2e/tests/dashboard-next/inbox-mark-unread-header.spec.ts
-git commit -m "feat(inbox): in-app Back to inbox goes back in history when the row was opened from the inbox
-
-Co-Authored-By: <authoring model> <noreply@anthropic.com>"
-```
-
----
-
 ### Task 8 (separable): Server prefetch on the `filter=all` pager
 
 **Files:**
@@ -4449,22 +4191,6 @@ test.describe('inbox rows and timestamps', () => {
     await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0, { timeout: 15_000 });
     expectHeadFirst(seen, mark2, 'after the return at limit=2', true);
-
-    // The in-app way back (Task 7b): open the group text at the bottom, use
-    // its "Back to inbox" control, and the same restore applies (it is a POP
-    // when the thread was opened from the inbox).
-    await page.goto(`${NEXT}/inbox?limit=10`);
-    await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
-    await scrollToBottom(page);
-    const saved3 = await scroller(page).evaluate((el) => el.scrollTop);
-    expect(saved3).toBeGreaterThan(0);
-    await page.getByRole('link', { name: /Group text/ }).first().click();
-    await page.waitForURL(/\/conversations\//);
-    await page.getByRole('link', { name: 'Back to inbox' }).click();
-    await page.waitForURL(/\/inbox/);
-    await expect(rows(page)).toHaveCount(9);
-    const restored3 = await scroller(page).evaluate((el) => el.scrollTop);
-    expect(Math.abs(restored3 - saved3)).toBeLessThanOrEqual(8);
   });
 
   test('4. the time fits at phone width and in the tightest one-line band; an ordinary name is not ellipsized wide', async ({ page, request }) => {
@@ -4939,9 +4665,9 @@ dev-login first). Prove, with screenshots under `.playwright-mcp/`:
 2. Phone width (360): two-line rows, time top right, no horizontal scroll.
 3. Send an inbound through the fake while scrolled mid-list: the list does
    not jump to the top; the new row appears at the top.
-4. Open a row, press the browser back button: the list and position are back
-   without a spinner. Open a relay or group thread from the inbox and use its
-   own "Back to inbox" arrow: the same restore (Task 7b).
+4. Open a row, press the browser (or the phone's own) back button: the list
+   and position are back without a spinner. A thread page's own "Back to
+   inbox" arrow is a forward navigation and lands at the top, by ruling.
 5. `/inbox?limit=15` at a short window: one page per scroll to the bottom,
    never two; `/inbox?limit=2`: the pages chain as soon as the page loads and
    Load more disappears at the end.
@@ -5006,8 +4732,11 @@ auto-load hook now consumes observer reports at arrival (a report that
 arrives while disabled is discarded; a commit while disabled re-observes once
 the hook is enabled), and Task 7b makes the in-app "Back to inbox" actions
 go back in history when the row was opened from the inbox (a product call
-pending at the launch gate). Round 3: 9 findings, adjudicated in
-`plan-r3-adjudications.md`; precision outside Task 7b, which grew the
-sidebar Inbox link (contact pages have no back arrow) and the one existing
-Playwright assertion it changes; the review is closed.**
+raised to Cameron). Round 3: 9 findings, adjudicated in
+`plan-r3-adjudications.md`; precision outside Task 7b. Cameron RULED on
+2026-09-25: only back/history navigations restore; every forward navigation
+(the sidebar link, the thread pages' arrows, the mark-unread jumps) opens at
+the top, because the phone's own back button or gesture is the way back on
+the installed app. Task 7b is removed; nothing else changes. The review is
+closed.**
 

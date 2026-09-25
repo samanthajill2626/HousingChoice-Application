@@ -54,3 +54,8 @@ Adjudicator: the planner (this session), 2026-09-25.
 spec took precision edits in each round (DRAFT 8.1, 8.2, 8.3); no product
 decision changed. Open for Cameron: the in-app way back (Task 7b) as
 recommended, or drop it.
+
+**Ruling (Cameron, 2026-09-25):** Task 7b DROPPED. The phone has its own
+back button or gesture even in the installed app, so the premise was wrong;
+only back and history navigations restore, every forward navigation opens at
+the top. Findings 1 and 6 are moot with it; the plan is v5, the spec 8.4.

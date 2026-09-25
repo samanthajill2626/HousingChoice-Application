@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8.3 - precision edits from plan review rounds 1-3; reviews closed; in-app way back (5.8) pending Cameron's ruling at the launch gate
+Status: DRAFT 8.4 - reviews closed; Cameron ruled 2026-09-25 that only back and history navigations restore (5.8); APPROVED for build
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -235,21 +235,11 @@ as today's 30-row page. That server slice is separable (section 5.10).
 - `dashboard/src/app/AuthGate.tsx` (the store clear, 5.8) and, if no optional
   accessor exists, `dashboard/src/app/AuthContext.tsx` (an additive
   `useOptionalAuth()` that returns `undefined` without a provider).
-- The in-app way back (5.8, pending the ruling in section 10): a new
-  `dashboard/src/routes/inbox/backToInbox.ts`, the row link's history state
-  in `InboxRow.tsx`, and the four back actions in
-  `dashboard/src/routes/conversation/ConversationDetail.tsx`,
-  `dashboard/src/routes/conversation/GroupTextView.tsx`,
-  `dashboard/src/routes/contact/ContactDetail.tsx` and
-  `dashboard/src/routes/conversation/ThreadUnreadToggle.tsx`.
 - `app/src/routes/inbox.ts`: the `filter=all` pager's prefetch only (5.10). No
   wire-shape change. No change to the relay or group merge, the unread branch,
   the unknown branch, cursors, or limits.
 - `e2e/tests/dashboard-next/`: a new `inbox-rows-timestamps.spec.ts`; existing
-  inbox specs are re-run unchanged and must stay green, with ONE exception
-  owned by the in-app way back (5.8): `inbox-mark-unread-header.spec.ts`'s
-  post-mark-unread URL assertion moves from a bare `/inbox` to the Groups
-  filter entry it came from.
+  inbox specs are re-run unchanged and must stay green.
 - `e2e/performance/collect.ts` and `collect.test.ts`: the inbox request
   classifier's page size moves from 30 to 100 (5.11); the hermetic
   `npm run perf:pages` self-QA is a mission gate. `app/src/lib/inboxDiagnostics.ts`
@@ -740,29 +730,16 @@ snapshot: {
   the top: an operator who clicks Inbox because the badge says there is new
   unread must land on the new rows, not at row 180. The container is resolved
   the same way 5.2 does.
-- THE IN-APP WAY BACK (pending Cameron's ruling, section 10; built by
-  default). The relay and group thread pages carry a "Back to inbox" arrow
-  (`ConversationDetail.tsx`, `GroupTextView.tsx`), and the mark-unread
-  actions on the contact page and the thread header navigate to `/inbox`
-  when done (`ContactDetail.tsx`, `ThreadUnreadToggle.tsx`). All four are
-  forward navigations today. The app is installed on Sam's phone as a
-  standalone web app (the manifest's display mode), where there may be no
-  browser back button, so those actions can be her only way back - and a
-  PUSH arrival starts at the top. Rule: a row opened FROM the inbox pushes
-  history state `{ fromInbox: true }`; a page's back action with that state
-  goes BACK in history (a POP, so the restore above applies); without it (a
-  deep link, the badge into a thread, a quick-reply link) it pushes `/inbox`
-  as today. The `<Link to="/inbox">` elements keep their href for semantics
-  and intercept a plain left click only (modified clicks keep the link's own
-  new-tab behavior). THE SIDEBAR'S INBOX LINK follows the same rule, because
-  contact and unknown rows - the main path - open a contact page that has no
-  back arrow of its own, so on the installed phone app the sidebar link can
-  be the only way back from a contact: with the `fromInbox` state on the
-  current page it goes back; from any other page (a badge click, a fresh
-  visit) it is the forward navigation to the top that 5.8 describes. One
-  existing Playwright assertion changes with this: the mark-unread header
-  spec now returns to `/inbox?filter=groups`, the entry it came from, rather
-  than a bare `/inbox` (the 4.1 exception).
+- THE IN-APP "BACK TO INBOX" ACTIONS STAY FORWARD NAVIGATIONS (Cameron's
+  ruling, 2026-09-25). The relay and group thread pages' "Back to inbox"
+  arrows (`ConversationDetail.tsx`, `GroupTextView.tsx`) and the mark-unread
+  actions that jump to `/inbox` (`ContactDetail.tsx`, `ThreadUnreadToggle.tsx`)
+  are PUSH arrivals and open at the top like the sidebar link. Only back and
+  history navigations restore. The plan review had proposed making them go
+  back in history on the theory that an installed phone app has no browser
+  back button; Cameron ruled that the phone's own back button or gesture is
+  the way back there, so the proposal was dropped and nothing outside the
+  Inbox page changes for navigation.
 - A return to `/inbox` with a DIFFERENT filter or limit than the one saved
   starts as a fresh load for that key; the other key's snapshot is kept for its
   own return.
@@ -1067,9 +1044,7 @@ head read on every mount).
    auto-load chain to all six, open the last row, go back: the restore shows
    all rows instantly, then the finished-request log shows a head read
    FIRST and cursor requests only after it (the pages were rebuilt from page
-   one, not kept), and the list settles back to all six contact rows. Then
-   the in-app way back (5.8): open the group text at the bottom from the
-   inbox, use its "Back to inbox" control, and the same restore applies.
+   one, not kept), and the list settles back to all six contact rows.
 4. Widths. At `NARROW_360` from `e2e/support/viewport.ts`: the shared
    no-horizontal-overflow assertion, and the first row's `<time>` bounding box
    fully inside the row's box and in its top half. Then at 768x720 (the
@@ -1173,12 +1148,6 @@ at both widths.
 
 ## 10. Open items
 
-- Cameron's ruling on the in-app way back (5.8): the thread pages' "Back to
-  inbox" arrows and the two mark-unread navigations go BACK in history when
-  the row was opened from the inbox, so the restore applies on an installed
-  phone app with no browser back button. Built by default (plan Task 7b);
-  raised by the plan review on 2026-09-25. Dropping it deletes that task and
-  nothing else.
-
-Sam approved the mockups on 2026-09-25; Cameron chose Option B at the spec
-gate on 2026-09-25.
+None. Sam approved the mockups on 2026-09-25; Cameron chose Option B at the
+spec gate on 2026-09-25 and ruled on 2026-09-25 that only back and history
+navigations restore the inbox's position (5.8).

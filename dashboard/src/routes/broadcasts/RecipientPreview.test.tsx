@@ -306,6 +306,58 @@ describe('RecipientPreview — add a tenant', () => {
     expect(screen.getByRole('button', { name: 'Send to 2 tenants' })).toBeInTheDocument();
   });
 
+  it('share-skip-fix D5: picking a tenant ALREADY listed (unseeded, flagged, unchecked) promotes that row to a seed - checked, still flagged, kept by Select all', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Tasha', seeded: true }),
+          candidate({
+            contactId: 'c2',
+            firstName: 'Bo',
+            lastName: 'Flag',
+            phone: '+14040000002',
+            alreadySentThisProperty: true,
+          }),
+        ],
+        priorRecipientContactIds: ['c2'],
+        seedContactIds: ['c1'],
+      }),
+      tenantCandidates: [
+        tenant({ contactId: 'c2', firstName: 'Bo', lastName: 'Flag', phone: '+14040000002' }),
+      ],
+    });
+    const list = screen.getByRole('list', { name: 'Candidate recipients' });
+    const box = () =>
+      within(within(list).getByText('Bo Flag').closest('li') as HTMLElement).getByRole('checkbox');
+    // The filter proposed Bo, flagged and unseeded: unchecked (the soft opt-in).
+    expect(box()).not.toBeChecked();
+
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Bo');
+    await u.click(await screen.findByRole('option', { name: /Bo Flag/ }));
+
+    // Promoted in place (no duplicate row): checked, and the flag still shows.
+    expect(within(list).getAllByText('Bo Flag')).toHaveLength(1);
+    expect(box()).toBeChecked();
+    const row = within(list).getByText('Bo Flag').closest('li') as HTMLElement;
+    expect(within(row).getByText('Already sent')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 2 tenants' })).toBeInTheDocument();
+    // Persisted exactly like a hand-add: appended to the draft's seed list.
+    await waitFor(() => expect(updateBroadcastSeeds).toHaveBeenCalledWith('bcast_1', ['c1', 'c2']));
+
+    // A seed stays checked through "Select all".
+    await u.click(screen.getByRole('button', { name: 'Deselect all' }));
+    expect(box()).not.toBeChecked();
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(box()).toBeChecked();
+
+    // Picking it again (now a seed) re-persists nothing.
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Bo');
+    await u.click(await screen.findByRole('option', { name: /Bo Flag/ }));
+    expect(box()).toBeChecked();
+    expect(updateBroadcastSeeds).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT add an opted-out tenant — surfaces an inline reason instead', async () => {
     const u = userEvent.setup();
     renderPreview({

@@ -48,8 +48,8 @@ interface Row {
   /** True for a manually-added tenant (badge cue). */
   added?: boolean;
   /** share-skip-fix D5: a deliberate pick (a preview-returned seed, or a tenant
-   *  added in this session). Seeded rows start checked even when already sent,
-   *  and "Select all" keeps them checked. */
+   *  added or picked in this session). Seeded rows start checked even when
+   *  already sent, and "Select all" keeps them checked. */
   seeded: boolean;
 }
 
@@ -172,10 +172,12 @@ export function RecipientPreview({
   }
 
   /** Add a tenant from the search (must resolve to a contactId). Annotate
-   *  already-sent locally via priorRecipientContactIds; ignore duplicates. We
-   *  VALIDATE before clearing the search box so a can't-add surfaces an inline
-   *  reason instead of vanishing silently. Mirrors the server fence: an opted-out
-   *  / unreachable tenant is NOT added (the server would drop it anyway). */
+   *  already-sent locally via priorRecipientContactIds; a pick of a tenant who is
+   *  already listed promotes that row to a seed (checked) instead of adding a
+   *  duplicate (share-skip-fix D5). We VALIDATE before clearing the search box
+   *  so a can't-add surfaces an inline reason instead of vanishing silently.
+   *  Mirrors the server fence: an opted-out / unreachable tenant is NOT added
+   *  (the server would drop it anyway). */
   function addTenant(picked: ContactSearchValue): void {
     setAddNote(null);
     if (picked.contactId === undefined) return;
@@ -208,10 +210,19 @@ export function RecipientPreview({
       return;
     }
     setSearch({ name: '' });
-    // Only a genuine add (not a dedupe hit) persists to the draft's seed list.
-    const alreadyListed = rows.some((r) => r.contactId === candidate.contactId);
+    // Only a genuine add, or the promotion of a listed row that was not yet a
+    // seed, persists to the draft's seed list (a repeat pick of a seed does not).
+    const listed = rows.find((r) => r.contactId === candidate.contactId);
     setRows((prev) => {
-      if (prev.some((r) => r.contactId === candidate.contactId)) return prev; // already listed
+      if (prev.some((r) => r.contactId === candidate.contactId)) {
+        // share-skip-fix D5: picking a tenant who is ALREADY listed (e.g. a
+        // filter-proposed row flagged "Already sent", so unchecked) is a
+        // deliberate pick too - promote that row to a seed and check it, never
+        // discard the pick. A no-consent row stays unchecked (hard fence).
+        return prev.map((r) =>
+          r.contactId === candidate.contactId ? { ...r, seeded: true, checked: r.hasConsent } : r,
+        );
+      }
       const already = priorIds.has(candidate.contactId);
       return [
         ...prev,
@@ -230,7 +241,7 @@ export function RecipientPreview({
         },
       ];
     });
-    if (!alreadyListed) {
+    if (listed === undefined || !listed.seeded) {
       // Best-effort persistence — a failed PATCH never blocks or surfaces in the
       // review UI (the send still posts the exact checked ids either way).
       seedsRef.current = [...seedsRef.current, candidate.contactId];

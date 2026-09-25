@@ -2,12 +2,26 @@
 id: relay-retry-stranded-claim-window
 title: A crash between the relay retry claim and its enqueue strands the ladder permanently
 type: bug
-severity: med
+severity: low
 status: open
 area: app/messaging-relay
 created: 2026-09-03
-refs: app/src/routes/webhooks/twilio.ts:2742, app/src/routes/webhooks/twilio.ts:2795, app/src/routes/webhooks/twilio.ts:2803, app/src/repos/messagesRepo.ts:714, app/src/repos/messagesRepo.ts:2342
+updated: 2026-09-24
+refs: app/src/routes/webhooks/twilio.ts:2742, app/src/routes/webhooks/twilio.ts:2795, app/src/routes/webhooks/twilio.ts:2803, app/src/repos/messagesRepo.ts:714, app/src/repos/messagesRepo.ts:2342, app/src/index.ts:154
 ---
+
+**Severity lowered to low (2026-09-24, Cameron's ruling).** Filed as med (code
+review R1 rated the finding HIGH). Two facts make it rare and bounded. First, a
+normal deploy does not hit the window: on SIGTERM the app stops accepting
+connections and lets in-flight requests finish, for up to 10 seconds
+(`app/src/index.ts:154-170`), so a status callback that is mid-claim completes
+its enqueue. Only an abrupt kill (OOM or SIGKILL, instance loss) in the few
+milliseconds between the two writes strands a rung - the "deploy, SIGTERM"
+causes named below were overstated. Second, what is lost is the retry itself:
+the member's leg had already failed with 30003, the ladder is a best-effort
+rescue, and the member's row still reads `Queued - not confirmed - Phone
+unreachable (error 30003)`. The mechanism and the fix below stand, and so does
+the warning against re-enqueueing on `already_claimed`.
 
 **Problem.** The 30003 retry claim commits the retry ROW and its
 `sid#relayretry-<digest>-<n>` pointer in one transaction (`twilio.ts:2742`), and

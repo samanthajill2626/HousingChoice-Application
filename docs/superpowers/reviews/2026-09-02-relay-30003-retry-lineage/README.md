@@ -9,6 +9,9 @@ and the plan
 [`2026-09-02-relay-30003-retry-lineage.md`](../../plans/2026-09-02-relay-30003-retry-lineage.md)
 were frozen as historical records in the same change.
 
+Cameron's rulings on the handback's open questions (2026-09-24) are in
+[`founder-rulings-2026-09-24.md`](founder-rulings-2026-09-24.md).
+
 ## Nothing new committed - by the mission's own split
 
 The mission committed its record as it went (47 files before this README) and split

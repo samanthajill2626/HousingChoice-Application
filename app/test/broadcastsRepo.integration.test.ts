@@ -356,6 +356,34 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
     expect(prior.size).toBe(0);
   });
 
+  it('share-skip-fix D5: prior recipients = any NON-skipped slot in a sent/sending share; a skipped slot never counts, a failed one still does', async () => {
+    const unitId = 'unit-d5';
+    const filter = { contact_type: 'tenant' as const, excludeOptedOut: true, excludeUnreachable: true };
+    // Share A (sent): one sent, one failed, one skipped, one skipped-in-A-but-sent-in-B.
+    const a = await broadcasts.create({ created_by: 'usr_test', unitId, audience_filter: filter, body_template: 'Hi [TenantName]' });
+    await broadcasts.markSending(a.broadcastId, {
+      'c-sent': { status: 'queued' },
+      'c-failed': { status: 'queued' },
+      'c-skipped': { status: 'queued' },
+      'c-both': { status: 'queued' },
+    });
+    await broadcasts.setRecipient(a.broadcastId, 'c-sent', { status: 'sent' });
+    await broadcasts.setRecipient(a.broadcastId, 'c-failed', { status: 'failed', errorCode: '30007' });
+    await broadcasts.setRecipient(a.broadcastId, 'c-skipped', { status: 'skipped', errorCode: 'manual_mode' });
+    await broadcasts.setRecipient(a.broadcastId, 'c-both', { status: 'skipped', errorCode: 'manual_mode' });
+    await broadcasts.markSent(a.broadcastId);
+    // Share B (sending): c-both was sent this time; c-legacy is a code-less legacy skip.
+    const b = await broadcasts.create({ created_by: 'usr_test', unitId, audience_filter: filter, body_template: 'Hi [TenantName]' });
+    await broadcasts.markSending(b.broadcastId, { 'c-both': { status: 'queued' }, 'c-legacy': { status: 'queued' } });
+    await broadcasts.setRecipient(b.broadcastId, 'c-both', { status: 'sent' });
+    await broadcasts.setRecipient(b.broadcastId, 'c-legacy', { status: 'skipped' });
+    // Share C (draft): its slots never count, as before.
+    await broadcasts.create({ created_by: 'usr_test', unitId, audience_filter: filter, body_template: 'Hi [TenantName]' });
+
+    const prior = await broadcasts.priorRecipientContactIds(unitId);
+    expect([...prior].sort()).toEqual(['c-both', 'c-failed', 'c-sent']);
+  });
+
   it('conditional delete: a DRAFT deletes; a SENT broadcast is refused (not_draft) and survives', async () => {
     const draft = await broadcasts.create({
       created_by: 'usr_test',

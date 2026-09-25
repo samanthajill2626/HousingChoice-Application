@@ -352,9 +352,11 @@ export interface BroadcastsRepo {
    */
   listByUnit(unitId: string, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
   /**
-   * The set of contactKeys already sent a broadcast for this unit — the union
-   * of every sent/sending broadcast's `recipients` map KEYS for the unit. The
-   * composer flags these (soft, opt-in resend; never a server-side exclusion).
+   * The set of contactKeys already sent a broadcast for this unit: the recipient
+   * keys with a NON-SKIPPED slot, unioned across every sent/sending broadcast
+   * for the unit (share-skip-fix D5 - a `skipped` slot means no text was
+   * attempted, so it never counts; `failed` still does). The composer flags
+   * these (soft, opt-in resend; never a server-side exclusion).
    * Degrades SAFELY: if the byUnit GSI is absent (an un-applied env) or the
    * query throws/returns nothing, returns an EMPTY set (nothing flagged) — the
    * already-sent protection is best-effort until the operator applies the GSI.
@@ -563,9 +565,10 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
 
     async priorRecipientContactIds(unitId) {
       // Best-effort union of every sent/sending broadcast's recipients KEYS for
-      // this unit. The byUnit GSI keeps this O(matches) not a Scan. Degrade
-      // SAFELY: a missing GSI (un-applied env) or any query error → empty set
-      // (nothing flagged); log IDs/counts only (NEVER recipient phones/keys).
+      // this unit, skipped slots excluded (share-skip-fix D5, below). The byUnit
+      // GSI keeps this O(matches) not a Scan. Degrade SAFELY: a missing GSI
+      // (un-applied env) or any query error -> empty set (nothing flagged); log
+      // IDs/counts only (NEVER recipient phones/keys).
       const prior = new Set<string>();
       try {
         let exclusiveStartKey: Record<string, unknown> | undefined;
@@ -575,7 +578,18 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
           });
           for (const b of page.items) {
             if (b.status !== 'sent' && b.status !== 'sending') continue;
-            for (const key of Object.keys(b.recipients ?? {})) prior.add(key);
+            for (const [key, slot] of Object.entries(b.recipients ?? {})) {
+              // share-skip-fix D5 (interim rule): a SKIPPED slot means no text was
+              // attempted for that tenant, so it must not flag them "Already sent"
+              // (Sam's #5: the skipped tenant then started unchecked on the next
+              // share). queued / sent / delivered still count; FAILED still counts
+              // on purpose - a failed text may have been delivered by a retry this
+              // share never hears about (Branch B replaces this with the attempts
+              // rule). This is the ONE place the rule lives: the route's
+              // per-candidate flag and the hand-add annotation both read this set.
+              if (slot.status === 'skipped') continue;
+              prior.add(key);
+            }
           }
           exclusiveStartKey = page.lastEvaluatedKey;
         } while (exclusiveStartKey !== undefined);

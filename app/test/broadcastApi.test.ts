@@ -1193,6 +1193,43 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(c1.alreadySentThisProperty).toBe(false);
   });
 
+  it('share-skip-fix D5: a tenant whose only earlier slot was SKIPPED is NOT "already sent"; a failed one still is', async () => {
+    const skipped = seedTenant(world, { contactId: 'c-skipped', firstName: 'Skip', phone: '+15550100001' });
+    const failed = seedTenant(world, { contactId: 'c-failed', firstName: 'Fail', phone: '+15550100002' });
+    seedUnit(world);
+    const now = new Date().toISOString();
+    world.broadcasts.set('bcast-prior', {
+      broadcastId: 'bcast-prior',
+      created_by: 'usr_test',
+      created_at: now,
+      updated_at: now,
+      status: 'sent',
+      unitId: 'unit-1',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'hi',
+      stats: { audience: 2, sent: 0, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0, skipped_other: 1, queued: 0 },
+      recipients: {
+        'c-skipped': { status: 'skipped', errorCode: 'manual_mode' },
+        'c-failed': { status: 'failed', errorCode: '30007' },
+      },
+    });
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const preview = await request(app)
+      .post(`/api/broadcasts/${id}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(preview.status).toBe(200);
+    const byId = new Map(
+      (preview.body.candidates as Array<{ contactId: string; alreadySentThisProperty: boolean }>).map((c) => [c.contactId, c]),
+    );
+    expect(byId.get(skipped.contactId)?.alreadySentThisProperty).toBe(false);
+    expect(byId.get(failed.contactId)?.alreadySentThisProperty).toBe(true);
+    // The hand-add annotation reads the SAME set (spec D5: one rule, one reader).
+    expect(preview.body.priorRecipientContactIds).toEqual([failed.contactId]);
+  });
+
   // --- S4: GET results/list return DERIVED disjoint stats -------------------
   const FILTER = { contact_type: 'tenant' as const, excludeOptedOut: true, excludeUnreachable: true };
 

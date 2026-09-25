@@ -330,7 +330,9 @@ run D1 and D2 against dev and prod, and the import-window rule from section 6.
   unchanged); the breaker (manual, unchanged); D2 (new); seed fixtures - the lean
   world gains one switched-off tenant conversation for the e2e checks (RSW's
   one-to-one e2e must not use it; the full demo profile composes lean, so it
-  appears there too), every other seed world is unchanged. Readers:
+  appears there too), every other seed world is unchanged (the performance
+  profiler's synthetic world already creates every one-to-one row switched
+  off, `app/src/lib/seed/performance.ts`; noted 2026-09-25, left as is). Readers:
   the send wrapper; the scheduled-send suppression previews (tour reminders
   panel, contact timeline scheduled cards) - no change; after D2 they report the
   new state.

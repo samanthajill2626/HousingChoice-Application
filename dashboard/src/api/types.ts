@@ -2951,7 +2951,12 @@ export interface BroadcastRecipient {
   tsMsgId?: string;
   /** ISO - when the carrier's own 'sent' status callback landed (webhook rollup). */
   carrierSentAt?: string;
-  /** Twilio error class on a failure (mapped to a reason for display). */
+  /** Why the slot did not simply send (mapped to a reason for display). On a
+   *  FAILED slot: the Twilio error class (or an internal code, e.g.
+   *  no_contact). On a SKIPPED slot: the skip reason - opted_out, unreachable,
+   *  contact_deleted, no_consent, or a send-wrapper refusal code
+   *  (contact_opted_out, manual_mode, sms_sending_disabled, ...). MIRRORS the
+   *  app's BroadcastRecipient.errorCode. */
   errorCode?: string;
   /** Resolved contact first name (absent for phone-only / deleted contacts). */
   firstName?: string;

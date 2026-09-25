@@ -383,8 +383,17 @@ describe('share-broadcast API (M1.8a)', () => {
     const evt = world.emitted.find((e) => e.event === 'broadcast.updated')!;
     const stats = (evt.payload as { stats: BroadcastStats }).stats;
     expect(stats).toMatchObject({ audience: 1, delivered: 1, sent: 0, queued: 0 });
+    // EVERY bucket, incl. the optional `sending` and `skipped_other` (same sum as
+    // broadcastFanOut.test.ts bucketsSumToAudience).
     expect(
-      stats.queued + stats.sent + stats.delivered + stats.failed + stats.skipped_opted_out + stats.skipped_no_consent,
+      stats.queued +
+        (stats.sending ?? 0) +
+        stats.sent +
+        stats.delivered +
+        stats.failed +
+        stats.skipped_opted_out +
+        stats.skipped_no_consent +
+        (stats.skipped_other ?? 0),
     ).toBe(stats.audience);
   });
 

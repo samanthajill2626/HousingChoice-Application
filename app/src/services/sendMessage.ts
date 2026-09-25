@@ -246,6 +246,8 @@ export interface SendMessageInput {
    * JIT-consent gates judge THIS contact rather than whichever contact the
    * phone lookup returns first (duplicate contacts on one phone), and the
    * opt-out gate refuses on EITHER contact's flag. Absent on every other send.
+   * So the deleted and consent gates judge the caller's already-resolved
+   * snapshot (redundant with the fan-out's own fence); opt-out stays fresh.
    */
   recipient?: ContactItem;
 }

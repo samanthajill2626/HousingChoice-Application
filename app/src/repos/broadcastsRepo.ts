@@ -136,6 +136,16 @@ export interface BroadcastRecipient {
    * own "sent". See carrierSentAt for the carrier-confirmed instant.
    */
   status: 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
+  /**
+   * Why the slot did not simply send. FAILED: the Twilio error class, or an
+   * internal code (no_contact, transient_cap, enqueue_failed). SKIPPED
+   * (share-skip-fix D7): the skip reason - a fan-out fence (opted_out,
+   * unreachable, contact_deleted, no_consent) or the send wrapper's refusal
+   * code (SendRefusedError.code: contact_opted_out, manual_mode,
+   * sms_sending_disabled, ...). A first-fence skip (opt-out or unreachable)
+   * recorded before 2026-09-25 has none. QUEUED: the transient code a
+   * deferred slot is awaiting a retry for.
+   */
   errorCode?: string;
   /**
    * ISO - set when the CARRIER's non-terminal 'sent' status callback lands

@@ -12,12 +12,14 @@ refs: app/src/routes/api.ts:1564, app/src/routes/webhooks/twilio.ts:3350, app/sr
 **Problem.** `feat/retry-send-window` (spec D7, D10) hides the manual Retry button
 and makes the retry route refuse (409 `retry_pending`) while an automatic 30003
 retry is scheduled: the failed message carries `retry_due_at`, and the guard
-holds until `retry_due_at + RETRY_PROMISE_GRACE_MS`. Before that branch, pressing
-Retry during the automatic retry's 60-240 second wait always texted the member
-twice. The guard is time-based, and these gaps remain:
+holds until `retry_due_at + RETRY_PROMISE_GRACE_MS` on the server's clock. Before
+that branch, pressing Retry during the automatic retry's 60-240 second wait always
+texted the member twice. The guard is time-based, and these gaps remain:
 
-1. The second or so between the delivery-status update reaching the screen and
-   the `retry_due_at` stamp reaching it.
+1. A press that reaches the route BEFORE the `retry_due_at` stamp is written -
+   while the webhook's 30003 arm is still doing its reads and the enqueue. (A
+   press after the write but before the screen hears about it gets the 409; the
+   gap is server-side.)
 2. A lost stamp: the enqueue succeeded but the `annotateMessage` write failed, so
    there is no promise, no hidden button and no 409 for the whole wait, while the
    automatic retry is still coming.
@@ -30,12 +32,14 @@ twice. The guard is time-based, and these gaps remain:
    that leaves it pending refreshes `retry_due_at` as the retry-send-window spec's
    section 5 requires.
 
-A robust fix needs a claim both sides contend on: a conditional write on the
-original that the route and the job each take before sending, plus consistent
+A robust fix needs a claim both sides contend on - a conditional write taken
+before sending by the manual route and the automatic job alike, with consistent
 reads. The retry-send-window spec deliberately did not build it (Cameron's option
 1 was the time-based guard).
 
-**Suggested fix.** If double sends are observed, give the original message a
-conditional "retry claimed" attribute that the manual route and `retrySend` each
-set before sending (the loser refuses or skips), released only by an explicit
-failure path. Related: `send-idempotency-key`, `accepted-send-lost-when-append-fails`.
+**Suggested fix.** `feat/send-outcome-reconcile` (revision 4) introduces a
+per-recipient send-attempt record with a conditional claim before every provider
+call, and keys `retrySend`'s record on the original message and the rung. That is
+most of the needed substrate: have the manual retry route claim against the same
+record, so whichever of the two sends second finds the claim taken and refuses.
+Related: `send-idempotency-key`, `accepted-send-lost-when-append-fails`.

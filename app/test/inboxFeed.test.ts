@@ -59,6 +59,13 @@ interface Seed {
    * offered. Default (absent) = agrees with the base table.
    */
   participantProjection?: ConversationItem[];
+  /** Make `contactsRepo.findByPhone` throw for ONE phone (the prefetch
+   *  equivalence fixture: the sequential path skips the email lookup on it). */
+  findByPhoneError?: { phone: string; error: Error };
+  /** Make every `messagesRepo.listByConversation` read take a macrotask, so a
+   *  concurrency bound can be asserted as a property of the code rather than
+   *  of microtask ordering (the stop-flag test). */
+  slowReads?: boolean;
 }
 
 interface InboxCallCounts {
@@ -92,7 +99,7 @@ function makeDeps(
   seed: Seed,
   calls?: InboxCallCounts,
   logger?: InboxRouterDeps['logger'],
-  routerOpts?: { unreadWalkLimit?: number },
+  routerOpts?: { unreadWalkLimit?: number; inboxPrefetch?: boolean },
 ): InboxRouterDeps {
   // Newest-activity-first total order over the OPEN conversations, the by
   // LastActivity GSI's descending sort.
@@ -118,6 +125,7 @@ function makeDeps(
     ...(routerOpts?.unreadWalkLimit !== undefined && {
       unreadWalkLimit: routerOpts.unreadWalkLimit,
     }),
+    ...(routerOpts?.inboxPrefetch !== undefined && { inboxPrefetch: routerOpts.inboxPrefetch }),
     conversationsRepo: {
       async getById(conversationId: string) {
         if (seed.getByIdError !== undefined) throw seed.getByIdError;
@@ -196,6 +204,9 @@ function makeDeps(
     contactsRepo: {
       async findByPhone(phone: string) {
         if (calls !== undefined) calls.findByPhone += 1;
+        if (seed.findByPhoneError !== undefined && seed.findByPhoneError.phone === phone) {
+          throw seed.findByPhoneError.error;
+        }
         return contactByPhone(phone);
       },
       // A18 again: layer 2 falls through to this whenever findByPhone misses.
@@ -232,6 +243,11 @@ function makeDeps(
     messagesRepo: {
       async listByConversation(conversationId: string) {
         if (calls !== undefined) calls.listByConversation += 1;
+        // AFTER the counter, never before it: the stop-flag test counts reads
+        // STARTED, including the ones still in flight when the request returns.
+        // Delayed first, the counter would see only FINISHED reads - and at
+        // limit 1 the request completes on the first 1 ms timer.
+        if (seed.slowReads === true) await new Promise((r) => setTimeout(r, 1));
         const latest = seed.latestMessage?.[conversationId];
         return latest ? [latest as MessageItem] : [];
       },
@@ -2396,5 +2412,159 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       lastActivityAt: T(11),
       placementContext: { placementId: 'placement-agree', label: 'Touring' },
     });
+  });
+});
+
+describe('aggregateInbox - prefetch equivalence (spec 5.10)', () => {
+  function captureLogger(): { logger: InboxRouterDeps['logger']; info: ReturnType<typeof vi.fn> } {
+    const info = vi.fn();
+    return {
+      info,
+      logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+    };
+  }
+  function assembled(info: ReturnType<typeof vi.fn>): unknown {
+    return info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+  }
+  async function bothWays(
+    seed: Seed,
+    opts: { filter: 'all'; limit: number; cursor?: string },
+  ): Promise<{ on: InboxPage; off: InboxPage; onLine: unknown; offLine: unknown; onCalls: InboxCallCounts; offCalls: InboxCallCounts }> {
+    const onLog = captureLogger();
+    const offLog = captureLogger();
+    const onCalls = emptyCallCounts();
+    const offCalls = emptyCallCounts();
+    const on = await aggregateInbox(opts, makeDeps(seed, onCalls, onLog.logger, { inboxPrefetch: true }));
+    const off = await aggregateInbox(opts, makeDeps(seed, offCalls, offLog.logger, { inboxPrefetch: false }));
+    return { on, off, onLine: assembled(onLog.info), offLine: assembled(offLog.info), onCalls, offCalls };
+  }
+  // The split-proof fixture, repeated here rather than referenced: the
+  // file's `splitSeed()` is declared inside another describe block and is not
+  // in scope at module level.
+  function mixedBase(): Seed {
+    return {
+      contacts: [
+        { contactId: 'c-1', type: 'tenant', phone: '+15550000001', phones: [
+          { phone: '+15550000001', primary: true },
+          { phone: '+15550000011', primary: false },
+        ] },
+        { contactId: 'c-2', type: 'tenant', phone: '+15550000002' },
+        { contactId: 'c-3', type: 'tenant', phone: '+15550000003' },
+        { contactId: 'c-4', type: 'tenant', phone: '+15550000004' },
+        { contactId: 'c-5', type: 'tenant', phone: '+15550000005' },
+      ],
+      conversations: [
+        conv({ conversationId: 'conv-1-new', participant_phone: '+15550000001', last_activity_at: '2026-06-10T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-2', participant_phone: '+15550000002', last_activity_at: '2026-06-09T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-3', participant_phone: '+15550000003', last_activity_at: '2026-06-08T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-4', participant_phone: '+15550000004', last_activity_at: '2026-06-07T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-5', participant_phone: '+15550000005', last_activity_at: '2026-06-06T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-1-old', participant_phone: '+15550000011', last_activity_at: '2026-06-03T10:00:00.000Z' }),
+      ],
+    };
+  }
+  /** Multi-number contacts, a relay group, an unknown number, a soft-deleted
+   *  resurfacing contact, and a phone whose lookup throws. */
+  function mixedSeed(): Seed {
+    const base = mixedBase();
+    return {
+      ...base,
+      contacts: [
+        ...base.contacts,
+        { contactId: 'c-del', type: 'tenant', phone: '+15550000090', deleted_at: '2026-06-05T00:00:00.000Z' },
+      ],
+      conversations: [
+        ...base.conversations,
+        relayConv({ conversationId: 'conv-relay', last_activity_at: '2026-06-09T12:00:00.000Z' }),
+        conv({ conversationId: 'conv-unknown', participant_phone: '+15550000099', last_activity_at: '2026-06-08T12:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'conv-del', participant_phone: '+15550000090', last_activity_at: '2026-06-07T12:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'conv-throw', participant_phone: '+15550000098', participant_email: 'throw@example.com', last_activity_at: '2026-06-06T12:00:00.000Z' }),
+      ],
+      latestMessage: {
+        'conv-1-new': { direction: 'inbound', body: 'newest', created_at: '2026-06-10T10:00:00.000Z' },
+        'conv-unknown': { direction: 'inbound', body: 'who dis', created_at: '2026-06-08T12:00:00.000Z' },
+        'conv-del': { direction: 'inbound', body: 'after delete', created_at: '2026-06-07T12:00:00.000Z' },
+      },
+      findByPhoneError: { phone: '+15550000098', error: new Error('lookup boom') },
+    };
+  }
+
+  it('page one is identical with prefetch on and off: rows, order, cursor, assembled counts', async () => {
+    const r = await bothWays(mixedSeed(), { filter: 'all', limit: 4 });
+    expect(r.on.rows).toEqual(r.off.rows);
+    expect(r.on.nextCursor).toEqual(r.off.nextCursor);
+    expect(r.onLine).toEqual(r.offLine);
+  });
+
+  it('page two (cursor) is identical with prefetch on and off', async () => {
+    const first = await aggregateInbox({ filter: 'all', limit: 4 }, makeDeps(mixedSeed()));
+    const r = await bothWays(mixedSeed(), { filter: 'all', limit: 4, cursor: first.nextCursor! });
+    expect(r.on.rows).toEqual(r.off.rows);
+    expect(r.on.nextCursor).toEqual(r.off.nextCursor);
+    expect(r.onLine).toEqual(r.offLine);
+  });
+
+  it('a failing conversation-set lookup produces the same page both ways', async () => {
+    const seed = { ...mixedSeed(), participantConversationLookupError: new Error('convs boom') };
+    const r = await bothWays(seed, { filter: 'all', limit: 25 });
+    expect(r.on.rows).toEqual(r.off.rows);
+    expect(r.onLine).toEqual(r.offLine);
+  });
+
+  it('the promise caches issue ONE read per key: repo call counts match the sequential path', async () => {
+    const r = await bothWays(mixedSeed(), { filter: 'all', limit: 25 });
+    // The prefetch and the loop share every key through the same caches, so
+    // no key is read twice. The counts CAN differ in general - only upward, on
+    // the prefetch arm: it reads ahead for conversations the loop never
+    // reaches (the page filled first), and it still reads the latest message
+    // for conversations the loop consumes but drops before its own
+    // latest-message read (`notNewestConv`, `deletedNoUnread`,
+    // `noContactNoPhone`). This fixture at limit 25 has neither - the loop
+    // consumes every conversation and none takes one of those drops - so the
+    // counts match exactly.
+    expect(r.onCalls.findByPhone).toBe(r.offCalls.findByPhone);
+    expect(r.onCalls.findByParticipantPhone).toBe(r.offCalls.findByParticipantPhone);
+    expect(r.onCalls.listByConversation).toBe(r.offCalls.listByConversation);
+  });
+
+  it('a throwing phone lookup skips the email lookup on both paths (the pair operation is memoized)', async () => {
+    const seed = mixedSeed();
+    seed.contacts.push({ contactId: 'c-email', type: 'tenant', email: 'throw@example.com' });
+    const r = await bothWays(seed, { filter: 'all', limit: 25 });
+    // Sequentially the throw aborted the whole lookup, so conv-throw is an
+    // UNKNOWN row (its phone) rather than c-email's row. Prefetch must agree.
+    const unknownRow = r.off.rows.find((row) => row.phone === '+15550000098');
+    expect(unknownRow?.kind).toBe('unknown');
+    expect(r.on.rows).toEqual(r.off.rows);
+    // The degraded fallback is memoized: the throwing phone is looked up ONCE
+    // (by the prefetch), and the loop's own lookup is a cache hit rather than
+    // a second throw. Call counts therefore match the sequential path exactly.
+    expect(r.onCalls.findByPhone).toBe(r.offCalls.findByPhone);
+  });
+
+  it('the stop flag ends scheduling when the page fills: reads stay near the page size, not the chunk', async () => {
+    const contacts: ContactItem[] = [];
+    const conversations: ConversationItem[] = [];
+    for (let i = 0; i < 60; i++) {
+      const phone = `+1555010${String(i).padStart(4, '0')}`;
+      contacts.push({ contactId: `c-${i}`, type: 'tenant', phone });
+      conversations.push(conv({ conversationId: `conv-${i}`, participant_phone: phone, last_activity_at: `2026-06-01T10:${String(59 - i).padStart(2, '0')}:00.000Z` }));
+    }
+    const calls = emptyCallCounts();
+    // slowReads makes every latest-message read take a macrotask, so the eight
+    // prefetch workers cannot race through the whole chunk on microtasks
+    // before the loop's first row lands: the bound below is then a property
+    // of the code (one row consumed + at most HYDRATE_CONCURRENCY chains in
+    // flight when `stop` is set), not of promise timing.
+    await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations, slowReads: true }, calls, undefined, { inboxPrefetch: true }));
+    // The prefetch read AHEAD of the one consumed row (the line that is red
+    // with no prefetch pass: the sequential loop reads exactly one) ...
+    expect(calls.listByConversation).toBeGreaterThan(1);
+    // ... but stopped scheduling when the page filled.
+    expect(calls.listByConversation).toBeLessThanOrEqual(9);
+    // And the sequential arm reads exactly one.
+    const sequential = emptyCallCounts();
+    await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations, slowReads: true }, sequential, undefined, { inboxPrefetch: false }));
+    expect(sequential.listByConversation).toBe(1);
   });
 });

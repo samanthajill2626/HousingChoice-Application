@@ -393,6 +393,12 @@ run D1 and D2 against dev and prod, and the import-window rule from section 6.
 
 ## 8. Risks and accepted tradeoffs
 
+- The interim "Already sent" rule (D5) counts a failed recipient only inside a
+  share that finalized `sent` or is `sending`. A share in which EVERY recipient
+  failed finalizes `failed` and is excluded whole - today's rule (section 1,
+  item 7), unchanged here - and that is the usual outcome for a one-recipient
+  share whose only text fails. Branch B's attempts rule replaces both.
+
 - D2 releases pending one-to-one tour-reminder rungs for previously switched-off
   conversations. Intended; D1 counts them before Cameron applies.
 - A breaker trip that lands while the bulk run is in progress may be switched back

@@ -8,9 +8,9 @@
 
 **Tech Stack:** TypeScript (Node 24, ESM), Express, DynamoDB (AWS SDK v3, DynamoDB Local in tests), Vitest (app + dashboard workspaces), React 18 + Testing Library (dashboard), Playwright (e2e workspace, hermetic lane), tsx for scripts.
 
-**Spec:** `docs/superpowers/specs/2026-09-24-share-skip-fix-design.md` (Branch A, v9 or later). Branch B stub (NOT this plan): `docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md`.
+**Spec:** `docs/superpowers/specs/2026-09-24-share-skip-fix-design.md` (Branch A, v10 or later). Branch B stub (NOT this plan): `docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md`.
 
-**Plan history:** v1 @a0e594b5; v2 after adversarial plan review round 1 (`docs/superpowers/reviews/2026-09-24-share-skip-fix/plan-review-r1-a.md`, `plan-review-r1-b.md`, adjudications in `plan-review-r1-adjudications.md`).
+**Plan history:** v1 @a0e594b5; v2 @a5b95400 after adversarial plan review round 1 (`docs/superpowers/reviews/2026-09-24-share-skip-fix/plan-review-r1-a.md`, `plan-review-r1-b.md`, adjudications in `plan-review-r1-adjudications.md`); v3 after round 2 (`plan-review-r2.md`, `plan-review-r2-adjudications.md` - precision only, the terminal round).
 
 ## Global Constraints
 
@@ -25,7 +25,7 @@
 - Exact spec copy, verbatim (spec D7 table and D5): `Automatic texts were off for this conversation`, `Opted out of texts`, `Number can't receive texts`, `No texting consent recorded`, `Contact was deleted`, `No contact or phone on file`, `Stopped by the automatic-text safety limit`, `Texting is turned off`, `Delivery failed`, `Opted out or number unreachable`, `Not sent (<code>)`, label `Not sent`, review note `Flagged tenants you picked stay checked; "Select all" skips the others.`
 - One-to-one default message, exactly: the one-line address, ONE space, the flyer link - `[Address] [FlyerLink]` resolved (spec D8). Blasts keep `DEFAULT_SEND_TEMPLATE` unchanged. The SENT flyer link ends in `?cta=text` (`app/src/lib/mergeFields.ts:28-30`); the composer shows a query-less same-origin fallback only for the ~600 ms before the first draft exists, so e2e assertions must target the `?cta=text` steady state.
 - Gates (from the worktree root, bare, never piped): `npm run typecheck`, `npm test` (needs `npm run db:start`), `npm run smoke`, `npm run e2e`, and `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` (skip the last if the list is empty; attribute errors by baseline comparison against the merge base). Run the e2e gate from Git Bash as `timeout 1500 npm run e2e` (the hard outer timeout AGENTS.md asks for; PowerShell's `timeout` is a different program - there, run `npm run e2e` bare). After ANY aborted or killed e2e run, confirm no listener survives on the lane's ports before starting another (`reuseExistingServer` adopts an orphan on a commit match alone).
-- Slice 1 (Tasks 1-5) is built, gated, and reviewed by the orchestrator's own slice review, and the planner hands its two commands to Cameron, BEFORE Task 6 starts. Task 6 does NOT wait for Cameron's dev/prod runs (spec section 6: running the script before the rest ships is safe).
+- Slice 1 (Tasks 1-5) is built, gated, and reviewed by the orchestrator's own slice review; Task 6 starts the moment that review is clean and the orchestrator has reported the slice (its report SHA) to the planner. The planner's hand-off to Cameron (a pinned, separate checkout of that SHA plus the three commands) happens in parallel and the build never waits for it, nor for Cameron's dev/prod runs (spec section 6: running the script before the rest ships is safe).
 
 ## Review Focus
 
@@ -107,9 +107,16 @@ A note on "Run it to verify it fails": most steps are true red-green. Where a li
 // selected by its key `hclane<L>` as much as by its prefix - a prefix alone
 // would read (and write) the wrong database.
 import { describe, expect, it } from 'vitest';
-import { parseLane, resolveStageClient } from '../scripts/lib/stageClient.js';
+// The harness's own key format: app/tsconfig.test.json includes ../e2e/support
+// with allowJs (app/test/lane.test.ts imports the same module).
+import { laneAccessKeyId as harnessLaneAccessKeyId } from '../../e2e/support/lane.mjs';
+import { laneAccessKeyId, parseLane, resolveStageClient } from '../scripts/lib/stageClient.js';
 
 describe('resolveStageClient', () => {
+  it('laneAccessKeyId matches the e2e harness format for every lane (a drift here reads an EMPTY database)', () => {
+    for (const lane of [1, 2, 3, 12]) expect(laneAccessKeyId(lane)).toBe(harnessLaneAccessKeyId(lane));
+  });
+
   it('local (no lane): DynamoDB Local, key local, hc-local- prefix - the live local dev stack; no account guard call', async () => {
     let guardCalls = 0;
     const stage = await resolveStageClient('local', {
@@ -364,7 +371,7 @@ export function parseStageArgs(
 - [ ] **Step 4: Run the stage-resolver test to verify it passes**
 
 Run: `cd app; npx vitest run test/stageClient.test.ts`
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 5: Write the failing census test**
 
@@ -553,9 +560,12 @@ Expected: FAIL - `Cannot find module '../scripts/conversation-automation-census.
 //     non-self_guided tour with a USABLE group goes to the group; everything
 //     else goes to the tenant's one-to-one conversation, reported by that
 //     conversation's switch state - `oneToOneSwitchedOff` is what the bulk
-//     fix script RELEASES, `oneToOneBreakerTripped` is what it leaves alone.
-//     The quiet-hours deferral is not replayed (it delays, never retires), so
-//     the released count is exact for today's pending rows, not a forecast;
+//     fix script RELEASES (an UPPER BOUND: the job's later gates are not
+//     replayed - the quiet-hours deferral, the conversion-claim deferral and
+//     stall retire, the pending open-group wait, the tenant-roster retire, and
+//     the wrapper's own opt-out / deleted refusals after the claim - each of
+//     which can still hold or retire a rung this count includes),
+//     `oneToOneBreakerTripped` is what the bulk run leaves alone;
 //   - pending placement nudges, reported separately: they are held manual-only
 //     today and the fix script releases none of them;
 //   - imported one-to-one rows whose phone claim points at a DIFFERENT row (a
@@ -579,7 +589,7 @@ import {
 import { tableName } from '../src/lib/config.js';
 import { queryAll } from '../src/lib/dynamoPaging.js';
 import { isSupersededRung } from '../src/lib/ladderPointer.js';
-import { logger } from '../src/lib/logger.js';
+import { createLogger, logger } from '../src/lib/logger.js';
 import { isOneToOneBucket } from '../src/lib/unreadFeed.js';
 import type { AuditEvent } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
@@ -750,8 +760,12 @@ export async function runConversationAutomationCensus(opts: CensusOpts): Promise
   const contacts = createContactsRepo({ doc, env });
   const conversations = createConversationsRepo({ doc, env });
   // resolveUsableGroup reads only deps.conversationsRepo (tourReminders.ts:1496-1530);
-  // the cast hands it that one dependency rather than a whole job wiring.
+  // the cast hands it that one dependency rather than a whole job wiring. It
+  // also logs the JOB's "falling back to tenant 1:1" WARN on an unusable group,
+  // which would read as an action in a read-only report - so it gets a silent
+  // logger; the census reports the outcome in its own counts.
   const usabilityDeps = { conversationsRepo: conversations } as unknown as RunDueTourRemindersDeps;
+  const silent = createLogger({ level: 'silent' });
   const tourCache = new Map<string, TourItem | undefined>();
   const tourFor = async (tourId: string): Promise<TourItem | undefined> => {
     if (tourCache.has(tourId)) return tourCache.get(tourId);
@@ -779,7 +793,7 @@ export async function runConversationAutomationCensus(opts: CensusOpts): Promise
       continue;
     }
     if (tour.tourType !== 'self_guided') {
-      const group = await resolveUsableGroup(tour, rung, usabilityDeps, logger);
+      const group = await resolveUsableGroup(tour, rung, usabilityDeps, silent);
       if (group !== undefined) {
         r.groupRouted += 1;
         continue;
@@ -823,7 +837,7 @@ export function reportCensus(census: AutomationCensus): 0 {
       rungsHeldByBreakerTrips: census.pendingTourRungs.oneToOneBreakerTripped,
       pendingNudgesHeldManualOnly: census.pendingNudgesHeldManualOnly,
     },
-    'conversation-automation-census - done (read-only; nothing written). rungsReleasedByBulkEnable start sending after the bulk apply; breaker-held rungs only after a single-conversation resume. Pending nudges are held manual-only today and are NOT released by the fix script.',
+    'conversation-automation-census - done (read-only; nothing written). rungsReleasedByBulkEnable is an UPPER BOUND on what starts sending after the bulk apply (the job\'s later gates - quiet hours, conversion claims, open-group waits, roster, opt-out/deleted - are not replayed); breaker-held rungs move only after a single-conversation resume. Pending nudges are held manual-only today and are NOT released by the fix script.',
   );
   return 0;
 }
@@ -1586,7 +1600,7 @@ Insert this text (ASCII only) before the supersession heading in `RUNBOOK.md`:
 ```markdown
 ### One-to-one conversation automation switch (2026-09-25): census, the fix script, and "a conversation tripped the breaker"
 
-**Owed as soon as slice 1 of `feat/share-skip-fix` is reviewed - BEFORE its merge and deploy: ONE census read, then ONE fix-script apply, dev then prod, each on Cameron's explicit go, run from that branch's checkout.** No Terraform, no secrets, no schema change. Running it early is safe: it only turns switches on, and one-to-one shares already work for switched-on conversations.
+**Owed as soon as slice 1 of `feat/share-skip-fix` is reviewed - BEFORE its merge and deploy: ONE census read, then ONE fix-script apply, dev then prod, each on Cameron's explicit go.** Run them from the PINNED checkout the planner hands over with the commands - a separate detached worktree at the reviewed slice-1 commit (`W:\tmp\share-skip-fix-ops`, `npm ci` done there), never from the build worktree, which the mission keeps editing (the scripts import the reminder job, whose import closure reaches `sendMessage.ts`, a file the later slices rewrite). No Terraform, no secrets, no schema change. Running it early is safe: it only turns switches on, and one-to-one shares already work for switched-on conversations.
 
 Every conversation row carries `ai_mode` (`auto` | `manual`). It was designed as the Phase-2 AI on/off switch, but the one-to-one send wrapper refuses EVERY automated text on a `manual` row - tour reminders, the missed-call text, the sign-up welcome, the 30003 retry and (before this branch) staff property sends. The Quo import created every conversation `manual`, nothing else ever turns the switch back on, and the circuit breaker turns it off (`mode_changed` audit event, reason `breaker_trip`) when a conversation exceeds `SEND_BREAKER_MAX_PER_MINUTE` automated texts in a minute. Placement nudges are NOT affected either way: every nudge kind is held manual-only and "Send now" is a person's send.
 
@@ -1594,7 +1608,13 @@ Both scripts take `--env local|dev|prod` and resolve the tables AND the credenti
 
 1. **Census (read-only):** `npx tsx app/scripts/conversation-automation-census.ts --env dev`. It logs counts only: rows by type and switch state (`unset` = no `ai_mode` attribute, which the wrapper already treats as auto), switched-off rows by cause (group thread / breaker trip / imported / other), EVERY breaker-tripped conversation id individually, pending tour-reminder rungs routed the way the reminder job routes them (`pendingTourRungs.oneToOneSwitchedOff` = the rungs the bulk apply releases; `oneToOneBreakerTripped` = held until a single-conversation resume; `groupRouted` never reads the switch), pending nudges (held manual-only, unaffected), and imported rows whose phone claim points at a different conversation. Read the breaker list before step 2.
 2. **Dry run:** `npx tsx app/scripts/enable-conversation-automation.ts --env dev`. Dry run is the DEFAULT. `planned` is what an apply would switch on (each id is logged); `breakerTrippedExcluded` are the breaker rows it will leave alone; `groupRows`, `alreadyOn`, `unset` and `pointerRows` are never touched. `failed > 0` exits 1 (`COMPLETED WITH FAILURES`): investigate the logged ids before applying.
-3. **Apply:** the same command with `--apply`. Every write is CONDITIONAL on the row still being a one-to-one conversation with the switch off, so a breaker trip that lands mid-run keeps the runtime's outcome (`skippedOnCondition`) and a re-run is a no-op. Each enable appends a `mode_changed` audit event `{ from: manual, to: auto, reason: bulk_enable }`. If the audit write fails after a switch landed, the run names that conversation at ERROR (`switched on but audit NOT written`), counts it `auditFailed` and exits 1: append the event by hand for each named id (a re-run reports them `alreadyOn`, it will not retry the audit).
+3. **Apply:** the same command with `--apply`. Every write is CONDITIONAL on the row still being a one-to-one conversation with the switch off, so a breaker trip that lands mid-run keeps the runtime's outcome (`skippedOnCondition`) and a re-run is a no-op. Each enable appends a `mode_changed` audit event `{ from: manual, to: auto, reason: bulk_enable }`. If the audit write fails after a switch landed, the run names that conversation at ERROR (`switched on but audit NOT written`), counts it `auditFailed` and exits 1. A re-run reports those rows `alreadyOn` and will not retry the audit, so append the event yourself for each named id - the item shape is `auditRepo.append`'s (`app/src/repos/auditRepo.ts:60-83`: `entityKey`, a `ts` sort key of `<ISO instant>#<suffix>`, `event_type`, `payload`; no `actorId` for a system action). PowerShell, replace `<id>`, `<env>` and the instant:
+
+   ```powershell
+   $item = @{entityKey=@{S='conversations#<id>'};ts=@{S='2026-09-25T00:00:00.000Z#backfill'};event_type=@{S='mode_changed'};payload=@{M=@{from=@{S='manual'};to=@{S='auto'};reason=@{S='bulk_enable'};script=@{S='enable-conversation-automation'};backfilled=@{BOOL=$true}}}} | ConvertTo-Json -Compress -Depth 6; aws dynamodb put-item --table-name hc-<env>-audit_events --item $item --condition-expression 'attribute_not_exists(entityKey)' --profile housingchoice --region us-east-1 --no-cli-pager
+   ```
+
+   (`reason` is `operator_resume` when the lost write was a single-conversation resume. The condition keeps a retyped command from overwriting an event that did land.)
 4. **Then prod**, the same three steps. Take dev all the way through first.
 5. **Import-window rule:** between the prod apply and the MERGE of this branch, do NOT run `import:apply` from `main` - it still creates one-to-one rows `manual` (the import is a local CLI run, so the boundary is the merge, not the deploy). If one must run, re-run step 3 afterwards (idempotent).
 
@@ -1672,7 +1692,7 @@ Expected: the census reports the lean world (the group text and the connecting r
 
 - [ ] **Step 3: Write the slice-1 report; the orchestrator reviews; the planner hands off; then Task 6**
 
-Write `docs/superpowers/reviews/2026-09-24-share-skip-fix/slice-1-report.md` (ASCII; the exit codes quoted verbatim from Step 1, the rehearsal counts from Step 2, the commit list). Commit it with explicit paths. The orchestrator's manual then runs its slice review and fixes anything it finds; on a clean review it reports the slice to the planner, who hands the three commands (census; dry run; apply, dev then prod) to Cameron. Task 6 starts right after that report - it never waits for Cameron's dev/prod runs (spec section 6: running the script before the rest ships is safe).
+Write `docs/superpowers/reviews/2026-09-24-share-skip-fix/slice-1-report.md` (ASCII; the exit codes quoted verbatim from Step 1, the rehearsal counts from Step 2, the commit list). Commit it with explicit paths. The orchestrator's manual then runs its slice review and fixes anything it finds; on a clean review it reports the slice AND ITS FINAL COMMIT SHA to the planner. Task 6 starts right after that report. The PLANNER (not the orchestrator) then hands Cameron a pinned checkout plus the three commands: `git worktree add --detach W:\tmp\share-skip-fix-ops <sha>` from the shared repo, `npm ci` inside it (never a shared or symlinked `node_modules`), and the census / dry-run / apply commands to run from that directory, dev then prod. The build never waits for Cameron's runs (spec section 6: running the script before the rest ships is safe); the ops worktree is removed only on Cameron's explicit cleanup ask.
 
 ---
 
@@ -1806,9 +1826,9 @@ Also update the existing `bucketsSumToAudience` helper in the S2 block:
   }
 ```
 
-- [ ] **Step 3: Write the failing DynamoDB integration case (Review Focus 5: a share mid-send at deploy)**
+- [ ] **Step 3: Write the DynamoDB VERIFICATION case (Review Focus 5: a share mid-send at deploy)**
 
-In `app/test/broadcastsRepo.integration.test.ts`, inside the DynamoDB Local describe (the repo is bound as `broadcasts`, `:61`), add:
+This case is not red-green: Task 6 changes nothing in `bumpStats`, so its outcome is whatever DynamoDB does with `ADD stats.#k :v` when the nested key is ABSENT under an existing map - no code in the repo relies on that today (every other `ADD` target is top-level), so it is UNVERIFIED until this runs. GREEN: DynamoDB creates the nested counter, nothing more to do. RED (`ValidationException`): change `bumpStats` (`app/src/repos/broadcastsRepo.ts:691-732`) to the SET idiom for every counter - `SET stats.#k = if_not_exists(stats.#k, :zero) + :v` per present field (still one atomic UpdateItem; the file's lifecycle test covers the rest) - and note the choice in the commit message. Either way the case stays as a pin. In `app/test/broadcastsRepo.integration.test.ts`, inside the DynamoDB Local describe (the repo is bound as `broadcasts`, `:61`), add:
 
 ```ts
   it('share-skip-fix D7: bumpStats ADDs skipped_other onto a persisted stats map that predates the field (a share mid-send at deploy)', async () => {
@@ -1850,7 +1870,7 @@ In `dashboard/src/routes/broadcasts/StatChips.test.tsx`, add inside `describe('S
 - [ ] **Step 5: Run all of them to verify they fail**
 
 Run: `cd app; npx vitest run test/deriveBroadcastStats.test.ts test/broadcastFanOut.test.ts test/broadcastsRepo.integration.test.ts` and `cd dashboard; npx vitest run src/routes/broadcasts/StatChips.test.tsx`
-Expected: FAIL (`skipped_other` undefined / not on the type; reasons absent; chip shows 5 not 9).
+Expected: FAIL on the derive tests, the fan-out tests and the chip test (`skipped_other` undefined / not on the type; reasons absent; chip shows 5 not 9). The Step 3 integration case reports whatever DynamoDB does (see Step 3); record which.
 
 - [ ] **Step 6: Implement the bucket + reasons**
 
@@ -2041,7 +2061,7 @@ In `app/test/broadcastApi.test.ts`, add near the draft-create tests:
 
 - [ ] **Step 2: Write the fan-out tests**
 
-Red before this task: the D4 test (a manual conversation refuses the share today) and the reason/bucket assertions on `c-del`. Regression PINS (already green today, kept as guards): the I1 opted-out/no-consent rows, the I2 test, the phone#-keyed test, the fan-out I8 test. In `app/test/broadcastFanOut.test.ts`:
+Red before this task: the D4 test only (a manual conversation refuses the share today). Regression PINS (already green once Task 6 has landed, kept as guards): the whole I1 test - `c-del` reaches the wrapper, whose deleted gate refuses it `contact_deleted` (`sendMessage.ts:324-327`; the harness `findByPhone` returns soft-deleted contacts) and Task 6's refusal branch files it under `skipped_other`; `c-both` hits Task 6's opt-out-first fence - plus the I2 test, the phone#-keyed test and the fan-out I8 test. In `app/test/broadcastFanOut.test.ts`:
 
 ```ts
   it('share-skip-fix D4: a DASHBOARD share reaches a switched-off (manual) conversation - sent as a person, never breaker-metered', async () => {
@@ -2169,7 +2189,7 @@ In `app/test/sendMessage.test.ts`, inside the JIT-consent `describe` (`:584-661`
 - [ ] **Step 4: Run all three to verify the red ones fail**
 
 Run: `cd app; npx vitest run test/broadcastApi.test.ts test/broadcastFanOut.test.ts test/sendMessage.test.ts`
-Expected: FAIL on: the route test (`created_via` undefined), the D4 fan-out test (the manual conversation refuses), the `c-del`/`c-both` reason assertions, and the wrapper test (`recipient` is not a known input, so the typecheck and the assertions fail). The pins listed in Step 2 pass already.
+Expected: FAIL on: the route test (`created_via` undefined), the D4 fan-out test (the manual conversation refuses), and the wrapper test (`recipient` is not a known input, so the typecheck and the assertions fail). The pins listed in Step 2 pass already.
 
 - [ ] **Step 5: Implement**
 
@@ -2646,7 +2666,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing pure-function test**
 
-Append to `dashboard/src/routes/broadcasts/broadcastFormat.test.ts` (it exists; add `shareRecipientReason` and `presentShareLabel` - Task 11 - to its existing import from `./broadcastFormat.js`, and `import type { BroadcastStats } from '../../api/index.js';` for Task 11):
+Append to `dashboard/src/routes/broadcasts/broadcastFormat.test.ts` (it exists; add ONLY `shareRecipientReason` to its existing import from `./broadcastFormat.js` - Task 11 adds its own import when its function exists; the dashboard typecheck covers test files, so an import of a not-yet-written export fails this task's gate):
 
 ```ts
 describe('shareRecipientReason (share-skip-fix D7)', () => {
@@ -2687,7 +2707,7 @@ describe('shareRecipientReason (share-skip-fix D7)', () => {
 
 - [ ] **Step 2: Write the failing badge tests**
 
-In `dashboard/src/routes/broadcasts/StatChips.test.tsx`, inside `describe('DeliveryBadge', ...)`, add:
+In `dashboard/src/routes/broadcasts/StatChips.test.tsx`, inside `describe('DeliveryBadge', ...)`, REPLACE the test `shows just the Failed label when no error code is supplied` (`:154-158`; after this task a code-less failed row reads "Failed - Delivery failed", so its title would state the opposite of the behavior) with the second test below, and add the first:
 
 ```tsx
   it('share-skip-fix D7: a skipped row appends its reason, and a code-less legacy skip the disjunction', () => {
@@ -2700,9 +2720,11 @@ In `dashboard/src/routes/broadcasts/StatChips.test.tsx`, inside `describe('Deliv
     expect(screen.getByText(/Opted out or number unreachable/)).toBeInTheDocument();
   });
 
-  it('share-skip-fix D7: a failed row with no code reads Delivery failed; no_contact has its own reason', () => {
+  it('share-skip-fix D7: a failed row with no code reads Delivery failed (no raw code, no "error"); no_contact has its own reason', () => {
     const { rerender } = render(<DeliveryBadge status="failed" />);
+    expect(screen.getByText('Failed')).toBeInTheDocument();
     expect(screen.getByText(/Delivery failed/)).toBeInTheDocument();
+    expect(screen.queryByText(/error/i)).not.toBeInTheDocument();
     rerender(<DeliveryBadge status="failed" errorCode="no_contact" />);
     expect(screen.getByText(/No contact or phone on file/)).toBeInTheDocument();
   });
@@ -2814,7 +2836,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `dashboard/src/routes/broadcasts/broadcastFormat.test.ts` (`presentShareLabel` and the `BroadcastStats` type were added to the file's top-of-file imports in Task 10):
+Append to `dashboard/src/routes/broadcasts/broadcastFormat.test.ts`, adding `presentShareLabel` to the file's existing import from `./broadcastFormat.js` and `import type { BroadcastStats } from '../../api/index.js';` at the top (both used below):
 
 ```ts
 function stats(over: Partial<BroadcastStats> = {}): BroadcastStats {
@@ -3252,8 +3274,13 @@ import { expectTodayReady } from '../../support/today.js';
 //      "Not sent" (D6), its row says why (D7), and once consent is recorded the
 //      next share of the property does NOT flag them "Already sent" (D5: a
 //      skipped slot never counts).
-//   3. A share whose only recipient FAILED (carrier 30007) keeps flagging them
-//      "Already sent" - the interim rule, pinned as such (D5; Branch B replaces it).
+//   3. A recipient whose text FAILED (carrier 30007) inside a share that still
+//      finalized "sent" keeps their "Already sent" flag - the interim rule,
+//      pinned as such (D5; Branch B replaces it). The share carries a SECOND,
+//      delivering recipient on purpose: a one-recipient share whose only text
+//      fails finalizes `failed` and is excluded whole (today's rule, spec
+//      section 1 item 7), and the fake's failure lands asynchronously, so a
+//      single-recipient version of this test would race finalize.
 // Sends are proven through the fake-twilio thread store, never real SMS.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const DARIO = { contactId: 'contact-tenant-0002', phone: '+15550100004', firstName: 'Dario' };
@@ -3315,16 +3342,16 @@ async function recordConsent(request: APIRequestContext, contactId: string): Pro
   expect(res.ok()).toBeTruthy();
 }
 
-/** Share `unitId` with exactly `contactId` through the API (a seeded draft sent
+/** Share `unitId` with exactly `contactIds` through the API (a seeded draft sent
  *  by explicit selection - the same route the dashboard's Send button posts). */
-async function shareViaApi(request: APIRequestContext, unitId: string, contactId: string): Promise<string> {
+async function shareViaApi(request: APIRequestContext, unitId: string, contactIds: string[]): Promise<string> {
   const draft = await request.post(`${NEXT}/api/broadcasts`, {
-    data: { unitId, body_template: '[Address] [FlyerLink]', seedContactIds: [contactId] },
+    data: { unitId, body_template: '[Address] [FlyerLink]', seedContactIds: contactIds },
   });
   expect(draft.ok()).toBeTruthy();
   const broadcastId = (await draft.json()).broadcastId as string;
   const send = await request.post(`${NEXT}/api/broadcasts/${broadcastId}/send`, {
-    data: { recipientContactIds: [contactId] },
+    data: { recipientContactIds: contactIds },
   });
   expect(send.ok()).toBeTruthy();
   return broadcastId;
@@ -3408,7 +3435,7 @@ test.describe('share-skip-fix - one-to-one shares', () => {
     const stamp = `${Date.now()}`.slice(-6);
     const { unitId } = await createUnitViaApi(page.request, stamp);
     const noConsent = await createTenant(page.request, `Skipme${stamp}`, { consent: false });
-    const broadcastId = await shareViaApi(page.request, unitId, noConsent.contactId);
+    const broadcastId = await shareViaApi(page.request, unitId, [noConsent.contactId]);
 
     // D6 + D7 on the results page: the one recipient was skipped for consent.
     await page.goto(`${NEXT}/broadcasts/${broadcastId}`);
@@ -3432,28 +3459,38 @@ test.describe('share-skip-fix - one-to-one shares', () => {
     await expect(row.getByRole('checkbox')).toBeChecked();
   });
 
-  test('a share whose only recipient FAILED still flags them "Already sent" (the interim rule, pinned)', async ({
+  test('a recipient whose text FAILED, in a share that still finalized sent, stays "Already sent" (the interim rule, pinned)', async ({
     page,
     request,
   }) => {
     await devLogin(page);
     const stamp = `${Date.now()}`.slice(-6);
     const { unitId } = await createUnitViaApi(page.request, stamp);
+    const fine = await createTenant(page.request, `Fineme${stamp}`, { consent: true });
     const failing = await createTenant(page.request, `Failme${stamp}`, { consent: true });
-    // Arm the NEXT message to this handset with a carrier failure.
+    // Arm the NEXT message to the failing handset with a carrier failure. The
+    // fake fails it ASYNCHRONOUSLY (a status callback ~300 ms after the send),
+    // so the share also carries a normal recipient: with one recipient the
+    // callback could land before finalize and the share would close `failed`
+    // and be excluded whole - a real rule, not a flake. Two recipients make
+    // the share finalize `sent` whatever the timing.
     await setDeliveryOutcome(request, {
       partyNumber: failing.phone,
       profile: { kind: 'fail', failState: 'failed', errorCode: '30007' },
     });
-    const broadcastId = await shareViaApi(page.request, unitId, failing.contactId);
+    const broadcastId = await shareViaApi(page.request, unitId, [fine.contactId, failing.contactId]);
 
-    // D7 on a failed row: the carrier reason, from the shared map.
+    // D7 on a failed row: the carrier reason, from the shared map; the other
+    // row delivers, so the share itself reads Sent.
     await page.goto(`${NEXT}/broadcasts/${broadcastId}`);
     const recipients = page.getByRole('list', { name: 'Recipients' });
     await expect(recipients.getByText('Failed').first()).toBeVisible({ timeout: 15_000 });
     await expect(recipients.getByText(/Carrier filtered the message/)).toBeVisible({ timeout: 15_000 });
+    await expect(recipients.getByText('Delivered').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('header').getByText('Sent', { exact: true })).toBeVisible({ timeout: 15_000 });
 
-    // D5 (failed -> still flagged, interim): the next share of the property flags them.
+    // D5 (failed -> still flagged, interim): the next share of the property flags
+    // the failed recipient exactly as it flags the delivered one.
     const row = await openReviewRow(page, unitId, failing.contactId, failing.firstName);
     await expect(row.getByText('Already sent')).toBeVisible();
     await expect(row.getByRole('checkbox')).toBeChecked(); // seeded, so still checked

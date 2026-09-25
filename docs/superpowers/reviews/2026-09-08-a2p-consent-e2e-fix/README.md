@@ -40,14 +40,19 @@ point-in-time `.superpowers/consent-evidence/` paths and the handback's
 "Branch is intentionally unmerged"; this README is the only note of the merge
 and the move.
 
-## The ORIGINAL red evidence lives in another worktree
+## The ORIGINAL red evidence came from another worktree
 
 `adjudication.md` also cites
 `W:\tmp\outbound-mms-scroll-recheck\.superpowers\scroll-recheck\full-suite-ca4317c8` -
 the full-suite run that produced the failure, with its trace. That worktree
-(`codex/outbound-mms-scroll-recheck`) was NOT part of this retirement and still
-exists. Preserve that directory before retiring it, or the adjudication loses its
-primary evidence.
+(`codex/outbound-mms-scroll-recheck`) was retired later the same day, after its
+whole `.superpowers/` was copied out and SHA-256 verified. The run now lives at:
+
+```
+W:\tmp\_preserved-artifacts\outbound-mms-scroll-recheck-20260924\.superpowers\scroll-recheck\full-suite-ca4317c8\
+```
+
+See [that record's README](../2026-09-07-outbound-mms-scroll-recheck/README.md).
 
 ## Scope guard, as recorded
 

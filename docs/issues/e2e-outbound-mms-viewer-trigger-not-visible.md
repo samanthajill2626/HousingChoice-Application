@@ -48,6 +48,12 @@ original failure with a three-test sequence, reproducing it in the isolated
 case with the permanent fixture, and making both pass without weakening the
 scroll contract. Unrelated rotating scenario failures remain a separate issue.
 
+**Duplicate closed (2026-09-24).** The same failure was filed in parallel as
+[`outbound-mms-viewer-trigger-visibility-full-suite`](outbound-mms-viewer-trigger-visibility-full-suite.md)
+from the `feat/comms-clickable-links` final gate (266 passed / 1 failed, 18.5m,
+failing at `outbound-mms.spec.ts:591:42`; the file then passed alone twice). It
+is closed as a duplicate of this issue.
+
 ## Historical sightings and pre-diagnosis hypotheses
 
 The observations below are retained as history. The former full-suite-only and

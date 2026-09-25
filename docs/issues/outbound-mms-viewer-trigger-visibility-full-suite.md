@@ -3,11 +3,27 @@ id: outbound-mms-viewer-trigger-visibility-full-suite
 title: Outbound-MMS viewer trigger can be non-visible only in the full E2E suite
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-09-02
-refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:587-625, docs/superpowers/reviews/2026-09-02-comms-clickable-links/final-gate-adjudication.md
+resolved: 2026-09-24
+refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:587-625, docs/superpowers/reviews/2026-09-02-comms-clickable-links/final-gate-adjudication.md, docs/issues/e2e-outbound-mms-viewer-trigger-not-visible.md
 ---
+
+**Resolution (2026-09-24) - duplicate.** This is the same failure as
+[`e2e-outbound-mms-viewer-trigger-not-visible`](e2e-outbound-mms-viewer-trigger-not-visible.md),
+filed in parallel the same day and fixed there in `f8d72a2e` (2026-09-07).
+Same test (`outbound-mms.spec.ts:517`, case (a)); same throw site - the spec's
+only `trigger is not visible`, raised inside the `trigger.evaluate` at `:591`,
+and this run's log reads `outbound-mms.spec.ts:591:42`; and the same
+pass-alone / fail-in-suite shape. The canonical issue's diagnosis explains that
+shape and shows it is not full-suite-only: earlier specs leave MMS history in
+the Timeline, so the conditional 180px cap was skipped and centering pushed the
+trigger below the viewport; a three-test sequence reproduces it. A full suite on
+the fixed code (`ca4317c8`, recorded in
+`docs/superpowers/reviews/2026-09-08-a2p-consent-e2e-fix/adjudication.md`)
+passed all six outbound-MMS cases. Kept rather than deleted, per the
+[issue lifecycle](README.md#lifecycle); the original report follows.
 
 **Problem.** A full hermetic E2E run on 2026-09-02 failed the outbound-MMS
 image-viewer test while arranging its scroll owners: `trigger.evaluate` raised

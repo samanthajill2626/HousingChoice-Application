@@ -539,8 +539,9 @@ describe('RecipientPreview — seeded recipients', () => {
   });
 });
 
-// ── Resolved 1:1 guard (C1): the body names ONE tenant, so it must reach exactly
-// that tenant — the add-a-tenant search is hidden and Send is blocked otherwise. ──
+// -- Resolved 1:1 guard (C1): the message was composed for ONE tenant, so it must
+// reach exactly that tenant - the add-a-tenant search is hidden and Send is
+// blocked otherwise. --
 describe('RecipientPreview — resolved 1:1 audience guard', () => {
   const resolvedFor = { contactId: 'c1', name: 'Brianna Smith' };
 

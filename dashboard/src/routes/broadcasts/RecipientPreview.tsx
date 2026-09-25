@@ -64,10 +64,11 @@ export interface RecipientPreviewProps {
    *  (spec 2026-07-10): a non-Available unit's flyer link is dead, so the send
    *  is blocked behind a "Make Available & send" dialog. */
   unitId?: string;
-  /** Resolved 1:1 mode (matching sends): the body was rendered with ONE tenant's
-   *  name baked in ("Hi Brianna, ..."), so it must reach exactly that tenant and
-   *  nobody else. When set: the add-a-tenant search is hidden, and Send is blocked
-   *  unless the checked set is exactly [contactId]. */
+  /** Resolved 1:1 mode (matching sends): the message was composed for exactly
+   *  ONE tenant (the one-to-one default is the address and the flyer link,
+   *  share-skip-fix D8, and any edit was written for them), so it must reach
+   *  exactly that tenant and nobody else. When set: the add-a-tenant search is
+   *  hidden, and Send is blocked unless the checked set is exactly [contactId]. */
   resolvedFor?: { contactId: string; name: string };
 }
 
@@ -127,9 +128,10 @@ export function RecipientPreview({
   const [checkingUnit, setCheckingUnit] = useState(false);
 
   const checkedCount = rows.filter((r) => r.checked).length;
-  // Resolved 1:1 mode: the body names ONE tenant, so the send must land on exactly
-  // that contactId — no more, no fewer. A mismatched selection (extra recipients,
-  // or the seeded row unchecked) hard-blocks Send behind an inline explanation.
+  // Resolved 1:1 mode: the message was composed for ONE tenant, so the send must
+  // land on exactly that contactId - no more, no fewer. A mismatched selection
+  // (extra recipients, or the seeded row unchecked) hard-blocks Send behind an
+  // inline explanation.
   const resolvedMismatch =
     resolvedFor !== undefined &&
     !(checkedCount === 1 && rows.some((r) => r.checked && r.contactId === resolvedFor.contactId));
@@ -441,7 +443,7 @@ export function RecipientPreview({
       )}
 
       {/* Add a tenant the filter didn't catch. Hidden in resolved 1:1 mode: the
-          body is written for one named tenant, so a broader audience is unsafe. */}
+          message was composed for one tenant, so a broader audience is unsafe. */}
       {resolvedFor === undefined ? (
         <>
           <div className={styles.addRow}>

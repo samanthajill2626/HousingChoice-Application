@@ -39,7 +39,7 @@ import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
 import {
   DEFAULT_SEND_TEMPLATE,
-  resolveTemplateForTenant,
+  ONE_TO_ONE_SEND_TEMPLATE,
   resolveTemplateForUnit,
 } from './resolveTemplate.js';
 import { useComposerDraft } from './useComposerDraft.js';
@@ -176,24 +176,27 @@ export function BroadcastComposer(): React.JSX.Element {
     return () => controller.abort();
   }, [effectiveUnitId]);
 
-  // Auto-seed the resolved default message for the single recipient: only in
-  // resolved mode, only with a property attached (no unit -> leave the body
-  // alone until the operator types or picks one), and only while the operator
-  // has not hand-edited it. Re-seeds on unit/tenant/flyer change. Written via
-  // a guarded state update (NOT the edit-tracking onChange) so it never marks
-  // the body as edited. The flyer prefers the server's flyerUrl, falling back to
-  // the same-origin funnel until the first draft exists.
+  // Auto-seed the one-to-one default for the single recipient (share-skip-fix
+  // D8): the property's one-line address, one space, the flyer link - no name,
+  // no greeting, no beds, no rent. Only in resolved mode, only with a property
+  // attached (no unit -> leave the body alone until the operator types or picks
+  // one), and only while the operator has not hand-edited it. Re-seeds on
+  // unit/flyer change. Written via a guarded state update (NOT the edit-tracking
+  // onChange) so it never marks the body as edited. The flyer prefers the
+  // server's flyerUrl, falling back to the same-origin funnel until the first
+  // draft exists.
   useEffect(() => {
     if (!resolvedMode || unit === null || bodyEdited) return;
     const flyer =
       draft.flyerUrl ?? (effectiveUnitId !== undefined ? flyerLinkFor(effectiveUnitId) : undefined);
     setMessage((current) =>
       current.edited ? current : {
-        body: resolveTemplateForTenant(DEFAULT_SEND_TEMPLATE, unit, seedContact?.firstName, flyer),
+        // share-skip-fix D8: one recipient -> address + flyer link only.
+        body: resolveTemplateForUnit(ONE_TO_ONE_SEND_TEMPLATE, unit, flyer),
         edited: false,
       },
     );
-  }, [resolvedMode, unit, bodyEdited, draft.flyerUrl, effectiveUnitId, seedContact]);
+  }, [resolvedMode, unit, bodyEdited, draft.flyerUrl, effectiveUnitId]);
 
   // Multi-recipient prefill (property-first, spec 2026-07-13): the moment a
   // property is attached OUTSIDE resolved mode, fill the message with its REAL
@@ -259,8 +262,9 @@ export function BroadcastComposer(): React.JSX.Element {
 
   // "Add more tenants by filters" - the one-way flip out of seeds-only. Leaving
   // resolved mode with a unit attached always resets the body: the resolved text
-  // names ONE tenant and must never send to a broader audience. When the operator
-  // has edited that text, confirm before discarding (cancel aborts the flip);
+  // was composed for ONE tenant (and may have been edited for them), so it must
+  // never send to a broader audience. When the operator has edited that text,
+  // confirm before discarding (cancel aborts the flip);
   // when it is still the untouched auto-seed there is nothing to protect, so the
   // reset is silent. The body clears and the multi-recipient prefill effect
   // refills it with the property's details + a [TenantName] token. A no-unit

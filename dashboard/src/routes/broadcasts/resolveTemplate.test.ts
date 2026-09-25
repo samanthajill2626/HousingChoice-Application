@@ -8,6 +8,7 @@ import {
   resolveTemplateForTenant,
   resolveTemplateForUnit,
   DEFAULT_SEND_TEMPLATE,
+  ONE_TO_ONE_SEND_TEMPLATE,
 } from './resolveTemplate.js';
 
 /** A minimal, properly-typed UnitItem fixture (only unitId/landlordId/status are
@@ -100,5 +101,28 @@ describe('resolveTemplateForTenant', () => {
     );
     expect(out).not.toContain('NaN');
     expect(out).not.toContain('Infinity');
+  });
+});
+
+describe('ONE_TO_ONE_SEND_TEMPLATE (share-skip-fix D8)', () => {
+  it('is the one-line address, ONE space, the flyer link - nothing else', () => {
+    expect(ONE_TO_ONE_SEND_TEMPLATE).toBe('[Address] [FlyerLink]');
+    expect(resolveTemplateForUnit(ONE_TO_ONE_SEND_TEMPLATE, makeUnit(), 'https://x/p/u1?cta=text')).toBe(
+      '44 Clifton Rd NE, Atlanta, GA 30307 https://x/p/u1?cta=text',
+    );
+    // A structured address renders the server's one-line form.
+    expect(
+      resolveTemplateForUnit(
+        ONE_TO_ONE_SEND_TEMPLATE,
+        makeUnit({ address: { line1: '77 Peachtree St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' } }),
+        'https://x/p/u1?cta=text',
+      ),
+    ).toBe('77 Peachtree St Apt 4, Atlanta, GA 30303 https://x/p/u1?cta=text');
+  });
+
+  it('the blast template is unchanged', () => {
+    expect(DEFAULT_SEND_TEMPLATE).toBe(
+      'Hi [TenantName], a [Beds]-bedroom home at [Address] is available for [Rent]/mo. Details: [FlyerLink]',
+    );
   });
 });

@@ -368,10 +368,13 @@ describe('BroadcastComposer - ?contactId= seeding', () => {
 describe('BroadcastComposer - resolved message mode (single recipient)', () => {
   it('a single seed + attached property auto-seeds the resolved text and hides the merge chips', async () => {
     renderComposer('?unitId=unit-0001&contactId=c-seed');
-    // The editor auto-seeds the resolved DEFAULT template for the one tenant.
-    await waitFor(() =>
-      expect((screen.getByLabelText('Message') as HTMLTextAreaElement).value).toContain('Hi Tasha,'),
-    );
+    // share-skip-fix D8: the one-recipient default is the address + the flyer
+    // link, nothing else - no greeting, no beds, no rent. (The fallback link:
+    // this file's createBroadcast mock returns no flyerUrl.)
+    await waitFor(() => {
+      const v = (screen.getByLabelText('Message') as HTMLTextAreaElement).value;
+      expect(v).toMatch(/^1450 Joseph E\. Boone Blvd NW, Atlanta, GA 30314 \S+\/p\/unit-0001$/);
+    });
     // Resolved mode: the text IS the message, so no merge-field chips.
     expect(screen.queryByRole('group', { name: 'Insert a merge field' })).not.toBeInTheDocument();
   });
@@ -381,10 +384,10 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
     const u = userEvent.setup();
     renderComposer('?unitId=unit-0001&contactId=c-seed');
     const ta = (await screen.findByLabelText('Message')) as HTMLTextAreaElement;
-    await waitFor(() => expect(ta.value).toContain('Hi Tasha,'));
+    await waitFor(() => expect(ta.value).toMatch(/^1450 Joseph E\. Boone Blvd NW/));
     // No manual edit -> nothing to protect: the flip proceeds WITHOUT a confirm,
-    // and the resolved single-tenant text must NOT survive into the broader
-    // audience (it would send "Hi Tasha," to every filtered recipient).
+    // and the resolved one-to-one text (composed for this one tenant) must NOT
+    // survive into the broader audience - the blast default takes over.
     await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
@@ -392,6 +395,7 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
     // [TenantName] as a token (never the resolved single-tenant text).
     await waitFor(() => {
       expect(ta.value).toContain('Hi [TenantName],');
+      expect(ta.value).not.toMatch(/^1450 Joseph/);
       expect(ta.value).not.toContain('Tasha');
     });
   });
@@ -401,7 +405,7 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
     const u = userEvent.setup();
     renderComposer('?unitId=unit-0001&contactId=c-seed');
     const ta = await screen.findByLabelText('Message');
-    await waitFor(() => expect((ta as HTMLTextAreaElement).value).toContain('Hi Tasha,'));
+    await waitFor(() => expect((ta as HTMLTextAreaElement).value).toMatch(/^1450 Joseph E\. Boone Blvd NW/));
     await u.type(ta, ' Come see it!'); // a manual edit -> bodyEdited
     await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
     expect(confirmSpy).toHaveBeenCalledWith(

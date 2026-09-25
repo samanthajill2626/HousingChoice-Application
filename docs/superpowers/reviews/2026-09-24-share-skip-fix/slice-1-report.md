@@ -68,7 +68,7 @@ Records: 022e890c (build research + adjudications), 79641c09 (slice-1 review rou
 - `npm run smoke` -> `smoke-dist: OK - 1413 import specifier(s) across 248 emitted file(s) resolve under plain Node.` / `smoke EXIT=0`
 - `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` (11 files) -> `eslint EXIT=1`, exactly the two PRE-EXISTING errors (present at the merge base at :739:59 / :818:59, shifted by the Task 3 edit):
   `app/test/importApply.integration.test.ts 745:59 error Unexpected any @typescript-eslint/no-explicit-any` and `824:59` the same - no new errors (gate-5 rule: no NEW errors in touched files).
-- `npm test` -> NPM_TEST_RESULT_PLACEHOLDER
+- `npm test` -> `EXIT=0`. Test Files per workspace (app; dashboard; e2e; fake-twilio; fake-twilio/web): 369 passed (369); 191 passed (191); 21 passed (21); 34 passed (34); 13 passed (13). `[dynamoAdmin]` lines: 0 (a nonzero count would be one real container fault, per AGENTS.md).
 - Slice suites (implementer, one file per run, at 7ecaf254): stageClient 29/29,
   conversationAutomationCensus 2/2, enableConversationAutomation 10/10, unreadFeed 26/26,
   dynamoAccessKeyGuard 15/15, m14.integration 11/11, importGroupGuards 16/16,
@@ -149,4 +149,10 @@ report back; the handback carries them as PENDING until then.
 
 ## Hand-off SHA
 
-HANDOFF_SHA_PLACEHOLDER
+**Hand-off SHA: `280186f3`** - a docs-only commit (this report plus the three
+issue filings) on top of the proven source SHA `7ecaf254`. Nothing under
+`app/`, `e2e/` or `RUNBOOK.md` changes between the two, so every gate and
+rehearsal result above applies to `280186f3` verbatim. The planner cuts the
+pinned ops worktree at this SHA: `git worktree add --detach
+W:\tmp\share-skip-fix-ops 280186f3` from the shared repo, `npm ci` there, then
+census / dry run / apply, dev then prod.

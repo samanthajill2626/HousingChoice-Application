@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 6 - adversarial review closed after round 4 (precision-only); awaiting Cameron's spec gate
+Status: DRAFT 7 - Option B ("page one persists") after Cameron's spec gate; one precision re-review pending
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -8,6 +8,7 @@ Worktree: `W:\tmp\inbox-rows-timestamps`
 Base: `main` at `cd8e8ddd15158e532d452383015f4e57115ff1d1`
 Tracker: Sam's improvements list item #17 (support work under Amendment No. 2)
 Review records: `docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/`
+Dropped from this mission (tracked): `docs/issues/inbox-loaded-pages-survive-refresh.md`
 
 ## 1. Outcome
 
@@ -15,11 +16,18 @@ Sam opens the Inbox and sees up to 100 conversations before she has to do
 anything. Scrolling to the bottom loads the next 100 by itself. Every row shows
 when its last activity happened, on the right, the way her phone's Messages app
 does it: a clock time for today, "Yesterday", a month-and-day for anything
-earlier this year, and month-day-year for other years. The list she has built
-by scrolling survives two things that wipe it today: a live update (a text or
-call arriving, a row marked read) and the browser's back button after she opens
-a conversation. When a background refresh fails, the rows she has stay on
-screen and a banner says the refresh failed, with a Retry.
+earlier this year, and month-day-year for other years. The first page of the
+list (100 rows) and her place in it survive two things that wipe them today: a
+live update (a text or call arriving, a row marked read) and the browser's
+back button after she opens a conversation. When a background refresh fails,
+the rows she has stay on screen and a banner says the refresh failed, with a
+Retry.
+
+Rows she loaded past the first page reload as she scrolls after a refresh
+rather than being kept across it. Keeping them was designed and reviewed
+(DRAFT 5 of this spec, commit `b53a9e8a`) and is deferred as
+`inbox-loaded-pages-survive-refresh` because it carried about half the build
+hours for a case that begins at row 101.
 
 Nothing tenant-, landlord- or partner-facing changes. No message-catalog copy is
 added. The inbox API's wire shape (`InboxRow`, `InboxPage`) is unchanged; the
@@ -48,19 +56,15 @@ as today's 30-row page. That server slice is separable (section 5.10).
   (`group-text-conversion.spec.ts`; the lean seed's connecting group).
 - Under `filter=unread`, `limit` counts ALL rows in one unified walk of the
   `byUnread` index ordered by the newest UNREAD thread; identity is a seen-set
-  of contact ids carried in the cursor, not the newest-conversation rule. A
-  multi-thread contact DISPLAYS its newest thread of any state, so its
-  displayed `lastActivityAt` can be newer than its position in the walk. A
-  budget exit returns a short page with a cursor and `truncated`; the depth cap
-  returns `nextCursor: null` with `truncated`; a zero-row page carries no
-  cursor.
+  of contact ids carried in the cursor. A budget exit returns a short page
+  with a cursor and `truncated`; the depth cap returns `nextCursor: null` with
+  `truncated`; a zero-row page carries no cursor.
 - Under `filter=unknown`, rows come from the contacts `byTypeStatus`
   partition in QUEUE order (untriaged first, then by status block, ids random
-  within a block), NOT in activity order. A new unknown number can land
-  anywhere in page one. A budget exit returns `{ rows: [], nextCursor }`, which
-  the server deliberately does NOT flag as a failure: it is a normal answer
-  ("nothing on this page yet, keep looking"), and the dashboard renders
-  `emptyMoreCopy()` for it.
+  within a block), NOT in activity order. A budget exit returns
+  `{ rows: [], nextCursor }`, which the server deliberately does NOT flag as a
+  failure: it is a normal answer ("nothing on this page yet, keep looking"),
+  and the dashboard renders `emptyMoreCopy()` for it.
 - Under `filter=groups`, rows are group texts only, paged newest-first on the
   `group_open` partition by `last_activity_at` with their own tagged cursor.
 - Every `InboxRow` carries `lastActivityAt` (ISO). `InboxRow.tsx` never renders
@@ -75,7 +79,8 @@ as today's 30-row page. That server slice is separable (section 5.10).
   `setBase(pageData.rows)` - the WHOLE list is replaced by page one. Rows
   appended by Load more are discarded. A `loadMore` in flight when a first-page
   read commits is discarded too (`firstPageGenRef`). So any inbox-affecting
-  event collapses the list to page one. `loadMore` appends without dedupe.
+  event collapses the list to page one AND, because the page re-renders from
+  `loading`, loses the scroll position. `loadMore` appends without dedupe.
 - Navigation: the app uses `BrowserRouter` + `<Routes>`; `/inbox` mounts
   `<Inbox />` and `/contacts/:id` or `/conversations/:id` unmounts it. There is
   no scroll restoration. Back re-mounts the page: status `loading`, first page
@@ -92,15 +97,17 @@ as today's 30-row page. That server slice is separable (section 5.10).
 - The page's scroll container is `<main className={styles.content}>` in
   `AppFrame.tsx` (`overflow-y: auto`, no `overflow-anchor` rule), not the
   window. When the Inbox is mounted, its page root is the only child of that
-  container. The contact and conversation pages that replace the Inbox are
-  `height: 100%` with their own internally scrolling panes, so after a route
-  swap `main.content` has nothing to scroll and its `scrollTop` reads 0.
-  Chromium's CSS scroll anchoring is on by default: when content is inserted
-  above the viewport's anchor node the browser raises `scrollTop` to keep that
-  node in place. `overflow-anchor: none` on an element excludes that element
-  and its subtree from ANCHOR SELECTION; it does not turn anchoring off for
-  the scroller, so an excluded list leaves the elements after it (a button)
-  as candidates. The contact timeline opts out on its own scroller
+  container. Nothing in the shell resets the container's `scrollTop` on a
+  route change; today the Inbox's spinner render is what clamps it. The
+  contact and conversation pages that replace the Inbox are `height: 100%`
+  with their own internally scrolling panes, so after a route swap
+  `main.content` has nothing to scroll and its `scrollTop` reads 0. Chromium's
+  CSS scroll anchoring is on by default: when content is inserted above the
+  viewport's anchor node the browser raises `scrollTop` to keep that node in
+  place. `overflow-anchor: none` on an element excludes that element and its
+  subtree from ANCHOR SELECTION; it does not turn anchoring off for the
+  scroller, so an excluded list leaves the elements after it (a button) as
+  candidates. The contact timeline opts out on its own scroller
   (`Timeline.module.css`, `.stream`).
 - The sidebar is 240px wide above the shell's narrow breakpoint; the shell's
   media query is `max-width: 767.98px` (`useNavChrome.ts`,
@@ -190,9 +197,13 @@ as today's 30-row page. That server slice is separable (section 5.10).
 5. The inbox uses `2:14 PM`, not the timeline's `2:14p`. The inbox is the
    screen Sam compares to her phone; the timeline's format is filed as a
    separate follow-up (section 9), not changed here.
-6. The loaded list persists across live updates and the back button via an
-   in-memory store keyed by operator, filter and page size, restored on mount
-   and then reconciled.
+6. The list persists across live updates and the back button via an in-memory
+   store keyed by operator, filter and page size, restored on mount and then
+   reconciled. OPTION B (Cameron, 2026-09-25, at the spec gate): what persists
+   across a COMPLETE refresh is page one (`limit` rows) and the scroll
+   position; rows loaded past page one are dropped by the refresh and reload
+   on scroll. Keeping them (DRAFT 5) is deferred, tracked in
+   `docs/issues/inbox-loaded-pages-survive-refresh.md`.
 7. A failed background refresh keeps the rows AND shows the failure: a banner
    above the list with a Retry button. Never a silent stale list, never a blank
    error state over rows that were fine. A server answer that is NOT a failure
@@ -208,14 +219,6 @@ as today's 30-row page. That server slice is separable (section 5.10).
    drop telemetry byte-identical (section 5.10). Separable: if the plan review
    finds it cannot be made equivalent, it is dropped and filed.
 
-Design consequence, not a product decision (section 5.5): the "rows survive a
-live update" guarantee is delivered by a head-plus-tail model on the two tabs
-whose page one is cut by `lastActivityAt` (All, Groups). On Unread and Unknown,
-whose page one is cut by a different key, a COMPLETE refresh replaces the list
-with its fresh page one, and an INCOMPLETE refresh (a budget exit, a
-truncated page) merges its rows in and never removes anything. Scroll position
-is kept on every tab.
-
 ## 4. Scope
 
 ### 4.1 In scope
@@ -224,7 +227,7 @@ is kept on every tab.
   CSS modules and tests; new modules under `dashboard/src/routes/inbox/`:
   `inboxTime.ts` (pure formatter), `inboxListStore.ts` (the store),
   `useAutoLoad.ts` (the observer hook), `inboxListMerge.ts` (the pure merge of
-  5.6 and the pure re-walk fold of 5.8, unit-tested on their own).
+  5.6, unit-tested on its own).
 - `dashboard/src/app/AuthGate.tsx` (the store clear, 5.8) and, if no optional
   accessor exists, `dashboard/src/app/AuthContext.tsx` (an additive
   `useOptionalAuth()` that returns `undefined` without a provider).
@@ -237,10 +240,13 @@ is kept on every tab.
   hermetic `npm run perf:pages` self-QA is a mission gate.
 - `docs/issues/`: resolve `inbox-reconcile-failure-blanks-list`; update the
   reachability paragraph of `seen-set-max-equals-max-inbox-limit`; file the
-  follow-ups in section 9.
+  follow-ups in section 9, including the deferred design.
 
 ### 4.2 Out of scope
 
+- Keeping rows loaded past page one across a complete refresh (the DRAFT 5
+  head-plus-tail model, its boundary rules and its return-time re-walk).
+  Deferred: `docs/issues/inbox-loaded-pages-survive-refresh.md`.
 - One timeline across one-on-one, relay and group rows (tracker #24).
 - Any edit to these files, which three live branches own
   (`feat/share-skip-fix`, `feat/retry-send-window`,
@@ -266,14 +272,6 @@ is kept on every tab.
 - A periodic re-render to roll "2:14 PM" over to "Yesterday" at midnight. Labels
   are computed at render time; a reconcile (any inbox event) or a navigation
   re-renders them. The contact timeline accepts the same thing.
-- Refreshing a loaded tail row for a NON-activity change while the operator
-  stays on the page (another operator's read, a rename or deletion made
-  elsewhere). Section 5.8 refreshes the whole list on every return to the
-  page; section 8 states the residue.
-- Re-reading rows past page one on Unread and Unknown after a return: those
-  tabs replace their list with page one on the first complete refresh (5.6),
-  so a return there restores instantly and then shows page one. Re-reading
-  their tail would be a new decision; it is not made here.
 - Tenant-facing or catalog copy. None exists here.
 
 ## 5. Design
@@ -296,17 +294,15 @@ is kept on every tab.
   a bare `/inbox` and therefore reset to the default: the knob is a URL you
   open (or bookmark), not a setting.
 - Every `getInbox` call from the hook uses the hook's `limit`: the initial
-  load, Retry, the SSE reconcile, the mount reconcile, the tail re-walk, and
-  `loadMore`.
+  load, Retry, the SSE reconcile, the mount reconcile, and `loadMore`.
 
 ### 5.2 Auto-load on scroll
 
 Ownership: `useInbox` owns the ARMED flag (`autoLoadArmed` in `InboxState`,
 persisted in the store) and a `pageEpoch` counter (`InboxState.pageEpoch`,
-bumped ONLY by a committed head read, a committed `loadMore` page, and the
-re-walk's final commit; never by a mark-read/unread commit, the reset, or a
-failure); `Inbox.tsx` owns the DOM (the sentinel and the scroll container) and
-mounts `useAutoLoad`.
+bumped ONLY by a committed head read and a committed `loadMore` page; never by
+a mark-read/unread commit, the reset, or a failure); `Inbox.tsx` owns the DOM
+(the sentinel and the scroll container) and mounts `useAutoLoad`.
 
 - A sentinel `<div aria-hidden="true">` sits after the list and before the Load
   more button, rendered only while `hasMore`. It is empty and not focusable.
@@ -330,12 +326,12 @@ mounts `useAutoLoad`.
     nor `epoch` changed. A head read that installs a cursor also bumps the
     epoch, so the second of those cases fires through the epoch arm once,
     which is the wanted single load.
-- `enabled = hasMore && autoLoadArmed && !loadingMore && !rewalking` (5.8).
-- `intersecting` is reset to `false` whenever the sentinel unmounts (`hasMore`
-  went false), from the effect that owns the observer; when the sentinel
-  returns, the new observer's first callback sets it again. Without that, a
-  stale `true` would fire one load the moment `hasMore` reappears, before any
-  observation.
+  - `intersecting` is reset to `false` whenever the sentinel unmounts
+    (`hasMore` went false), from the effect that owns the observer; when the
+    sentinel returns, the new observer's first callback sets it again.
+    Without that, a stale `true` would fire one load the moment `hasMore`
+    reappears, before any observation.
+- `enabled = hasMore && autoLoadArmed && !loadingMore`.
 - The Inbox PAGE ROOT (`.page`, the only child of the scroll container while
   the Inbox is mounted) gets `overflow-anchor: none`. That excludes the entire
   page subtree - list, sentinel, button, notices - from anchor selection, so
@@ -343,8 +339,8 @@ mounts `useAutoLoad`.
   (a fresh head row, or an appended page that sorts above page one's old
   group rows) push the content and the sentinel DOWN instead of the browser
   raising `scrollTop` to hold something in place. On the `<ul>` alone the
-  exclusion would leave the Load more button as the anchor and the chain
-  would survive (section 2). Consequences: a committed page of `limit` rows
+  exclusion would leave the Load more button as the anchor and auto-load
+  could chain (section 2). Consequences: a committed page of `limit` rows
   pushes the sentinel `limit` row-heights further away, so after a full page
   the sentinel is outside the margin and the epoch-driven re-check finds
   `intersecting` false; only a SHORT page in pixels (a budget exit, a tiny
@@ -353,15 +349,11 @@ mounts `useAutoLoad`.
   budget exit and the expected behavior at a tiny `?limit`. A head read that
   inserts one row moves the operator's reading position by one row height,
   the same as the Messages app.
-- ARMING RULE, in the hook. `autoLoadArmed` is set from the result of the read
-  that installs the CURRENT cursor chain: every committed `loadMore`
-  (`true` iff its page delivered at least one row AFTER dedupe), the re-walk's
-  final commit (`true` iff its last page delivered a row), and every committed
-  head read that REPLACES the chain (the initial load; a complete head read on
-  Unread and Unknown; a head read on All and Groups when the paged tail is
-  empty). A head read that keeps a paged tail leaves it unchanged, because the
-  tail's cursor and the last page result it describes are still the live
-  chain. A failed page leaves it unchanged.
+- ARMING RULE, in the hook. `autoLoadArmed` is set by every committed
+  `loadMore` (`true` iff its page delivered at least one row AFTER dedupe) and
+  by every committed COMPLETE head read (`true` iff the page delivered at
+  least one row); an incomplete head read (5.6 branch I) leaves it unchanged
+  unless the list was empty. A failed page leaves it unchanged.
 - Consequences, each pinned by unit tests:
   - an empty page with a cursor (the Unknown tab's budget exit) disarms; the
     epoch did not change (nothing committed), so nothing re-fires; the manual
@@ -372,10 +364,8 @@ mounts `useAutoLoad`.
     re-enters the margin or the operator clicks;
   - a head read that discarded an in-flight `loadMore` bumps the epoch, so if
     the sentinel is still inside the margin the page is re-issued once;
-  - a restored list restores `autoLoadArmed`; on Unread and Unknown the first
-    complete head read replaces the chain and re-arms from its own result,
-    which is right because the restored cursor is discarded with the old
-    chain.
+  - a restored list restores `autoLoadArmed`; the first complete head read
+    after the restore replaces the chain and re-arms from its own result.
 - In jsdom (`IntersectionObserver` undefined) the hook installs nothing and the
   button alone drives paging. Unit tests inject an observer factory through an
   optional hook argument; Playwright exercises the real one, including the
@@ -480,11 +470,9 @@ authoritative value for every computation, and in React state for rendering:
 
 ```
 interface ListState {
-  head: InboxRowData[];   // the server's page one as of the last head read, in server order,
-                          // plus (All only) additive rows kept across a head read (5.6)
-  tail: InboxRowData[];   // PAGED rows only: rows from loadMore pages in load order, plus
-                          // (All/Groups) paged rows that slid out of the head; deduplicated
-                          // by rowKey; never holds an additive row
+  head: InboxRowData[];   // the server's page one as of the last complete head read, server order
+  tail: InboxRowData[];   // rows from loadMore pages, in load order, deduplicated by rowKey;
+                          // emptied by every complete head read (5.6)
   cursor: string | null;  // the position after the last row of head ++ tail;
                           // null means the loaded list reaches the end of the feed
   groupsTruncated: boolean;
@@ -493,18 +481,17 @@ interface ListState {
   pageEpoch: number;      // bumped per 5.2
 }
 base = [...head, ...tail]   // what serverRowCount, the notices and the Unread narrowing read
-rewalking: boolean          // hook state, NOT part of ListState or the snapshot (5.8)
 ```
 
 - `commitList(next)` is the ONLY writer: it sets `listRef.current = next`,
   calls `setList(next)`, and, when `aliveRef.current` is true and
   `statusRef.current === 'ready'`, saves the snapshot to the store under
   `keyRef.current` (5.8). Every mutation (head merge, `loadMore` append, the
-  re-walk fold, the optimistic commit and rollback in `markRead`/`markUnread`,
-  the reset) computes `next` from `listRef.current` synchronously and calls
-  `commitList`. No functional `setState` updater touches the list, so the
-  saved snapshot is exactly the committed value and never a pre-commit list
-  with a post-commit cursor.
+  optimistic commit and rollback in `markRead`/`markUnread`, the reset)
+  computes `next` from `listRef.current` synchronously and calls `commitList`.
+  No functional `setState` updater touches the list, so the saved snapshot is
+  exactly the committed value and never a pre-commit list with a post-commit
+  cursor.
 - `pending` (the optimistic patches) is mirrored in `pendingRef`, written
   synchronously by `setPatch`/`clearPatch` alongside the state update, so the
   unmount save can read the patch a row click made in the same render that
@@ -513,8 +500,8 @@ rewalking: boolean          // hook state, NOT part of ListState or the snapshot
 - `aliveRef` is set TRUE in the body of the hook's mount effect and FALSE in
   its cleanup, so a StrictMode simulated unmount/remount leaves it true for
   the live instance. `loadMore`'s controller is aborted in the cleanup too. A
-  `loadMore`, re-walk page, `markRead` or `markUnread` that settles while
-  `aliveRef` is false neither commits nor saves.
+  `loadMore`, `markRead` or `markUnread` that settles while `aliveRef` is
+  false neither commits nor saves.
 - THE RESET (filter or limit change) first sets `status: 'loading'` through
   `applyStatus`, THEN commits an empty `ListState`; because the save is gated
   on `statusRef === 'ready'`, the reset never writes an empty snapshot under
@@ -524,18 +511,16 @@ rewalking: boolean          // hook state, NOT part of ListState or the snapshot
   that shares a `conversationId` with an appended row under another kind is
   dropped in favor of the appended one - `dedupeConversations`, below),
   installs its cursor, bumps `pageEpoch`, sets `autoLoadArmed` to whether the
-  page delivered at least one NEW row, and keeps its two staleness guards. The
-  dedupe closes the seen-set gap on Unread: a kept cursor's seen-set never
-  learned the contacts a later head read emitted, so a multi-thread contact
-  that surfaced in the head can be emitted again by the next page. Today's
-  list is not deduped on append because today a head read always resets the
-  cursor.
-- `dedupeConversations(list, freshKeys)`: a pure pass run after EVERY merge
-  (5.6, every branch), every `loadMore` append and the re-walk fold. When two
-  rows share a `conversationId` (a relay group converted in place to a group
-  text: `g:<id>` and `gt:<id>`), the row from the most recent read wins and
-  the other is dropped. This is what makes invariant 9 hold on every path,
-  not only branch P.
+  page delivered at least one NEW row, and keeps its two staleness guards.
+  The dedupe matters after an incomplete head read kept the old cursor
+  (5.6 branch I): on Unread that cursor's seen-set never learned the
+  contacts the head read emitted, so a multi-thread contact can be emitted
+  again by the next page.
+- `dedupeConversations(list, freshKeys)`: a pure pass run after every merge
+  branch and every `loadMore` append. When two rows share a `conversationId`
+  (a relay group converted in place to a group text: `g:<id>` and `gt:<id>`),
+  the row from the most recent read wins and the other is dropped. This is
+  what makes invariant 8 hold on every path.
 - A HEAD READ (initial load, Retry, SSE reconcile, mount reconcile) requests
   `limit` rows and merges per 5.6. The head read is never larger than page
   one, so `?limit=` tunes every read, not only the first.
@@ -546,7 +531,7 @@ rewalking: boolean          // hook state, NOT part of ListState or the snapshot
 
 Inputs on a committed head read: `P` (its rows), `C` (its cursor), its
 `truncated` and `groupsTruncated` flags, the current `ListState`, `limit`,
-`filter`. Definitions shared by every branch:
+`filter`. Definitions:
 
 ```
 additive(row)  := filter === 'all' && (row.kind === 'relay_group' || row.kind === 'group_text')
@@ -555,8 +540,25 @@ headComplete   := !truncated && (C === null || pagedP.length >= limit)
                   // a truncated page, or a short page with a cursor, stopped early and
                   // says nothing about absent rows
 inP            := Set(P.map(rowKey))
-convsInP       := Set(P.map(r => r.conversationId).filter(defined))
 ```
+
+**Branch C (complete head, every filter).** A complete page one is the truth;
+the list becomes it:
+
+```
+head := P; tail := []; cursor := C
+autoLoadArmed := P.length > 0
+flags := from the page
+then dedupeConversations, P's rows winning (a no-op on a fresh page, kept for symmetry)
+```
+
+Rows the operator had loaded past page one are dropped and reload as she
+scrolls (auto-load re-arms from `P`, and the sentinel is at the bottom of
+page one). Additive rows absent from `P` are dropped exactly as today's
+`setBase(P)` drops them (a swallowed relay-list failure hides the relay rows
+until the next read, as today). The scroll position is NOT touched by the
+merge; if the list got shorter than the operator's position the browser
+clamps it.
 
 **Branch I (incomplete head, every filter).** The read stopped early (a budget
 exit or a truncated page, on any tab), so absence proves nothing:
@@ -570,108 +572,19 @@ cursor := (head.length + tail.length was > 0 before this read) ? cursor : C   //
                                                                             // takes the read's cursor
 autoLoadArmed := unchanged (or P.length > 0 when the list was empty)
 flags  := from the page
-then dedupeConversations (5.5), P's rows winning
+then dedupeConversations, P's rows winning
 ```
 
 Nothing is removed (a converted conversation's older-kind row excepted, per
-invariant 9) and nothing is flagged as a failure: a zero-row budget
-exit on Unknown is a normal server answer (section 2). If the list was empty
-before, the result is exactly today's rendering of that page (`emptyMoreCopy`
-beside a live Load more). Rows kept this way are re-examined by the next
-complete head read.
+invariant 8) and nothing is flagged as a failure: a zero-row budget exit on
+Unknown is a normal server answer (section 2). If the list was empty before,
+the result is exactly today's rendering of that page (`emptyMoreCopy` beside
+a live Load more). Rows kept this way are replaced by the next complete head
+read.
 
-**Branch R (complete head; `filter === 'unread'` or `'unknown'`).** Page one
-on these tabs is not cut by `lastActivityAt` (section 2), so no "slid out"
-inference is sound; a complete page one is the truth:
-
-```
-head := P; tail := []; cursor := C
-autoLoadArmed := P.length > 0
-flags := from the page
-```
-
-On Unread, page one (100 rows) is the badge cap, so a replaced tail is the
-uncommon case. On Unknown, the queue is the set of untriaged numbers and page
-one is its front; the tab exists to triage the newest, and rows past page one
-are re-reachable through Load more, so replacing is the honest rendering of a
-queue whose order the client cannot reason about. The store still restores
-rows instantly on both tabs and the scroll position is kept (it clamps if the
-list shrank).
-
-**Branch P (complete head; `filter === 'all'` or `'groups'`).** Page one is
-the newest `limit` paged rows by `lastActivityAt` plus (All) the additive
-rows:
-
-```
-boundary        := min(lastActivityAt) over pagedP, or undefined when pagedP is empty
-hasKind(k)      := P.some(r => r.kind === k)
-oldestGroupInP  := min(lastActivityAt) over P.filter(kind === 'group_text'), or undefined
-
-keepAdditive(oldRow):                                   // old HEAD additive rows only
-  if inP.has(rowKey(oldRow))                    -> false // P's fresh copy wins
-  if oldRow.conversationId in convsInP          -> false // the same conversation came back under
-                                                         // another kind (relay converted to group
-                                                         // text in place): never show it twice
-  if !hasKind(oldRow.kind)                      -> true  // no row of that kind came back: a swallowed
-                                                         // relay-list failure or an empty budget looks
-                                                         // identical to "all closed"; keep rather than
-                                                         // blank (residue in section 8)
-  if oldRow.kind === 'group_text' && groupsTruncated
-     && oldestGroupInP !== undefined
-     && oldRow.lastActivityAt <= oldestGroupInP -> true  // outside the page-one cap, not gone
-  return false                                           // returned every read; absence means closed,
-                                                         // converted or gone
-
-keepPaged(oldRow, wasInHead):
-  if inP.has(rowKey(oldRow))                    -> false
-  if C === null                                 -> false // the feed ended inside the head; gone
-  if !wasInHead                                 -> true  // a loadMore row; the head says nothing
-  return boundary !== undefined && oldRow.lastActivityAt <= boundary
-                                                         // slid out of page one (ties kept: losing a
-                                                         // live row costs more than carrying a gone
-                                                         // one until the next return re-walks it)
-
-keptAdditive := head.filter(r => additive(r) && keepAdditive(r))
-newTail      := dedupeByRowKey([ ...head.filter(r => !additive(r) && keepPaged(r, true)),
-                                 ...tail.filter(r => keepPaged(r, false)) ])
-head         := [ ...P, ...keptAdditive ]                // kept additive rows stay HEAD rows
-tail         := newTail
-cursor       := newTail.length > 0 ? cursor : C          // a kept PAGED tail keeps ITS cursor,
-                                                         // INCLUDING null (null + a tail = the list
-                                                         // reaches the end; installing C would re-walk
-                                                         // rows already on screen); kept additive
-                                                         // rows do not count
-autoLoadArmed := newTail.length > 0 ? autoLoadArmed : P.length > 0
-flags := from the page
-```
-
-Why this delivers the guarantees on All and Groups:
-
-- Rows that slid past the head boundary because newer activity arrived are
-  KEPT (they move to the front of the tail), so an insertion at the top never
-  makes a row vanish. They sit between the new head and the old tail in time
-  order, and the tail's cursor still addresses the position after the old
-  tail, so there is no gap in the cursor chain. The client sort by
-  `lastActivityAt` renders them in place.
-- Rows the server has stopped returning inside page one (a relay group that
-  closed or was converted while other relay rows still return, a resurfaced
-  soft-deleted contact after it was read, a contact whose threads all closed)
-  are DROPPED. A dropped row's `unreadCount` no longer counts anywhere, which
-  matches the badge. A converted relay group is dropped in favor of its
-  group-text row under the same conversation, so a conversion never shows
-  twice.
-- A fully loaded list (`cursor === null`, paged tail non-empty) stays fully
-  loaded across head reads: no spurious Load more, no re-walk of rows on
-  screen. Kept additive rows never affect the cursor.
-- On Groups no row is additive, so every row follows the paged rule, which
-  matches the partition's `last_activity_at` order.
-
-Invariant 1, stated honestly: on All and Groups a live update never removes a
-row from the list unless a COMPLETE head read shows the server no longer
-returns it inside page one; rows slide, they do not vanish. On Unread and
-Unknown a complete head read replaces the list with its fresh page one. On
-every tab an incomplete head read removes nothing, and no live update resets
-the scroll position.
+Invariant 1, stated honestly: a complete head read replaces the list with
+page one; an incomplete head read removes nothing and is not a failure; no
+live update resets the scroll position.
 
 ### 5.7 Refresh failure and Retry
 
@@ -704,7 +617,7 @@ the scroll position.
 - `docs/issues/inbox-reconcile-failure-blanks-list.md` is set to `resolved`
   with a Resolution block naming this section.
 
-### 5.8 The list store, save, restore and re-walk
+### 5.8 The list store, save and restore
 
 New module `dashboard/src/routes/inbox/inboxListStore.ts`, module-level state
 (a `Map`), no React:
@@ -735,10 +648,11 @@ snapshot: {
   `statusRef.current === 'ready'` ONLY (it IS the unmount, so an `aliveRef`
   gate would silence it whenever the alive effect's cleanup happened to run
   first, which depends on effect kind and declaration order). Both capture
-  the key from `keyRef` at that moment. Hence an empty pre-first-page snapshot is
-  never written (a StrictMode simulated unmount before the first page commits
-  finds `status: 'loading'` and skips), a save can never land under a filter
-  the state does not belong to, and the saved rows are the committed rows.
+  the key from `keyRef` at that moment. Hence an empty pre-first-page
+  snapshot is never written (a StrictMode simulated unmount before the first
+  page commits finds `status: 'loading'` and skips), a save can never land
+  under a filter the state does not belong to, and the saved rows are the
+  committed rows.
 - THE UNMOUNT SAVE runs from a LAYOUT-effect cleanup (it runs before the
   replacing route's DOM commits) and writes the list from `listRef` with the
   `pendingRef` patches folded in, and `scrollTop` from `scrollTopRef`, which a
@@ -751,7 +665,7 @@ snapshot: {
 - RESTORE ON MOUNT. `useInbox` initializes its state lazily from the store:
   if `load(key)` returns a snapshot, the FIRST render already has the list
   and `status: 'ready'` (no spinner). A `restoredKeyRef` starts as that key
-  (or `null` on a miss), and a `rewalkDueRef` starts as `true` on a hit.
+  (or `null` on a miss).
 - THE FILTER EFFECT'S RULE: on every run, if `key !== restoredKeyRef.current`
   it performs today's reset and initial fetch; otherwise it schedules a head
   read immediately (no debounce) as a reconcile. In both cases it then sets
@@ -760,62 +674,15 @@ snapshot: {
   never resets a restored list, while a real filter change (different key)
   resets. On a store miss the first run resets and fetches, the cleanup aborts
   that fetch, and the replay's reconcile issues the one live fetch.
-- THE TAIL RE-WALK (All and Groups only; the first complete head read on
-  Unread/Unknown replaces the tail, so nothing is owed there). It runs ONCE
-  per store restore, triggered by the FIRST head read that COMMITS after the
-  restore (the mount reconcile normally; a Retry or an SSE head read if that
-  one failed), when the committed state holds a non-empty PAGED tail.
-  `rewalkDueRef` is set on a store hit and CLEARED by whichever comes first:
-  the walk starting, a committing head read that leaves no paged tail
-  (branch R, or branch P with an empty tail), or a reset; so a walk that is
-  not owed can never start later. Mechanics, as a pure fold in
-  `inboxListMerge.ts` plus the hook's loop:
-  - it ABORTS any `loadMore` in flight when it starts (the mount head read
-    already discarded such a page; its `.finally` must not clear a hold the
-    walk depends on), then holds its OWN flag `rewalking` for its duration.
-    `enabled` in 5.2 includes `!rewalking` and the Load more button is
-    disabled while it is set, so no `loadMore` can race the walk, and a
-    `loadMore`'s `.finally` clearing `loadingMore` cannot release it;
-  - let `start` be the triggering head read's OWN page cursor `C` (never
-    `ListState.cursor`, which after branch P is the kept tail's cursor and
-    would make the walk read past the tail), `headBoundary` the oldest
-    `lastActivityAt` among that head read's paged rows, and `oldest` the
-    oldest `lastActivityAt` in the current tail; it requests pages from
-    `start` (each a normal `loadMore`-shaped read of `limit` rows) until the
-    page's cursor is null, or the page's oldest row is at or older than
-    `oldest` (the walk has covered the tail's range), or
-    `REWALK_MAX_PAGES = 5` pages have been read; intermediate pages are
-    accumulated, not committed;
-  - the FOLD, committed once at the end: `fresh` is the accumulated rows
-    deduplicated against the CURRENT head (a head read may have landed
-    meanwhile; branch P kept the tail, so the fold applies to the current
-    state). The walked range is `[freshOldest, headBoundary)` by
-    `lastActivityAt`: everything the walk COULD have returned lies below the
-    triggering head's boundary, so a gone row at the top of the tail (the
-    row the operator just deleted or triaged, the case the walk exists for)
-    is inside the range even though no page returned anything that new. The
-    new tail is `fresh` followed by the current tail rows OUTSIDE the range:
-    rows at or above `headBoundary` are rows a meanwhile head read slid into
-    the tail, or boundary ties (kept, unexamined); rows below `freshOldest`
-    exist only when the page cap stopped the walk (kept, unexamined). Current
-    tail rows INSIDE the range that no page returned are dropped: that is the
-    operator's triaged, renamed, deleted or otherwise-read row refreshing.
-    Then `dedupeConversations`, `fresh` winning. `cursor` becomes the last
-    page's cursor when the walk reached the end or covered the range, and
-    stays the current cursor when the page cap stopped it. `pageEpoch` bumps
-    once; arming is set from the last page;
-  - abandonment: a filter or limit change, or unmount (`aliveRef`), abandons
-    it (nothing is committed, `rewalking` clears). A head read landing
-    meanwhile does NOT abandon it; the fold accounts for that read as above.
-    A page failure ends the walk early and folds what was read (a partial
-    refresh beats none).
-  It costs one request per `limit` rows of tail (typically zero or one), runs
-  behind the already-rendered list, and keeps the scroll position. It is what
-  makes a return to the page show the operator's own triage, rename or
-  deletion on a tail row, and another operator's reads. While the operator
-  stays on the page, a tail row refreshes only through activity (which moves
-  it into the head); non-activity changes wait for the next return or reload
-  (section 8).
+- WHAT THE RETURN SHOWS. The restored list renders instantly (all of it,
+  including rows past page one, with the saved scroll position on `POP`).
+  The mount reconcile then commits: a complete page one replaces the list
+  (rows past page one drop; if the operator's position was among them the
+  browser clamps the scroll to the new bottom and the sentinel is in view, so
+  auto-load fetches the next page once), an incomplete one merges in. This is
+  the Option B trade: the row the operator just triaged, renamed or deleted
+  is refreshed if it is on page one; a row past page one is dropped and comes
+  back fresh when she scrolls to it.
 - Scroll restore: `Inbox.tsx` sets the container's `scrollTop` in a layout
   effect on the first render that has rows: to the snapshot's value when the
   mount came from the store AND `useNavigationType()` is `POP` (the back or
@@ -832,9 +699,9 @@ snapshot: {
   starts as a fresh load for that key; the other key's snapshot is kept for its
   own return.
 - A return after the operator marked a row read on its contact page shows the
-  restored (pre-mark) count for one round trip until the mount reconcile (or
-  the re-walk, for a tail row) commits. Today a fresh mount shows a spinner
-  instead; the brief stale count is the accepted price of an instant return.
+  restored (pre-mark) count for one round trip until the mount reconcile
+  commits. Today a fresh mount shows a spinner instead; the brief stale count
+  is the accepted price of an instant return.
 
 ### 5.9 Group and relay rows
 
@@ -952,9 +819,9 @@ Protected state: the `ListState` (5.5), `pending`, `refreshFailed`, and the
 list store.
 
 Writers (all through `commitList`): initial load, Retry, SSE reconcile, mount
-reconcile (head reads); the tail re-walk's fold; `loadMore` (auto or manual);
-`markRead`/`markUnread` optimistic patches and their commits/rollbacks; the
-filter/limit-change reset; the unmount save; `clear()` on sign-out.
+reconcile (head reads); `loadMore` (auto or manual); `markRead`/`markUnread`
+optimistic patches and their commits/rollbacks; the filter/limit-change reset;
+the unmount save; `clear()` on sign-out.
 
 Readers/renderers: `Inbox.tsx` (rows, empty states, notices, banner, sentinel,
 Load more gating, scroll restore), `InboxRow.tsx` (row + time + actions
@@ -965,16 +832,12 @@ that reads the inbox (`inbox*.spec.ts`, `group-text-inbox.spec.ts`,
 
 Invariants the plan must carry as explicit tasks or watch items:
 
-1. All/Groups: a live update never removes a row unless a complete head read
-   shows the server no longer returns it inside page one; rows slide, they do
-   not vanish. Unread/Unknown: a complete head read replaces the list with
-   page one. Every tab: an incomplete head read removes nothing and is not a
-   failure. No live update resets scroll.
-2. Back from a contact or conversation page shows the same rows and scroll
-   position instantly. On All/Groups it then reconciles with one head read
-   plus the re-walk (one read per `limit` rows of tail), refreshing every row.
-   On Unread/Unknown it then reconciles with one head read that replaces the
-   list with page one, so rows past page one drop and the scroll clamps.
+1. A complete head read replaces the list with page one; an incomplete head
+   read removes nothing and is not a failure; no live update resets the
+   scroll position (the browser may clamp it when the list shortens).
+2. Back from a contact or conversation page shows the restored rows and scroll
+   position instantly, then reconciles with exactly one head read (no cursor
+   request unless the sentinel is in view after the reconcile).
 3. Auto-load never fires on a zero-row page with a cursor, never while
    `loadingMore`, never when `hasMore` is false, never re-tries a failed page
    without an intersection change or a manual click, and never chains past
@@ -989,13 +852,10 @@ Invariants the plan must carry as explicit tasks or watch items:
 7. Sign-out clears the store; a save never lands under a key the rows do not
    belong to; no snapshot is written before the first page commits or from a
    reset; nothing writes after unmount.
-8. A fully loaded list stays fully loaded across head reads and across a
-   return (no spurious Load more, no re-walk of rows on screen beyond the
-   return's refresh).
-9. A conversation never renders twice under two kinds.
-10. The server page for `filter=all` is identical in rows, order, cursor and
-    telemetry counts with and without prefetch.
-11. The perf harness observes one page request per inbox sample and no cursor
+8. A conversation never renders twice under two kinds.
+9. The server page for `filter=all` is identical in rows, order, cursor and
+   telemetry counts with and without prefetch.
+10. The perf harness observes one page request per inbox sample and no cursor
     request.
 
 ## 7. Testing
@@ -1009,49 +869,29 @@ Invariants the plan must carry as explicit tasks or watch items:
   `new Date(y, m, d, 23, 30)` in a fixed-offset case guarded by
   `getTimezoneOffset() !== 0` (skipped with a stated reason when the runner is
   UTC); unparseable input; the U+202F normalization; the full-stamp helper.
-- `inboxListMerge.test.ts` (the pure merge and fold): branch I on every
-  filter - a short-with-cursor head merges its rows in and removes nothing,
-  keeps the old cursor including null, and a zero-row budget exit with rows
-  present changes nothing and flags nothing; with an empty list it yields the
-  page as-is. Branch R - a complete head replacing the tail and cursor; the
-  Unknown queue-order case (a new row inserted mid-page pushes the last row
-  out and the list is exactly the fresh page one); the Unread multi-thread
-  case. Branch P - additive rows dropped when absent while their kind
-  returned, kept (in HEAD) when their kind did not return, a converted relay
-  row dropped when its conversation returns as a group text, a group_text
-  kept under `groupsTruncated` when older than the oldest in P; a slid head
-  row (older than or equal to the boundary) kept in the tail and a
-  boundary-or-newer absent head row dropped; a tail row kept; a `C === null`
-  head dropping the paged tail; a null old cursor with a paged tail kept as
-  null; kept additive rows not affecting the cursor or arming; dedupe of a
-  tail row that reappears in P. The re-walk fold - rows inside the walked
-  range not returned are dropped, rows newer (slid in meanwhile) and older
-  (page cap) are kept, the cursor rules for end-reached, range-covered and
-  cap-stopped, dedupe against a head that changed meanwhile.
+- `inboxListMerge.test.ts` (the pure merge): branch C on every filter - a
+  complete head replaces head, tail and cursor, re-arms from `P`, and drops
+  additive rows absent from `P`; the Unknown queue-order case (the list is
+  exactly the fresh page one). Branch I on every filter - a short-with-cursor
+  head merges its rows in and removes nothing, keeps the old cursor including
+  null, and a zero-row budget exit with rows present changes nothing and
+  flags nothing; with an empty list it yields the page as-is. Conversion
+  dedupe: a `gt:` row in `P` drops a `g:` row of the same conversation in
+  either branch.
 - `useInbox.test.tsx` additions: every head read requests `limit`; the mount
   from store skips the spinner and issues exactly one LIVE head read under a
   StrictMode-style double effect run (the aborted first one is not counted);
-  the re-walk runs after the first committing head read (also when the mount
-  reconcile failed and a Retry commits), aborts an in-flight `loadMore`
-  first, holds `rewalking` (auto-load and the button stay disabled even after
-  a discarded loadMore's `.finally` runs), issues its FIRST request with the
-  head read's own page cursor `C`, reads pages until the range is covered or
-  the end, folds once with the range bounded above by the head boundary (a
-  gone row at the top of the tail is dropped), bumps the epoch once, and is
-  abandoned on a filter change; `rewalkDueRef` is cleared by a committing
-  head read that leaves no paged tail, so no later head read starts a walk
-  that is not owed; saves happen only through
-  `commitList`/the unmount save, only while ready, with the committed value
-  (a loadMore commit saves the appended rows AND the new cursor together);
-  the reset writes no snapshot; nothing commits or saves after unmount (a
-  loadMore resolved post-unmount); `aliveRef` is true again after a
-  StrictMode replay (a commit after the replay saves); the unmount save folds
-  `pendingRef` in (a patch set in the same act as the unmount is saved) and
-  writes the seeded `scrollTop` when no scroll event happened; `loadMore`
-  dedupes against `base` by rowKey AND by conversationId across kinds (a
-  `gt:` row replacing a `g:` row) and arms only on new rows; branch I also
-  dedupes by conversationId; `pageEpoch` bumps on head
-  and page commits and the fold, not on mark-read commits, resets or
+  after the restore's head read commits, rows past page one are gone and no
+  cursor request was issued; saves happen only through `commitList`/the
+  unmount save, only while ready, with the committed value (a loadMore commit
+  saves the appended rows AND the new cursor together); the reset writes no
+  snapshot; nothing commits or saves after unmount (a loadMore resolved
+  post-unmount); `aliveRef` is true again after a StrictMode replay (a commit
+  after the replay saves); the unmount save folds `pendingRef` in (a patch set
+  in the same act as the unmount is saved) and writes the seeded `scrollTop`
+  when no scroll event happened; `loadMore` dedupes against `base` by rowKey
+  AND by conversationId across kinds and arms only on new rows; `pageEpoch`
+  bumps on head and page commits, not on mark-read commits, resets or
   failures; `refreshFailed` set and cleared per 5.7 including the
   404-with-rows arm and the failing-retry-with-rows arm, and NOT set by an
   incomplete head; the no-rows failure still yields `error`.
@@ -1072,8 +912,8 @@ Invariants the plan must carry as explicit tasks or watch items:
   scroll restore sets the container's `scrollTop` to the saved value on a
   store-backed mount under `POP` and explicitly to 0 under `PUSH` (a
   `MemoryRouter` with a pushed history entry versus a popped one, the
-  container pre-scrolled to a non-zero offset); the groups link and `selectFilter` preserve
-  `limit`; the page root has `overflow-anchor: none`.
+  container pre-scrolled to a non-zero offset); the groups link and
+  `selectFilter` preserve `limit`; the page root has `overflow-anchor: none`.
 - `inboxListStore.test.ts`: save/load/clear; keys differ by operator id.
 - Every inbox test file that mounts the hook or the page calls the store's
   `clear()` in `beforeEach`: the store is module-level state and would
@@ -1108,26 +948,30 @@ head read on every mount).
    June rows (Tasha, the group text) have text matching
    `^[A-Z][a-z]{2} \d{1,2}(, \d{4})?$` (year-agnostic on purpose so the spec
    survives January).
-2. Paging and survival. Seed three fresh parties; open `/inbox?limit=2`; assert
-   the two newest contact rows plus the two multi-party rows render and Load
-   more is visible; scroll the container to the bottom; assert the remaining
-   contact rows append (at `limit=2` every page is short in pixels, so the
-   epoch rule chains to the end here BY DESIGN) and Load more disappears;
-   then a new inbound for a fourth fresh party arrives and the list still
-   holds every previously loaded row plus the new one at the top, with no
-   spinner shown in between: take an `ElementHandle` of the list before the
-   inbound and assert `isConnected` after, and that its row count only grew.
-   Also assert (through the request log) that no finished request carrying
-   `cursor` was issued after the inbound (the fully loaded list must not
-   re-walk).
-3. Back button. Viewport 1280x500 (so the list overflows), seed six parties at
-   `?limit=2`, auto-load until Load more disappears, scroll the container to
-   the bottom and assert `scrollTop > 0`; open the last row; `page.goBack()`;
-   assert the same row count without a spinner and the container's `scrollTop`
-   within 8px of the saved value; then assert (request log, finished
-   requests) that exactly one head read and the re-walk's cursor reads
-   followed the return, and that the row count is unchanged after they
-   settle.
+2. Paging and the page-one refresh. Seed three fresh parties; open
+   `/inbox?limit=2`; assert the two newest contact rows plus the two
+   multi-party rows render and Load more is visible; scroll the container to
+   the bottom; assert the remaining contact rows append (at `limit=2` every
+   page is short in pixels, so the epoch rule chains to the end here BY
+   DESIGN) and Load more disappears; then a new inbound for a fourth fresh
+   party arrives: the list is never detached (take an `ElementHandle` of the
+   list before the inbound and assert `isConnected` after) and no spinner
+   shows; after the refresh settles the list is page one again (the new row
+   at the top, two contact rows plus the two multi-party rows) and Load more
+   is visible again; exactly one finished head read and no cursor request
+   followed the inbound. Then, at the DEFAULT limit on the same seed (a page
+   one that holds everything), a further inbound adds its row at the top and
+   removes nothing.
+3. Back button. Viewport 1280x400 (so the list overflows), seed six parties at
+   `?limit=10` (everything fits in page one), scroll the container to the
+   bottom and assert `scrollTop > 0`; open the last row; `page.goBack()`;
+   assert the same rows without a spinner and the container's `scrollTop`
+   within 8px of the saved value; then assert (finished requests) that
+   exactly one head read and no cursor request followed the return, and the
+   rows and scroll are unchanged after it settles. Then the Option B trade,
+   pinned deliberately: at `?limit=2` load all six, open the last row, go
+   back: the restore shows all rows instantly, and after the head read
+   settles the list is page one with Load more visible again.
 4. Widths. At `NARROW_360` from `e2e/support/viewport.ts`: the shared
    no-horizontal-overflow assertion, and the first row's `<time>` bounding box
    fully inside the row's box and in its top half. Then at 768x720 (the
@@ -1164,35 +1008,26 @@ at both widths.
 
 ## 8. Risks and accepted trade-offs
 
+- OPTION B: a complete refresh drops rows loaded past page one; they reload
+  on scroll, and if the operator's position was among them the scroll clamps
+  to the new bottom and auto-load fetches the next page once. At the default
+  page size this begins at row 101. Accepted by Cameron at the spec gate; the
+  reviewed keep-them design is tracked as
+  `inbox-loaded-pages-survive-refresh`.
 - Read cost: a head read is `limit` rows (100 by default) per 300 ms debounce
-  window instead of 30; a return to the page costs one head read plus one
-  read per `limit` rows of tail (capped at 5). DynamoDB on-demand cost at
-  Sam's volume is negligible; latency is the real cost and 5.10 is the
-  mitigation for the All tab. If 5.10 is dropped, `?limit=50` is the fallback
-  knob without a deploy, and it tunes every read.
+  window instead of 30. DynamoDB on-demand cost at Sam's volume is negligible;
+  latency is the real cost and 5.10 is the mitigation for the All tab. If
+  5.10 is dropped, `?limit=50` is the fallback knob without a deploy, and it
+  tunes every read.
 - A committed head read still discards an in-flight `loadMore` page and
   re-enables the button; the epoch rule re-issues it once if the sentinel is
   still in view, so a busy SSE stream delays paging by one head read and does
   not starve it. Accepted.
-- Tail rows on All and Groups are refreshed on every return to the page and
-  whenever activity moves them into the head, but NOT for a non-activity
-  change while the operator stays on the page: another operator's read, a
-  rename or deletion made in another tab. Sam is the only operator today;
-  accepted, and stated in front of her as "the list refreshes when you come
-  back to it". A row a complete head read should have dropped but that was
-  kept on a timestamp tie stays until the next return re-walks it.
-- On Unread and Unknown a complete refresh replaces the loaded list with its
-  fresh page one, so a tail loaded past page one is dropped on the next
-  complete refresh, including the one a return triggers. Accepted; on Unread
-  page one is the badge cap, on Unknown it is the front of the triage queue.
-- A relay or group row whose kind returned no rows at all on a head read is
-  kept (a swallowed relay-list failure and "all closed" look identical on the
-  wire); the last closed group can linger until a later head read returns one
-  of its kind or a reload. Accepted; today's behavior drops them on the same
-  read and re-shows them on the next, which is worse.
-- A row that legitimately reappears (a relay group reopened) is re-added by the
-  next head read; a row inserted mid-list with an OLD timestamp (an import
-  writing historical activity) is missed until the next full load. Accepted.
+- A relay or group row absent from a complete head read is dropped, as today;
+  a swallowed relay-list failure hides the relay rows until the next read, as
+  today. Unchanged behavior, stated so nobody reads it as new.
+- A row inserted mid-list with an OLD timestamp (an import writing historical
+  activity) is missed until the next full load. Accepted.
 - The store is per tab and in memory. Two tabs do not share it; a reload
   starts fresh. Accepted; it matches the badge's optimistic layer.
 - Labels do not roll over at midnight without a re-render. Accepted (section
@@ -1209,6 +1044,10 @@ at both widths.
 
 ## 9. Issues to file and resolve
 
+- File (this revision, committed with the spec):
+  `inbox-loaded-pages-survive-refresh` (improvement, deferred): the DRAFT 5
+  design that keeps rows past page one across a refresh and re-reads them on
+  return, with pointers to the reviewed sections and the review records.
 - Resolve: `inbox-reconcile-failure-blanks-list` (5.7).
 - Update: `seen-set-max-equals-max-inbox-limit` - the dashboard now requests
   `limit=100`, so the zero-margin invariant is on the live path; the pinning
@@ -1221,14 +1060,11 @@ at both widths.
   unknown branches hydrate one row at a time; at `limit=100` a full unread
   page is up to 100 sequential latest-message reads per reconcile. Apply the
   5.10 prefetch pattern there if a measured page is slow.
-- File: `inbox-tail-rows-stale-until-return` (low, decision): on All and
-  Groups a loaded tail row does not reflect a non-activity change made
-  elsewhere until the operator returns to the page; revisit if a second
-  operator joins.
 - File only if 5.10 is dropped: `inbox-all-page-hydration-sequential` (medium,
   debt) with reviewer B's analysis of the cache race and the in-function dedupe.
 - Tracker #24 (one timeline) is Cameron's, outside the repo.
 
 ## 10. Open items
 
-None. Sam approved the mockups on 2026-09-25.
+None. Sam approved the mockups on 2026-09-25; Cameron chose Option B at the
+spec gate on 2026-09-25.

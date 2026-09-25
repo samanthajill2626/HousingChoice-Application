@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InboxRow as InboxRowData } from '../../api/index.js';
@@ -30,6 +30,11 @@ function renderRow(row: InboxRowData): void {
       </ul>
     </MemoryRouter>,
   );
+}
+
+function cleanupAndRender(row: InboxRowData): void {
+  cleanup();
+  renderRow(row);
 }
 
 beforeEach(() => {
@@ -196,6 +201,69 @@ describe('InboxRow', () => {
       }),
     );
     expect(screen.getByText('Closed')).toBeInTheDocument();
+  });
+
+  describe('the last-activity time (spec 5.4)', () => {
+    // setup.ts pins Date to 2026-07-01T12:00:00Z; the fixture row is
+    // 2026-06-17, earlier the same year -> "Jun 17".
+    it('renders a <time> with dateTime, a full-stamp title and the tier label', () => {
+      renderRow(mkRow({ unreadCount: 0 }));
+      const link = screen.getByRole('link', { name: /Tasha Williams/ });
+      const time = link.querySelector('time');
+      expect(time).not.toBeNull();
+      expect(time).toHaveAttribute('dateTime', '2026-06-17T10:00:00.000Z');
+      expect(time?.getAttribute('title')).toMatch(/^Jun 17, 2026, \d{1,2}:\d{2} [AP]M$/);
+      expect(time).toHaveTextContent(/^Jun 17$/);
+    });
+
+    it('marks the time on an unread row and not on a read row', () => {
+      renderRow(mkRow({ unreadCount: 3 }));
+      const unreadTime = screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time');
+      expect(unreadTime?.closest('div')?.className).toMatch(/unread/);
+      cleanupAndRender(mkRow({ unreadCount: 0 }));
+      const readTime = screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time');
+      expect(readTime?.closest('div')?.className).not.toMatch(/unread/);
+    });
+
+    it('renders the time on relay_group and group_text rows too', () => {
+      renderRow(
+        mkRow({
+          kind: 'relay_group',
+          contactId: undefined,
+          conversationId: 'conv-relay-1',
+          name: 'With Ana & Ben',
+          status: 'open',
+          // Six days before the pinned clock: a date, never "Yesterday", in
+          // any runner time zone.
+          lastActivityAt: '2026-06-25T10:00:00.000Z',
+        }),
+      );
+      expect(screen.getByRole('link', { name: /With Ana/ }).querySelector('time')).toHaveTextContent(
+        /^Jun 25$/,
+      );
+      cleanupAndRender(
+        mkRow({
+          kind: 'group_text',
+          contactId: undefined,
+          conversationId: 'conv-group-1',
+          name: 'Ana & Ben',
+          lastActivityAt: '2025-12-18T10:00:00.000Z',
+        }),
+      );
+      expect(screen.getByRole('link', { name: /Ana & Ben/ }).querySelector('time')).toHaveTextContent(
+        /^Dec 18, 2025$/,
+      );
+    });
+
+    it('renders NO <time> for an unparseable instant', () => {
+      renderRow(mkRow({ lastActivityAt: 'garbage' }));
+      expect(screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time')).toBeNull();
+    });
+
+    it('keeps the Mark read / Mark unread actions and their names', () => {
+      renderRow(mkRow({ unreadCount: 1 }));
+      expect(screen.getByRole('button', { name: 'Mark Tasha Williams read' })).toBeInTheDocument();
+    });
   });
 });
 

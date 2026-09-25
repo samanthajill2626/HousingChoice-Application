@@ -10,6 +10,7 @@ import { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { InboxChannel, InboxRow as InboxRowData } from '../../api/index.js';
 import styles from './InboxRow.module.css';
+import { formatInboxTime, formatInboxTimeFull } from './inboxTime.js';
 
 export interface InboxRowProps {
   row: InboxRowData;
@@ -59,6 +60,10 @@ export function InboxRow({
   // Both multi-party kinds get the same people glyph; the CHIP is what tells
   // them apart (a masked relay thread vs a native carrier group text).
   const isMultiParty = isRelay || isGroupText;
+  // The last-activity label (spec 5.3/5.4): computed at render; tests pin the
+  // clock with vi.setSystemTime. An unparseable instant renders no element.
+  const timeLabel = formatInboxTime(row.lastActivityAt, new Date());
+  const timeFull = formatInboxTimeFull(row.lastActivityAt);
   // The channel/kind chip: contact/unknown rows show the latest item's channel
   // (Text/Photo/Call); a multi-party row has no channel - show what it IS.
   const kindLabel = isRelay
@@ -116,6 +121,11 @@ export function InboxRow({
             <span className={styles.count} aria-label={`${row.unreadCount} unread`}>
               {row.unreadCount}
             </span>
+          ) : null}
+          {timeLabel !== '' ? (
+            <time className={styles.time} dateTime={row.lastActivityAt} title={timeFull}>
+              {timeLabel}
+            </time>
           ) : null}
         </Link>
 

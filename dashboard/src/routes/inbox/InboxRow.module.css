@@ -1,4 +1,7 @@
-/* InboxRow — a contact/unknown comms row. All values from ui/tokens.css. */
+/* InboxRow - a contact/unknown/group comms row. All values from ui/tokens.css.
+   Spec 5.4: one line on desktop with the time at the far right; two lines under
+   the shell's narrow breakpoint; the actions box is an OVERLAY that takes no
+   layout width so the times line up in one column on every row. */
 .rowItem {
   list-style: none;
   margin-bottom: var(--sp-2);
@@ -60,16 +63,23 @@
   background: var(--c-dot-unknown);
 }
 
+/* The name can shrink on one line (spec 5.4): the cap resolves against the
+   link, the head's flex container; chips and tags never shrink. */
 .head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
 }
 .name {
   font-weight: var(--fw-medium);
   color: var(--c-text);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .bold {
   font-weight: var(--fw-bold);
@@ -77,6 +87,7 @@
 .channel {
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
+  white-space: nowrap;
 }
 .tag {
   padding: 1px var(--sp-2);
@@ -98,9 +109,8 @@
   white-space: nowrap;
 }
 
-/* Deleted-contact resurfacing: a soft-deleted contact's thread resurfaces in
-   the inbox while an unread post-deletion inbound exists. Danger-tinted so the
-   row reads as "deleted, but they messaged you". */
+/* Deleted-contact resurfacing: danger-tinted so the row reads as "deleted, but
+   they messaged you". */
 .deletedTag {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -136,12 +146,32 @@
   font-weight: var(--fw-semibold);
 }
 
-/* Inline actions — present + focusable always; visible on hover / focus / swipe. */
-.actions {
-  display: flex;
+/* The last-activity time: a right-aligned column; 5rem holds "Dec 18, 2025". */
+.time {
   flex: 0 0 auto;
+  min-width: 5rem;
+  text-align: right;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+.unread .time {
+  color: var(--c-text);
+  font-weight: var(--fw-semibold);
+}
+
+/* Inline actions - an OVERLAY over the row's right end. Present + focusable
+   always; visible on hover / focus-within / swipe. No layout width, so the
+   time column is straight whatever button the row offers. */
+.actions {
+  position: absolute;
+  right: var(--sp-3);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
   gap: var(--sp-1);
-  padding-right: var(--sp-3);
+  padding-left: var(--sp-3);
+  background: var(--c-surface);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
@@ -169,4 +199,40 @@
 .action:focus-visible {
   outline: 2px solid var(--c-focus-ring);
   outline-offset: 1px;
+}
+
+/* Narrow: the shell's own breakpoint (below it the sidebar is a drawer). Two
+   rows: name/chips/time on top, preview/count below. */
+@media (max-width: 767.98px) {
+  .main {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    column-gap: var(--sp-2);
+    row-gap: 2px;
+    align-items: center;
+  }
+  .dot {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .head {
+    grid-column: 2;
+    grid-row: 1;
+    max-width: none;
+  }
+  .time {
+    grid-column: 3;
+    grid-row: 1;
+    min-width: 0;
+  }
+  .preview {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .count {
+    grid-column: 3;
+    grid-row: 2;
+    justify-self: end;
+  }
 }

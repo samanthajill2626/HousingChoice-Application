@@ -91,6 +91,16 @@ describe('mergeHeadRead - branch C (complete head)', () => {
     expect(next.tail).toEqual([]);
   });
 
+  it('on the Groups tab, group rows ARE the paged rows: a full page with a cursor is complete', () => {
+    // Only the All tab treats group rows as additive. Under filter=groups they
+    // are what the server pages, so two of them fill a limit-2 page.
+    const s = state({ head: [groupText('old')], tail: [groupText('t1')], cursor: 'OLD' });
+    const next = mergeHeadRead(s, page([groupText('n1'), groupText('n2')], 'NEW'), 'groups', 2);
+    expect(ids(next.head)).toEqual(['gt:n1', 'gt:n2']);
+    expect(next.tail).toEqual([]);
+    expect(next.cursor).toBe('NEW');
+  });
+
   it('drops additive rows absent from the page, as today', () => {
     const s = state({ head: [contact('n1'), relay('r1')], cursor: null });
     const next = mergeHeadRead(s, page([contact('n1')], null), 'all', 100);

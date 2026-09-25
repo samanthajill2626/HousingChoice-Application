@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { formatInboxTime, formatInboxTimeFull } from './inboxTime.js';
 
 // Every instant is built with the LOCAL-time constructor so the tier logic is
@@ -67,5 +67,31 @@ describe('formatInboxTimeFull', () => {
   });
   it('returns an empty string for an unparseable instant', () => {
     expect(formatInboxTimeFull('nope')).toBe('');
+  });
+});
+
+// Whether en-US emits U+202F (narrow no-break space) before AM/PM depends on
+// the host's ICU, and this runner's emits a plain space, so nothing above
+// reaches the normalization. These stub the Date formatters with the ICU 72+
+// shape; the call count proves the output came through the stub. The two
+// characters are built from char codes so this file stays ASCII.
+const NNBSP = String.fromCharCode(0x202f);
+const NBSP = String.fromCharCode(0x00a0);
+
+describe('no-break space normalization', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('formatInboxTime turns a U+202F before PM into a plain space', () => {
+    const spy = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockReturnValue(`2:14${NNBSP}PM`);
+    expect(formatInboxTime(iso(new Date(2026, 8, 25, 14, 14)), now)).toBe('2:14 PM');
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('formatInboxTimeFull turns U+202F and U+00A0 into plain spaces', () => {
+    const spy = vi.spyOn(Date.prototype, 'toLocaleString').mockReturnValue(`Sep${NBSP}12, 2026, 2:14${NNBSP}PM`);
+    expect(formatInboxTimeFull(iso(new Date(2026, 8, 12, 14, 14)))).toBe('Sep 12, 2026, 2:14 PM');
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

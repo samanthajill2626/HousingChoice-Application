@@ -44,8 +44,8 @@ export interface InboxProfilePageCase {
  * The nav badge, which reads its OWN endpoint (`GET /api/inbox/unread-count` ->
  * `countUnreadRows`). It has NO filter and NO limit by construction: the count
  * walks the unread index to a fixed cap and hydrates nothing, so a page-shaped
- * `{ filter: 'unread', limit: 100 }` case would profile a workload the app no
- * longer issues.
+ * `{ filter: 'unread', limit: 100 }` case would profile the Unread tab's page
+ * read (the `unread-page` case below), not the badge.
  */
 export interface InboxProfileBadgeCase {
   kind: 'unread-badge-endpoint';
@@ -57,18 +57,19 @@ export type InboxProfilePlanEntry = InboxProfilePageCase | InboxProfileBadgeCase
 
 /**
  * The fixed comparison workload for the manual Inbox repository profiler.
- * Dashboard pages request 30 rows; the badge case drives the count endpoint
- * instead of a page. Five repeats provide comparable dispersion without
- * mutating the local data.
+ * Dashboard pages request 100 rows (DEFAULT_PAGE_LIMIT in
+ * dashboard/src/routes/inbox/useInbox.ts); the badge case drives the count
+ * endpoint instead of a page. Five repeats provide comparable dispersion
+ * without mutating the local data.
  */
 export function createInboxProfilePlan(): InboxProfilePlanEntry[] {
   const cases: ReadonlyArray<
     Omit<InboxProfilePageCase, 'repeat'> | Omit<InboxProfileBadgeCase, 'repeat'>
   > = [
-    { kind: 'inbox-page', caseId: 'all-page', filter: 'all', limit: 30 },
-    { kind: 'inbox-page', caseId: 'unread-page', filter: 'unread', limit: 30 },
-    { kind: 'inbox-page', caseId: 'unknown-page', filter: 'unknown', limit: 30 },
-    { kind: 'inbox-page', caseId: 'groups-page', filter: 'groups', limit: 30 },
+    { kind: 'inbox-page', caseId: 'all-page', filter: 'all', limit: 100 },
+    { kind: 'inbox-page', caseId: 'unread-page', filter: 'unread', limit: 100 },
+    { kind: 'inbox-page', caseId: 'unknown-page', filter: 'unknown', limit: 100 },
+    { kind: 'inbox-page', caseId: 'groups-page', filter: 'groups', limit: 100 },
     { kind: 'unread-badge-endpoint', caseId: 'unread-badge' },
   ];
 

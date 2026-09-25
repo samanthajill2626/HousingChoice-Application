@@ -329,7 +329,8 @@ run D1 and D2 against dev and prod, and the import-window rule from section 6.
   import (D3); relay group creation and group-text creation/conversion (manual,
   unchanged); the breaker (manual, unchanged); D2 (new); seed fixtures - the lean
   world gains one switched-off tenant conversation for the e2e checks (RSW's
-  one-to-one e2e must not use it), every other seed world is unchanged. Readers:
+  one-to-one e2e must not use it; the full demo profile composes lean, so it
+  appears there too), every other seed world is unchanged. Readers:
   the send wrapper; the scheduled-send suppression previews (tour reminders
   panel, contact timeline scheduled cards) - no change; after D2 they report the
   new state.
@@ -361,7 +362,10 @@ run D1 and D2 against dev and prod, and the import-window rule from section 6.
    buckets and the StatChips balance rule (SOR adds an `unconfirmed` bucket);
    the dashboard internal-code reason map and `deliveryReason`'s options and
    check order (SOR and RSW add codes; RSW adds `retryScheduled`); the
-   results-row reason gate (SOR shows a reason for `send_unconfirmed`); the
+   results-row reason gate - `shareRecipientReason` in the dashboard's
+   broadcast presentation helpers, which the recipient badge calls for skipped
+   AND failed rows over the share-skip map kept beside the internal-code map
+   (SOR shows a reason for `send_unconfirmed` there); the
    fan-out's send call, first-fence skips and finalize log line (SOR
    restructures the recipient unit and rebuilds finalize); `sendMessage.ts`
    (this branch's I8 gates, SOR's typed errors, RSW's lineage inputs); the seed

@@ -24,6 +24,12 @@
 // touch. Every dev/prod client here is built from `hcCredentials()`, and the
 // guard is re-checked here (not only inside assertHousingChoiceAccount) so a
 // test can inject a wrong-account identity and prove the refusal.
+//
+// NO AMBIENT ENDPOINT: the SDK honors `AWS_ENDPOINT_URL` and
+// `AWS_ENDPOINT_URL_<SERVICE>` from the shell, which would point a dev/prod
+// client at another endpoint (DynamoDB Local, say) while the target line
+// still says AWS - and the guard, which checks the account, would pass. So a
+// dev/prod run REFUSES to start while any AWS_ENDPOINT_URL* variable is set.
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { AwsCredentialIdentityProvider } from '@aws-sdk/types';
@@ -88,11 +94,18 @@ export function laneAccessKeyId(lane: number): string {
   return `hclane${lane}`;
 }
 
+/** The AWS_ENDPOINT_URL* variables set in this environment (compared without
+ *  case: Windows environment names are case-insensitive to the SDK too). */
+export function ambientEndpointVariables(env: NodeJS.ProcessEnv = process.env): string[] {
+  return Object.keys(env).filter((k) => k.toUpperCase().startsWith('AWS_ENDPOINT_URL') && env[k] !== undefined);
+}
+
 export async function resolveStageClient(
   target: StageTarget,
   deps: StageClientDeps = {},
   opts: StageClientOpts = {},
 ): Promise<StageClient> {
+  // Defense in depth: parseStageArgs already refuses this as a usage error.
   if (opts.lane !== undefined && target !== 'local') {
     throw new Error(`--lane is accepted with --env local only (got --env ${target}); refusing to continue.`);
   }
@@ -117,6 +130,14 @@ export async function resolveStageClient(
       accessKeyId,
       describe: `DynamoDB Local ${LOCAL_ENDPOINT} database ${accessKeyId}${opts.lane !== undefined ? ` (e2e lane ${opts.lane})` : ' (the live local dev stack)'}`,
     };
+  }
+  const endpointVariables = ambientEndpointVariables();
+  if (endpointVariables.length > 0) {
+    throw new Error(
+      `${endpointVariables.join(', ')} ${endpointVariables.length === 1 ? 'is' : 'are'} set in this shell: an ambient ` +
+        `endpoint would redirect the ${target} client away from AWS while the target line still says AWS. Unset ` +
+        `${endpointVariables.map((v) => `Env:${v}`).join(', ')} (PowerShell: Remove-Item) and re-run. Refusing to continue.`,
+    );
   }
   const prefix = `hc-${target}-`;
   const env: NodeJS.ProcessEnv = { ...process.env, TABLE_PREFIX: prefix };
@@ -144,7 +165,10 @@ export async function resolveStageClient(
 /** Shared CLI parsing for the two scripts: `--env` (required), `--lane`
  *  (local only), plus the caller's own value/flag names. Unknown arguments are
  *  REFUSED, never ignored - a mistyped flag must never turn a rehearsal into a
- *  live apply, nor the reverse. */
+ *  live apply, nor the reverse. So is an argument given TWICE (the last value
+ *  would silently win: `--env dev ... --env prod` would target prod, and dev
+ *  and prod share one account, so the guard cannot catch it), and `--lane`
+ *  with any `--env` but local. */
 export function parseStageArgs(
   argv: string[],
   known: { values: string[]; flags: string[] },
@@ -155,6 +179,7 @@ export function parseStageArgs(
   const flagNames = new Set(known.flags);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
+    if (values.has(a) || flags.has(a)) return { usage: true };
     if (valueNames.has(a)) {
       const v = argv[i + 1];
       if (v === undefined || v.startsWith('--')) return { usage: true };
@@ -166,6 +191,7 @@ export function parseStageArgs(
   const target = parseStageTarget(values.get('--env'));
   if (target === undefined) return { usage: true };
   const rawLane = values.get('--lane');
+  if (rawLane !== undefined && target !== 'local') return { usage: true };
   const lane = parseLane(rawLane);
   if (rawLane !== undefined && lane === undefined) return { usage: true };
   return { target, lane, values, flags };

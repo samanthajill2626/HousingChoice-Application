@@ -25,7 +25,8 @@
 // SINGLE MODE (--conversation <id>): the breaker-resume path, for tripped rows
 // above all - it enables that one row whatever its trip evidence; refuses an
 // unknown id or a group thread as a USAGE error (exit 2, no partial-run
-// banner); reports an already-on row.
+// banner); reports an already-on row. --include-breaker-tripped means nothing
+// here, so combining the two is a usage error too (never silently ignored).
 //
 // EVERY WRITE IS CONDITIONAL on the row still being a one-to-one conversation
 // with the switch off: a row another run or a resume switched on, a row
@@ -75,7 +76,7 @@ import { isOneToOneBucket } from '../src/lib/unreadFeed.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { findBreakerTrip, hasBreakerSendCounter, isPointerRow, type TripEvidence } from './conversation-automation-census.js';
-import { parseStageArgs, resolveStageClient } from './lib/stageClient.js';
+import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
 
 export const SCRIPT_NAME = 'enable-conversation-automation';
 
@@ -116,9 +117,9 @@ export interface EnableOpts {
   apply?: boolean;
   /** Single mode: enable this one conversation (breaker resume). */
   conversationId?: string;
-  /** Bulk mode: also enable rows with a breaker trip on record. */
+  /** Bulk mode only: also enable breaker-tripped rows (either evidence).
+   *  Combined with conversationId it is a UsageError. */
   includeBreakerTripped?: boolean;
-  now?: string;
   scanLimit?: number;
   logger?: Logger;
 }
@@ -174,6 +175,11 @@ async function run(opts: EnableOpts, result: EnableResult, log: Logger): Promise
   const table = tableName('conversations', env);
   const apply = opts.apply === true;
   const single = opts.conversationId;
+  if (single !== undefined && opts.includeBreakerTripped === true) {
+    throw new UsageError(
+      `${SCRIPT_NAME}: --include-breaker-tripped applies to the bulk run only; single mode (--conversation) already resumes a tripped row - refusing`,
+    );
+  }
   const audit = createAuditRepo({ doc, env });
   log.info(
     { table, apply, mode: single !== undefined ? 'single' : 'bulk', ...(single !== undefined && { conversationId: single }) },
@@ -358,16 +364,31 @@ if (invokedDirectly) {
     values: ['--conversation'],
     flags: ['--apply', '--include-breaker-tripped'],
   });
-  if ('usage' in parsed) {
+  // --include-breaker-tripped is bulk-only: with --conversation it is a usage
+  // error, never silently ignored (enableConversationAutomation refuses it too).
+  if ('usage' in parsed || (parsed.flags.has('--include-breaker-tripped') && parsed.values.has('--conversation'))) {
     console.error(
-      `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply] [--conversation <id>] [--include-breaker-tripped]\n` +
-        '  DRY RUN by default; --apply writes. Unknown arguments are refused. --lane selects a hermetic e2e lane (local only).',
+      `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply] [--conversation <id> | --include-breaker-tripped]\n` +
+        '  DRY RUN by default; --apply writes. Unknown or repeated arguments are refused. --lane selects a hermetic e2e lane\n' +
+        '  (local only). --include-breaker-tripped is bulk-only; --conversation resumes one row (a tripped one included).',
     );
     process.exit(2);
   }
   const apply = parsed.flags.has('--apply');
-  resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {})
-    .then(async (stage) => {
+  void (async () => {
+    // STEP 1 - resolve the target on its own: a refusal here (account guard,
+    // STS, an ambient AWS_ENDPOINT_URL*) happens BEFORE any table is read, so
+    // it must never point the operator at a PARTIAL report.
+    let stage: StageClient;
+    try {
+      stage = await resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+    } catch (err) {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
+      process.exitCode = 1;
+      return;
+    }
+    // STEP 2 - the run.
+    try {
       defaultLogger.info({ target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply }, `${SCRIPT_NAME} - starting`);
       const result = await enableConversationAutomation({
         doc: stage.doc,
@@ -377,9 +398,7 @@ if (invokedDirectly) {
         includeBreakerTripped: parsed.flags.has('--include-breaker-tripped'),
       });
       process.exitCode = reportEnableRun(result, apply);
-      stage.doc.destroy();
-    })
-    .catch((err: unknown) => {
+    } catch (err) {
       if (err instanceof UsageError) {
         console.error(err.message);
         process.exitCode = 2;
@@ -387,5 +406,8 @@ if (invokedDirectly) {
       }
       defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED (see the PARTIAL report above)`);
       process.exitCode = 1;
-    });
+    } finally {
+      stage.doc.destroy();
+    }
+  })();
 }

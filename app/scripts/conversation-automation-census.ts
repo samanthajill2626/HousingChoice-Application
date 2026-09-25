@@ -48,19 +48,14 @@ import { tableName } from '../src/lib/config.js';
 import { queryAll } from '../src/lib/dynamoPaging.js';
 import { isSupersededRung } from '../src/lib/ladderPointer.js';
 import { createLogger, logger, type Logger } from '../src/lib/logger.js';
-import { isOneToOneBucket } from '../src/lib/unreadFeed.js';
+import { isOneToOneBucket, POINTER_PARTITION_PREFIXES } from '../src/lib/unreadFeed.js';
 import type { AuditEvent } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import { createPlacementNudgesRepo } from '../src/repos/placementNudgesRepo.js';
 import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo, type TourItem } from '../src/repos/toursRepo.js';
-import { parseStageArgs, resolveStageClient } from './lib/stageClient.js';
-
-/** Pointer partitions in the conversations table (claims + reply tokens). They
- *  carry only a key and a ref - never a conversation. Mirrors the private list
- *  in lib/unreadFeed.ts. */
-export const POINTER_PREFIXES = ['phone#', 'email#', 'token#'] as const;
+import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
 
 /** A dueAt bound past every real rung: listDue(FAR_FUTURE) = every pending row. */
 const FAR_FUTURE = '9999-12-31T00:00:00.000Z';
@@ -112,8 +107,11 @@ export function switchStateOf(row: Pick<ConversationItem, 'ai_mode'>): SwitchSta
   return 'unset';
 }
 
+/** A pointer item in the conversations table (a phone/email claim or a reply
+ *  token): a key and a ref, never a conversation. The prefix list is
+ *  lib/unreadFeed.ts's own, imported so the two can never drift. */
 export function isPointerRow(conversationId: string): boolean {
-  return POINTER_PREFIXES.some((p) => conversationId.startsWith(p));
+  return POINTER_PARTITION_PREFIXES.some((p) => conversationId.startsWith(p));
 }
 
 /**
@@ -360,18 +358,30 @@ if (invokedDirectly) {
     );
     process.exit(2);
   }
-  resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {})
-    .then(async (stage) => {
+  void (async () => {
+    // STEP 1 - resolve the target on its own: a refusal here (account guard,
+    // STS, an ambient AWS_ENDPOINT_URL*) happens before any table is read.
+    let stage: StageClient;
+    try {
+      stage = await resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+    } catch (err) {
+      logger.error({ err }, 'conversation-automation-census - FAILED before the run started (no table was read)');
+      process.exitCode = 1;
+      return;
+    }
+    // STEP 2 - the census (read-only: a failure here wrote nothing either).
+    try {
       logger.info(
         { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix },
         'conversation-automation-census - target resolved (read-only)',
       );
       const census = await runConversationAutomationCensus({ doc: stage.doc, env: stage.env });
       process.exitCode = reportCensus(census);
-      stage.doc.destroy();
-    })
-    .catch((err: unknown) => {
-      logger.error({ err }, 'conversation-automation-census - FAILED');
+    } catch (err) {
+      logger.error({ err }, 'conversation-automation-census - FAILED (read-only: nothing was written)');
       process.exitCode = 1;
-    });
+    } finally {
+      stage.doc.destroy();
+    }
+  })();
 }

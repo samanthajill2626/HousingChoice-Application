@@ -10,6 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -47,6 +48,20 @@ if (!reachable) console.warn(`[enableConversationAutomation] SKIPPED - no Dynamo
 
 const NOW = '2026-09-25T12:00:00.000Z';
 const ERROR = 50;
+const READ_COMMANDS = new Set(['ScanCommand', 'QueryCommand', 'GetCommand']);
+
+/** A client that records every command's class name, then sends it for real. */
+function recordingClient(inner: DynamoDBDocumentClient): { doc: DynamoDBDocumentClient; sent: string[] } {
+  const sent: string[] = [];
+  const doc = {
+    send: async (command: { constructor: { name: string } }) => {
+      sent.push(command.constructor.name);
+      return await inner.send(command as never);
+    },
+    destroy: () => {},
+  } as unknown as DynamoDBDocumentClient;
+  return { doc, sent };
+}
 
 describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Local', () => {
   const client = createDynamoClient({ endpoint });
@@ -87,14 +102,22 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     const modeEvents = async (id: string) =>
       (await allModeEvents()).filter((e) => e.entityKey === `conversations#${id}`);
     const reasonOf = (e: Record<string, unknown>): unknown => (e.payload as { reason?: unknown } | undefined)?.reason;
-    return { env, mode, modeEvents, allModeEvents, reasonOf };
+    /** Every item of a table, in a stable order (for before/after equality). */
+    const scanTable = async (base: 'conversations' | 'audit_events') =>
+      ((await doc.send(new ScanCommand({ TableName: tableName(base, env) }))).Items ?? [])
+        .map((item) => JSON.stringify(item))
+        .sort();
+    return { env, mode, modeEvents, allModeEvents, reasonOf, scanTable };
   }
 
   it('dry run: plans the one-to-one manual rows (breaker-tripped excluded, by audit event or send counter) and writes NOTHING', async () => {
     const w = await seedWorld();
     const capture = createLogCapture();
     const log = createLogger({ level: 'info', destination: capture.stream });
-    const result = await enableConversationAutomation({ doc, env: w.env, now: NOW, logger: log });
+    const before = { conversations: await w.scanTable('conversations'), audit: await w.scanTable('audit_events') };
+    // Every command the dry run sends goes through a recorder.
+    const recorder = recordingClient(doc);
+    const result = await enableConversationAutomation({ doc: recorder.doc, env: w.env, logger: log });
     expect(result).toMatchObject({
       scanned: 9,
       pointerRows: 1,
@@ -118,10 +141,13 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
       ['c-counter', 'send_counter'],
     ]);
     // The Scan paging loop: two rows a page walks every page to the same plan.
-    expect(await enableConversationAutomation({ doc, env: w.env, now: NOW, scanLimit: 2 })).toEqual(result);
-    expect(await w.mode('c-import')).toBe('manual');
-    expect(await w.mode('c-typeless')).toBe('manual');
-    expect(await w.modeEvents('c-import')).toHaveLength(0);
+    expect(await enableConversationAutomation({ doc: recorder.doc, env: w.env, scanLimit: 2 })).toEqual(result);
+    // WRITES NOTHING, two ways: it sent only reads, and not one item changed
+    // in either table it touches.
+    expect(recorder.sent).toContain('ScanCommand');
+    expect(recorder.sent.filter((name) => !READ_COMMANDS.has(name))).toEqual([]);
+    expect(await w.scanTable('conversations')).toEqual(before.conversations);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
     expect(reportEnableRun(result, false)).toBe(0);
     // Exit 1 only when a row could not be planned.
     expect(reportEnableRun({ ...result, failed: 1 }, false, createLogger({ level: 'silent' }))).toBe(1);
@@ -129,7 +155,7 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
 
   it('apply: enables exactly the planned rows with an audit event each; a SECOND run is a no-op', async () => {
     const w = await seedWorld();
-    const first = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true });
+    const first = await enableConversationAutomation({ doc, env: w.env, apply: true });
     expect(first).toMatchObject({ planned: 2, enabled: 2, breakerTrippedExcluded: 2, skippedOnCondition: 0, failed: 0 });
     // On an apply, byType counts rows actually switched on (sums to enabled).
     expect(first.byType).toEqual({ unknown_1to1: 1, '(none)': 1 });
@@ -156,14 +182,16 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     // key `<ISO instant>#<8-hex suffix>`, and no actorId for a system action.
     expect(events[0]!.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z#[0-9a-f]{8}$/);
     expect(events[0]!).not.toHaveProperty('actorId');
-    const second = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true });
+    // Every change audited: exactly one bulk_enable event per row switched on.
+    expect((await w.allModeEvents()).filter((e) => w.reasonOf(e) === 'bulk_enable')).toHaveLength(first.enabled);
+    const second = await enableConversationAutomation({ doc, env: w.env, apply: true });
     expect(second).toMatchObject({ planned: 0, enabled: 0, alreadyOn: 3 });
     expect(await w.modeEvents('c-import')).toHaveLength(1);
   }, 120_000);
 
   it('apply with --include-breaker-tripped also enables the tripped rows (audited and send-counter), with the same reason', async () => {
     const w = await seedWorld();
-    const result = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, includeBreakerTripped: true });
+    const result = await enableConversationAutomation({ doc, env: w.env, apply: true, includeBreakerTripped: true });
     expect(result).toMatchObject({ planned: 4, enabled: 4, breakerTrippedExcluded: 0 });
     expect(await w.mode('c-breaker')).toBe('auto');
     expect(await w.mode('c-counter')).toBe('auto');
@@ -174,7 +202,7 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     const w = await seedWorld();
     const capture = createLogCapture();
     const log = createLogger({ level: 'info', destination: capture.stream });
-    const resumed = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-breaker', logger: log });
+    const resumed = await enableConversationAutomation({ doc, env: w.env, apply: true, conversationId: 'c-breaker', logger: log });
     expect(resumed).toMatchObject({ planned: 1, enabled: 1, scanned: 1 });
     expect(await w.mode('c-breaker')).toBe('auto');
     expect((await w.modeEvents('c-breaker')).map((e) => (e.payload as { reason: string }).reason)).toEqual([
@@ -184,21 +212,27 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     // The targeted id is printed up front (spec D2: single mode reports the one id).
     expect(capture.atLevel(30).some((l) => l['conversationId'] === 'c-breaker' && String(l['msg']).includes('single mode'))).toBe(true);
     // Already on: nothing written, reported as alreadyOn.
-    const again = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-breaker' });
+    const again = await enableConversationAutomation({ doc, env: w.env, apply: true, conversationId: 'c-breaker' });
     expect(again).toMatchObject({ planned: 0, enabled: 0, alreadyOn: 1 });
     // A trip known only by its send counter resumes the same way: single mode
     // is the path FOR tripped rows, whatever the evidence.
-    const counterResume = await enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-counter' });
+    const counterResume = await enableConversationAutomation({ doc, env: w.env, apply: true, conversationId: 'c-counter' });
     expect(counterResume).toMatchObject({ planned: 1, enabled: 1, breakerTrippedExcluded: 0, skippedOnCondition: 0 });
     expect(await w.mode('c-counter')).toBe('auto');
     expect((await w.modeEvents('c-counter')).map((e) => (e.payload as { reason: string }).reason)).toEqual(['operator_resume']);
     await expect(
-      enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-relay' }),
+      enableConversationAutomation({ doc, env: w.env, apply: true, conversationId: 'c-relay' }),
     ).rejects.toBeInstanceOf(UsageError);
     await expect(
-      enableConversationAutomation({ doc, env: w.env, now: NOW, apply: true, conversationId: 'c-missing' }),
+      enableConversationAutomation({ doc, env: w.env, apply: true, conversationId: 'c-missing' }),
     ).rejects.toThrow(/not found/);
     expect(await w.mode('c-relay')).toBe('manual');
+    // --include-breaker-tripped means nothing in single mode: refused, never
+    // silently ignored.
+    await expect(
+      enableConversationAutomation({ doc, env: w.env, apply: true, conversationId: 'c-import', includeBreakerTripped: true }),
+    ).rejects.toBeInstanceOf(UsageError);
+    expect(await w.mode('c-import')).toBe('manual');
   }, 120_000);
 
   it('a row switched ON elsewhere mid-run (another run, or a resume) loses the conditional write and is counted - no second audit event', async () => {
@@ -225,7 +259,7 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
       },
       destroy: () => {},
     } as unknown as DynamoDBDocumentClient;
-    const result = await enableConversationAutomation({ doc: racingDoc, env: w.env, now: NOW, apply: true });
+    const result = await enableConversationAutomation({ doc: racingDoc, env: w.env, apply: true });
     expect(raced).toBe(true);
     expect(result.skippedOnCondition).toBe(1);
     expect(result.enabled).toBe(1); // c-typeless still landed
@@ -234,6 +268,44 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
     expect(result.byType).toEqual({ '(none)': 1 });
     expect(await w.modeEvents('c-import')).toHaveLength(0); // no audit for a lost write
   }, 120_000);
+
+  it.each(['turned into a group thread', 'deleted'] as const)(
+    'a row %s between the Scan and the write loses the conditional write: skippedOnCondition, nothing written, never resurrected',
+    async (change) => {
+      const w = await seedWorld();
+      const table = tableName('conversations', w.env);
+      let raced = false;
+      const racingDoc = {
+        send: async (command: unknown) => {
+          const out = await (doc as DynamoDBDocumentClient).send(command as never);
+          if (command instanceof ScanCommand && !raced) {
+            raced = true;
+            await doc.send(
+              change === 'deleted'
+                ? new DeleteCommand({ TableName: table, Key: { conversationId: 'c-import' } })
+                : new UpdateCommand({
+                    TableName: table,
+                    Key: { conversationId: 'c-import' },
+                    UpdateExpression: 'SET #type = :g',
+                    ExpressionAttributeNames: { '#type': 'type' },
+                    ExpressionAttributeValues: { ':g': 'group_text' },
+                  }),
+            );
+          }
+          return out;
+        },
+        destroy: () => {},
+      } as unknown as DynamoDBDocumentClient;
+      const result = await enableConversationAutomation({ doc: racingDoc, env: w.env, apply: true });
+      expect(raced).toBe(true);
+      expect(result).toMatchObject({ planned: 2, enabled: 1, skippedOnCondition: 1 });
+      const row = (await doc.send(new GetCommand({ TableName: table, Key: { conversationId: 'c-import' } }))).Item;
+      if (change === 'deleted') expect(row).toBeUndefined(); // the Update never recreates it
+      else expect(row).toMatchObject({ type: 'group_text', ai_mode: 'manual' });
+      expect(await w.modeEvents('c-import')).toHaveLength(0);
+    },
+    120_000,
+  );
 
   it('a breaker trip that lands between the Scan and the write loses the conditional write: the bulk write requires no send counter', async () => {
     const w = await seedWorld();

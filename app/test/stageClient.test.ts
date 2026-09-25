@@ -79,8 +79,38 @@ describe('resolveStageClient', () => {
     expect(stage.endpoint).toBeUndefined();
     expect(stage.accessKeyId).toBeUndefined();
     expect(credentialCalls).toBe(1);
+    // The client the script writes through signs with THAT identity - not one
+    // it built beside it (e.g. from the machine's default chain).
+    const creds = await stage.doc.config.credentials();
+    expect(creds.accessKeyId).toBe('AKIAFAKE');
     stage.doc.destroy();
   });
+
+  it.each(['AWS_ENDPOINT_URL_DYNAMODB', 'AWS_ENDPOINT_URL'])(
+    'dev/prod: REFUSE to start when %s is set (it would redirect the client while the target line says AWS), before the guard; local is unaffected',
+    async (name) => {
+      const saved = process.env[name];
+      let guardCalls = 0;
+      const assertAccount = async () => {
+        guardCalls += 1;
+        return { Account: '938565869261' };
+      };
+      try {
+        process.env[name] = 'http://127.0.0.1:8000';
+        for (const target of ['dev', 'prod'] as const) {
+          await expect(resolveStageClient(target, { assertAccount })).rejects.toThrow(new RegExp(`${name}\\b`));
+        }
+        expect(guardCalls).toBe(0);
+        const local = await resolveStageClient('local', { assertAccount }, { lane: 3 });
+        expect(local.endpoint).toBe('http://localhost:8000');
+        expect(guardCalls).toBe(0);
+        local.doc.destroy();
+      } finally {
+        if (saved === undefined) delete process.env[name];
+        else process.env[name] = saved;
+      }
+    },
+  );
 });
 
 describe('parseStageArgs', () => {
@@ -127,6 +157,14 @@ describe('parseStageArgs', () => {
     { label: '--lane x', argv: ['--env', 'local', '--lane', 'x'] },
     { label: 'an unknown flag (a typo of --apply)', argv: ['--env', 'dev', '--aply'] },
     { label: 'an unknown --env target', argv: ['--env', 'staging'] },
+    // A repeated argument never silently takes the last value: dev and prod
+    // share one account, so the account guard cannot catch a dev/prod swap.
+    { label: 'a repeated --env (--env dev ... --env prod)', argv: ['--env', 'dev', '--apply', '--env', 'prod'] },
+    { label: 'a repeated --conversation', argv: ['--env', 'dev', '--conversation', 'a', '--conversation', 'b'] },
+    { label: 'a repeated flag', argv: ['--env', 'dev', '--apply', '--apply'] },
+    // --lane is local-only: with dev/prod it is a usage error, before any AWS call.
+    { label: '--lane with --env dev', argv: ['--env', 'dev', '--lane', '3'] },
+    { label: '--lane with --env prod (in either order)', argv: ['--lane', '1', '--env', 'prod'] },
   ])('refuses $label as a usage error', ({ argv }) => {
     expect(parseStageArgs(argv, FIX_SCRIPT)).toEqual({ usage: true });
   });

@@ -1,7 +1,7 @@
 // The read-only census (spec D1) against DynamoDB Local: every group the spec
 // names, each proven by one seeded row, and the invariant that it WRITES NOTHING.
 import { randomUUID } from 'node:crypto';
-import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -32,6 +32,23 @@ if (!reachable) {
 
 const TABLES = ['conversations', 'audit_events', 'contacts', 'tours', 'tourReminders', 'placementNudges'] as const;
 const NOW = '2026-09-25T12:00:00.000Z';
+const READ_COMMANDS = new Set(['ScanCommand', 'QueryCommand', 'GetCommand']);
+
+/** A client that records every command (class name + table), then sends it for real. */
+function recordingClient(inner: DynamoDBDocumentClient): {
+  doc: DynamoDBDocumentClient;
+  sent: Array<{ name: string; table: string | undefined }>;
+} {
+  const sent: Array<{ name: string; table: string | undefined }> = [];
+  const doc = {
+    send: async (command: { constructor: { name: string }; input?: { TableName?: string } }) => {
+      sent.push({ name: command.constructor.name, table: command.input?.TableName });
+      return await inner.send(command as never);
+    },
+    destroy: () => {},
+  } as unknown as DynamoDBDocumentClient;
+  return { doc, sent };
+}
 
 describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Local', () => {
   const client = createDynamoClient({ endpoint });
@@ -60,6 +77,9 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     const audit = createAuditRepo({ doc, env });
     // Conversations: one of each group.
     await put('conversations', { conversationId: 'c-import-manual', participant_phone: '+15550000001', status: 'open', last_activity_at: NOW, type: 'unknown_1to1', ai_mode: 'manual', imported_from: 'quo-airtable-import', created_at: NOW });
+    // An imported one-to-one row with NO phone claim at all: the normal state
+    // for an imported row (spec D1), so NOT a mismatch.
+    await put('conversations', { conversationId: 'c-import-noclaim', participant_phone: '+15550000008', status: 'open', last_activity_at: NOW, type: 'unknown_1to1', ai_mode: 'auto', imported_from: 'quo-airtable-import', created_at: NOW });
     await put('conversations', { conversationId: 'c-breaker', participant_phone: '+15550000002', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', imported_from: 'quo-airtable-import', created_at: NOW });
     await audit.append('conversations#c-breaker', 'message_sent', { automated: true });
     await audit.append('conversations#c-breaker', 'mode_changed', { from: 'auto', to: 'manual', reason: 'breaker_trip' });
@@ -84,12 +104,14 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     await put('contacts', { contactId: 'ten-trip', type: 'tenant', status: 'searching', phone: '+15550000002', firstName: 'T', lastName: 'R', created_at: NOW });
     await put('contacts', { contactId: 'ten-on', type: 'tenant', status: 'searching', phone: '+15550000004', firstName: 'C', lastName: 'D', created_at: NOW });
     await put('contacts', { contactId: 'ten-counter', type: 'tenant', status: 'searching', phone: '+15550000007', firstName: 'E', lastName: 'F', created_at: NOW });
+    await put('contacts', { contactId: 'ten-nophone', type: 'tenant', status: 'searching', firstName: 'G', lastName: 'H', created_at: NOW });
     const tours = createToursRepo({ doc, env });
     const reminders = createTourRemindersRepo({ doc, env });
     const offTour = await tours.create({ tenantId: 'ten-off', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
     const tripTour = await tours.create({ tenantId: 'ten-trip', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
     const onTour = await tours.create({ tenantId: 'ten-on', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
     const counterTour = await tours.create({ tenantId: 'ten-counter', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
+    const noPhoneTour = await tours.create({ tenantId: 'ten-nophone', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'self_guided' });
     const groupTour = await tours.create({ tenantId: 'ten-off', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'landlord_led' });
     await tours.patch(groupTour.tourId, { groupThreadId: 'c-relay' });
     const fallbackTour = await tours.create({ tenantId: 'ten-off', unitId: 'u1', scheduledAt: '2026-10-01T15:00:00.000Z', tourType: 'landlord_led' });
@@ -101,6 +123,9 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     await reminders.create({ tourId: tripTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: onTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: counterTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
+    // Unresolvable, two ways: the rung's tour does not exist; the tenant has no phone.
+    await reminders.create({ tourId: 'tour-missing', kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
+    await reminders.create({ tourId: noPhoneTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: groupTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: fallbackTour.tourId, kind: 'day_before', dueAt: '2026-09-30T23:00:00.000Z' });
     await reminders.create({ tourId: pastTour.tourId, kind: 'day_before', dueAt: '2026-08-31T23:00:00.000Z' });
@@ -114,17 +139,16 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     const sentNudge = await nudges.create({ placementId: 'p2', kind: 'approval_check', dueAt: '2026-09-20T00:00:00.000Z' });
     await nudges.claimSend(sentNudge.nudgeId, NOW);
 
-    const before = {
-      conversations: await scanAll('conversations'),
-      audit: await scanAll('audit_events'),
-      reminders: await scanAll('tourReminders'),
-    };
+    const before = new Map<string, Record<string, unknown>[]>();
+    for (const base of TABLES) before.set(base, await scanAll(base));
 
-    const census = await runConversationAutomationCensus({ doc, env, now: NOW });
+    // Every command the census sends goes through a recorder.
+    const recorder = recordingClient(doc);
+    const census = await runConversationAutomationCensus({ doc: recorder.doc, env, now: NOW });
 
     expect(census.pointerRows).toBe(3);
     expect(census.byType).toEqual({
-      unknown_1to1: { auto: 0, manual: 1, unset: 0 },
+      unknown_1to1: { auto: 1, manual: 1, unset: 0 },
       tenant_1to1: { auto: 1, manual: 2, unset: 1 },
       landlord_1to1: { auto: 0, manual: 1, unset: 0 },
       '(none)': { auto: 0, manual: 1, unset: 0 },
@@ -138,6 +162,9 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
       { conversationId: 'c-breaker', type: 'tenant_1to1', trippedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), evidence: 'audit_event' },
       { conversationId: 'c-counter', type: 'tenant_1to1', trippedAt: '2026-09-25T11:59', evidence: 'send_counter' },
     ]);
+    // Three imported one-to-one rows: a claim that matches, a claim that points
+    // ELSEWHERE (the one mismatch), and NO claim (normal - not a mismatch).
+    expect(census.importedOneToOneRows).toBe(3);
     expect(census.importClaimMismatches).toBe(1);
     // The job's own routing, replayed: usable group -> group; unusable group ->
     // the tenant 1:1; a breaker-tripped 1:1 is its own line because the bulk
@@ -150,7 +177,7 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
       tourPast: 1,
       superseded: 1,
       discontinued: 1,
-      unresolvable: 0,
+      unresolvable: 2, // the rung whose tour is missing + the tenant with no phone
     });
     expect(census.pendingNudgesHeldManualOnly).toBe(2);
 
@@ -163,11 +190,12 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     // The Scan paging loop: two rows a page walks every page to the same answer
     // (a real table spans many 1 MB pages; a dropped ExclusiveStartKey would
     // silently undercount).
-    expect(await runConversationAutomationCensus({ doc, env, now: NOW, scanLimit: 2 })).toEqual(census);
+    expect(await runConversationAutomationCensus({ doc: recorder.doc, env, now: NOW, scanLimit: 2 })).toEqual(census);
 
-    // READ-ONLY: not one row changed in any table the census reads.
-    expect(await scanAll('conversations')).toEqual(before.conversations);
-    expect(await scanAll('audit_events')).toEqual(before.audit);
-    expect(await scanAll('tourReminders')).toEqual(before.reminders);
+    // READ-ONLY, two ways: every command it sent is a read, across all six
+    // tables it reads; and not one item changed in any of them.
+    expect(recorder.sent.filter((c) => !READ_COMMANDS.has(c.name))).toEqual([]);
+    expect(new Set(recorder.sent.map((c) => c.table))).toEqual(new Set(TABLES.map(t)));
+    for (const base of TABLES) expect(await scanAll(base)).toEqual(before.get(base));
   }, 120_000);
 });

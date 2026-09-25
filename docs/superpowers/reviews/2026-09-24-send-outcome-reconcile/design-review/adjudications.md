@@ -85,3 +85,37 @@ after 6/7. Reviewer conceded A5, A19 (second half), A22, A23.
 
 **Round 2 outcome:** 20 findings, 19 accepted (one in part), 1 rejected in
 part. Decisions changed: yes (D8a, D11, D13, D7a, D16a) -> round 3 required.
+
+## Spec round 3 (2026-09-24) - reviewer A continued
+
+Planner's reading of the round as a whole: findings 1-4, 6, 8-10 all come from
+ONE structural choice - using the slot's `errorCode` as a state machine that
+six writers share, two of which (`setRecipient` on broadcast, `markRecipient`
+on legacy relay) rewrite the slot wholesale. Revision 4 moves every piece of
+coordination state OUT of the slot into a per-recipient send-attempt RECORD
+(new D8a) - the same reasoning that put the retry-counter mission's pass
+counter outside the wholesale-written slot (its D2) - and the slot goes back
+to being a presentation record. Most rows below are accepted by that one
+change rather than by a patch each.
+
+| # | finding | ruling | what changed |
+|---|---|---|---|
+| 1 | a relay success leaves the slot `queued` with a SID, which the claim accepts; a twice-enqueued re-drive texts again | ACCEPT, decision changed (BLOCKING) | The claim lives on the attempt record, not the slot; a record that holds a SID, or is in any non-claimable state, refuses the claim regardless of slot status (D8a). |
+| 2 | `send_unconfirmed` marks both a pending and a closed slot; finalize, the flip and the chip read only the code | ACCEPT, decision changed | Pending is a record STATE (`reconciling`); the slot carries `send_unconfirmed` only when CLOSED (`failed`). Finalize consults records for open attempts (D16a); the re-drive flip is a record transition (D11); the chip counts closed unresolved legs only (D21). |
+| 3 | D7 vs D11 disagree on a slot that never got the code; the safe rule keys on the attempt start | ACCEPT | Every record transition is conditioned on the record's `attemptedAt` equalling the payload's (D11); the reconcile is recorded on the record BEFORE the enqueue, so there is no "never got the code" state (D7). |
+| 4 | cap-closes, the brake, the relay opt-out arm and the retry gates can overwrite a slot another pass is sending | ACCEPT, decision changed | D8: every close this branch owns (the two cap-closes, `redrive_refused`, `unresolved`) reads the recipient's attempt record consistently first and refuses an open attempt; the retry gates and the opt-out arm run BEFORE that job's own claim and a foreign open attempt refuses their claim next (D8a); the brake defers only recipients that have no attempt. |
+| 5 | identical bodies (media-only legs, emoji-only) defeat identification; "earliest" lets two reconciles adopt one SID | ACCEPT, decision changed | D13: adoption CLAIMS the SID (a conditional SID-pointer put); a loser takes the next unclaimed matching candidate; none left is `never_sent`. With that, identical-body orphans may be ASSIGNED swapped between two legs of the same body to the same member, which changes no delivery and no count, and never produce one-text-twice plus one-never. Media-only bodies match on media count (D13). |
+| 6 | `retrySend` has no send claim | ACCEPT, decision changed | The attempt record is owner-agnostic: the 1:1 retry keys its record on the original message and the rung (D8a, D12). |
+| 7 | the page walk assumes newest-first, which D17 marks UNVERIFIED; "few messages per pair" is false for shared pool numbers | ACCEPT | D13: walk every page up to a bound (20 pages); exceeded is `unresolved`. |
+| 8 | contests round-2 #14: with a claim, a failed deferral write leaves `attempting`; the continuation loses and skips for good | CONCEDE, decision changed | D8a: a FRESH foreign claim makes the continuation DEFER the recipient again (it stays in the transient set), and a STALE one (older than the claim TTL) is taken over and handed to reconcile - never a silent skip. |
+| 9 | D7's unconditional slot write after the enqueue races an early adoption | ACCEPT | D7: the record is written first (`reconciling`), then the enqueue; no slot write happens while reconciling, so nothing can regress an adoption. |
+| 10 | a re-drive's claim overwrites `send_redrive`; a stale hand-off re-arms a second re-drive | ACCEPT | `redriveCount` is a record attribute the claim never touches (D8a, D13a). |
+| 11 | "unmatched candidate -> unresolved" has no timing rule | ACCEPT | D13: unmatched candidates decide only at the FINAL check; earlier checks continue. |
+| 12 | re-running the adoption duplicates the milestone and audit writes; a record-phase stats-bump failure is never repaired | ACCEPT | D15: the best-effort rows and the stats bump are written only by the adoption that WINS the slot transition; D7a: the record phase writes the slot LAST and bumps stats in the same conditional, so "slot moved" implies "stats moved". |
+| 13 | contests round-2 #8 for one cause: a `never_sent` whose re-drive enqueue throws should close `enqueue_failed`, keeping the Retry | CONCEDE | D16: that case closes `enqueue_failed`. |
+| 14 | smaller defects (digest check on the known-SID path; claim TTL shorter than a `sendMessage` call; absent legacy slots fail the claim; media-only 1:1 retry; re-drive vs the close-on-no-claim branch; relay retry adoption's inbox touch) | ACCEPT | D12 (digest check only on the lookup path); D8a (claim TTL = the provider timeout plus the send service's own budget, 90 seconds; the record is created on first claim so an absent slot is not consulted); D13 (media count); D13a (a re-drive pass claims a ladder rung only when it has transient remainder to defer); D15 (the relay retry adoption touches the inbox the preserving way). |
+
+**Round 3 outcome:** 14 findings, all accepted (two as conceded contests).
+Decisions changed: yes (the attempt record) -> round 4, the LAST round under
+the cap. If round 4 still changes a decision, the open findings go to Cameron
+as a decision rather than a fifth round.

@@ -2,17 +2,17 @@
 
 Anchor issue: `throw-for-redelivery-defeated-by-job-marker` (high).
 Branch `feat/send-outcome-reconcile`, cut from `main@685f2ede`, 2026-09-24.
-Revision 3 (after design review rounds 1 and 2; see the adjudications).
+Revision 4 (after design review rounds 1-3; see the adjudications).
 
 | sev | issue | this branch |
 |---|---|---|
 | high | `throw-for-redelivery-defeated-by-job-marker` | **closes** |
 | med | `accepted-send-lost-when-append-fails` | piece 1 (the typed error) **built**; piece 2 **built for the adopted callers** - `missedCallAutoText`, its production path, is Stage 2 (Sec 9) |
-| low | `exactly-once-send-intent` | **partly** - the per-recipient send claim (D8a) and the reconcile mechanism; no separate intent record (D14) |
+| low | `exactly-once-send-intent` | **substantially built** - the per-recipient send-attempt record (D8a) IS the durable intent that issue sketches, for the adopted callers |
 
 **This document states DECISIONS and INVARIANTS.** Mechanics - control flow,
-where a line goes, exact backoff values, test seams - belong to the plan.
-Review history, adjudications and rejected alternatives are in
+where a line goes, exact backoff values, key shapes, test seams - belong to
+the plan. Review history, adjudications and rejected alternatives are in
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/design-review/`.
 
 ## 1. The invariant, stated with its scope
@@ -21,21 +21,23 @@ Three guarantees, each with the mechanism that delivers it and the residue it
 leaves:
 
 1. **Nobody is texted twice by this branch.** Every send site claims the
-   recipient before calling the provider (D8a), so two passes, two
-   continuations or two re-drives for one recipient produce one send; a
-   re-drive is attempted only after a verdict that nothing was sent (D13);
-   the verdict never adopts a message it cannot identify as ours (D13).
-   Residue: an orphan the provider lists outside the pages the lookup walks
-   (D13) would be ruled `never_sent` - the walk covers the whole recipient/
-   sender list inside the window and is verified on the first hosted-dev run.
+   recipient on its send-attempt record before calling the provider (D8a), so
+   two passes, two continuations or two re-drives for one recipient produce
+   one send; a re-drive is attempted only after a verdict that nothing was
+   sent (D13); the verdict never adopts a message it cannot identify as ours,
+   and never lets two attempts adopt the same message (D13). Residue: an
+   orphan the provider lists beyond the bounded page walk (D13) is ruled
+   `unresolved`, not `never_sent`, so even that residue re-sends nothing.
 2. **A recipient whose provider send was attempted reaches a terminal state
    without anyone throwing out of the loop.** The per-recipient unit is split
    into prepare / send / record phases and each phase has a defined failure
    handling (D7a); the reconcile job's own failures are genuine retries (D11)
    and end in a verdict (D13a). Residue, recorded not closed: a process death
-   between a claim (D8a) or an ambiguous send and the enqueue of its reconcile
-   job (D14); a failure of the per-PASS setup before any recipient is
-   attempted (Sec 9); a failure-arm write that itself fails (D7, D7a).
+   between a claim or an ambiguous send and the enqueue that follows it (D14);
+   a failure of the per-PASS setup before any recipient is attempted (Sec 9);
+   a failure-arm write that itself fails (D7a). Each leaves a slot
+   non-terminal with an open attempt record and an attempt clock, which is
+   what the Stage 2 sweeper will read (Sec 9).
 3. **An outcome the provider left ambiguous is resolved by the platform.** The
    reconcile job looks the message up at the provider and either adopts it or
    rules it never sent (D13, D15). Residue: the provider unreachable for the
@@ -85,9 +87,10 @@ echoes what was submitted. All of these shape Sec 5.
   (`sendOneRelayLeg` and the fan-out loop), `app/src/jobs/relayRetryLeg.ts`,
   `app/src/jobs/retrySend.ts` - the adopters (Sec 4).
 - A new `send.reconcile` job (Sec 5) and its per-owner verdict handlers.
-- `app/src/repos/broadcastsRepo.ts` (the send claim D8a, idempotent finalize
-  D16a, the stats bucket D22); `app/src/repos/messagesRepo.ts` (the send claim
-  on relay slots, the 1:1 owner's state on the original message row D12).
+- `app/src/repos/messagesRepo.ts` - the send-attempt record (D8a) and a
+  conditional `relaysid#` pointer put (D13); `app/src/repos/broadcastsRepo.ts`
+  - idempotent finalize (D16a), the stats bucket (D22), `attemptedAt` on the
+  slot (D8a).
 - `fake-twilio` - the Messages list and fetch routes and a fail-next-send
   control seam (D19).
 - Dashboard: `dashboard/src/routes/contact/deliveryStatus.ts`,
@@ -108,15 +111,14 @@ echoes what was submitted. All of these shape Sec 5.
   (unknown-SID callback resolves a pending reconcile) is the follow-up that
   closes both.
 - `relay-fanout-active-pass-cap-close-race` (deferred, same file): this branch
-  adds writers of relay slots (the claim, the reconcile job) but does not touch
-  the pass claim. D8 keeps a claimed or reconciling slot out of every close,
-  which narrows that race's damage without closing it.
+  adds the attempt record and the reconcile job as writers but does not touch
+  the pass claim. Every close this branch owns refuses a recipient with an
+  open attempt (D8), which narrows that race's damage without closing it.
 - `fanout-close-path-robustness-residues`: the close loops stay unwrapped; a
   failure-arm write that itself fails (D7a) is that issue's "throwing close"
   class one step earlier and is added to it.
-- `relay-retry-stranded-claim-window`: the crash window between a claim or a
-  send and the enqueue of its reconcile job (D14) is the same class; recorded,
-  not closed. The sweeper that closes both is Stage 2 material.
+- `relay-retry-stranded-claim-window`: the crash windows D14 records are the
+  same class; recorded, not closed. The sweeper that closes both is Stage 2.
 - `provider-status-unenumerated-defaults`: `mapTwilioStatus` is used as-is by
   the adoption write (D15).
 - The continuation ladder's timing (retry-counter D7/D11): its 5/10/20s backoff
@@ -157,12 +159,12 @@ facts a reconcile needs, instead of the bare provider error:**
   read, the contact read, the breaker increment). Nothing was sent. Classified
   `retryable`.
 - `ProviderSendFailedError` - the provider call threw. Carries the D1 kind, the
-  code, and the reconcile facts: a keyed digest of the recipient number, the
-  sender, the normalized body hash (D13), the attempt start.
+  code, and the reconcile facts: the recipient number's keyed digest, the
+  sender, the normalized body hash and media count (D13), the attempt start.
 - `SendAcceptedNotRecordedError` - Twilio accepted the message and the row
   write (`append`) failed. Carries the provider SID, provider timestamp and
-  status. This is `accepted-send-lost-when-append-fails` piece 1; Sec 4 says
-  what an adopter does with it (D7a).
+  status. This is `accepted-send-lost-when-append-fails` piece 1; D7a says
+  what an adopter does with it.
 - Failures AFTER the row is written (the inbox touch, the audit row, the SSE
   emits) no longer fail the send: they are logged at ERROR and the send returns
   its normal result. The text is out and recorded; reporting it as failed was
@@ -188,11 +190,11 @@ invisible to the `SendThrottled` alarm because the marker checks `429` and
 `30022`. Connection failures are `retryable` but are not throttles and do not
 fire it.
 
-## 4. Decisions: what a fan-out does with each kind
+## 4. Decisions: what a send site does
 
 Applies to `broadcastFanOut`, `sendOneRelayLeg` (and therefore both the relay
-fan-out loop and the relay retry job), and, with the variant row in D16,
-`retrySend`.
+fan-out loop and the relay retry job), and `retrySend` (with the variant row
+in D16).
 
 **D5. `rejected`: mark the recipient `failed` with the provider code, continue
 to the next recipient.** The existing 30007 and 30005/30006 arms keep their
@@ -208,62 +210,87 @@ The recipient is written `queued` with the code, joins the same
 the same cap (`MAX_BROADCAST_ATTEMPTS` / `MAX_FANOUT_ATTEMPTS`, unchanged) and
 the same backoff. A ladder that runs out closes `transient_cap` as today.
 
-**D7. `unknown`: hand the recipient to the reconcile job, continue.** The pass
-FIRST enqueues one `send.reconcile` job for that recipient (Sec 5; the payload
-carries everything the job needs), THEN writes the slot `queued` with code
-`send_unconfirmed` (the code only - `sentAt` and `carrierSentAt` are provider
-timestamps and stay unset; the attempt clock is `attemptedAt` from the claim,
-D8a), and moves on. The pass never waits for the verdict. A slot in this state
-is OWNED by its reconcile job until the verdict lands. The order is
-deliberate: the job's verdict conditions tolerate a slot that never received
-the code (D11), so a slot write that fails after the enqueue still resolves;
-an enqueue that throws closes the slot `unresolved` on the spot (the D9
-precedent from the retry-counter design).
+**D7. `unknown`: hand the recipient to the reconcile job, continue.** The site
+transitions the attempt record to `reconciling` (D8a; the record already
+holds every fact the job needs), THEN enqueues one `send.reconcile` job for
+that recipient (Sec 5), and moves on. The slot is not written: it stays
+`queued` with no code while the reconcile runs, and only a verdict writes it
+(D16). The pass never waits for the verdict. The order is deliberate: the
+record is the coordination state and it is durable before anything depends on
+it; an enqueue that throws transitions the record to `done` / `unresolved`
+and closes the slot the same way (the D9 precedent from the retry-counter
+design).
 
 **D7a. The per-recipient unit has three phases, and each phase fails
 differently.**
 
 | phase | what runs | on failure |
 |---|---|---|
-| PREPARE | reads and writes before the provider call: contact, conversation, roster suppression check, presign, the aggregation-state write, the claim itself (D8a) | nothing was sent: the recipient is deferred as `retryable` (D6); a lost claim is a skip, not a failure |
+| PREPARE | reads and writes before the provider call: contact, conversation, roster suppression check, presign, the aggregation-state write, the claim itself (D8a) | nothing was sent: the recipient is deferred as `retryable` (D6), and the record - if it was claimed - is released to `done` / `retryable`; a refused claim is handled by D8a, not here |
 | SEND | the provider call, or `sendMessage` | classified (D1) |
-| RECORD | writes after a successful send that the receipts depend on: the slot, the SID pointer (relay), the message row (`sendMessage`'s append); and the stats bump | the send HAPPENED and its SID is known: `sent_unrecorded` - one ERROR line carrying the SID and the owner, then the recipient is handed to the reconcile job WITH the SID (D13's known-SID path), whose adoption re-runs those writes idempotently; the loop continues. The token acquire, the milestone and listing-send rows and the SSE emits are already best-effort and stay so |
+| RECORD | writes after a successful send that the receipts depend on: the SID pointer (relay), the message row (`sendMessage`'s append), then LAST the slot together with the stats bump in one conditional write, then the record's `done` / `sent` | the send HAPPENED and its SID is known: `sent_unrecorded` - one ERROR line carrying the SID and the owner, then the record goes to `reconciling` WITH the SID and a reconcile is enqueued (D13's known-SID path), whose adoption re-runs those writes idempotently; the loop continues. The token acquire, the milestone and listing-send rows and the SSE emits are best-effort and stay so |
 
-A failure-arm write (the D5/D6/D7 slot writes) that itself fails is logged at
-ERROR with the owner and the recipient and the loop continues; the slot keeps
-whatever it held. That recipient is the future sweeper's, and Sec 1 records
-it. Nothing in any phase throws out of the loop. The relay unit returns two
-new outcome kinds, `sent_unrecorded` and `handed_to_reconcile`, so its callers
-can count them and the retry rung can handle them explicitly.
+A failure-arm write (the D5/D6/D7 writes) that itself fails is logged at ERROR
+with the owner and the recipient and the loop continues; the record keeps
+`attempting` and the slot keeps whatever it held. That recipient is the future
+sweeper's, and Sec 1 records it. Nothing in any phase throws out of the loop.
+The relay unit returns two new outcome kinds, `sent_unrecorded` and
+`handed_to_reconcile`, so its callers can count them and the retry rung can
+handle them explicitly.
 
-**D8. Claimed and reconciling slots are invisible to the cap-closes, to the
-continuation's recipient set, and to every send site.** `closeBroadcast` and
-`closeRelay` skip a slot whose code is `send_attempting` or
-`send_unconfirmed` (stamping one `transient_cap` would overwrite a text that
-may have gone out or is going out); the continuation payload never lists one;
-every send site's claim (D8a) refuses one; a pass that finds one still open
-does not finalize the broadcast (finalize checks, D16a). A `send_redrive`
-slot is an ordinary queued slot to all of them.
+**D8. Every close this branch owns refuses a recipient with an open attempt.**
+Before writing a slot terminal - `closeBroadcast` and `closeRelay` (the cap
+and enqueue-failed closes), and the reconcile job's own `redrive_refused`,
+`enqueue_failed` and `unresolved` closes - the writer reads the recipient's
+attempt record with a strongly consistent read and skips the recipient if the
+record is in any state but `done` (someone is sending, reconciling or about to
+re-drive it). The D9 brake defers only recipients that have no attempt yet.
+The relay retry job's gate refusals and the relay opt-out arm run before that
+job's own claim, and a foreign open attempt then refuses the claim (D8a), so
+they need no read of their own.
 
-**D8a. Every send site claims the recipient before calling the provider.**
-Immediately before the provider call the site conditionally writes the slot
-`queued` with code `send_attempting` and `attemptedAt = now`, on the condition
-that the slot is `queued` and its code is not `send_attempting` and not
-`send_unconfirmed`. Losing that condition means another writer owns the
-recipient: the site skips it without a send and without an error. The claim
-is released by the outcome write the same site makes moments later (`sent`,
-`failed` with a code, `queued` with a retry code, or `send_unconfirmed`), so
-in the normal case the claim lives for the duration of one provider call.
-This is the per-recipient form of the guarantee the run-once marker gives per
-job: a duplicate pass, a duplicate continuation, or a twice-enqueued re-drive
-cannot text the same recipient twice, because only one of them wins the
-claim. A `send_attempting` slot that outlives the provider's timeout is a
-process that died mid-send; a send site that meets one older than that hands
-it to the reconcile job as `unknown` with its `attemptedAt` instead of
-sending. Today only a re-drive or a first pass revisits such a slot, so the
-general case of that residue is the future sweeper's (Sec 1). Both slot
-types gain the `attemptedAt` field; the versioned relay row's existing
-pre-send aggregation-state write and the claim are one conditional update.
+**D8a. Every send site claims the recipient on its send-attempt RECORD before
+calling the provider.** The record is a per-owner-per-recipient item in the
+messages table's pointer/marker family (the exact key shape is the plan's),
+written by exactly two kinds of writer - send sites and the reconcile job -
+and never by the slot's wholesale writers (`setRecipient`, `markRecipient`),
+which is why the coordination state cannot live in the slot: the
+retry-counter mission's D2 lesson, applied again. It holds: the owner
+reference and recipient key; `state` in `attempting` | `reconciling` |
+`redriven` | `done`; `attemptNo`; `attemptedAt`; `redriveCount`; `checkNo`;
+`sid` once known; `outcome` (`sent`, `rejected`, `retryable`, `adopted`,
+`never_sent`, `unresolved`, `enqueue_failed`, `redrive_refused`) and its
+`cause` when `done`; the recipient number's keyed digest, the sender, the
+normalized body hash and the media count of THIS attempt.
+
+The claim is one conditional write:
+
+- creates the record when absent -> `attempting`, `attemptNo` 1,
+  `attemptedAt` now;
+- is allowed from `done` / `retryable` (a deferred recipient's next pass) and
+  from `redriven` (the re-drive pass) -> `attempting`, `attemptNo` + 1, a new
+  `attemptedAt`; `redriveCount` is never touched by a claim;
+- is a TAKEOVER, not a send, from `attempting` older than the claim TTL (90
+  seconds: the provider's 30-second timeout plus the send service's own
+  reads): the site transitions the record to `reconciling` keeping the old
+  `attemptedAt` and enqueues a reconcile - a process died mid-send and the
+  outcome is unknown;
+- is refused from `attempting` fresher than the TTL, from `reconciling`, from
+  `redriven` while a re-drive is already in flight, and from `done` with any
+  outcome but `retryable`. A refused claim on a recipient a continuation
+  carries is DEFERRED again (the recipient stays in the transient set for the
+  next pass, which will find the attempt resolved, stale, or still fresh);
+  a refused claim on a terminal outcome is a skip.
+
+Every later write to the record by the same site (the D5/D6/D7 transitions
+and the record-phase `done` / `sent`) is conditioned on `state = attempting`
+AND `attemptedAt` equal to this attempt's, so a stale writer cannot overwrite
+a newer attempt. The claim also writes `attemptedAt` onto the slot (an
+additive attribute, best-effort: a wholesale slot write may erase it; the
+record stays authoritative) so a stranded slot can age (D20a). Both slot types
+gain the field. A `queued` slot with a SID recorded on its record can never be
+claimed again, whatever the slot's status says: this is what makes a relay
+success that leaves the slot `queued` safe against a duplicate.
 
 **D9. Outage brake.** Three consecutive `unknown` outcomes in one pass end the
 pass early: every recipient not yet attempted is deferred to the continuation
@@ -278,33 +305,41 @@ honestly, and retrying it could not help.
 existing status (`queued`, `failed`, `sent`) plus a code. `deriveBroadcastStats`
 switches on status with no default arm and the dashboard's status maps fall
 through to "Sending...", so a new status would vanish from every chip silently.
-The codes this branch writes: `send_attempting`, `send_unconfirmed`,
-`send_redrive`, `redrive_refused`, `sms_sending_disabled` (existing token),
-and the provider's own rejection codes.
+The codes this branch writes on slots: `send_unconfirmed` (closed
+unresolved), `enqueue_failed` (existing), `redrive_refused`,
+`sms_sending_disabled` (existing token), and the provider's own rejection
+codes. Pending states are record states, never slot codes.
 
 ## 5. Decisions: the reconcile job
 
 **D11. `send.reconcile` is an ordinary job with a fresh `jobId` and NO run-once
 marker. Its enqueues are AT-LEAST-ONCE and every write it makes is idempotent
-or conditional, so a redelivery, a duplicate check, or two chains for one
-recipient converge on one outcome:**
+or conditional on the attempt record, so a redelivery, a duplicate check, or
+two chains for one recipient converge on one outcome:**
 
-- Adoption is a set of individually idempotent writes (the row append dedupes
-  on the SID; the pointer put is a plain put; the slot write is forward-only
-  and returns whether it moved; the stats bump happens only when the slot
-  write moved). Re-running the whole adoption is safe, so a throw partway
-  through is a genuine retry that completes it.
-- A check records its number on the slot (or the 1:1 owner's row) and then
-  enqueues its successor. The record is tolerant of its own duplicate, so a
-  redelivered check may enqueue a second successor; the chain is bounded at
-  three checks (D13a) and every verdict below is idempotent, so a duplicate
-  chain costs a few extra list calls and nothing else.
-- A `never_sent` verdict flips the slot to `send_redrive` on the condition
-  that it reads `send_unconfirmed` or already `send_redrive`, then enqueues
-  the re-drive. The enqueue may therefore happen twice; the send claim (D8a)
-  makes the second continuation a no-op.
-- An `unresolved` verdict and a `redrive_refused` close are forward-only
-  writes from a non-terminal slot; a duplicate finds a terminal slot and
+- Every record transition the job makes is conditioned on `state =
+  reconciling` and on `attemptedAt` equal to the payload's attempt start; a
+  payload for an older attempt writes nothing.
+- A check records its number (`checkNo` n, allowed from n-1 or n - tolerant
+  of its own duplicate) and then enqueues its successor. A redelivered check
+  may enqueue a second successor; the chain is bounded at three checks (D13a)
+  and every verdict is idempotent, so a duplicate chain costs a few extra
+  list calls and nothing else.
+- Adoption first CLAIMS the message: the `sid#` row append (broadcast, 1:1),
+  which dedupes on the SID, or a conditional `relaysid#` pointer put (relay).
+  A claim that loses to a DIFFERENT attempt means that message is someone
+  else's; the job takes the next candidate (D13). The rest of the adoption is
+  individually idempotent writes (a forward-only slot write that reports
+  whether it moved; the stats bump, the best-effort rows and the emits only
+  when it moved), then the record `done` / `adopted` with the SID. Re-running
+  the whole adoption is safe, so a throw partway through is a genuine retry
+  that completes it.
+- A `never_sent` verdict transitions the record to `redriven` on the
+  condition `redriveCount = 0`, incrementing it, then enqueues the re-drive.
+  The enqueue may happen twice; the second continuation's claim finds
+  `attempting` (fresh) or `done` and defers or skips (D8a).
+- `unresolved`, `enqueue_failed` and `redrive_refused` transition the record
+  to `done` and write the slot forward-only; a duplicate finds `done` and
   writes nothing.
 
 Because nothing in the chain depends on being the single winner, a throw
@@ -313,42 +348,48 @@ through the existing `jobs-dlq-depth` alarm. (Other jobs - media mirror, voice
 transcripts, relay warm - already retry genuinely; this one joins them and
 its docblock says why the marker is absent.)
 
-**D12. The payload carries identifiers and the reconcile facts, never a body or
-a recipient phone in the clear:** the owner reference (D16), a keyed digest of
-the recipient number (SHA-256 over the owner reference and the E.164 - the
-relay retry claim's shape), the sender (a pool or business number, not PII),
-the normalized body hash (D13), the attempt start, the check number, the
-pass's continuation context (so a `never_sent` verdict can re-drive the
-recipient), and the provider SID when one is known. At run time the job
+**D12. The payload carries identifiers only:** the owner reference (D16), the
+recipient key, the attempt start (the record's `attemptedAt`, which every
+condition keys on), the check number, and the pass's continuation context
+(sender key and name override for relay, so a `never_sent` verdict can
+re-drive the recipient). Everything else - the recipient digest, the sender,
+the body hash, the media count, a known SID - is read from the attempt record
+at run time. Never a body or a recipient phone. On the LOOKUP path the job
 re-reads the recipient's CURRENT number from the owner (the contact, the
-roster member, the 1:1 conversation) and compares its digest; a mismatch is
+roster member, the 1:1 conversation) and compares its keyed digest (SHA-256
+over the owner reference and the E.164) with the record's; a mismatch is
 `unresolved` - a text, if any, went to a number we can no longer look up. The
-1:1 owner (`retrySend`) has no slot: its durable record is the ORIGINAL
-message row, and its check number, deferral and verdict are conditional
-attributes on that row.
+known-SID path needs no number and skips that check. The 1:1 owner
+(`retrySend`) keys its record on the original message and the retry rung;
+its recipient key is the conversation.
 
 **D13. The lookup, and its three verdicts.**
 
-- **Known SID:** fetch that message by SID (D17). The verdict is `found`. A
-  fetch that fails is a job failure (a genuine retry, D11), never a verdict.
-- **Otherwise** list the provider's messages to that recipient from that sender
-  (D17), walking EVERY page until a whole page is older than the window (one
-  recipient/sender pair holds few messages), and keep those created inside
-  the window: from 60 seconds before the attempt start (clock skew plus the
-  provider's one-second resolution) to now. Exclude any candidate whose SID
-  another owner already holds - a `sid#` or `relaysid#` pointer resolving to
-  a different owner or recipient, or the `syssid#` system-send marker. A
-  candidate whose pointer resolves to THIS owner and recipient is `found` (a
-  repair: the send was recorded after all). Of the rest, a candidate is OURS
-  only if its body matches: compare after a lossy normalization (Unicode
-  NFKC, then letters and digits only), because Smart Encoding rewrites
-  punctuation in the stored body (Sec 1). One matching candidate: `found`.
-  Several: `found` with the earliest and a WARN. Candidates in the window
-  that match nothing (a Twilio STOP/HELP auto-reply from our own number, an
-  orphan of some other send to the same recipient): `unresolved`, with the
-  cause named in the log - never adopted, never re-driven. A normalized body
-  shorter than three characters cannot be matched and is `unresolved` too.
-- **No candidate through the whole window:** `never_sent`.
+- **Known SID (on the record):** fetch that message by SID (D17). The verdict
+  is `found`. A fetch that fails is a job failure (a genuine retry, D11),
+  never a verdict.
+- **Otherwise** list the provider's messages to that recipient from that
+  sender (D17), walking every page up to a bound of 20; a walk that exhausts
+  the bound is `unresolved`. Keep the messages created inside the window:
+  from 60 seconds before the attempt start (clock skew plus the provider's
+  one-second resolution) to now. Exclude any candidate whose SID another
+  attempt or owner already holds - a `sid#` or `relaysid#` pointer resolving
+  elsewhere, or the `syssid#` system-send marker. A candidate whose pointer
+  resolves to THIS owner and recipient is `found` (a repair: the send was
+  recorded after all). Of the rest, a candidate is OURS only if it matches
+  the record: bodies compared after a lossy normalization (Unicode NFKC, then
+  letters and digits only), because Smart Encoding rewrites punctuation in
+  the stored body (Sec 1); when the normalized body is shorter than three
+  characters (a media-only or emoji-only message) the media count must match
+  instead. The job then tries to CLAIM matching candidates oldest-first
+  (D11); the first claim that wins is `found`. Two attempts with identical
+  bodies to the same member may thereby adopt each other's messages, which
+  changes no delivery and no count. Candidates in the window that match
+  nothing (a Twilio STOP/HELP auto-reply from our own number, an orphan of
+  some other send to the same recipient) are ignored on the first two checks
+  and decide `unresolved` at the FINAL check only, with the cause named in
+  the log - never adopted, never re-driven.
+- **No claimable match through the whole window:** `never_sent`.
 - **Provider unreachable on every check:** `unresolved`. A provider error
   INSIDE a check is caught and counted as that check's result; only the job's
   own writes throw.
@@ -358,26 +399,30 @@ checks per recipient (about 5 seconds, 30 seconds and 4 minutes after the
 attempt - the first no sooner than 5 seconds, for the list lag), scheduled as
 the job's own continuations (fresh `jobId`, the check number in the payload),
 never an in-process sleep: the worker's 120-second visibility timeout forbids a
-five-minute handler. At most ONE re-drive per recipient: a `send_redrive` slot
-that meets a second `unknown` closes `unresolved` directly, with no second
-reconcile. A re-drive continuation claims no pass from the ladder (the
-single-re-drive rule bounds it); a transient outcome inside it joins the
-ladder as usual. Worst-case chain depth is 8 hops of `MAX_HOP_COUNT`'s 10: a
-relay fan-out reached through `relay.numberReady` starts at hop 2, two
+five-minute handler. At most ONE re-drive per recipient, enforced by the
+record's `redriveCount`: a re-drive attempt whose outcome is `unknown` again
+goes to `done` / `unresolved` directly, with no second reconcile. A re-drive
+pass claims a ladder rung only if, after its loop, it has a transient
+remainder to defer (its single recipient came back `retryable`); it never
+claims one up front, so a spent ladder cannot close the recipient before it
+is tried. Worst-case chain depth is 8 hops of `MAX_HOP_COUNT`'s 10: a relay
+fan-out reached through `relay.numberReady` starts at hop 2, two
 continuations (4), three checks (7), the re-drive (8). Any enqueue that
 throws inside the reconcile job - the hop limit or the queue - is caught and
-closes the recipient `unresolved` on the spot. The window is overridable for
-the hermetic lane only, on the `E2E_RELAY_RETRY_BACKOFF_MS` precedent
-(topology-guarded on `JOBS_QUEUE_URL`; production cannot shorten it).
+closes the recipient `enqueue_failed` on the spot when the verdict was
+`never_sent` (the Retry offer stays: we know nothing went out) and
+`unresolved` otherwise. The window is overridable for the hermetic lane only,
+on the `E2E_RELAY_RETRY_BACKOFF_MS` precedent (topology-guarded on
+`JOBS_QUEUE_URL`; production cannot shorten it).
 
-**D14. No separate send-intent record.** The claim on the slot (D8a) is the
-durable intent, and the reconcile job's payload carries the facts, made
-durable by SQS the moment the enqueue succeeds. A process death between the
-claim and the send, or between an ambiguous send and the enqueue, leaves the
-slot `send_attempting` or `send_unconfirmed` with a clock and nothing to
-resolve it: the same crash window `relay-retry-stranded-claim-window`
-records, closed by the same not-yet-built sweeper. Recorded, not fixed. An
-enqueue that THROWS is not a crash window (D7).
+**D14. The attempt record is the intent; there is no second one.** A process
+death between the claim and the send, or between a record transition and the
+enqueue that follows it, leaves the record `attempting` or `reconciling` with
+its `attemptedAt` and nothing to resolve it. A later send site that meets a
+stale `attempting` takes it over (D8a); everything else in that class is the
+same crash window `relay-retry-stranded-claim-window` records, closed by the
+Stage 2 sweeper, which now has a record with a clock to read. Recorded, not
+fixed. An enqueue that THROWS is not a crash window (D7, D13a).
 
 **D15. Adoption writes the message the provider already holds, the way the
 owner's success path would have.** For a `found` verdict the handler reads
@@ -393,16 +438,17 @@ it) and records:
   already failed adopts as failed. `sentAt` (relay) and `carrierSentAt`
   (broadcast) take the provider's `date_sent` when it has one; the relay
   slot's first-write-wins rule may keep an earlier value, which is accepted.
-- everything else the owner's success path writes: broadcast - the message row
-  in the tenant's 1:1 conversation with the broadcast stamp (the write
-  `sendMessage` would have made, idempotent on the SID), the slot with
-  `conversationId`+`tsMsgId` so later receipts roll up, the stats bump (only
-  when the slot write moved), the `listing_sent` milestone, the listing-send
-  row, the audit row and the SSE emits, best-effort ones best-effort; the
-  inbox touch uses the status-preserving variant with no preview and never
-  moves `last_activity_at` backwards (the relay retry job's shape); relay -
-  the slot and the `relaysid#` pointer; 1:1 retry - the row with the retry
-  lineage.
+- everything else the owner's success path writes, gated on the slot write
+  having moved: broadcast - the message row in the tenant's 1:1 conversation
+  with the broadcast stamp (the write `sendMessage` would have made; this is
+  the SID claim), the slot with `conversationId`+`tsMsgId` so later receipts
+  roll up, the stats bump, the `listing_sent` milestone, the listing-send
+  row, the audit row and the SSE emits; the inbox touch uses the
+  status-preserving variant with no preview and never moves
+  `last_activity_at` backwards (the relay retry job's shape); relay - the
+  `relaysid#` pointer (the SID claim) and the slot; relay retry - the same,
+  plus the preserving inbox touch that job's success path makes; 1:1 retry -
+  the row with the retry lineage.
 - for a terminal failure code, the BROADCAST owner's own arms (30005/30006
   flag the contact unreachable - SMS by construction); the relay owners
   record the code only, since an MMS leg's 30005 says nothing about SMS
@@ -416,52 +462,54 @@ lands between the status read and the pointer write is lost, as it was before
 adoption; accepted.
 
 **D16. Per-owner verdict handling.** The job dispatches on the owner kind in its
-payload; each owner has an adopt, a re-drive and an unresolved write. Every
-`never_sent` re-drive first flips the slot to `queued` / `send_redrive` (D11)
-- from that moment it is an ordinary queued slot to every send site and every
-close - and only then enqueues. A continuation that carries `recipientKeys`
-reads its snapshot strongly consistently, so it cannot miss its own flip.
+payload; each owner has an adopt, a re-drive and an unresolved write. A
+`never_sent` re-drive transitions the record to `redriven` (D11) and then
+enqueues; the re-drive continuation claims the record like any send site
+(D8a), reads its snapshot strongly consistently, and sends. Because the slot
+was never written while reconciling, a re-driven recipient is an ordinary
+queued slot to every reader.
 
 | owner | `found` (adopt) | `never_sent` (re-drive) | `unresolved` |
 |---|---|---|---|
-| broadcast recipient | D15 | enqueue a `broadcast.send` continuation for that one recipient, claiming no pass (D13a) | slot `failed` with `send_unconfirmed`; stats bucket `unconfirmed` (D22) |
-| relay fan-out leg | D15 | pre-check sendability (group open, member on the roster, source present); if it holds, enqueue a `relay.fanOut` continuation for that one member, claiming no pass; if not, close the slot `failed` / `redrive_refused` | slot `failed` with `send_unconfirmed` |
-| relay retry rung | D15, on the retry row | the same pre-check; then enqueue the same `relay.retryLeg` rung, claiming no transient pass | same, on the retry row |
-| 1:1 retry (`retrySend`) | D15 | re-enqueue the same rung once, recorded conditionally on the original message row; a second `never_sent` or `retryable` on a deferred rung ends the chain with an ERROR | ERROR, chain ends; the original stays visibly `undelivered` |
+| broadcast recipient | D15 | enqueue a `broadcast.send` continuation for that one recipient (D13a) | record `done`; slot `failed` with `send_unconfirmed`; stats bucket `unconfirmed` (D22) |
+| relay fan-out leg | D15 | pre-check sendability (group open, member on the roster, source present); if it holds, enqueue a `relay.fanOut` continuation for that one member; if not, record `done` / `redrive_refused` and slot `failed` / `redrive_refused` | record `done`; slot `failed` with `send_unconfirmed` |
+| relay retry rung | D15, on the retry row | the same pre-check; then enqueue the same `relay.retryLeg` rung | same, on the retry row |
+| 1:1 retry (`retrySend`) | D15 | re-enqueue the same rung once (the record's `redriveCount`); a second `never_sent` or `retryable` on that rung ends the chain with an ERROR | record `done`; ERROR, chain ends; the original stays visibly `undelivered` |
 
 `retrySend`'s other kinds, for completeness: a prepare-phase failure (the
 original read, the presign) and `retryable` take the same single deferral as
 `never_sent`; `rejected` -> ERROR, chain ends; `unknown` -> reconcile;
 `SendAcceptedNotRecordedError` -> reconcile with the SID. D5-D9 otherwise do
-not apply to it (it has no slot and no pass). The relay retry rung's outcome
-switch handles `handed_to_reconcile` and `sent_unrecorded` explicitly: neither
-is a terminal close and neither emits a failure.
+not apply to it (it has no slot and no pass), except the claim, which it
+makes on its own record. The relay retry rung's outcome switch handles
+`handed_to_reconcile` and `sent_unrecorded` explicitly: neither is a terminal
+close and neither emits a failure.
 
 Log levels are uniform across owners: `found` INFO, `never_sent` WARN,
 `unresolved` ERROR (exactly one, naming the owner, the recipient key and the
-cause: provider unreachable, unidentified candidate, digest mismatch, enqueue
-failed, second unknown after a re-drive).
+cause: provider unreachable, unidentified candidate, page bound exceeded,
+digest mismatch, enqueue failed, second unknown after a re-drive).
 
 **D16a. Finalize is idempotent, decides on a strongly consistent read, and
 holds its own open-check.** `finalize` re-reads the broadcast consistently,
-returns without writing if any slot is non-terminal or carries
-`send_attempting`, `send_unconfirmed` or `send_redrive`, and otherwise flips
-the status on the condition `status = sending`; only the writer that wins it
-writes the `broadcast_sent` audit row and emits the terminal event. Every
-writer that could be the last - the pass, a continuation, a cap-close, a
-verdict handler - simply calls `finalize` after its own writes, and N callers
-produce one finalize. The terminal status: `failed` when no recipient reached
-`sent` or `delivered` AND at least one is `failed` or unconfirmed (`last_error`
-names which; skipped recipients count for neither side), else `sent` as
-today.
+returns without writing if ANY recipient slot is non-terminal (a reconciling,
+re-driven or in-flight recipient is `queued`, so no record read is needed
+here), and otherwise flips the status on the condition `status = sending`;
+only the writer that wins it writes the `broadcast_sent` audit row and emits
+the terminal event. Every writer that could be the last - the pass, a
+continuation, a cap-close, a verdict handler - simply calls `finalize` after
+its own writes, and N callers produce one finalize. The terminal status:
+`failed` when no recipient reached `sent` or `delivered` AND at least one is
+`failed` or unconfirmed (`last_error` names which; skipped recipients count
+for neither side), else `sent` as today.
 
 ## 6. Decisions: the adapter port and the hermetic fake
 
 **D17. `MessagingAdapter` gains `listMessages({ to, from, createdAfter,
 pageToken? })` and `getMessage(providerSid)`,** both returning `{ providerSid,
-status, errorCode?, body, createdAt, sentAt? }` (the list: one page plus a
-token for the next). The Twilio driver lists by `To` and `From` only and
-filters on `date_created` client-side (the spike showed `DateSent` is the
+status, errorCode?, body, mediaCount, createdAt, sentAt? }` (the list: one page
+plus a token for the next). The Twilio driver lists by `To` and `From` only
+and filters on `date_created` client-side (the spike showed `DateSent` is the
 wrong clock); the reconcile job owns the page walk (D13). List order and the
 page size are asserted against the fake and recorded by the plan as
 UNVERIFIED against real Twilio until the first hosted-dev run. The console
@@ -488,28 +536,30 @@ status read is what carries the delivered state (D15).
 ## 7. Decisions: dashboard
 
 **D20. `send_unconfirmed` is presented by CODE, the way `contact_opted_out`
-already is.** On a `failed` slot it renders the label "Not confirmed", danger
-tone, `isFailure: false` (so no Retry that could double-send is offered), with
-the reason "Couldn't confirm whether this text went out." - true for every
-cause D16 names, since in each the platform does not know; the cause is for
-the log, not the row. On a `queued` slot (the minutes while the reconcile
-runs) it renders exactly as a queued slot renders today. Every render position
-keys on the code together: the relay rollup, the per-recipient row, the
-accessible name, the broadcast row, AND the relay retry join
-(`relayRetryJoin.ts`), which today projects a rung's terminal code onto the
-root leg as a failure and must not turn an unresolved rung into a Retry offer.
+already is.** It only ever appears on a CLOSED (`failed`) slot, where it
+renders the label "Not confirmed", danger tone, `isFailure: false` (so no
+Retry that could double-send is offered), with the reason "Couldn't confirm
+whether this text went out." - true for every cause D16 names, since in each
+the platform does not know; the cause is for the log, not the row. A
+recipient still being reconciled is a plain `queued` slot and renders as one.
+Every render position keys on the code together: the relay rollup, the
+per-recipient row, the accessible name, the broadcast row, AND the relay retry
+join (`relayRetryJoin.ts`), which today projects a rung's terminal code onto
+the root leg as a failure and must not turn an unresolved rung into a Retry
+offer.
 
 **D20a. A queued leg with no provider clock ages from its attempt clock.** The
 relay staleness rules gain one row: a `queued` slot with no `sentAt` but an
 `attemptedAt` ages from `attemptedAt`, so a leg stranded mid-send or
 mid-reconcile reads "Queued - not confirmed" after the existing 15-minute
 budget instead of "Sending..." for ever. A `queued` slot with neither clock
-still never ages (the held-message case that rule protects).
+still never ages (the held-message case that rule protects). A wholesale slot
+write can erase `attemptedAt`; that leg falls back to today's behavior.
 
 **D21. The relay rollup counts an unresolved leg under "not confirmed", not
-"failed".** `presentRelayDelivery`'s K (failed) excludes slots carrying
-`send_unconfirmed`, whatever their status; they join J (not confirmed). The
-chip stays danger-toned and `isFailure: false`.
+"failed".** `presentRelayDelivery`'s K (failed) excludes `failed` slots
+carrying `send_unconfirmed`; they join J (not confirmed). The chip stays
+danger-toned and `isFailure: false`.
 
 **D22. Broadcast stats gain an `unconfirmed` bucket and the results page a
 "Not confirmed" chip.** `deriveBroadcastStats` routes a `failed` slot with
@@ -525,10 +575,9 @@ list routes, and the two seed files that build stats.
 app-invented codes this branch writes (`send_unconfirmed`, `redrive_refused`)
 and the existing `sms_sending_disabled` token go in the delivery-reason
 internal-code map (`redrive_refused`: "Wasn't resent: the group closed or the
-member left"); `send_attempting` and `send_redrive` are transient and render
-as queued. A Twilio rejection code renders through the existing carrier map or
-its `(error N)` fallback, which is correct for a real Twilio number. The
-pre-existing `transient_cap` copy widens from "carrier deferrals" to
+member left"). A Twilio rejection code renders through the existing carrier
+map or its `(error N)` fallback, which is correct for a real Twilio number.
+The pre-existing `transient_cap` copy widens from "carrier deferrals" to
 "temporary errors", because D6 routes 20429 and connection refusals through
 that close.
 
@@ -544,54 +593,65 @@ Test INTENTIONS; the plan specifies seams, fixtures and mechanics.
 2. `sendMessage` throws each typed error from the step D3 names, and a failure
    after the row is written does NOT throw (D3).
 3. Per adopter, an `unknown` mid-audience leaves the later recipients
-   attempted, the failing one `queued`/`send_unconfirmed` with a reconcile job
-   enqueued, and no throw - the broadcast pass (recipient 3 of 5), the relay
-   fan-out (member 2 of 4), the relay retry rung, and `retrySend` (whose
-   record is the original row) (D7). **The broadcast and relay cases must
-   fail on `main`.**
-4. D7a per phase: a prepare-phase failure defers as `retryable`; a
-   record-phase failure after a successful send logs ERROR with the SID and
-   enqueues a reconcile carrying that SID, and the loop continues; a
-   `SendAcceptedNotRecordedError` does the same.
+   attempted, the failing one's record `reconciling` with a reconcile job
+   enqueued and its slot untouched, and no throw - the broadcast pass
+   (recipient 3 of 5), the relay fan-out (member 2 of 4), the relay retry
+   rung, and `retrySend` (D7). **The broadcast and relay cases must fail on
+   `main`.**
+4. D7a per phase: a prepare-phase failure defers as `retryable` and releases
+   the record; a record-phase failure after a successful send logs ERROR with
+   the SID, moves the record to `reconciling` with that SID, enqueues, and
+   the loop continues; a `SendAcceptedNotRecordedError` does the same; the
+   slot write and the stats bump are one conditional write.
 5. D8a: two passes sending the same recipient concurrently produce ONE
-   provider call; a claim outlives the provider timeout and the next pass
-   hands it to reconcile instead of sending; the claim is released by every
-   outcome write; `attemptedAt` is set.
-6. A cap-close leaves `send_attempting` and `send_unconfirmed` slots
-   untouched; a continuation payload never lists one; a pass with one open
-   does not finalize (D8).
+   provider call; a relay success that left the slot `queued` with a SID
+   refuses a second claim; a fresh foreign claim defers the recipient rather
+   than skipping it; a stale one is taken over into `reconciling` with the
+   old `attemptedAt`; a stale writer's outcome write is refused by the
+   `attemptedAt` condition; `attemptedAt` lands on the slot; a legacy relay
+   slot that is absent at first claim is created and claimed.
+6. D8: a cap-close leaves a recipient with an `attempting`, `reconciling` or
+   `redriven` record untouched (and closes one whose record is `done` /
+   `retryable`); a continuation payload never lists a reconciling recipient;
+   the brake defers only unattempted recipients.
 7. Three consecutive `unknown` outcomes brake the pass and defer the untried
    remainder; three `retryable` or three `rejected` do not (D9).
 8. Reconcile verdicts against a fake adapter: known SID adopts via fetch
-   without a list; a listed orphan adopts with the reported status (a
-   `delivered` listing adopts as delivered with `carrierSentAt`/`sentAt`, an
-   `undelivered` one as failed with its code); a listing that is empty at
-   check 1 and populated at check 2 adopts (the lag); a candidate held by
-   ANOTHER owner or by the `syssid#` marker is excluded while one held by
-   THIS owner repairs; the spike's exact Smart-Encoded body (curly quote, em
-   dash, ellipsis) matches its submitted body; a STOP auto-reply in the window
-   yields `unresolved`, not `never_sent` and not adoption; a body under three
-   normalized characters yields `unresolved`; a multi-page list is walked to
-   the window edge; an empty window is `never_sent` and re-drives exactly
-   once; a throwing adapter on every check is `unresolved` with one ERROR; a
-   digest mismatch is `unresolved`; a known-SID fetch failure throws (D12,
-   D13, D15, D16).
+   without a list and without the digest check; a listed orphan adopts with
+   the reported status (a `delivered` listing adopts as delivered with
+   `carrierSentAt`/`sentAt`, an `undelivered` one as failed with its code); a
+   listing that is empty at check 1 and populated at check 2 adopts (the
+   lag); a candidate held by ANOTHER attempt or by the `syssid#` marker is
+   excluded while one held by THIS owner repairs; the spike's exact
+   Smart-Encoded body (curly quote, em dash, ellipsis) matches its submitted
+   body; a media-only message matches on media count; two attempts with
+   identical bodies each adopt one of two orphans and neither re-drives; a
+   STOP auto-reply in the window is ignored at checks 1-2 and decides
+   `unresolved` at check 3, never adoption and never `never_sent`; a
+   multi-page list is walked to its end and a walk past the bound is
+   `unresolved`; an empty window is `never_sent` and re-drives exactly once;
+   a throwing adapter on every check is `unresolved` with one ERROR; a digest
+   mismatch is `unresolved`; a known-SID fetch failure throws (D12, D13, D15,
+   D16).
 9. D11 idempotency: the same adoption run twice writes once; a redelivered
    check yields at most one extra chain that converges; a `never_sent`
-   verdict delivered twice enqueues two continuations and the claim makes the
-   second a no-op; an `unresolved` delivered twice writes once.
-10. D13a: three checks and no more; a second `unknown` on a `send_redrive` slot
-    closes `unresolved` with no reconcile; an enqueue that throws inside the
-    job closes `unresolved`; a re-drive continuation claims no pass.
+   verdict delivered twice increments `redriveCount` once and the second
+   continuation's claim is refused; an `unresolved` delivered twice writes
+   once; a payload for an older `attemptedAt` writes nothing.
+10. D13a: three checks and no more; a re-drive attempt that comes back
+    `unknown` closes `unresolved` with no reconcile; an enqueue that throws
+    inside the job closes `enqueue_failed` after `never_sent` and
+    `unresolved` otherwise; a re-drive pass claims no ladder rung unless it
+    has a transient remainder.
 11. D16a: N concurrent finalizers produce one status flip, one audit row and
     one terminal emit; the pass-then-verdict and verdict-then-pass orderings
     both finalize exactly once; a broadcast with only skipped, failed and
     unconfirmed recipients finalizes `failed`; a relay re-drive on a closed
     group closes `redrive_refused`; a re-drive continuation reads its own
-    flip.
+    record and sends.
 12. The 1:1 retry variant: `found` appends the row with lineage; `never_sent`
-    re-enqueues once, recorded on the original row, then ends the chain with
-    an ERROR; a duplicate deferral is refused by the row condition (D16).
+    re-enqueues once, recorded on the rung's record, then ends the chain with
+    an ERROR; a duplicate deferral is refused by the record (D16).
 13. `send_throttled` fires on 20429 and not on ECONNREFUSED (D4).
 14. Dashboard: `send_unconfirmed` renders "Not confirmed" / danger / not a
     failure in every relay position including the retry join, and on the
@@ -617,7 +677,7 @@ The 2026-09-24 sweep found the same claim-then-throw shape at nine more sites.
 None is edited here; each is filed as its own issue, citing the sweep's
 findings by file:line, and grouped for the follow-on:
 
-- **Send-shaped** (adopt the D1-D3 core and the D8a claim; small edits once
+- **Send-shaped** (adopt the D1-D3 core and the D8a record; small edits once
   they exist): `call.missedAutoText`, the tour reminder poll (1:1 and group),
   the placement nudge poll, `relay.intro` and `relay.memberAdded` via
   `sendRelayAnnouncement`.
@@ -625,10 +685,11 @@ findings by file:line, and grouped for the follow-on:
   `relay.numberReady`'s two post-flip enqueues, the pending roster-action poll,
   the voice recording callback after a successful mirror, and the pre-send
   database reads in the two announcement jobs.
-- **The sweeper** that closes the crash windows Sec 1 records (a
-  `send_attempting` or `send_unconfirmed` slot with nothing in flight, a
-  `send_redrive` slot no continuation lists) and the relay staleness alarm
-  the dashboard assumes.
+- **The sweeper** that closes the crash windows Sec 1 records - an
+  `attempting` record past its TTL with no send site revisiting it, a
+  `reconciling` record with no chain, a `redriven` record no continuation
+  lists - and the relay staleness alarm the dashboard assumes. The attempt
+  record gives it a clock and a state to read.
 
 Also filed, found along the way: the `no_contact` code renders as a fake
 carrier error; broadcast 30003 retries never update the broadcast slot
@@ -647,14 +708,15 @@ corrected in the issue file: it has the same shape, and this branch adopts it.
 
 ## 10. Post-merge obligations
 
-**No infrastructure, dependency, environment or schema work.** The new counter,
-codes and `attemptedAt` are optional attributes; the new job name registers
-like every other. The `send.reconcile` job reaches the DLQ on repeated
-failure, which the existing `jobs-dlq-depth` alarm already covers. One
-check owed at the first hosted-dev run: the list walk's order and page bound
-against real Twilio (D17), and whether the PROD Messaging Service also has
-Smart Encoding on (the dev one does; the normalization does not depend on it,
-but the record should say).
+**No infrastructure, dependency, environment or schema work.** The attempt
+record is a new item family in an existing table; the counter, codes and
+`attemptedAt` are optional attributes; the new job name registers like every
+other. The `send.reconcile` job reaches the DLQ on repeated failure, which the
+existing `jobs-dlq-depth` alarm already covers. One check owed at the first
+hosted-dev run: the list walk's order and page bound against real Twilio
+(D17), and whether the PROD Messaging Service also has Smart Encoding on (the
+dev one does; the normalization does not depend on it, but the record should
+say).
 
 ## 11. Risks
 
@@ -666,6 +728,10 @@ but the record should say).
   reach the classifier as `unknown` re-creates the double text the reviewers
   found in round 1. The three-phase split in D7a is the structural guard; a
   builder who wraps "the whole recipient" in one try has undone it.
+- **The coordination state must stay OUT of the slot.** Three review rounds
+  found holes while it lived in `errorCode`, because six writers share the
+  slot and two rewrite it wholesale. A builder who "simplifies" by folding
+  the record back into the slot re-opens all of them.
 - **D13's body match is a requirement, not a hint.** Adopting "the only
   message in the window" adopts Twilio's own STOP auto-reply (round 2). And
   the normalization must be the lossy one: an exact match rules a real
@@ -674,9 +740,6 @@ but the record should say).
   "because the conditions already dedupe" re-opens every double-text the
   round-2 review found; removing the conditions "because the claim already
   dedupes" strands recipients on a crash. Both are load-bearing.
-- **The reconcile job is a new writer of state four other writers already
-  race on** (the pass, the continuation, the cap-close, the status webhook).
-  D8, D11 and D15 are the rules that keep it out of their way.
 - **"The existing X handles this" must be traced from the new call site.** The
   retry-counter mission found several close branches unreachable from where its
   plan wanted to call them; `finalize` from the reconcile handler is exactly

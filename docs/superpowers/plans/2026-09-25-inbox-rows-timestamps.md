@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v2 - revised after adversarial plan review round 1 (A + B); round 2 pending
+Status: v3 - revised after adversarial plan review round 2; round 3 pending; Task 7b awaits Cameron's ruling at the launch gate
 Date: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
 Worktree: `W:\tmp\inbox-rows-timestamps`
@@ -1525,6 +1525,8 @@ Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 **Files:**
 - Modify: `dashboard/src/routes/inbox/useInbox.ts` (whole-file replacement)
 - Modify: `dashboard/src/routes/inbox/useInbox.test.tsx`
+- Modify: `dashboard/src/routes/inbox/Inbox.test.tsx` (five fields in
+  `baseState`, so the dashboard typecheck stays green in this task)
 
 **Interfaces:**
 - Consumes: Task 3's store (`inboxListKey`, `loadInboxList`, `saveInboxList`,
@@ -1538,7 +1540,7 @@ Co-Authored-By: <authoring model> <noreply@anthropic.com>"
   export const DEFAULT_PAGE_LIMIT = 100;
   export const MAX_PAGE_LIMIT = 100;
   export { rowKey } from './inboxListMerge.js';
-  export function useInbox(filter: InboxFilter, limit?: number, operatorId?: string): InboxState
+  export function useInbox(filter: InboxFilter, limit?: number, operatorId?: string, restoreScroll?: boolean): InboxState
   export interface InboxState {  // today's fields plus:
     refreshFailed: boolean;
     autoLoadArmed: boolean;
@@ -2048,21 +2050,31 @@ export function useInbox(
 }
 ```
 
-Carry over VERBATIM, at the guards they explain, these comment blocks from
-the current `useInbox.ts` on `main` (read them with `git show
+Carry over, at the guards they explain, these comment blocks from the
+current `useInbox.ts` on `main` (read them with `git show
 main:dashboard/src/routes/inbox/useInbox.ts`; the code above keeps the guards
 but trims their history, and the history is what stops the next reader from
 deleting a guard): (1) the `activeFilterRef` block beginning "THE FILTER THIS
 HOOK IS CURRENTLY SHOWING" through "A GENERATION COUNTER CANNOT DO THIS JOB";
 (2) the `statusRef` block "Written through `applyStatus` and NEVER through
-`setStatus` directly"; (3) the full "THE GENERATION GUARD PROTECTS A LIST, NOT
-A SPINNER" block in `fetchHead`; (4) the "HONEST STATUS: no test can currently
-fail by deleting this line" block on the filter refusal; (5) `loadMore`'s C2
-block ("Same abort + generation pattern") and the adversarial-29
-`reconcileStale` block; (6) `markRead`'s "AN EPOCH, NOT AN IDENTITY" block.
-The old failure-path block ("THE SAME TWO AXES ... RESIDUE") is REPLACED by
-the spec 5.7 comment already in the code above, because the residue it
-described is resolved by this change.
+`setStatus` directly"; (3) the "THE GENERATION GUARD PROTECTS A LIST, NOT A
+SPINNER" block in `fetchHead`, with its worked example AMENDED: its sentence
+"Reachable without any filter change: mark read, a background reconcile
+fails, the operator hits Retry, and the POST commits while Retry's page is
+on the wire" no longer holds (a background failure with rows keeps the rows
+and Retry with rows never sets `loading`, spec 5.7); replace that example
+with "Reachable on a filter change: mark read, switch tabs (the filter
+effect sets loading and fetches), and the POST commits while that page is
+on the wire"; (4) the "HONEST STATUS: no test can currently fail by deleting
+this line" block on the filter refusal; (5) `loadMore`'s C2 block ("Same
+abort + generation pattern") with its first sentence AMENDED from "The filter
+and cursor are captured at callback creation" to "The filter is captured at
+callback creation and the cursor is read from `listRef` at call time" (the
+rest of the block stands), and the adversarial-29 `reconcileStale` block;
+(6) `markRead`'s "AN EPOCH, NOT AN IDENTITY" block. The old failure-path
+block ("THE SAME TWO AXES ... RESIDUE") is REPLACED by the spec 5.7 comment
+already in the code above, because the residue it described is resolved by
+this change.
 
 - [ ] **Step 2: Run the existing hook tests and rewrite the one that pins the old failure rule**
 
@@ -2075,55 +2087,14 @@ spec replaces: `a mark-read committing under RETRY does not strand the tab on
 a spinner` (around line 781). It expects a failed BACKGROUND head read with
 rows on screen to reach `status: 'error'` and then drives Retry from there.
 Under spec 5.7 that read keeps the rows and raises the banner, and a Retry
-with rows rendered never enters `loading`. Replace that test's body so it
-proves the same structural point (a mutation committing under a head read
-that set `loading` must not strand the tab) on the path that still sets
-`loading`: the FILTER EFFECT.
-
-```tsx
-  it('a mark-read committing under a filter-change load does not strand the tab on a spinner', async () => {
-    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
-    let releaseRead: () => void = () => {};
-    markInboxRead.mockImplementationOnce(
-      () =>
-        new Promise<void>((res) => {
-          releaseRead = () => res();
-        }),
-    );
-    const { rerender } = render(<Probe filter="all" />);
-    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-
-    // Mark read; the POST hangs.
-    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
-
-    // The operator switches tabs: the filter effect sets loading and fetches;
-    // that page is on the wire...
-    let releaseLoad: () => void = () => {};
-    getInbox.mockImplementationOnce(
-      () =>
-        new Promise((res) => {
-          releaseLoad = () => res(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
-        }),
-    );
-    rerender(<Probe filter="unread" />);
-    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
-
-    // ...and the mark-read commits first. Its generation bump belongs to the
-    // filter it was made against, so the new filter's page must still land:
-    // discarding it would leave nothing on screen and nothing in flight.
-    await act(async () => {
-      releaseRead();
-      await Promise.resolve();
-    });
-    await act(async () => {
-      releaseLoad();
-      await new Promise((r) => setTimeout(r, 50));
-    });
-
-    expect(screen.getByTestId('status')).toHaveTextContent('ready');
-    expect(screen.getByTestId('count')).toHaveTextContent('1');
-  });
-```
+with rows rendered never enters `loading`, so the scenario it describes no
+longer exists. DELETE that test (its whole `it(...)` block and the comment
+paragraph directly above it that begins "The structural point"). Do not
+rewrite it onto the filter path: a filter change means the mark-read never
+bumps `genRef` for the new filter, so such a test would not reach the guard
+and would duplicate the existing filter-epoch test at about line 717, which
+still pins the spinner guard. The new-rule behavior (rows kept, banner
+raised, Retry without a spinner) is pinned by the tests added in Step 3.
 
 Any OTHER existing test that fails is a regression in the rewrite: fix the
 hook, not the test. If a test fails on module-level store state leaking
@@ -2174,12 +2145,14 @@ function Probe({
   filter,
   limit,
   operatorId,
+  restoreScroll,
 }: {
   filter: InboxFilter;
   limit?: number;
   operatorId?: string;
+  restoreScroll?: boolean;
 }): React.JSX.Element {
-  const s = useInbox(filter, limit, operatorId);
+  const s = useInbox(filter, limit, operatorId, restoreScroll);
   return (
     <div>
       <span data-testid="status">{s.status}</span>
@@ -2453,6 +2426,18 @@ describe('useInbox - page one persists (spec 5.5-5.8)', () => {
     expect(screen.getByTestId('status')).toHaveTextContent('loading');
     await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('c:c2'));
   });
+
+  it('seeds the scroll ref from the snapshot only when restoreScroll is set, so an immediate unmount saves the shown position', async () => {
+    saveInboxList(KEY, snapshot([mkRow({ contactId: 'r1' })], null, 77));
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    const first = render(<Probe filter="all" limit={2} restoreScroll />);
+    first.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(77);
+    saveInboxList(KEY, snapshot([mkRow({ contactId: 'r1' })], null, 77));
+    const second = render(<Probe filter="all" limit={2} restoreScroll={false} />);
+    second.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(0);
+  });
 });
 ```
 
@@ -2485,7 +2470,7 @@ unchanged until Task 7 extends them.
 Read bare `git status`, confirm no `MERGE_HEAD`, then:
 
 ```
-git add dashboard/src/routes/inbox/useInbox.ts dashboard/src/routes/inbox/useInbox.test.tsx
+git add dashboard/src/routes/inbox/useInbox.ts dashboard/src/routes/inbox/useInbox.test.tsx dashboard/src/routes/inbox/Inbox.test.tsx
 git commit -m "feat(inbox): rebuild useInbox around one committed list with a restore-and-reconcile store
 
 Co-Authored-By: <authoring model> <noreply@anthropic.com>"
@@ -2513,10 +2498,16 @@ Co-Authored-By: <authoring model> <noreply@anthropic.com>"
     observerFactory?: AutoLoadObserverFactory;   // tests inject one; default wraps IntersectionObserver
   }): void
   ```
-  The observer REPORTS on `observe()` (its initial state), on every threshold
-  crossing, and on `reobserve()` (a forced fresh report of the current
-  geometry). An `epoch` change never fires by itself: it calls `reobserve`,
-  and the load fires only from the report that follows (spec 5.2).
+  THE RULE (spec 5.2). The observer REPORTS on `observe()`, on every
+  threshold crossing, and on `reobserve()`. A report is consumed when it
+  arrives: while ENABLED it fires a load if it says intersecting; while
+  DISABLED it is DISCARDED (never acted on later). When the hook is enabled
+  and the `epoch` has moved since the last one it handled, it RE-OBSERVES so
+  the next report describes the current geometry. Nothing ever fires from a
+  report that predates the commit that enabled it. A real
+  `IntersectionObserver` delivers its entries in a task after the next
+  rendering update, never synchronously; the rule holds either way because
+  consumption happens at arrival.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2528,9 +2519,10 @@ import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAutoLoad, type AutoLoadObserverFactory } from './useAutoLoad.js';
 
-// A hand-driven observer that behaves like IntersectionObserver: it reports
-// the CURRENT geometry on observe() and reobserve(), and on every crossing
-// the test simulates through `cross`.
+// A hand-driven observer. It reports the CURRENT geometry on observe() and
+// reobserve(), and on every crossing the test simulates through `cross`. It
+// reports synchronously; the hook's rule does not depend on timing because a
+// report is consumed at arrival.
 let current = false;
 let report: (intersecting: boolean) => void = () => {};
 let created = 0;
@@ -2589,21 +2581,21 @@ describe('useAutoLoad', () => {
     expect(onLoad).toHaveBeenCalledTimes(1);
   });
 
-  it('does not fire while disabled, and does not fire when only enabled changes', () => {
+  it('discards a report that arrives while disabled: enabling alone never fires (the failed-page shape)', () => {
     const { rerender } = render(<Harness enabled={false} epoch={1} />);
     act(() => cross(true));
     expect(onLoad).not.toHaveBeenCalled();
-    // The failed-page shape: enabled flips true with no new report.
     rerender(<Harness enabled epoch={1} />);
+    expect(reobserved).toBe(0);
     expect(onLoad).not.toHaveBeenCalled();
   });
 
-  it('an epoch change re-observes and fires only from the fresh report', () => {
+  it('an epoch change while enabled re-observes and fires only from the fresh report', () => {
     const { rerender } = render(<Harness enabled epoch={1} />);
     act(() => cross(true));
     expect(onLoad).toHaveBeenCalledTimes(1);
-    // The DOM grew and pushed the sentinel out before the epoch changed: the
-    // fresh report says NOT intersecting, so nothing fires.
+    // The DOM grew and pushed the sentinel out: the fresh report says not
+    // intersecting, so nothing fires.
     current = false;
     rerender(<Harness enabled epoch={2} />);
     expect(reobserved).toBe(1);
@@ -2612,6 +2604,37 @@ describe('useAutoLoad', () => {
     current = true;
     rerender(<Harness enabled epoch={3} />);
     expect(reobserved).toBe(2);
+    expect(onLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it('a commit that lands while disabled re-observes when the hook is enabled again, and fires exactly once (the restore and discarded-page shapes)', () => {
+    // Restore: mounted unarmed, sentinel already in view (held report is discarded).
+    current = true;
+    const { rerender } = render(<Harness enabled={false} epoch={0} />);
+    expect(onLoad).not.toHaveBeenCalled();
+    // The head read commits: armed and epoch 1 in ONE render.
+    rerender(<Harness enabled epoch={1} />);
+    expect(reobserved).toBe(1);
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    // The page it loaded pushed the sentinel out; its commit re-observes and
+    // finds nothing to do.
+    current = false;
+    rerender(<Harness enabled={false} epoch={1} />); // loadingMore
+    rerender(<Harness enabled epoch={2} />); // the page committed
+    expect(reobserved).toBe(2);
+    expect(onLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it('a crossing during a load is discarded; the commit re-observes and fires once if still in view', () => {
+    const { rerender } = render(<Harness enabled epoch={1} />);
+    act(() => cross(true));
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    rerender(<Harness enabled={false} epoch={1} />); // loading
+    act(() => cross(false));
+    act(() => cross(true)); // the operator scrolled across the margin mid-load
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    rerender(<Harness enabled epoch={2} />); // the page committed, still in view
+    expect(reobserved).toBe(1);
     expect(onLoad).toHaveBeenCalledTimes(2);
   });
 
@@ -2666,22 +2689,23 @@ Create `dashboard/src/routes/inbox/useAutoLoad.ts`:
 
 ```ts
 // useAutoLoad - fires `onLoad` when the list's sentinel scrolls into the
-// 400px margin (spec 5.2). ONE observer per sentinel mount. The observer's
-// callback only records a REPORT { intersecting, seq }; the load fires from
-// an effect over [report, enabled] exactly when a NEW report says
-// intersecting while enabled, so `onLoad` is always the current loadMore (no
-// stale closure) and nothing fires from stale state.
-//
-// An `epoch` change (a committed head read or page) never fires by itself:
-// at that moment the DOM has grown but the observer has not reported the
-// sentinel's new position, so firing on the held state would load two pages
-// per scroll. Instead it RE-OBSERVES the sentinel, which makes the observer
-// report the current geometry; if the sentinel is still inside the margin
-// (a short page) that fresh report fires the next load once. A change of
-// `enabled` alone (a failed page re-enabling the button; hasMore appearing
-// without a commit) produces no report and never fires. Intersection is
-// reset when the sentinel unmounts, so a returning sentinel waits for its own
-// observer's first report.
+// 400px margin (spec 5.2). ONE observer per sentinel mount. Its callback only
+// records a REPORT { intersecting, seq }; the hook consumes each report AT
+// ARRIVAL:
+//   - while ENABLED, a report that says intersecting fires one load;
+//   - while DISABLED, the report is discarded - it is never acted on later, so
+//     a page committing after a mid-load crossing, or the list arming after a
+//     restore, can never fire from stale geometry.
+// When the hook is enabled and the page `epoch` has moved since the last one
+// it handled, it RE-OBSERVES the sentinel so the observer reports the
+// current geometry after the DOM grew; that fresh report fires the next load
+// once if the sentinel is still inside the margin (a short page), and nothing
+// otherwise. A change of `enabled` alone (a failed page re-enabling the
+// button; hasMore appearing without a commit) neither re-observes nor fires.
+// Intersection is reset when the sentinel unmounts. A real
+// IntersectionObserver delivers entries asynchronously (a task after the next
+// rendering update); consumption-at-arrival makes the rule independent of
+// that timing.
 import { useEffect, useRef, useState } from 'react';
 
 export interface AutoLoadObserver {
@@ -2714,7 +2738,7 @@ const defaultFactory: AutoLoadObserverFactory = (onReport, root) => {
   );
   return {
     observe: (el) => io.observe(el),
-    // unobserve + observe delivers a fresh initial entry for the element.
+    // unobserve + observe queues a fresh initial entry for the element.
     reobserve: (el) => {
       io.unobserve(el);
       io.observe(el);
@@ -2735,7 +2759,10 @@ export function useAutoLoad(opts: {
   const [report, setReport] = useState<Report>(NO_REPORT);
   const observerRef = useRef<AutoLoadObserver | undefined>(undefined);
   const seqRef = useRef(0);
-  const lastFiredSeqRef = useRef(0);
+  // The seq of the last report CONSUMED (fired or discarded).
+  const consumedSeqRef = useRef(0);
+  // The epoch the hook last handled (re-observed for, or mounted at).
+  const handledEpochRef = useRef(epoch);
 
   // One observer per sentinel mount; its only job is to record reports.
   useEffect(() => {
@@ -2758,19 +2785,20 @@ export function useAutoLoad(opts: {
     };
   }, [sentinel, root, observerFactory]);
 
-  // An epoch change re-observes so the NEXT report describes the grown DOM.
-  const mountEpochRef = useRef(epoch);
+  // Re-observe when enabled and the epoch moved since it was last handled:
+  // the NEXT report then describes the grown DOM. A failed page moves no
+  // epoch, so enabling after it re-observes nothing.
   useEffect(() => {
-    if (epoch === mountEpochRef.current) return;
-    mountEpochRef.current = epoch;
+    if (!enabled || epoch === handledEpochRef.current) return;
+    handledEpochRef.current = epoch;
     if (sentinel !== null) observerRef.current?.reobserve(sentinel);
-  }, [epoch, sentinel]);
+  }, [enabled, epoch, sentinel]);
 
-  // The one place a load fires: a NEW report that says intersecting, while enabled.
+  // Consume each report at arrival: fire while enabled, discard while not.
   useEffect(() => {
+    if (report.seq === consumedSeqRef.current) return;
+    consumedSeqRef.current = report.seq;
     if (!enabled || !report.intersecting) return;
-    if (report.seq === lastFiredSeqRef.current) return;
-    lastFiredSeqRef.current = report.seq;
     onLoad();
   }, [report, enabled, onLoad]);
 }
@@ -2782,7 +2810,7 @@ export function useAutoLoad(opts: {
 npx vitest run src/routes/inbox/useAutoLoad.test.tsx --root dashboard
 ```
 
-Expected: PASS, 7 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -2790,7 +2818,7 @@ Read bare `git status`, confirm no `MERGE_HEAD`, then:
 
 ```
 git add dashboard/src/routes/inbox/useAutoLoad.ts dashboard/src/routes/inbox/useAutoLoad.test.tsx
-git commit -m "feat(inbox): report-driven auto-load that re-observes on every page commit
+git commit -m "feat(inbox): auto-load consumes observer reports at arrival and re-observes on a commit
 
 Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
@@ -2803,9 +2831,10 @@ Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 - Modify: `dashboard/src/routes/inbox/Inbox.tsx` (whole-file replacement)
 - Modify: `dashboard/src/routes/inbox/Inbox.module.css` (append)
 - Modify: `dashboard/src/routes/inbox/Inbox.test.tsx`
+- Create: `dashboard/src/routes/inbox/Inbox.styles.test.ts`
 
 **Interfaces:**
-- Consumes: `useInbox(filter, limit, operatorId)` + `DEFAULT_PAGE_LIMIT`,
+- Consumes: `useInbox(filter, limit, operatorId, restoreScroll)` + `DEFAULT_PAGE_LIMIT`,
   `MAX_PAGE_LIMIT` (Task 5); `useAutoLoad` (Task 6); `useOptionalAuth`
   (Task 3); `useNavigationType`, `useSearchParams` from react-router-dom.
 - Produces: `export function limitFromParam(raw: string | null): number`;
@@ -2916,7 +2945,8 @@ describe('Inbox - page size, banner, sentinel, scroll (spec 5.1/5.2/5.7/5.8)', (
   });
 
   it('restores the saved scroll position on a POP arrival and zeroes it on a PUSH arrival', () => {
-    const scroller = document.scrollingElement as HTMLElement;
+    // jsdom has no document.scrollingElement; the page falls back to the root.
+    const scroller = (document.scrollingElement ?? document.documentElement) as HTMLElement;
     scroller.scrollTop = 999;
     state = baseState({ rows: [mkRow()], serverRowCount: 1, restoredScrollTop: 500 });
     // A MemoryRouter's initial entry is a POP navigation.
@@ -3094,25 +3124,31 @@ export function Inbox(): React.JSX.Element {
   // --- The DOM the observer and the scroll restore need ----------------------
   const listRef = useRef<HTMLUListElement>(null);
   const [sentinel, setSentinel] = useState<Element | null>(null);
-  const [scrollRoot, setScrollRoot] = useState<Element | null>(null);
+  // The scroll container lives in a REF (assigning `scrollTop` on a value
+  // held in React state trips the dashboard's react-hooks/immutability lint
+  // rule); `rootReady` is the render trigger once it is resolved.
+  const scrollRootRef = useRef<Element | null>(null);
+  const [rootReady, setRootReady] = useState(false);
   const restoredRef = useRef(false);
   const noteScrollTop = inbox.noteScrollTop;
+  const hasRows = inbox.rows.length > 0;
 
   // Resolve the scroll container once the list exists; keep its scrollTop
   // reported to the hook through a passive listener.
   useLayoutEffect(() => {
-    if (listRef.current === null) return;
-    const root = scrollParentOf(listRef.current);
+    if (!hasRows || listRef.current === null || scrollRootRef.current !== null) return;
+    scrollRootRef.current = scrollParentOf(listRef.current);
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setScrollRoot(root);
-  }, [inbox.rows.length > 0]);
+    setRootReady(true);
+  }, [hasRows]);
 
   useEffect(() => {
-    if (scrollRoot === null) return;
-    const onScroll = (): void => noteScrollTop(scrollRoot.scrollTop);
-    scrollRoot.addEventListener('scroll', onScroll, { passive: true });
-    return () => scrollRoot.removeEventListener('scroll', onScroll);
-  }, [scrollRoot, noteScrollTop]);
+    const root = scrollRootRef.current;
+    if (!rootReady || root === null) return;
+    const onScroll = (): void => noteScrollTop(root.scrollTop);
+    root.addEventListener('scroll', onScroll, { passive: true });
+    return () => root.removeEventListener('scroll', onScroll);
+  }, [rootReady, noteScrollTop]);
 
   // Scroll restore (spec 5.8): once, on the first render that has rows AND a
   // resolved container. POP (back/forward) restores the saved position; any
@@ -3120,17 +3156,18 @@ export function Inbox(): React.JSX.Element {
   // previous page's offset otherwise, and a restored list is tall enough not
   // to clamp it).
   useLayoutEffect(() => {
-    if (restoredRef.current || scrollRoot === null || inbox.rows.length === 0) return;
+    const root = scrollRootRef.current;
+    if (restoredRef.current || !rootReady || root === null || !hasRows) return;
     restoredRef.current = true;
     if (inbox.restoredScrollTop === null) return;
     const target = navigationType === 'POP' ? inbox.restoredScrollTop : 0;
-    scrollRoot.scrollTop = target;
+    root.scrollTop = target;
     noteScrollTop(target);
-  }, [scrollRoot, inbox.rows.length, inbox.restoredScrollTop, navigationType, noteScrollTop]);
+  }, [rootReady, hasRows, inbox.restoredScrollTop, navigationType, noteScrollTop]);
 
   useAutoLoad({
     sentinel,
-    root: scrollRoot,
+    root: rootReady ? scrollRootRef.current : null,
     enabled: inbox.hasMore && inbox.autoLoadArmed && !inbox.loadingMore,
     epoch: inbox.pageEpoch,
     onLoad: inbox.loadMore,
@@ -3333,6 +3370,213 @@ git commit -m "feat(inbox): page-size param, auto-load sentinel, refresh banner,
 Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
+### Task 7b: In-app "Back to inbox" behaves as back
+
+Pending Cameron's ruling at the launch gate (spec 5.8, section 10). Build
+it unless the mission block says to drop it; dropping it is deleting this
+task, nothing else depends on it.
+
+**Files:**
+- Create: `dashboard/src/routes/inbox/backToInbox.ts`
+- Create: `dashboard/src/routes/inbox/backToInbox.test.tsx`
+- Modify: `dashboard/src/routes/inbox/InboxRow.tsx` (the row link carries
+  `state={{ fromInbox: true }}`)
+- Modify: `dashboard/src/routes/conversation/ConversationDetail.tsx:398`
+- Modify: `dashboard/src/routes/conversation/GroupTextView.tsx:319`
+- Modify: `dashboard/src/routes/contact/ContactDetail.tsx:399` (the
+  mark-unread navigation)
+- Modify: `dashboard/src/routes/conversation/ThreadUnreadToggle.tsx:189`
+  (the mark-unread navigation)
+
+**Interfaces:**
+- Produces:
+  ```ts
+  export const FROM_INBOX_STATE = { fromInbox: true } as const;
+  export function cameFromInbox(state: unknown): boolean;   // reads location.state
+  export function useBackToInbox(): () => void;            // navigate(-1) when it came from the inbox, else navigate('/inbox')
+  ```
+  A row opened from the inbox pushes history state `{ fromInbox: true }`.
+  The thread and contact pages' "back" actions call `useBackToInbox()`: with
+  that state they go BACK in history (a POP, so spec 5.8's restore applies);
+  without it (a deep link, a badge click into a thread) they push `/inbox`
+  as today. The `<Link to="/inbox">` elements keep their href for semantics
+  and intercept the click.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `dashboard/src/routes/inbox/backToInbox.test.tsx`:
+
+```tsx
+import { render, screen, fireEvent } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { useEffect } from 'react';
+import { describe, expect, it } from 'vitest';
+import { FROM_INBOX_STATE, cameFromInbox, useBackToInbox } from './backToInbox.js';
+
+function Thread(): React.JSX.Element {
+  const back = useBackToInbox();
+  const location = useLocation();
+  return (
+    <div>
+      <span data-testid="from">{String(cameFromInbox(location.state))}</span>
+      <button onClick={back}>back</button>
+    </div>
+  );
+}
+function InboxStub(): React.JSX.Element {
+  const location = useLocation();
+  return <div data-testid="inbox">inbox {location.search}</div>;
+}
+function OpenFromInbox(): React.JSX.Element {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigate('/conversations/x', { state: FROM_INBOX_STATE });
+  }, [navigate]);
+  return <div />;
+}
+
+describe('backToInbox', () => {
+  it('cameFromInbox reads the state the inbox row sets', () => {
+    expect(cameFromInbox(FROM_INBOX_STATE)).toBe(true);
+    expect(cameFromInbox(null)).toBe(false);
+    expect(cameFromInbox({ other: true })).toBe(false);
+  });
+
+  it('goes BACK in history when the thread was opened from the inbox', () => {
+    render(
+      <MemoryRouter initialEntries={['/inbox?limit=7']}>
+        <Routes>
+          <Route path="/inbox" element={<><InboxStub /><OpenFromInbox /></>} />
+          <Route path="/conversations/:id" element={<Thread />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId('from')).toHaveTextContent('true');
+    fireEvent.click(screen.getByRole('button', { name: 'back' }));
+    // Back to the SAME entry, query and all (a POP; the inbox restores).
+    expect(screen.getByTestId('inbox')).toHaveTextContent('inbox ?limit=7');
+  });
+
+  it('pushes /inbox when the thread was reached any other way', () => {
+    render(
+      <MemoryRouter initialEntries={['/conversations/x']}>
+        <Routes>
+          <Route path="/inbox" element={<InboxStub />} />
+          <Route path="/conversations/:id" element={<Thread />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId('from')).toHaveTextContent('false');
+    fireEvent.click(screen.getByRole('button', { name: 'back' }));
+    expect(screen.getByTestId('inbox')).toHaveTextContent('inbox');
+  });
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```
+npx vitest run src/routes/inbox/backToInbox.test.tsx --root dashboard
+```
+
+Expected: FAIL - "Failed to resolve import "./backToInbox.js"".
+
+- [ ] **Step 3: Write the helper**
+
+Create `dashboard/src/routes/inbox/backToInbox.ts`:
+
+```ts
+// backToInbox - the in-app way back from a thread or contact page (spec 5.8).
+// A row opened FROM the inbox pushes { fromInbox: true } as history state; a
+// page's "Back to inbox" action then goes BACK in history, which is a POP
+// arrival at /inbox and restores the list and the scroll position. Reached any
+// other way (a deep link, the badge, a quick-reply link) it pushes /inbox as
+// before. On an installed phone app (standalone display) these in-app actions
+// can be the only way back, which is why they must not be forward navigations.
+import { useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+
+export const FROM_INBOX_STATE = { fromInbox: true } as const;
+
+export function cameFromInbox(state: unknown): boolean {
+  return typeof state === 'object' && state !== null && (state as { fromInbox?: unknown }).fromInbox === true;
+}
+
+export function useBackToInbox(): () => void {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const from = cameFromInbox(location.state);
+  return useCallback(() => {
+    if (from) navigate(-1);
+    else navigate('/inbox');
+  }, [from, navigate]);
+}
+```
+
+- [ ] **Step 4: Wire the row and the four back actions**
+
+In `dashboard/src/routes/inbox/InboxRow.tsx`, import
+`FROM_INBOX_STATE` from `./backToInbox.js` and give the row link the state:
+
+```tsx
+        <Link className={styles.main} to={hrefFor(row)} state={FROM_INBOX_STATE} onClick={() => onOpen(row)}>
+```
+
+In `dashboard/src/routes/conversation/ConversationDetail.tsx` and
+`dashboard/src/routes/conversation/GroupTextView.tsx`, import
+`useBackToInbox` from `../inbox/backToInbox.js`, call
+`const backToInbox = useBackToInbox();` in the component body (with the
+other hooks, before any early return), and change the back link to:
+
+```tsx
+        <Link
+          to="/inbox"
+          className={styles.backBtn}
+          aria-label="Back to inbox"
+          onClick={(e) => {
+            e.preventDefault();
+            backToInbox();
+          }}
+        >
+```
+
+(the arrow glyph child stays as it is in each file).
+
+In `dashboard/src/routes/contact/ContactDetail.tsx` (the mark-unread
+success path, `navigate('/inbox')` at line 399) and
+`dashboard/src/routes/conversation/ThreadUnreadToggle.tsx` (line 189),
+import `useBackToInbox`, call it in the component body, and replace the
+`navigate('/inbox')` call with `backToInbox()`; add `backToInbox` to the
+enclosing `useCallback`'s dependency array where the call sits inside one
+(ContactDetail: the array that currently lists `navigate`).
+
+- [ ] **Step 5: Run the tests, the dashboard suite and typecheck**
+
+```
+npx vitest run src/routes/inbox/backToInbox.test.tsx src/routes/inbox/InboxRow.test.tsx --root dashboard
+npm run test -w @housingchoice/dashboard
+npm run typecheck
+```
+
+Expected: PASS; exit 0; exit 0. If an existing ConversationDetail /
+GroupTextView / ContactDetail test asserts the exact `navigate` call or the
+link's onClick, update its expectation to the helper's behavior (a POP when
+`fromInbox` state is present, else `/inbox`) - that is the spec change, not
+a regression.
+
+- [ ] **Step 6: Commit**
+
+Read bare `git status`, confirm no `MERGE_HEAD`, then:
+
+```
+git add dashboard/src/routes/inbox/backToInbox.ts dashboard/src/routes/inbox/backToInbox.test.tsx dashboard/src/routes/inbox/InboxRow.tsx dashboard/src/routes/conversation/ConversationDetail.tsx dashboard/src/routes/conversation/GroupTextView.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/conversation/ThreadUnreadToggle.tsx
+git commit -m "feat(inbox): in-app Back to inbox goes back in history when the row was opened from the inbox
+
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
+```
+
+---
+
 ### Task 8 (separable): Server prefetch on the `filter=all` pager
 
 **Files:**
@@ -3532,6 +3776,10 @@ describe('aggregateInbox - prefetch equivalence (spec 5.10)', () => {
     // of the code (one row consumed + at most HYDRATE_CONCURRENCY chains in
     // flight when `stop` is set), not of promise timing.
     await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations, slowReads: true }, calls, undefined, { inboxPrefetch: true }));
+    // The prefetch read AHEAD of the one consumed row (this is the red line
+    // before Step 5) ...
+    expect(calls.listByConversation).toBeGreaterThan(1);
+    // ... but stopped scheduling when the page filled.
     expect(calls.listByConversation).toBeLessThanOrEqual(9);
     // And the sequential arm reads exactly one.
     const sequential = emptyCallCounts();
@@ -3552,18 +3800,17 @@ npx vitest run test/inboxFeed.test.ts -t "prefetch equivalence"
 cd ..
 ```
 
-Expected: RED for one honest reason only - `inboxPrefetch` is not a member of
-`InboxRouterDeps`, so the file fails to type-check under vitest's esbuild
-strip? No: esbuild strips types, so the run itself proceeds and the
-equivalence tests PASS TRIVIALLY (both arms are sequential until Step 5).
-The red that matters is `npm run typecheck`, which fails on the unknown
-`inboxPrefetch` key, and the stop-flag test's SECOND assertion
-(`sequential.listByConversation).toBe(1)`) passes while its first is vacuous.
-Record that the equivalence tests are a REGRESSION NET, green before and
-after by design, and that the stop-flag bound only becomes meaningful after
-Step 5. (The app test setup requires DynamoDB Local to be reachable even for
-in-memory files: run `npm run db:start` first, from the repo root, or the
-setup throws.)
+Expected: exactly ONE red, and it is the stop-flag test's first assertion
+`expect(calls.listByConversation).toBeGreaterThan(1)` - with no prefetch the
+sequential loop reads exactly one latest message at `limit=1`, so the
+"prefetch reads ahead" claim is false until Step 5 builds it. Everything
+else in the block passes now and must still pass after Step 5: the
+equivalence tests are a REGRESSION NET, green before and after by design
+(both arms are sequential until the prefetch exists), and `npm run typecheck`
+is green because Step 1 already widened `routerOpts` (TypeScript does not
+excess-check spread members). The app test setup requires DynamoDB Local to
+be reachable even for in-memory files: run `npm run db:start` first, from the
+repo root, or the setup throws.
 
 - [ ] **Step 4: Add the switch and the promise caches**
 
@@ -3916,14 +4163,14 @@ function trackInboxRequests(page: Page): SeenInboxRequest[] {
   return seen;
 }
 
-/** After `mark`: the first finished request is a head read, and no cursor
- *  request precedes a head read. */
-function expectHeadFirst(seen: SeenInboxRequest[], mark: number, where: string): void {
+/** After `mark`: the first finished request is a head read (so every cursor
+ *  request that follows came from a chain rebuilt after it), and at least
+ *  one cursor request followed when `expectCursors` says so. */
+function expectHeadFirst(seen: SeenInboxRequest[], mark: number, where: string, expectCursors: boolean): void {
   const after = seen.slice(mark);
   expect(after.length, `${where}: requests after the mark`).toBeGreaterThan(0);
   expect(after[0]?.cursor, `${where}: first request is a head read`).toBe(false);
-  const firstHead = after.findIndex((r) => !r.cursor);
-  expect(after.slice(0, firstHead).some((r) => r.cursor), `${where}: no cursor request before a head read`).toBe(false);
+  expect(after.some((r) => r.cursor), `${where}: cursor requests followed`).toBe(expectCursors);
 }
 
 const rows = (page: Page): Locator => page.getByRole('list', { name: 'Conversations' }).getByRole('listitem');
@@ -3997,7 +4244,7 @@ test.describe('inbox rows and timestamps', () => {
     await expect(rows(page)).toHaveCount(7, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
     expect(await listHandle!.evaluate((el) => el.isConnected)).toBe(true);
-    expectHeadFirst(seen, mark, 'after the inbound at limit=2');
+    expectHeadFirst(seen, mark, 'after the inbound at limit=2', true);
 
     // At the DEFAULT limit a page one holds everything: a further inbound adds
     // its row at the top, removes nothing, and issues no cursor request.
@@ -4057,12 +4304,40 @@ test.describe('inbox rows and timestamps', () => {
     await expect.poll(() => seen.slice(mark2).filter((r) => r.cursor).length, { timeout: 15_000 }).toBeGreaterThan(0);
     await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0, { timeout: 15_000 });
-    expectHeadFirst(seen, mark2, 'after the return at limit=2');
+    expectHeadFirst(seen, mark2, 'after the return at limit=2', true);
+
+    // The in-app way back (Task 7b): open the group text at the bottom, use
+    // its "Back to inbox" control, and the same restore applies (it is a POP
+    // when the thread was opened from the inbox).
+    await page.goto(`${NEXT}/inbox?limit=10`);
+    await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
+    await scrollToBottom(page);
+    const saved3 = await scroller(page).evaluate((el) => el.scrollTop);
+    expect(saved3).toBeGreaterThan(0);
+    await page.getByRole('link', { name: /Group text/ }).first().click();
+    await page.waitForURL(/\/conversations\//);
+    await page.getByRole('link', { name: 'Back to inbox' }).click();
+    await page.waitForURL(/\/inbox/);
+    await expect(rows(page)).toHaveCount(9);
+    const restored3 = await scroller(page).evaluate((el) => el.scrollTop);
+    expect(Math.abs(restored3 - saved3)).toBeLessThanOrEqual(8);
   });
 
   test('4. the time fits at phone width and in the tightest one-line band; an ordinary name is not ellipsized wide', async ({ page, request }) => {
     const stamp = `${Date.now()}`.slice(-6);
     const [number] = await seedParties(request, 1, stamp);
+    // A LONG NAME is minted through the app: create the contact FIRST (so the
+    // inbound folds into a contact row named by it), then text from it. The
+    // body shape is `ContactCreate` (dashboard/src/api/types.ts).
+    const longNumber = `+1555${stamp.slice(-4)}998`;
+    const created = await page.request.post(`${APP}/api/contacts`, {
+      headers: apiHeaders,
+      data: { type: 'tenant', firstName: 'Bartholomew', lastName: `Montgomery-Fitzgerald-Longname-${stamp}`, phone: longNumber },
+    });
+    expect(created.ok(), `create contact: ${created.status()}`).toBe(true);
+    await registerParty(request, { label: `Long ${stamp}`, role: 'tenant', number: longNumber });
+    await sendAsParty(request, { from: longNumber, body: 'a long name' });
+    const longRow = page.getByRole('link', { name: /Bartholomew Montgomery-Fitzgerald-Longname/ });
 
     async function timeInsideRow(link: Locator, where: string): Promise<{ row: { x: number; y: number; width: number; height: number }; time: { x: number; y: number; width: number; height: number } }> {
       const li = link.locator('xpath=ancestor::li[1]');
@@ -4085,11 +4360,14 @@ test.describe('inbox rows and timestamps', () => {
     // Two-line layout: the time sits in the row's top half.
     expect(narrow.time.y + narrow.time.height).toBeLessThanOrEqual(narrow.row.y + narrow.row.height / 2 + 2);
 
-    // The tightest one-line band: sidebar open, content about 480px. The
-    // unknown row carries the widest chip a lean-world row can (Needs triage).
+    // The tightest one-line band: sidebar open, content about 480px. Both the
+    // unknown row (the Needs triage chip) and the long-name contact row (the
+    // shrinking head, spec 5.4) must keep their time inside the row.
     await page.setViewportSize({ width: 768, height: 720 });
     await expect(unknownRow).toBeVisible();
-    await timeInsideRow(unknownRow, 'one-line at 768');
+    await timeInsideRow(unknownRow, 'one-line at 768 (unknown)');
+    await expect(longRow).toBeVisible();
+    await timeInsideRow(longRow, 'one-line at 768 (long name)');
 
     await page.setViewportSize(WIDE_RESTORE);
     const tashaName = page.getByRole('link', { name: /Tasha Nguyen/ }).getByText('Tasha Nguyen', { exact: true });
@@ -4429,7 +4707,10 @@ In `app/src/lib/inboxDiagnostics.ts`, change the four `limit: 30` entries in
 "Dashboard pages request 30 rows" to "Dashboard pages request 100 rows
 (DEFAULT_PAGE_LIMIT in dashboard/src/routes/inbox/useInbox.ts)". In
 `app/test/inboxDiagnostics.test.ts`, change the four pinned `limit: 30`
-entries to `limit: 100`. Run:
+entries to `limit: 100` AND the fifth pin, the distinct-limits assertion
+`.toEqual([30])` (about line 39), to `.toEqual([100])`. Run (DynamoDB Local
+must be up: `npm run db:start` from the repo root first, the app test setup
+requires it even for in-memory files):
 
 ```
 cd app
@@ -4494,12 +4775,11 @@ npm run perf:pages
 
 Expected: the hermetic run reports its inbox self-QA invariants satisfied
 (one initial page request per inbox sample, no `cursor` request; the
-classifier accepts `limit=100` after Task 10b). A violation on a WARM inbox
-sample means that flow reached `/inbox` with a snapshot in the store, so
-readiness resolved on the restored list before the head read finished (spec
-5.11): extend the harness's inbox readiness for that flow to also await the
-finished head read, re-run, and record the change in the handback. A
-violation on a COLD sample means the dashboard is wrong: stop and diagnose.
+classifier accepts `limit=100` after Task 10b). The harness's readiness
+already waits until no tracked request is pending (`e2e/performance/
+readiness.ts`), so a warm sample that restores from the store still counts
+its one head read. Any violation means the dashboard is wrong: stop and
+diagnose before touching the harness.
 
 - [ ] **Step 4: Live self-QA in a session lane**
 
@@ -4515,9 +4795,16 @@ dev-login first). Prove, with screenshots under `.playwright-mcp/`:
 2. Phone width (360): two-line rows, time top right, no horizontal scroll.
 3. Send an inbound through the fake while scrolled mid-list: the list does
    not jump to the top; the new row appears at the top.
-4. Open a row, press back: the list and position are back without a spinner.
-5. `/inbox?limit=2`: auto-load appends on scroll; Load more disappears at the
-   end.
+4. Open a row, press the browser back button: the list and position are back
+   without a spinner. Open a relay or group thread from the inbox and use its
+   own "Back to inbox" arrow: the same restore (Task 7b).
+5. `/inbox?limit=15` at a short window: one page per scroll to the bottom,
+   never two; `/inbox?limit=2`: the pages chain as soon as the page loads and
+   Load more disappears at the end.
+6. A contact with a PLACEMENT TAG on its row (the full seed profile has
+   them; or attach a placement to a lean contact through the UI) at 768px
+   wide with a long name: the time stays inside the row and the name
+   ellipsizes (spec 5.4; the e2e cannot mint a placement tag).
 
 Then `npm run e2e:stop`. Write the self-QA notes to
 `docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/self-qa.md`
@@ -4569,5 +4856,11 @@ page commit can never fire from the stale intersection state the effect
 holds at that moment.
 
 **Round-1 review (plan): 36 findings across two reviewers, adjudicated in
-`docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/plan-r1-adjudications.md`.**
+`docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/plan-r1-adjudications.md`.
+Round 2: 18 findings, adjudicated in `plan-r2-adjudications.md`; the
+auto-load hook now consumes observer reports at arrival (a report that
+arrives while disabled is discarded; a commit while disabled re-observes once
+the hook is enabled), and Task 7b makes the in-app "Back to inbox" actions
+go back in history when the row was opened from the inbox (a product call
+pending at the launch gate).**
 

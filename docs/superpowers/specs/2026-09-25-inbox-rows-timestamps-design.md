@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8.1 - precision edits from plan review round 1 (auto-load re-observe, restoreScroll seed, perf classifier page size, e2e row naming); approved for planning per Cameron's gate ruling of 2026-09-25
+Status: DRAFT 8.2 - precision edits from plan review rounds 1-2 (auto-load report consumption, restoreScroll seed, perf classifier page size, e2e row naming, in-app way back pending ruling); approved for planning per Cameron's gate ruling of 2026-09-25
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -235,6 +235,13 @@ as today's 30-row page. That server slice is separable (section 5.10).
 - `dashboard/src/app/AuthGate.tsx` (the store clear, 5.8) and, if no optional
   accessor exists, `dashboard/src/app/AuthContext.tsx` (an additive
   `useOptionalAuth()` that returns `undefined` without a provider).
+- The in-app way back (5.8, pending the ruling in section 10): a new
+  `dashboard/src/routes/inbox/backToInbox.ts`, the row link's history state
+  in `InboxRow.tsx`, and the four back actions in
+  `dashboard/src/routes/conversation/ConversationDetail.tsx`,
+  `dashboard/src/routes/conversation/GroupTextView.tsx`,
+  `dashboard/src/routes/contact/ContactDetail.tsx` and
+  `dashboard/src/routes/conversation/ThreadUnreadToggle.tsx`.
 - `app/src/routes/inbox.ts`: the `filter=all` pager's prefetch only (5.10). No
   wire-shape change. No change to the relay or group merge, the unread branch,
   the unknown branch, cursors, or limits.
@@ -322,22 +329,29 @@ a mark-read/unread commit, the reset, or a failure); `Inbox.tsx` owns the DOM
     `react-hooks/refs` rule is satisfied and there is no stale closure.
   - the callback records a REPORT: `{ intersecting, seq }` with `seq` counting
     up on every callback. The observer reports on `observe()` (its initial
-    state) and on every threshold crossing.
-  - an `epoch` change RE-OBSERVES the sentinel (`unobserve` then `observe`),
-    which makes the observer report the sentinel's CURRENT geometry after the
-    DOM grew. Nothing fires from the epoch change itself: the state the
-    effect holds at that moment is stale (the DOM has grown but the observer
-    has not yet reported), and firing on it would load two pages per scroll.
-  - fires from an EFFECT over `[report, enabled]`: when `enabled &&
-    report.intersecting` and `report.seq` differs from the seq at the last
-    fire, it calls `onLoad()` once and records the seq. `onLoad` is the
-    current `loadMore` by construction (effects see current props).
-  - never fires otherwise. In particular a change of `enabled` alone (for
-    example `loadingMore` flipping back to false after a FAILED page, or
-    `hasMore` appearing without a commit) does not fire, because no new
-    report arrived. A head read that installs a cursor bumps the epoch, so
-    that case re-observes and fires through the report once if the sentinel
-    is in view, which is the wanted single load.
+    state), on every threshold crossing, and on `reobserve()` (a forced
+    fresh report of the current geometry). A real `IntersectionObserver`
+    delivers entries in a task after the next rendering update, never
+    synchronously; the rules below do not depend on that timing because a
+    report is consumed AT ARRIVAL.
+  - a report is consumed when it arrives: while ENABLED, a report that says
+    intersecting fires `onLoad()` once (the current `loadMore` by
+    construction: effects see current props); while DISABLED, the report is
+    DISCARDED and is never acted on later. So a report that predates the
+    commit that enabled the hook can never fire: not the observer's initial
+    "in view" report on a restored, unarmed mount, not a crossing the
+    operator made mid-load.
+  - when the hook is ENABLED and the `epoch` has moved since the last epoch
+    it handled, it RE-OBSERVES the sentinel so the next report describes the
+    grown DOM. That covers an epoch change while enabled (a page committed)
+    and an epoch change that landed while disabled (a head read that armed a
+    restored list; a head read that discarded an in-flight page; a manual
+    Load more that re-armed after an empty page): in each case exactly one
+    fresh report follows, and it fires once if the sentinel is still inside
+    the margin (a short page) and not at all if the page pushed it out.
+  - never fires otherwise. A change of `enabled` alone (for example
+    `loadingMore` flipping back to false after a FAILED page, which moves no
+    epoch) neither re-observes nor fires.
   - `intersecting` is reset to `false` whenever the sentinel unmounts
     (`hasMore` went false), from the effect that owns the observer; when the
     sentinel returns, the new observer's first callback sets it again.
@@ -716,6 +730,21 @@ snapshot: {
   the top: an operator who clicks Inbox because the badge says there is new
   unread must land on the new rows, not at row 180. The container is resolved
   the same way 5.2 does.
+- THE IN-APP WAY BACK (pending Cameron's ruling, section 10; built by
+  default). The relay and group thread pages carry a "Back to inbox" arrow
+  (`ConversationDetail.tsx`, `GroupTextView.tsx`), and the mark-unread
+  actions on the contact page and the thread header navigate to `/inbox`
+  when done (`ContactDetail.tsx`, `ThreadUnreadToggle.tsx`). All four are
+  forward navigations today. The app is installed on Sam's phone as a
+  standalone web app (the manifest's display mode), where there may be no
+  browser back button, so those actions can be her only way back - and a
+  PUSH arrival starts at the top. Rule: a row opened FROM the inbox pushes
+  history state `{ fromInbox: true }`; a page's back action with that state
+  goes BACK in history (a POP, so the restore above applies); without it (a
+  deep link, the badge into a thread, a quick-reply link) it pushes `/inbox`
+  as today. The `<Link to="/inbox">` elements keep their href for semantics
+  and intercept the click. Nothing else changes for the sidebar link or the
+  badge.
 - A return to `/inbox` with a DIFFERENT filter or limit than the one saved
   starts as a fresh load for that key; the other key's snapshot is kept for its
   own return.
@@ -831,16 +860,12 @@ The design keeps its invariants without changing the harness:
 - Cold samples navigate by `page.goto`, which resets module state, so the
   store is empty and exactly one initial page request is issued as today.
 - Warm samples `goto` a SOURCE page and then click one link or tab to the
-  measured target. A warm inbox sample reached by a link within a page
-  session that already visited `/inbox` restores from the store, so its
-  readiness (list visible) can resolve BEFORE the head read finishes and the
-  sample's one-request count reads 0. Whether any current warm flow does
-  that is UNVERIFIED from the harness's flow definitions; the hermetic
-  `npm run perf:pages` run in the gates is the arbiter. If it reports a
-  count violation on a warm inbox sample, the harness's inbox readiness for
-  that flow is extended to await the finished head read (a harness-side
-  change in this mission); a violation on a cold sample means the dashboard
-  is wrong.
+  measured target. A warm inbox sample reached within a page session that
+  already visited `/inbox` restores from the store and renders before its
+  head read finishes, but the harness's readiness already waits until no
+  tracked request is pending (`e2e/performance/readiness.ts`), so the sample
+  still counts exactly one page request. The hermetic `npm run perf:pages`
+  run in the gates is the arbiter; a violation means the dashboard is wrong.
 - Auto-load fires only when the sentinel is within 400px of the viewport
   bottom; the perf seed's `filter=all` page is 100 rows tall, so it does not
   fire without a scroll, and the harness never scrolls. Its Unread/Unknown
@@ -1024,7 +1049,9 @@ head read on every mount).
    auto-load chain to all six, open the last row, go back: the restore shows
    all rows instantly, then the finished-request log shows a head read
    FIRST and cursor requests only after it (the pages were rebuilt from page
-   one, not kept), and the list settles back to all six contact rows.
+   one, not kept), and the list settles back to all six contact rows. Then
+   the in-app way back (5.8): open the group text at the bottom from the
+   inbox, use its "Back to inbox" control, and the same restore applies.
 4. Widths. At `NARROW_360` from `e2e/support/viewport.ts`: the shared
    no-horizontal-overflow assertion, and the first row's `<time>` bounding box
    fully inside the row's box and in its top half. Then at 768x720 (the
@@ -1033,12 +1060,13 @@ head read on every mount).
    row can carry): the `<time>` box fully inside the row's box (its right
    edge at most the row's right edge, its width above 0), since
    `.row { overflow: hidden }` would otherwise clip it silently and
-   `toBeVisible` would still pass. Then at `WIDE_RESTORE`: Tasha's name is
-   not ellipsized (`scrollWidth <= clientWidth` on the name). A LONG name
-   with a placement tag cannot be minted through the fake alone (a contact
-   with a placement is a seed-profile matter); that case is covered in the
-   live self-QA (7.4) by renaming a contact to a long name and checking the
-   768px band by eye and by bounding box.
+   `toBeVisible` would still pass; and the same for a CONTACT row with a
+   long name, minted by creating the contact through `POST /api/contacts`
+   before texting from its number (so the inbound folds into a contact row
+   named by it and the shrinking head rule of 5.4 is exercised). Then at
+   `WIDE_RESTORE`: Tasha's name is not ellipsized (`scrollWidth <=
+   clientWidth` on the name). A row with a PLACEMENT TAG is a seed-profile
+   matter and is covered in the live self-QA (7.4) at the 768px band.
 5. Refresh failure banner. `page.route` returns 500 for the head read only
    (match on the absence of `cursor` in the query), triggered by an inbound;
    rows remain, the banner and `Retry refresh` appear; un-route and click Retry
@@ -1127,5 +1155,12 @@ at both widths.
 
 ## 10. Open items
 
-None. Sam approved the mockups on 2026-09-25; Cameron chose Option B at the
-spec gate on 2026-09-25.
+- Cameron's ruling on the in-app way back (5.8): the thread pages' "Back to
+  inbox" arrows and the two mark-unread navigations go BACK in history when
+  the row was opened from the inbox, so the restore applies on an installed
+  phone app with no browser back button. Built by default (plan Task 7b);
+  raised by the plan review on 2026-09-25. Dropping it deletes that task and
+  nothing else.
+
+Sam approved the mockups on 2026-09-25; Cameron chose Option B at the spec
+gate on 2026-09-25.

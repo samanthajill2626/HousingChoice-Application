@@ -340,7 +340,7 @@ describe('relay.retryLeg (30003 ladder)', () => {
   ];
 
   it.each(gateCases)(
-    'refuses on %s and closes the retry leg with the gate code',
+    'refuses on %s, closes the retry leg with the gate code, and logs it at WARN',
     async (_name, arrange, code) => {
       seedRelay(world);
       const row = seedRetryRow(world);
@@ -354,7 +354,9 @@ describe('relay.retryLeg (30003 ladder)', () => {
       expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
       // The chain ENDS: nothing further is scheduled, on either ladder.
       expect(outbound.delayed).toHaveLength(0);
-      const terminal = errorLogs().filter((l) => l['closeCode'] === code);
+      // WARN, not ERROR: a gate refusal is a deliberate human action (Cameron's
+      // Q1 ruling, 2026-09-24), so it must never feed the ErrorLogs alarms.
+      const terminal = warnLogs().filter((l) => l['closeCode'] === code);
       expect(terminal).toHaveLength(1);
       expect(terminal[0]).toMatchObject({
         event: 'relay_retry_leg',
@@ -363,6 +365,7 @@ describe('relay.retryLeg (30003 ladder)', () => {
         rootTsMsgId: ROOT_TS_MSG_ID,
         attempt: 1,
       });
+      expect(errorLogs().some((l) => l['retryClaim'] === 'gate_refused')).toBe(false);
       // Finding P1: the close ANNOUNCES, once, for the ROOT. Without it the
       // refusal is durable but invisible - the chip keeps reading `retrying`
       // until an unrelated SSE arrives, then ages into `not confirmed`.
@@ -990,7 +993,7 @@ describe('relay.retryLeg (30003 ladder)', () => {
 
     await runHandler(payloadFor(row));
 
-    const terminal = errorLogs().filter((l) => l['closeCode'] === 'retry_group_closed');
+    const terminal = warnLogs().filter((l) => l['closeCode'] === 'retry_group_closed');
     expect(terminal).toHaveLength(1);
     expect(terminal[0]!['memberKey']).toBe('phone-only-member');
     expect(JSON.stringify(capture.lines)).not.toContain(BOB);

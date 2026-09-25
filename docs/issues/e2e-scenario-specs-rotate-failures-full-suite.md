@@ -20,6 +20,16 @@ time. No scenario file failed twice.
 | branch run 2 | `docs/media-cache-risk-accepted` | `approval-and-move-in.spec.ts` (2 cases) |
 | relay-30003 gate 4 (2026-09-02, `feat/relay-30003-retry-lineage` @ 17bf49a7, main @ f82c149c merged) | none - the run's only red was `outbound-mms.spec.ts:517` with the trigger-not-visible signature, which passed alone twice on the same code | (a fourth data point: zero scenario failures this run; the pass-alone / fail-in-suite shape held on a NON-scenario file) |
 
+**Surviving artifacts (2026-09-24).** Only branch run 2's output outlived the
+`docs/media-cache-risk-accepted` worktree: its `results.json` (263 passed, 3
+failed, 21.1m), HTML report, and the error context, screenshot and video of
+both `approval-and-move-in.spec.ts` failures (plus the run's
+`outbound-mms.spec.ts:517` failure). They were copied out, SHA-256 verified,
+before the worktree was retired:
+`W:\tmp\_preserved-artifacts\media-cache-risk-accepted-20260924\`. That run
+captured no Playwright traces. Branch run 1's artifacts were not in the
+worktree; each run overwrites `e2e/.artifacts/`.
+
 Observed messages were absent-element assertions - e.g. a contact link filtered
 by phone number never appearing in the Unknown tab
 (`scenarios/steps.ts:576`) - not timeouts on a slow render.

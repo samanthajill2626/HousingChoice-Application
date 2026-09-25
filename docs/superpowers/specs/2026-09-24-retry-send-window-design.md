@@ -562,12 +562,17 @@ branch lands second carries each one.
   scheduled retry), not share-skip-fix's retry count; until share-skip-fix reads
   `retry_due_at`, that row shows no promise (section 5, D8).
 - **Sequencing** with `feat/share-skip-fix` and `feat/send-outcome-reconcile`
-  (section 5). Recommended: this branch lands LAST. Reconcile restructures
-  `sendOneRelayLeg` and `retrySend` wholesale and fences off `twilio.ts`, where
-  most of this branch's server work lives; this branch's edits in the shared
-  files are small insertions (a gate, a deadline option, lineage fields, copy
-  entries). Landing last means this branch's builder carries every section 5
-  coupling against real code, and the other two specs need no change.
+  (section 5). Proposed order (share-skip-fix's planner, 2026-09-24, with this
+  planner's condition): share-skip-fix's narrowed Branch A first; then THIS
+  branch; then send-outcome-reconcile; then share-skip-fix's Branch B, built on
+  reconcile's attempt record and this branch's `retry_due_at`. It works because
+  reconcile has no plan yet and can be planned against code that already holds
+  this branch's small insertions. The condition: reconcile's spec does not mention
+  this branch at all, so its plan must take in section 5's requirements before it
+  is written - above all requirement 5 (its "best-effort" acquire and its
+  `retryable` deferral of prepare failures would quietly re-open late sends) and
+  requirements 2 and 3 (its adoption and deferral paths are new code no test on
+  this branch can see).
 
 ## 8. Out of scope
 

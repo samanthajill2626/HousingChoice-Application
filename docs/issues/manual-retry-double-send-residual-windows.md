@@ -20,9 +20,10 @@ texted the member twice. The guard is time-based, and these gaps remain:
    while the webhook's 30003 arm is still doing its reads and the enqueue. (A
    press after the write but before the screen hears about it gets the 409; the
    gap is server-side.)
-2. A lost stamp: the enqueue succeeded but the `annotateMessage` write failed, so
-   there is no promise, no hidden button and no 409 for the whole wait, while the
-   automatic retry is still coming.
+2. No stamp while a retry is coming: the enqueue succeeded but the
+   `annotateMessage` write failed, or the arm's conversation or contact read failed
+   and it scheduled without a stamp by design (spec D3a). Either way there is no
+   promise, no hidden button and no 409 for the whole wait.
 3. A late job: the promise expired while the automatic job is still queued or
    running, and a press lands before it sends.
 4. A stale browser tab retrying an original that an automatic retry has already

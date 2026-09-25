@@ -1,8 +1,9 @@
 # Retry send window - design
 
 Date: 2026-09-24. Branch `feat/retry-send-window`, worktree `W:\tmp\retry-send-window`,
-cut from `main` @`685f2ede`. Status: DRAFT 4 - after adversarial review rounds 1-3
-(`docs/superpowers/reviews/2026-09-24-retry-send-window/`).
+cut from `main` @`685f2ede`. Status: DRAFT 5 - adversarial review closed after
+round 4 returned precision edits only, all folded in here
+(`docs/superpowers/reviews/2026-09-24-retry-send-window/`). For Cameron's review.
 
 | sev | issue | this branch |
 | --- | --- | --- |
@@ -40,6 +41,12 @@ plus one ticker interval after it was due, measured on the server's clock.**
 group) retry ladder and the one-to-one `messaging.retrySend` chain. A staff member
 pressing Retry is a new human send; the window never limits it, and it starts a
 window of its own.
+
+Two named exceptions, both in section 9: a retry with no usable origin - a relay
+slot without `sentAt`, a rung claimed before this deploy, an origin that does not
+parse - is not windowed (D5), so its send has no deadline; and while a retry's
+outcome is pending reconcile, its promise stays up until it resolves (section 5,
+requirement 3).
 
 ## 2. What exists today
 
@@ -116,12 +123,18 @@ and resolves in this order:
 2. **Would a job gate refuse it?** On this decline path only - it is rare - the
    claim reads what the job's four gates read (`relayRetryLeg.ts:491-555`): the
    conversation (its status, its roster, and the member's current number,
-   compared by digest) and the member's suppression. If any gate would refuse,
-   the outcome is the existing `gate_refused` with that gate's code, logged at
-   WARN per Cameron's Q1 ruling (`isTerminalRelayLegFailure`, `twilio.ts:433-446`,
-   adds `gate_refused` to its WARN set; at the claim it arises only here). No rung
-   exists to carry the gate's close code, so the leg shows the plain failure
-   (D8).
+   compared by digest) and the member's suppression, run in the job's own order -
+   group open, on the roster, number unchanged, not opted out - so "that gate's
+   code" is deterministic when two apply. Everything needed is already in scope
+   at the claim (`relayMemberKey`, `isMemberSuppressed`, `normalizeToE164`,
+   `relayRetryDigest`, the contacts and conversations repositories, and the
+   claim's own `destDigest`). If any gate would refuse, the outcome is the
+   existing `gate_refused` with that gate's code, logged at WARN per Cameron's Q1
+   ruling (`isTerminalRelayLegFailure`, `twilio.ts:433-446`, adds `gate_refused`
+   to its WARN set; at the claim it arises only here). No rung exists to carry
+   the gate's close code, so the leg shows the plain failure (D8). A read that
+   FAILS on this path is the claim's existing `claim_failed`: ERROR, a 5xx and a
+   Twilio redelivery (`twilio.ts:3000-3007`, `:3176-3198`), not a WARN.
 3. **Otherwise** the new outcome `window_closed`, ERROR (D9).
 Every branch leaves the member's slot exactly as `cap_exhausted` does: terminal on
 30003, no new retry row, no enqueue, no claim SSE.
@@ -158,8 +171,17 @@ scheduling).
   window's end) into `sendOneRelayLeg`, whose token-bucket acquire becomes bounded
   for this caller (`acquire(1, { timeoutMs })`, `app/src/lib/tokenBucket.ts`; the
   group-send precedent, `app/src/services/groupSend.ts:504`). A timeout sends
-  nothing, and the job closes the rung `retry_window_closed`. The fan-out passes
-  no deadline and is unchanged. The transient re-enqueue
+  nothing, and the job closes the rung `retry_window_closed`. Its path must be
+  explicit, because today a `TokenBucketBusyError` there would escape: the
+  acquire (`relayFanOut.ts:1360`) sits outside the unit's only try (`:1385-1390`),
+  the unit lets unclassified errors throw (`:1246-1248`), the job has no catch
+  around the call (`relayRetryLeg.ts:575-598`) and its execution marker is already
+  set, so the rung would strand at `queued`. The timeout therefore surfaces as a
+  distinct outcome (or a job-side catch of that error) BEFORE the unit's
+  `attempted` aggregation write (`:1380-1382`), closes through `refuseGate`
+  (nothing was attempted), and is never mapped to `transient`, whose branch
+  assumes a provider refusal. The fan-out passes no deadline and is unchanged.
+  The transient re-enqueue
   (`relayRetryLeg.ts:643-646`) re-checks and closes instead of re-enqueueing once
   past the window.
 - One-to-one job: checks before `sendMessage` and ends the chain without sending.
@@ -209,7 +231,11 @@ dashboard type (`dashboard/src/api/types.ts:2479`).
 - **The relay map keeps its 30003 entry** (the same words as the new base), and
   `relay` wins over `retryScheduled`: a relay leg never promises through the
   one-to-one option. The order test (`deliveryStatus.test.ts:761-767`) is
-  rewritten to pin exactly that.
+  rewritten to pin exactly that. Because `relay` wins, the one-to-one chip must
+  NEVER pass `relay`: the contact page's `rosterKind` defaults to `'relay'`
+  (`Timeline.tsx:1790`, `:906`), and the chip deliberately omits the flag today
+  ("DELIBERATELY no `relay` flag here", `Timeline.tsx:973-980`). That rationale
+  survives D12's rewrite of the comment.
 - The base wording is what shows on native group-text legs, rollups and message
   rows, and on a one-to-one bubble whose retries ran out, was declined, or sits on
   a manual-mode thread.
@@ -217,8 +243,18 @@ dashboard type (`dashboard/src/api/types.ts:2479`).
   before `retry_due_at + RETRY_PROMISE_GRACE_MS` (2 minutes). The dashboard
   estimates the server's clock from its latest fresh API response rather than
   trusting the browser's clock, so a skewed browser clock does not change how long
-  the promise shows. (Mechanism - a server-now field, or the response's `Date`
-  header, which stays fresh on a 304 - is the plan's.)
+  the promise shows. Either route is the plan's, and each has a trap: the
+  response's `Date` header stays fresh on a 304 but the API client discards
+  response headers today (`dashboard/src/api/client.ts:92-126`), so it must expose
+  them; a server-now body field goes stale on a 304 (Express's default weak ETag,
+  and API JSON carries no `Cache-Control`), so it needs `Cache-Control: no-store`
+  on the timeline route. The error is then the `Date` header's one-second
+  resolution plus one tick.
+- **The ticker reads the same clock.** Its arming predicate must use the same
+  server-clock estimate as the bubble (the file's own rule: a predicate over the
+  presenter's functions, never a shape test, `Timeline.tsx:768-775`); otherwise,
+  on a fast browser clock, the ticker disarms while the bubble is still live and
+  the promise never expires on screen.
 - The promise expires on screen without a reload: a one-to-one bubble with a live
   promise joins the Timeline's existing ticker (today one-to-one bubbles never
   tick, `Timeline.tsx:859-899`, pinned by `Timeline.ticker.test.tsx:412-418`).
@@ -252,9 +288,10 @@ and the exhausted-retries line today:
   timeout), ERROR;
 - one-to-one arm and job: one ERROR line each, naming `window_closed`.
 WARN, not ERROR: a D3a skip; a relay claim that finds a job gate would refuse
-(`gate_refused`, D3); `already_claimed`; a missing or unparseable origin; and a
-failed read (D3a, D5). The per-callback `delivery_failed` marker and every alarm
-threshold are unchanged.
+(`gate_refused`, D3); `already_claimed`; a missing or unparseable origin (D5); and
+a failed read in the one-to-one arm (D3a, which then schedules). A failed read on
+the relay claim's decline path is the existing `claim_failed`, ERROR (D3). The
+per-callback `delivery_failed` marker and every alarm threshold are unchanged.
 
 **D10. The manual Retry guard** (Cameron's option 1, `rulings.md`).
 - Screen: the Retry button is hidden while the one-to-one promise is live (D8).
@@ -294,6 +331,8 @@ message row. The tests that pin the carve-out (`deliveryStatus.test.ts:419` and
   promise holds"), and `:3422-3429` and `:3477-3479` (native group texts "ARE
   REACHABLE HERE"), reworded to D11's position.
 - `Timeline.tsx:973-979` and `:1272-1275` (the group-text "retry is real" notes).
+  The rewrite at `:973-980` keeps its other half: the one-to-one chip passes no
+  `relay` flag, now because `relay` would also switch off the promise (D8).
 - D6 makes these false: `sendMessage.ts:234-240`, `messagesRepo.ts:725-731` and
   `:2262-2265`, `retrySend.ts:9-10` and `:221-225`.
 - Test and doc comments: `deliveryStatus.test.ts:721-737`, `:744-751`, `:762-763`,
@@ -344,6 +383,12 @@ rounds 1-3):
   `:2494`, `:2509-2515`; `useRelayThread.ts:101-142`; `relayRetryJoin.ts:135-164`,
   `:405-415` (the terminal step, which learns `retry_window_closed`), `:453`;
   `Timeline.tsx:885`, `:1077`, `:1975-1984`, `:2004-2019`.
+- **The promise's clock:** the dashboard API client (`dashboard/src/api/client.ts:92-126`,
+  which discards response headers today) if the `Date` route is taken, or the
+  timeline route's `Cache-Control` if a server-now field is; the one-to-one chip's
+  reason call and the Retry gate (`Timeline.tsx:980`, `:1341`), which read the
+  bubble clock derived later (`:1016`); and the ticker's arming predicate
+  (`Timeline.tsx:859-899`, `:2101-2104`).
 - **Readers of the 30003 copy:** `deliveryStatus.ts:778` and `:859-861` (the relay
   map entry, kept) via the Timeline chip, reason, rollup, row and spoken summary;
   EmailCard; `DeliveryBadge.tsx:31`; StatChips. Tests: those in D11, plus
@@ -391,11 +436,11 @@ branch lands second carries each one.
     statement then describes pre-existing rows only. D3a reads the live switch,
     so both orders hold.
   - It accepts the manual double send as today's behavior; D10 narrows it.
-- **`feat/send-outcome-reconcile`** (revision 4 @`bf2c5bf2`) plans edits to
-  `relayRetryLeg.ts`, `retrySend.ts`, `messagesRepo.ts`, `sendMessage.ts` and
-  `deliveryStatus.ts`; retypes `sendMessage`'s errors on the input and append path
-  D6 edits; and restructures `sendOneRelayLeg`'s phases, which D4's deadline option
-  must survive. Requirements on any path it adds:
+- **`feat/send-outcome-reconcile`** (revision 5 @`922675db`, its review closed)
+  plans edits to `relayRetryLeg.ts`, `retrySend.ts`, `messagesRepo.ts`,
+  `sendMessage.ts` and `deliveryStatus.ts`; retypes `sendMessage`'s errors on the
+  input and append path D6 edits; and restructures `sendOneRelayLeg`'s phases,
+  which D4's deadline option must survive. Requirements on any path it adds:
   1. A relay rung it re-drives later passes through D4's job-time check, so the
      window bounds it.
   2. Any path that appends a one-to-one retry row (its "adopt") carries
@@ -410,6 +455,12 @@ branch lands second carries each one.
   4. Its filed issue that an unresolved one-to-one retry "leaves the original's
      'will retry' copy standing" changes with D8: the copy now follows
      `retry_due_at`, so requirement 3 is what keeps it truthful.
+  5. Its phase table calls the token acquire "best-effort" and defers PREPARE
+     failures as `retryable`. That predates D4's bounded acquire, which CAN fail.
+     For a relay retry rung, a deadline timeout is TERMINAL whatever phase model
+     `sendOneRelayLeg` adopts: nothing is sent and the rung closes
+     `retry_window_closed`. Deferring it as `retryable` would re-open a send past
+     the window. Test intention 3 is re-run after that merge to catch it.
 
 ## 6. Test intentions
 
@@ -421,13 +472,17 @@ branch lands second carries each one.
    consistently) yields `already_claimed` (WARN); with any of the four job gates
    refusing (group closed, member removed, number changed, opted out) it yields
    `gate_refused` with that gate's code (WARN), at rung 1 and at rungs 2-3 and for
-   a team send alike; inside the window it claims as today; rung 2's claim
+   a team send alike, and with two gates refusing it reports the one the job
+   checks first; a read failure on that path is `claim_failed` (ERROR, 5xx);
+   inside the window it claims as today; rung 2's claim
    measures from the carried origin (with the harness append preserving the new
    field).
 3. Relay job: past the window it closes with `retry_window_closed` - ERROR, one
    SSE for the root, no send; the join renders that leg as "Phone unreachable
    (error 30003)"; a bounded acquire that times out closes `retry_window_closed`
-   without sending; a transient pass past the window closes instead of
+   through `refuseGate` without sending, never through the transient branch and
+   never leaving the rung `queued`; a transient pass past the window closes
+   instead of
    re-enqueueing; a pre-deploy rung without the field still runs (WARN); the
    fan-out's acquire is unbounded as before.
 4. One-to-one arm: `group_text` schedules nothing (WARN); a manual-mode, opted-out
@@ -446,11 +501,14 @@ branch lands second carries each one.
      ahead of the media map (an MMS one-to-one 30003 still promises); a relay leg
      never promises, even with `retryScheduled`; without it no surface promises;
      the no-tail fallback copy for `retry_window_closed` is present.
-   - A one-to-one bubble with a live `retry_due_at` shows "Phone unreachable -
-     will retry (error 30003)" and no Retry button; one without (manual mode,
-     declined, exhausted) shows the plain failure and the Retry button.
-   - The ticker arms while the promise is live, and the promise disappears after
-     `retry_due_at + grace` on the server's clock without a reload.
+   - A one-to-one bubble with a live `retry_due_at`, rendered with the DEFAULT
+     `rosterKind` (as the existing guard test does,
+     `Timeline.delivery.test.tsx:575-593`), shows "Phone unreachable - will retry
+     (error 30003)" and no Retry button; one without (manual mode, declined,
+     exhausted) shows the plain failure and the Retry button.
+   - The ticker arms on the same server-clock estimate as the bubble while the
+     promise is live, and the promise disappears after `retry_due_at + grace` on
+     the server's clock without a reload - including on a fast browser clock.
    - Skew: a browser clock 10 minutes fast or 10 minutes slow shows the promise
      for the same real duration as a correct one.
    - `retry_pending` maps to its message; the native group-text tests are
@@ -467,6 +525,12 @@ branch lands second carries each one.
   one-to-one bubble while a retry is scheduled), "A retry is already scheduled
   for this message." (a stale tab's manual Retry), and "Not retried - message too
   old" (a fallback no current screen shows).
+- **One visible change to confirm:** a LATE 30003 that arrives after a human
+  action - the group was closed, the member removed, their number changed, or they
+  opted out - used to show "Not retried - group closed" (or "no longer in this
+  group", "number changed since", "opted out"). Now no retry step is created, so
+  it shows the plain "Phone unreachable (error 30003)", per the ruling that a
+  declined retry is a plain failed attempt.
 - **One rule across specs:** the share results row's "will retry" follows D8 (a
   scheduled retry), not share-skip-fix's retry count; until share-skip-fix reads
   `retry_due_at`, that row shows no promise (section 5, D8).
@@ -491,7 +555,8 @@ Each is filed or accepted here, so it outlives this spec's freeze.
 - **Manual double send** (`manual-retry-double-send-residual-windows`): the guard is
   time-based. A Retry can still double-send when it reaches the route before the
   `retry_due_at` stamp is written; for the whole wait if the stamp write fails
-  (D7); after an expired promise while the automatic job is running late; from a
+  (D7) or if D3a failed open and scheduled without a stamp; after an expired
+  promise while the automatic job is running late; from a
   stale tab on an original an automatic retry already replaced; and while a retry's
   outcome is pending, unless the path that left it pending honors section 5's
   requirement 3.
@@ -501,3 +566,7 @@ Each is filed or accepted here, so it outlives this spec's freeze.
   double send.
 - **Refused at send time:** a retry refused for a reason D3a cannot preview (the
   breaker, a soft-deleted contact) keeps its promise until it expires.
+- **No usable origin** (accepted, D5): a relay slot without `sentAt`, a rung
+  claimed before this deploy, or an origin that does not parse is not windowed,
+  so that retry's send has no deadline. Production writes `sentAt` on every fanned
+  leg, and pre-deploy rungs finish within minutes of the deploy.

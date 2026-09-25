@@ -1,7 +1,14 @@
 /* Inbox page — header, filter tablist, list, states. All values from tokens.css. */
 .page {
   /* Full-width: the list fills the AppFrame content area (which already pads the
-   * gutters). No max-width cap — this nav page spans the whole window. */
+   * gutters). No max-width cap - this nav page spans the whole window.
+   * overflow-anchor: none on the PAGE ROOT (spec 5.2): it is the scroll
+   * container's only child while the inbox is mounted, so excluding its whole
+   * subtree from anchor selection leaves the scroller no anchor candidate, and
+   * an inserted row or page pushes the sentinel DOWN instead of the browser
+   * raising scrollTop to hold something in place (which would let auto-load
+   * chain). On the <ul> alone the Load more button would become the anchor. */
+  overflow-anchor: none;
 }
 .title {
   margin: 0;
@@ -123,4 +130,26 @@
   margin: 0;
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
+}
+
+/* Spec 5.7: the refresh-failure banner. Quiet, not the error surface. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+.banner .retry {
+  margin-top: 0;
+}
+
+/* Spec 5.2: the auto-load sentinel. One pixel tall so it has a box to observe. */
+.sentinel {
+  height: 1px;
 }

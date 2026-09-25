@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { useEffect } from 'react';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InboxRow as InboxRowData } from '../../api/index.js';
 // THE COPY IS IMPORTED, NEVER RE-TYPED (2026-08-26, phase-6 review). A sentence
@@ -12,6 +13,10 @@ import type { InboxState } from './useInbox.js';
 
 let state: InboxState;
 let seenFilter: string | undefined;
+let seenLimit: number | undefined;
+let seenOperator: string | undefined;
+let seenRestoreScroll: boolean | undefined;
+const noteScrollTop = vi.fn();
 const markRead = vi.fn();
 const markUnread = vi.fn();
 const loadMore = vi.fn();
@@ -35,7 +40,7 @@ function baseState(over: Partial<InboxState> = {}): InboxState {
     autoLoadArmed: false,
     pageEpoch: 0,
     restoredScrollTop: null,
-    noteScrollTop: () => {},
+    noteScrollTop,
     ...over,
   };
 }
@@ -44,13 +49,16 @@ vi.mock('./useInbox.js', async () => {
   const actual = await vi.importActual<typeof import('./useInbox.js')>('./useInbox.js');
   return {
     ...actual,
-    useInbox: (filter: string) => {
+    useInbox: (filter: string, limit: number, operatorId: string, restoreScroll: boolean) => {
       seenFilter = filter;
+      seenLimit = limit;
+      seenOperator = operatorId;
+      seenRestoreScroll = restoreScroll;
       return state;
     },
   };
 });
-import { Inbox } from './Inbox.js';
+import { Inbox, limitFromParam } from './Inbox.js';
 
 function mkRow(over: Partial<InboxRowData> = {}): InboxRowData {
   return {
@@ -77,6 +85,10 @@ function renderInbox(entry = '/inbox'): ReturnType<typeof render> {
 beforeEach(() => {
   state = baseState();
   seenFilter = undefined;
+  seenLimit = undefined;
+  seenOperator = undefined;
+  seenRestoreScroll = undefined;
+  noteScrollTop.mockReset();
   markRead.mockReset();
   loadMore.mockReset();
   retry.mockReset();
@@ -535,5 +547,100 @@ describe('the Unknown tab empty state (contact-side read, 2026-08-25)', () => {
     renderInbox('/inbox?filter=unknown');
     expect(screen.queryByText(emptyCopy('unknown').title)).toBeNull();
     expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+});
+
+describe('Inbox - page size, banner, sentinel, scroll (spec 5.1/5.2/5.7/5.8)', () => {
+  it.each([
+    [null, 100],
+    ['', 100],
+    ['0', 100],
+    ['-5', 100],
+    ['abc', 100],
+    ['1000', 100],
+    ['1.5', 100],
+    ['1', 1],
+    ['12', 12],
+    ['100', 100],
+  ])('limitFromParam(%j) -> %i', (raw, expected) => {
+    expect(limitFromParam(raw)).toBe(expected);
+  });
+
+  it('passes the URL limit (or the default) and the anon operator to the hook', () => {
+    renderInbox('/inbox?limit=12');
+    expect(seenLimit).toBe(12);
+    expect(seenOperator).toBe('anon');
+    cleanup();
+    renderInbox('/inbox');
+    expect(seenLimit).toBe(100);
+  });
+
+  it('renders the refresh banner with a Retry refresh button that calls retry, only while ready', () => {
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, refreshFailed: true });
+    renderInbox();
+    const banner = screen.getByRole('status');
+    expect(banner).toHaveTextContent("Couldn't refresh the inbox.");
+    fireEvent.click(screen.getByRole('button', { name: 'Retry refresh' }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    // The rows are still rendered under the banner.
+    expect(screen.getByRole('link', { name: /Tasha Williams/ })).toBeInTheDocument();
+    cleanup();
+    state = baseState({ status: 'error', refreshFailed: true });
+    renderInbox();
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('renders the sentinel only while hasMore', () => {
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, hasMore: true });
+    const { container } = renderInbox();
+    expect(container.querySelector('[data-autoload-sentinel]')).not.toBeNull();
+    cleanup();
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, hasMore: false });
+    const { container: c2 } = renderInbox();
+    expect(c2.querySelector('[data-autoload-sentinel]')).toBeNull();
+  });
+
+  it('the groups notice link and the tab switch both preserve a tuned limit', () => {
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, groupsTruncated: true, groupRowsShown: 1 });
+    renderInbox('/inbox?limit=12');
+    expect(screen.getByRole('link', { name: 'See all group texts' })).toHaveAttribute('href', '/inbox?limit=12&filter=groups');
+    fireEvent.click(screen.getByRole('tab', { name: 'Unread' }));
+    expect(seenFilter).toBe('unread');
+    expect(seenLimit).toBe(12);
+  });
+
+  it('restores the saved scroll position on a POP arrival and zeroes it on a PUSH arrival', () => {
+    // jsdom has no document.scrollingElement; the page falls back to the root.
+    const scroller = (document.scrollingElement ?? document.documentElement) as HTMLElement;
+    scroller.scrollTop = 999;
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, restoredScrollTop: 500 });
+    // A MemoryRouter's initial entry is a POP navigation.
+    renderInbox('/inbox');
+    expect(seenRestoreScroll).toBe(true);
+    expect(scroller.scrollTop).toBe(500);
+    expect(noteScrollTop).toHaveBeenCalledWith(500);
+    cleanup();
+    noteScrollTop.mockReset();
+    scroller.scrollTop = 999;
+    function PushToInbox(): React.JSX.Element {
+      const navigate = useNavigate();
+      useEffect(() => {
+        navigate('/inbox');
+      }, [navigate]);
+      return <div />;
+    }
+    render(
+      <MemoryRouter initialEntries={['/elsewhere']}>
+        <Routes>
+          <Route path="/elsewhere" element={<PushToInbox />} />
+          <Route path="/inbox" element={<Inbox />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('heading', { name: 'Inbox' })).toBeInTheDocument();
+    expect(seenRestoreScroll).toBe(false);
+    expect(scroller.scrollTop).toBe(0);
+    expect(noteScrollTop).toHaveBeenCalledWith(0);
   });
 });

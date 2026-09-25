@@ -364,6 +364,14 @@ two chains for one recipient converge on one outcome:**
   to `done` and write the slot forward-only; a duplicate finds `done` and
   writes nothing.
 
+Every condition above is evaluated by DynamoDB against the base-table item,
+atomically with the write; no index is involved. Every READ that a decision
+in this design rests on - the close gate (D8), the continuation snapshot
+(D16), finalize (D16a), the SID-pointer checks (D13) - is a strongly
+consistent primary-key read on the base table. No coordination read may go
+through a GSI: a GSI is eventually consistent and cannot be read
+consistently, so a decision made from one can act on a stale image.
+
 Because nothing in the chain depends on being the single winner, a throw
 inside the job is a genuine retry: five failures reach the DLQ and page
 through the existing `jobs-dlq-depth` alarm. (Other jobs - media mirror, voice

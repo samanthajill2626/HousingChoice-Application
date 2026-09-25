@@ -208,12 +208,19 @@ rows keep `manual`. A re-run never changes an existing conversation's switch
   BEFORE any send (no contact or phone, a ladder close) has no text and no
   retry, but telling the two apart is Branch B's attempts rule; until then every
   failed recipient stays flagged, and staff can tick them by hand.
-- Everything else about the review list is unchanged, with one fix: the flag is
-  a review-time hint, never a send-time block; tenants the filter proposed start
-  unchecked when flagged; a seeded row (the one-to-one tenant, or a hand-picked
-  tenant) starts checked; and "Select all" skips flagged rows EXCEPT seeded
-  ones, which it leaves checked - today it unchecks them too, which on a
-  one-to-one share unchecks the only row and blocks Send.
+- The flag stays a review-time hint, never a send-time block, and tenants the
+  filter proposed start unchecked when flagged. Seeded rows change in two
+  places: a hand-picked tenant is a seed from the moment staff add them in the
+  review step, so a flagged one starts CHECKED (today it starts unchecked and
+  flips to checked only after a re-preview) exactly like the one-to-one tenant;
+  and "Select all" skips flagged rows EXCEPT seeded ones, which it leaves
+  checked (today it unchecks them too, which on a one-to-one share unchecks
+  the only row and blocks Send). The review list's note beneath the toolbar
+  says the new rule: flagged tenants you picked stay checked; "Select all"
+  skips the others.
+- One rule, one reader: the skipped-slot exclusion lives where the "already
+  sent" set is built, so the per-candidate flag and the hand-add annotation
+  (both fed by that one set) agree.
 - Because the rule reads stored outcomes, it corrects history the moment it
   ships (the tenant Sam named has four skipped shares and is flagged today).
 
@@ -392,8 +399,10 @@ run D1 and D2 against dev and prod, and the import-window rule from section 6.
   pre-existing), so the breaker could only matter for more than ten shares to one
   tenant within a minute; the per-user share rate limit still applies.
 - Interim D5: a tenant whose text failed stays "Already sent" for that property
-  until Branch B, even if they never received it. Safe direction; staff can tick
-  them by hand.
+  until Branch B, even if they never received it - including the three
+  app-internal failures where no text was ever attempted (`no_contact`,
+  `transient_cap`, `enqueue_failed`). Safe direction; staff can tick them by
+  hand; Branch B's attempts rule tells them apart.
 
 ## 9. For Cameron at the spec gate
 

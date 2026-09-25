@@ -33,9 +33,9 @@ copy follows RSW's rule (a promise only while `retry_due_at` is live).
   per-recipient record is bounded (newest attempt plus a delivered flag). Open
   from the split: how `failed` + `send_unconfirmed` (SOR) counts per surface -
   flag as already sent (safe), do not count in the ledger.
-- **D5(a).** The review list follows the rule; a hand-picked tenant is a seed
-  from the moment they are added and stays pre-checked with the tag (Branch A
-  already keeps seeded rows checked through "Select all").
+- **D5(a).** The review list follows the rule. (Branch A already owns the
+  seeded-row behavior: a hand-picked tenant is a seed from the moment they are
+  added, and "Select all" keeps seeded rows checked.)
 - **D5(c).** The property activity entry ("Sent to N tenants") counts only
   counted recipients, derived at render time (one share read per entry, bounded
   by shares per property; the landlord timeline inherits the bound).

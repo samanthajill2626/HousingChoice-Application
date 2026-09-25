@@ -18,9 +18,11 @@ Manual. It says nothing about stopping system texts.
 
 The build went further. The one-to-one send wrapper refuses EVERY send marked
 automated when the conversation is `manual`, so the switch silently stops: tour
-reminders (one-to-one route), placement nudges, the missed-call auto-text, the
-public sign-up welcome, the 30003 automatic retry, and (until the share-skip-fix
-branch) staff-created property sends. There is no UI or API for the switch; after
+reminders (one-to-one route), the missed-call auto-text, the public sign-up
+welcome, the 30003 automatic retry, and (until the share-skip-fix branch)
+staff-created property sends. Placement nudges are NOT among them: every nudge
+kind is held for manual sending and "Send now" is a person's send, so the
+switch never stops one (corrected 2026-09-25 with the share-skip-fix spec). There is no UI or API for the switch; after
 creation only the breaker writes it.
 
 The Quo import created every conversation `manual`, so for weeks every imported

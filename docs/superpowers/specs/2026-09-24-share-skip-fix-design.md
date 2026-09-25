@@ -131,8 +131,12 @@ Reports, counts only, no names, phones or message bodies:
 - All conversation rows by type and switch state (claim/pointer items excluded;
   rows with no type reported as their own group).
 - Switched-off conversations by cause: imported (import stamp), breaker trip (a
-  `mode_changed` audit event with reason `breaker_trip`), group thread
-  (relay_group/group_text, off by design), other.
+  `mode_changed` audit event with reason `breaker_trip` - or, as built, the
+  breaker's own send counter on a `manual` row, since the breaker is the only
+  runtime writer of `manual` on a row that has counted an automated send, so
+  the counter is trip evidence even when the trip's audit append was lost; the
+  census labels which evidence it found), group thread (relay_group/group_text,
+  off by design), other.
 - Breaker-tripped conversations listed individually (conversation id, type, trip
   time) for Cameron's review.
 - Not-yet-sent tour-reminder rungs that would take the one-to-one route (the
@@ -150,8 +154,11 @@ Reports, counts only, no names, phones or message bodies:
 - Population: conversation rows whose switch is `manual` and whose type is
   neither relay_group nor group_text - the codebase's own definition of
   one-to-one, which includes legacy rows with no type. Never a group thread.
-- Bulk mode excludes conversations with a breaker trip on record unless an
-  explicit flag includes them; Cameron reviews the D1 list first.
+- Bulk mode excludes conversations with a breaker trip on record (either
+  evidence D1 accepts: the audit event or the send counter) unless an explicit
+  flag includes them; Cameron reviews the D1 list first. Work Package 2's
+  visible switch will be a second writer of `manual` and must revisit the
+  send-counter rule.
 - Single-conversation mode switches one named conversation on (the breaker resume
   path); it refuses a group thread or an unknown id.
 - Every write is conditional on the row still being a one-to-one conversation with

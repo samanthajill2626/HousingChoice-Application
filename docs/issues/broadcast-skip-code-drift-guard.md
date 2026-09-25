@@ -34,3 +34,15 @@ the build (the pattern `BroadcastStats` already uses across the two workspaces).
 **Timing.** Do this AFTER `feat/send-outcome-reconcile` and `feat/retry-send-window`
 land: both ADD codes to these exact sites (SOR's `send_unconfirmed`, RSW's retry
 codes), so introducing the union earlier would collide with their merges.
+
+**Addendum (planner adversarial review, 2026-09-25, finding 5).** The drift has
+a second face: `isOptedOutCode(undefined)` is true by design, because a skipped
+slot written BEFORE 2026-09-25 carries no reason and was an opt-out or an
+unreachable number. A NEW skip path that forgets its `errorCode` therefore does
+not surface as `Not sent (<code>)`; it is silently counted under
+`skipped_opted_out` and rendered "Opted out or number unreachable" - a
+TCPA-flavored statement about a tenant who never opted out. Slots carry no
+timestamp, so the rule cannot tell a legacy slot from a forgotten code. When
+this guard is built, either backfill the legacy slots to an explicit legacy code
+(so `undefined` can become an error bucket) or add a test that every
+`status: 'skipped'` write in `app/src/jobs/broadcastFanOut.ts` carries a code.

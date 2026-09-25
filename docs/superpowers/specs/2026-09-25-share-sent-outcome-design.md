@@ -38,7 +38,13 @@ copy follows RSW's rule (a promise only while `retry_due_at` is live).
   added, and "Select all" keeps seeded rows checked.)
 - **D5(c).** The property activity entry ("Sent to N tenants") counts only
   counted recipients, derived at render time (one share read per entry, bounded
-  by shares per property; the landlord timeline inherits the bound).
+  by shares per property; the landlord timeline inherits the bound). It must
+  also RELABEL, not merely recount: Branch A's D6 gives "Not sent" only to the
+  results header and the list row, so today the property Activity card
+  (`dashboard/src/routes/listing/listingFormat.ts`) and the landlord timeline
+  (`app/src/routes/contactTimeline.ts`) still read "Sent to N tenants" for a
+  share that texted nobody, and a count-only fix would read "Sent to 0
+  tenants" (planner conformance review, 2026-09-25, finding 3).
 - **D5(d).** The results row shows the outcome that decides the count; 30003
   wording per RSW.
 - **D5(e).** Share labels derive from recipients: Draft / Sending / Sent / Not

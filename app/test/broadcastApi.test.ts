@@ -161,6 +161,13 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(stored.flyer_url).toBe(`${PUBLIC_BASE_URL}/p/unit-1?cta=text`);
   });
 
+  it('share-skip-fix D4: a draft created through the dashboard route records created_via dashboard', async () => {
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    expect(world.broadcasts.get(id)?.created_via).toBe('dashboard');
+  });
+
   it('rejects a non-tenant contact_type (never relay-group rosters)', async () => {
     const { app } = makeWebhookHarness({ world });
     const res = await request(app)

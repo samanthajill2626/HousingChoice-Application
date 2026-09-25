@@ -342,6 +342,95 @@ describe('broadcast.send (M1.8a)', () => {
     expect(done!['skipped_other']).toBe(1);
   });
 
+  it('share-skip-fix D4: a DASHBOARD share reaches a switched-off (manual) conversation - sent as a person, never breaker-metered', async () => {
+    const off = seedTenant(world, { contactId: 'c-off', firstName: 'Off', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [off], { created_via: 'dashboard' });
+    const offConv = await world.conversationsRepo.createOrGetByParticipantPhone(off.phone!, 'tenant_1to1');
+    await world.conversationsRepo.setMode(offConv.conversationId, 'manual');
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to)).toEqual([off.phone]);
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.recipients['c-off']?.status).toBe('sent');
+    // The wrapper audited it as a person's send (the harness records the real
+    // DynamoDB item shape: event_type, payload - twilioWebhookHarness.ts:226-236).
+    const sentEvents = world.auditEvents.filter(
+      (e) => e.entityKey === `conversations#${offConv.conversationId}` && e.event_type === 'message_sent',
+    );
+    expect(sentEvents).toHaveLength(1);
+    expect(sentEvents[0]!.payload).toMatchObject({ automated: false });
+  });
+
+  it('share-skip-fix I1: a DASHBOARD share still refuses an opted-out, a no-consent and a soft-deleted recipient (deleted judged AFTER opt-out)', async () => {
+    const stopped = seedTenant(world, { contactId: 'c-stop', sms_opt_out: true, phone: '+15550100001' });
+    const noConsent = seedTenant(world, { contactId: 'c-nc', phone: '+15550100002', consent_method: undefined });
+    const deleted = seedTenant(world, { contactId: 'c-del', phone: '+15550100003', deleted_at: '2026-09-01T00:00:00.000Z' });
+    const both = seedTenant(world, { contactId: 'c-both', phone: '+15550100004', sms_opt_out: true, deleted_at: '2026-09-01T00:00:00.000Z' });
+    seedUnit(world);
+    seedBroadcast(world, [stopped, noConsent, deleted, both], { created_via: 'dashboard' });
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.recipients['c-stop']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+    expect(bcast.recipients['c-nc']).toEqual({ status: 'skipped', errorCode: 'no_consent' });
+    expect(bcast.recipients['c-del']).toEqual({ status: 'skipped', errorCode: 'contact_deleted' });
+    expect(bcast.recipients['c-both']).toEqual({ status: 'skipped', errorCode: 'opted_out' }); // opt-out wins
+    expect(bcast.stats).toMatchObject({ skipped_opted_out: 2, skipped_no_consent: 1, skipped_other: 1 });
+  });
+
+  it('share-skip-fix I8: consent is judged on the FENCED recipient, not on a duplicate no-consent contact that shares the phone', async () => {
+    // The fake findByPhone returns the FIRST contact on the phone in insertion
+    // order: push the duplicate (no consent) first, the real recipient second.
+    seedTenant(world, { contactId: 'c-dup', phone: '+15550100001', consent_method: undefined });
+    const real = seedTenant(world, { contactId: 'c-real', firstName: 'Real', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [real], { created_via: 'dashboard' });
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to)).toEqual([real.phone]);
+    expect(world.broadcasts.get('bcast-1')!.recipients['c-real']?.status).toBe('sent');
+  });
+
+  it('share-skip-fix I8: a phone#-keyed recipient of a DASHBOARD share still sends', async () => {
+    const byPhone = seedTenant(world, { contactId: 'c-by-phone', firstName: 'Ph', phone: '+15550100009' });
+    seedUnit(world);
+    const item = seedBroadcast(world, [], { created_via: 'dashboard' });
+    item.recipients[`phone#${byPhone.phone}`] = { status: 'queued' };
+    item.stats.audience = 1;
+    item.stats.queued = 1;
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to)).toEqual([byPhone.phone]);
+    expect(world.broadcasts.get('bcast-1')!.recipients[`phone#${byPhone.phone}`]?.status).toBe('sent');
+  });
+
+  it('share-skip-fix I2: a share with NO created_via is automated and a manual conversation still refuses it', async () => {
+    const off = seedTenant(world, { contactId: 'c-off', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [off]);
+    const offConv = await world.conversationsRepo.createOrGetByParticipantPhone(off.phone!, 'tenant_1to1');
+    await world.conversationsRepo.setMode(offConv.conversationId, 'manual');
+    wireHandler(world, logger);
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+    expect(world.sent).toHaveLength(0);
+    expect(world.broadcasts.get('bcast-1')!.recipients['c-off']).toEqual({ status: 'skipped', errorCode: 'manual_mode' });
+  });
+
   it('A2P/CTIA (spec §4): skips a NO-CONSENT recipient (skipped_no_consent++), NO token, NO send', async () => {
     const ok = seedTenant(world, { contactId: 'c-ok', firstName: 'Ok', phone: '+15550100001' });
     // Override the default consent so this recipient has NONE.

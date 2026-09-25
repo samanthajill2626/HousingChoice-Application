@@ -8,13 +8,19 @@
 //     (sent/delivered/failed/skipped) — the per-recipient idempotency layer;
 //   - re-check the contact's opt-out/unreachable flags -> SKIP with its reason
 //     recorded (opted_out bumps skipped_opted_out, unreachable bumps
-//     skipped_other; NO token spent, NO send) - the TCPA second fence;
+//     skipped_other; NO token spent, NO send) - the TCPA second fence; then a
+//     soft-deleted contact -> SKIP contact_deleted (skipped_other);
 //   - render the body for this recipient (merge fields) and sendMessage into
 //     the tenant's 1:1 conversation, STAMPED with broadcast_id so the delivery
-//     callback can roll delivered/failed into the broadcast stats;
-//   - on a RESOLVED send (message reached the adapter) acquire ONE A2P token —
-//     a SendRefusedError (conversation-level opt-out/breaker/manual) throws
-//     before the adapter, so a refused/skipped recipient spends NO token;
+//     callback can roll delivered/failed into the broadcast stats. A share the
+//     dashboard created (created_via 'dashboard') is a PERSON'S send (automated
+//     false: the switch and the breaker do not apply); any other share is
+//     automated. The fenced contact rides along as `recipient`, so the
+//     wrapper's deleted + consent gates judge THAT contact (share-skip-fix I8);
+//   - on a RESOLVED send (message reached the adapter) acquire ONE A2P token -
+//     a SendRefusedError (opt-out/deleted/consent; manual/breaker on an
+//     AUTOMATED share only) throws before the adapter, so a refused/skipped
+//     recipient spends NO token;
 //   - record the recipient slot + bump `sent`.
 //
 // Idempotency (SQS at-least-once + our own continuation re-enqueues):
@@ -23,9 +29,10 @@
 //     continuation job never double-sends.
 //
 // Error handling per recipient (mirrors relay):
-//   - SendRefusedError (opt-out/breaker/manual) -> recipient 'skipped' with its
-//     code; bump the bucket its code selects: consent, opt-out, or other
-//     (share-skip-fix D7); continue (a by-design refusal, not a failure);
+//   - SendRefusedError (opt-out/deleted/consent; manual/breaker on an automated
+//     share only) -> recipient 'skipped' with its code; bump the bucket its code
+//     selects: consent, opt-out, or other (share-skip-fix D7); continue (a
+//     by-design refusal, not a failure);
 //   - 429 / 30022 (transient) → leave the slot 'queued' + add to the
 //     continuation's remaining list (capped at MAX_BROADCAST_ATTEMPTS);
 //   - 30007 (carrier filtering) → recipient 'failed', NEVER retried;
@@ -52,6 +59,7 @@ import {
 } from '../repos/broadcastsRepo.js';
 import {
   createContactsRepo,
+  isDeleted,
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
@@ -405,6 +413,23 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         continue;
       }
 
+      // share-skip-fix I8: a soft-deleted recipient is unreachable through this
+      // path (the deleted-contact rule). Judged on the RESOLVED contact, before
+      // any send, with its own reason - never left to the wrapper's phone lookup.
+      // Sits after the opt-out fence (opt-out wins, as in sendMessage) and before
+      // the consent fence.
+      if (isDeleted(contact)) {
+        await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: 'contact_deleted' });
+        emitBroadcastProgress(
+          events,
+          payload.broadcastId,
+          await broadcasts.bumpStats(payload.broadcastId, { skipped_other: 1, queued: -1 }),
+        );
+        skippedCount += 1;
+        log.info({ broadcastId: payload.broadcastId, contactKey }, 'broadcastFanOut: recipient contact is soft-deleted - skipped');
+        continue;
+      }
+
       // A2P/CTIA consent fence (spec §4): a broadcast can't pop a JIT modal
       // mid-fan-out, so a no-consent recipient is EXCLUDED here (no token, no
       // send) and counted separately (skipped_no_consent) so the results view
@@ -427,14 +452,23 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       const body = renderBody(broadcast.body_template, unitContext, firstNameOf(contact));
 
       try {
-        // sendMessage runs FIRST — it may throw SendRefusedError (conversation-
-        // level opt-out / breaker / manual) BEFORE any adapter send, and a
-        // refusal must spend NO token (the throw skips everything below).
+        // sendMessage runs FIRST - it may throw SendRefusedError (opt-out /
+        // deleted / consent, or manual / breaker on an automated share) BEFORE
+        // any adapter send, and a refusal must spend NO token (the throw skips
+        // everything below).
+        // share-skip-fix D4: a share the dashboard created is a PERSON'S send -
+        // the switch and the breaker do not apply; kill switch, opt-out,
+        // deleted and consent still do (the wrapper's gates). Anything else
+        // (a pre-2026-09-25 draft, a future engine) stays automated.
+        const staffShare = broadcast.created_via === 'dashboard';
         const outcome = await sendMessage({
           conversationId: conversation.conversationId,
           body,
           author: 'teammate',
-          automated: true,
+          automated: !staffShare,
+          // I8: the fenced recipient, so a duplicate contact on the same phone
+          // cannot make the wrapper refuse (or admit) the wrong person.
+          recipient: contact,
           broadcastId: payload.broadcastId,
         });
         // Persist the recipient slot (conversationId+tsMsgId, status 'sent') +
@@ -505,9 +539,10 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         }
       } catch (err) {
         if (err instanceof SendRefusedError) {
-          // Opt-out / breaker / manual — a by-design refusal for THIS recipient.
-          // Treat as a skip (no token "wasted" on a real send; the recipient is
-          // simply not reachable for this automated broadcast).
+          // A by-design refusal for THIS recipient: opt-out / deleted / consent,
+          // or manual / breaker on an AUTOMATED share (a dashboard share is a
+          // person's send and never meets those two). Treat as a skip (no token
+          // "wasted" on a real send), filed in the bucket its code selects.
           await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: err.code });
           const bucket: keyof BroadcastStats = isNoConsentCode(err.code)
             ? 'skipped_no_consent'

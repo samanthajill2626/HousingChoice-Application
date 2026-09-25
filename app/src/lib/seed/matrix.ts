@@ -1234,6 +1234,9 @@ function buildBroadcasts(): Record<string, unknown>[] {
       broadcastId: 'broadcast-mx-draft-01',
       status: 'draft',
       created_by: 'user-0002',
+      // share-skip-fix D4: a staff-created draft - sent from the dashboard it
+      // is a person's send (reaches a switched-off conversation like any other).
+      created_via: 'dashboard',
       created_at: D.T5,
       _listPartition: 'broadcasts', // byCreated GSI membership
       unitId: 'unit-mx-tourable-02',

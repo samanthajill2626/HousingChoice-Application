@@ -2897,6 +2897,7 @@ export function createFakeWorld(): FakeWorld {
         ...(input.seedContactIds !== undefined &&
           input.seedContactIds.length > 0 && { seed_contact_ids: input.seedContactIds }),
         ...(input.audienceMode !== undefined && { audience_mode: input.audienceMode }),
+        ...(input.createdVia !== undefined && { created_via: input.createdVia }),
       };
       broadcasts.set(item.broadcastId, item);
       return { ...item };

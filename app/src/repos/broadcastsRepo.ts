@@ -151,6 +151,8 @@ export interface BroadcastItem {
   broadcastId: string;
   /** The acting user's userId (audit/attribution; no longer an index key). */
   created_by: string;
+  /** share-skip-fix D4: the creation path; `'dashboard'` = a person's share. See CreateBroadcastInput.createdVia. */
+  created_via?: 'dashboard';
   /** byCreated GSI range (ISO 8601). */
   created_at: string;
   /**
@@ -320,6 +322,13 @@ export interface CreateBroadcastInput {
   estimatedAudience?: number;
   seedContactIds?: string[];
   audienceMode?: BroadcastAudienceMode;
+  /**
+   * share-skip-fix D4: `'dashboard'` when the authenticated dashboard draft
+   * route created this share. The send job sends such a share as a PERSON'S
+   * send (no switch, no breaker). Absent = automated (a draft created before
+   * 2026-09-25, or by any other path, including a future engine).
+   */
+  createdVia?: 'dashboard';
 }
 
 export interface BroadcastsRepo {
@@ -524,6 +533,7 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
         ...(input.seedContactIds !== undefined &&
           input.seedContactIds.length > 0 && { seed_contact_ids: input.seedContactIds }),
         ...(input.audienceMode !== undefined && { audience_mode: input.audienceMode }),
+        ...(input.createdVia !== undefined && { created_via: input.createdVia }),
       };
       await doc.send(
         new PutCommand({

@@ -593,10 +593,15 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
               // attempted for that tenant, so it must not flag them "Already sent"
               // (Sam's #5: the skipped tenant then started unchecked on the next
               // share). queued / sent / delivered still count; FAILED still counts
-              // on purpose - a failed text may have been delivered by a retry this
-              // share never hears about (Branch B replaces this with the attempts
-              // rule). This is the ONE place the rule lives: the route's
-              // per-candidate flag and the hand-add annotation both read this set.
+              // on purpose, as an INTERIM over-approximation: a 30003 failure may
+              // have been delivered by the automatic retry this share never hears
+              // about (30003 is the only retried code; no_contact, transient_cap,
+              // enqueue_failed and the carrier rejections were never delivered and
+              // count anyway - spec section 8 records the tradeoff, and Branch B's
+              // attempts rule replaces it). This is the ONE runtime place the rule
+              // lives - the route's per-candidate flag and the hand-add annotation
+              // both read this set - and app/test/helpers/twilioWebhookHarness.ts
+              // mirrors it for the in-memory world, so the two change together.
               if (slot.status === 'skipped') continue;
               prior.add(key);
             }

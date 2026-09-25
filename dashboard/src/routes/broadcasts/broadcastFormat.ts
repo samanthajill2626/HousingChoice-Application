@@ -97,10 +97,17 @@ export function presentShareLabel(
   stats?: BroadcastStats,
 ): { label: string; tone: BroadcastStatusTone } {
   if (status === 'sent' && stats !== undefined && stats.audience > 0) {
-    const skipped = stats.skipped_opted_out + stats.skipped_no_consent + (stats.skipped_other ?? 0);
-    if (skipped >= stats.audience) return { label: 'Not sent', tone: 'neutral' };
+    if (skippedTotal(stats) >= stats.audience) return { label: 'Not sent', tone: 'neutral' };
   }
   return { label: BROADCAST_STATUS_LABELS[status], tone: BROADCAST_STATUS_TONE[status] };
+}
+
+/** Every skipped recipient across the three skip buckets - the ONE dashboard
+ *  definition of "skipped", shared by the Skipped chip and the "Not sent" label
+ *  so a fourth bucket changes both at once. `skipped_other` is optional (stats
+ *  persisted before 2026-09-25 lack it). */
+export function skippedTotal(stats: BroadcastStats): number {
+  return stats.skipped_opted_out + stats.skipped_no_consent + (stats.skipped_other ?? 0);
 }
 
 /** The recipient-status -> comms DeliveryPresentation map. `skipped` has no comms

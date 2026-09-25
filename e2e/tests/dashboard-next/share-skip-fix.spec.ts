@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { listThreads, setDeliveryOutcome } from '../../fixtures/fakeTwilio.js';
+import { reseed } from '../../fixtures/reseed.js';
 import { expectTodayReady } from '../../support/today.js';
 
 // share-skip-fix (Sam's improvements #4 and #5), end to end on the hermetic lane:
@@ -28,6 +29,15 @@ const DARIO = {
   firstName: 'Dario',
 };
 const NOTE = 'Flagged tenants you picked stay checked; "Select all" skips the others.';
+
+// Restore the lean baseline for the specs that run after this file: test 1
+// texts INTO conv-0002, which bumps its last_activity_at to now and makes
+// Dario's thread the newest inbox row - the ordering the lean seed promises
+// never happens (lean.ts, adjudication A29). Same pattern as
+// deleted-contact-resurfacing.spec.ts.
+test.afterAll(async ({ request }) => {
+  await reseed(request);
+});
 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);

@@ -328,6 +328,12 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
         {
           conversationId,
           contactId: contact?.contactId,
+          // Which record carried the flag: the phone-matched contact and the
+          // caller's recipient can differ (duplicate contacts on one phone).
+          phoneContactId: phoneContact?.contactId,
+          phoneContactOptOut: phoneContact?.sms_opt_out === true,
+          recipientContactId: recipient?.contactId,
+          recipientOptOut: recipient?.sms_opt_out === true,
           conversationOptOut: conversation.sms_opt_out === true,
         },
         'send refused: sms_opt_out is set (conversation and/or contact)',

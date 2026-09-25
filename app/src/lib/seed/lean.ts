@@ -266,8 +266,10 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       created_at: T0,
     },
     // share-skip-fix: Dario's one-to-one thread, SWITCHED OFF. `imported_from`
-    // marks it the way the import does, so the census counts it under
-    // "imported" and the fix script's dry run plans it; the send job reaches
+    // marks the row as imported - any string counts for the census's "imported"
+    // cause and the fix script's dry run plans it (the value is the seed's
+    // short stamp, like the connecting relay group above; the real importer
+    // writes IMPORT_SOURCE from lib/import/apply.ts); the send job reaches
     // him regardless because a dashboard share is a person's send. Automated
     // sends to this thread are refused - see the contact's comment.
     {

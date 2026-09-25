@@ -4,10 +4,9 @@
 // unit; [TenantName] is the one per-recipient token, which a blast keeps as a
 // token (the backend renders it per recipient at send time). The ONE-recipient
 // editor (share-skip-fix D8) pre-fills ONE_TO_ONE_SEND_TEMPLATE, which carries
-// no [TenantName], through resolveTemplateForUnit. resolveTemplateForTenant
-// (the [TenantName] resolver, fallback "there" - never a phone/id) stays
-// exported and tested, but no composer path calls it any more. Unresolvable
-// tokens (or no unit) render as ''.
+// no [TenantName], through resolveTemplateForUnit - so the dashboard never
+// resolves [TenantName] itself any more (the former resolveTemplateForTenant
+// was removed as dead code). Unresolvable tokens (or no unit) render as ''.
 //
 // Parity notes (keep in lockstep with mergeFields.ts):
 //   [Beds]    - String(beds), finite numbers only.
@@ -38,9 +37,6 @@ export const DEFAULT_SEND_TEMPLATE =
  *  (no per-recipient token here). Dashboard copy, not catalog copy: the
  *  operator sees and edits it before anything sends. */
 export const ONE_TO_ONE_SEND_TEMPLATE = '[Address] [FlyerLink]';
-
-/** Neutral [TenantName] fallback when no first name is known - NEVER a phone. */
-const NEUTRAL_TENANT_NAME = 'there';
 
 /** One-line address, ported verbatim from the backend's formatAddress
  *  (app/src/lib/address.ts) so [Address] previews exactly what will send:
@@ -95,23 +91,4 @@ export function resolveTemplateForUnit(
     .replace(tokenRegex('[Address]'), unit !== null ? serverFormatAddress(unit.address) : '')
     .replace(tokenRegex('[Rent]'), unit !== null ? rentText(unit) : '')
     .replace(tokenRegex('[FlyerLink]'), flyerLink ?? '');
-}
-
-/** Client-side mirror of the backend's renderBody (mergeFields.ts): the unit
- *  resolution above PLUS [TenantName]. Resolved (single-recipient) mode used
- *  it until share-skip-fix D8 moved that mode to ONE_TO_ONE_SEND_TEMPLATE; it
- *  is now exercised by its tests only. firstName undefined/blank -> the
- *  neutral fallback; a null unit (or missing field) drops the token to ''. */
-export function resolveTemplateForTenant(
-  template: string,
-  unit: UnitItem | null,
-  firstName: string | undefined,
-  flyerLink: string | undefined,
-): string {
-  const name =
-    firstName !== undefined && firstName.trim().length > 0 ? firstName.trim() : NEUTRAL_TENANT_NAME;
-  return resolveTemplateForUnit(template, unit, flyerLink).replace(
-    tokenRegex('[TenantName]'),
-    name,
-  );
 }

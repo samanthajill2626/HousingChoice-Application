@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8.2 - precision edits from plan review rounds 1-2 (auto-load report consumption, restoreScroll seed, perf classifier page size, e2e row naming, in-app way back pending ruling); approved for planning per Cameron's gate ruling of 2026-09-25
+Status: DRAFT 8.3 - precision edits from plan review rounds 1-3; reviews closed; in-app way back (5.8) pending Cameron's ruling at the launch gate
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -246,7 +246,10 @@ as today's 30-row page. That server slice is separable (section 5.10).
   wire-shape change. No change to the relay or group merge, the unread branch,
   the unknown branch, cursors, or limits.
 - `e2e/tests/dashboard-next/`: a new `inbox-rows-timestamps.spec.ts`; existing
-  inbox specs are re-run unchanged and must stay green.
+  inbox specs are re-run unchanged and must stay green, with ONE exception
+  owned by the in-app way back (5.8): `inbox-mark-unread-header.spec.ts`'s
+  post-mark-unread URL assertion moves from a bare `/inbox` to the Groups
+  filter entry it came from.
 - `e2e/performance/collect.ts` and `collect.test.ts`: the inbox request
   classifier's page size moves from 30 to 100 (5.11); the hermetic
   `npm run perf:pages` self-QA is a mission gate. `app/src/lib/inboxDiagnostics.ts`
@@ -352,6 +355,13 @@ a mark-read/unread commit, the reset, or a failure); `Inbox.tsx` owns the DOM
   - never fires otherwise. A change of `enabled` alone (for example
     `loadingMore` flipping back to false after a FAILED page, which moves no
     epoch) neither re-observes nor fires.
+  - before it re-observes, the hook discards any report it has recorded but
+    not yet consumed (React may batch a crossing into the same render as the
+    enabling commit). Residual, stated rather than hidden: a real observer
+    entry queued before the `unobserve` and delivered after the following
+    `observe` would arrive as a fresh report of old geometry; whether
+    Chromium can deliver one is UNVERIFIED, and the cost would be one extra
+    page in a rare timing, bounded and self-correcting.
   - `intersecting` is reset to `false` whenever the sentinel unmounts
     (`hasMore` went false), from the effect that owns the observer; when the
     sentinel returns, the new observer's first callback sets it again.
@@ -743,8 +753,16 @@ snapshot: {
   goes BACK in history (a POP, so the restore above applies); without it (a
   deep link, the badge into a thread, a quick-reply link) it pushes `/inbox`
   as today. The `<Link to="/inbox">` elements keep their href for semantics
-  and intercept the click. Nothing else changes for the sidebar link or the
-  badge.
+  and intercept a plain left click only (modified clicks keep the link's own
+  new-tab behavior). THE SIDEBAR'S INBOX LINK follows the same rule, because
+  contact and unknown rows - the main path - open a contact page that has no
+  back arrow of its own, so on the installed phone app the sidebar link can
+  be the only way back from a contact: with the `fromInbox` state on the
+  current page it goes back; from any other page (a badge click, a fresh
+  visit) it is the forward navigation to the top that 5.8 describes. One
+  existing Playwright assertion changes with this: the mark-unread header
+  spec now returns to `/inbox?filter=groups`, the entry it came from, rather
+  than a bare `/inbox` (the 4.1 exception).
 - A return to `/inbox` with a DIFFERENT filter or limit than the one saved
   starts as a fresh load for that key; the other key's snapshot is kept for its
   own return.

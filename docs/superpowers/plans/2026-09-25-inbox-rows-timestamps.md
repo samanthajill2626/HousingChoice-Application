@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v3 - revised after adversarial plan review round 2; round 3 pending; Task 7b awaits Cameron's ruling at the launch gate
+Status: v4 - revised after adversarial plan review round 3 (precision outside Task 7b); review closed; Task 7b awaits Cameron's ruling at the launch gate
 Date: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
 Worktree: `W:\tmp\inbox-rows-timestamps`
@@ -2061,11 +2061,13 @@ HOOK IS CURRENTLY SHOWING" through "A GENERATION COUNTER CANNOT DO THIS JOB";
 SPINNER" block in `fetchHead`, with its worked example AMENDED: its sentence
 "Reachable without any filter change: mark read, a background reconcile
 fails, the operator hits Retry, and the POST commits while Retry's page is
-on the wire" no longer holds (a background failure with rows keeps the rows
-and Retry with rows never sets `loading`, spec 5.7); replace that example
-with "Reachable on a filter change: mark read, switch tabs (the filter
-effect sets loading and fetches), and the POST commits while that page is
-on the wire"; (4) the "HONEST STATUS: no test can currently fail by deleting
+on the wire" no longer holds as stated (a background failure with rows keeps
+the rows and Retry with rows never sets `loading`, spec 5.7); replace that
+example with "Reachable without any filter change: mark read, a complete
+head read that returns no rows empties the list, a head read then fails with
+nothing rendered (the error arm), the operator hits Retry (which sets
+loading with no rows), and the POST commits while Retry's page is on the
+wire"; (4) the "HONEST STATUS: no test can currently fail by deleting
 this line" block on the filter refusal; (5) `loadMore`'s C2 block ("Same
 abort + generation pattern") with its first sentence AMENDED from "The filter
 and cursor are captured at callback creation" to "The filter is captured at
@@ -2088,13 +2090,78 @@ a spinner` (around line 781). It expects a failed BACKGROUND head read with
 rows on screen to reach `status: 'error'` and then drives Retry from there.
 Under spec 5.7 that read keeps the rows and raises the banner, and a Retry
 with rows rendered never enters `loading`, so the scenario it describes no
-longer exists. DELETE that test (its whole `it(...)` block and the comment
-paragraph directly above it that begins "The structural point"). Do not
-rewrite it onto the filter path: a filter change means the mark-read never
-bumps `genRef` for the new filter, so such a test would not reach the guard
-and would duplicate the existing filter-epoch test at about line 717, which
-still pins the spinner guard. The new-rule behavior (rows kept, banner
-raised, Retry without a spinner) is pinned by the tests added in Step 3.
+longer exists as written. REWRITE it on the SAME-FILTER path that still
+reaches the spinner guard under the new rule: a mark-read whose POST hangs,
+a complete head read that returns ZERO rows (the list empties), then a head
+read that FAILS with no rows rendered (today's `error` arm still applies),
+then Retry (no rows, so it sets `loading`), then the POST commits while
+Retry's page is on the wire. The guard must install that page. Replace the
+whole `it(...)` block AND the comment paragraphs above it (from "The
+structural point" up to the `it(`, including the earlier paragraph at about
+lines 771-774 that introduces the scenario) with:
+
+```tsx
+  // THE GENERATION GUARD PROTECTS A LIST, NOT A SPINNER (see fetchHead). A
+  // mutation committing under a head read that set `loading` must not strand
+  // the tab: nothing re-issues a discarded page there. Same filter throughout.
+  it('a mark-read committing under RETRY (no rows rendered) does not strand the tab on a spinner', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    let releaseRead: () => void = () => {};
+    markInboxRead.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          releaseRead = () => res();
+        }),
+    );
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // Mark read; the POST hangs.
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+
+    // A complete head read returns ZERO rows: the list empties (still ready).
+    getInbox.mockResolvedValueOnce(pageOf([], null));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(screen.getByTestId('serverRowCount')).toHaveTextContent('0'), { timeout: 2000 });
+
+    // Now a head read FAILS with no rows rendered: today's error arm.
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-2' } as never));
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'), { timeout: 2000 });
+
+    // Retry with no rows sets loading; its page is on the wire...
+    let releaseRetry: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseRetry = () => res(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })]));
+        }),
+    );
+    act(() => screen.getByRole('button', { name: 'retry' }).click());
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
+
+    // ...and the mark-read commits first, bumping the generation for THIS
+    // filter. Retry's page must still land: discarding it leaves nothing on
+    // screen and nothing in flight.
+    await act(async () => {
+      releaseRead();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      releaseRetry();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+  });
+```
+
+(The empty complete head read is branch C with zero rows and a null cursor,
+spec 5.6; the failure that follows finds no rows rendered, so it takes the
+`error` arm rather than the banner, spec 5.7.) The new-rule behavior with
+rows rendered (rows kept, banner raised, Retry without a spinner) is pinned
+by the tests added in Step 3.
 
 Any OTHER existing test that fails is a regression in the rewrite: fix the
 hook, not the test. If a test fails on module-level store state leaking
@@ -2646,6 +2713,17 @@ describe('useAutoLoad', () => {
     expect(onLoad).toHaveBeenCalledTimes(2);
   });
 
+  it('a crossing batched into the SAME render as the enabling commit fires once, from the fresh report', () => {
+    const { rerender } = render(<Harness enabled={false} epoch={1} />);
+    // The crossing and the commit land in one act: one render sees both.
+    act(() => {
+      cross(true);
+      rerender(<Harness enabled epoch={2} />);
+    });
+    expect(reobserved).toBe(1);
+    expect(onLoad).toHaveBeenCalledTimes(1);
+  });
+
   // Review Focus 5: the sentinel unmounting resets intersection.
   it('resets intersection when the sentinel unmounts, so a returning sentinel waits for its own report', () => {
     const { rerender } = render(<Harness enabled epoch={1} />);
@@ -2787,10 +2865,14 @@ export function useAutoLoad(opts: {
 
   // Re-observe when enabled and the epoch moved since it was last handled:
   // the NEXT report then describes the grown DOM. A failed page moves no
-  // epoch, so enabling after it re-observes nothing.
+  // epoch, so enabling after it re-observes nothing. Any report already
+  // recorded but not yet consumed is discarded FIRST (it predates this
+  // commit; React may have batched it into this very render), so the consume
+  // effect below, which runs after this one, cannot act on stale geometry.
   useEffect(() => {
     if (!enabled || epoch === handledEpochRef.current) return;
     handledEpochRef.current = epoch;
+    consumedSeqRef.current = seqRef.current;
     if (sentinel !== null) observerRef.current?.reobserve(sentinel);
   }, [enabled, epoch, sentinel]);
 
@@ -2810,7 +2892,15 @@ export function useAutoLoad(opts: {
 npx vitest run src/routes/inbox/useAutoLoad.test.tsx --root dashboard
 ```
 
-Expected: PASS, 9 tests.
+Expected: PASS, 10 tests.
+
+Residual, stated so nobody claims more than the mechanism gives: a real
+observer entry that was QUEUED before an `unobserve` and delivered after the
+following `observe` would arrive as a "fresh" report describing the old
+geometry. Whether Chromium can deliver such an entry is UNVERIFIED; if it
+can, the cost is one extra page in a rare timing, bounded and
+self-correcting (the extra page's own commit re-observes). Spec 5.2 states
+the same residual.
 
 - [ ] **Step 5: Commit**
 
@@ -3124,11 +3214,13 @@ export function Inbox(): React.JSX.Element {
   // --- The DOM the observer and the scroll restore need ----------------------
   const listRef = useRef<HTMLUListElement>(null);
   const [sentinel, setSentinel] = useState<Element | null>(null);
-  // The scroll container lives in a REF (assigning `scrollTop` on a value
-  // held in React state trips the dashboard's react-hooks/immutability lint
-  // rule); `rootReady` is the render trigger once it is resolved.
+  // The scroll container is held TWICE on purpose: in React state for the
+  // observer (a value read during render; the dashboard's react-hooks/refs
+  // rule forbids reading a ref in render) and in a ref for the two effects
+  // that ASSIGN its scrollTop (the react-hooks/immutability rule forbids
+  // mutating a state-held value). Both are set once, in the same layout effect.
+  const [scrollRoot, setScrollRoot] = useState<Element | null>(null);
   const scrollRootRef = useRef<Element | null>(null);
-  const [rootReady, setRootReady] = useState(false);
   const restoredRef = useRef(false);
   const noteScrollTop = inbox.noteScrollTop;
   const hasRows = inbox.rows.length > 0;
@@ -3137,18 +3229,19 @@ export function Inbox(): React.JSX.Element {
   // reported to the hook through a passive listener.
   useLayoutEffect(() => {
     if (!hasRows || listRef.current === null || scrollRootRef.current !== null) return;
-    scrollRootRef.current = scrollParentOf(listRef.current);
+    const root = scrollParentOf(listRef.current);
+    scrollRootRef.current = root;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRootReady(true);
+    setScrollRoot(root);
   }, [hasRows]);
 
   useEffect(() => {
     const root = scrollRootRef.current;
-    if (!rootReady || root === null) return;
+    if (scrollRoot === null || root === null) return;
     const onScroll = (): void => noteScrollTop(root.scrollTop);
     root.addEventListener('scroll', onScroll, { passive: true });
     return () => root.removeEventListener('scroll', onScroll);
-  }, [rootReady, noteScrollTop]);
+  }, [scrollRoot, noteScrollTop]);
 
   // Scroll restore (spec 5.8): once, on the first render that has rows AND a
   // resolved container. POP (back/forward) restores the saved position; any
@@ -3157,17 +3250,17 @@ export function Inbox(): React.JSX.Element {
   // to clamp it).
   useLayoutEffect(() => {
     const root = scrollRootRef.current;
-    if (restoredRef.current || !rootReady || root === null || !hasRows) return;
+    if (restoredRef.current || scrollRoot === null || root === null || !hasRows) return;
     restoredRef.current = true;
     if (inbox.restoredScrollTop === null) return;
     const target = navigationType === 'POP' ? inbox.restoredScrollTop : 0;
     root.scrollTop = target;
     noteScrollTop(target);
-  }, [rootReady, hasRows, inbox.restoredScrollTop, navigationType, noteScrollTop]);
+  }, [scrollRoot, hasRows, inbox.restoredScrollTop, navigationType, noteScrollTop]);
 
   useAutoLoad({
     sentinel,
-    root: rootReady ? scrollRootRef.current : null,
+    root: scrollRoot,
     enabled: inbox.hasMore && inbox.autoLoadArmed && !inbox.loadingMore,
     epoch: inbox.pageEpoch,
     onLoad: inbox.loadMore,
@@ -3387,6 +3480,9 @@ task, nothing else depends on it.
   mark-unread navigation)
 - Modify: `dashboard/src/routes/conversation/ThreadUnreadToggle.tsx:189`
   (the mark-unread navigation)
+- Modify: `dashboard/src/app/NavContents.tsx` (the sidebar's Inbox link)
+- Modify: `e2e/tests/dashboard-next/inbox-mark-unread-header.spec.ts:215`
+  (the post-mark-unread URL assertion)
 
 **Interfaces:**
 - Produces:
@@ -3394,6 +3490,7 @@ task, nothing else depends on it.
   export const FROM_INBOX_STATE = { fromInbox: true } as const;
   export function cameFromInbox(state: unknown): boolean;   // reads location.state
   export function useBackToInbox(): () => void;            // navigate(-1) when it came from the inbox, else navigate('/inbox')
+  export function isPlainLeftClick(e: React.MouseEvent): boolean;
   ```
   A row opened from the inbox pushes history state `{ fromInbox: true }`.
   The thread and contact pages' "back" actions call `useBackToInbox()`: with
@@ -3408,8 +3505,7 @@ Create `dashboard/src/routes/inbox/backToInbox.test.tsx`:
 
 ```tsx
 import { render, screen, fireEvent } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import { FROM_INBOX_STATE, cameFromInbox, useBackToInbox } from './backToInbox.js';
 
@@ -3427,12 +3523,17 @@ function InboxStub(): React.JSX.Element {
   const location = useLocation();
   return <div data-testid="inbox">inbox {location.search}</div>;
 }
-function OpenFromInbox(): React.JSX.Element {
-  const navigate = useNavigate();
-  useEffect(() => {
-    navigate('/conversations/x', { state: FROM_INBOX_STATE });
-  }, [navigate]);
-  return <div />;
+// The inbox stub carries a row-shaped link: the test CLICKS it (no
+// auto-navigation, which would re-fire when the inbox remounts after the POP).
+function InboxWithRow(): React.JSX.Element {
+  return (
+    <div>
+      <InboxStub />
+      <Link to="/conversations/x" state={FROM_INBOX_STATE}>
+        open row
+      </Link>
+    </div>
+  );
 }
 
 describe('backToInbox', () => {
@@ -3446,11 +3547,12 @@ describe('backToInbox', () => {
     render(
       <MemoryRouter initialEntries={['/inbox?limit=7']}>
         <Routes>
-          <Route path="/inbox" element={<><InboxStub /><OpenFromInbox /></>} />
+          <Route path="/inbox" element={<InboxWithRow />} />
           <Route path="/conversations/:id" element={<Thread />} />
         </Routes>
       </MemoryRouter>,
     );
+    fireEvent.click(screen.getByRole('link', { name: 'open row' }));
     expect(screen.getByTestId('from')).toHaveTextContent('true');
     fireEvent.click(screen.getByRole('button', { name: 'back' }));
     // Back to the SAME entry, query and all (a POP; the inbox restores).
@@ -3511,6 +3613,13 @@ export function useBackToInbox(): () => void {
     else navigate('/inbox');
   }, [from, navigate]);
 }
+
+/** For a `<Link to="/inbox">` that should behave as back: intercept only a
+ *  plain left click (react-router's own Link lets modified clicks - ctrl,
+ *  cmd, shift, alt, middle button - open a new tab or window; so do we). */
+export function isPlainLeftClick(e: React.MouseEvent): boolean {
+  return e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+}
 ```
 
 - [ ] **Step 4: Wire the row and the four back actions**
@@ -3522,11 +3631,15 @@ In `dashboard/src/routes/inbox/InboxRow.tsx`, import
         <Link className={styles.main} to={hrefFor(row)} state={FROM_INBOX_STATE} onClick={() => onOpen(row)}>
 ```
 
-In `dashboard/src/routes/conversation/ConversationDetail.tsx` and
-`dashboard/src/routes/conversation/GroupTextView.tsx`, import
-`useBackToInbox` from `../inbox/backToInbox.js`, call
-`const backToInbox = useBackToInbox();` in the component body (with the
-other hooks, before any early return), and change the back link to:
+In `dashboard/src/routes/conversation/ConversationDetail.tsx` the back link
+lives in the `RelayGroupView` component (about line 176 for the component,
+398 for the link), NOT in the top-level `ConversationDetail`; in
+`dashboard/src/routes/conversation/GroupTextView.tsx` it is in the
+component that renders the header (about line 319). In each of those two
+components import `isPlainLeftClick`, `useBackToInbox` from
+`../inbox/backToInbox.js`, call `const backToInbox = useBackToInbox();` in
+that component's body (with its other hooks, before any early return), and
+change the back link to:
 
 ```tsx
         <Link
@@ -3534,13 +3647,30 @@ other hooks, before any early return), and change the back link to:
           className={styles.backBtn}
           aria-label="Back to inbox"
           onClick={(e) => {
+            if (!isPlainLeftClick(e)) return; // modified clicks keep Link's own behavior
             e.preventDefault();
             backToInbox();
           }}
         >
 ```
 
-(the arrow glyph child stays as it is in each file).
+(the arrow glyph child stays as it is in each file). Keyboard activation
+(Enter on the focused link) dispatches a plain click and takes the back
+path.
+
+THE SIDEBAR'S INBOX LINK follows the same rule, because contact and unknown
+rows (the main path) open `/contacts/...`, which has no back arrow of its
+own; on the installed phone app the sidebar link can be the only way back
+from a contact. In `dashboard/src/app/NavContents.tsx`, where the leaf
+`NavLink` is rendered (about lines 51-64; the same element is used for
+child links at 97-107), give the link whose `item.to === '/inbox'` (and the
+child whose `child.to === '/inbox'`, if the inbox is ever nested) an
+`onClick` that runs the existing `onNavigate` (the drawer close) AND, when
+`cameFromInbox(location.state)` and `isPlainLeftClick(e)`, prevents the
+default and calls `backToInbox()`; `NavContents` calls `useBackToInbox()`
+and `useLocation()` once at its top for that. A badge click or an Inbox
+click from any page NOT opened from an inbox row carries no state and keeps
+today's forward navigation (top of the list, spec 5.8).
 
 In `dashboard/src/routes/contact/ContactDetail.tsx` (the mark-unread
 success path, `navigate('/inbox')` at line 399) and
@@ -3559,17 +3689,31 @@ npm run typecheck
 ```
 
 Expected: PASS; exit 0; exit 0. If an existing ConversationDetail /
-GroupTextView / ContactDetail test asserts the exact `navigate` call or the
-link's onClick, update its expectation to the helper's behavior (a POP when
-`fromInbox` state is present, else `/inbox`) - that is the spec change, not
-a regression.
+GroupTextView / ContactDetail / NavContents test asserts the exact
+`navigate` call or the link's onClick, update its expectation to the
+helper's behavior (a POP when `fromInbox` state is present, else `/inbox`) -
+that is the spec change, not a regression.
+
+ONE EXISTING PLAYWRIGHT SPEC CHANGES WITH THIS TASK (the exception to
+"existing inbox specs run unchanged", spec 4.1):
+`e2e/tests/dashboard-next/inbox-mark-unread-header.spec.ts` opens the group
+thread from `/inbox?filter=groups` and, after the header's mark-unread,
+asserts `toHaveURL(/\/inbox$/)` (about line 215). Under this task the
+mark-unread goes BACK to the entry it came from, `/inbox?filter=groups`.
+Change that assertion to `toHaveURL(/\/inbox\?filter=groups$/)` and leave
+the rest of the spec alone; its later assertions read the Groups filter
+anyway.
+
+If Cameron DROPS this task, also remove: the in-app back step at the end of
+Task 9's test 3, the second sentence of Task 11's self-QA item 4, and the
+"Then the in-app way back" sentence in spec 7.3 test 3.
 
 - [ ] **Step 6: Commit**
 
 Read bare `git status`, confirm no `MERGE_HEAD`, then:
 
 ```
-git add dashboard/src/routes/inbox/backToInbox.ts dashboard/src/routes/inbox/backToInbox.test.tsx dashboard/src/routes/inbox/InboxRow.tsx dashboard/src/routes/conversation/ConversationDetail.tsx dashboard/src/routes/conversation/GroupTextView.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/conversation/ThreadUnreadToggle.tsx
+git add dashboard/src/routes/inbox/backToInbox.ts dashboard/src/routes/inbox/backToInbox.test.tsx dashboard/src/routes/inbox/InboxRow.tsx dashboard/src/routes/conversation/ConversationDetail.tsx dashboard/src/routes/conversation/GroupTextView.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/conversation/ThreadUnreadToggle.tsx dashboard/src/app/NavContents.tsx e2e/tests/dashboard-next/inbox-mark-unread-header.spec.ts
 git commit -m "feat(inbox): in-app Back to inbox goes back in history when the row was opened from the inbox
 
 Co-Authored-By: <authoring model> <noreply@anthropic.com>"
@@ -4862,5 +5006,8 @@ auto-load hook now consumes observer reports at arrival (a report that
 arrives while disabled is discarded; a commit while disabled re-observes once
 the hook is enabled), and Task 7b makes the in-app "Back to inbox" actions
 go back in history when the row was opened from the inbox (a product call
-pending at the launch gate).**
+pending at the launch gate). Round 3: 9 findings, adjudicated in
+`plan-r3-adjudications.md`; precision outside Task 7b, which grew the
+sidebar Inbox link (contact pages have no back arrow) and the one existing
+Playwright assertion it changes; the review is closed.**
 

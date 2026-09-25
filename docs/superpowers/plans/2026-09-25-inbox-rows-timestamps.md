@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v1 - DRAFT, pending adversarial plan review
+Status: v2 - revised after adversarial plan review round 1 (A + B); round 2 pending
 Date: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
 Worktree: `W:\tmp\inbox-rows-timestamps`
@@ -76,8 +76,15 @@ Vitest + Testing Library (jsdom), Playwright, Express + DynamoDB Local (app).
 - No wire-shape change to `InboxRow` / `InboxPage`. No message-catalog copy.
 - New or touched lines are ASCII-only. Before every commit read bare
   `git status` and check `.git/MERGE_HEAD` is absent; stage only the explicit
-  paths named by the task. Every commit ends with
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+  paths named by the task. Every commit ends with a `Co-Authored-By` trailer
+  naming the model that WROTE the commit: replace `<authoring model>` in the
+  commit blocks below with your own model name, for example
+  `Claude Opus 5.5 <noreply@anthropic.com>` (AGENTS.md: the trailer names the
+  authoring model, never a fixed one).
+- The perf harness's inbox request classifier (`e2e/performance/collect.ts`)
+  and the manual profiler plan (`app/src/lib/inboxDiagnostics.ts`) hard-code
+  the page size; Task 10b moves both from 30 to 100 (spec 5.11). No other
+  harness change unless the Task 11 perf gate names one.
 - Playwright runs only through the root `npm run e2e` (full) or
   `npm run e2e:session` (interactive); never against `:5174` / `:8080`. Do not
   run the full suite while an interactive session is live in this worktree.
@@ -327,7 +334,7 @@ Read bare `git status`; confirm `.git/MERGE_HEAD` is absent. Then:
 git add dashboard/src/routes/inbox/inboxTime.ts dashboard/src/routes/inbox/inboxTime.test.ts
 git commit -m "feat(inbox): four-tier last-activity time formatter
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ### Task 2: The row shows its time; the actions box becomes an overlay
@@ -379,11 +386,13 @@ Append to `dashboard/src/routes/inbox/InboxRow.test.tsx`, inside the existing
           conversationId: 'conv-relay-1',
           name: 'With Ana & Ben',
           status: 'open',
-          lastActivityAt: '2026-06-30T10:00:00.000Z',
+          // Six days before the pinned clock: a date, never "Yesterday", in
+          // any runner time zone.
+          lastActivityAt: '2026-06-25T10:00:00.000Z',
         }),
       );
       expect(screen.getByRole('link', { name: /With Ana/ }).querySelector('time')).toHaveTextContent(
-        /^Jun 30$/,
+        /^Jun 25$/,
       );
       cleanupAndRender(
         mkRow({
@@ -736,7 +745,7 @@ Expected: exit 0. Then read bare `git status`, confirm no `MERGE_HEAD`, and:
 git add dashboard/src/routes/inbox/InboxRow.tsx dashboard/src/routes/inbox/InboxRow.module.css dashboard/src/routes/inbox/InboxRow.test.tsx
 git commit -m "feat(inbox): last-activity time on every row; actions become an overlay
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ### Task 3: The list store, the optional auth accessor, and the sign-out clear
@@ -1052,7 +1061,7 @@ Expected: exit 0. Read bare `git status`, confirm no `MERGE_HEAD`, then:
 git add dashboard/src/routes/inbox/inboxListStore.ts dashboard/src/routes/inbox/inboxListStore.test.ts dashboard/src/app/AuthContext.tsx dashboard/src/app/AuthGate.tsx dashboard/src/app/AuthGate.test.tsx
 git commit -m "feat(inbox): per-operator list store, cleared by AuthGate on sign-out
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ---
@@ -1508,7 +1517,7 @@ Read bare `git status`, confirm no `MERGE_HEAD`, then:
 git add dashboard/src/routes/inbox/inboxListMerge.ts dashboard/src/routes/inbox/inboxListMerge.test.ts
 git commit -m "feat(inbox): pure list model - complete heads replace, incomplete heads merge
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ### Task 5: The rebuilt `useInbox` hook
@@ -1697,6 +1706,10 @@ export function useInbox(
   filter: InboxFilter,
   limit: number = DEFAULT_PAGE_LIMIT,
   operatorId = 'anon',
+  // True when the page is about to APPLY a restored scroll position (a POP
+  // arrival): the scroll ref is then seeded with it from the first render, so
+  // a StrictMode simulated unmount saves the position this visit shows.
+  restoreScroll = false,
 ): InboxState {
   const initialKey = inboxListKey(operatorId, filter, limit);
   // Lazy init from the store: a restored list's FIRST render is already ready.
@@ -1725,8 +1738,9 @@ export function useInbox(
   // True between the mount effect's body and its cleanup: a request that
   // settles after unmount neither commits nor saves.
   const aliveRef = useRef(false);
-  // The scroll container's last reported scrollTop (spec 5.8).
-  const scrollTopRef = useRef(0);
+  // The scroll container's last reported scrollTop (spec 5.8), seeded with
+  // the restored value only when the page will apply it.
+  const scrollTopRef = useRef(restoreScroll && restored !== undefined ? restored.scrollTop : 0);
 
   const abortRef = useRef<AbortController | null>(null);
   // Bumped on every committed optimistic mutation; a head read that started
@@ -1799,9 +1813,12 @@ export function useInbox(
       }
       if (err instanceof ApiError && err.status === 404) {
         // C8 backend slice isn't live yet -> honest pending state (not an error).
+        // Status FIRST, then the empty commit: an empty tab is `ready` with no
+        // rows, and committing before the status change would save an empty
+        // snapshot. The epoch is carried, never reset (spec 5.2).
         firstPageGenRef.current += 1;
-        commitList(emptyListState()); // status is not ready: nothing is saved
         applyStatus('pending');
+        commitList({ ...emptyListState(), pageEpoch: listRef.current.pageEpoch });
         return;
       }
       applyStatus('error');
@@ -1823,7 +1840,8 @@ export function useInbox(
     if (key !== restoredKeyRef.current) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       applyStatus('loading');
-      commitList(emptyListState());
+      // The epoch is carried across the reset: it only ever counts up (spec 5.2).
+      commitList({ ...emptyListState(), pageEpoch: listRef.current.pageEpoch });
       pendingRef.current = new Map();
       setPending(new Map());
       setRefreshFailed(false);
@@ -2030,16 +2048,87 @@ export function useInbox(
 }
 ```
 
-- [ ] **Step 2: Run the existing hook tests**
+Carry over VERBATIM, at the guards they explain, these comment blocks from
+the current `useInbox.ts` on `main` (read them with `git show
+main:dashboard/src/routes/inbox/useInbox.ts`; the code above keeps the guards
+but trims their history, and the history is what stops the next reader from
+deleting a guard): (1) the `activeFilterRef` block beginning "THE FILTER THIS
+HOOK IS CURRENTLY SHOWING" through "A GENERATION COUNTER CANNOT DO THIS JOB";
+(2) the `statusRef` block "Written through `applyStatus` and NEVER through
+`setStatus` directly"; (3) the full "THE GENERATION GUARD PROTECTS A LIST, NOT
+A SPINNER" block in `fetchHead`; (4) the "HONEST STATUS: no test can currently
+fail by deleting this line" block on the filter refusal; (5) `loadMore`'s C2
+block ("Same abort + generation pattern") and the adversarial-29
+`reconcileStale` block; (6) `markRead`'s "AN EPOCH, NOT AN IDENTITY" block.
+The old failure-path block ("THE SAME TWO AXES ... RESIDUE") is REPLACED by
+the spec 5.7 comment already in the code above, because the residue it
+described is resolved by this change.
+
+- [ ] **Step 2: Run the existing hook tests and rewrite the one that pins the old failure rule**
 
 ```
 npx vitest run src/routes/inbox/useInbox.test.tsx --root dashboard
 ```
 
-Expected: the existing 36 tests PASS (the API of `useInbox(filter)` is
-unchanged; `rowKey` is re-exported). If a test fails on module-level store
-state leaking between cases, that is the order-dependence spec 7.1 warns
-about: add the `clearInboxLists()` call from Step 3 first and re-run.
+Expected: every existing test PASSES except ONE, which pins the rule this
+spec replaces: `a mark-read committing under RETRY does not strand the tab on
+a spinner` (around line 781). It expects a failed BACKGROUND head read with
+rows on screen to reach `status: 'error'` and then drives Retry from there.
+Under spec 5.7 that read keeps the rows and raises the banner, and a Retry
+with rows rendered never enters `loading`. Replace that test's body so it
+proves the same structural point (a mutation committing under a head read
+that set `loading` must not strand the tab) on the path that still sets
+`loading`: the FILTER EFFECT.
+
+```tsx
+  it('a mark-read committing under a filter-change load does not strand the tab on a spinner', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    let releaseRead: () => void = () => {};
+    markInboxRead.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          releaseRead = () => res();
+        }),
+    );
+    const { rerender } = render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // Mark read; the POST hangs.
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+
+    // The operator switches tabs: the filter effect sets loading and fetches;
+    // that page is on the wire...
+    let releaseLoad: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseLoad = () => res(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+        }),
+    );
+    rerender(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
+
+    // ...and the mark-read commits first. Its generation bump belongs to the
+    // filter it was made against, so the new filter's page must still land:
+    // discarding it would leave nothing on screen and nothing in flight.
+    await act(async () => {
+      releaseRead();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      releaseLoad();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+  });
+```
+
+Any OTHER existing test that fails is a regression in the rewrite: fix the
+hook, not the test. If a test fails on module-level store state leaking
+between cases, that is the order-dependence spec 7.1 warns about: add the
+`clearInboxLists()` call from Step 3 first and re-run.
 
 - [ ] **Step 3: Add the new hook tests**
 
@@ -2121,7 +2210,19 @@ function Probe({
 }
 ```
 
-(e) Append a new `describe` block at the end of the file:
+(e) Keep the dashboard typecheck green for this task: `Inbox.test.tsx`
+builds an `InboxState` literal in `baseState`, which now needs the new
+fields. Add to that object (Task 7 changes the rest of that file):
+
+```ts
+    refreshFailed: false,
+    autoLoadArmed: false,
+    pageEpoch: 0,
+    restoredScrollTop: null,
+    noteScrollTop: () => {},
+```
+
+(f) Append a new `describe` block at the end of the file:
 
 ```tsx
 describe('useInbox - page one persists (spec 5.5-5.8)', () => {
@@ -2273,7 +2374,7 @@ describe('useInbox - page one persists (spec 5.5-5.8)', () => {
 
   it('pageEpoch bumps on head and page commits, not on a mark-read commit, a reset or a failure', async () => {
     getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 1 })], 'C1'));
-    render(<Probe filter="all" limit={1} />);
+    const { rerender } = render(<Probe filter="all" limit={1} />);
     await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
     act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
     await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
@@ -2282,6 +2383,12 @@ describe('useInbox - page one persists (spec 5.5-5.8)', () => {
     act(() => screen.getByRole('button', { name: 'more' }).click());
     await waitFor(() => expect(screen.getByTestId('loadingMore')).toHaveTextContent('false'));
     expect(screen.getByTestId('epoch')).toHaveTextContent('1');
+    // A reset carries the epoch (never back to 0); the new filter's first
+    // page then bumps it.
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'u1' })], null));
+    rerender(<Probe filter="unread" limit={1} />);
+    expect(screen.getByTestId('epoch')).toHaveTextContent('1');
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('2'));
   });
 
   it('a failed background head read with rows rendered keeps the rows and raises refreshFailed; a 404 does the same', async () => {
@@ -2381,7 +2488,7 @@ Read bare `git status`, confirm no `MERGE_HEAD`, then:
 git add dashboard/src/routes/inbox/useInbox.ts dashboard/src/routes/inbox/useInbox.test.tsx
 git commit -m "feat(inbox): rebuild useInbox around one committed list with a restore-and-reconcile store
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ---
@@ -2395,8 +2502,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces:
   ```ts
-  export interface AutoLoadObserver { observe(el: Element): void; disconnect(): void }
-  export type AutoLoadObserverFactory = (onChange: (intersecting: boolean) => void, root: Element | null) => AutoLoadObserver | undefined;
+  export interface AutoLoadObserver { observe(el: Element): void; reobserve(el: Element): void; disconnect(): void }
+  export type AutoLoadObserverFactory = (onReport: (intersecting: boolean) => void, root: Element | null) => AutoLoadObserver | undefined;
   export function useAutoLoad(opts: {
     sentinel: Element | null;      // the sentinel node, or null while it is not rendered
     root: Element | null;          // the scroll container
@@ -2406,6 +2513,10 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
     observerFactory?: AutoLoadObserverFactory;   // tests inject one; default wraps IntersectionObserver
   }): void
   ```
+  The observer REPORTS on `observe()` (its initial state), on every threshold
+  crossing, and on `reobserve()` (a forced fresh report of the current
+  geometry). An `epoch` change never fires by itself: it calls `reobserve`,
+  and the load fires only from the report that follows (spec 5.2).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2417,15 +2528,32 @@ import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAutoLoad, type AutoLoadObserverFactory } from './useAutoLoad.js';
 
-// A hand-driven observer: tests flip intersection through `fire`.
-let fire: (intersecting: boolean) => void = () => {};
+// A hand-driven observer that behaves like IntersectionObserver: it reports
+// the CURRENT geometry on observe() and reobserve(), and on every crossing
+// the test simulates through `cross`.
+let current = false;
+let report: (intersecting: boolean) => void = () => {};
 let created = 0;
 let disconnected = 0;
-const factory: AutoLoadObserverFactory = (onChange) => {
+let reobserved = 0;
+const factory: AutoLoadObserverFactory = (onReport) => {
   created += 1;
-  fire = onChange;
-  return { observe: () => {}, disconnect: () => { disconnected += 1; } };
+  report = onReport;
+  return {
+    observe: () => onReport(current),
+    reobserve: () => {
+      reobserved += 1;
+      onReport(current);
+    },
+    disconnect: () => {
+      disconnected += 1;
+    },
+  };
 };
+function cross(intersecting: boolean): void {
+  current = intersecting;
+  report(intersecting);
+}
 
 const onLoad = vi.fn();
 
@@ -2437,62 +2565,77 @@ function Harness({ enabled, epoch, withSentinel = true }: { enabled: boolean; ep
 
 beforeEach(() => {
   onLoad.mockReset();
+  current = false;
   created = 0;
   disconnected = 0;
+  reobserved = 0;
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('useAutoLoad', () => {
-  it('creates one observer per sentinel mount and fires once when intersection begins while enabled', () => {
+  it('creates one observer per sentinel mount and fires once when a report says intersecting while enabled', () => {
     const { rerender } = render(<Harness enabled epoch={1} />);
     expect(created).toBe(1);
-    act(() => fire(true));
+    act(() => cross(true));
     expect(onLoad).toHaveBeenCalledTimes(1);
     rerender(<Harness enabled epoch={1} />);
     expect(created).toBe(1);
+    expect(onLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires once from the initial report when the sentinel mounts already in view', () => {
+    current = true;
+    render(<Harness enabled epoch={1} />);
     expect(onLoad).toHaveBeenCalledTimes(1);
   });
 
   it('does not fire while disabled, and does not fire when only enabled changes', () => {
     const { rerender } = render(<Harness enabled={false} epoch={1} />);
-    act(() => fire(true));
+    act(() => cross(true));
     expect(onLoad).not.toHaveBeenCalled();
-    // The failed-page shape: enabled flips true with no crossing and no epoch change.
+    // The failed-page shape: enabled flips true with no new report.
     rerender(<Harness enabled epoch={1} />);
     expect(onLoad).not.toHaveBeenCalled();
   });
 
-  it('fires again on an epoch change while still intersecting, and not on an epoch change while not intersecting', () => {
+  it('an epoch change re-observes and fires only from the fresh report', () => {
     const { rerender } = render(<Harness enabled epoch={1} />);
-    act(() => fire(true));
+    act(() => cross(true));
     expect(onLoad).toHaveBeenCalledTimes(1);
+    // The DOM grew and pushed the sentinel out before the epoch changed: the
+    // fresh report says NOT intersecting, so nothing fires.
+    current = false;
     rerender(<Harness enabled epoch={2} />);
-    expect(onLoad).toHaveBeenCalledTimes(2);
-    act(() => fire(false));
+    expect(reobserved).toBe(1);
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    // A short page left it in view: the fresh report says intersecting.
+    current = true;
     rerender(<Harness enabled epoch={3} />);
+    expect(reobserved).toBe(2);
     expect(onLoad).toHaveBeenCalledTimes(2);
   });
 
   it('a leave-and-re-enter fires again at the same epoch', () => {
     render(<Harness enabled epoch={1} />);
-    act(() => fire(true));
-    act(() => fire(false));
-    act(() => fire(true));
+    act(() => cross(true));
+    act(() => cross(false));
+    act(() => cross(true));
     expect(onLoad).toHaveBeenCalledTimes(2);
   });
 
   // Review Focus 5: the sentinel unmounting resets intersection.
-  it('resets intersection when the sentinel unmounts, so a returning sentinel waits for its observer', () => {
+  it('resets intersection when the sentinel unmounts, so a returning sentinel waits for its own report', () => {
     const { rerender } = render(<Harness enabled epoch={1} />);
-    act(() => fire(true));
+    act(() => cross(true));
     expect(onLoad).toHaveBeenCalledTimes(1);
+    current = false;
     rerender(<Harness enabled={false} epoch={1} withSentinel={false} />);
     expect(disconnected).toBe(1);
     rerender(<Harness enabled epoch={2} withSentinel />);
-    // New observer, no callback yet: nothing fires from the stale true.
+    // A new observer reported NOT intersecting on observe(): nothing fires.
     expect(created).toBe(2);
     expect(onLoad).toHaveBeenCalledTimes(1);
-    act(() => fire(true));
+    act(() => cross(true));
     expect(onLoad).toHaveBeenCalledTimes(2);
   });
 
@@ -2523,37 +2666,61 @@ Create `dashboard/src/routes/inbox/useAutoLoad.ts`:
 
 ```ts
 // useAutoLoad - fires `onLoad` when the list's sentinel scrolls into the
-// 400px margin (spec 5.2). ONE observer per sentinel mount; its callback only
-// records intersection state. The load itself fires from an EFFECT over
-// [intersecting, enabled, epoch], so `onLoad` is always the current loadMore
-// (no stale closure), and it fires exactly when intersection BEGINS or the
-// list's page epoch CHANGES while intersecting. A change of `enabled` alone
-// (a failed page re-enabling the button; hasMore appearing without a commit)
-// never fires. Intersection is reset when the sentinel unmounts, so a
-// returning sentinel waits for its own observer's first report.
+// 400px margin (spec 5.2). ONE observer per sentinel mount. The observer's
+// callback only records a REPORT { intersecting, seq }; the load fires from
+// an effect over [report, enabled] exactly when a NEW report says
+// intersecting while enabled, so `onLoad` is always the current loadMore (no
+// stale closure) and nothing fires from stale state.
+//
+// An `epoch` change (a committed head read or page) never fires by itself:
+// at that moment the DOM has grown but the observer has not reported the
+// sentinel's new position, so firing on the held state would load two pages
+// per scroll. Instead it RE-OBSERVES the sentinel, which makes the observer
+// report the current geometry; if the sentinel is still inside the margin
+// (a short page) that fresh report fires the next load once. A change of
+// `enabled` alone (a failed page re-enabling the button; hasMore appearing
+// without a commit) produces no report and never fires. Intersection is
+// reset when the sentinel unmounts, so a returning sentinel waits for its own
+// observer's first report.
 import { useEffect, useRef, useState } from 'react';
 
 export interface AutoLoadObserver {
   observe(el: Element): void;
+  /** Force a fresh report of the element's CURRENT geometry. */
+  reobserve(el: Element): void;
   disconnect(): void;
 }
 export type AutoLoadObserverFactory = (
-  onChange: (intersecting: boolean) => void,
+  onReport: (intersecting: boolean) => void,
   root: Element | null,
 ) => AutoLoadObserver | undefined;
 
 const ROOT_MARGIN = '400px 0px';
 
-const defaultFactory: AutoLoadObserverFactory = (onChange, root) => {
+interface Report {
+  intersecting: boolean;
+  seq: number;
+}
+const NO_REPORT: Report = { intersecting: false, seq: 0 };
+
+const defaultFactory: AutoLoadObserverFactory = (onReport, root) => {
   if (typeof IntersectionObserver === 'undefined') return undefined;
   const io = new IntersectionObserver(
     (entries) => {
       const last = entries[entries.length - 1];
-      if (last !== undefined) onChange(last.isIntersecting);
+      if (last !== undefined) onReport(last.isIntersecting);
     },
     { root, rootMargin: ROOT_MARGIN },
   );
-  return { observe: (el) => io.observe(el), disconnect: () => io.disconnect() };
+  return {
+    observe: (el) => io.observe(el),
+    // unobserve + observe delivers a fresh initial entry for the element.
+    reobserve: (el) => {
+      io.unobserve(el);
+      io.observe(el);
+    },
+    disconnect: () => io.disconnect(),
+  };
 };
 
 export function useAutoLoad(opts: {
@@ -2565,35 +2732,47 @@ export function useAutoLoad(opts: {
   observerFactory?: AutoLoadObserverFactory;
 }): void {
   const { sentinel, root, enabled, epoch, onLoad, observerFactory } = opts;
-  const [intersecting, setIntersecting] = useState(false);
-  // The epoch at the last fire; -1 = never fired.
-  const lastFiredEpochRef = useRef(-1);
-  const wasIntersectingRef = useRef(false);
+  const [report, setReport] = useState<Report>(NO_REPORT);
+  const observerRef = useRef<AutoLoadObserver | undefined>(undefined);
+  const seqRef = useRef(0);
+  const lastFiredSeqRef = useRef(0);
 
+  // One observer per sentinel mount; its only job is to record reports.
   useEffect(() => {
     if (sentinel === null) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setIntersecting(false);
+      setReport(NO_REPORT);
       return;
     }
-    const observer = (observerFactory ?? defaultFactory)(setIntersecting, root);
+    const observer = (observerFactory ?? defaultFactory)((intersecting) => {
+      seqRef.current += 1;
+      setReport({ intersecting, seq: seqRef.current });
+    }, root);
+    observerRef.current = observer;
     if (observer === undefined) return;
     observer.observe(sentinel);
     return () => {
       observer.disconnect();
-      setIntersecting(false);
+      observerRef.current = undefined;
+      setReport(NO_REPORT);
     };
   }, [sentinel, root, observerFactory]);
 
+  // An epoch change re-observes so the NEXT report describes the grown DOM.
+  const mountEpochRef = useRef(epoch);
   useEffect(() => {
-    const began = intersecting && !wasIntersectingRef.current;
-    wasIntersectingRef.current = intersecting;
-    if (!enabled || !intersecting) return;
-    if (began || epoch !== lastFiredEpochRef.current) {
-      lastFiredEpochRef.current = epoch;
-      onLoad();
-    }
-  }, [intersecting, enabled, epoch, onLoad]);
+    if (epoch === mountEpochRef.current) return;
+    mountEpochRef.current = epoch;
+    if (sentinel !== null) observerRef.current?.reobserve(sentinel);
+  }, [epoch, sentinel]);
+
+  // The one place a load fires: a NEW report that says intersecting, while enabled.
+  useEffect(() => {
+    if (!enabled || !report.intersecting) return;
+    if (report.seq === lastFiredSeqRef.current) return;
+    lastFiredSeqRef.current = report.seq;
+    onLoad();
+  }, [report, enabled, onLoad]);
 }
 ```
 
@@ -2603,7 +2782,7 @@ export function useAutoLoad(opts: {
 npx vitest run src/routes/inbox/useAutoLoad.test.tsx --root dashboard
 ```
 
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -2611,10 +2790,12 @@ Read bare `git status`, confirm no `MERGE_HEAD`, then:
 
 ```
 git add dashboard/src/routes/inbox/useAutoLoad.ts dashboard/src/routes/inbox/useAutoLoad.test.tsx
-git commit -m "feat(inbox): intersection-driven auto-load keyed on the page epoch
+git commit -m "feat(inbox): report-driven auto-load that re-observes on every page commit
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
+
+---
 
 ### Task 7: The Inbox page - limit param, sentinel, banner, scroll restore
 
@@ -2636,51 +2817,30 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 In `dashboard/src/routes/inbox/Inbox.test.tsx`:
 
-(a) Replace the `useInbox` mock so it records all three arguments, and give
-`baseState` the new fields:
+(a) Replace the `useInbox` mock so it records all four arguments, and point
+`baseState`'s `noteScrollTop` (added in Task 5) at a spy:
 
 ```ts
 let seenFilter: string | undefined;
 let seenLimit: number | undefined;
 let seenOperator: string | undefined;
+let seenRestoreScroll: boolean | undefined;
 const noteScrollTop = vi.fn();
 ```
 
-```ts
-function baseState(over: Partial<InboxState> = {}): InboxState {
-  return {
-    status: 'ready',
-    rows: [],
-    groupsTruncated: false,
-    truncated: false,
-    serverRowCount: 0,
-    groupRowsShown: 0,
-    hasMore: false,
-    loadingMore: false,
-    loadMore,
-    retry,
-    markRead,
-    markUnread,
-    refreshFailed: false,
-    autoLoadArmed: false,
-    pageEpoch: 0,
-    restoredScrollTop: null,
-    noteScrollTop,
-    ...over,
-  };
-}
-```
+In `baseState`, replace `noteScrollTop: () => {},` with `noteScrollTop,`.
 
 ```ts
-    useInbox: (filter: string, limit: number, operatorId: string) => {
+    useInbox: (filter: string, limit: number, operatorId: string, restoreScroll: boolean) => {
       seenFilter = filter;
       seenLimit = limit;
       seenOperator = operatorId;
+      seenRestoreScroll = restoreScroll;
       return state;
     },
 ```
 
-and in `beforeEach` add `seenLimit = undefined; seenOperator = undefined; noteScrollTop.mockReset();`.
+and in `beforeEach` add `seenLimit = undefined; seenOperator = undefined; seenRestoreScroll = undefined; noteScrollTop.mockReset();`.
 
 (b) Add these imports at the top:
 
@@ -2761,6 +2921,7 @@ describe('Inbox - page size, banner, sentinel, scroll (spec 5.1/5.2/5.7/5.8)', (
     state = baseState({ rows: [mkRow()], serverRowCount: 1, restoredScrollTop: 500 });
     // A MemoryRouter's initial entry is a POP navigation.
     renderInbox('/inbox');
+    expect(seenRestoreScroll).toBe(true);
     expect(scroller.scrollTop).toBe(500);
     expect(noteScrollTop).toHaveBeenCalledWith(500);
     cleanup();
@@ -2782,6 +2943,7 @@ describe('Inbox - page size, banner, sentinel, scroll (spec 5.1/5.2/5.7/5.8)', (
       </MemoryRouter>,
     );
     expect(screen.getByRole('heading', { name: 'Inbox' })).toBeInTheDocument();
+    expect(seenRestoreScroll).toBe(false);
     expect(scroller.scrollTop).toBe(0);
     expect(noteScrollTop).toHaveBeenCalledWith(0);
   });
@@ -2789,7 +2951,41 @@ describe('Inbox - page size, banner, sentinel, scroll (spec 5.1/5.2/5.7/5.8)', (
 ```
 
 Add `Routes, Route` to the `react-router-dom` import and `cleanup` to the
-`@testing-library/react` import.
+`@testing-library/react` import. The `document.scrollingElement` read in
+this test is the jsdom fallback the page uses (jsdom has no
+`scrollingElement`, so the page falls back to `document.documentElement`;
+assign through `document.scrollingElement ?? document.documentElement` in
+the test as well).
+
+(d) Create `dashboard/src/routes/inbox/Inbox.styles.test.ts` (the CSS-source
+pattern of `app/AppFrame.styles.test.ts`): jsdom applies no CSS, so the
+anchoring opt-out is pinned at the source and proven in the browser by the
+Playwright spec's test 6.
+
+```ts
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+
+const testDir = dirname(fileURLToPath(import.meta.url));
+const css = readFileSync(join(testDir, 'Inbox.module.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+function bodyOf(selector: string): string {
+  const match = css.match(new RegExp(`(?:^|\\n)\\${selector}\\s*\\{([^}]*)\\}`));
+  expect(match, `missing CSS rule for ${selector}`).not.toBeNull();
+  return match![1]!;
+}
+
+describe('Inbox.module.css', () => {
+  it('the page root opts out of scroll anchoring (spec 5.2)', () => {
+    expect(bodyOf('.page')).toMatch(/overflow-anchor:\s*none/);
+  });
+  it('the sentinel has a box to observe', () => {
+    expect(bodyOf('.sentinel')).toMatch(/height:\s*1px/);
+  });
+});
+```
 
 - [ ] **Step 2: Run the page tests to verify they fail**
 
@@ -2841,15 +3037,16 @@ export function limitFromParam(raw: string | null): number {
 }
 
 /** The nearest ancestor that scrolls vertically, else the document's
- *  scrolling element (jsdom, or a page that scrolls the window). */
-function scrollParentOf(el: Element | null): Element | null {
+ *  scrolling element (a page that scrolls the window), else the root element
+ *  (jsdom has no `scrollingElement`; it still lets scrollTop be assigned). */
+function scrollParentOf(el: Element | null): Element {
   let cur = el?.parentElement ?? null;
   while (cur !== null) {
     const overflowY = getComputedStyle(cur).overflowY;
     if (overflowY === 'auto' || overflowY === 'scroll') return cur;
     cur = cur.parentElement;
   }
-  return document.scrollingElement;
+  return document.scrollingElement ?? document.documentElement;
 }
 
 export function Inbox(): React.JSX.Element {
@@ -2858,7 +3055,9 @@ export function Inbox(): React.JSX.Element {
   const limit = limitFromParam(params.get('limit'));
   const operatorId = useOptionalAuth()?.me?.userId ?? 'anon';
   const navigationType = useNavigationType();
-  const inbox = useInbox(filter, limit, operatorId);
+  // A POP arrival (back/forward) applies the restored scroll position; the
+  // hook seeds its scroll ref with it from the first render (spec 5.8).
+  const inbox = useInbox(filter, limit, operatorId, navigationType === 'POP');
 
   // THE EMPTY COPY DEPENDS ON WHETHER THE SERVER PAGE CAME BACK EMPTY WITH MORE
   // BEHIND IT, not on the filter alone (see emptyMoreCopy / emptyClearedCopy).
@@ -3115,22 +3314,23 @@ and append:
 - [ ] **Step 5: Run the page tests, the whole dashboard suite and typecheck**
 
 ```
-npx vitest run src/routes/inbox/Inbox.test.tsx --root dashboard
+npx vitest run src/routes/inbox/Inbox.test.tsx src/routes/inbox/Inbox.styles.test.ts --root dashboard
 npm run test -w @housingchoice/dashboard
 npm run typecheck
 ```
 
-Expected: PASS (36 existing + 16 new in `Inbox.test.tsx`), then exit 0, exit 0.
+Expected: PASS (36 existing + 16 new in `Inbox.test.tsx`, 2 in
+`Inbox.styles.test.ts`), then exit 0, exit 0.
 
 - [ ] **Step 6: Commit**
 
 Read bare `git status`, confirm no `MERGE_HEAD`, then:
 
 ```
-git add dashboard/src/routes/inbox/Inbox.tsx dashboard/src/routes/inbox/Inbox.module.css dashboard/src/routes/inbox/Inbox.test.tsx
+git add dashboard/src/routes/inbox/Inbox.tsx dashboard/src/routes/inbox/Inbox.module.css dashboard/src/routes/inbox/Inbox.test.tsx dashboard/src/routes/inbox/Inbox.styles.test.ts
 git commit -m "feat(inbox): page-size param, auto-load sentinel, refresh banner, scroll restore
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ### Task 8 (separable): Server prefetch on the `filter=all` pager
@@ -3162,6 +3362,10 @@ In `app/test/inboxFeed.test.ts`, add to `interface Seed`:
   /** Make `contactsRepo.findByPhone` throw for ONE phone (the prefetch
    *  equivalence fixture: the sequential path skips the email lookup on it). */
   findByPhoneError?: { phone: string; error: Error };
+  /** Make every `messagesRepo.listByConversation` read take a macrotask, so a
+   *  concurrency bound can be asserted as a property of the code rather than
+   *  of microtask ordering (the stop-flag test). */
+  slowReads?: boolean;
 ```
 
 and in `makeDeps`'s `contactsRepo.findByPhone`, before the return:
@@ -3170,6 +3374,12 @@ and in `makeDeps`'s `contactsRepo.findByPhone`, before the return:
         if (seed.findByPhoneError !== undefined && seed.findByPhoneError.phone === phone) {
           throw seed.findByPhoneError.error;
         }
+```
+
+and in `makeDeps`'s `messagesRepo.listByConversation`, as its first line:
+
+```ts
+        if (seed.slowReads === true) await new Promise((r) => setTimeout(r, 1));
 ```
 
 Also let `makeDeps` pass the prefetch switch through: change its
@@ -3211,8 +3421,33 @@ describe('aggregateInbox - prefetch equivalence (spec 5.10)', () => {
   }
   /** Multi-number contacts, a relay group, an unknown number, a soft-deleted
    *  resurfacing contact, and a phone whose lookup throws. */
+  // The split-proof fixture, repeated here rather than referenced: the
+  // file's `splitSeed()` is declared inside another describe block and is not
+  // in scope at module level.
+  function mixedBase(): Seed {
+    return {
+      contacts: [
+        { contactId: 'c-1', type: 'tenant', phone: '+15550000001', phones: [
+          { phone: '+15550000001', primary: true },
+          { phone: '+15550000011', primary: false },
+        ] },
+        { contactId: 'c-2', type: 'tenant', phone: '+15550000002' },
+        { contactId: 'c-3', type: 'tenant', phone: '+15550000003' },
+        { contactId: 'c-4', type: 'tenant', phone: '+15550000004' },
+        { contactId: 'c-5', type: 'tenant', phone: '+15550000005' },
+      ],
+      conversations: [
+        conv({ conversationId: 'conv-1-new', participant_phone: '+15550000001', last_activity_at: '2026-06-10T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-2', participant_phone: '+15550000002', last_activity_at: '2026-06-09T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-3', participant_phone: '+15550000003', last_activity_at: '2026-06-08T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-4', participant_phone: '+15550000004', last_activity_at: '2026-06-07T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-5', participant_phone: '+15550000005', last_activity_at: '2026-06-06T10:00:00.000Z' }),
+        conv({ conversationId: 'conv-1-old', participant_phone: '+15550000011', last_activity_at: '2026-06-03T10:00:00.000Z' }),
+      ],
+    };
+  }
   function mixedSeed(): Seed {
-    const base = splitSeed();
+    const base = mixedBase();
     return {
       ...base,
       contacts: [
@@ -3276,6 +3511,10 @@ describe('aggregateInbox - prefetch equivalence (spec 5.10)', () => {
     const unknownRow = r.off.rows.find((row) => row.phone === '+15550000098');
     expect(unknownRow?.kind).toBe('unknown');
     expect(r.on.rows).toEqual(r.off.rows);
+    // The degraded fallback is memoized: the throwing phone is looked up ONCE
+    // (by the prefetch), and the loop's own lookup is a cache hit rather than
+    // a second throw. Call counts therefore match the sequential path exactly.
+    expect(r.onCalls.findByPhone).toBe(r.offCalls.findByPhone);
   });
 
   it('the stop flag ends scheduling when the page fills: reads stay near the page size, not the chunk', async () => {
@@ -3287,11 +3526,17 @@ describe('aggregateInbox - prefetch equivalence (spec 5.10)', () => {
       conversations.push(conv({ conversationId: `conv-${i}`, participant_phone: phone, last_activity_at: `2026-06-01T10:${String(59 - i).padStart(2, '0')}:00.000Z` }));
     }
     const calls = emptyCallCounts();
-    await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations }, calls, undefined, { inboxPrefetch: true }));
-    // The loop consumed ONE conversation. At most HYDRATE_CONCURRENCY chains
-    // were in flight when it stopped scheduling, so the latest-message reads
-    // are bounded by 1 + 8, not by the 25-conversation chunk.
+    // slowReads makes every latest-message read take a macrotask, so the eight
+    // prefetch workers cannot race through the whole chunk on microtasks
+    // before the loop's first row lands: the bound below is then a property
+    // of the code (one row consumed + at most HYDRATE_CONCURRENCY chains in
+    // flight when `stop` is set), not of promise timing.
+    await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations, slowReads: true }, calls, undefined, { inboxPrefetch: true }));
     expect(calls.listByConversation).toBeLessThanOrEqual(9);
+    // And the sequential arm reads exactly one.
+    const sequential = emptyCallCounts();
+    await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations, slowReads: true }, sequential, undefined, { inboxPrefetch: false }));
+    expect(sequential.listByConversation).toBe(1);
   });
 });
 ```
@@ -3307,12 +3552,18 @@ npx vitest run test/inboxFeed.test.ts -t "prefetch equivalence"
 cd ..
 ```
 
-Expected: the equivalence tests PASS trivially (no prefetch exists yet, both
-arms are sequential) except the stop-flag test, which FAILS only once
-prefetch exists; and TypeScript complains about `inboxPrefetch` in
-`routerOpts`. That is the expected red: the switch is not defined. (Run from
-the `app` directory because the app suite needs DynamoDB Local only for the
-integration files; `inboxFeed.test.ts` is in-memory and runs without it.)
+Expected: RED for one honest reason only - `inboxPrefetch` is not a member of
+`InboxRouterDeps`, so the file fails to type-check under vitest's esbuild
+strip? No: esbuild strips types, so the run itself proceeds and the
+equivalence tests PASS TRIVIALLY (both arms are sequential until Step 5).
+The red that matters is `npm run typecheck`, which fails on the unknown
+`inboxPrefetch` key, and the stop-flag test's SECOND assertion
+(`sequential.listByConversation).toBe(1)`) passes while its first is vacuous.
+Record that the equivalence tests are a REGRESSION NET, green before and
+after by design, and that the stop-flag bound only becomes meaningful after
+Step 5. (The app test setup requires DynamoDB Local to be reachable even for
+in-memory files: run `npm run db:start` first, from the repo root, or the
+setup throws.)
 
 - [ ] **Step 4: Add the switch and the promise caches**
 
@@ -3562,7 +3813,7 @@ Read bare `git status`, confirm no `MERGE_HEAD`, then:
 git add app/src/routes/inbox.ts app/test/inboxFeed.test.ts
 git commit -m "perf(inbox): prefetch per-row reads on the all-tab pager through promise caches
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ### Task 9: The Playwright spec
@@ -3577,6 +3828,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   `expectNoHorizontalOverflow` (`e2e/support/viewport.js`); the dashboard
   built by Tasks 1-7 (the `data-autoload-sentinel` attribute, the
   `Retry refresh` button, the `Conversations` list, `<time>` elements).
+- A fake-Twilio party is NOT a contact. `registerParty` registers a persona
+  on the FAKE only; the app receives an inbound from a number it has never
+  seen and renders an UNKNOWN row named by the formatted phone
+  ("(555) 123-4567") with a Needs triage chip. Rows are located by that
+  formatted phone, never by the persona label.
 
 - [ ] **Step 1: Write the spec**
 
@@ -3590,19 +3846,24 @@ Create `e2e/tests/dashboard-next/inbox-rows-timestamps.spec.ts`:
 //
 // Hermetic e2e:session only. Every test RESEEDS first (and after, so the unread
 // rows it mints never poison a later spec's "nothing unread" baseline) and mints
-// its parties with run-unique numbers. Under filter=all at ?limit=N the lean
-// world renders N contact rows PLUS the seeded group text and the connecting
-// relay group; the counts below say "+ 2" for those.
+// its parties with run-unique numbers. A minted party is an UNKNOWN row named
+// by its formatted phone (the fake registers a persona; the app has no contact
+// for it), so rows are found by phone, never by label. Under filter=all at
+// ?limit=N the lean world renders N contact rows PLUS the seeded group text and
+// the connecting relay group; the counts below say "+ 2" for those.
 //
 // Request-log assertions count FINISHED inbox page requests (StrictMode issues
 // and aborts one extra head read on every mount; an aborted request never
 // reaches `requestfinished`). networkidle is never awaited: the SSE stream is
-// an open request, so it would never settle.
+// an open request, so it would never settle. Counts of head reads are never
+// asserted exactly: any later live event adds one; the ORDER (a head read
+// first, cursor requests only after it) is the claim.
 //
 // The auto-load DISARM on an empty page with a cursor (the Unknown tab's budget
 // exit) is proven in the unit tests only; the lean world cannot cheaply produce
-// that server state.
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+// that server state. A long name with a placement tag cannot be minted through
+// the fake; the 768px band with such a row is checked in the live self-QA.
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { reseed } from '../../fixtures/reseed.js';
 import { registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
 import { expectTodayReady } from '../../support/today.js';
@@ -3619,18 +3880,23 @@ async function devLogin(page: Page): Promise<void> {
   await expectTodayReady(page);
 }
 
-/** Mint `n` fresh tenants, each with one inbound text, newest last. Returns
- *  their labels in send order. */
+/** "+15551234567" -> "(555) 123-4567", the app's display of an unknown number. */
+function displayOf(e164: string): string {
+  const d = e164.replace(/\D/g, '').slice(-10);
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+/** Mint `n` fresh parties, each with one inbound text, newest last. Returns
+ *  their E.164 numbers in send order. */
 async function seedParties(request: APIRequestContext, n: number, stamp: string): Promise<string[]> {
-  const labels: string[] = [];
+  const numbers: string[] = [];
   for (let i = 0; i < n; i++) {
     const number = `+1555${stamp.slice(-4)}${String(i).padStart(3, '0')}`;
-    const label = `Party ${stamp} ${String(i).padStart(2, '0')}`;
-    await registerParty(request, { label, role: 'tenant', number });
-    await sendAsParty(request, { from: number, body: `hello from ${label}` });
-    labels.push(label);
+    await registerParty(request, { label: `Party ${stamp} ${i}`, role: 'tenant', number });
+    await sendAsParty(request, { from: number, body: `hello from party ${i}` });
+    numbers.push(number);
   }
-  return labels;
+  return numbers;
 }
 
 interface SeenInboxRequest {
@@ -3650,9 +3916,20 @@ function trackInboxRequests(page: Page): SeenInboxRequest[] {
   return seen;
 }
 
-const rows = (page: Page) => page.getByRole('list', { name: 'Conversations' }).getByRole('listitem');
-const loadMore = (page: Page) => page.getByRole('button', { name: 'Load more' });
-const scroller = (page: Page) => page.locator('main');
+/** After `mark`: the first finished request is a head read, and no cursor
+ *  request precedes a head read. */
+function expectHeadFirst(seen: SeenInboxRequest[], mark: number, where: string): void {
+  const after = seen.slice(mark);
+  expect(after.length, `${where}: requests after the mark`).toBeGreaterThan(0);
+  expect(after[0]?.cursor, `${where}: first request is a head read`).toBe(false);
+  const firstHead = after.findIndex((r) => !r.cursor);
+  expect(after.slice(0, firstHead).some((r) => r.cursor), `${where}: no cursor request before a head read`).toBe(false);
+}
+
+const rows = (page: Page): Locator => page.getByRole('list', { name: 'Conversations' }).getByRole('listitem');
+const rowFor = (page: Page, number: string): Locator => page.getByRole('link', { name: displayOf(number) });
+const loadMore = (page: Page): Locator => page.getByRole('button', { name: 'Load more' });
+const scroller = (page: Page): Locator => page.locator('main');
 
 async function scrollToBottom(page: Page): Promise<void> {
   await scroller(page).evaluate((el) => {
@@ -3671,17 +3948,17 @@ test.describe('inbox rows and timestamps', () => {
 
   test('1. every row shows its last-activity time', async ({ page, request }) => {
     const stamp = `${Date.now()}`.slice(-6);
-    const [label] = await seedParties(request, 1, stamp);
+    const [number] = await seedParties(request, 1, stamp);
     await page.goto(`${NEXT}/inbox`);
-    const fresh = page.getByRole('link', { name: new RegExp(label!) });
+    const fresh = rowFor(page, number!);
     await expect(fresh).toBeVisible({ timeout: 15_000 });
 
     // The row's <time> carries the exact instant the API reports and a
     // clock-time label (the inbound is "today").
     const res = await page.request.get(`${APP}/api/inbox?limit=100`, { headers: apiHeaders });
     expect(res.ok()).toBe(true);
-    const body = (await res.json()) as { rows: { name: string; lastActivityAt: string }[] };
-    const apiRow = body.rows.find((r) => r.name === label);
+    const body = (await res.json()) as { rows: { phone?: string; lastActivityAt: string }[] };
+    const apiRow = body.rows.find((r) => r.phone === number);
     expect(apiRow).toBeDefined();
     const time = fresh.locator('time');
     await expect(time).toHaveAttribute('datetime', apiRow!.lastActivityAt);
@@ -3703,48 +3980,39 @@ test.describe('inbox rows and timestamps', () => {
     const seen = trackInboxRequests(page);
     await page.goto(`${NEXT}/inbox?limit=2`);
 
-    // Page one: the two newest contacts + the two multi-party rows.
-    await expect(rows(page)).toHaveCount(4, { timeout: 15_000 });
-    await expect(loadMore(page)).toBeVisible();
-
-    // Scroll to the bottom: at limit=2 every page is short in pixels, so the
-    // epoch rule chains to the end BY DESIGN (spec 5.2): 3 parties + Tasha + 2.
-    await scrollToBottom(page);
+    // At limit=2 the four-row page one leaves the sentinel in view, so
+    // auto-load chains to the end as soon as the page loads (spec 5.2, by
+    // design at a tiny limit): 3 parties + Tasha + 2 multi-party rows.
     await expect(rows(page)).toHaveCount(6, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
+    expect(seen.filter((r) => r.cursor).length).toBeGreaterThan(0);
 
     // A live update: a fourth party texts. The list is never detached, the
     // head read replaces page one, and auto-load rebuilds the pages from the
     // fresh chain.
     const listHandle = await page.getByRole('list', { name: 'Conversations' }).elementHandle();
     const mark = seen.length;
-    const [label4] = await seedParties(request, 1, `${stamp.slice(1)}4`);
-    await expect(page.getByRole('link', { name: new RegExp(label4!) })).toBeVisible({ timeout: 15_000 });
+    const [number4] = await seedParties(request, 1, `${stamp.slice(1)}4`);
+    await expect(rowFor(page, number4!)).toBeVisible({ timeout: 15_000 });
     await expect(rows(page)).toHaveCount(7, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
     expect(await listHandle!.evaluate((el) => el.isConnected)).toBe(true);
-
-    // ORDER: exactly one head read after the inbound, and every cursor request
-    // after it (none between the inbound and the head read).
-    const after = seen.slice(mark);
-    expect(after.filter((r) => !r.cursor)).toHaveLength(1);
-    expect(after[0]?.cursor).toBe(false);
-    expect(after.slice(1).every((r) => r.cursor)).toBe(true);
+    expectHeadFirst(seen, mark, 'after the inbound at limit=2');
 
     // At the DEFAULT limit a page one holds everything: a further inbound adds
     // its row at the top, removes nothing, and issues no cursor request.
     await page.goto(`${NEXT}/inbox`);
     await expect(rows(page)).toHaveCount(7, { timeout: 15_000 });
     const mark2 = seen.length;
-    const [label5] = await seedParties(request, 1, `${stamp.slice(1)}5`);
-    await expect(page.getByRole('link', { name: new RegExp(label5!) })).toBeVisible({ timeout: 15_000 });
+    const [number5] = await seedParties(request, 1, `${stamp.slice(1)}5`);
+    await expect(rowFor(page, number5!)).toBeVisible({ timeout: 15_000 });
     await expect(rows(page)).toHaveCount(8);
-    await expect(rows(page).first().getByRole('link')).toHaveText(new RegExp(label5!));
+    await expect(rows(page).first().getByRole('link')).toHaveText(new RegExp(displayOf(number5!).replace(/[()]/g, '\\$&')));
     await page.waitForTimeout(1000);
     expect(seen.slice(mark2).filter((r) => r.cursor)).toHaveLength(0);
   });
 
-  test('3. the back button restores the list and the scroll position, then reconciles once', async ({ page, request }) => {
+  test('3. the back button restores the list and the scroll position, then reconciles', async ({ page, request }) => {
     test.slow();
     await page.setViewportSize({ width: 1280, height: 400 });
     const stamp = `${Date.now()}`.slice(-6);
@@ -3768,18 +4036,16 @@ test.describe('inbox rows and timestamps', () => {
     await expect(rows(page)).toHaveCount(9);
     const restored = await scroller(page).evaluate((el) => el.scrollTop);
     expect(Math.abs(restored - saved)).toBeLessThanOrEqual(8);
-    // Exactly one head read followed the return, and no cursor request.
-    await expect.poll(() => seen.slice(mark).filter((r) => !r.cursor).length, { timeout: 10_000 }).toBe(1);
+    // A head read followed the return, and no cursor request did.
+    await expect.poll(() => seen.slice(mark).filter((r) => !r.cursor).length, { timeout: 10_000 }).toBeGreaterThan(0);
     await page.waitForTimeout(800);
     expect(seen.slice(mark).filter((r) => r.cursor)).toHaveLength(0);
     await expect(rows(page)).toHaveCount(9);
 
     // The Option B trade, pinned deliberately: at limit=2 the restore shows all
     // rows instantly, then the head read rebuilds from page one and auto-load
-    // reloads the rest (one head read, THEN cursor requests).
+    // reloads the rest (a head read FIRST, cursor requests only after it).
     await page.goto(`${NEXT}/inbox?limit=2`);
-    await expect(rows(page)).toHaveCount(4, { timeout: 15_000 });
-    await scrollToBottom(page);
     await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
     const mark2 = seen.length;
@@ -3788,24 +4054,17 @@ test.describe('inbox rows and timestamps', () => {
     await page.goBack();
     await page.waitForURL(/\/inbox/);
     await expect(rows(page)).toHaveCount(9);
-    await expect.poll(() => seen.slice(mark2).length, { timeout: 15_000 }).toBeGreaterThan(1);
+    await expect.poll(() => seen.slice(mark2).filter((r) => r.cursor).length, { timeout: 15_000 }).toBeGreaterThan(0);
     await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0, { timeout: 15_000 });
-    const after = seen.slice(mark2);
-    expect(after[0]?.cursor).toBe(false);
-    expect(after.filter((r) => !r.cursor)).toHaveLength(1);
-    expect(after.slice(1).every((r) => r.cursor)).toBe(true);
+    expectHeadFirst(seen, mark2, 'after the return at limit=2');
   });
 
-  test('4. the time fits at phone width, in the tightest one-line band, and ordinary names are not ellipsized wide', async ({ page, request }) => {
+  test('4. the time fits at phone width and in the tightest one-line band; an ordinary name is not ellipsized wide', async ({ page, request }) => {
     const stamp = `${Date.now()}`.slice(-6);
-    const longLabel = `Bartholomew Montgomery-Fitzgerald-Longname ${stamp}`;
-    const longNumber = `+1555${stamp.slice(-4)}999`;
-    await registerParty(request, { label: longLabel, role: 'tenant', number: longNumber });
-    await sendAsParty(request, { from: longNumber, body: 'a long name' });
-    const [plain] = await seedParties(request, 1, stamp);
+    const [number] = await seedParties(request, 1, stamp);
 
-    async function timeInsideRow(link: ReturnType<Page['getByRole']>, where: string): Promise<{ row: { x: number; y: number; width: number; height: number }; time: { x: number; y: number; width: number; height: number } }> {
+    async function timeInsideRow(link: Locator, where: string): Promise<{ row: { x: number; y: number; width: number; height: number }; time: { x: number; y: number; width: number; height: number } }> {
       const li = link.locator('xpath=ancestor::li[1]');
       const row = await li.boundingBox();
       const time = await link.locator('time').boundingBox();
@@ -3819,22 +4078,23 @@ test.describe('inbox rows and timestamps', () => {
 
     await page.setViewportSize(NARROW_360);
     await page.goto(`${NEXT}/inbox`);
-    const longRow = page.getByRole('link', { name: new RegExp(longLabel) });
-    await expect(longRow).toBeVisible({ timeout: 15_000 });
+    const unknownRow = rowFor(page, number!);
+    await expect(unknownRow).toBeVisible({ timeout: 15_000 });
     await expectNoHorizontalOverflow(page, 'inbox at 360');
-    const narrow = await timeInsideRow(longRow, 'narrow');
+    const narrow = await timeInsideRow(unknownRow, 'narrow');
     // Two-line layout: the time sits in the row's top half.
     expect(narrow.time.y + narrow.time.height).toBeLessThanOrEqual(narrow.row.y + narrow.row.height / 2 + 2);
 
-    // The tightest one-line band: sidebar open, content about 480px.
+    // The tightest one-line band: sidebar open, content about 480px. The
+    // unknown row carries the widest chip a lean-world row can (Needs triage).
     await page.setViewportSize({ width: 768, height: 720 });
-    await expect(longRow).toBeVisible();
-    await timeInsideRow(longRow, 'one-line at 768');
+    await expect(unknownRow).toBeVisible();
+    await timeInsideRow(unknownRow, 'one-line at 768');
 
     await page.setViewportSize(WIDE_RESTORE);
-    const plainName = page.getByRole('link', { name: new RegExp(plain!) }).getByText(plain!, { exact: true });
-    await expect(plainName).toBeVisible();
-    expect(await plainName.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    const tashaName = page.getByRole('link', { name: /Tasha Nguyen/ }).getByText('Tasha Nguyen', { exact: true });
+    await expect(tashaName).toBeVisible();
+    expect(await tashaName.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
   });
 
   test('5. a failed background refresh keeps the rows and shows a banner whose Retry clears it', async ({ page, request }) => {
@@ -3846,16 +4106,16 @@ test.describe('inbox rows and timestamps', () => {
     // Fail HEAD reads only (no cursor in the query); leave the badge count alone.
     const failHead = (url: URL): boolean => url.pathname.endsWith('/api/inbox') && !url.searchParams.has('cursor');
     await page.route(failHead, (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }));
-    const [label2] = await seedParties(request, 1, `${stamp.slice(1)}2`);
+    const [number2] = await seedParties(request, 1, `${stamp.slice(1)}2`);
     const banner = page.getByRole('status').filter({ hasText: "Couldn't refresh the inbox." });
     await expect(banner).toBeVisible({ timeout: 15_000 });
     await expect(rows(page)).toHaveCount(4);
-    await expect(page.getByRole('link', { name: new RegExp(label2!) })).toHaveCount(0);
+    await expect(rowFor(page, number2!)).toHaveCount(0);
 
     await page.unroute(failHead);
     await banner.getByRole('button', { name: 'Retry refresh' }).click();
     await expect(banner).toHaveCount(0, { timeout: 15_000 });
-    await expect(page.getByRole('link', { name: new RegExp(label2!) })).toBeVisible();
+    await expect(rowFor(page, number2!)).toBeVisible();
     await expect(rows(page)).toHaveCount(5);
   });
 
@@ -3863,22 +4123,23 @@ test.describe('inbox rows and timestamps', () => {
     test.slow();
     await page.setViewportSize({ width: 1280, height: 400 });
     const stamp = `${Date.now()}`.slice(-6);
-    await seedParties(request, 30, stamp);
+    await seedParties(request, 35, stamp);
     const seen = trackInboxRequests(page);
 
-    // A 12-row page is taller than the viewport plus the 400px margin, so a
-    // committed page pushes the sentinel out of the margin (spec 5.2).
-    await page.goto(`${NEXT}/inbox?limit=12`);
-    await expect(rows(page)).toHaveCount(14, { timeout: 15_000 });
+    // A 15-row page is about 700px, clearly taller than the viewport plus the
+    // 400px margin, so a committed page pushes the sentinel out (spec 5.2).
+    // 35 parties + Tasha = 36 contacts: pages of 15, 15, 6; + 2 multi-party.
+    await page.goto(`${NEXT}/inbox?limit=15`);
+    await expect(rows(page)).toHaveCount(17, { timeout: 15_000 });
     const mark = seen.length;
     await scrollToBottom(page);
-    await expect(rows(page)).toHaveCount(26, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(32, { timeout: 15_000 });
     await page.waitForTimeout(1500);
     expect(seen.slice(mark).filter((r) => r.cursor)).toHaveLength(1);
-    await expect(rows(page)).toHaveCount(26);
+    await expect(rows(page)).toHaveCount(32);
 
     await scrollToBottom(page);
-    await expect(rows(page)).toHaveCount(33, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(38, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
     await page.waitForTimeout(800);
     expect(seen.slice(mark).filter((r) => r.cursor)).toHaveLength(2);
@@ -3886,9 +4147,9 @@ test.describe('inbox rows and timestamps', () => {
 });
 ```
 
-Counts in test 6 assume 30 parties + Tasha = 31 contacts at 12 per page
-(12, 12, 7) plus the 2 multi-party rows: 14, 26, 33. If the measured row
-height makes a 12-row page shorter than 800px (viewport + margin), raise
+Counts in test 6 assume 35 parties + Tasha = 36 contacts at 15 per page
+(15, 15, 6) plus the 2 multi-party rows: 17, 32, 38. If the measured row
+height makes a 15-row page shorter than 800px (viewport + margin), raise
 `limit` and the party count together and recompute the three counts.
 
 - [ ] **Step 2: Run the spec alone in a session lane**
@@ -3906,8 +4167,8 @@ npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/inbox-rows-timestamps.
 ```
 
 Expected: 6 passed. A count mismatch in test 6 is the row-height note above;
-a timing failure in test 2 or 3 is a real ordering defect, not a flake (see
-AGENTS.md: there is no named-flake list).
+an ORDER failure in test 2 or 3 (a cursor request before the head read) is a
+real defect, not a flake (see AGENTS.md: there is no named-flake list).
 
 Then stop the session:
 
@@ -3923,8 +4184,10 @@ Read bare `git status`, confirm no `MERGE_HEAD`, then:
 git add e2e/tests/dashboard-next/inbox-rows-timestamps.spec.ts
 git commit -m "test(e2e): inbox rows, timestamps, auto-load, back-button restore and the refresh banner
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
+
+---
 
 ### Task 10: Issue registry updates
 
@@ -4068,7 +4331,123 @@ it). Read bare `git status`, confirm no `MERGE_HEAD`, then:
 git add docs/issues/inbox-reconcile-failure-blanks-list.md docs/issues/seen-set-max-equals-max-inbox-limit.md docs/issues/contact-timeline-time-format-differs-from-inbox.md docs/issues/inbox-labels-do-not-roll-over-at-midnight.md docs/issues/inbox-unread-page-hydration-sequential.md
 git commit -m "docs(issues): resolve the reconcile-failure decision; file the inbox follow-ups
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
+```
+
+---
+
+### Task 10b: The perf classifier and the profiler plan follow the page size
+
+**Files:**
+- Modify: `e2e/performance/collect.ts` (the inbox request classifier's `limit` arms)
+- Modify: `e2e/performance/collect.test.ts` (the pinned tuples)
+- Modify: `app/src/lib/inboxDiagnostics.ts` (`createInboxProfilePlan`)
+- Modify: `app/test/inboxDiagnostics.test.ts` (the pinned plan)
+
+**Interfaces:**
+- Consumes: the dashboard's `DEFAULT_PAGE_LIMIT = 100` (Task 5). Neither file
+  imports it (one is the e2e workspace, one is the app); both carry the
+  literal with a comment naming the constant.
+
+- [ ] **Step 1: Write the failing classifier test change**
+
+In `e2e/performance/collect.test.ts`, in the block that pins
+`classifyInboxRequest`, change every `limit=30` page tuple to `limit=100` and
+swap the retired-shape expectation: the `filter=unread&limit=100` case now
+classifies as `'inbox_page_unread'`, and a `filter=all&limit=30` read is the
+contract mismatch (`null`). Concretely, replace the existing lines:
+
+```ts
+    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&limit=100', {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBeNull();
+```
+
+with:
+
+```ts
+    // The dashboard pages at 100 since feat/inbox-rows-timestamps (2026-09-25);
+    // a 30-row read is the retired shape and a contract mismatch now.
+    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&limit=100', {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBe('inbox_page_unread');
+    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=all&limit=30', {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBeNull();
+```
+
+and update every other `limit=30` page-read tuple in that block to
+`limit=100` (search the file for `limit=30`; the `filter=unread&filter=all&limit=30`
+double-filter case stays as it is, since it is refused by arity, not by
+limit).
+
+- [ ] **Step 2: Run the collector tests to verify they fail**
+
+```
+npx vitest run e2e/performance/collect.test.ts
+```
+
+(The e2e workspace's own vitest picks up `e2e/**/*.test.ts`; if the root
+`npm test` is the only entry, run `npm run test -w @housingchoice/e2e`.)
+Expected: FAIL on the changed expectations.
+
+- [ ] **Step 3: Move the classifier to 100**
+
+In `e2e/performance/collect.ts`, change the four arms
+
+```ts
+    if (filter === 'all' && limit === '30') return { requestClass: 'inbox_page_all', endpointContractMismatch: false };
+    if (filter === 'unread' && limit === '30') return { requestClass: 'inbox_page_unread', endpointContractMismatch: false };
+    if (filter === 'unknown' && limit === '30') return { requestClass: 'inbox_page_unknown', endpointContractMismatch: false };
+    if (filter === 'groups' && limit === '30') return { requestClass: 'inbox_page_groups', endpointContractMismatch: false };
+    // No `filter=unread&limit=100` arm any more: that was the OLD badge shape.
+    // A page read at limit 100 now falls through to the contract mismatch below,
+    // which is what it is - the dashboard only ever asks this endpoint for 30.
+```
+
+to
+
+```ts
+    // The dashboard pages at DEFAULT_PAGE_LIMIT = 100
+    // (dashboard/src/routes/inbox/useInbox.ts) since 2026-09-25. Any other
+    // size is a contract mismatch: a 30-row read is the retired shape, and
+    // the badge is classified by path alone above this.
+    if (filter === 'all' && limit === '100') return { requestClass: 'inbox_page_all', endpointContractMismatch: false };
+    if (filter === 'unread' && limit === '100') return { requestClass: 'inbox_page_unread', endpointContractMismatch: false };
+    if (filter === 'unknown' && limit === '100') return { requestClass: 'inbox_page_unknown', endpointContractMismatch: false };
+    if (filter === 'groups' && limit === '100') return { requestClass: 'inbox_page_groups', endpointContractMismatch: false };
+```
+
+- [ ] **Step 4: Run the collector tests to verify they pass**
+
+Same command as Step 2. Expected: PASS.
+
+- [ ] **Step 5: The profiler plan**
+
+In `app/src/lib/inboxDiagnostics.ts`, change the four `limit: 30` entries in
+`createInboxProfilePlan` to `limit: 100` and the docblock sentence
+"Dashboard pages request 30 rows" to "Dashboard pages request 100 rows
+(DEFAULT_PAGE_LIMIT in dashboard/src/routes/inbox/useInbox.ts)". In
+`app/test/inboxDiagnostics.test.ts`, change the four pinned `limit: 30`
+entries to `limit: 100`. Run:
+
+```
+cd app
+npx vitest run test/inboxDiagnostics.test.ts
+cd ..
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+Read bare `git status`, confirm no `MERGE_HEAD`, then:
+
+```
+git add e2e/performance/collect.ts e2e/performance/collect.test.ts app/src/lib/inboxDiagnostics.ts app/test/inboxDiagnostics.test.ts
+git commit -m "chore(perf): the inbox request classifier and profiler plan follow the 100-row page
+
+Co-Authored-By: <authoring model> <noreply@anthropic.com>"
 ```
 
 ---
@@ -4114,9 +4493,13 @@ npm run perf:pages
 ```
 
 Expected: the hermetic run reports its inbox self-QA invariants satisfied
-(one initial page request per inbox sample, no `cursor` request). A
-violation on a warm inbox sample means a harness flow visited `/inbox`
-twice: report it rather than editing the harness.
+(one initial page request per inbox sample, no `cursor` request; the
+classifier accepts `limit=100` after Task 10b). A violation on a WARM inbox
+sample means that flow reached `/inbox` with a snapshot in the store, so
+readiness resolved on the restored list before the head read finished (spec
+5.11): extend the harness's inbox readiness for that flow to also await the
+finished head read, re-run, and record the change in the handback. A
+violation on a COLD sample means the dashboard is wrong: stop and diagnose.
 
 - [ ] **Step 4: Live self-QA in a session lane**
 
@@ -4175,9 +4558,16 @@ listed at the top.
 
 **Known judgment calls for the plan reviewers.** (a) Task 7 resolves the
 scroll container by walking `getComputedStyle().overflowY`, falling back to
-`document.scrollingElement`; jsdom reports no computed overflow, so the unit
-test asserts against the document's scrolling element. (b) Task 8's
-equivalence fixtures reuse `splitSeed()`; a builder must confirm
-`ContactItem` accepts `deleted_at` and `email` as written. (c) Task 9 test 6's
-counts assume a 12-row page taller than 800px at the desktop row height.
+`document.scrollingElement ?? document.documentElement`; jsdom reports no
+computed overflow and has no `scrollingElement`, so the unit test asserts
+against the root element. (b) Task 8's equivalence fixture is inlined; a
+builder must confirm `ContactItem` accepts `deleted_at` and `email` as
+written. (c) Task 9 test 6's counts assume a 15-row page taller than 800px at
+the desktop row height. (d) The auto-load hook fires only from an observer
+REPORT; an epoch change re-observes (spec 5.2 as revised in DRAFT 8.1), so a
+page commit can never fire from the stale intersection state the effect
+holds at that moment.
+
+**Round-1 review (plan): 36 findings across two reviewers, adjudicated in
+`docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/plan-r1-adjudications.md`.**
 

@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8 - Option B ("page one persists"); adversarial review closed (round 5 precision-only); APPROVED for planning per Cameron's gate ruling of 2026-09-25
+Status: DRAFT 8.1 - precision edits from plan review round 1 (auto-load re-observe, restoreScroll seed, perf classifier page size, e2e row naming); approved for planning per Cameron's gate ruling of 2026-09-25
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -240,8 +240,10 @@ as today's 30-row page. That server slice is separable (section 5.10).
   the unknown branch, cursors, or limits.
 - `e2e/tests/dashboard-next/`: a new `inbox-rows-timestamps.spec.ts`; existing
   inbox specs are re-run unchanged and must stay green.
-- `e2e/performance/`: enumerated as a reader (5.11); no change expected, the
-  hermetic `npm run perf:pages` self-QA is a mission gate.
+- `e2e/performance/collect.ts` and `collect.test.ts`: the inbox request
+  classifier's page size moves from 30 to 100 (5.11); the hermetic
+  `npm run perf:pages` self-QA is a mission gate. `app/src/lib/inboxDiagnostics.ts`
+  and its test: the profiler plan's page size moves to 100.
 - `docs/issues/`: resolve `inbox-reconcile-failure-blanks-list`; update the
   reachability paragraph of `seen-set-max-equals-max-inbox-limit`; file the
   follow-ups in section 9, including the deferred design.
@@ -318,18 +320,24 @@ a mark-read/unread commit, the reset, or a failure); `Inbox.tsx` owns the DOM
     thing: `setIntersecting(entry.isIntersecting)`. No ref is written during
     render and no handler is captured in the callback, so the repo's
     `react-hooks/refs` rule is satisfied and there is no stale closure.
-  - fires from an EFFECT over `[intersecting, enabled, epoch]`: when
-    `enabled && intersecting` and EITHER `intersecting` just became true OR
-    `epoch` differs from the epoch at the last fire, it calls `onLoad()` once
-    and records `epoch` as the last-fired epoch. `onLoad` is the current
-    `loadMore` by construction (effects see current props).
+  - the callback records a REPORT: `{ intersecting, seq }` with `seq` counting
+    up on every callback. The observer reports on `observe()` (its initial
+    state) and on every threshold crossing.
+  - an `epoch` change RE-OBSERVES the sentinel (`unobserve` then `observe`),
+    which makes the observer report the sentinel's CURRENT geometry after the
+    DOM grew. Nothing fires from the epoch change itself: the state the
+    effect holds at that moment is stale (the DOM has grown but the observer
+    has not yet reported), and firing on it would load two pages per scroll.
+  - fires from an EFFECT over `[report, enabled]`: when `enabled &&
+    report.intersecting` and `report.seq` differs from the seq at the last
+    fire, it calls `onLoad()` once and records the seq. `onLoad` is the
+    current `loadMore` by construction (effects see current props).
   - never fires otherwise. In particular a change of `enabled` alone (for
     example `loadingMore` flipping back to false after a FAILED page, or
-    `hasMore` appearing after a head read while the sentinel was already
-    intersecting) does not fire, because neither `intersecting` transitioned
-    nor `epoch` changed. A head read that installs a cursor also bumps the
-    epoch, so the second of those cases fires through the epoch arm once,
-    which is the wanted single load.
+    `hasMore` appearing without a commit) does not fire, because no new
+    report arrived. A head read that installs a cursor bumps the epoch, so
+    that case re-observes and fires through the report once if the sentinel
+    is in view, which is the wanted single load.
   - `intersecting` is reset to `false` whenever the sentinel unmounts
     (`hasMore` went false), from the effect that owns the observer; when the
     sentinel returns, the new observer's first callback sets it again.
@@ -666,10 +674,12 @@ snapshot: {
   replacing route's DOM commits) and writes the list from `listRef` with the
   `pendingRef` patches folded in, and `scrollTop` from `scrollTopRef`, which a
   passive `scroll` listener on the container keeps current. `scrollTopRef` is
-  SEEDED at mount with the restored snapshot's value ONLY when that value is
-  about to be applied (a `POP` arrival, below), and with 0 otherwise, so a
-  StrictMode simulated unmount or an exit before any scroll event saves the
-  position this visit actually showed. Reading `scrollTop` from the container
+  SEEDED inside the hook at its lazy initialization with the restored
+  snapshot's value ONLY when the page says that value is about to be applied
+  (a fourth hook argument, `restoreScroll`, that `Inbox.tsx` passes as
+  `useNavigationType() === 'POP'`), and with 0 otherwise, so a StrictMode
+  simulated unmount or an exit before any scroll event saves the position
+  this visit actually showed, from the first render on. Reading `scrollTop` from the container
   at passive-cleanup time reads 0 (section 2), so that is never done.
 - RESTORE ON MOUNT. `useInbox` initializes its state lazily from the store:
   if `load(key)` returns a snapshot, the FIRST render already has the list
@@ -779,7 +789,13 @@ the reads it awaits come from:
   not WARN counts.
 - The caches are closures shared with the unread branch today; converting
   them to promise caches changes nothing for that branch's callers (they
-  `await` either way).
+  `await` either way), and the unread branch's lagged-retry `delete` on the
+  conversation-set cache keeps its meaning. The NEW raw-message cache is
+  shared too: within one request a conversation's latest message does not
+  change, so a second read of the same conversation on the unread path now
+  returns the memoized row instead of re-reading it - the same value, one
+  fewer read. That is the whole of the unread branch's exposure to this
+  section, and it is stated so "not touched" is read as "not restructured".
 - A route test asserts the page for a fixture with multi-number contacts, a
   relay row, an unknown row, a soft-deleted resurfacing row, a contact whose
   conversation-set lookup fails (the `?? conv` fallback path), AND a
@@ -803,16 +819,28 @@ the reads it awaits come from:
 `e2e/performance/` is a reader of the inbox's request pattern (section 2).
 The design keeps its invariants without changing the harness:
 
+- THE REQUEST CLASSIFIER HARD-CODES THE PAGE SIZE. `e2e/performance/collect.ts`
+  classifies an inbox page read as `inbox_page_<filter>` only when its query
+  is exactly `filter=<f>&limit=30`, and treats `limit=100` as an endpoint
+  contract mismatch (pinned in `collect.test.ts`). The dashboard now requests
+  100, so the classifier's `limit` arm and that test move to `100` in this
+  mission (a one-value change in the harness's contract, not its
+  measurement). The manual profiler's plan (`app/src/lib/inboxDiagnostics.ts`,
+  `createInboxProfilePlan`) and its test move from 30-row to 100-row pages
+  for the same reason: they exist to profile what the dashboard asks for.
 - Cold samples navigate by `page.goto`, which resets module state, so the
   store is empty and exactly one initial page request is issued as today.
 - Warm samples `goto` a SOURCE page and then click one link or tab to the
-  measured target, so `/inbox` as a warm target is reached once per page
-  session and the store is empty on arrival: the head read is the initial page
-  request, as today. A snapshot would exist only if a flow visited `/inbox`
-  twice in one page session, which no harness flow does. If one is ever added,
-  readiness would resolve on the restored list before the head read finishes
-  and the one-request count would read 0; the harness's inbox readiness would
-  then need to await the head read for that flow.
+  measured target. A warm inbox sample reached by a link within a page
+  session that already visited `/inbox` restores from the store, so its
+  readiness (list visible) can resolve BEFORE the head read finishes and the
+  sample's one-request count reads 0. Whether any current warm flow does
+  that is UNVERIFIED from the harness's flow definitions; the hermetic
+  `npm run perf:pages` run in the gates is the arbiter. If it reports a
+  count violation on a warm inbox sample, the harness's inbox readiness for
+  that flow is extended to await the finished head read (a harness-side
+  change in this mission); a violation on a cold sample means the dashboard
+  is wrong.
 - Auto-load fires only when the sentinel is within 400px of the viewport
   bottom; the perf seed's `filter=all` page is 100 rows tall, so it does not
   fire without a scroll, and the harness never scrolls. Its Unread/Unknown
@@ -925,7 +953,11 @@ Invariants the plan must carry as explicit tasks or watch items:
   store-backed mount under `POP` and explicitly to 0 under `PUSH` (a
   `MemoryRouter` with a pushed history entry versus a popped one, the
   container pre-scrolled to a non-zero offset); the groups link and
-  `selectFilter` preserve `limit`; the page root has `overflow-anchor: none`.
+  `selectFilter` preserve `limit`.
+- `Inbox.styles.test.ts`: reads `Inbox.module.css` as source (the pattern in
+  `app/AppFrame.styles.test.ts`) and asserts the `.page` rule carries
+  `overflow-anchor: none`; jsdom applies no CSS, so the rule is pinned at the
+  source and proven in the browser by 7.3 test 6.
 - `inboxListStore.test.ts`: save/load/clear; keys differ by operator id.
 - Every inbox test file that mounts the hook or the page calls the store's
   `clear()` in `beforeEach`: the store is module-level state and would
@@ -960,53 +992,61 @@ head read on every mount).
    June rows (Tasha, the group text) have text matching
    `^[A-Z][a-z]{2} \d{1,2}(, \d{4})?$` (year-agnostic on purpose so the spec
    survives January).
+   A fake-Twilio party is NOT a contact: an inbound from a number the app has
+   never seen renders as an UNKNOWN row named by its formatted phone
+   ("(555) 123-4567", with a Needs triage chip). Rows minted this way are
+   located by that formatted phone, never by the persona label.
 2. Paging and the page-one refresh. Seed three fresh parties; open
-   `/inbox?limit=2`; assert the two newest contact rows plus the two
-   multi-party rows render and Load more is visible; scroll the container to
-   the bottom; assert the remaining contact rows append (at `limit=2` every
-   page is short in pixels, so the epoch rule chains to the end here BY
-   DESIGN) and Load more disappears; then a new inbound for a fourth fresh
-   party arrives: the list is never detached (take an `ElementHandle` of the
-   list before the inbound and assert `isConnected` after) and no spinner
-   shows; the refresh replaces the list with page one (the new row at the
-   top) and, because the shrunken list leaves the sentinel in view, auto-load
-   rebuilds the remaining pages from the fresh chain (at `limit=2` it chains
-   to the end). Assert the ORDER in the finished-request log: exactly one
-   head read after the inbound, and every cursor request after that head
-   read (none between the inbound and the head read); and the final list
-   holds all five contact rows plus the two multi-party rows with Load more
-   gone. Then, at the DEFAULT limit on the same seed (a page one that holds
-   everything), a further inbound adds its row at the top, removes nothing,
-   and issues no cursor request.
+   `/inbox?limit=2`. At `limit=2` the four-row page one leaves the sentinel
+   in view, so auto-load chains to the end as soon as the page loads (spec
+   5.2, by design at a tiny limit): assert the list SETTLES at the three
+   parties + Tasha + the two multi-party rows with Load more gone, and that
+   at least one cursor request finished. Then a new inbound for a fourth
+   fresh party arrives: the list is never detached (take an `ElementHandle`
+   of the list before the inbound and assert `isConnected` after) and no
+   spinner shows; the refresh replaces the list with page one (the new row
+   at the top) and auto-load rebuilds the rest. Assert the ORDER in the
+   finished-request log after the inbound: the FIRST request is a head read,
+   no cursor request precedes a head read, and the final list holds all
+   five contact rows plus the two multi-party rows with Load more gone (a
+   later live event may add a second head read; the order, not the count,
+   is the claim). Then, at the DEFAULT limit on the same seed (a page one
+   that holds everything), a further inbound adds its row at the top,
+   removes nothing, and issues no cursor request.
 3. Back button. Viewport 1280x400 (so the list overflows), seed six parties at
    `?limit=10` (everything fits in page one), scroll the container to the
    bottom and assert `scrollTop > 0`; open the last row; `page.goBack()`;
-   assert the same rows without a spinner and the container's `scrollTop`
-   within 8px of the saved value; then assert (finished requests) that
-   exactly one head read and no cursor request followed the return, and the
-   rows and scroll are unchanged after it settles. Then the Option B trade,
-   pinned deliberately: at `?limit=2` load all six, open the last row, go
-   back: the restore shows all rows instantly (no spinner), then the
-   finished-request log shows exactly one head read followed by cursor
-   requests (the pages were rebuilt from page one, not kept), and the list
-   settles back to all six contact rows.
+   assert the same rows and the container's `scrollTop` within 8px of the
+   saved value immediately (a fresh mount would sit at 0 behind a spinner);
+   then assert (finished requests) that a head read followed the return and
+   no cursor request did, and the rows and scroll are unchanged after it
+   settles. Then the Option B trade, pinned deliberately: at `?limit=2` let
+   auto-load chain to all six, open the last row, go back: the restore shows
+   all rows instantly, then the finished-request log shows a head read
+   FIRST and cursor requests only after it (the pages were rebuilt from page
+   one, not kept), and the list settles back to all six contact rows.
 4. Widths. At `NARROW_360` from `e2e/support/viewport.ts`: the shared
    no-horizontal-overflow assertion, and the first row's `<time>` bounding box
    fully inside the row's box and in its top half. Then at 768x720 (the
-   tightest one-line band, sidebar open) on a seeded row with a long name and
-   a placement tag: the `<time>` box fully inside the row's box (its right
+   tightest one-line band, sidebar open) on a minted unknown row (a
+   phone-named row with the Needs triage chip, the widest chip a lean-world
+   row can carry): the `<time>` box fully inside the row's box (its right
    edge at most the row's right edge, its width above 0), since
    `.row { overflow: hidden }` would otherwise clip it silently and
-   `toBeVisible` would still pass. Then at `WIDE_RESTORE`: an ordinary
-   seeded name is not ellipsized (`scrollWidth <= clientWidth` on the name).
+   `toBeVisible` would still pass. Then at `WIDE_RESTORE`: Tasha's name is
+   not ellipsized (`scrollWidth <= clientWidth` on the name). A LONG name
+   with a placement tag cannot be minted through the fake alone (a contact
+   with a placement is a seed-profile matter); that case is covered in the
+   live self-QA (7.4) by renaming a contact to a long name and checking the
+   768px band by eye and by bounding box.
 5. Refresh failure banner. `page.route` returns 500 for the head read only
    (match on the absence of `cursor` in the query), triggered by an inbound;
    rows remain, the banner and `Retry refresh` appear; un-route and click Retry
    refresh; the banner clears and the new row appears.
-6. No auto-load chain at the group wall. Viewport 1280x400; seed about 30
-   fresh parties, all newer than the lean group rows; open `/inbox?limit=12`
-   (a 12-row page is about 550px, taller than the viewport plus the 400px
-   margin, so a committed page pushes the sentinel out); scroll to the bottom
+6. No auto-load chain at the group wall. Viewport 1280x400; seed about 35
+   fresh parties, all newer than the lean group rows; open `/inbox?limit=15`
+   (a 15-row page is about 700px, clearly taller than the viewport plus the
+   400px margin, so a committed page pushes the sentinel out); scroll to the bottom
    ONCE; wait for the network to settle; assert through the request log that
    EXACTLY ONE finished request carrying `cursor` was issued and that the
    list gained exactly one page; scroll to the bottom again and assert a

@@ -30,7 +30,10 @@ confirmed resets still clear both fields. The consent E2E checks the editor's
 exact value after the draft settles, before leaving compose; its provider-body
 assertion and 30-second delivery budget remain unchanged.
 
-Implemented in `4fd63c90` on `codex/a2p-consent-e2e-fix`, left unmerged.
+Implemented in `4fd63c90` on `codex/a2p-consent-e2e-fix`, fast-forwarded into
+`main` (tip `8e193c94`); branch and worktree retired 2026-09-24, and the
+record's [README](../superpowers/reviews/2026-09-08-a2p-consent-e2e-fix/README.md)
+says where its cited `.superpowers/` evidence moved.
 Adversarial review found no blockers; its one-draft regression strengthening
 was accepted. Final targeted unit tests passed 44/44, the consent scenario
 passed three traced repetitions, and five related browser cases passed.

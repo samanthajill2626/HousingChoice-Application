@@ -49,8 +49,8 @@ import { expectTodayReady } from '../../support/today.js';
 // fires the opportunistic stuck-sweep in poolNumbers.provisionForGroup, and
 // `flagStuckConnecting` (poolNumbers.ts:484-499) log.ERRORs one line per connecting
 // group older than relayWarmingMaxWaitMs. The LEAN SEED ships exactly such a group
-// (lean.ts:247-269 - an imported relay group that never gets a number), so this
-// spec's create leaves an ERROR line naming ITS conversationId in the app's
+// (lean.ts CONNECTING_GROUP_ID - an imported relay group that never gets a number),
+// so this spec's create leaves an ERROR line naming ITS conversationId in the app's
 // retained log ring. That id is group-text-conversion.spec.ts's CONNECTING_ID.
 //
 // That spec used to read an UNWINDOWED log tail, so the line failed a spec this
@@ -62,7 +62,7 @@ import { expectTodayReady } from '../../support/today.js';
 // See docs/issues/group-text-conversion-unwindowed-log-assert.md.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
-// --- Lean seed identities (app/src/lib/seed/lean.ts:81-150) ------------------
+// --- Lean seed identities (app/src/lib/seed/lean.ts SEED.contacts) -----------
 // The TENANT is the page we drive from: her "Relay groups" card is EMPTY in the
 // lean world. The landlord's is not - lean seeds a connecting group of his - so
 // driving from his page would make the card assertions ambiguous.

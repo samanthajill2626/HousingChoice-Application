@@ -28,6 +28,10 @@ const TG0 = '2026-06-01T13:40:00.000Z';
 const TG1 = '2026-06-01T13:42:30.000Z';
 const TG2 = '2026-06-01T13:45:00.000Z';
 const TC0 = '2026-06-01T13:30:00.000Z';
+// share-skip-fix: the switched-off tenant's thread. EARLIER than every other
+// conversation row (A29 again): it must never displace Tasha as the newest
+// inbox row.
+const TS0 = '2026-06-01T13:20:00.000Z';
 // matches TTL: epoch seconds for 2026-09-01T00:00:00Z (far enough out that
 // DynamoDB Local's TTL sweep never deletes it mid-demo).
 const MATCH_EXPIRES_AT = 1_787_270_400;
@@ -43,6 +47,8 @@ const IDS = {
   invoice: 'invoice-0001',
   founder: 'user-0001',
   va: 'user-0002',
+  tenantOff: 'contact-tenant-0002',
+  conversationOff: 'conv-0002',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -169,6 +175,31 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       role_title: 'HCV Program Specialist',
       created_at: T0,
     },
+    {
+      // share-skip-fix (2026-09-25): a tenant whose one-to-one conversation is
+      // switched OFF (`ai_mode: manual`, the state the Quo import left every
+      // imported thread in). The e2e proof that a staff property send reaches
+      // him anyway (share-skip-fix.spec.ts). ANY AUTOMATED SEND TO HIM IS
+      // REFUSED manual_mode BY DESIGN: no other spec - the retry-send-window
+      // one-to-one e2e included - may use him as a recipient of a reminder,
+      // a retry or any other automated text. voucherSize 1 keeps him out of
+      // every 2-BR audience the existing specs build; atlanta_housing keeps
+      // the facet spec's DCA/Fulton discriminators unused.
+      contactId: IDS.tenantOff,
+      type: 'tenant', // byTypeStatus HASH
+      status: 'searching', // byTypeStatus RANGE
+      phone: '+15550100004', // byPhone
+      housingAuthority: 'atlanta_housing', // byHousingAuthority
+      firstName: 'Dario',
+      lastName: 'Reyes',
+      voucherSize: 1,
+      voucher_program: 'HCV',
+      // Consent recorded by a human (an imported contact whose intake call was
+      // logged), so the JIT gate never blocks a person's send to him.
+      consent_method: 'verbal_phone',
+      consent_at: T0,
+      created_at: T0,
+    },
   ],
   units: [
     {
@@ -233,6 +264,25 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       participants: [{ contactId: IDS.tenant, phone: '+15550100001' }],
       last_message_preview: 'Saturday morning works great, thank you!',
       created_at: T0,
+    },
+    // share-skip-fix: Dario's one-to-one thread, SWITCHED OFF. `imported_from`
+    // marks it the way the import does, so the census counts it under
+    // "imported" and the fix script's dry run plans it; the send job reaches
+    // him regardless because a dashboard share is a person's send. Automated
+    // sends to this thread are refused - see the contact's comment.
+    {
+      conversationId: IDS.conversationOff,
+      participant_phone: '+15550100004', // byParticipantPhone
+      status: 'open', // byLastActivity HASH
+      last_activity_at: TS0, // byLastActivity RANGE - oldest row on purpose
+      type: 'tenant_1to1',
+      ai_mode: 'manual',
+      participants: [{ contactId: IDS.tenantOff, phone: '+15550100004' }],
+      last_message_preview: 'Thanks, I will keep an eye out.',
+      unread_count: 0,
+      imported_from: 'quo',
+      imported_at: TS0,
+      created_at: TS0,
     },
     // A NATIVE CARRIER group text (type `group_text`). It lives in its OWN
     // byLastActivity partition (`group_open`) and carries none of relay's

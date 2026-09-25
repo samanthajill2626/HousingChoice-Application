@@ -167,10 +167,13 @@ carries because it lands after the other two:
      `send_unconfirmed` and RSW's "no display code" for `retry_window_closed`
      must both survive the merge, each with its test.
 3. **This branch** (Stage 1) merges third.
-4. **After it:** the `retrySend` adoption (which carries RSW #2, #3 and #4 -
-   lineage on an adopted retry row, `retry_due_at` refreshed while a 1:1
-   outcome is pending, the promise copy following `retry_due_at` - and closes
-   the joint gap RSW records as `manual-retry-double-send-residual-windows`),
+4. **After it:** the `retrySend` adoption (which carries, for the one-to-one
+   retry, RSW #1 and #6 - a re-driven rung runs the same handler so the
+   job-time window check bounds it, and the window checks run before the
+   claim - plus #2, #3 and #4 - lineage on an adopted retry row,
+   `retry_due_at` refreshed while a 1:1 outcome is pending, the promise copy
+   following `retry_due_at` - and closes the joint gap RSW records as
+   `manual-retry-double-send-residual-windows`),
    and share-skip-fix's Branch B (the counted-as-sent attempts rule), both
    planned on this branch's attempt record rather than a second one.
 

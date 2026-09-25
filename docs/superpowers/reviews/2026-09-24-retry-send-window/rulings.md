@@ -38,3 +38,29 @@ issues." Real 30003s have occurred in production.
    text.)
 4. **Process:** the full feature pipeline (`/abt:feature-mission`); spec approval
    in writing after adversarial review.
+
+## Spec-gate answers (2026-09-25, on draft 5)
+
+His words, then what changed in draft 6.
+
+1. **Copy:** "For my todos, yes i approve the text." All four strings in the
+   spec's section 7 stand.
+2. **A late 30003 after a human action:** "the former not-retried verbiage is
+   better, but if that creates a whole lot of work just for that one rare case,
+   you can use the new copy if it's much easier to implement." It is not much
+   work - the claim already closes a rung it created (`closeRetryLegEnqueueFailed`)
+   - so draft 6 keeps "Not retried - group closed" and its siblings, shown at
+   once (spec D3).
+3. **The promise is decided at once:** "I don't want it to NOT say will retry,
+   then LATER that pops up after an amount of time. We should be able to know
+   immediately if we are going to attempt a retry or not, regardless of it's
+   actually QUEUED for retry." Draft 6: the relay claim records its decision on
+   the rung it creates (D3); the one-to-one webhook decides before it writes the
+   failure and writes `retry_due_at` in the same conditional write (D3a, D7); a
+   failed read now attempts the retry AND shows it, reversing draft 5's
+   schedule-without-a-stamp.
+4. **The reverse guard:** "The dropped guard is fine, I would rather err on the
+   side of a double-text than a message not delivered at all."
+5. **Sequencing:** agreed with share-skip-fix's planner - its Branch A first, then
+   this branch, then send-outcome-reconcile. Its Stage 1 / `retrySend`-adoption
+   split (2026-09-25) is recorded in the spec's section 5.

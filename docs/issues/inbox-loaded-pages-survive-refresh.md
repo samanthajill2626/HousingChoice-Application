@@ -19,10 +19,13 @@ as she scrolls. If her scroll position was among the dropped rows the browser
 clamps it to the new bottom and auto-load fetches the next page once. This
 begins at row 101 at the default page size.
 
-**Why it was deferred.** Keeping those rows correctly was designed and
-survived four adversarial review rounds as DRAFT 5 of the spec (commit
-`b53a9e8a`, sections 5.5, 5.6 and 5.8; adjudications under
-`docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/`). It needs:
+**Why it was deferred.** Keeping those rows correctly was designed across
+four adversarial review rounds; the last reviewed text is DRAFT 6 of the spec
+(commit `35843a25`, sections 5.5, 5.6 and 5.8; adjudications under
+`docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/`). Round 4 found
+defects in DRAFT 5's re-walk that DRAFT 6 fixed, and DRAFT 6's fixes were
+never re-reviewed before the design was dropped, so a builder starts from
+DRAFT 6 and should expect one more review round. It needs:
 
 - a head-plus-tail list model by PROVENANCE on the tabs whose page one is
   cut by `lastActivityAt` (All, Groups), with a boundary rule that keeps rows
@@ -48,6 +51,7 @@ row 101, so Cameron chose "page one persists" (Option B) at the spec gate on
 reports losing her place past the first 100 rows, or the page size is
 lowered for latency reasons and the tail becomes the common case.
 
-**Suggested fix.** Build DRAFT 5 sections 5.5, 5.6 (branch P) and 5.8 (the
-re-walk) as reviewed; the round-2 through round-4 adjudications list the
-interleavings the design must hold and the tests that pin them.
+**Suggested fix.** Build DRAFT 6 sections 5.5, 5.6 (branch P) and 5.8 (the
+re-walk) after one more review round of its round-4 fixes; the round-2
+through round-4 adjudications list the interleavings the design must hold
+and the tests that pin them.

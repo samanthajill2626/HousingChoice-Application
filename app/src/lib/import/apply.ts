@@ -1104,7 +1104,14 @@ async function upsertConversation(
   const values: Record<string, unknown> = {
     ':type': type,
     ':status': status,
-    ':aiMode': 'manual',
+    // share-skip-fix D3 (2026-09-25): a one-to-one thread imports switched ON.
+    // `manual` was designed as the AI-only default (the AI layer is Phase 2)
+    // but the send wrapper refuses EVERY automated text on a manual row -
+    // reminders, the missed-call text, the welcome, retries and staff property
+    // sends - so every imported contact silently lost them. Group threads stay
+    // manual (their send paths never read the switch). `if_not_exists` above
+    // keeps a re-run from ever changing an existing row's switch.
+    ':aiMode': input.isGroup ? 'manual' : 'auto',
     ':createdAt': input.createdAt,
     ':participants': input.participants,
     ':lastActivity': input.lastActivityAt,

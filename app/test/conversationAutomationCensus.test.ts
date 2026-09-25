@@ -80,7 +80,12 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     // An imported one-to-one row with NO phone claim at all: the normal state
     // for an imported row (spec D1), so NOT a mismatch.
     await put('conversations', { conversationId: 'c-import-noclaim', participant_phone: '+15550000008', status: 'open', last_activity_at: NOW, type: 'unknown_1to1', ai_mode: 'auto', imported_from: 'quo-airtable-import', created_at: NOW });
-    await put('conversations', { conversationId: 'c-breaker', participant_phone: '+15550000002', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', imported_from: 'quo-airtable-import', created_at: NOW });
+    // An AUDITED trip, in the shape every real trip has: the breaker counts the
+    // send before it switches the row off (sendMessage.ts), so the row carries
+    // the send counter AS WELL as the event - and the event must still win the
+    // evidence label and the time. The bucket precedes the event, which is
+    // appended at the real clock.
+    await put('conversations', { conversationId: 'c-breaker', participant_phone: '+15550000002', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', imported_from: 'quo-airtable-import', outbound_minute_bucket: '2026-09-25T11:58', outbound_minute_count: 11, created_at: NOW });
     await audit.append('conversations#c-breaker', 'message_sent', { automated: true });
     await audit.append('conversations#c-breaker', 'mode_changed', { from: 'auto', to: 'manual', reason: 'breaker_trip' });
     // A trip with NO audit event: `manual` plus the breaker's send counter
@@ -158,8 +163,17 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     // Cause precedence: group thread, then breaker trip (an audit event OR the
     // send counter), then imported, then other.
     expect(census.manualByCause).toEqual({ groupThread: 3, breakerTrip: 2, imported: 1, other: 2 });
+    // Evidence precedence: c-breaker has BOTH the event and the counter, and
+    // is listed by its event, at the event's own instant (the `ts` sort key's
+    // ISO half, read back from the table, not from the census); only the
+    // counter-only trip is `send_counter`.
+    const tripEvent = before
+      .get('audit_events')!
+      .find((e) => e['entityKey'] === 'conversations#c-breaker' && e['event_type'] === 'mode_changed');
+    const tripEventAt = String(tripEvent?.['ts']).split('#')[0];
+    expect(tripEventAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     expect([...census.breakerTripped].sort((a, b) => a.conversationId.localeCompare(b.conversationId))).toEqual([
-      { conversationId: 'c-breaker', type: 'tenant_1to1', trippedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), evidence: 'audit_event' },
+      { conversationId: 'c-breaker', type: 'tenant_1to1', trippedAt: tripEventAt, evidence: 'audit_event' },
       { conversationId: 'c-counter', type: 'tenant_1to1', trippedAt: '2026-09-25T11:59', evidence: 'send_counter' },
     ]);
     // Three imported one-to-one rows: a claim that matches, a claim that points
@@ -197,5 +211,27 @@ describe.skipIf(!reachable)('conversation-automation-census against DynamoDB Loc
     expect(recorder.sent.filter((c) => !READ_COMMANDS.has(c.name))).toEqual([]);
     expect(new Set(recorder.sent.map((c) => c.table))).toEqual(new Set(TABLES.map(t)));
     for (const base of TABLES) expect(await scanAll(base)).toEqual(before.get(base));
+  }, 120_000);
+
+  // Runs AFTER the case above, in the same tables (that case pins whole-table
+  // counts), and asserts only its own row.
+  it('an audited trip reports the LATER of its event and its send counter: a newer trip whose append was lost is not hidden behind an older event', async () => {
+    const audit = createAuditRepo({ doc, env });
+    // The row tripped (its event landed), was resumed, and tripped AGAIN - but
+    // that trip's audit append was lost. Its newest `breaker_trip` event is the
+    // OLD one; its send counter names the later trip's minute (here a minute
+    // past any real event instant: the events carry the real clock).
+    await audit.append('conversations#c-retrip', 'mode_changed', { from: 'auto', to: 'manual', reason: 'breaker_trip' });
+    await audit.append('conversations#c-retrip', 'mode_changed', { from: 'manual', to: 'auto', reason: 'operator_resume' });
+    await put('conversations', { conversationId: 'c-retrip', participant_phone: '+15550000009', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', outbound_minute_bucket: '2999-01-01T00:00', outbound_minute_count: 11, created_at: NOW });
+    const census = await runConversationAutomationCensus({ doc, env, now: NOW });
+    // Still listed by its event (the evidence label), at the counter's later
+    // minute as an ISO instant.
+    expect(census.breakerTripped.find((trip) => trip.conversationId === 'c-retrip')).toEqual({
+      conversationId: 'c-retrip',
+      type: 'tenant_1to1',
+      trippedAt: '2999-01-01T00:00:00.000Z',
+      evidence: 'audit_event',
+    });
   }, 120_000);
 });

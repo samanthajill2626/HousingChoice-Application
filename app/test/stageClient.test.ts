@@ -5,12 +5,19 @@
 // ONE DATABASE PER ACCESS KEY (e2e/support/lane.mjs:150-168), so a lane is
 // selected by its key `hclane<L>` as much as by its prefix - a prefix alone
 // would read (and write) the wrong database.
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { describe, expect, it } from 'vitest';
 // The harness's own key format: app/tsconfig.test.json includes ../e2e/support
 // with allowJs (app/test/dynamoKeyLedger.test.ts imports the same module
 // statically).
 import { laneAccessKeyId as harnessLaneAccessKeyId } from '../../e2e/support/lane.mjs';
 import { laneAccessKeyId, parseLane, parseStageArgs, resolveStageClient } from '../scripts/lib/stageClient.js';
+
+/** The regional AWS endpoint a dev/prod client is pinned to (HC_REGION us-east-1). */
+const AWS_DYNAMODB = 'https://dynamodb.us-east-1.amazonaws.com';
 
 describe('resolveStageClient', () => {
   it('laneAccessKeyId matches the e2e harness format for every lane (a drift here reads an EMPTY database)', () => {
@@ -76,7 +83,8 @@ describe('resolveStageClient', () => {
       },
     });
     expect(stage.prefix).toBe('hc-dev-');
-    expect(stage.endpoint).toBeUndefined();
+    expect(stage.endpoint).toBe(AWS_DYNAMODB);
+    expect(stage.describe).toContain(AWS_DYNAMODB);
     expect(stage.accessKeyId).toBeUndefined();
     expect(credentialCalls).toBe(1);
     // The client the script writes through signs with THAT identity - not one
@@ -84,6 +92,62 @@ describe('resolveStageClient', () => {
     const creds = await stage.doc.config.credentials();
     expect(creds.accessKeyId).toBe('AKIAFAKE');
     stage.doc.destroy();
+  });
+
+  // An `endpoint_url` in the shared AWS config file - on the profile, or in a
+  // `services` section naming dynamodb - redirects a client built with only a
+  // region and credentials, and the AWS_ENDPOINT_URL* refusal cannot see a
+  // file. The dev/prod client is PINNED to the regional AWS endpoint, which
+  // outranks every ambient source. Proven with NO network: a finalizeRequest
+  // probe records the request's origin and throws before any socket opens.
+  it.each<{ form: string; config: string }>([
+    { form: 'an endpoint_url on the profile', config: '[default]\nendpoint_url = http://127.0.0.1:9\n' },
+    {
+      form: 'a services section naming dynamodb',
+      config: '[default]\nservices = redirect\n\n[services redirect]\ndynamodb =\n  endpoint_url = http://127.0.0.1:9\n',
+    },
+  ])('dev: the client sends to the regional AWS endpoint even when the shared config file carries $form', async ({ config }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'hc-stage-endpoint-'));
+    const saved = { configFile: process.env.AWS_CONFIG_FILE, profile: process.env.AWS_PROFILE };
+    try {
+      writeFileSync(join(dir, 'config'), config);
+      process.env.AWS_CONFIG_FILE = join(dir, 'config');
+      delete process.env.AWS_PROFILE; // the [default] profile above
+      const stage = await resolveStageClient('dev', {
+        assertAccount: async () => ({ Account: '938565869261' }),
+        credentials: () => async () => ({ accessKeyId: 'AKIAFAKE', secretAccessKey: 'fake' }),
+      });
+      // Belt and braces: were the probe ever bypassed, the terminal handler
+      // refuses too - no socket opens either way.
+      (stage.doc.config as { requestHandler: unknown }).requestHandler = {
+        handle: async () => {
+          throw new Error('endpoint test: a network request was attempted');
+        },
+      };
+      let origin: string | undefined;
+      stage.doc.middlewareStack.add(
+        () => async (args) => {
+          const request = args.request as { protocol?: string; hostname?: string; port?: number };
+          origin = `${request.protocol}//${request.hostname}${request.port !== undefined ? `:${request.port}` : ''}`;
+          throw new Error('endpoint probe: stopped before the network');
+        },
+        { step: 'finalizeRequest', name: 'endpointProbe' },
+      );
+      try {
+        await expect(stage.doc.send(new ScanCommand({ TableName: 'hc-dev-conversations' }))).rejects.toThrow(
+          'endpoint probe: stopped before the network',
+        );
+        expect(origin).toBe(AWS_DYNAMODB);
+        expect(stage.endpoint).toBe(AWS_DYNAMODB);
+      } finally {
+        stage.doc.destroy();
+      }
+    } finally {
+      if (saved.configFile === undefined) delete process.env.AWS_CONFIG_FILE;
+      else process.env.AWS_CONFIG_FILE = saved.configFile;
+      if (saved.profile !== undefined) process.env.AWS_PROFILE = saved.profile;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it.each(['AWS_ENDPOINT_URL_DYNAMODB', 'AWS_ENDPOINT_URL'])(

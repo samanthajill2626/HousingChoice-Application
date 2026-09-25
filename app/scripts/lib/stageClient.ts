@@ -23,13 +23,19 @@
 // a client from the default chain would prove an account the writes never
 // touch. Every dev/prod client here is built from `hcCredentials()`, and the
 // guard is re-checked here (not only inside assertHousingChoiceAccount) so a
-// test can inject a wrong-account identity and prove the refusal.
+// test can inject a wrong-account identity and prove the refusal. It is also
+// built with an EXPLICIT regional endpoint (AWS_DYNAMODB_ENDPOINT), which
+// outranks every ambient source: without it, an `endpoint_url` in the shared
+// AWS config file (on the profile, or in a `services` entry for dynamodb)
+// would redirect the client while the target line says AWS - and the guard,
+// which checks only the account, would pass.
 //
-// NO AMBIENT ENDPOINT: the SDK honors `AWS_ENDPOINT_URL` and
-// `AWS_ENDPOINT_URL_<SERVICE>` from the shell, which would point a dev/prod
-// client at another endpoint (DynamoDB Local, say) while the target line
-// still says AWS - and the guard, which checks the account, would pass. So a
-// dev/prod run REFUSES to start while any AWS_ENDPOINT_URL* variable is set.
+// NO AMBIENT ENDPOINT VARIABLE: the SDK also honors `AWS_ENDPOINT_URL` and
+// `AWS_ENDPOINT_URL_<SERVICE>` from the shell. The pinned endpoint outranks
+// them too, so one would be silently ignored - yet a variable someone set says
+// they meant another target (DynamoDB Local, say). So a dev/prod run REFUSES
+// to start while any AWS_ENDPOINT_URL* variable is set: a clear refusal beats
+// a silent override.
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { AwsCredentialIdentityProvider } from '@aws-sdk/types';
@@ -45,6 +51,9 @@ export const STAGE_TARGETS = ['local', 'dev', 'prod'] as const;
 export type StageTarget = (typeof STAGE_TARGETS)[number];
 
 export const LOCAL_ENDPOINT = 'http://localhost:8000';
+
+/** The regional AWS endpoint every dev/prod client is PINNED to (see the header). */
+export const AWS_DYNAMODB_ENDPOINT = `https://dynamodb.${HC_REGION}.amazonaws.com`;
 
 export interface StageClientDeps {
   /** Test seam: the identity check. Defaults to the real STS call on the profile. */
@@ -68,8 +77,8 @@ export interface StageClient {
   doc: DynamoDBDocumentClient;
   /** Env carrying the stage's TABLE_PREFIX (and the lane key) - hand it to every repo/tableName call. */
   env: NodeJS.ProcessEnv;
-  /** Set for local only; undefined means real AWS. */
-  endpoint: string | undefined;
+  /** The endpoint the client is pinned to: DynamoDB Local for local, the regional AWS endpoint for dev/prod. */
+  endpoint: string;
   prefix: string;
   /** The DynamoDB Local access key (selects the database); undefined on AWS. */
   accessKeyId: string | undefined;
@@ -134,8 +143,9 @@ export async function resolveStageClient(
   const endpointVariables = ambientEndpointVariables();
   if (endpointVariables.length > 0) {
     throw new Error(
-      `${endpointVariables.join(', ')} ${endpointVariables.length === 1 ? 'is' : 'are'} set in this shell: an ambient ` +
-        `endpoint would redirect the ${target} client away from AWS while the target line still says AWS. Unset ` +
+      `${endpointVariables.join(', ')} ${endpointVariables.length === 1 ? 'is' : 'are'} set in this shell: the ${target} ` +
+        `client is pinned to ${AWS_DYNAMODB_ENDPOINT} and would silently ignore ${endpointVariables.length === 1 ? 'it' : 'them'}, ` +
+        `so the run refuses rather than guess which target was meant. Unset ` +
         `${endpointVariables.map((v) => `Env:${v}`).join(', ')} (PowerShell: Remove-Item) and re-run. Refusing to continue.`,
     );
   }
@@ -149,16 +159,20 @@ export async function resolveStageClient(
     );
   }
   const doc = DynamoDBDocumentClient.from(
-    new DynamoDBClient({ region: HC_REGION, credentials: (deps.credentials ?? hcCredentials)() }),
+    new DynamoDBClient({
+      region: HC_REGION,
+      endpoint: AWS_DYNAMODB_ENDPOINT,
+      credentials: (deps.credentials ?? hcCredentials)(),
+    }),
     { marshallOptions },
   );
   return {
     doc,
     env,
-    endpoint: undefined,
+    endpoint: AWS_DYNAMODB_ENDPOINT,
     prefix,
     accessKeyId: undefined,
-    describe: `AWS ${HC_REGION} account ${identity.Account} (profile ${HC_PROFILE})`,
+    describe: `AWS ${HC_REGION} account ${identity.Account} (profile ${HC_PROFILE}) at ${AWS_DYNAMODB_ENDPOINT}`,
   };
 }
 

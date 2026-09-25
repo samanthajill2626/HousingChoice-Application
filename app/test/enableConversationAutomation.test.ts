@@ -82,7 +82,10 @@ describe.skipIf(!reachable)('enable-conversation-automation against DynamoDB Loc
       doc.send(new PutCommand({ TableName: tableName('conversations', env), Item: item }));
     await put({ conversationId: 'c-import', participant_phone: '+15550000001', status: 'open', last_activity_at: NOW, type: 'unknown_1to1', ai_mode: 'manual', imported_from: 'quo-airtable-import', created_at: NOW });
     await put({ conversationId: 'c-typeless', participant_phone: '+15550000002', status: 'open', last_activity_at: NOW, ai_mode: 'manual', created_at: NOW });
-    await put({ conversationId: 'c-breaker', participant_phone: '+15550000003', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', created_at: NOW });
+    // An AUDITED trip in the shape every real trip has: the event AND the send
+    // counter (the breaker counts the send before it switches the row off), so
+    // the evidence the run logs for it must still be `audit_event`.
+    await put({ conversationId: 'c-breaker', participant_phone: '+15550000003', status: 'open', last_activity_at: NOW, type: 'tenant_1to1', ai_mode: 'manual', outbound_minute_bucket: '2026-09-25T11:58', outbound_minute_count: 11, created_at: NOW });
     await createAuditRepo({ doc, env }).append('conversations#c-breaker', 'mode_changed', { from: 'auto', to: 'manual', reason: 'breaker_trip' });
     // A trip with NO audit event (its append failed, or is not readable yet):
     // `manual` plus the breaker's send counter, which only an automated send on

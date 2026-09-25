@@ -69,9 +69,15 @@ export type TripEvidence = 'audit_event' | 'send_counter';
 export interface BreakerTrippedRow {
   conversationId: string;
   type: string;
-  /** audit_event: the event's ISO instant. send_counter: the counter's minute
-   *  bucket (`YYYY-MM-DDTHH:mm`, UTC) - the last counted minute, the trip's
-   *  best available time. */
+  /**
+   * audit_event: the newest `breaker_trip` event's ISO instant - or, when the
+   * row's send counter names a LATER minute, that minute as an ISO instant
+   * (`YYYY-MM-DDTHH:mm:00.000Z`; the evidence stays `audit_event`): the row
+   * was resumed and tripped AGAIN, that newer trip's own audit append was
+   * lost, and the older event alone would report the wrong trip's time.
+   * send_counter: the counter's minute bucket (`YYYY-MM-DDTHH:mm`, UTC) - the
+   * last counted minute, the trip's best available time.
+   */
   trippedAt: string;
   evidence: TripEvidence;
 }
@@ -135,10 +141,27 @@ export function isPointerRow(conversationId: string): boolean {
  * row that can count a send. A future writer of `manual` - Work Package 2's
  * per-conversation switch (docs/issues/ai-mode-switch-gates-all-automation.md)
  * - MUST revisit this rule: a staff switch-off on a row with an old counter
- * would read as a trip here, and in enable-conversation-automation.ts.
+ * would read as a trip here, and in enable-conversation-automation.ts. So does
+ * a row switched off BY HAND once it has counted an automated send (an
+ * operator writing `manual` directly, e.g. with the AWS CLI - there is no
+ * rollback tool): both scripts read it as a trip, the bulk run keeps skipping
+ * it, and it must be resumed with single mode (--conversation), which ignores
+ * trip evidence.
  */
 export function hasBreakerSendCounter(row: Pick<ConversationItem, 'outbound_minute_bucket'>): boolean {
   return typeof row.outbound_minute_bucket === 'string';
+}
+
+/** trippedAt for a trip whose `breaker_trip` event is on record: the event's
+ *  instant, or the row's send-counter minute when that is LATER (see
+ *  BreakerTrippedRow.trippedAt). */
+function auditedTrippedAt(trip: AuditEvent, row: Pick<ConversationItem, 'outbound_minute_bucket'>): string {
+  const eventAt = trip.ts.split('#')[0] ?? trip.ts;
+  const bucket = row.outbound_minute_bucket;
+  if (typeof bucket !== 'string') return eventAt;
+  // `YYYY-MM-DDTHH:mm` in the event's own ISO form, so the two compare as strings.
+  const bucketAt = `${bucket}:00.000Z`;
+  return bucketAt > eventAt ? bucketAt : eventAt;
 }
 
 /** The breaker trip on record for a conversation, newest first, or undefined.
@@ -229,16 +252,18 @@ export async function runConversationAutomationCensus(opts: CensusOpts): Promise
         census.manualByCause.groupThread += 1;
         continue;
       }
-      // A trip on record (its audit event) is preferred for its exact time; a
-      // manual row with the breaker's send counter and NO event is a trip too
-      // (hasBreakerSendCounter), listed so the operator sees the missing event.
+      // A trip on record (its audit event) is preferred for the evidence label
+      // and its exact time - unless the counter names a later minute
+      // (auditedTrippedAt); a manual row with the breaker's send counter and NO
+      // event is a trip too (hasBreakerSendCounter), listed so the operator
+      // sees the missing event.
       const trip = await findBreakerTrip(doc, env, raw.conversationId);
       if (trip !== undefined || hasBreakerSendCounter(raw)) {
         census.manualByCause.breakerTrip += 1;
         breakerTrippedIds.add(raw.conversationId);
         census.breakerTripped.push(
           trip !== undefined
-            ? { conversationId: raw.conversationId, type: typeKey, trippedAt: trip.ts.split('#')[0] ?? trip.ts, evidence: 'audit_event' }
+            ? { conversationId: raw.conversationId, type: typeKey, trippedAt: auditedTrippedAt(trip, raw), evidence: 'audit_event' }
             : { conversationId: raw.conversationId, type: typeKey, trippedAt: String(raw.outbound_minute_bucket), evidence: 'send_counter' },
         );
         continue;

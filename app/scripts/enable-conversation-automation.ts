@@ -53,7 +53,9 @@
 // FAILURE HANDLING mirrors retire-paused-tour-reminders.ts: a row that cannot
 // be PLANNED is stepped over and counted `failed` (exit 1); a WRITE (the
 // transaction) failing for any reason but the row's condition ABORTS with a
-// PARTIAL report - nothing was written for that row, and re-running after the
+// PARTIAL report. A cancellation wrote nothing for that row; a timeout or a
+// 5xx that outlasts the SDK's retries MAY have landed (the row on WITH its
+// event - a re-run reports it `alreadyOn`). Either way re-running after the
 // fix is safe (idempotent).
 //
 // TARGET: `--env local|dev|prod` through scripts/lib/stageClient.ts (dev/prod:
@@ -104,7 +106,8 @@ export interface EnableResult {
    */
   byType: Record<string, number>;
   /** Writes whose condition failed because the row changed under the run (or,
-   *  in bulk mode, now carries the breaker's send counter); nothing written. */
+   *  in bulk mode without --include-breaker-tripped, now carries the breaker's
+   *  send counter); nothing written. */
   skippedOnCondition: number;
   /** Rows the run could not PLAN (a read that threw); nothing written for them. */
   failed: number;
@@ -251,7 +254,9 @@ async function run(opts: EnableOpts, result: EnableResult, log: Logger): Promise
         return false;
       }
       // Anything else - the audit half refused, a transaction conflict,
-      // throttling, permissions - aborts the run: nothing landed for this row.
+      // throttling, permissions, a timeout - aborts the run. A cancellation
+      // landed nothing for this row; a timeout or a 5xx may have landed both
+      // halves (a re-run then counts the row `alreadyOn`).
       throw err;
     }
     // Both landed: the switch is on AND its event is written.

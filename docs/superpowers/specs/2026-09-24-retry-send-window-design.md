@@ -436,13 +436,17 @@ branch lands second carries each one.
     statement then describes pre-existing rows only. D3a reads the live switch,
     so both orders hold.
   - It accepts the manual double send as today's behavior; D10 narrows it.
-- **`feat/send-outcome-reconcile`** (revision 5 @`922675db`, its review closed)
-  plans edits to `relayRetryLeg.ts`, `retrySend.ts`, `messagesRepo.ts`,
-  `sendMessage.ts` and `deliveryStatus.ts`; retypes `sendMessage`'s errors on the
-  input and append path D6 edits; and restructures `sendOneRelayLeg`'s phases,
-  which D4's deadline option must survive. Requirements on any path it adds:
-  1. A relay rung it re-drives later passes through D4's job-time check, so the
-     window bounds it.
+- **`feat/send-outcome-reconcile`** (revision 5, @`616d120d`, its review closed)
+  plans edits to `relayRetryLeg.ts`, `relayFanOut.ts` (`sendOneRelayLeg`, split
+  into prepare / send / record phases with a claim on a per-recipient
+  send-attempt record before every provider call), `retrySend.ts`,
+  `messagesRepo.ts`, `sendMessage.ts` (typed errors on the input and append path
+  D6 edits), `deliveryStatus.ts`, `relayRetryJoin.ts` and the lane `childEnv`. It
+  fences off `routes/webhooks/twilio.ts` entirely, so it does not touch this
+  branch's claim or 30003-arm changes. Requirements on any path it adds:
+  1. A retry it re-drives later - a relay rung, or the one-to-one rung it
+     re-enqueues once - runs the same job handler, so D4's job-time check
+     bounds it.
   2. Any path that appends a one-to-one retry row (its "adopt") carries
      `retry_of`, `retry_attempt` and `retry_window_start` at append (D2, D6).
   3. Any path that DEFERS a one-to-one retry, or leaves its outcome pending past
@@ -461,6 +465,29 @@ branch lands second carries each one.
      `sendOneRelayLeg` adopts: nothing is sent and the rung closes
      `retry_window_closed`. Deferring it as `retryable` would re-open a send past
      the window. Test intention 3 is re-run after that merge to catch it.
+  6. Its D8 makes every close by a writer other than the recipient's own attempt
+     - it names "the relay retry job's gate refusals" - first read the attempt
+     record, strongly consistently, and close only if it is absent or
+     `done` / `retryable`. This branch's window close in the relay job (the gate
+     and the bounded-acquire timeout) is such a close and follows the same rule.
+     The window checks run BEFORE that branch's claim (in `retrySend` too), so a
+     decline never holds a claim; if the plan puts the acquire after the claim,
+     the timeout also finishes the attempt record as a terminal non-send, which
+     needs an outcome value in that branch's record vocabulary.
+  7. Both branches edit the join's terminal step (`relayRetryJoin.ts:405-415`):
+     that branch renders a rung closed `send_unconfirmed` as "Not confirmed" and
+     not a failure; this one treats `retry_window_closed` as carrying no display
+     code. Both special cases must survive the merge, each with its test.
+- **All three branches reach the share results row.** Its copy table is
+  share-skip-fix's; reconcile adds a "Not confirmed" chip and an `unconfirmed`
+  stats bucket for `send_unconfirmed` (its D22); this branch sets the rule that
+  its 30003 promise follows `retry_due_at` (D8).
+- **A joint gap neither spec closes:** when reconcile rules a one-to-one retry
+  `unresolved`, its D16 leaves the original "visibly undelivered" - so the Retry
+  button is live - while its own D20 hides Retry on an unresolved relay or
+  broadcast slot because the text may have gone out. This branch's guard has
+  expired by then (`retry_due_at + grace`), so a press can double-send. It is
+  that branch's decision; recorded in `manual-retry-double-send-residual-windows`.
 
 ## 6. Test intentions
 
@@ -535,7 +562,12 @@ branch lands second carries each one.
   scheduled retry), not share-skip-fix's retry count; until share-skip-fix reads
   `retry_due_at`, that row shows no promise (section 5, D8).
 - **Sequencing** with `feat/share-skip-fix` and `feat/send-outcome-reconcile`
-  (section 5): which lands first.
+  (section 5). Recommended: this branch lands LAST. Reconcile restructures
+  `sendOneRelayLeg` and `retrySend` wholesale and fences off `twilio.ts`, where
+  most of this branch's server work lives; this branch's edits in the shared
+  files are small insertions (a gate, a deadline option, lineage fields, copy
+  entries). Landing last means this branch's builder carries every section 5
+  coupling against real code, and the other two specs need no change.
 
 ## 8. Out of scope
 

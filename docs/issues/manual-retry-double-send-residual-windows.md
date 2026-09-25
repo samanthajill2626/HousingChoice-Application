@@ -32,6 +32,10 @@ texted the member twice. The guard is time-based, and these gaps remain:
    example an `unknown` send outcome awaiting reconcile checks), unless the path
    that leaves it pending refreshes `retry_due_at` as the retry-send-window spec's
    section 5 requires.
+6. A one-to-one retry that `feat/send-outcome-reconcile` rules `unresolved`: its
+   D16 leaves the original visibly undelivered with the Retry button live, although
+   the retry's text may have gone out (its D20 hides Retry for the same verdict on
+   relay and broadcast slots).
 
 A robust fix needs a claim both sides contend on - a conditional write taken
 before sending by the manual route and the automatic job alike, with consistent

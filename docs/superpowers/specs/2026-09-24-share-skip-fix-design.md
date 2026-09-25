@@ -99,8 +99,8 @@ Goals:
   one-to-one conversations.
 - G3. A tenant whose share was skipped is never marked "Already sent" for it.
 - G4. Every skipped or failed recipient shows its real reason; counts stop
-  filing other skips under opt-outs; a share that texted nobody never reads
-  "Sent".
+  filing other skips under opt-outs; a share in which every recipient was
+  skipped never reads "Sent".
 - G5. A one-to-one share defaults to the full address and the flyer link.
 - G6. A breaker trip has a documented, scripted way back.
 
@@ -198,10 +198,12 @@ rows keep `manual`. A re-run never changes an existing conversation's switch
   tenant would re-propose them. Branch B replaces this with the attempts-based
   rule; until then a tenant whose text failed stays flagged, and staff can tick
   them by hand.
-- Everything else about the review list is unchanged: the flag is a review-time
-  hint, never a send-time block; tenants the filter proposed start unchecked
-  when flagged; the one-to-one seeded tenant stays pre-checked; "Select all"
-  keeps skipping flagged rows.
+- Everything else about the review list is unchanged, with one fix: the flag is
+  a review-time hint, never a send-time block; tenants the filter proposed start
+  unchecked when flagged; a seeded row (the one-to-one tenant, or a hand-picked
+  tenant) starts checked; and "Select all" skips flagged rows EXCEPT seeded
+  ones, which it leaves checked - today it unchecks them too, which on a
+  one-to-one share unchecks the only row and blocks Send.
 - Because the rule reads stored outcomes, it corrects history the moment it
   ships (the tenant Sam named has four skipped shares and is flagged today).
 
@@ -285,7 +287,7 @@ against dev and prod, and the import-window rule from section 6.
 - I3. A `skipped` recipient is never "Already sent" and never makes a share
   read "Sent".
 - I4. The "Already sent" flag is a review-time hint, never a send-time block,
-  and a seeded row stays checked.
+  and a seeded row stays checked - through "Select all" too.
 - I5. Nothing in this branch turns a switch OFF; only the existing breaker does.
 - I6. D2 only ever turns switches on, only on one-to-one conversations, and audits
   every change.
@@ -327,11 +329,17 @@ against dev and prod, and the import-window rule from section 6.
 2. D4-D8 and the D10 filings follow in the same worktree; one whole-branch review
    at the end.
 3. Concurrent branches (agreed order A, RSW, SOR, then B): this branch needs
-   nothing from them. Textual merge points for whoever lands second: the
-   derived stats buckets and the StatChips balance rule (SOR adds an
-   `unconfirmed` bucket), the dashboard internal-code reason map (SOR and RSW
-   add codes), the fan-out's send call and first-fence skips (SOR restructures
-   the recipient unit), and the seed files' broadcast fixtures.
+   nothing from them. Merge points for whoever lands second: the derived stats
+   buckets and the StatChips balance rule (SOR adds an `unconfirmed` bucket);
+   the dashboard internal-code reason map and `deliveryReason`'s options and
+   check order (SOR and RSW add codes; RSW adds `retryScheduled`); the
+   results-row reason gate (SOR shows a reason for `send_unconfirmed`); the
+   fan-out's send call, first-fence skips and finalize log line (SOR
+   restructures the recipient unit and rebuilds finalize); `sendMessage.ts`
+   (this branch's I8 gates, SOR's typed errors, RSW's lineage inputs); the seed
+   files' broadcast fixtures. One semantic point for SOR: its adoption writes
+   the message and audit rows a share's send would have made, so it must read
+   this branch's person's-share record to stamp `automated` correctly.
 
 ## 7. Testing and acceptance
 

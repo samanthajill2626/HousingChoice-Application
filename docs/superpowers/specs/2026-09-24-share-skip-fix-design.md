@@ -62,8 +62,10 @@ diagnosis confirmed the first four in production for the tenant Sam named):
    the breaker writes the field after creation (to `manual`, with a
    `mode_changed` audit event, reason `breaker_trip`).
 4. The same refusal silently stops every other automated one-to-one text for those
-   contacts: tour reminders (one-to-one route), placement nudges, the missed-call
-   auto-text, the public sign-up welcome and the 30003 automatic retry.
+   contacts: tour reminders (one-to-one route), the missed-call auto-text, the
+   public sign-up welcome and the 30003 automatic retry. (Placement nudges are
+   held for manual sending today and go out as a person's send, so the switch
+   never stops one; corrected 2026-09-25 from the plan research.)
 5. The fan-out records a refusal on the recipient slot as `skipped` with the
    refusal code, but a skip for opt-out or unreachable at its own first fence
    records NO code. Derived stats count every skipped slot except `no_consent`
@@ -94,8 +96,8 @@ Goals:
   honors the switch; after D2 that only matters for a breaker-stopped
   conversation.)
 - G2. Every one-to-one conversation not currently stopped by the breaker has the
-  switch on, so reminders, nudges, missed-call texts, welcome texts and retries
-  work again for imported contacts; the import no longer creates switched-off
+  switch on, so reminders, missed-call texts, welcome texts and retries work
+  again for imported contacts; the import no longer creates switched-off
   one-to-one conversations.
 - G3. A tenant whose share was skipped is never marked "Already sent" for it.
 - G4. Every skipped or failed recipient shows its real reason; counts stop
@@ -133,11 +135,14 @@ Reports, counts only, no names, phones or message bodies:
   (relay_group/group_text, off by design), other.
 - Breaker-tripped conversations listed individually (conversation id, type, trip
   time) for Cameron's review.
-- Not-yet-sent scheduled texts (tour-reminder rungs, placement nudges) whose
-  recipient's one-to-one conversation is switched off: these start sending once D2
-  runs.
-- Import-created one-to-one conversations missing the one-conversation-per-phone
-  claim record (for the D10 issue).
+- Not-yet-sent tour-reminder rungs that would take the one-to-one route (the
+  census replays the reminder job's own target resolution: not a discontinued
+  kind, not a group-routed tour, not a tour already started) whose conversation
+  is switched off: these start sending once D2 runs. Pending placement nudges
+  are reported separately as held manual-only, unaffected by D2.
+- Import-created one-to-one conversations whose one-conversation-per-phone claim
+  record points at a DIFFERENT conversation (a missing claim is the normal state
+  for an imported row; only a mismatch matters) - for the D10 issue.
 
 ### D2. Fix script: switch every one-to-one conversation on
 
@@ -154,9 +159,13 @@ Reports, counts only, no names, phones or message bodies:
 - Every switch it turns on gets a `mode_changed` audit event (manual to auto) whose
   reason distinguishes a bulk enable from a single resume.
 - Output: counts by type (and, for single mode, the one id).
-- Target safety: follows the repo's ops-script posture (explicit table prefix, the
-  resolved target logged before the first read) and, when pointed at real AWS,
-  refuses to run unless the account is 938565869261.
+- Target safety: follows the GUARDED ops-script precedents (`import-apply.ts`,
+  `rail-verify.ts`): explicit table prefix, the resolved target logged before
+  the first read, and, when the endpoint is not DynamoDB Local, the account is
+  asserted as 938565869261 on the `housingchoice` profile and the DynamoDB
+  client is built from those same credentials - never the default chain, which
+  on the operator's machine belongs to another account. The account check is
+  injectable so a test can prove the refusal. D1 follows the same shape.
 - Only Cameron runs it against dev or prod (or gives an explicit go per run).
 
 ### D3. Import default
@@ -169,8 +178,8 @@ rows keep `manual`. A re-run never changes an existing conversation's switch
 
 - Who created the share is decided ONCE, at creation. The dashboard's draft
   route can only be called by an authenticated staff session (the session
-  middleware has just verified that user exists), so that route records on the
-  share that it is a person's share. The recorded creator id stays as
+  middleware verifies the user still exists, through a 60-second cache), so
+  that route records on the share that it is a person's share. The recorded creator id stays as
   attribution.
 - The send job reads that record. Present: every recipient is sent as a person's
   send; the switch and the breaker do not apply. Absent - a draft created before
@@ -193,11 +202,12 @@ rows keep `manual`. A re-run never changes an existing conversation's switch
   recipients of that property's earlier sending/sent shares whose slot is
   `queued`, `sent`, `delivered` or `failed`. A `skipped` recipient never counts:
   no text was attempted for them.
-- `failed` keeps counting, as today, on purpose: a failed text may have been
-  delivered by a retry the share never hears about, and un-flagging such a
-  tenant would re-propose them. Branch B replaces this with the attempts-based
-  rule; until then a tenant whose text failed stays flagged, and staff can tick
-  them by hand.
+- `failed` keeps counting, as today, on purpose: a text that failed after it was
+  sent may have been delivered by a retry the share never hears about, and
+  un-flagging such a tenant would re-propose them. A recipient that failed
+  BEFORE any send (no contact or phone, a ladder close) has no text and no
+  retry, but telling the two apart is Branch B's attempts rule; until then every
+  failed recipient stays flagged, and staff can tick them by hand.
 - Everything else about the review list is unchanged, with one fix: the flag is
   a review-time hint, never a send-time block; tenants the filter proposed start
   unchecked when flagged; a seeded row (the one-to-one tenant, or a hand-picked
@@ -262,18 +272,26 @@ rows keep `manual`. A re-run never changes an existing conversation's switch
 
 ### D9. RUNBOOK: "a conversation tripped the breaker"
 
-How to see why (the alarm log line, the conversation's `mode_changed` event, the
-automated sends that preceded it), and how to switch it back on with D2's
-single-conversation mode once the cause is understood. Also: how to run D1 and D2
-against dev and prod, and the import-window rule from section 6.
+How to see why - one trip fires no alarm (the error alarms need five errors in
+five minutes or three consecutive periods), so the section gives the ways a trip
+is found: a Logs Insights search for `circuit breaker TRIPPED` in the app log
+group, Settings -> System status -> Recent errors, the D1 breaker list, and a
+read-only Query of the conversation's audit partition (`conversations#<id>` in
+`hc-<env>-audit_events`, via the `housingchoice` profile) for the `mode_changed`
+event and the `message_sent` events with `automated: true` that preceded it (no
+UI or API shows a conversation's audit trail). Then how to switch it back on
+with D2's single-conversation mode once the cause is understood. Also: how to
+run D1 and D2 against dev and prod, and the import-window rule from section 6.
 
 ### D10. Issues filed or amended by this branch
 
 - `ai-mode-switch-gates-all-automation` (WP2; filed with this spec) carries item
   8: engine-created property sends use their own creation path, never the
   dashboard route (D4).
-- Import-created conversations lack the one-conversation-per-phone claim record
-  (low risk; D1 sizes it).
+- Import-created conversations lack the one-conversation-per-phone claim record;
+  a missing claim is their normal state and is harmless until a claim points at
+  a different conversation than the phone's open row (low risk; D1 sizes the
+  mismatches).
 - The tenant timeline's "Property sent" milestone still reads sent after a later
   delivery failure (Branch B's rule decides it; filed so it is tracked
   meanwhile).
@@ -284,8 +302,8 @@ against dev and prod, and the import-window rule from section 6.
   whoever created it.
 - I2. A share not created through the dashboard's draft route is automated
   (switch and breaker apply).
-- I3. A `skipped` recipient is never "Already sent" and never makes a share
-  read "Sent".
+- I3. A `skipped` recipient is never "Already sent", and a share in which every
+  recipient was skipped never reads "Sent".
 - I4. The "Already sent" flag is a review-time hint, never a send-time block,
   and a seeded row stays checked - through "Select all" too.
 - I5. Nothing in this branch turns a switch OFF; only the existing breaker does.
@@ -311,9 +329,12 @@ against dev and prod, and the import-window rule from section 6.
 - Person's-share record. Writer: the dashboard draft route (D4); seed fixtures
   (seeded shares a test sends as staff must carry it); never the engine.
   Readers: the send job; the share list (attribution unchanged).
-- Recipient reason and stats. Writers: the fan-out's first-fence skips (D7).
-  Readers: results rows and chips, share list stats, derived stats, the finalize
-  log line, "already sent" (D5), the labels (D6).
+- Recipient reason and stats. Writers: the fan-out's first-fence skips (D7), and
+  the PERSISTED stat counters the fan-out bumps (its refusal branch bumps
+  `skipped_opted_out` today; other skips move to the new bucket in the
+  persisted counters as well as the derived stats). Readers: results rows and
+  chips, share list stats, derived stats, the finalize log line (which reads
+  the persisted counters today), "already sent" (D5), the labels (D6).
 - One-to-one default text: the composer's one-recipient mode and the message
   editor's placeholder in that mode.
 
@@ -361,8 +382,8 @@ against dev and prod, and the import-window rule from section 6.
 
 ## 8. Risks and accepted tradeoffs
 
-- D2 releases pending automated texts for previously switched-off conversations.
-  Intended; D1 counts them before Cameron applies.
+- D2 releases pending one-to-one tour-reminder rungs for previously switched-off
+  conversations. Intended; D1 counts them before Cameron applies.
 - A breaker trip that lands while the bulk run is in progress may be switched back
   on by that run; the breaker re-trips on the next capped minute. Bounded, accepted.
 - After D2, `auto` does not mean "the AI may reply" (WP2 must not read it so).
@@ -399,5 +420,7 @@ against dev and prod, and the import-window rule from section 6.
   `resolveTemplate.ts`, `RecipientPreview.tsx`, `BroadcastResults.tsx`,
   `broadcastFormat.ts`, `StatChips.tsx`); reason wording:
   `dashboard/src/routes/contact/deliveryStatus.ts`.
-- Ops-script precedents: `app/scripts/` (for example
-  `retire-paused-tour-reminders.ts`, `measure-unread-contact-coverage.ts`).
+- Ops-script precedents: `app/scripts/` - dry-run/conditional-write shape from
+  `retire-paused-tour-reminders.ts`; the account guard plus
+  credentials-from-profile shape from `import-apply.ts` and `rail-verify.ts`
+  (`scripts/lib/hcAws.mjs`); local-endpoint detection from `db-create.ts`.

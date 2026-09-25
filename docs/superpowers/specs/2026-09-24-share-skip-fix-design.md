@@ -209,9 +209,15 @@ A recipient counts as sent when:
   send never started never count; or
 - their newest attempt is `sent` (handed to the carrier, confirmed or not).
 
-A recipient does not count when skipped, or when every attempt failed. An older
-attempt still `sent` beside a newer failed one keeps the recipient eligible: if
-it delivers, they count. A draft never counts. Known and accepted: a share whose
+A recipient does not count when skipped, or when every attempt failed. A draft
+never counts.
+
+An attempt is attributed to the recipient whose text it retried, through the
+attempt it retried - never by conversation, so two recipients of one share who
+share a phone (duplicate contacts) stay distinct. The record follows the newest
+attempt: when attempts overlap (a staff Retry pressed during an automatic
+backoff), a delivery of the superseded attempt is not recorded. Accepted: rare,
+and the same double-send case section 8 names. Known and accepted: a share whose
 fan-out died on an unclassified error is never finalized (no route closes it;
 I7), so its remaining `queued` slots count permanently - pre-existing, tracked
 in `docs/issues/throw-for-redelivery-defeated-by-job-marker.md`.
@@ -247,9 +253,10 @@ Every surface that tells staff a property was sent to a tenant follows it:
   keeps promising a retry - the same wording and affordance the conversation
   timeline shows today (WP2 owns retries). A `queued` slot of a share that is
   not `sending` presents as "Not sent".
-- (e) The share's own label derives from its recipients, not its stored status,
-  and has three values: "Sending" while the share is `sending` and any recipient
-  is still queued; "Sent" when any recipient counts; otherwise "Not sent" -
+- (e) A draft keeps "Draft". Any other share's label derives from its
+  recipients, not its stored status, and has three values, first match wins:
+  "Sending" while the share is `sending` and any recipient is still queued;
+  "Sent" when any recipient counts; otherwise "Not sent" -
   including during a 30003 retry wait, when the recipient's row explains the
   coming retry. "Sent" holds even when the stored status is `failed` because a
   30003 landed before finalize and a retry later delivered. The results page's
@@ -282,7 +289,11 @@ while the first is still going out flags those tenants as already sent.
   whose text was delivered on a retry stays counted, AND the repair records
   those historical attempts against their shares, so "Already sent", the
   activity count, the results row and the label agree with the ledger for
-  history.
+  history. The repair follows D2's write discipline: every write is conditional
+  on the record being unchanged since its read, it never erases a recorded
+  delivery or an attempt recorded after deploy, and an applied run re-reads
+  rather than replaying a dry run's plan. A retry whose lineage was never
+  written (a rare crash between send and annotate) is invisible to it - accepted.
 
 ### D7. Real reasons and honest counts
 
@@ -381,9 +392,11 @@ against dev and prod, and the import-window rule from section 6.
   automatic retry is the existing retry job; both keep today's gates, and a
   refused one is not an attempt.
 - I9. A recipient's recorded outcome leaves `failed` only through a newly sent
-  attempt for that recipient, and a recorded delivery is never erased by a later
-  attempt. Within one attempt, delivery outcomes stay forward-only (the existing
-  exactly-once rule for callbacks).
+  attempt for that recipient - or, once, through the post-deploy repair
+  recording an attempt sent before this branch, under D6's write rule - and a
+  recorded delivery is never erased by a later attempt or by the repair. Within
+  one attempt, delivery outcomes stay forward-only (the existing exactly-once
+  rule for callbacks).
 
 ## 5. Surfaces (writers and readers the plan must cover)
 
@@ -431,7 +444,11 @@ against dev and prod, and the import-window rule from section 6.
    afterwards (idempotent).
 2. D4-D8 and the D10 filings follow in the same worktree; one whole-branch review
    at the end.
-3. After Cameron merges and deploys: the D6 repair pass, dry run first, on his go.
+3. After Cameron merges and deploys: the D6 repair pass, dry run first, on his
+   go - immediately after the deploy and before the first blast, because until
+   it runs a tenant who received a property on a pre-branch retry reads not sent
+   and would be proposed again. D1's count says whether that gap holds anyone
+   at all.
 
 ## 7. Testing and acceptance
 

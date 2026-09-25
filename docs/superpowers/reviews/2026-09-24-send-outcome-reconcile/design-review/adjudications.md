@@ -119,3 +119,35 @@ change rather than by a patch each.
 Decisions changed: yes (the attempt record) -> round 4, the LAST round under
 the cap. If round 4 still changes a decision, the open findings go to Cameron
 as a decision rather than a fifth round.
+
+## Spec round 4 (2026-09-25) - reviewer A continued; the cap round
+
+The reviewer reported the record mechanics it was asked to test - D7's
+record-first order, D11's `attemptedAt` conditions, D16a, D13a's late rung
+claim, D20a - as sound. The ten findings below each tighten an existing rule;
+none adds a mechanism, a surface or moves an invariant, so the planner rules
+this the TERMINAL round: fold in and stop.
+
+| # | finding | ruling | what changed |
+|---|---|---|---|
+| 1 | the close gate lets any `done` record through (a delivered relay leg is `done/sent` with a `queued` slot); the retry gates and the opt-out arm write the slot BEFORE their claim | ACCEPT | D8: a close proceeds only when the record is absent or `done` / `retryable`; the slot write requires `queued` with no SID; the retry gates and the opt-out arm read the record too. |
+| 2 | identical-body MEDIA legs carry different photos; with one orphan and two attempts, the loser re-drives: photo B twice, photo A never | ACCEPT | D13: `never_sent` is withheld - `unresolved` - while another attempt for the same recipient and sender with the same fingerprint (body hash + media count) is open or adopted in the window. |
+| 3 | the reconcile job's own closes cannot satisfy D8 (reads its own record) and D11 (record `done` first strands the slot on a crash) at once | ACCEPT | D8: own closes are exempt from the gate, write the slot first, then the record; a redelivered close re-applies the slot write. |
+| 4 | contests the round-3 #8 concession: a 90s takeover TTL outlives both ladders, so a stuck attempt is deferred to the cap and then skipped | CONCEDE | D8a: TTL = the provider's 30-second timeout (a premature takeover of a live call is repaired by the lookup); D8: a cap-close takes over a stale `attempting` record instead of skipping it. |
+| 5 | 20 pages at the default page size caps a pair at ~1000 messages; active members and long-running tenants exceed it | ACCEPT | D13: the provider's maximum page size (1000), asserted by the driver, and a bound of 5 pages. |
+| 6 | "the brake defers only recipients that have no attempt yet" drops a continuation's deferred remainder | ACCEPT | D8: "not yet attempted in this pass". |
+| 7 | D8a both allows and refuses a claim from `redriven`; no rule for `never_sent` with `redriveCount` 1; "deferred again" is meaningless for `retrySend` | ACCEPT | D8a and D13a reworded; a `retrySend` refusal is a duplicate rung and a skip. |
+| 8 | D15 gates the row append on the slot write while D11 makes it the SID claim; `putRelaySidPointer` swallows its conditional failure | ACCEPT | D15: the order is SID claim, slot, then the gated best-effort writes; the pointer put must report a lost claim. |
+| 9 | the record key can carry a phone; no TTL horizon | ACCEPT | D8a: phone-bearing recipient keys are hashed into the key (the relay retry claim's rule); a 30-day cleanup `expires_at`. |
+| 10 | a BatchGet's unprocessed keys read as "absent = no attempt" and would close in-flight recipients | ACCEPT | D8: per-key consistent reads, or a completeness check that re-reads unprocessed keys. |
+
+**Round 4 outcome:** 10 findings, all accepted (one as a conceded contest).
+No decision changed - precision edits folded into revision 5. Review closed
+at the cap. The one adjudication that stands REJECTED across all four rounds:
+round 2 #8's multiplicity - `unresolved` is ONE state on screen ("Couldn't
+confirm whether this text went out."), and its cause lives in the log line,
+because in every cause the platform genuinely does not know.
+
+Totals across rounds: 74 findings adjudicated (R1 30 distinct of 50 raw, R2
+20, R3 14, R4 10); ACCEPT 71 (5 as conceded contests), REJECT 1 (in part),
+DEFER 2 (filed in Sec 9).

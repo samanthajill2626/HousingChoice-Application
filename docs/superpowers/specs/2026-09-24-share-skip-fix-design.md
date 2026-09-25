@@ -16,8 +16,8 @@ Shorthand used in THIS DOCUMENT ONLY (never UI, RUNBOOK or issue copy): a
 seeded recipient started from that tenant's file; a "blast" is a filter-audience
 broadcast. "The switch" is the per-conversation `ai_mode` field
 (`auto` | `manual`). "Counts" and "counted" are defined in D5. An "attempt" is
-one text sent for a share recipient: the original, an automatic retry, or a
-staff Retry of the failed message.
+a text ACTUALLY SENT for a share recipient: the original, an automatic 30003
+retry, or a staff Retry of the failed message (D5).
 
 ---
 
@@ -41,13 +41,14 @@ diagnosis confirmed the first four in production for the tenant Sam named):
    `manual` (reason `manual_mode`). A person's send skips that check and is never
    counted by the circuit breaker. Every send still passes the kill switch, the
    opt-out gate and the deleted-contact gate; a person's send also passes the
-   just-in-time consent gate, which checks whichever contact the phone lookup
-   returns first.
+   just-in-time consent gate. The deleted-contact and consent gates check
+   whichever contact the phone lookup returns first; opt-out is per number by
+   design.
 3. The Quo import writes the switch `manual` on any conversation row that has no
    value yet (new rows, and existing rows that lack the field). Nothing turns a
-   switch back on: there is no UI or API, and after creation only the breaker
-   writes it (to `manual`, with a `mode_changed` audit event, reason
-   `breaker_trip`).
+   switch back on: there is no UI or API, and apart from that import write, only
+   the breaker writes the field after creation (to `manual`, with a
+   `mode_changed` audit event, reason `breaker_trip`).
 4. The same refusal silently stops every other automated one-to-one text for those
    contacts: tour reminders (one-to-one route), placement nudges, the missed-call
    auto-text, the public sign-up welcome and the 30003 automatic retry.
@@ -56,7 +57,8 @@ diagnosis confirmed the first four in production for the tenant Sam named):
    records NO code. Derived stats count every skipped slot except `no_consent`
    as `skipped_opted_out`. The results page shows only "Skipped".
 6. A finished share is marked `sent` unless every recipient FAILED; an all-skipped
-   share reads "Sent".
+   share reads "Sent". A share whose only recipient failed before finalize is
+   stored `failed` with the alert "all recipients failed".
 7. "Already sent" is the union of recipient keys of every sending/sent share of
    that property, whatever happened to each recipient. Skipped and failed count.
    A share whose lifecycle status is `failed` is excluded.
@@ -69,12 +71,14 @@ diagnosis confirmed the first four in production for the tenant Sam named):
    Activity card and on the owning landlord's timeline. Skipped and failed count.
 10. Every share - one tenant or fifty - starts from the same default message:
     greeting with first name, bedrooms, address, rent, flyer link.
-11. A share text that fails 30003 is retried automatically (up to three times
-    over about seven minutes), and the results page sends staff to the
-    conversation's Retry button for any failed row. Both retries send a NEW
-    message that carries no share id, so the retry's outcome never reaches the
-    recipient slot: the slot reads `failed` forever even when the retry
-    delivered.
+11. A share text that fails 30003 is retried automatically (up to three times,
+    60/120/240 s apart), and the results page sends staff to the conversation's
+    Retry button for any failed row. Both retries send a NEW message that carries
+    no share id, so the retry's outcome never reaches the recipient slot: the
+    slot reads `failed` forever even when the retry delivered. A retry that is
+    refused (by a gate or the switch), never scheduled, or errors out leaves no
+    record at all; only exhaustion is derivable. A recipient's recorded outcome
+    never leaves `failed` today (forward-only rule).
 
 The architecture doc (section 6, "AI Conversation Layer") defines the switch as an
 AI control: `auto` = the assistant replies itself; `manual` = the assistant stays
@@ -111,11 +115,11 @@ Non-goals (do not build; each is filed or owned elsewhere):
   group threads (WP2 issue above).
 - Any UI or API that turns the switch on or off.
 - Any change to the breaker's cap or behavior, or to which failures retry and how
-  often.
+  often, or to the conversation timeline's Retry affordance and wording.
 - The switch value on relay_group and group_text threads (stays `manual`; inert).
 - Which tenants a blast targets (Sam's #6, awaiting her answers).
 - The tenant timeline's "Property sent" milestone after a delivery fails (D10).
-- Re-filing all-skipped shares under the list's "Failed" tab (D7).
+- Re-filing shares under the list's status tabs (D7).
 
 ## 3. Decisions
 
@@ -133,8 +137,8 @@ Reports, counts only, no names, phones or message bodies:
 - Not-yet-sent scheduled texts (tour-reminder rungs, placement nudges) whose
   recipient's one-to-one conversation is switched off: these start sending once D2
   runs.
-- Listing-send ledger rows that D6 would un-count (the share's latest attempt for
-  that recipient failed with no retry pending) - sizes the D6 repair.
+- Listing-send ledger rows that D6 would un-count (no attempt of any share of the
+  pair delivered, and the newest attempt of each failed) - sizes the D6 repair.
 - Import-created one-to-one conversations missing the one-conversation-per-phone
   claim record (for the D10 issue).
 
@@ -166,64 +170,78 @@ rows keep `manual`. A re-run never changes an existing conversation's switch
 
 ### D4. Staff-created shares are a person's sends
 
-- The send job decides per share from its recorded creator. The creator is staff
-  when it resolves to a record in the users table (any lifecycle status). That is
-  true of every draft the dashboard creates, in every environment, because the
-  authenticated draft route stamps the session's user id.
-- A staff share sends every recipient as a person's send: the switch and the
-  breaker do not apply.
-- Every other creator - missing, unresolvable, or any future engine identity - is
-  automated, exactly as today. Unrecognized means automated (the safe direction).
-  A draft whose creator has since been removed from the team therefore sends as
-  automated (accepted: rare, and after D2 only a breaker-stopped conversation
-  notices; a colleague can recreate the draft).
+- Who created the share is decided ONCE, at creation. The dashboard's draft
+  route can only be called by an authenticated staff session (the session
+  middleware has just verified that user exists), so that route records on the
+  share that it is a person's share. The recorded creator id stays as
+  attribution.
+- The send job reads that record. Present: every recipient is sent as a person's
+  send; the switch and the breaker do not apply. Absent - a draft created before
+  this change, or by any path other than the dashboard route, including a future
+  engine - the share is automated, exactly as today. Unrecognized means automated
+  (the safe direction). Nothing is looked up on the send path, so there is no
+  read-failure case, and a draft whose creator has since left the team keeps its
+  record.
 - The creator decides, not the person who presses Send: an engine-created draft a
   person reviews and sends stays automated, because the engine composed it.
 - Kill switch, opt-out, deleted contact and consent still refuse, for staff shares
-  and blasts alike. A recipient the share already fenced as consented is never
-  refused for consent because a duplicate contact on the same phone lacks it (I8).
-- WP3's engine-sent shares must be created under a non-user identity so they stay
-  automated: recorded as item 8 of the WP2 issue (D10).
+  and blasts alike, judged as I8 says.
+- WP3's engine-sent shares must be created by their own path, never the dashboard
+  route, so they stay automated: item 8 of the WP2 issue (D10).
 
 ### D5. One "counted as sent" rule
 
-A share recipient's outcome follows their LATEST attempt (original text, automatic
-retry, or a staff Retry of the failed message): every attempt belongs to the share
-that started it. A recipient counts as sent while the latest attempt is:
+Attempts. Every text actually sent for a share recipient is an attempt recorded
+against that share: the original, an automatic 30003 retry, or a staff Retry of
+the failed message. A retry that never sends - refused by a gate or the switch,
+never scheduled, or errored out - is not an attempt and changes nothing; the
+recipient stays as their last attempt left them, which is the truth.
 
-- `queued` on our side (including a rate-limit retry wait) AND the share is still
-  `sending` - the queued slots of a share whose send never started never count;
-- `sent` (handed to the carrier, confirmed or not);
-- `delivered`;
-- `failed` with an automatic retry still pending (the text is still on its way).
+A recipient counts as sent when:
 
-A recipient never counts when skipped, or when the latest attempt failed with no
-retry pending. A draft never counts. Known and accepted: a share whose fan-out died
-on an unclassified error is never finalized, so its remaining `queued` slots count
-until someone closes it (pre-existing, tracked separately).
+- any attempt for them was delivered; or
+- their newest attempt is `queued` on our side (including a rate-limit retry
+  wait) AND the share is still `sending` - the queued slots of a share whose
+  send never started never count; or
+- their newest attempt is `sent` (handed to the carrier, confirmed or not).
+
+A recipient does not count when skipped, or when every attempt failed. A draft
+never counts. Known and accepted: a share whose fan-out died on an unclassified
+error is never finalized (no route closes it; I7), so its remaining `queued`
+slots count permanently - pre-existing, tracked in
+`docs/issues/throw-for-redelivery-defeated-by-job-marker.md`.
 
 Every surface that tells staff a property was sent to a tenant follows it:
 
 - (a) The recipient review list: the "Already sent" tag and the default-unchecked
-  state in a blast, including tenants added by hand. A seeded row - the one-to-one
-  tenant, or a hand-picked tenant - stays pre-checked (a deliberate choice) and
-  still shows the tag. A tenant whose earlier share of the property was skipped
-  or failed (no retry pending) is NOT already sent.
+  state for tenants the audience filter proposed. A seeded row - the one-to-one
+  tenant, or a tenant staff picked by hand, from the moment they are added - is a
+  deliberate choice: it stays pre-checked and still shows the tag. A tenant whose
+  every attempt for the property failed, or who was skipped, is NOT already sent.
 - (b) "Properties sent" on a contact and "Sent to tenants" on a property (via D6).
 - (c) The property activity entry for a finished share: N counts only counted
   recipients; when N is 0 the entry says nothing was sent. The count is derived
   at render time from the share's stored outcomes, so it is right for shares
-  already on record (the tenant Sam named has four) and after later delivery
-  failures. Cost: one share read per activity entry, bounded by the number of
-  shares of that property; the landlord timeline's property interleave inherits
-  the same bound. Related read-cost tracking:
+  already on record (the tenant Sam named has four) and after later attempts.
+  Cost: one share read per activity entry, bounded by the number of shares of
+  that property; the landlord timeline's property interleave inherits the same
+  bound. Related read-cost tracking:
   `docs/issues/broadcast-results-enrichment-read-cost.md`.
-- (d) The share's results row for the recipient shows the latest attempt's
-  outcome (a delivered retry reads delivered, not the original failure).
+- (d) The share's results row for the recipient shows the newest attempt's
+  outcome (a delivered retry reads delivered, not the original failure). A 30003
+  failure keeps the existing "will retry" wording and the existing
+  open-conversation-to-retry hint. Known limitation, accepted: a retry the switch
+  or a gate refuses is unrecorded, so that row keeps promising a retry - the same
+  wording and affordance the conversation timeline shows today (WP2 owns
+  retries).
+- (e) The share's own label ("Sent" / "Not sent" / "Failed") and the results
+  page's failure alert derive from its recipients, not its stored status: "Not
+  sent" when no recipient counts and none is in flight; "Sent" when any counts,
+  even when the stored status is `failed` because a 30003 landed before finalize
+  and a retry later delivered.
 
-Because `queued`, `sent` and a pending retry count, a second share of the same
-property started while the first is still going out flags those tenants as
-already sent.
+Because `queued` and `sent` count, a second share of the same property started
+while the first is still going out flags those tenants as already sent.
 
 ### D6. The listing-send ledger follows the rule
 
@@ -231,12 +249,11 @@ already sent.
   to that tenant is counted (D5), judged from carrier acceptance onward: the
   ledger is written when the carrier accepts the text, so it lags D5's `queued`
   window by the send pacing (the one stated exception to G3/I3).
-- A failure with no retry pending un-counts the pair unless another share of it
-  still counts (an earlier delivered share keeps it counted). A later counted
-  attempt - a delivered retry, or a new share - re-counts it.
-- A counted pair describes its latest COUNTED share (date and id), never a share
-  whose attempt failed. This date orders "Properties sent" and picks the tour
-  form's default property.
+- A pair stops counting when no share of it counts any more: no attempt of any
+  share delivered and the newest attempt of each share failed. A newly sent
+  attempt (a retry) or a new share re-counts it.
+- A counted pair describes its latest counted share (date and id). This date
+  orders "Properties sent" and picks the tour form's default property.
 - A failure reported before the ledger row is written must still un-count it: the
   order of the carrier callback and the ledger write must not matter.
 - "Properties sent", "Sent to tenants" and any future matching read show only
@@ -244,8 +261,8 @@ already sent.
   No. 1's matching will read this at scale.
 - Rows already on record that D6 would un-count are brought in line by a
   dry-run-first repair pass run on Cameron's go after deploy (D1 counts them
-  first). The repair honors retries: a pair whose text was delivered on a retry
-  stays counted.
+  first). The repair judges by attempts: a pair whose text was delivered on a
+  retry stays counted.
 
 ### D7. Real reasons and honest counts
 
@@ -270,22 +287,23 @@ already sent.
   | breaker | Stopped by the automatic-text safety limit |
   | kill switch | Texting is turned off |
   | rate-limit cap / could not schedule | the existing wording for those two codes |
-  | carrier failure with a code | the existing carrier-code wording, else "Delivery failed (error N)" |
+  | carrier failure with a code | the existing carrier-code wording (30003 keeps "will retry"), else "Delivery failed (error N)" |
   | failed with no code | Delivery failed |
   | a skip recorded before this change with no reason | Opted out or number unreachable |
   | any other code | Not sent (code) |
 
 - Counts (wire and log only; no new chip): the derived stat buckets stop filing
   other skips under opted-out - "opted out" holds opt-outs and reason-less legacy
-  skips, "no consent" holds both consent codes, every other skip goes to its own
-  bucket; the results page's Skipped chip sums every skip bucket, so its total is
-  unchanged; the finalize log line reports every skip.
-- A finished share where no recipient counts reads "Not sent" instead of "Sent"
-  on its results page and in the share list. Presentation only: the stored
-  lifecycle status and the list's status tabs are unchanged, so such a share
-  stays under the "Sent" tab with a "Not sent" label, while a share whose every
-  recipient failed inside the send job stays under "Failed". Accepted split:
-  re-filing history is a production rewrite (I7).
+  skips, "no consent" holds both consent codes, every other skip goes to ONE
+  other-skipped bucket; the results page's Skipped chip sums every skip bucket,
+  so its total is unchanged; the finalize log line reports every skip.
+- Labels are presentation (D5(e)): the stored lifecycle status and the list's
+  status tabs are unchanged, so an all-skipped share stays under the "Sent" tab
+  reading "Not sent", a share whose every recipient failed inside the send job
+  stays under "Failed", and a `failed`-stored share rescued by a retry reads
+  "Sent" under "Failed". Accepted split: re-filing history is a production
+  rewrite (I7), and a share's outcome keeps moving after finalize (retries, late
+  callbacks), so no stored status could stay right.
 
 ### D8. One-to-one share default message (#4)
 
@@ -306,8 +324,9 @@ against dev and prod, and the import-window rule from section 6.
 
 ### D10. Issues filed or amended by this branch
 
-- `ai-mode-switch-gates-all-automation` (WP2; filed with this spec) gains item
-  8: engine-created shares use a non-user creator identity (D4).
+- `ai-mode-switch-gates-all-automation` (WP2; filed with this spec) carries item
+  8: engine-created property sends use their own creation path, never the
+  dashboard route (D4).
 - The tenant timeline's "Property sent" milestone still reads sent after a later
   delivery failure (the failed message bubble on the same timeline shows the
   truth; deferred).
@@ -318,22 +337,28 @@ against dev and prod, and the import-window rule from section 6.
 
 - I1. Kill switch, opt-out, deleted contact and consent refuse every share,
   whoever created it.
-- I2. A share not created by a staff user account is automated (switch and breaker
-  apply).
+- I2. A share not created through the dashboard's draft route is automated
+  (switch and breaker apply).
 - I3. One definition of "counted as sent" (D5); no surface counts a skipped or
-  finally-failed send as sent, except the ledger's acceptance lag (D6) and the
-  deferred tenant-timeline milestone (D10).
+  all-attempts-failed send as sent, except the ledger's acceptance lag (D6) and
+  the deferred tenant-timeline milestone (D10).
 - I4. A second share of a property flags a tenant whose text is still queued, on
-  its way or delivered as already sent, and leaves them unchecked in a blast. The
-  flag is a review-time hint, never a send-time block, and a seeded row stays
-  checked.
+  its way or delivered as already sent, and leaves them unchecked when the filter
+  proposed them. The flag is a review-time hint, never a send-time block, and a
+  seeded row stays checked.
 - I5. Nothing in this branch turns a switch OFF; only the existing breaker does.
 - I6. D2 only ever turns switches on, only on one-to-one conversations, and audits
   every change.
 - I7. Production is written only by Cameron-run operator scripts on his explicit
   go (D2, the D6 repair); no infrastructure, index or dependency changes.
-- I8. A share recipient's consent is judged on the recipient contact the share
-  resolved, never on another contact that shares the phone.
+- I8. For a share's own sends, consent and deletion are judged on the recipient
+  contact the share resolved, never on another contact that shares the phone;
+  opt-out stays per number (either contact's opt-out refuses). A staff Retry of a
+  share message is an ordinary staff send through the conversation with today's
+  gates; if refused, it is not an attempt.
+- I9. A recipient's recorded outcome leaves `failed` only through a newly sent
+  attempt for that recipient. Within one attempt, delivery outcomes stay
+  forward-only (the existing exactly-once rule for callbacks).
 
 ## 5. Surfaces (writers and readers the plan must cover)
 
@@ -345,18 +370,19 @@ against dev and prod, and the import-window rule from section 6.
   load shape, not behavior under test). Readers: the send wrapper; the
   scheduled-send suppression previews (tour reminders panel, contact timeline
   scheduled cards). Readers need no change: after D2 they report the new state.
-- Share creator. Writers: the draft-create route; seed fixtures (their creators
-  must resolve as staff where a test sends them); the future engine. Readers: the
-  send job (D4, via the users table); the share list.
-- Recipient outcome (slot status + reason). Writers: the send route (queued), the
-  fan-out (sent/skipped/failed, transient deferrals, ladder closes), the delivery
-  callback rollup (delivered/failed, carrier-sent marker), and - new - the
-  automatic 30003 retry and the staff Retry of a share message (D5). Readers:
-  results rows and chips, share list stats, derived stats, "already sent" (D5a),
-  the property activity count (D5c), finalize, the finalize log line, the ledger
-  (D6).
+- Person's-share record. Writer: the dashboard draft route (D4); seed fixtures
+  (seeded shares a test sends as staff must carry it); never the engine.
+  Readers: the send job; the share list (attribution unchanged).
+- Recipient outcome (attempts, status, reason). Writers: the send route (queued),
+  the fan-out (sent/skipped/failed, transient deferrals, ladder closes), the
+  delivery callback rollup (delivered/failed, carrier-sent marker, per attempt),
+  and - new - the automatic 30003 retry and the staff Retry of a share message,
+  which carry the share so their sent attempt is recorded (D5, I9). Readers:
+  results rows, chips and the share label/alert (D5(d), (e)), share list stats
+  and label, derived stats, "already sent" (D5a), the property activity count
+  (D5c), finalize, the finalize log line, the ledger (D6).
 - Ledger. Writers: the fan-out on acceptance, the delivery rollup and retry
-  outcomes (D6), the D6 repair, seed fixtures (seed rows with no share stay
+  attempts (D6), the D6 repair, seed fixtures (seed rows with no share stay
   counted). Readers: "Properties sent" (and the tour form's default property),
   "Sent to tenants" (and their tour-chip join), future matching.
 - Property activity entry. Writer: fan-out finalize. Readers: the property
@@ -364,6 +390,9 @@ against dev and prod, and the import-window rule from section 6.
   count, D5c).
 - One-to-one default text: the composer's one-recipient mode and the message
   editor's placeholder in that mode.
+- Dev seam (new): the one-to-one retry backoff (60/120/240 s) must be injectable
+  for the hermetic harness, as the relay retry ladder's is, so the 30003
+  scenario in section 7 runs in seconds.
 
 ## 6. Sequencing and rollout
 
@@ -387,14 +416,17 @@ against dev and prod, and the import-window rule from section 6.
   run on the wrong account refuses.
 - End to end (Playwright harness): a staff one-to-one share to a tenant whose
   conversation is switched off is delivered; a tenant whose earlier share was
-  skipped or finally failed is not "Already sent" while one whose share is
-  queued, sent, delivered or awaiting an automatic retry is; a seeded already-sent
-  row stays checked; a share text that fails 30003 and delivers on retry counts
-  (review list, ledger, results row); skipped/failed rows show their reasons; an
+  skipped or whose every attempt failed is not "Already sent" while one whose
+  share is queued, sent or delivered is; a seeded already-sent row stays checked;
+  a share text that fails 30003 and delivers on retry counts (review list,
+  ledger, results row, share label) - asserted on D5 surfaces and the derived
+  label, never on the stored lifecycle status, because finalize can race the
+  30003 callback either way; skipped/failed rows show their reasons; an
   all-skipped share reads "Not sent"; the one-to-one default text; the property
-  activity count; "Properties sent" drops a finally-failed delivery and keeps a
-  pair an earlier share delivered. The lean seed world needs a switched-off
-  one-to-one tenant conversation - a deliberate, reviewed change to that world.
+  activity count; "Properties sent" drops a pair whose every attempt failed and
+  keeps a pair an earlier share delivered. The lean seed world needs a
+  switched-off one-to-one tenant conversation - a deliberate, reviewed change
+  to that world.
 - All five completion gates from AGENTS.md.
 - Handback reports: the D1 numbers, the diagnosed cause (done), what D2 changed or
   would change, and every issue filed or amended.
@@ -413,20 +445,28 @@ against dev and prod, and the import-window rule from section 6.
 - The ledger and the review list disagree for the pacing window of an in-flight
   blast (D6's stated lag). Accepted: minutes, and the review list is the surface
   staff decide from.
-- Until the retry rule (D5) is built, and forever for a retry the switch refuses,
-  a recipient whose original text failed reads not sent while a retry may still
-  deliver. Accepted for the retry window only; the rule closes it otherwise.
+- During a retry's backoff (60-240 s per attempt, about seven minutes in all) a
+  recipient whose text failed reads not sent everywhere; a second share started
+  in that window can text them twice. Accepted: the window is short, the results
+  row says a retry is coming, and a retry that never sends leaves the truth in
+  place. Pressing Retry on the conversation while an automatic retry is pending
+  can also double-text; that is today's behavior for every one-to-one message
+  and is out of scope.
 
 ## 9. For Cameron at the spec gate
 
+- The retry rule (D5 attempts, I9) is load-bearing for D6 and is not optional;
+  confirm it.
 - Beyond the approved outline, included as consistency fixes: D5(c) (the property
-  activity count, derived at read with the stated cost), D5(d)/the retry rule
-  (retries follow the share), and the "Not sent" label in D7 with its accepted
-  tab split. Confirm or cut each.
+  activity count, derived at read with the stated cost), D5(e) (labels derived
+  from recipients, with the accepted tab split), and hand-picked tenants staying
+  pre-checked (D5(a)). Confirm or cut each.
+- D4 records "person's share" at creation instead of resolving the creator on
+  the send path (your suggestion was the creator id; this keys off the same
+  identity, one step earlier, and avoids a lookup that could fail mid-send).
 - Deferred with an issue rather than built: the tenant timeline "Property sent"
   milestone after a failed delivery (D10).
 - The plain-word reason copy in D7.
-- D4's recognition rule (a users-table record) and its removed-member consequence.
 
 ## Appendix A. Where these live today (orientation, not instructions)
 
@@ -434,7 +474,8 @@ against dev and prod, and the import-window rule from section 6.
   `app/src/services/sendMessage.ts`. Suppression preview:
   `app/src/services/scheduledSendSuppression.ts`. Automatic retry:
   `app/src/jobs/retrySend.ts`; staff Retry: the conversation retry route in
-  `app/src/routes/api.ts`.
+  `app/src/routes/api.ts`. Number-scoped opt-out:
+  `app/src/services/numberSuppression.ts`.
 - Share routes (draft, preview/"already sent", send, results):
   `app/src/routes/broadcasts.ts`; storage and derived stats:
   `app/src/repos/broadcastsRepo.ts`; delivery rollup:
@@ -447,10 +488,12 @@ against dev and prod, and the import-window rule from section 6.
   `app/src/routes/contactTimeline.ts`.
 - Import: `app/src/lib/import/apply.ts`. Conversation creation and the switch:
   `app/src/repos/conversationsRepo.ts`; the one-to-one bucket definition in
-  `app/src/lib/unreadFeed.ts`. Users: `app/src/repos/usersRepo.ts`.
+  `app/src/lib/unreadFeed.ts`. Session user check: `app/src/middleware/auth.ts`.
 - Composer and review: `dashboard/src/routes/broadcasts/` (`BroadcastComposer.tsx`,
   `resolveTemplate.ts`, `RecipientPreview.tsx`, `BroadcastResults.tsx`,
   `broadcastFormat.ts`, `StatChips.tsx`); reason wording:
   `dashboard/src/routes/contact/deliveryStatus.ts`.
 - Ops-script precedents: `app/scripts/` (for example
   `retire-paused-tour-reminders.ts`, `measure-unread-contact-coverage.ts`).
+- Retry-backoff seam precedent: the relay retry ladder
+  (`docs/superpowers/specs/2026-09-02-relay-30003-retry-lineage-design.md`).

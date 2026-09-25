@@ -20,7 +20,7 @@ The build went further. The one-to-one send wrapper refuses EVERY send marked
 automated when the conversation is `manual`, so the switch silently stops: tour
 reminders (one-to-one route), placement nudges, the missed-call auto-text, the
 public sign-up welcome, the 30003 automatic retry, and (until the share-skip-fix
-branch) staff-created property shares. There is no UI or API for the switch; after
+branch) staff-created property sends. There is no UI or API for the switch; after
 creation only the breaker writes it.
 
 The Quo import created every conversation `manual`, so for weeks every imported
@@ -42,8 +42,8 @@ contact silently lost all of the above (found via Sam's improvements list item #
 
 **Interim state (after the share-skip-fix branch).** Every one-to-one conversation
 is switched to `auto` by a one-time operator script; the import creates new
-one-to-one conversations `auto`; shares that staff start are sent as a person's
-send and never read the switch. The switch therefore only turns off when the
+one-to-one conversations `auto`; property sends staff create through the
+dashboard are sent as a person's send and never read the switch. The switch therefore only turns off when the
 breaker trips, and the script's single-conversation mode (RUNBOOK: "a conversation
 tripped the breaker") is the only way back. Relay groups and native group texts
 stay hard-coded `manual`; this is inert today because their send paths never read
@@ -53,7 +53,7 @@ the switch.
 
 1. The switch controls ONLY whether the AI may reply in a conversation.
 2. System texts never read it: tour reminders, placement nudges, the missed-call
-   text, the welcome text, automatic retries, and shares staff start.
+   text, the welcome text, automatic retries, and property sends staff create.
 3. A retry follows the original sender: a message a person sent is retried to
    exhaustion regardless of any AI or automation setting.
 4. The runaway breaker gets its own stop, separate from the AI switch, with a
@@ -63,11 +63,12 @@ the switch.
 7. Do NOT read today's `ai_mode = auto` as permission for the engine to reply: the
    share-skip-fix script set `auto` on every one-to-one conversation to restore
    system texts, not to opt anyone into AI replies.
-8. Engine-created property shares (Work Package 3, automated sharing to "wants to
-   tour") must be created under a NON-USER creator identity. The share send job
-   treats a share as a person's send when its creator resolves to a users-table
-   record and as automated otherwise (share-skip-fix D4); an engine share created
-   under a staff user id would bypass the switch and the breaker.
+8. Engine-created property sends (Work Package 3, automated sharing to "wants to
+   tour") must be created by the engine's own path, never the dashboard's draft
+   route. That route records at creation that a send is a person's send, and the
+   send job treats any send without that record as automated (share-skip-fix
+   D4); an engine send created through the dashboard route would bypass the
+   switch and the breaker.
 
 Related: [reminder-state-sent-overstates-delivery](./reminder-state-sent-overstates-delivery.md),
 [placement-nudge-suppression-opt-out-parity](./placement-nudge-suppression-opt-out-parity.md).

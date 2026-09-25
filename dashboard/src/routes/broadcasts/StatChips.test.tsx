@@ -158,10 +158,23 @@ describe('DeliveryBadge', () => {
     expect(container.textContent ?? '').not.toContain('enqueue_failed');
   });
 
-  it('shows just the Failed label when no error code is supplied', () => {
-    render(<DeliveryBadge status="failed" />);
+  it('share-skip-fix D7: a skipped row appends its reason, and a code-less legacy skip the disjunction', () => {
+    const { rerender } = render(<DeliveryBadge status="skipped" errorCode="manual_mode" />);
+    expect(screen.getByText('Skipped')).toBeInTheDocument();
+    expect(screen.getByText(/Automatic texts were off for this conversation/)).toBeInTheDocument();
+    rerender(<DeliveryBadge status="skipped" errorCode="opted_out" />);
+    expect(screen.getByText(/Opted out of texts/)).toBeInTheDocument();
+    rerender(<DeliveryBadge status="skipped" />);
+    expect(screen.getByText(/Opted out or number unreachable/)).toBeInTheDocument();
+  });
+
+  it('share-skip-fix D7: a failed row with no code reads Delivery failed (no raw code, no "error"); no_contact has its own reason', () => {
+    const { rerender } = render(<DeliveryBadge status="failed" />);
     expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText(/Delivery failed/)).toBeInTheDocument();
     expect(screen.queryByText(/error/i)).not.toBeInTheDocument();
+    rerender(<DeliveryBadge status="failed" errorCode="no_contact" />);
+    expect(screen.getByText(/No contact or phone on file/)).toBeInTheDocument();
   });
 });
 

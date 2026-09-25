@@ -10,6 +10,7 @@ import {
   toRecipientViews,
   voucherSizeLabel,
   presentRecipientStatus,
+  shareRecipientReason,
 } from './broadcastFormat.js';
 
 describe('voucherSizeLabel', () => {
@@ -124,5 +125,40 @@ describe('presentRecipientStatus', () => {
     const byKey = new Map(views.map((v) => [v.contactKey, v]));
     expect(byKey.get('c-1')?.carrierSentAt).toBe('2026-07-16T00:00:01.000Z');
     expect(byKey.get('c-2')?.carrierSentAt).toBeUndefined();
+  });
+});
+
+describe('shareRecipientReason (share-skip-fix D7)', () => {
+  it('maps every skip code to its staff-facing reason, exactly', () => {
+    expect(shareRecipientReason('skipped', 'manual_mode')).toBe('Automatic texts were off for this conversation');
+    expect(shareRecipientReason('skipped', 'opted_out')).toBe('Opted out of texts');
+    expect(shareRecipientReason('skipped', 'contact_opted_out')).toBe('Opted out of texts');
+    expect(shareRecipientReason('skipped', 'unreachable')).toBe("Number can't receive texts");
+    expect(shareRecipientReason('skipped', 'no_consent')).toBe('No texting consent recorded');
+    expect(shareRecipientReason('skipped', 'contact_no_consent')).toBe('No texting consent recorded');
+    expect(shareRecipientReason('skipped', 'contact_deleted')).toBe('Contact was deleted');
+    expect(shareRecipientReason('skipped', 'breaker_open')).toBe('Stopped by the automatic-text safety limit');
+    expect(shareRecipientReason('skipped', 'sms_sending_disabled')).toBe('Texting is turned off');
+  });
+
+  it('a legacy skip with no code reads the honest disjunction; an unknown code shows the code', () => {
+    expect(shareRecipientReason('skipped', undefined)).toBe('Opted out or number unreachable');
+    expect(shareRecipientReason('skipped', 'something_new')).toBe('Not sent (something_new)');
+  });
+
+  it('failed rows: no_contact has its own line; carrier and fan-out codes keep deliveryReason; no code = Delivery failed', () => {
+    expect(shareRecipientReason('failed', 'no_contact')).toBe('No contact or phone on file');
+    expect(shareRecipientReason('failed', '30007')).toBe('Carrier filtered the message (error 30007)');
+    expect(shareRecipientReason('failed', 'transient_cap')).toBe('Sending gave up after repeated carrier deferrals');
+    expect(shareRecipientReason('failed', 'enqueue_failed')).toBe('Sending could not be scheduled');
+    expect(shareRecipientReason('failed', undefined)).toBe('Delivery failed');
+    // The 30003 wording is the shared map's, untouched here (owned by feat/retry-send-window).
+    expect(shareRecipientReason('failed', '30003')).toMatch(/^Phone unreachable/);
+  });
+
+  it('no reason for the in-flight and success states', () => {
+    for (const s of ['queued', 'sent', 'delivered'] as const) {
+      expect(shareRecipientReason(s, 'anything')).toBeUndefined();
+    }
   });
 });

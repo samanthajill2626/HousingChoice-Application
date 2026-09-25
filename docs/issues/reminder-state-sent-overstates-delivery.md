@@ -60,3 +60,15 @@ the moment it happens.
 during the feat/tour-reminder-details merge review, 2026-08-06. Not fixed on that
 branch: the underlying state model predates it, and changing what `sentAt` means
 touches the concurrency guarantee three review passes had just verified.
+
+**Update 2026-09-25 - the thrown-error path reads "Sent" too.** The 2026-09-24
+marker sweep (`feat/send-outcome-reconcile`) found that a NON-refusal error after
+the claim - on the 1:1 route, the group route (`sendRelayAnnouncement`'s
+pre-send reads and append) and Send now - also leaves `sentAt` stamped with
+nothing delivered, so the panel shows the same "Sent" plus body. That path loses
+the rung, not just its label, and its fix is different (the send-outcome core),
+so it is filed separately as
+[tour-reminder-lost-on-post-claim-send-error](./tour-reminder-lost-on-post-claim-send-error.md).
+Whatever state this issue adds for a refusal should leave room for "not sent"
+from that path as well; `stateOf` (now `app/src/routes/tourReminders.ts:193`)
+is the one place both land.

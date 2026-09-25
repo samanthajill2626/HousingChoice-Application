@@ -6,8 +6,8 @@ severity: high
 status: open
 area: jobs
 created: 2026-09-01
-updated: 2026-09-01
-refs: app/src/jobs/broadcastFanOut.ts:545, app/src/jobs/relayFanOut.ts:1002, app/src/jobs/jobs.ts:188, app/src/jobs/jobs.ts:262, app/src/repos/messagesRepo.ts:2653, app/src/jobs/retrySend.ts:122
+updated: 2026-09-25
+refs: app/src/jobs/broadcastFanOut.ts:564, app/src/jobs/relayFanOut.ts:1447, app/src/jobs/relayRetryLeg.ts:575, app/src/jobs/jobs.ts:188, app/src/jobs/jobs.ts:262, app/src/repos/messagesRepo.ts:2653, app/src/jobs/retrySend.ts:131, app/src/jobs/retrySend.ts:218
 ---
 
 **Problem.** `broadcastFanOut` and `relayFanOut` both handle an unrecognised
@@ -106,3 +106,58 @@ the skip.
 
 **Also worth checking.** Any other handler that throws expecting a redelivery to
 re-run its work has the same defect. This sweep has not been done.
+
+## Update 2026-09-25
+
+**Correction: `retrySend` has the same shape.** The claim above that
+`retrySend.ts:122-128` "does not rely on redelivery" is wrong. That comment
+describes the marker's duplicate suppression correctly, but the handler claims
+the marker (`app/src/jobs/retrySend.ts:131`) BEFORE the attachment presign
+(`:164-166`) and the send (`:200-207`), and then rethrows every error that is
+not a refusal (`:218`). The redelivery carries the same `jobId`, the marker
+suppresses it, and the automatic 30003 retry is lost exactly as the fan-outs'
+recipients are. Filed as
+[retry-send-lost-under-job-marker](./retry-send-lost-under-job-marker.md).
+
+**Current anchors.** The broadcast throw is now `broadcastFanOut.ts:564`
+(`TODO` at `:553`). The relay throw moved into the extracted per-leg unit
+`sendOneRelayLeg` (`relayFanOut.ts:1447`), so the relay 30003 retry rung
+inherits it: `relay.retryLeg` claims its own marker
+(`relayRetryLeg.ts:352`) and calls that unit with no catch (`:575`).
+
+**The fix is designed and being built.** The
+[send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md)
+replaces the throw with a three-way classification of every provider send
+failure (`rejected` / `retryable` / `unknown`), typed errors from `sendMessage`,
+a per-recipient send-attempt record claimed before every provider call (so the
+redelivery guarantee this issue warns about is kept without the marker doing
+the work), and a `send.reconcile` job that looks an ambiguous send up at Twilio
+and adopts it or re-drives it once. It is being built on
+`feat/send-outcome-reconcile` for BOTH fan-outs and the relay retry rung. The
+one-to-one retry job (`retrySend`) is adopted afterwards, once
+`feat/retry-send-window` has merged (design Sec 2a), because that branch
+rewrites the same job. This issue closes when `feat/send-outcome-reconcile`
+merges; its status is unchanged until then.
+
+**The sweep is done.** The 2026-09-24 sweep of `app/src` found the same
+claim-then-throw shape at nine more sites beyond this branch's own; findings
+with file:line citations are in
+`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/research/marker-sweep-findings.md`.
+Each is filed as its own issue (design Sec 9); none is edited on this branch:
+
+| # | site | issue | group |
+|---|---|---|---|
+| F1 | `relay.numberReady` post-flip enqueues | [relay-number-ready-post-flip-enqueue-loss](./relay-number-ready-post-flip-enqueue-loss.md) | not a send |
+| F2 | `relay.intro` | [relay-intro-lost-under-job-marker](./relay-intro-lost-under-job-marker.md) | send-shaped + pre-send reads |
+| F3 | `relay.memberAdded` | [relay-member-added-lost-under-job-marker](./relay-member-added-lost-under-job-marker.md) | send-shaped + pre-send reads |
+| F4 | `messaging.retrySend` | [retry-send-lost-under-job-marker](./retry-send-lost-under-job-marker.md) | the post-RSW adoption |
+| F5 | `call.missedAutoText` | [missed-call-autotext-pre-send-failure-not-retried](./missed-call-autotext-pre-send-failure-not-retried.md) | send-shaped |
+| F6 | tour reminder poll (1:1, group, Send now) | [tour-reminder-lost-on-post-claim-send-error](./tour-reminder-lost-on-post-claim-send-error.md) | send-shaped |
+| F7 | placement nudge poll | [placement-nudge-lost-on-post-claim-send-error](./placement-nudge-lost-on-post-claim-send-error.md) | send-shaped |
+| F8 | pending roster-action poll | [roster-action-lost-on-post-claim-error](./roster-action-lost-on-post-claim-error.md) | not a send |
+| F9 | voice recording callback after the mirror | [voicemail-upgrade-and-transcript-lost-after-mirror](./voicemail-upgrade-and-transcript-lost-after-mirror.md) | not a send |
+
+The residue this branch records rather than closes is filed too:
+[fanout-pass-setup-throw-strands-pass](./fanout-pass-setup-throw-strands-pass.md)
+(this issue's shape in the per-PASS setup, before any recipient) and
+[send-attempt-sweeper](./send-attempt-sweeper.md) (the crash windows).

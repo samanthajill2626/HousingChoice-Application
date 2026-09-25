@@ -47,3 +47,41 @@ both. Severity is the reviewer's; "decision changed" is the planner's.
 27, REJECT 1 (A13/B2 second half), DEFER 2 (A19 second half, A22). Decisions
 changed: yes (D3a, D7a, D11, D13, D13a, D15, D16, D16a among others) -> round
 2 required.
+
+## Spec round 2 (2026-09-24) - reviewer A continued, with B's round-1 report
+
+Between rounds the planner ran two more read-only/one-send probes against the
+real dev account (outputs in `../research/`): the dev Messaging Service has
+`smart_encoding: true`, and a body sent with U+2019 / U+2014 / U+2026 is
+STORED (fetch and list alike) as `'` / `-` / `...` while the create response
+echoes the submitted body. That settles finding 2's body-match question with
+evidence rather than a rule.
+
+| # | finding | ruling | what changed |
+|---|---|---|---|
+| 1 | once a reconcile job wins a conditional write, a later throw or crash is not a real retry; resuming would double-text because no send site claims the recipient before sending | ACCEPT, decision changed (BLOCKING) | New D8a: a per-recipient SEND CLAIM - every send site conditionally marks the slot `send_attempting` with an `attemptedAt` clock before the provider call and loses gracefully. With the claim in place D11 is rewritten to AT-LEAST-ONCE enqueues with idempotent verdict writes: adoption is a set of individually idempotent writes re-runnable as a whole; the check chain tolerates a duplicate (bounded by three checks); a re-drive may be enqueued twice and the claim makes the second continuation a no-op. Nothing in the chain depends on being the single winner any more. |
+| 2 | a single survivor is adopted whatever its body: another owner's orphan on a multiplexed number, a Twilio STOP/HELP auto-reply from our own number, a `syssid#` system send | ACCEPT, decision changed (BLOCKING) | D13: a body match is REQUIRED, on a lossy normalization the spike justifies (NFKC, letters and digits only) because Smart Encoding rewrites punctuation; SIDs held by ANY other owner or by the `syssid#` marker are excluded; candidates that exist but match nothing yield `unresolved` (never adopt, never re-drive) with a named log cause. A normalized body shorter than three characters cannot match and yields `unresolved`. |
+| 3 | `retrySend` has no slot, so nothing conditions its writes; a duplicate reconcile double-texts on the 1:1 path | ACCEPT, decision changed | D12/D16: the 1:1 owner's durable record is the ORIGINAL message row; its deferral and reconcile state are conditional attributes on that row, and its re-send goes through the same claim shape (a conditional `retry_deferred_at`). |
+| 4 | the re-drive pass reads its snapshot eventually consistently right after the flip and can skip its own `send_redrive` recipient | ACCEPT | D16: a continuation that carries `recipientKeys` reads its snapshot strongly consistently. |
+| 5 | `never_sent` is inferred from one page whose order and bound are unverified; queued orphans have a null `DateSent`; guarantee 1 still says "none accepted" | ACCEPT | D13: the job walks EVERY page of the `To`+`From` list until a whole page is older than the window (a single recipient/sender pair has few messages). Guarantee 1 now records the residue: an orphan the provider lists outside that walk is ruled `never_sent`; the walk is asserted against the fake and verified on the first hosted-dev run. |
+| 6 | `sent_unrecorded` leaves a known-sent recipient non-terminal for ever, though the known-SID reconcile would repair it | ACCEPT, decision changed | D7a: a record-phase failure hands the recipient to reconcile WITH the known SID (a repair, not a lookup); D3a's rule is narrowed to "never classified as unknown". |
+| 7 | `SendAcceptedNotRecordedError` has no arm in Sec 4; D3a and D12 disagree | ACCEPT | Same resolution as 6: known SID -> reconcile -> adoption. A failed fetch of a known SID is a job failure (a genuine retry to the DLQ), never `unresolved`. |
+| 8 | one `unresolved` copy for six causes, five of them not "Twilio unreachable" | ACCEPT (copy), REJECT (multiplicity) | The copy becomes "Couldn't confirm whether this text went out." - true for every cause, since in each one the platform does not know. The causes are distinguished in the log line, not in the code: staff need one honest state, operators need the cause. A recipient ruled `never_sent` that cannot be re-driven closes with `transient_cap` or `redrive_refused`, both of which keep the Retry offer. |
+| 9 | an adopted broadcast slot with provider status `sent` never gets `carrierSentAt` | ACCEPT | D15: adoption sets `carrierSentAt` (broadcast) / `sentAt` (relay) from the provider's `date_sent` when present. |
+| 10 | the inbox touch on adoption reopens a closed thread, overwrites a newer preview, moves `last_activity_at` back | ACCEPT | D15: the status-preserving touch with no preview, never moving `last_activity_at` backwards - the relay retry job's shape. |
+| 11 | the 30005/30006 unreachable flag applied to an adopted relay MMS leg recreates the prod false positive | ACCEPT | D15: that arm applies to the broadcast owner only (SMS by construction). |
+| 12 | any `skipped` recipient defeats the all-failed finalize rule | ACCEPT | D16a: `failed` when no recipient reached `sent`/`delivered` AND at least one is `failed` or unconfirmed; skipped recipients count for neither side. |
+| 13 | contests the A13 rejection: re-drives are already capped at one, so the "unbounded" premise is gone; a re-drive should not spend the shared ladder | CONCEDE, decision changed | D13a/D16: a re-drive continuation does not claim a pass (the single-re-drive cap bounds it); its own transient outcome, if any, joins the ladder as usual. |
+| 14 | the failure-arm writes (D5-D7, D9) can fail too; a failed `send_unconfirmed` write strands the chain | ACCEPT (partly) | D7: the reconcile is enqueued BEFORE the slot write and its verdict conditions tolerate a slot that never received the code; other failure-arm write failures are logged at ERROR and left for the sweeper (the D7a record-phase rule), which Sec 1 records. |
+| 15 | with no `sentAt`, a stranded relay leg never ages into "not confirmed" | ACCEPT | D8a's `attemptedAt` is the non-provider attempt clock; D20a: the dashboard ages a `queued` leg from `attemptedAt` when it has no `sentAt`. |
+| 16 | `closeBroadcast` calls finalize unconditionally, so the open-check must live inside finalize | ACCEPT | D16a. |
+| 17 | the relay retry job's outcome switch routes the new kinds through its catch-all | ACCEPT | D16: the retry rung handles `handed_to_reconcile` and the record-phase kind explicitly. |
+| 18 | Sec 8 still expects a later receipt routed after adoption | ACCEPT | Sec 8 reworded; the routing of a post-adoption receipt is proven at integration level. |
+| 19 | worst-case hop depth is 8 | ACCEPT | D13a. |
+| 20 | smaller inaccuracies (success-path status mapping, the digest's home, D20/D21 keying, the D7a phase table, `retrySend`'s leftover throws) | ACCEPT | All fixed; `retrySend`'s prepare-phase throws (the original read, the presign) take its single deferral. |
+
+Contested adjudications: A13 conceded (above); A17 conceded by the reviewer
+after 6/7. Reviewer conceded A5, A19 (second half), A22, A23.
+
+**Round 2 outcome:** 20 findings, 19 accepted (one in part), 1 rejected in
+part. Decisions changed: yes (D8a, D11, D13, D7a, D16a) -> round 3 required.

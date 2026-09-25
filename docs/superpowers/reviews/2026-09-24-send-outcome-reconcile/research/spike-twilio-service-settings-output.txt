@@ -1,0 +1,1 @@
+dev Messaging Service settings (read-only GET, 2026-09-24): smart_encoding=true sticky_sender=true mms_converter=true fallback_to_long_code=true scan_message_content=inherit use_inbound_webhook_on_number=false usecase=undeclared

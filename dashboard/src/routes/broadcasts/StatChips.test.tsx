@@ -189,4 +189,13 @@ describe('BroadcastStatusPill', () => {
     rerender(<BroadcastStatusPill status="failed" />);
     expect(screen.getByText('Failed')).toBeInTheDocument();
   });
+
+  it('share-skip-fix D6: with stats, an all-skipped sent share reads Not sent; a partly delivered one still reads Sent', () => {
+    const { rerender } = render(
+      <BroadcastStatusPill status="sent" stats={stats({ audience: 1, sent: 0, delivered: 0, queued: 0, skipped_other: 1 })} />,
+    );
+    expect(screen.getByText('Not sent')).toBeInTheDocument();
+    rerender(<BroadcastStatusPill status="sent" stats={stats({ audience: 2, sent: 0, delivered: 1, queued: 0, skipped_other: 1 })} />);
+    expect(screen.getByText('Sent')).toBeInTheDocument();
+  });
 });

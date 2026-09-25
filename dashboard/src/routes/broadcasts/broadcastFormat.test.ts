@@ -2,7 +2,7 @@
 // logic the QA agent will lean on (audience summary, contactKey split, recipient
 // flattening + failures-first ordering, status tone). Pure functions, no DOM.
 import { describe, expect, it } from 'vitest';
-import type { BroadcastRecipient } from '../../api/index.js';
+import type { BroadcastRecipient, BroadcastStats } from '../../api/index.js';
 import {
   audienceSummary,
   sendReachLabel,
@@ -11,6 +11,7 @@ import {
   voucherSizeLabel,
   presentRecipientStatus,
   shareRecipientReason,
+  presentShareLabel,
 } from './broadcastFormat.js';
 
 describe('voucherSizeLabel', () => {
@@ -160,5 +161,28 @@ describe('shareRecipientReason (share-skip-fix D7)', () => {
     for (const s of ['queued', 'sent', 'delivered'] as const) {
       expect(shareRecipientReason(s, 'anything')).toBeUndefined();
     }
+  });
+});
+
+function stats(over: Partial<BroadcastStats> = {}): BroadcastStats {
+  return { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0, ...over };
+}
+
+describe('presentShareLabel (share-skip-fix D6)', () => {
+  it('a finished share whose EVERY recipient was skipped reads Not sent (neutral)', () => {
+    expect(presentShareLabel('sent', stats({ audience: 1, skipped_other: 1 }))).toEqual({ label: 'Not sent', tone: 'neutral' });
+    expect(presentShareLabel('sent', stats({ audience: 3, skipped_opted_out: 1, skipped_no_consent: 1, skipped_other: 1 }))).toEqual({ label: 'Not sent', tone: 'neutral' });
+    // Legacy stats without skipped_other: the two old buckets alone decide.
+    expect(presentShareLabel('sent', stats({ audience: 2, skipped_opted_out: 2 }))).toEqual({ label: 'Not sent', tone: 'neutral' });
+  });
+
+  it('anything else keeps the status label and tone', () => {
+    expect(presentShareLabel('sent', stats({ audience: 2, skipped_other: 1, delivered: 1 }))).toEqual({ label: 'Sent', tone: 'positive' });
+    expect(presentShareLabel('sent', stats({ audience: 2, skipped_other: 1, failed: 1 }))).toEqual({ label: 'Sent', tone: 'positive' });
+    expect(presentShareLabel('sending', stats({ audience: 1, skipped_other: 1 }))).toEqual({ label: 'Sending', tone: 'progress' });
+    expect(presentShareLabel('failed', stats({ audience: 1, failed: 1 }))).toEqual({ label: 'Failed', tone: 'danger' });
+    expect(presentShareLabel('draft', stats({ audience: 5 }))).toEqual({ label: 'Draft', tone: 'neutral' });
+    expect(presentShareLabel('sent', stats())).toEqual({ label: 'Sent', tone: 'positive' }); // audience 0 is not "all skipped"
+    expect(presentShareLabel('sent')).toEqual({ label: 'Sent', tone: 'positive' }); // no stats at hand
   });
 });

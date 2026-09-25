@@ -8,6 +8,7 @@ import type {
   AudienceFilter,
   BroadcastRecipient,
   BroadcastRecipientView,
+  BroadcastStats,
   BroadcastStatus,
 } from '../../api/index.js';
 import {
@@ -84,6 +85,23 @@ export const BROADCAST_STATUS_TONE: Readonly<Record<BroadcastStatus, BroadcastSt
   sent: 'positive',
   failed: 'danger',
 };
+
+/** share-skip-fix D6: the share's label for the list row and the results
+ *  header. A finished share (`sent`) whose EVERY recipient was skipped reached
+ *  nobody, and "Sent" would be a lie (Sam's #5: one-to-one shares that read
+ *  Sent with a Skipped row). Presentation ONLY: the stored status, the list's
+ *  status filter and the tab it lists under are unchanged. A share with any
+ *  sent / delivered / failed / queued slot keeps its status label. */
+export function presentShareLabel(
+  status: BroadcastStatus,
+  stats?: BroadcastStats,
+): { label: string; tone: BroadcastStatusTone } {
+  if (status === 'sent' && stats !== undefined && stats.audience > 0) {
+    const skipped = stats.skipped_opted_out + stats.skipped_no_consent + (stats.skipped_other ?? 0);
+    if (skipped >= stats.audience) return { label: 'Not sent', tone: 'neutral' };
+  }
+  return { label: BROADCAST_STATUS_LABELS[status], tone: BROADCAST_STATUS_TONE[status] };
+}
 
 /** The recipient-status -> comms DeliveryPresentation map. `skipped` has no comms
  *  equivalent (nothing was sent: a fan-out fence or the send wrapper refused the

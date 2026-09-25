@@ -1,18 +1,28 @@
-// useInbox — owns the entity-centric inbox list for the active filter: the first
-// page (GET /api/inbox), cursor "load more", optimistic mark-read with
-// rollback, and live updates. Degrades to an honest 'pending' state until the C8
-// backend slice lands (GET /api/inbox 404s).
+// useInbox - owns the entity-centric inbox list for the active filter: the
+// head page (GET /api/inbox), cursor "load more", optimistic mark-read /
+// mark-unread with rollback, live updates, and (spec 5.8) an instant restore
+// from the module store when the page comes back after a navigation. Degrades
+// to an honest 'pending' state when GET /api/inbox 404s with no rows on
+// screen (the C8 backend slice not live yet).
+//
+// ONE AUTHORITATIVE LIST. Every list mutation computes its next value from
+// `listRef.current` synchronously and goes through `commitList`, which mirrors
+// it into React state for rendering and saves a snapshot to the store while
+// the list is `ready` and this instance is alive. No functional setState
+// updater ever touches the list, so a saved snapshot is exactly what was
+// committed. The pure merge rules live in inboxListMerge.ts.
 //
 // Live-update policy: the SSE `conversation.updated` event is PER-CONVERSATION
 // and carries no contactId, so it cannot soundly patch an aggregated CONTACT
-// row. Per the design spec ("treat either event as 'something changed,
-// reconcile'"), any inbox-affecting event schedules a debounced refetch of the
-// current filter's first page — the proven useToday policy. A future row-keyed
-// `inbox.updated` event would enable no-network patch-in-place (see the plan's
-// contract notes). Self-initiated mark-read IS patched optimistically
-// (we know the row), re-applied over a racing refetch while in flight, and
-// rolled back on failure.
-import { useCallback, useEffect, useRef, useState } from 'react';
+// row. Any inbox-affecting event schedules a debounced HEAD READ of the
+// current filter (spec 5.6): a complete page one replaces the list; an
+// incomplete one (a budget exit, a truncated page) merges in and removes
+// nothing. A failed head read while rows are rendered keeps them and raises
+// `refreshFailed` (the banner, spec 5.7). A future row-keyed `inbox.updated`
+// event would enable no-network patch-in-place. Self-initiated mark-read IS
+// patched optimistically (we know the row), re-applied over a racing head read
+// while in flight, and rolled back on failure.
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ApiError,
   getInbox,
@@ -26,11 +36,33 @@ import {
 } from '../../api/index.js';
 import { useUnread } from '../../app/UnreadContext.js';
 import { contactClearKey, conversationClearKey, phoneClearKey } from '../../app/unreadKeys.js';
+import {
+  appendPage,
+  baseOf,
+  emptyListState,
+  mergeHeadRead,
+  patchUnread,
+  rowKey,
+  type ListState,
+} from './inboxListMerge.js';
+import {
+  inboxListKey,
+  loadInboxList,
+  saveInboxList,
+  type InboxListSnapshot,
+} from './inboxListStore.js';
+
+export { rowKey } from './inboxListMerge.js';
 
 export type InboxStatus = 'loading' | 'pending' | 'ready' | 'error';
 
-/** An in-flight optimistic mutation patch for one row (re-applied over refetches
- *  until the request settles). */
+/** The page size the dashboard requests (spec 5.1). */
+export const DEFAULT_PAGE_LIMIT = 100;
+/** Mirrors the server's MAX_INBOX_LIMIT (app/src/routes/inbox.ts). */
+export const MAX_PAGE_LIMIT = 100;
+
+/** An in-flight optimistic mutation patch for one row (re-applied over
+ *  head reads until the request settles). */
 interface Pending {
   unreadCount?: number;
 }
@@ -61,11 +93,12 @@ export interface InboxState {
    *  Only a `filter=unread` response can set it. A page with rows simply ends -
    *  no affordance; an EMPTY SERVER page with this flag is NOT "all caught up",
    *  so Inbox.tsx renders the existing failure state + Retry instead of lying.
-   *  It is a statement about the LATEST page read, so it is replaced (never
-   *  OR-ed) by each page and reset on every filter change. */
+   *  It is a statement about the LATEST page read (a head read or a loaded
+   *  page), so it is replaced (never OR-ed) by each page and reset on every
+   *  filter change. */
   truncated: boolean;
-  /** How many rows the SERVER has handed down for this filter (all pages so
-   *  far), BEFORE the optimistic patches and the Unread narrowing produce
+  /** How many rows the SERVER has handed down for this filter (head + loaded
+   *  pages), BEFORE the optimistic patches and the Unread narrowing produce
    *  `rows`.
    *
    *  Adversarial 4, the same drift the `groupRowsShown` comment above records
@@ -77,7 +110,7 @@ export interface InboxState {
    *  statement behind it. `groupRowsShown` moved a claim about the RENDERED list
    *  onto the rendered list; this moves a claim about the SERVER page onto the
    *  server page. Mark-read cannot move it (it only patches `unreadCount`); only
-   *  a fetch installing new rows does. */
+   *  a committed head read or loaded page does. */
   serverRowCount: number;
   hasMore: boolean;
   loadingMore: boolean;
@@ -89,23 +122,22 @@ export interface InboxState {
   /** Optimistically mark a READ row unread (the row's toggle counterpart). No-op
    *  if already unread or unaddressable. */
   markUnread: (row: InboxRowData) => void;
+  /** A background head read failed while rows were rendered (spec 5.7). */
+  refreshFailed: boolean;
+  /** Auto-load may fire (spec 5.2): the read that installed the live cursor
+   *  chain delivered at least one row. */
+  autoLoadArmed: boolean;
+  /** Bumped by every committed head read and loaded page (never by a patch). */
+  pageEpoch: number;
+  /** The snapshot's scroll position when this mount restored from the store. */
+  restoredScrollTop: number | null;
+  /** The page reports the scroll container's scrollTop here (spec 5.8). */
+  noteScrollTop: (top: number) => void;
 }
 
-const PAGE_LIMIT = 30;
-/** Debounce window (ms) for SSE-triggered reconcile-refetches — coalesces a
- *  burst of conversation.updated events into one refetch (matches useToday). */
+/** Debounce window (ms) for SSE-triggered head reads - coalesces a burst of
+ *  conversation.updated events into one read (matches useToday). */
 const REFETCH_DEBOUNCE_MS = 300;
-
-/** Stable identity for a row: conversationId for the two multi-party kinds,
- *  contactId for contacts, phone for unknowns. The four prefixes never collide -
- *  native group texts take `gt:` because `g:` is already relay's, and the
- *  trailing branch is the UNKNOWN case, so an unhandled kind would key as `u:`
- *  (empty phone) and collide with every other unhandled row. */
-export function rowKey(row: InboxRowData): string {
-  if (row.kind === 'relay_group') return `g:${row.conversationId ?? ''}`;
-  if (row.kind === 'group_text') return `gt:${row.conversationId ?? ''}`;
-  return row.kind === 'contact' ? `c:${row.contactId ?? ''}` : `u:${row.phone ?? ''}`;
-}
 
 /** Group-text rows in a list (the basis for the truncation notice's count - see
  *  `InboxState.groupRowsShown`). */
@@ -120,14 +152,64 @@ function sortByActivity(rows: InboxRowData[]): InboxRowData[] {
   );
 }
 
-export function useInbox(filter: InboxFilter): InboxState {
-  const [status, setStatus] = useState<InboxStatus>('loading');
-  const [base, setBase] = useState<InboxRowData[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [groupsTruncated, setGroupsTruncated] = useState(false);
-  const [truncated, setTruncated] = useState(false);
+/** Overlay the in-flight optimistic patches (keyed by rowKey) on a row list. */
+function applyPatches(rows: InboxRowData[], pending: Map<string, Pending>): InboxRowData[] {
+  return rows.map((row) => {
+    const p = pending.get(rowKey(row));
+    if (p === undefined) return row;
+    return { ...row, ...(p.unreadCount !== undefined && { unreadCount: p.unreadCount }) };
+  });
+}
+
+/** The store's shape (spec 5.8): server order, NOT narrowed, NOT sorted, with
+ *  the pending patches folded in. */
+function snapshotOf(
+  list: ListState,
+  pending: Map<string, Pending>,
+  scrollTop: number,
+): InboxListSnapshot {
+  return {
+    head: applyPatches(list.head, pending),
+    tail: applyPatches(list.tail, pending),
+    cursor: list.cursor,
+    groupsTruncated: list.groupsTruncated,
+    truncated: list.truncated,
+    scrollTop,
+  };
+}
+
+function listFromSnapshot(s: InboxListSnapshot): ListState {
+  return {
+    head: s.head,
+    tail: s.tail,
+    cursor: s.cursor,
+    groupsTruncated: s.groupsTruncated,
+    truncated: s.truncated,
+    // A restore mounts UNARMED (spec 5.2): the first complete head read arms.
+    autoLoadArmed: false,
+    pageEpoch: 0,
+  };
+}
+
+export function useInbox(
+  filter: InboxFilter,
+  limit: number = DEFAULT_PAGE_LIMIT,
+  operatorId = 'anon',
+  // True when the page is about to APPLY a restored scroll position (a POP
+  // arrival): the scroll ref is then seeded with it from the first render, so
+  // a StrictMode simulated unmount saves the position this visit shows.
+  restoreScroll = false,
+): InboxState {
+  const initialKey = inboxListKey(operatorId, filter, limit);
+  // Lazy init from the store: a restored list's FIRST render is already ready.
+  const [restored] = useState<InboxListSnapshot | undefined>(() => loadInboxList(initialKey));
+  const [status, setStatus] = useState<InboxStatus>(restored ? 'ready' : 'loading');
+  const [list, setList] = useState<ListState>(() =>
+    restored ? listFromSnapshot(restored) : emptyListState(),
+  );
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  // In-flight optimistic patches keyed by rowKey; re-applied over refetches.
+  // In-flight optimistic patches keyed by rowKey; re-applied over head reads.
   const [pending, setPending] = useState<Map<string, Pending>>(new Map());
   // The nav badge's optimistic layer. Marking a row read here decrements the
   // badge INSTANTLY instead of waiting for the reconcile fetch; the server stays
@@ -136,10 +218,40 @@ export function useInbox(filter: InboxFilter): InboxState {
   // depends on that.
   const { noteRowsCleared, rollbackRowsCleared } = useUnread();
 
+  // The authoritative list, readable from any callback.
+  const listRef = useRef<ListState>(list);
+  // The rendered status, readable from inside a fetch callback without making
+  // `fetchHead` depend on it. It decides whether the generation guard below
+  // has anything to protect: see the guard for why that matters. It also
+  // decides whether rows are rendered (spec 5.7) and whether a commit may save
+  // (spec 5.8).
+  //
+  // Written through `applyStatus` and NEVER through `setStatus` directly, so the
+  // ref cannot drift from the state. A `useEffect` mirror would look tidier and
+  // be wrong: effects flush after commit, and a fetch continuation resolving in
+  // that gap would read the previous status and take the opposite branch.
+  const statusRef = useRef<InboxStatus>(status);
+  // The pending patches, mirrored synchronously so the unmount save can see a
+  // patch made in the same render that navigated away.
+  const pendingRef = useRef<Map<string, Pending>>(new Map());
+  // The store key the current state belongs to; captured at every save.
+  const keyRef = useRef(initialKey);
+  // The key whose state is already on screen (restored, or reset by the
+  // filter effect): the effect resets only when the key CHANGES, which is
+  // what lets a StrictMode replay and a restored mount skip the reset.
+  const restoredKeyRef = useRef<string | null>(restored ? initialKey : null);
+  // True between the mount effect's body and its cleanup: a request that
+  // settles after unmount neither commits nor saves.
+  const aliveRef = useRef(false);
+  // The scroll container's last reported scrollTop (spec 5.8), seeded with
+  // the restored value only when the page will apply it.
+  const scrollTopRef = useRef(restoreScroll && restored !== undefined ? restored.scrollTop : 0);
+
   const abortRef = useRef<AbortController | null>(null);
-  // Bumped on every committed optimistic mutation; a first-page refetch that
-  // started before the commit (so it read pre-mutation server state) is then
-  // discarded instead of clobbering the commit.
+  // Bumped on every committed optimistic mutation; a head read that started
+  // before the commit (so it read pre-mutation server state) is then discarded
+  // instead of clobbering the commit - unless the screen shows a spinner, in
+  // which case nothing would re-issue it (see the guard in fetchHead).
   const genRef = useRef(0);
   // C2 / spec 11's defense-in-depth pair. `loadMore` gets its OWN abort handle
   // and its own generation, both keyed on the FILTER rather than on optimistic
@@ -148,21 +260,23 @@ export function useInbox(filter: InboxFilter): InboxState {
   // so installing it would 400 the next Load more.
   const loadMoreAbortRef = useRef<AbortController | null>(null);
   const filterGenRef = useRef(0);
-  // The SSE-RECONCILE axis (adversarial 29). Bumped whenever a first-page read
-  // COMMITS - the initial load, a retry, or a debounced reconcile - so an
-  // in-flight `loadMore` can tell that the list it was a continuation of has
-  // been replaced underneath it. Without it, the page appends to a list it does
-  // not continue (duplicate rowKeys, silently skipped rows - `rows` is not
-  // deduped) and installs a cursor addressing a position the list no longer
-  // holds, which the next Load more 400s on. The filter axis already had this
-  // guard; this is the same guard on the other axis that can move `base`.
+  // The SSE-RECONCILE axis (adversarial 29). Bumped whenever a head read
+  // COMMITS - the initial load, a retry, a debounced reconcile, or the mount
+  // reconcile - so an in-flight `loadMore` can tell that the list it was a
+  // continuation of has been replaced underneath it. Without it, the page
+  // appends to a list it does not continue (silently skipped rows; before
+  // appendPage's rowKey dedupe, duplicate rowKeys too) and installs a cursor
+  // addressing a position the list no longer holds, which the next Load more
+  // 400s on. The filter axis already had this guard; this is the same guard on
+  // the other axis that can move the list.
   const firstPageGenRef = useRef(0);
   // THE FILTER THIS HOOK IS CURRENTLY SHOWING, readable from a callback that was
-  // built for a DIFFERENT one. `scheduleRefetch` closes over the
-  // `fetchFirstPage` of whichever filter was active when the SSE event arrived,
-  // so a reconcile can land for a tab the operator has already left - and
-  // `fetchFirstPage` installs its page wholesale. Comparing the closure's
-  // `filter` against this ref is what refuses it.
+  // built for a DIFFERENT one. `scheduleRefetch` closes over the `fetchHead` of
+  // whichever filter was active when the SSE event arrived, so a reconcile can
+  // land for a tab the operator has already left - and `fetchHead` applies its
+  // page to whatever list is on screen: a complete page replaces the list; an
+  // incomplete one merges in (spec 5.6). Comparing the closure's `filter`
+  // against this ref is what refuses it.
   //
   // A GENERATION COUNTER CANNOT DO THIS JOB, which is why `filterGenRef` is not
   // reused here: the stale callback would read the counter at CALL time, by
@@ -170,25 +284,27 @@ export function useInbox(filter: InboxFilter): InboxState {
   // would compare EQUAL and commit. The identity of the filter is the only
   // thing the closure carries that the ref can be checked against.
   const activeFilterRef = useRef(filter);
-  // The rendered status, readable from inside a fetch callback without making
-  // `fetchFirstPage` depend on it. It decides whether the generation guard below
-  // has anything to protect: see the guard for why that matters.
-  //
-  // Written through `applyStatus` and NEVER through `setStatus` directly, so the
-  // ref cannot drift from the state. A `useEffect` mirror would look tidier and
-  // be wrong: effects flush after commit, and a fetch continuation resolving in
-  // that gap would read the previous status and take the opposite branch.
-  const statusRef = useRef<InboxStatus>('loading');
   // The pending debounced reconcile, declared up here (rather than beside
   // `scheduleRefetch` below) so the filter-change effect can cancel it. Its
   // clearing effect has empty deps and therefore only ever ran on UNMOUNT,
   // which is what let a reconcile outlive the filter that scheduled it.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
   /** The ONLY way this hook changes `status` - keeps `statusRef` atomic with it. */
   const applyStatus = useCallback((next: InboxStatus) => {
     statusRef.current = next;
     setStatus(next);
   }, []);
+
+  /** The ONLY writer of the list (spec 5.5). */
+  const commitList = useCallback((next: ListState) => {
+    listRef.current = next;
+    setList(next);
+    if (aliveRef.current && statusRef.current === 'ready') {
+      saveInboxList(keyRef.current, snapshotOf(next, pendingRef.current, scrollTopRef.current));
+    }
+  }, []);
+
   const clearPendingRefetch = useCallback(() => {
     if (debounceRef.current !== undefined) {
       clearTimeout(debounceRef.current);
@@ -196,94 +312,126 @@ export function useInbox(filter: InboxFilter): InboxState {
     }
   }, []);
 
-  const fetchFirstPage = useCallback(async () => {
+  const fetchHead = useCallback(async () => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     const gen = genRef.current;
     try {
-      const pageData = await getInbox({ filter, limit: PAGE_LIMIT }, controller.signal);
+      const pageData = await getInbox({ filter, limit }, controller.signal);
       if (controller.signal.aborted) return;
       // THE GENERATION GUARD PROTECTS A LIST, NOT A SPINNER.
       //
       // Discarding a pre-mutation page is right when there is a rendered list
       // whose committed state it would clobber. It is WRONG when the screen is
       // showing a spinner, because nothing re-issues a discarded page: the
-      // filter effect and `retry` both set 'loading' and then fetch exactly
-      // once. Discarding there leaves no rows, no request in flight, and no
-      // Retry (that affordance lives under `status: error`) - a permanently
-      // stuck tab, which is a worse outcome than the stale-page bug this hook
-      // was just fixed for.
+      // filter effect's reset and a `retry` with no rows rendered both set
+      // 'loading' and then fetch exactly once. Discarding there leaves no rows,
+      // no request in flight, and no Retry (that affordance lives under
+      // `status: error`) - a permanently stuck tab, which is a worse outcome
+      // than the stale-page bug this hook was just fixed for.
       //
-      // Reachable without any filter change: mark read, a background reconcile
-      // fails, the operator hits Retry, and the POST commits while Retry's page
-      // is on the wire. Installing that page instead is safe - the optimistic
-      // patch still overlays it, and mark-read emits `conversation.updated`, so
-      // a reconcile follows within the debounce window and corrects any count
-      // the page carried stale.
+      // Reachable without any filter change: mark read, a complete head read
+      // that returns no rows empties the list, a head read then fails with
+      // nothing rendered (the error arm), the operator hits Retry (which sets
+      // loading with no rows), and the POST commits while Retry's page is on
+      // the wire. Installing that page instead is safe - the optimistic patch
+      // still overlays it, and mark-read emits `conversation.updated`, so a
+      // reconcile follows within the debounce window and corrects any count the
+      // page carried stale.
       if (gen !== genRef.current && statusRef.current === 'ready') return;
       // A page for a filter we have LEFT is refused, never installed.
       //
       // HONEST STATUS: no test can currently fail by deleting this line, and
       // that is stated rather than hidden. Two other mechanisms already cover
       // every path that reaches here - the filter effect's cleanup ABORTS any
-      // in-flight first-page fetch, and the effect CLEARS a pending reconcile
-      // before it can fire - so today this is the third lock on a door with two
+      // in-flight head read, and the effect CLEARS a pending reconcile before
+      // it can fire - so today this is the third lock on a door with two
       // working ones. It is kept for the same reason `loadMore` checks
       // `filterStale()` at its commit point despite also aborting: it makes the
       // refusal local to the moment state is installed, so a future scheduler
       // (a focus-retry, a polling fallback) cannot reintroduce this class
       // silently. Delete it only together with that argument.
       if (filter !== activeFilterRef.current) return;
+      // Settled after unmount: neither commit nor save (spec 5.5). Another
+      // commit-point lock: the unmount cleanup already aborts this read.
+      if (!aliveRef.current) return;
       firstPageGenRef.current += 1;
-      setBase(pageData.rows);
-      setCursor(pageData.nextCursor);
-      setGroupsTruncated(pageData.groupsTruncated === true);
-      setTruncated(pageData.truncated === true);
+      // Ready BEFORE the commit so the commit's save sees a ready list.
       applyStatus('ready');
+      // Any committed head read clears the banner (spec 5.7).
+      setRefreshFailed(false);
+      commitList(mergeHeadRead(listRef.current, pageData, filter, limit));
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
       }
-      // THE SAME TWO AXES THE SUCCESS PATH REFUSES ON, and for the same reason.
-      // This branch previously checked only the filter while claiming to check
-      // both, and the missing generation check was reachable with no filter
-      // change at all: a background reconcile that started before an optimistic
-      // mark-read committed, and then FAILED, replaced a healthy list - and the
-      // operator's just-committed action - with the inbox error state. The 404
-      // arm below is worse, since it also empties `base`.
+      // A failure for a filter we have LEFT is refused, like its page would be:
+      // the same commit-point lock as the success path's refusal (the filter
+      // effect's cleanup already aborts this read on a filter change).
       //
-      // RESIDUE, stated because the next reader will otherwise trust the
-      // principle over the code: this does NOT make a failed reconcile
-      // non-destructive in general. A background 500 with no mutation in flight
-      // still blanks a healthy rendered list into the inbox error state, which
-      // is what `loadMore`'s deliberately empty .catch refuses to do for a page
-      // the operator actually asked for. Whether a background failure should
-      // surface at all is a product decision rather than a defect, so it is
-      // filed (docs/issues/inbox-reconcile-failure-blanks-list.md) rather than
-      // decided here.
-      if (gen !== genRef.current || filter !== activeFilterRef.current) return;
+      // NO GENERATION CHECK ON THIS PATH, DELIBERATELY; the success path above
+      // keeps its guard. The generation exists to stop a PRE-mutation page from
+      // clobbering a committed mutation, and a failure installs no page: with
+      // rows rendered it keeps them and only raises the banner, so there is
+      // nothing for the generation to protect, and refusing on it SWALLOWS the
+      // failure. Reachable with no filter change: a mark-read POST and a
+      // background head read are both in flight, the POST commits (the
+      // generation bumps), then the read fails - a generation check returns
+      // here, before the rows-rendered check, and leaves a silently stale list
+      // with no banner (spec decision 7, 5.7, invariant 4). The generation
+      // check that stood here only ever stopped such a failure from BLANKING
+      // the list, which the rows-rendered rule below now prevents on every
+      // generation. With no rows rendered, returning here could strand a
+      // spinner instead (a reset or a no-rows Retry set 'loading'): the error
+      // and 404 arms below are its only way out.
+      if (filter !== activeFilterRef.current) return;
+      // Spec 5.7: with rows rendered, a failed head read (a 404 included: a
+      // proxy or deploy-window 404 must not blank a healthy list) keeps the
+      // rows and raises the banner. This resolves the residue the old failure
+      // path could only file (docs/issues/inbox-reconcile-failure-blanks-list.md):
+      // a background failure no longer blanks a healthy list into the error
+      // state, and it is no longer silent either.
+      const rowsRendered = statusRef.current === 'ready' && baseOf(listRef.current).length > 0;
+      if (rowsRendered) {
+        setRefreshFailed(true);
+        return;
+      }
       if (err instanceof ApiError && err.status === 404) {
-        // C8 backend slice isn't live yet → honest pending state (not an error).
+        // C8 backend slice isn't live yet -> honest pending state (not an error).
+        // Status FIRST, then the empty commit: an empty tab is `ready` with no
+        // rows, and committing before the status change would save an empty
+        // snapshot. The epoch is carried, never reset (spec 5.2). The empty
+        // list resets `truncated` with the rest: a stale `truncated` from a
+        // previous unread page would make this legitimately empty page render
+        // the FAILURE state.
         firstPageGenRef.current += 1;
-        setBase([]);
-        setCursor(null);
-        setGroupsTruncated(false);
-        // Reset with the rest: a stale `truncated` from a previous unread page
-        // would make this legitimately empty page render the FAILURE state.
-        setTruncated(false);
         applyStatus('pending');
+        commitList({ ...emptyListState(), pageEpoch: listRef.current.pageEpoch });
         return;
       }
       applyStatus('error');
     }
-  }, [filter, applyStatus]);
+  }, [filter, limit, applyStatus, commitList]);
 
-  // Initial load + full reload whenever the filter changes. The synchronous
-  // reset clears four independent state atoms (status/base/cursor/pending) on a
-  // filter change; folding them into one derived state would obscure this hook's
-  // gen-ref race handling, so this reset-on-key-change is suppressed deliberately.
+  // Initial load / restore-and-reconcile / full reload on a key change. The
+  // reset runs ONLY when the key differs from the one whose state is already
+  // on screen (spec 5.8): a restored mount and a StrictMode replay of the same
+  // key take the reconcile branch instead. `loading` is applied BEFORE the
+  // empty commit so no empty snapshot is ever saved.
+  //
+  // The synchronous reset clears several independent state atoms (status, the
+  // list, pending, refreshFailed) on a key change; folding them into one
+  // derived state would obscure this hook's gen-ref race handling, so it stays
+  // a reset-on-key-change by design. It needs no react-hooks/set-state-in-effect
+  // suppression today (eslint-plugin-react-hooks 7.1.1): the rule reports at
+  // most once per effect, at its FIRST setState, and accepts one that sits
+  // under a ref-derived condition, as the reset's `applyStatus` does
+  // (`restoredKeyRef`). Moving an unconditional setState such as
+  // `setLoadingMore(false)` above that `if` makes the rule fire on it; a
+  // suppression then belongs on that line.
   useEffect(() => {
+    const key = inboxListKey(operatorId, filter, limit);
     // A NEW filter is a new partition: bump the loadMore generation and abort any
     // in-flight page BEFORE the reset, so a response already on the wire cannot
     // append to the list we are about to build (C2).
@@ -291,61 +439,99 @@ export function useInbox(filter: InboxFilter): InboxState {
     loadMoreAbortRef.current?.abort();
     // The new filter is the one we are showing from here on, and any reconcile
     // still pending for the OLD one is cancelled rather than left to fire into
-    // this list. Both lines must precede `fetchFirstPage()` below: the fetch
-    // it starts checks `activeFilterRef` when it lands.
+    // this list. These lines must precede `fetchHead()` below: the fetch it
+    // starts checks `activeFilterRef` when it lands, and its commit saves under
+    // `keyRef`.
     activeFilterRef.current = filter;
+    keyRef.current = key;
     clearPendingRefetch();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    applyStatus('loading');
-    setBase([]);
-    setCursor(null);
-    setGroupsTruncated(false);
-    // Same reset for the same reason: `truncated` is a statement about the page
-    // this filter last read. Carried across a tab switch it would still be set
-    // while the new filter's first page is in flight, and the moment that page
-    // lands empty the All tab would render the inbox ERROR state.
-    setTruncated(false);
+    if (key !== restoredKeyRef.current) {
+      applyStatus('loading');
+      // The epoch is carried across the reset: it only ever counts up (spec 5.2).
+      // The empty list resets `truncated` too, for the same reason as the rest:
+      // `truncated` is a statement about the page this filter last read.
+      // Carried across a tab switch it would still be set while the new
+      // filter's first page is in flight, and the moment that page lands empty
+      // the All tab would render the inbox ERROR state.
+      commitList({ ...emptyListState(), pageEpoch: listRef.current.pageEpoch });
+      pendingRef.current = new Map();
+      setPending(new Map());
+      setRefreshFailed(false);
+      scrollTopRef.current = 0;
+    }
     setLoadingMore(false);
-    setPending(new Map());
-    void fetchFirstPage();
+    restoredKeyRef.current = key;
+    void fetchHead();
     return () => abortRef.current?.abort();
-  }, [fetchFirstPage, filter, clearPendingRefetch, applyStatus]);
+  }, [fetchHead, filter, limit, operatorId, clearPendingRefetch, applyStatus, commitList]);
+
+  // Alive for exactly the mounted lifetime (true again after a StrictMode
+  // replay); an in-flight loadMore is abandoned on unmount.
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      loadMoreAbortRef.current?.abort();
+    };
+  }, []);
+
+  // THE UNMOUNT SAVE (spec 5.8): a LAYOUT cleanup runs before the replacing
+  // route's DOM commits, with the pending patches folded in and the last
+  // reported scrollTop. Gated on `ready` only - it IS the unmount.
+  useLayoutEffect(
+    () => () => {
+      if (statusRef.current !== 'ready') return;
+      saveInboxList(
+        keyRef.current,
+        snapshotOf(listRef.current, pendingRef.current, scrollTopRef.current),
+      );
+    },
+    [],
+  );
+
+  const noteScrollTop = useCallback((top: number) => {
+    scrollTopRef.current = top;
+  }, []);
 
   const retry = useCallback(() => {
-    applyStatus('loading');
-    void fetchFirstPage();
-  }, [fetchFirstPage, applyStatus]);
+    // With rows rendered the rows stay (no spinner); the banner clears when the
+    // read commits and stays if it fails again (spec 5.7).
+    const rowsRendered = statusRef.current === 'ready' && baseOf(listRef.current).length > 0;
+    if (!rowsRendered) applyStatus('loading');
+    void fetchHead();
+  }, [fetchHead, applyStatus]);
 
   const loadMore = useCallback(() => {
+    const cursor = listRef.current.cursor;
     if (cursor === null || loadingMore) return;
     setLoadingMore(true);
-    // Same abort + generation pattern as fetchFirstPage above (C2). The filter
-    // and cursor are captured at callback creation, so without this a tab switch
-    // mid-flight appends the OLD filter's rows and installs a cursor addressing
-    // the OLD partition - which the server tag-check then 400s into the empty
-    // .catch below, leaving contaminated rows and a permanently dead Load more.
+    // Same abort + generation pattern as fetchHead above (C2). The filter is
+    // captured at callback creation and the cursor is read from `listRef` at
+    // call time, so without this a tab switch mid-flight appends the OLD
+    // filter's rows and installs a cursor addressing the OLD partition - which
+    // the server tag-check then 400s into the empty .catch below, leaving
+    // contaminated rows and a permanently dead Load more.
     loadMoreAbortRef.current?.abort();
     const controller = new AbortController();
     loadMoreAbortRef.current = controller;
     const gen = filterGenRef.current;
     const firstPageGen = firstPageGenRef.current;
     const filterStale = (): boolean => controller.signal.aborted || gen !== filterGenRef.current;
-    // The SECOND axis (adversarial 29): a first-page read committed while this
-    // page was on the wire, so `base` is no longer the list this page continues
-    // and `cursor` is no longer the position it was fetched from. Kept SEPARATE
-    // from `filterStale` because the two want different cleanup: a filter change
-    // has its own effect that already reset `loadingMore`, whereas nothing else
-    // clears it here - leaving it set would spin Load more forever.
+    // The SECOND axis (adversarial 29): a head read committed while this page
+    // was on the wire, so the list is no longer the one this page continues and
+    // its cursor is no longer the position the page was fetched from. Kept
+    // SEPARATE from `filterStale` because the two want different cleanup: a
+    // filter change has its own effect that already reset `loadingMore`,
+    // whereas nothing else clears it here - leaving it set would spin Load more
+    // forever.
     const reconcileStale = (): boolean => firstPageGen !== firstPageGenRef.current;
-    getInbox({ filter, limit: PAGE_LIMIT, cursor }, controller.signal)
+    getInbox({ filter, limit, cursor }, controller.signal)
       .then((pageData) => {
-        if (filterStale() || reconcileStale()) return;
-        setBase((prev) => [...prev, ...pageData.rows]);
-        setCursor(pageData.nextCursor);
-        // REPLACE, never OR: the flag describes the page just read, and it sits
-        // inside the staleness guard so a page for a filter (or a list) we no
-        // longer show cannot stamp it.
-        setTruncated(pageData.truncated === true);
+        if (filterStale() || reconcileStale() || !aliveRef.current) return;
+        // appendPage REPLACES `truncated`, never ORs it: the flag describes the
+        // page just read, and this commit sits inside the staleness guard so a
+        // page for a filter (or a list) we no longer show cannot stamp it.
+        commitList(appendPage(listRef.current, pageData));
       })
       .catch(() => {
         /* keep the cursor so the user can retry "Load more" */
@@ -354,12 +540,13 @@ export function useInbox(filter: InboxFilter): InboxState {
         // The filter-change effect already cleared the flag for the new filter;
         // clearing it again from a stale page would re-enable the button under a
         // page that IS in flight. A reconcile-stale page DOES clear it: the
-        // reconcile installed a fresh cursor, so Load more is live again.
-        if (!filterStale()) setLoadingMore(false);
+        // reconcile installed a fresh cursor, so Load more is live again. After
+        // unmount there is nothing left to clear.
+        if (!filterStale() && aliveRef.current) setLoadingMore(false);
       });
-  }, [filter, cursor, loadingMore]);
+  }, [filter, limit, loadingMore, commitList]);
 
-  // --- SSE: debounced reconcile-refetch of the current filter's first page ---
+  // --- SSE: debounced head read of the current filter ------------------------
   // `debounceRef` / `clearPendingRefetch` are declared with the other refs above,
   // because the filter-change effect has to be able to cancel a pending
   // reconcile before it fires into a list it was never scheduled for.
@@ -367,42 +554,41 @@ export function useInbox(filter: InboxFilter): InboxState {
     clearPendingRefetch();
     debounceRef.current = setTimeout(() => {
       debounceRef.current = undefined;
-      void fetchFirstPage();
+      void fetchHead();
     }, REFETCH_DEBOUNCE_MS);
-  }, [fetchFirstPage, clearPendingRefetch]);
+  }, [fetchHead, clearPendingRefetch]);
 
   useEffect(() => clearPendingRefetch, [clearPendingRefetch]);
 
   useEventStream({ onConversationUpdated: scheduleRefetch });
 
-  // --- Optimistic mutations -------------------------------------------------
+  // --- Optimistic mutations (the patches are mirrored in pendingRef) --------
   const setPatch = useCallback((key: string, patch: Pending) => {
-    setPending((prev) => {
-      const next = new Map(prev);
-      next.set(key, { ...next.get(key), ...patch });
-      return next;
-    });
+    const next = new Map(pendingRef.current);
+    next.set(key, { ...next.get(key), ...patch });
+    pendingRef.current = next;
+    setPending(next);
   }, []);
   // Clear only the field this mutation owns - so concurrent overlays on the same
   // row don't wipe each other's still-in-flight state.
   const clearPatch = useCallback((key: string, field: keyof Pending) => {
-    setPending((prev) => {
-      const entry = prev.get(key);
-      if (entry === undefined || !(field in entry)) return prev;
-      const next = new Map(prev);
-      const remaining = { ...entry };
-      delete remaining[field];
-      if (Object.keys(remaining).length === 0) next.delete(key);
-      else next.set(key, remaining);
-      return next;
-    });
+    const prev = pendingRef.current;
+    const entry = prev.get(key);
+    if (entry === undefined || !(field in entry)) return;
+    const next = new Map(prev);
+    const remaining = { ...entry };
+    delete remaining[field];
+    if (Object.keys(remaining).length === 0) next.delete(key);
+    else next.set(key, remaining);
+    pendingRef.current = next;
+    setPending(next);
   }, []);
 
   const markRead = useCallback(
     (row: InboxRowData) => {
       if (row.unreadCount === 0) return;
       const key = rowKey(row);
-      // Resolve the read action per KIND (bail if unaddressable — don't fake
+      // Resolve the read action per KIND (bail if unaddressable - don't fake
       // success). A MULTI-PARTY row (relay_group / group_text) marks read through
       // its OWN conversation (POST /api/conversations/:id/read), NOT the
       // contact/phone fan-out - the inbox mark-read routes both fan out over a
@@ -411,8 +597,9 @@ export function useInbox(filter: InboxFilter): InboxState {
       // action, bundled with it, rather than derived from `row.kind` separately:
       // the third branch catches rows BY PHONE across kinds, so a kind-derived
       // key would mint `c:undefined` for a contact row addressed by phone. It is
-      // also a different vocabulary from `rowKey` above - both group kinds share
-      // `cv:` so the badge dedupes with the tour/placement tabs (unreadKeys.ts).
+      // also a different vocabulary from `rowKey` (inboxListMerge.ts) - both
+      // group kinds share `cv:` so the badge dedupes with the tour/placement
+      // tabs (unreadKeys.ts).
       let resolved: { read: () => Promise<void>; clearKey: string } | undefined;
       if (row.kind === 'relay_group' || row.kind === 'group_text') {
         if (row.conversationId !== undefined) {
@@ -424,10 +611,7 @@ export function useInbox(filter: InboxFilter): InboxState {
         }
       } else if (row.kind === 'contact' && row.contactId !== undefined) {
         const contactId = row.contactId;
-        resolved = {
-          read: () => markInboxRead({ contactId }),
-          clearKey: contactClearKey(contactId),
-        };
+        resolved = { read: () => markInboxRead({ contactId }), clearKey: contactClearKey(contactId) };
       } else if (row.phone !== undefined) {
         const phone = row.phone;
         resolved = { read: () => markInboxRead({ phone }), clearKey: phoneClearKey(phone) };
@@ -435,12 +619,17 @@ export function useInbox(filter: InboxFilter): InboxState {
       if (resolved === undefined) return; // unaddressable - don't fake success
       const { read, clearKey } = resolved;
       // The filter EPOCH this mutation belongs to. `genRef` is global to the
-      // hook, so without this the commit below invalidates the in-flight first
-      // page of whatever filter the operator moved to - and since the filter
+      // hook, so without this the commit below invalidates the in-flight head
+      // read of whatever filter the operator moved to - and since the filter
       // effect has already set status 'loading' and nothing re-fetches, that tab
       // strands on a SPINNER, with no Retry (that lives under `status: error`)
       // until an unrelated event arrives. The mutation is real either way; it
       // simply has no authority over a list it was never part of.
+      //
+      // (Since fetchHead's generation guard stopped discarding a page while the
+      // screen shows a spinner, that strand has a second lock. This epoch still
+      // keeps the bump from discarding a READY tab's in-flight head read on a
+      // filter the mutation was never made against.)
       //
       // AN EPOCH, NOT AN IDENTITY, and the difference is a live bug not a nicety:
       // filter identities RECUR. Mark read on All, glance at Unread, come back
@@ -461,21 +650,22 @@ export function useInbox(filter: InboxFilter): InboxState {
       noteRowsCleared([clearKey]);
       read()
         .then(() => {
-          // Commit wins over any in-flight pre-commit refetch of the list this
+          // Commit wins over any in-flight pre-commit head read of the list this
           // mutation was made against - and only that list.
           if (filterGenRef.current === mutationGen) genRef.current += 1;
-          // Commit to base regardless: if the operator has moved to a filter
-          // that also shows this row, zeroing it there is correct, and on a list
-          // that does not contain it the map is a no-op.
-          setBase((prev) => prev.map((r) => (rowKey(r) === key ? { ...r, unreadCount: 0 } : r)));
+          // Commit to the list regardless of the filter: if the operator has
+          // moved to a filter that also shows this row, zeroing it there is
+          // correct, and on a list that does not contain it the patch is a
+          // no-op. After unmount it neither commits nor saves (spec 5.5).
+          if (aliveRef.current) commitList(patchUnread(listRef.current, key, 0));
         })
         .catch(() => {
-          /* rollback: dropping the patch restores base's original count */
+          /* rollback: dropping the patch restores the list's original count */
           rollbackRowsCleared([clearKey]);
         })
         .finally(() => clearPatch(key, 'unreadCount'));
     },
-    [setPatch, clearPatch, noteRowsCleared, rollbackRowsCleared],
+    [setPatch, clearPatch, noteRowsCleared, rollbackRowsCleared, commitList],
   );
 
   const markUnread = useCallback(
@@ -509,25 +699,19 @@ export function useInbox(filter: InboxFilter): InboxState {
       flag()
         .then(() => {
           if (filterGenRef.current === mutationGen) genRef.current += 1;
-          setBase((prev) => prev.map((r) => (rowKey(r) === key ? { ...r, unreadCount: 1 } : r)));
+          if (aliveRef.current) commitList(patchUnread(listRef.current, key, 1));
         })
         .catch(() => {
-          /* rollback: dropping the patch restores base's original (read) count */
+          /* rollback: dropping the patch restores the original (read) count */
         })
         .finally(() => clearPatch(key, 'unreadCount'));
     },
-    [setPatch, clearPatch],
+    [setPatch, clearPatch, commitList],
   );
 
   // --- Assemble the displayed rows ------------------------------------------
-  const patched = base.map((row) => {
-    const p = pending.get(rowKey(row));
-    if (p === undefined) return row;
-    return {
-      ...row,
-      ...(p.unreadCount !== undefined && { unreadCount: p.unreadCount }),
-    };
-  });
+  const base = baseOf(list);
+  const patched = applyPatches(base, pending);
   // On the Unread filter a row optimistically marked read drops out immediately,
   // so the list (and the "all caught up" empty state) stay in sync with the action.
   const visible = filter === 'unread' ? patched.filter((r) => r.unreadCount > 0) : patched;
@@ -536,18 +720,23 @@ export function useInbox(filter: InboxFilter): InboxState {
   return {
     status,
     rows,
-    groupsTruncated,
-    truncated,
+    groupsTruncated: list.groupsTruncated,
+    truncated: list.truncated,
     // Counted off the SERVER list, never the rendered one (adversarial 4) - see
     // `InboxState`. `base` is exactly what the server handed down; `rows` is not.
     serverRowCount: base.length,
     // Counted off the RENDERED list (adversarial 30) - see `InboxState`.
     groupRowsShown: countGroupRows(rows),
-    hasMore: cursor !== null,
+    hasMore: list.cursor !== null,
     loadingMore,
     loadMore,
     retry,
     markRead,
     markUnread,
+    refreshFailed,
+    autoLoadArmed: list.autoLoadArmed,
+    pageEpoch: list.pageEpoch,
+    restoredScrollTop: restored ? restored.scrollTop : null,
+    noteScrollTop,
   };
 }

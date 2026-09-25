@@ -31,6 +31,11 @@ function baseState(over: Partial<InboxState> = {}): InboxState {
     retry,
     markRead,
     markUnread,
+    refreshFailed: false,
+    autoLoadArmed: false,
+    pageEpoch: 0,
+    restoredScrollTop: null,
+    noteScrollTop: () => {},
     ...over,
   };
 }

@@ -480,8 +480,14 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     }
 
     // 4. The gates (spec D9), in order. Each refusal writes its OWN close code,
-    // emits D23's terminal ERROR with the `gate_refused` cause, and ENDS the
-    // chain - no further rung is claimed.
+    // logs a WARN with the `gate_refused` cause, and ENDS the chain - no further
+    // rung is claimed. WARN, not the spec's D23 ERROR, by Cameron's ruling on the
+    // handback's open question Q1 (2026-09-24): a closed group, a removed member,
+    // a changed number and an opt-out are deliberate human actions, not faults -
+    // the 21610 carve-out's reasoning - and at ERROR an operator who closed a
+    // group with several rungs pending could trip the ErrorLogs burst alarm on
+    // their own action. The send-time refusal below (e.g. `breaker_open`) is a
+    // system condition and stays ERROR.
     const conversation = await conversationsRepo.getById(conversationId);
     if (conversation === undefined || conversation.status !== 'open') {
       // Same authoritative check the fan-out uses: `status`, not pool_number
@@ -489,7 +495,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       // absent conversation is not open either, and the four codes are a closed
       // set - "group closed" is the truthful one of them.
       await refuseGate('retry_group_closed');
-      log.error(
+      log.warn(
         {
           ...ladder,
           memberKey: logSafeStoredMemberKey(memberKey),
@@ -512,7 +518,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     const member = roster.find((candidate) => relayMemberKey(candidate) === memberKey);
     if (member === undefined) {
       await refuseGate('retry_member_removed');
-      log.error(
+      log.warn(
         {
           ...ladder,
           memberKey: logSafeStoredMemberKey(memberKey),
@@ -532,7 +538,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     const currentE164 = normalizeToE164(member.phone);
     if (currentE164 === undefined || relayRetryDigest(rootTsMsgId, currentE164) !== destDigest) {
       await refuseGate('retry_number_changed');
-      log.error(
+      log.warn(
         { ...memberLog, retryClaim: 'gate_refused', closeCode: 'retry_number_changed' },
         'relayRetryLeg: retry refused - destination number changed since the claim',
       );
@@ -541,7 +547,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
 
     if (await isMemberSuppressed(contactsRepo, conversationsRepo, member)) {
       await refuseGate('retry_opted_out');
-      log.error(
+      log.warn(
         { ...memberLog, retryClaim: 'gate_refused', closeCode: 'retry_opted_out' },
         'relayRetryLeg: retry refused - member opted out',
       );

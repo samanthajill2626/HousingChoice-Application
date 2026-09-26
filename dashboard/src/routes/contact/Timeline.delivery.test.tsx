@@ -1013,6 +1013,68 @@ describe('Timeline relay retry states - the chip, the recital and the row togeth
     ).toBeInTheDocument();
   });
 
+  // retry-send-window D8: a WINDOW decline is a plain failed attempt. The rung
+  // closes `retry_window_closed` - kept for data and logs - but the join gives
+  // that code NO display code, so the original's 30003 stands at all three
+  // positions: never "Not retried - message too old", and never a promise. The
+  // rung arrives already closed when the claim declines it at once (D3), so this
+  // is also what the FIRST render shows - no "Retrying" in between.
+  it('reads a window-declined rung as the plain 30003 failure at all three positions', () => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'failed', errorCode: 'retry_window_closed', transportAggregationState: 'excluded' },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent('delivered 1/2 - 1 failed - Phone unreachable (error 30003)');
+    expect(rollup).toHaveAccessibleName(/Lars Landlord: Undelivered, Phone unreachable \(error 30003\)/);
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(
+        'Undelivered - Phone unreachable (error 30003)',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Not retried/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/too old/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retrying/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+
+  // The four GATE declines keep their copy (Cameron's gate answer), whether the
+  // claim closed the rung at once (D3) or the job closed it at send time: one
+  // data shape, one rendering.
+  it.each([
+    ['retry_group_closed', 'Not retried - group closed'],
+    ['retry_member_removed', 'Not retried - no longer in this group'],
+    ['retry_number_changed', 'Not retried - number changed since'],
+    ['retry_opted_out', 'Not retried - opted out'],
+  ] as Array<[string, string]>)('reads a rung closed %s as "%s" at the chip and the row', (code, copy) => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'failed', errorCode: code, transportAggregationState: 'excluded' },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    expect(screen.getByRole('img')).toHaveTextContent(`delivered 1/2 - 1 failed - ${copy}`);
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(`Undelivered - ${copy}`),
+    ).toBeInTheDocument();
+  });
+
   // D19's second table: `unconfirmed` recites today's NOT-CONFIRMED copy. The
   // projection overlays the quiet rung's own status, which is what lets the row
   // say it at all: the ORIGINAL's status is terminal, and a terminal status can

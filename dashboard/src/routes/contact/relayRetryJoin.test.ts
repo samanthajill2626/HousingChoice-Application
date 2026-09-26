@@ -66,6 +66,18 @@ function failedLeg(errorCode?: string): RelayRecipientDelivery {
   };
 }
 
+/** A rung the claim or the job closed as a WINDOW decline (retry-send-window
+ *  D3/D4): the pre-send refusal shape - failed, never sent, aggregation
+ *  `excluded` - with the window's close code. */
+function windowClosedLeg(): RelayRecipientDelivery {
+  return {
+    status: 'failed',
+    errorCode: 'retry_window_closed',
+    requestedTransport: 'sms',
+    transportAggregationState: 'excluded',
+  };
+}
+
 /** A retry ROW as the relay projector hands it to the timeline. */
 function retryItem(opts: {
   attempt: number;
@@ -197,6 +209,41 @@ describe('projectRelayLegs - the four end states', () => {
 
     expect(legs).toMatchObject({ errorCode: '30003', retryState: 'terminal' });
   });
+
+  // retry-send-window D8: a WINDOW decline carries NO display code. The rung
+  // closed `retry_window_closed` (kept for data and logs); the ORIGINAL's 30003
+  // stands, so the leg reads as the plain failed attempt the ruling asks for -
+  // every slot field intact, exactly as a terminal rung with no code leaves it.
+  it('keeps the original carrier code when the last rung closed retry_window_closed', () => {
+    const legs = project([retryItem({ attempt: 1, leg: windowClosedLeg(), atMs: NOW - 60_000 })], NOW);
+
+    expect(legs).toEqual({ ...ORIGINAL, retryState: 'terminal' });
+  });
+
+  // Rung 2 is claimed only by rung 1's own 30003, so the code that stands is the
+  // same carrier failure the ladder ran for.
+  it('keeps the original carrier code when a LATER rung closed retry_window_closed', () => {
+    const legs = project(
+      [
+        retryItem({ attempt: 1, leg: failedLeg('30003'), atMs: NOW - 300_000 }),
+        retryItem({ attempt: 2, leg: windowClosedLeg(), atMs: NOW - 60_000 }),
+      ],
+      NOW,
+    );
+
+    expect(legs).toMatchObject({ errorCode: '30003', retryState: 'terminal' });
+  });
+
+  // The four GATE closes are untouched: each still replaces the carrier code,
+  // so the leg reads its "Not retried - ..." copy (Cameron's gate answer).
+  it.each(['retry_group_closed', 'retry_member_removed', 'retry_number_changed', 'retry_opted_out'])(
+    'still projects the gate close %s onto the original leg',
+    (code) => {
+      const legs = project([retryItem({ attempt: 1, leg: failedLeg(code), atMs: NOW - 60_000 })], NOW);
+
+      expect(legs).toMatchObject({ errorCode: code, retryState: 'terminal' });
+    },
+  );
 
   // D18, half one: the stranded claim - created, never sent.
   it('is unconfirmed when a rung never reached sent inside the budget', () => {

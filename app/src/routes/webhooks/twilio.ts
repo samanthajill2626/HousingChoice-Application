@@ -76,6 +76,7 @@ import {
   type DeliveryStatus,
   type MediaAttachment,
   type MessagesRepo,
+  type RelayRecipientDelivery,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
@@ -136,13 +137,15 @@ import {
   type RelayLegPayload,
   type RelayTransportMode,
 } from '../../jobs/relayFanOut.js';
-import { enqueueRelayRetryLeg } from '../../jobs/relayRetryLeg.js';
+import { enqueueRelayRetryLeg, resolveRelayRetryBackoff } from '../../jobs/relayRetryLeg.js';
 import {
   MAX_RELAY_RETRY_ATTEMPTS,
   relayRetryDigest,
   relayRetryProviderSid,
   type RelayRetryClaimOutcome,
 } from '../../lib/relayRetryClaim.js';
+import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../../lib/relayRetryGates.js';
+import { parseRetryWindowOrigin, retryFitsSendWindow } from '../../lib/retrySendWindow.js';
 import { resolveMessage } from '../../messages/index.js';
 
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
@@ -389,6 +392,13 @@ interface RelayRetryClaimResult {
   outcome: RelayRetryClaimOutcome;
   /** The 1-based rung, present only where a retry ROW exists for it. */
   attempt?: number;
+  /**
+   * retry-send-window D3: the code a declined rung was APPENDED with (a gate
+   * code, or `retry_window_closed`) - set on exactly `gate_refused` and
+   * `window_closed`, the two claim-time declines. The failure marker carries
+   * it, as the enqueue-failure line carries the code its close wrote.
+   */
+  closeCode?: RelayRetryGateCode | 'retry_window_closed';
 }
 
 /**
@@ -396,7 +406,7 @@ interface RelayRetryClaimResult {
  * shared carve-outs rather than instead of them. A relay leg logs WARN while a
  * retry is actually claimed and ERROR once the chain is a real dead end.
  *
- * Four properties are load-bearing and none is obvious:
+ * Five properties are load-bearing and none is obvious:
  *
  *   - 21610 keeps its carve-out. A purely attempt-aware rule would alarm on the
  *     platform correctly honoring STOP, which is a strictly larger increase than
@@ -420,12 +430,21 @@ interface RelayRetryClaimResult {
  *     whose write was refused and still reads `sent` - two internal anomalies
  *     on a leg that DID end terminally on 30003, silenced on a brand-new alarm.
  *     They are a separate outcome now and they ERROR.
+ *   - `gate_refused` stays WARN (retry-send-window spec D3, by Cameron's Q1
+ *     ruling of 2026-09-24). The claim now previews the retry job's four gates
+ *     and, when one would refuse, appends the rung already closed with that
+ *     gate's code. A closed group, a removed member, a changed number and an
+ *     opt-out are deliberate human actions, not faults - the job's own refusal
+ *     of the same rung has logged WARN since that ruling, and the claim seeing
+ *     it sooner must not turn it into an alarm.
  *   - Every OTHER terminal 30003 on a fan-out or team leg is ERROR, whether the
- *     ladder ran to its cap, was refused at a gate, or was never claimed at all
- *     (`to_missing`, `to_malformed`, `source_unreadable`, `slot_ineligible`,
- *     `enqueue_failed`, `claim_failed`). What matters is the PRODUCT the leg
- *     belongs to, not whether the ladder happened to start - that whole set is
- *     what was approved.
+ *     ladder ran to its cap, could not go out inside the 15-minute send window
+ *     (`window_closed`, retry-send-window D9 - the member never got the text, a
+ *     dead end like the cap), or was never claimed at all (`to_missing`,
+ *     `to_malformed`, `source_unreadable`, `slot_ineligible`, `enqueue_failed`,
+ *     `claim_failed`). What matters is the PRODUCT the leg belongs to, not
+ *     whether the ladder happened to start - that whole set is what was
+ *     approved.
  *
  * This function is the relay branch's ONLY severity reader; the shared set above
  * still decides the 1:1 and native-group-text paths, which are fenced.
@@ -440,7 +459,8 @@ function isTerminalRelayLegFailure(
     claim !== 'claimed' &&
     claim !== 'already_claimed' &&
     claim !== 'fenced_announcement' &&
-    claim !== 'slot_settled'
+    claim !== 'slot_settled' &&
+    claim !== 'gate_refused'
   );
 }
 
@@ -2667,6 +2687,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
      * atomic claim - a duplicate, redelivered or concurrent callback loses that
      * create and claims nothing.
      *
+     * It also DECIDES, before the rung exists, whether the rung will be
+     * attempted (retry-send-window spec D3): the retry job's four gates are
+     * previewed through the job's own evaluator, then the 15-minute send window
+     * is checked, and a rung that either check refuses is APPENDED already
+     * CLOSED - in that same single write - and never enqueued, so the leg
+     * shows at once whether a retry is coming.
+     *
      * THIS FUNCTION NEVER RETURNS OUT OF ITS CALLER. It reports an outcome and
      * control always falls through to the handler's tail, because that tail
      * carries three things a claim must not skip: the delivery-failure marker,
@@ -2778,6 +2805,100 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // mid-ladder must not change the wording of what is being retried.
             src.relay_retry_leg_body
           : await composeRelayLegCopy(ptr.conversationId, senderKey, rawBody, sourceMedia.length);
+
+      // 7a. Decide NOW whether rung N will be attempted (retry-send-window spec
+      // D3), so the leg shows at once whether a retry is coming - never
+      // "Retrying" for the 1 to 4 minutes before the job refuses a rung the
+      // claim could already see was doomed. The decision is known BEFORE the
+      // append, so it is recorded IN the append: a declined rung is written
+      // already closed, ONE data shape (the one a job-time refusal already
+      // leaves), and the append's SID dedupe still answers a duplicate callback
+      // with no separate lookup. The member's slot on the ROOT is never touched.
+      //
+      // First the job's four gates, in the job's own order (group open, on the
+      // roster, number unchanged, not opted out), through the SAME evaluator
+      // the job runs, so "that gate's code" is deterministic when two apply.
+      // The job still re-runs every gate at send time: a group can close during
+      // the backoff. A read that THROWS here is the existing `claim_failed`
+      // (ERROR, a 5xx, and Twilio's redelivery re-runs the claim), like every
+      // read above.
+      const conversation = await conversations.getById(ptr.conversationId);
+      const gate = await evaluateRelayRetryGates({
+        conversation,
+        memberKey: ptr.memberKey,
+        rootTsMsgId,
+        destDigest,
+        isSuppressed: (member) => isMemberSuppressed(contacts, conversations, member),
+      });
+      // D2: where this ladder's window started. Step 6 fell back to
+      // `ptr.tsMsgId` for the root key exactly when this callback is for the
+      // ROOT's own leg - rung 1 - whose origin is that member slot's `sentAt`:
+      // the leg's real send time (Twilio's dateCreated), never the root row's
+      // timestamp, which is receipt or compose time and, for a message held
+      // while a group connects, can precede the send by a long time. Rungs 2-3
+      // are claimed off the previous RETRY row and copy the origin it carries -
+      // never re-derived from that row's own slot, which would restart the
+      // window on every rung.
+      const onRootLeg = rootTsMsgId === ptr.tsMsgId;
+      const originRaw: unknown = onRootLeg ? slot.sentAt : src.relay_retry_window_start;
+      const originMs = parseRetryWindowOrigin(originRaw);
+      let decline: RelayRetryGateCode | 'retry_window_closed' | undefined;
+      let originGap: 'missing' | 'unparseable' | undefined;
+      if (gate.refused) {
+        decline = gate.code;
+      } else if (originMs === undefined) {
+        // D5: no usable origin fails OPEN - the rung is claimed without a
+        // window check, and a WARN names the gap once the rung exists (below).
+        originGap = originRaw === undefined ? 'missing' : 'unparseable';
+      } else if (
+        !retryFitsSendWindow({
+          originMs,
+          nowMs: Date.now(),
+          // The SAME resolution chain `enqueueRelayRetryLeg` schedules this
+          // rung with, so the check measures the send time the queue honors.
+          backoffMs: resolveRelayRetryBackoff()(attempt),
+        })
+      ) {
+        // Then the window (D1, D3 step 2): now + backoff + RETRY_JOB_GRACE_MS
+        // must still fit inside origin + RETRY_SEND_WINDOW_MS.
+        decline = 'retry_window_closed';
+      }
+      // The rung's member slot. An OPEN rung is seeded `queued` for its job,
+      // as always. A DECLINED rung is appended ALREADY CLOSED, with exactly the
+      // slot the job's own pre-send refusal (`refuseGate` in
+      // `jobs/relayRetryLeg.ts`) leaves for that code - in this one write, not
+      // a second one, so no open rung ever exists to be stranded or to be read
+      // as "Retrying" by a refetch. The refusal's writers touch nothing but
+      // this slot (`setRecipientTransportAggregationState`,
+      // `applyRecipientSendResult`, `setRecipientDelivery` in
+      // `repos/messagesRepo.ts`), so every other field of the rung - its
+      // row-level `delivery_status` included - is the same either way; and
+      // `append`'s shape check covers transport fields only, so it accepts a
+      // closed slot.
+      let rungSlot: RelayRecipientDelivery;
+      if (decline === undefined) {
+        rungSlot = versioned
+          ? {
+              status: 'queued',
+              ...(requestedTransport !== undefined && { requestedTransport }),
+              // `attempted` is reachable ONLY from `planned`, so a slot seeded
+              // without it throws on the first retry send.
+              transportAggregationState: 'planned',
+            }
+          : { status: 'queued' };
+      } else if (versioned) {
+        // The versioned refusal's two writes - aggregation `excluded`, then
+        // the failed slot with the code - folded into the one.
+        rungSlot = {
+          status: 'failed',
+          ...(requestedTransport !== undefined && { requestedTransport }),
+          transportAggregationState: 'excluded',
+          errorCode: decline,
+        };
+      } else {
+        // `markRecipient`'s whole-slot write: nothing else survives in it.
+        rungSlot = { status: 'failed', errorCode: decline };
+      }
       const appended = await messages.append({
         conversationId: ptr.conversationId,
         providerSid,
@@ -2799,17 +2920,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         // inbound prohibition is on the MESSAGE's requestedTransport, never on
         // the SLOT's, which is permitted and required.
         ...(versioned && { transportSchemaVersion: TRANSPORT_SCHEMA_VERSION }),
-        deliveryRecipients: {
-          [ptr.memberKey]: versioned
-            ? {
-                status: 'queued' as const,
-                ...(requestedTransport !== undefined && { requestedTransport }),
-                // `attempted` is reachable ONLY from `planned`, so a slot seeded
-                // without it throws on the first retry send.
-                transportAggregationState: 'planned' as const,
-              }
-            : { status: 'queued' as const },
-        },
+        // The member slot step 7a decided: open for its job, or - for a
+        // decline - already closed, in this same write.
+        deliveryRecipients: { [ptr.memberKey]: rungSlot },
         // The RAW body on the row, the composed leg copy beside it (D12): the row
         // body is what is persisted, previewed and inherited by the inbox
         // preview, while the sender prefix belongs to the outbound LEG only.
@@ -2824,19 +2937,69 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         relayRetryOriginDirection:
           src.relay_retry_origin_direction ?? (src.direction === 'inbound' ? 'inbound' : 'outbound'),
         relayRetryLegBody: legBody,
+        // retry-send-window D2: the ladder's window origin, carried on every
+        // rung so rungs 2-3 measure from the member's ORIGINAL leg send.
+        // Normalized to ISO; absent when there is no usable origin (D5).
+        ...(originMs !== undefined && {
+          relayRetryWindowStart: new Date(originMs).toISOString(),
+        }),
         // DELIBERATELY no `retryOf`: stamping it would add the ORIGINAL to the
         // timeline's supersededIds and DELETE the bubble this retry is meant to
         // render beside - the display contract, inverted.
       });
       if (appended.deduped) {
-        // A sibling callback won the create. The ladder is running; claim nothing
-        // further and do not re-emit for it.
+        // A sibling callback won the create. The ladder is running - or its
+        // rung was already appended CLOSED - so claim nothing further and do
+        // not re-emit for it. The dedupe also means THIS callback wrote
+        // nothing, whatever its own preview decided (retry-send-window D3): a
+        // duplicate can never close a rung an earlier callback opened, nor
+        // open one it closed.
         return { outcome: 'already_claimed', attempt };
+      }
+      const retryTsMsgId = appended.tsMsgId;
+      if (originGap !== undefined) {
+        // D5, logged only for a rung THIS claim created (a duplicate returned
+        // above), so a redelivered callback does not repeat it.
+        log.warn(
+          {
+            conversationId: ptr.conversationId,
+            retryTsMsgId,
+            rootTsMsgId,
+            attempt,
+            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
+            windowOrigin: originGap,
+            originField: onRootLeg ? 'sentAt' : 'relay_retry_window_start',
+          },
+          'relay retry claim: no usable send-window origin - rung claimed without a window check (spec D5)',
+        );
+      }
+      /** Step 9's emit, shared by both exits below (see step 9). */
+      const announceRootClaim = (): void => {
+        events.emit('message.persisted', {
+          conversationId: ptr.conversationId,
+          tsMsgId: rootTsMsgId,
+          direction: 'inbound',
+          deliveryStatus: mapped,
+        });
+      };
+
+      if (decline !== undefined) {
+        // 8a. A DECLINED rung (retry-send-window D3). The append above wrote it
+        // already CLOSED, in the one transaction that IS the claim, so there is
+        // nothing to enqueue and nothing left to close. The dashboard join
+        // renders it exactly as a rung the job refused: a gate code reads "Not
+        // retried - ...", and `retry_window_closed` leaves the original's 30003
+        // standing. Step 9's SSE fires after that one write.
+        announceRootClaim();
+        return {
+          outcome: decline === 'retry_window_closed' ? 'window_closed' : 'gate_refused',
+          attempt,
+          closeCode: decline,
+        };
       }
 
       // 8. Hand the rung to the queue. The claim defeats duplicate CALLBACKS;
       // the job's own execution marker defeats duplicate DELIVERIES.
-      const retryTsMsgId = appended.tsMsgId;
       let outcome: RelayRetryClaimOutcome = 'claimed';
       try {
         await enqueueRelayRetryLeg(
@@ -2897,12 +3060,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // addresses the ROOT (adjudication S4): the existing emit below carries
       // `ptr.tsMsgId`, which on rungs 2-3 is a retry row, and does not fire at
       // all in the crash-recovery case where nothing transitioned.
-      events.emit('message.persisted', {
-        conversationId: ptr.conversationId,
-        tsMsgId: rootTsMsgId,
-        direction: 'inbound',
-        deliveryStatus: mapped,
-      });
+      announceRootClaim();
       return { outcome, attempt };
     };
 
@@ -3076,6 +3234,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           // 30003" with the internal fault the one nobody expects.
           retryClaim: retryClaim.outcome,
           ...(retryClaim.attempt !== undefined && { retryAttempt: retryClaim.attempt }),
+          // retry-send-window D3: the code a declined rung was appended with -
+          // present on `gate_refused` and `window_closed` only.
+          ...(retryClaim.closeCode !== undefined && { closeCode: retryClaim.closeCode }),
         };
         // The three INTERNAL ANOMALIES take their own message rather than the
         // shared carrier-shaped one, so each alarm names its own cause instead

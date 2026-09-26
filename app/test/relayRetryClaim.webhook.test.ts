@@ -16,7 +16,7 @@
 //
 // This file is separate from relayWebhook.test.ts (966 lines, and about the
 // INBOUND pipeline) purely for size - the harness idioms are the same ones.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import {
   InMemorySchedulerAdapter,
@@ -37,6 +37,7 @@ import {
 } from '../src/jobs/relayRetryLeg.js';
 import { createLogger } from '../src/lib/logger.js';
 import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
+import type { RelayRetryGateCode } from '../src/lib/relayRetryGates.js';
 import { SYSTEM_SENDER_KEY } from '../src/services/relayAnnouncements.js';
 import type { MessageItem, RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
 import {
@@ -67,6 +68,17 @@ const ROOT_PROVIDER_TS = '2026-09-01T12:00:00.000Z';
 const RAW_BODY = 'is the unit still available?';
 const LEG_BODY = 'Alice: is the unit still available?';
 const PLACEMENT_ID = 'placement-relay-1';
+/** Bob's number after a change (the changed-number gate, retry-send-window D3). */
+const BOB_NEW = '+15558675399';
+
+/**
+ * An ISO instant `minutes` before now - a relay slot's `sentAt`, the send
+ * window's origin (retry-send-window D2). Wall-clock relative, with a margin
+ * of 30 seconds or more against every boundary a test aims at.
+ */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
 
 interface SourceOptions {
   direction?: 'inbound' | 'outbound';
@@ -76,6 +88,8 @@ interface SourceOptions {
   body?: string;
   /** Bob's slot as the fan-out left it, BEFORE the failure callback. */
   bobSlot?: RelayRecipientDelivery;
+  /** Carol's slot, likewise (retry-send-window: the same-data comparison). */
+  carolSlot?: RelayRecipientDelivery;
 }
 
 describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
@@ -175,7 +189,7 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
         // `sent`, not `delivered`: a delivered slot cannot take a failure
         // callback at all (forward-only), so the second-member escalation case
         // would silently assert nothing.
-        [CAROL_KEY]: versioned ? versionedSlot('sent') : { status: 'sent' },
+        [CAROL_KEY]: opts.carolSlot ?? (versioned ? versionedSlot('sent') : { status: 'sent' }),
       },
     });
     for (const [sid, memberKey] of [
@@ -255,6 +269,23 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     );
     expect(entry).toBeDefined();
     await postStatus(failureParams({ MessageSid: entry![0] }));
+  }
+
+  /**
+   * Run the rung that is currently scheduled (it sends to Bob) and return that
+   * rung's REAL leg SID - so a test can change the world between a rung going
+   * out and its failure callback arriving.
+   */
+  async function runScheduledRung(): Promise<string> {
+    await outbound.deliverDelayed(dispatchJob);
+    await outbound.settle();
+    const rows = retryRows();
+    const latest = rows[rows.length - 1]!;
+    const entry = [...world.relaySidPointers.entries()].find(
+      ([, ref]) => ref.tsMsgId === latest.tsMsgId && ref.memberKey === BOB_KEY,
+    );
+    expect(entry).toBeDefined();
+    return entry![0];
   }
 
   // --- the claim itself ----------------------------------------------------
@@ -823,5 +854,523 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     );
 
     expect(escalations()).toHaveLength(2);
+  });
+
+  // --- retry-send-window: the claim decides at once (spec D2, D3, D5, D9) ---
+  //
+  // Every NEW fixture below carries a slot `sentAt` - the window's origin
+  // (D2). The older fixtures above carry none and pass through D5 unchanged:
+  // their rungs are claimed without a window check, exactly as before.
+
+  it('retry-send-window D3: with every gate passing inside the window, claims as today and carries the origin', async () => {
+    const sentAt = minutesAgo(1);
+    const root = await seedSource({ bobSlot: { status: 'sent', sentAt } });
+
+    await postRootFailure();
+
+    const rows = retryRows();
+    expect(rows).toHaveLength(1);
+    // D2: the ROOT member slot's sentAt, carried on the rung. The harness
+    // append preserves the field (Task 2), so this cannot pass vacuously.
+    expect(rows[0]!.relay_retry_window_start).toBe(sentAt);
+    expect(slotOf(rows[0]!.tsMsgId)).toEqual({ status: 'queued' });
+    const jobs = scheduledRetryJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.delaySeconds).toBe(60);
+    expect(failureLines(WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'claimed', retryAttempt: 1 }),
+    );
+    expect(failureLines(ERROR)).toHaveLength(0);
+    // No D5 line: the origin was usable.
+    expect(capture.atLevel(WARN).some((l) => l['windowOrigin'] !== undefined)).toBe(false);
+    // The member's slot on the ROOT is untouched by the claim.
+    expect(slotOf(root)).toEqual({ status: 'undelivered', errorCode: '30003', sentAt });
+  });
+
+  const claimGateCases: [string, () => void, RelayRetryGateCode][] = [
+    [
+      'the group closed',
+      () => {
+        world.conversations.get(CONV)!.status = 'closed';
+      },
+      'retry_group_closed',
+    ],
+    [
+      'the member was removed',
+      () => {
+        const conv = world.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).filter((m) => m.contactId !== BOB_KEY);
+      },
+      'retry_member_removed',
+    ],
+    [
+      'the number changed',
+      () => {
+        const conv = world.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).map((m) =>
+          m.contactId === BOB_KEY ? { ...m, phone: BOB_NEW } : m,
+        );
+      },
+      'retry_number_changed',
+    ],
+    [
+      'the member opted out',
+      () => {
+        world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: true });
+      },
+      'retry_opted_out',
+    ],
+  ];
+
+  it.each(claimGateCases)(
+    'retry-send-window D3: when %s, rung 1 is APPENDED already CLOSED with that gate code and nothing is enqueued',
+    async (_label, arrange, code) => {
+      const sentAt = minutesAgo(1);
+      const root = await seedSource({ bobSlot: { status: 'sent', sentAt } });
+      arrange();
+
+      await postRootFailure();
+
+      const rows = retryRows();
+      expect(rows).toHaveLength(1);
+      // ONE data shape: the rung exists with its full lineage and origin, and
+      // is appended closed with the code the job itself would have written.
+      expect(rows[0]).toMatchObject({
+        relay_retry_of: root,
+        relay_retry_attempt: 1,
+        relay_retry_window_start: sentAt,
+        delivery_status: 'queued',
+      });
+      expect(slotOf(rows[0]!.tsMsgId)).toEqual({ status: 'failed', errorCode: code });
+      expect(scheduledRetryJobs()).toHaveLength(0);
+      expect(world.sent).toHaveLength(0);
+      // WARN (Cameron's Q1 ruling), carrying the code the rung was appended with.
+      expect(failureLines(WARN)).toContainEqual(
+        expect.objectContaining({ retryClaim: 'gate_refused', retryAttempt: 1, closeCode: code }),
+      );
+      expect(capture.atLevel(ERROR)).toHaveLength(0);
+      expect(slotOf(root)).toEqual({ status: 'undelivered', errorCode: '30003', sentAt });
+    },
+  );
+
+  it('retry-send-window D3: with two gates refusing, the rung carries the one the JOB checks first', async () => {
+    await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(1) } });
+    // Number changed AND opted out: the job checks the number first.
+    const conv = world.conversations.get(CONV)!;
+    conv.participants = (conv.participants ?? []).map((m) =>
+      m.contactId === BOB_KEY ? { ...m, phone: BOB_NEW } : m,
+    );
+    world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB_NEW, sms_opt_out: true });
+
+    await postRootFailure();
+
+    expect(slotOf(retryRows()[0]!.tsMsgId)).toEqual({
+      status: 'failed',
+      errorCode: 'retry_number_changed',
+    });
+    expect(failureLines(WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'gate_refused', closeCode: 'retry_number_changed' }),
+    );
+  });
+
+  it('retry-send-window D3: a gate refusal is recorded ahead of a closed window - the gates run first', async () => {
+    await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(14) } });
+    world.conversations.get(CONV)!.status = 'closed';
+
+    await postRootFailure();
+
+    expect(slotOf(retryRows()[0]!.tsMsgId)).toEqual({
+      status: 'failed',
+      errorCode: 'retry_group_closed',
+    });
+    expect(failureLines(WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'gate_refused', closeCode: 'retry_group_closed' }),
+    );
+    expect(capture.atLevel(ERROR)).toHaveLength(0);
+  });
+
+  it.each([2, 3])(
+    'retry-send-window D3: a member who opts out mid-ladder gets rung %i appended CLOSED at the claim, carrying the ROOT origin',
+    async (rung) => {
+      const sentAt = minutesAgo(1);
+      await seedSource({ bobSlot: { status: 'sent', sentAt } });
+      await postRootFailure(); // rung 1 claimed open
+      for (let next = 2; next <= rung; next += 1) {
+        const legSid = await runScheduledRung(); // rung next-1 goes out
+        if (next === rung) {
+          world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: true });
+        }
+        await postStatus(failureParams({ MessageSid: legSid })); // ...and fails 30003
+      }
+
+      const rows = retryRows();
+      expect(rows).toHaveLength(rung);
+      const declined = rows[rung - 1]!;
+      expect(declined.relay_retry_attempt).toBe(rung);
+      // Carried rung to rung from the ROOT leg (D2), never re-derived.
+      expect(declined.relay_retry_window_start).toBe(sentAt);
+      expect(slotOf(declined.tsMsgId)).toEqual({ status: 'failed', errorCode: 'retry_opted_out' });
+      expect(scheduledRetryJobs()).toHaveLength(0);
+      expect(world.sent).toHaveLength(rung - 1);
+      expect(failureLines(WARN)).toContainEqual(
+        expect.objectContaining({
+          retryClaim: 'gate_refused',
+          retryAttempt: rung,
+          closeCode: 'retry_opted_out',
+        }),
+      );
+      expect(failureLines(ERROR)).toHaveLength(0);
+    },
+  );
+
+  it('retry-send-window D3: a TEAM send declined at the claim keeps its mirrored shape and its gate code', async () => {
+    const sentAt = minutesAgo(1);
+    await seedSource({
+      direction: 'outbound',
+      author: 'teammate',
+      senderKey: TEAM_SENDER_KEY,
+      versioned: true,
+      bobSlot: { status: 'sent', requestedTransport: 'sms', transportAggregationState: 'attempted', sentAt },
+    });
+    const conv = world.conversations.get(CONV)!;
+    conv.participants = (conv.participants ?? []).filter((m) => m.contactId !== BOB_KEY);
+
+    await postRootFailure();
+
+    const row = retryRows()[0]!;
+    expect(row).toMatchObject({
+      direction: 'outbound',
+      author: 'teammate',
+      relay_sender_key: TEAM_SENDER_KEY,
+      relay_retry_origin_direction: 'outbound',
+      relay_retry_window_start: sentAt,
+      relay_retry_leg_body: `${TEAM_SENDER_LABEL}: ${RAW_BODY}`,
+    });
+    expect(slotOf(row.tsMsgId)).toEqual({
+      status: 'failed',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+      errorCode: 'retry_member_removed',
+    });
+    expect(scheduledRetryJobs()).toHaveLength(0);
+    expect(failureLines(WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'gate_refused', retryAttempt: 1, closeCode: 'retry_member_removed' }),
+    );
+    expect(failureLines(ERROR)).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    'retry-send-window D3: a rung that would send past the window is APPENDED CLOSED retry_window_closed - one write, one ERROR, nothing enqueued (versioned=%s)',
+    async (versioned) => {
+      // One minute of window left; rung 1 needs 60s backoff + 60s grace.
+      const sentAt = minutesAgo(14);
+      const root = await seedSource({
+        versioned,
+        bobSlot: versioned
+          ? { status: 'sent', requestedTransport: 'sms', transportAggregationState: 'attempted', sentAt }
+          : { status: 'sent', sentAt },
+      });
+      // The three writers a job-time refusal uses. The root leg's own writes
+      // go through updateRecipientDeliveryStatus / setRecipientActualTransport,
+      // so any call to these would be a second write on the rung.
+      const setSlot = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+      const setState = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const applyResult = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
+
+      await postRootFailure();
+
+      const rows = retryRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.relay_retry_window_start).toBe(sentAt);
+      // The SAME slot the job's own window refusal leaves (Task 5 pins the job
+      // side to this identical literal) - written by the append alone.
+      expect(slotOf(rows[0]!.tsMsgId)).toEqual(
+        versioned
+          ? {
+              status: 'failed',
+              requestedTransport: 'sms',
+              transportAggregationState: 'excluded',
+              errorCode: 'retry_window_closed',
+            }
+          : { status: 'failed', errorCode: 'retry_window_closed' },
+      );
+      expect(setSlot).not.toHaveBeenCalled();
+      expect(setState).not.toHaveBeenCalled();
+      expect(applyResult).not.toHaveBeenCalled();
+      expect(scheduledRetryJobs()).toHaveLength(0);
+      expect(world.sent).toHaveLength(0);
+      // D9: ONE ERROR line - the marker, through isTerminalRelayLegFailure.
+      expect(capture.atLevel(ERROR)).toHaveLength(1);
+      expect(failureLines(ERROR)).toContainEqual(
+        expect.objectContaining({
+          retryClaim: 'window_closed',
+          retryAttempt: 1,
+          closeCode: 'retry_window_closed',
+          errorCode: '30003',
+        }),
+      );
+      expect(failureLines(WARN)).toHaveLength(0);
+      if (!versioned) {
+        expect(slotOf(root)).toEqual({ status: 'undelivered', errorCode: '30003', sentAt });
+      }
+    },
+  );
+
+  it('retry-send-window D2/D3: rung 2 measures from the ORIGIN rung 1 carried, never from the fresh send of rung 1', async () => {
+    // 2.5 minutes of window left. Rung 1 needs 60s backoff + 60s grace: it
+    // fits. Rung 2 needs 120s + 60s: it does not - measured from the ROOT
+    // leg's send. Rung 1's own slot gets a FRESH sentAt when it goes out, so a
+    // claim that re-derived the origin from that slot would find the whole
+    // window left and claim.
+    const sentAt = minutesAgo(12.5);
+    await seedSource({ bobSlot: { status: 'sent', sentAt } });
+    await postRootFailure();
+    expect(retryRows()[0]!.relay_retry_window_start).toBe(sentAt);
+    expect(scheduledRetryJobs()).toHaveLength(1);
+
+    await failNextLeg(); // rung 1 goes out, then its own leg fails 30003
+
+    const rows = retryRows();
+    expect(rows).toHaveLength(2);
+    const rungOneSentAt = slotOf(rows[0]!.tsMsgId)?.sentAt;
+    expect(rungOneSentAt).toBeDefined();
+    expect(Date.now() - Date.parse(rungOneSentAt!)).toBeLessThan(60_000);
+    // Copied from rung 1's row, not re-derived from rung 1's own slot.
+    expect(rows[1]!.relay_retry_window_start).toBe(sentAt);
+    expect(slotOf(rows[1]!.tsMsgId)).toEqual({ status: 'failed', errorCode: 'retry_window_closed' });
+    expect(scheduledRetryJobs()).toHaveLength(0);
+    expect(failureLines(ERROR)).toContainEqual(
+      expect.objectContaining({
+        retryClaim: 'window_closed',
+        retryAttempt: 2,
+        closeCode: 'retry_window_closed',
+      }),
+    );
+  });
+
+  it('Review Focus 3: rung 2 of a ladder whose rung 1 predates this deploy (no carried origin) claims OPEN, with one WARN naming the gap', async () => {
+    // 12.5 minutes after the root leg's send: a windowed rung 2 (120 s backoff
+    // + 60 s grace) would be declined. Without a carried origin the claim
+    // cannot measure the window, so it must not decline on it (spec D5).
+    const sentAt = minutesAgo(12.5);
+    await seedSource({ bobSlot: { status: 'sent', sentAt } });
+    await postRootFailure();
+    // A rung 1 written before this deploy carries no origin. retryRows()
+    // returns the stored rows, so this edits the world.
+    delete (retryRows()[0] as { relay_retry_window_start?: string }).relay_retry_window_start;
+
+    await failNextLeg(); // rung 1 goes out, then its own leg fails 30003
+
+    const rows = retryRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!.relay_retry_window_start).toBeUndefined();
+    expect(slotOf(rows[1]!.tsMsgId)?.status).toBe('queued');
+    const gap = capture.atLevel(WARN).filter((l) => l['windowOrigin'] !== undefined);
+    expect(gap).toContainEqual(
+      expect.objectContaining({
+        windowOrigin: 'missing',
+        originField: 'relay_retry_window_start',
+        attempt: 2,
+      }),
+    );
+  });
+
+  it.each<[string, string | undefined]>([
+    ['missing', undefined],
+    ['unparseable', 'not-a-date'],
+  ])(
+    'retry-send-window D5: a %s slot sentAt fails OPEN - claimed without a window check, with one WARN naming the gap',
+    async (label, sentAt) => {
+      await seedSource({ bobSlot: sentAt === undefined ? { status: 'sent' } : { status: 'sent', sentAt } });
+
+      await postRootFailure();
+
+      const rows = retryRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.relay_retry_window_start).toBeUndefined();
+      expect(scheduledRetryJobs()).toHaveLength(1);
+      expect(failureLines(WARN)).toContainEqual(expect.objectContaining({ retryClaim: 'claimed' }));
+      const gap = capture.atLevel(WARN).filter((l) => l['windowOrigin'] !== undefined);
+      expect(gap).toHaveLength(1);
+      expect(gap[0]).toMatchObject({
+        windowOrigin: label,
+        originField: 'sentAt',
+        attempt: 1,
+        memberKey: BOB_KEY,
+        retryTsMsgId: rows[0]!.tsMsgId,
+      });
+      expect(JSON.stringify(gap[0])).not.toContain(BOB);
+    },
+  );
+
+  it.each([false, true])(
+    'retry-send-window D3: a claim-time decline appends the SAME rung data the job refusal leaves for that code (versioned=%s)',
+    async (versioned) => {
+      const sentAt = minutesAgo(1);
+      const legSlot = (): RelayRecipientDelivery =>
+        versioned
+          ? { status: 'sent', requestedTransport: 'sms', transportAggregationState: 'attempted', sentAt }
+          : { status: 'sent', sentAt };
+      await seedSource({ versioned, bobSlot: legSlot(), carolSlot: legSlot() });
+      // Carol's leg fails while the group is OPEN: her rung is claimed open.
+      await postStatus(failureParams({ MessageSid: CAROL_LEG_SID, To: CAROL }));
+      // The group closes. Bob's leg fails now: the CLAIM declines his rung and
+      // appends it already closed - it is never enqueued, so only Carol's
+      // rung is waiting. (Before this task both rungs were enqueued and the
+      // job refused both, which would make the comparison below vacuous.)
+      world.conversations.get(CONV)!.status = 'closed';
+      await postRootFailure();
+      expect(scheduledRetryJobs()).toHaveLength(1);
+      const bobRung = retryRows().find((r) => r.relay_retry_member_key === BOB_KEY)!;
+      expect(slotOf(bobRung.tsMsgId, BOB_KEY)).toMatchObject({
+        status: 'failed',
+        errorCode: 'retry_group_closed',
+      });
+      // Carol's rung runs, and the JOB refuses it at its own gate.
+      await outbound.deliverDelayed(dispatchJob);
+      await outbound.settle();
+      const carolRung = retryRows().find((r) => r.relay_retry_member_key === CAROL_KEY)!;
+
+      /** A rung's data minus what is per-member by construction - its key,
+       *  provider identity, timestamps and destination digest - with the
+       *  member slot read under the rung's own key. */
+      const rungData = (row: MessageItem, key: string) => {
+        const {
+          tsMsgId: _tsMsgId,
+          provider_sid: _providerSid,
+          provider_ts: _providerTs,
+          created_at: _createdAt,
+          relay_retry_member_key: _memberKey,
+          relay_retry_dest_digest: _destDigest,
+          delivery_recipients: slots,
+          ...rest
+        } = row;
+        return { ...rest, slot: slots?.[key] };
+      };
+      // Field by field - the row-level delivery_status included - the rung the
+      // claim appended closed equals the rung the job closed.
+      expect(rungData(bobRung, BOB_KEY)).toEqual(rungData(carolRung, CAROL_KEY));
+      expect(bobRung.delivery_status).toBe('queued');
+      expect(world.sent).toHaveLength(0);
+    },
+  );
+
+  it.each<[string, number, boolean, RelayRetryGateCode | 'retry_window_closed']>([
+    ['a gate decline', 1, true, 'retry_group_closed'],
+    ['a window decline', 14, false, 'retry_window_closed'],
+  ])(
+    'retry-send-window D3: on %s the rung is APPENDED closed - one write, nothing closes it after - and the ROOT SSE fires once, after that write',
+    async (_label, sentMinutesAgo, closeGroup, code) => {
+      // The crash-recovery shape (the slot is already terminal on 30003):
+      // nothing transitions, so the tail's own emit cannot fire and the ONLY
+      // root emit is the claim's.
+      const root = await seedSource({
+        bobSlot: { status: 'undelivered', errorCode: '30003', sentAt: minutesAgo(sentMinutesAgo) },
+      });
+      if (closeGroup) world.conversations.get(CONV)!.status = 'closed';
+      const rootEmits = (): number =>
+        world.emitted.filter(
+          (e) =>
+            e.event === 'message.persisted' &&
+            (e.payload as { tsMsgId?: string }).tsMsgId === root,
+        ).length;
+      // Record what the rung's append carried, and how many root emits had
+      // already happened when it ran.
+      let appendedSlot: RelayRecipientDelivery | undefined;
+      let emitsAtAppend = -1;
+      const realAppend = world.messagesRepo.append.bind(world.messagesRepo);
+      world.messagesRepo.append = async (message) => {
+        if (message.relayRetryOf !== undefined) {
+          appendedSlot = message.deliveryRecipients?.[BOB_KEY];
+          emitsAtAppend = rootEmits();
+        }
+        return realAppend(message);
+      };
+      const setSlot = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+      const setState = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const applyResult = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
+
+      await postRootFailure();
+
+      // The append itself carried the final closed slot ...
+      expect(appendedSlot).toEqual({ status: 'failed', errorCode: code });
+      expect(slotOf(retryRows()[0]!.tsMsgId)).toEqual({ status: 'failed', errorCode: code });
+      // ... and no second write touched the rung afterwards.
+      expect(setSlot).not.toHaveBeenCalled();
+      expect(setState).not.toHaveBeenCalled();
+      expect(applyResult).not.toHaveBeenCalled();
+      // The claim's root SSE fires once, AFTER that one write.
+      expect(emitsAtAppend).toBe(0);
+      expect(rootEmits()).toBe(1);
+      expect(scheduledRetryJobs()).toHaveLength(0);
+    },
+  );
+
+  it('retry-send-window D3: a duplicate callback for an OPEN rung answers already_claimed and changes nothing, whatever its own preview says', async () => {
+    await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(1) } });
+    await postRootFailure();
+    const rung = retryRows()[0]!;
+    expect(slotOf(rung.tsMsgId)).toEqual({ status: 'queued' });
+    // Between the two deliveries the group closes, so THIS callback's own
+    // preview declines. Its append dedupes: the rung an earlier callback
+    // opened stays open and enqueued.
+    world.conversations.get(CONV)!.status = 'closed';
+
+    await postRootFailure();
+
+    expect(retryRows()).toHaveLength(1);
+    expect(slotOf(rung.tsMsgId)).toEqual({ status: 'queued' });
+    expect(scheduledRetryJobs()).toHaveLength(1);
+    expect(failureLines(WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'already_claimed', retryAttempt: 1 }),
+    );
+    expect(failureLines(WARN).some((l) => l['retryClaim'] === 'gate_refused')).toBe(false);
+  });
+
+  it('retry-send-window D3: a duplicate callback for a CLOSED rung answers already_claimed and enqueues nothing, whatever its own preview says', async () => {
+    await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(1) } });
+    world.conversations.get(CONV)!.status = 'closed';
+    await postRootFailure();
+    const rung = retryRows()[0]!;
+    expect(slotOf(rung.tsMsgId)).toEqual({ status: 'failed', errorCode: 'retry_group_closed' });
+    // The group reopens: THIS callback's preview would pass. Its append
+    // dedupes: the rung an earlier callback closed stays closed.
+    world.conversations.get(CONV)!.status = 'open';
+
+    await postRootFailure();
+
+    expect(retryRows()).toHaveLength(1);
+    expect(slotOf(rung.tsMsgId)).toEqual({ status: 'failed', errorCode: 'retry_group_closed' });
+    expect(scheduledRetryJobs()).toHaveLength(0);
+    expect(failureLines(WARN)).toContainEqual(
+      expect.objectContaining({ retryClaim: 'already_claimed', retryAttempt: 1 }),
+    );
+  });
+
+  it('retry-send-window D3: a gate-preview read that THROWS is claim_failed - one ERROR, a 5xx, no rung - and the redelivery claims', async () => {
+    await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(1) } });
+    // The suppression read (the evaluator's one read) fails ONCE.
+    const realGetById = world.contactsRepo.getById.bind(world.contactsRepo);
+    let failed = false;
+    world.contactsRepo.getById = async (contactId) => {
+      if (!failed && contactId === BOB_KEY) {
+        failed = true;
+        throw new Error('dynamodb throttled');
+      }
+      return realGetById(contactId);
+    };
+
+    const res = await signedTwilioPost(app, STATUS_PATH, failureParams());
+
+    expect(res.status).toBe(500);
+    expect(failed).toBe(true);
+    expect(retryRows()).toHaveLength(0);
+    expect(capture.atLevel(ERROR)).toHaveLength(1);
+    expect(failureLines(ERROR)).toContainEqual(expect.objectContaining({ retryClaim: 'claim_failed' }));
+
+    await postRootFailure(); // Twilio's redelivery re-runs the claim
+
+    expect(retryRows()).toHaveLength(1);
+    expect(scheduledRetryJobs()).toHaveLength(1);
   });
 });

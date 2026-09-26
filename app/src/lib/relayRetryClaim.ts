@@ -48,6 +48,14 @@ export type RelayRetryClaimOutcome =
   | 'claimed'
   | 'already_claimed'
   | 'cap_exhausted'
+  /**
+   * A job gate refuses the rung: group closed, member removed, number changed
+   * or opted out. The relay JOB logs it when its send-time gate refuses; since
+   * retry-send-window D3 the CLAIM returns it too, when its gate preview sees
+   * that refusal coming and appends the rung already closed with the gate's
+   * code. WARN on both ends (Cameron's Q1 ruling, 2026-09-24): a deliberate
+   * human action, not a fault.
+   */
   | 'gate_refused'
   | 'fenced_announcement'
   | 'to_missing'
@@ -75,6 +83,15 @@ export type RelayRetryClaimOutcome =
   | 'slot_settled'
   | 'code_not_retryable'
   | 'enqueue_failed'
+  /**
+   * retry-send-window D3: the claim appended rung N already CLOSED with
+   * `retry_window_closed`, because it could not go out inside the send window
+   * (its send time plus RETRY_JOB_GRACE_MS lands after the member's original
+   * leg send plus 15 minutes). Nothing is enqueued. ERROR (D9): the member
+   * never got the text - a dead end, like `cap_exhausted`. The relay JOB logs
+   * the same value for its own window closes.
+   */
+  | 'window_closed'
   /**
    * An internal fault WHILE claiming - the claim helper threw (a DynamoDB
    * throttle or timeout on the consistent read, the roster read behind the leg

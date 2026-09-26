@@ -1,9 +1,12 @@
 # Retry send window - design
 
 Date: 2026-09-24. Branch `feat/retry-send-window`, worktree `W:\tmp\retry-send-window`,
-cut from `main` @`685f2ede`. Status: DRAFT 6 - revised after Cameron's spec-gate
-answers of 2026-09-25 (the adversarial review closed at round 4,
-`docs/superpowers/reviews/2026-09-24-retry-send-window/`).
+cut from `main` @`685f2ede`, synced with `main` @`da04d0cb` at `f49a2fe9` after
+share-skip-fix Branch A merged. Status: DRAFT 7 - draft 6 took Cameron's
+spec-gate answers of 2026-09-25 (the adversarial review closed at round 4,
+`docs/superpowers/reviews/2026-09-24-retry-send-window/`); draft 7 reconciles with
+the merged Branch A and adds D14 (a retry follows the original send). Code
+citations are at `f49a2fe9`.
 
 | sev | issue | this branch |
 | --- | --- | --- |
@@ -12,6 +15,8 @@ answers of 2026-09-25 (the adversarial review closed at round 4,
 | - | (unfiled) on manual-mode threads the screen promises a retry that is always refused | **closes** |
 | - | (unfiled) a manual Retry during an automatic retry's wait texts the member twice | **narrows**; the rest is filed as `manual-retry-double-send-residual-windows` (new, low) |
 | - | (unfiled) a relay leg reads "Retrying" for 1 to 4 minutes before a refusal the claim could already see | **closes** (D3) |
+| - | (Branch A's recorded edge) a person's property send that fails 30003 into a breaker-tripped thread reads "will retry" and is refused `manual_mode` | **closes** (D14) |
+| med | `ai-mode-switch-gates-all-automation`, item 3 ("a retry follows the original sender") | **delivers it for the 30003 retry** (D14); the rest stays Work Package 2's |
 | low | `quiet-hours-ungated-automated-paths`, item 3 | annotate: automatic retries now end 15 minutes after the send |
 | low | `relay-retry-stranded-claim-window` | unchanged; the same window also sits between a claim-time close's two writes (D3, section 9) |
 
@@ -38,6 +43,15 @@ only when a retry will actually be attempted, and the screen must know that at
 once - never a plain failure that later turns into "will retry"; and dropping the
 reverse double-send guard is fine - he would rather risk a double text than a
 message never delivered.
+
+His mission brief of 2026-09-25, after Branch A merged, asked this spec to
+decide whether the automatic retry carries the original send's `automated` flag
+and recipient, under his standing rule (quoted in
+`docs/issues/ai-mode-switch-gates-all-automation.md`): "If somebody sends a
+message, I want it to be retried until it's exhausted or fails." It does (D14).
+He also ruled that `main` is merged into this branch again before handback if it
+moves, and that the post-gate changes (drafts 6 and 7) are reviewed inside the
+plan review.
 
 ## 1. The invariant
 
@@ -74,19 +88,32 @@ failure until Twilio's redelivery completes the claim (D3).
   (Verizon: up to 5 days) and may then give up. A late 30003 today re-sends
   hours- or days-old content, out of context in the thread.
 - **Manual-mode threads.** Every automated send is refused when a conversation is
-  in manual mode (`app/src/services/sendMessage.ts:348-349`), including the
-  automatic retry; the job logs WARN and stops (`retrySend.ts:209-216`). The Quo
-  import writes `ai_mode = manual` on every conversation it creates
-  (`app/src/lib/import/apply.ts:1093`, `:1107`), and the breaker also switches a
-  conversation to manual (`sendMessage.ts:352`). On those threads the arm still
-  enqueues a retry that is certain to be refused.
+  in manual mode (`app/src/services/sendMessage.ts:373`), and the automatic retry
+  is always sent automated (`retrySend.ts:196-207`); the job logs WARN and stops
+  (`retrySend.ts:209-216`). Since share-skip-fix Branch A and its operator run of
+  2026-09-25, every one-to-one conversation is `auto` and the import creates
+  `auto`: a one-to-one thread is manual only after the breaker trips
+  (`sendMessage.ts:376`) - plus the lean seed's deliberately switched-off
+  `conv-0002`. On such a thread the arm still enqueues a retry certain to be
+  refused, even of a text a person sent: a staff property send goes out as a
+  person's send (share-skip-fix D4, `app/src/jobs/broadcastFanOut.ts:463-468`),
+  but its retry does not.
+- **What a message row knows about its sender.** Its `author` is `teammate` for a
+  staff send AND for a tour reminder, the missed-call text or the welcome text;
+  whether a send was automated reaches only the audit row
+  (`sendMessage.ts:457-461`). A property send is judged against the contact it
+  was fenced to (share-skip-fix I8, the `recipient` input,
+  `sendMessage.ts:242-252`), which is not persisted on the message, so a retry
+  judges whichever contact the phone lookup returns first.
 - **The promise.** The one-to-one reason reads "Phone unreachable - will retry
   (error 30003)" for EVERY 30003, keyed by the code alone
   (`dashboard/src/routes/contact/deliveryStatus.ts:778`, with the template's tail):
   false after the third retry fails, false on manual-mode threads, and false for
-  native group texts, where no retry exists. On the broadcast result badge
-  (`dashboard/src/routes/broadcasts/DeliveryBadge.tsx:31`) it reflects that a
-  broadcast recipient's 30003 IS retried, but the badge never learns the outcome.
+  native group texts, where no retry exists. On the property-send results row
+  (`dashboard/src/routes/broadcasts/DeliveryBadge.tsx:36`, through
+  `shareRecipientReason`, `broadcastFormat.ts:151-161`, which renders a failed row
+  with `deliveryReason`) it reflects that a recipient's 30003 IS retried, but the
+  row never learns the outcome.
 - **The double send.** The manual Retry button shows on any failed one-to-one
   bubble (`dashboard/src/routes/contact/Timeline.tsx:1341`), including during an
   automatic retry's wait, and the retry route checks only that the message failed
@@ -168,15 +195,22 @@ every gate at send time, because a group can close during the wait.
 When a status callback carries 30003, the webhook decides whether a retry will be
 attempted before it writes the failed status, so the failure and the decision
 become visible together (D7). It uses the message it already reads
-(`twilio.ts:3151`) plus the conversation and the contact. In order:
+(`twilio.ts:3151`) plus the conversation, the phone-matched contact and, when the
+message recorded one, its recipient (D14). In order:
 1. A `group_text` conversation: no retry (D11); WARN.
-2. An automated send that would be refused right now: the kill switch, an
-   opt-out or manual mode (previewed with the existing
-   `evaluateScheduledSendSuppression`, `app/src/services/scheduledSendSuppression.ts:52-68`),
-   or a soft-deleted contact (the send path's `isDeleted` gate,
-   `sendMessage.ts:108`, which the shared preview omits by design): no retry;
-   WARN (the job's refusal level today). The bubble shows the plain failure with a
-   live Retry button - on manual-mode threads, today's only working retry path.
+2. A retry the send path would refuse right now, judged as D14 will send it:
+   the kill switch; an opt-out (the conversation's flag, the phone-matched
+   contact's or the recipient's); a soft-deleted recipient (the send path's
+   `isDeleted` gate, `sendMessage.ts:348`, which the shared scheduled-send preview
+   omits by design); for an automated original, manual mode; for a person's
+   original, no recorded consent (the JIT gate, `sendMessage.ts:362`). The
+   decision and the send path's gates (`sendMessage.ts:298-391`) share one set of
+   predicates, so they cannot drift (the existing
+   `evaluateScheduledSendSuppression`,
+   `app/src/services/scheduledSendSuppression.ts:52-68`, covers the first three
+   only). No retry; WARN (the job's refusal level today). The bubble shows the
+   plain failure with a live Retry button - on a breaker-tripped thread, the only
+   way to resend an automated text.
 3. The existing cap: exhausted retries, no retry; ERROR, as today.
 4. The window: a retry only if `now + backoff + RETRY_JOB_GRACE_MS <=
    origin + RETRY_SEND_WINDOW_MS`; otherwise no retry; ERROR (D9).
@@ -188,9 +222,10 @@ logs and enqueues nothing twice.
 unparseable origin, FAILS OPEN to "a retry will be attempted" - and that decision
 is shown like any other (D7), per Cameron's preference to attempt rather than risk
 a text never delivered. The job's `sendMessage` re-applies every refusal at send
-time (`sendMessage.ts:286-300`, `:307-318`, `:348-349`). The breaker is the one
-refusal the arm cannot preview (it is live state); a retry the breaker refuses at
-send time keeps its promise until it expires (section 9).
+time (`sendMessage.ts:298-391`). The breaker is the one refusal the arm cannot
+preview (it is live state), and it meters automated sends only; an automated
+retry the breaker refuses at send time keeps its promise until it expires
+(section 9).
 
 **D4. Check again right before sending.** The job checks
 `now <= origin + RETRY_SEND_WINDOW_MS`, strictly (the grace was spent at
@@ -228,7 +263,7 @@ drop every rung claimed before the deploy. A one-to-one row with no
 **D6. Lineage is written with the row.** The one-to-one retry job passes
 `retry_of`, `retry_attempt` and `retry_window_start` into the send, so they are
 written when the row is appended (the `sendMessage` input and append path,
-`app/src/services/sendMessage.ts:193-241`, `:398-428` ->
+`app/src/services/sendMessage.ts:194-253`, `:422-452` ->
 `app/src/repos/messagesRepo.ts:2265`), not annotated afterwards. This closes the
 race in section 2, which now matters more: a lost origin would restart the window.
 
@@ -292,12 +327,13 @@ dashboard through the contact-timeline projection
   promise joins the Timeline's existing ticker (today one-to-one bubbles never
   tick, `Timeline.tsx:859-899`, pinned by `Timeline.ticker.test.tsx:412-418`).
   Expiry lands within the ticker's 60 seconds.
-- **The share results row** (`dashboard/src/routes/broadcasts/DeliveryBadge.tsx:31`)
-  reads only the broadcast slot, which has no `retry_due_at`. On this branch alone,
-  the base wording therefore removes that row's promise even while a retry IS
-  scheduled - under-promising, never false. Reading `retry_due_at` from the failed
-  message belongs to `feat/share-skip-fix`'s results path, which already reads that
-  message (section 5). The row's copy table is that branch's.
+- **The share results row** (`dashboard/src/routes/broadcasts/DeliveryBadge.tsx:36`,
+  through `shareRecipientReason`) reads only the broadcast slot, which has no
+  `retry_due_at`, and hands a failed row to `deliveryReason` without
+  `retryScheduled`. On this branch alone, the base wording therefore removes that
+  row's promise even while a retry IS scheduled - under-promising, never false.
+  Reading `retry_due_at` from the failed message is share-skip-fix Branch B's
+  (section 5), under this rule. The row's copy is that branch's.
 - New and touched copy is ASCII (the current string's em dash becomes a hyphen).
 - **Relay.** Every declined retry is a CLOSED rung, whether the claim (D3) or the
   job (D4) declined it, so the join renders both alike. A window decline closes
@@ -344,7 +380,7 @@ one-to-one enqueue keeps today's ERROR from the arm's catch. The per-callback
 conversation read succeeds, the one-to-one arm refuses to schedule one for a
 `group_text` conversation (the conversation is read anyway for D3a), logging WARN.
 If the read fails, D3a fails open, and the job's `sendMessage` refuses the
-`group_text` send (`sendMessage.ts:297-300`). Whether a classic callback can reach
+`group_text` send (`sendMessage.ts:310-312`). Whether a classic callback can reach
 that arm for a group text at all is live Twilio behavior no build can settle: the
 repo asserts both sides (`app/src/services/groupReceipts.ts:3-10` against
 `twilio.ts:3422-3429`, `:3477-3479`), and a synthetic test drives the arm with a
@@ -367,7 +403,7 @@ message row. The tests that pin the carve-out (`deliveryStatus.test.ts:419` and
 - `Timeline.tsx:973-979` and `:1272-1275` (the group-text "retry is real" notes).
   The rewrite at `:973-980` keeps its other half: the one-to-one chip passes no
   `relay` flag, now because `relay` would also switch off the promise (D8).
-- D6 makes these false: `sendMessage.ts:234-240`, `messagesRepo.ts:725-731` and
+- D6 makes these false: `sendMessage.ts:235-241`, `messagesRepo.ts:725-731` and
   `:2262-2265`, `retrySend.ts:9-10` and `:221-225`.
 - Test and doc comments: `deliveryStatus.test.ts:721-737`, `:744-751`, `:762-763`,
   `Timeline.delivery.test.tsx:460-465`, `:509-515`, `:570-576`,
@@ -379,8 +415,14 @@ message row. The tests that pin the carve-out (`deliveryStatus.test.ts:419` and
 - A one-to-one retry backoff lane seam, `E2E_SEND_RETRY_BACKOFF_MS`, honored only
   when `JOBS_QUEUE_URL` is unset (the relay's `E2E_RELAY_RETRY_BACKOFF_MS` guard,
   `relayRetryLeg.ts:190-196`), set in the lane's `childEnv`
-  (`scripts/e2e-session.mjs:254-272`). `feat/share-skip-fix` plans the same seam;
-  whichever lands first builds it and the other reuses it.
+  (`scripts/e2e-session.mjs:254-272`). Branch A did not build it, so this branch
+  does; share-skip-fix Branch B (its stub names it,
+  `docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md:69`) and
+  send-outcome-reconcile reuse it.
+- The one-to-one e2e texts the lean seed's `conv-0001` (Tasha Nguyen), never
+  `conv-0002` (Dario Reyes), whose switch is off by design and whose seed comment
+  forbids any automated text or retry to him (`app/src/lib/seed/lean.ts`,
+  `contact-tenant-0002`). D14's person's-send path is proven below the e2e layer.
 - If an e2e needs a short window, `E2E_RETRY_SEND_WINDOW_MS` has the same guard,
   and its lane value must exceed the longest lane rung backoff plus
   `RETRY_JOB_GRACE_MS`, with margin, in BOTH lanes - otherwise it declines every
@@ -391,10 +433,40 @@ message row. The tests that pin the carve-out (`deliveryStatus.test.ts:419` and
   `:174-178`) pass through D5 unchanged; the relay window tests need NEW fixtures
   with a slot `sentAt`.
 
+**D14. A retry follows the original send** (Cameron's standing rule,
+`ai-mode-switch-gates-all-automation` item 3: "a message a person sent is retried
+to exhaustion regardless of any AI or automation setting").
+- `sendMessage` records on every one-to-one row it appends whether the send was
+  automated (`automated`, true or false, from its own input, default false) and,
+  when the caller named a recipient (share-skip-fix I8), that contact's id
+  (`recipient_contact_id`). Every caller already passes the flag explicitly or
+  takes the person's-send default (`app/src/jobs/tourReminders.ts:1440`, `:2004`,
+  `missedCallAutoText.ts:242`, `placementNudges.ts:676`, `:860`, `public.ts:300`,
+  `api.ts:1436`, `:1647`, `broadcastFanOut.ts:468`, `retrySend.ts:205`).
+- The automatic retry is sent with the original's `automated` flag and, when the
+  original recorded one, the same recipient, read by id. A person's send is
+  retried as a person's send: manual mode and the breaker do not apply, the
+  consent gate does - exactly as for the original. An automated original is
+  retried automated and breaker-metered, as today. Each retry row records the
+  flags it was sent with, so attempts 2 and 3 inherit them.
+- A row without `automated` (sent before this deploy) is retried as today:
+  automated, recipient by phone. The window confines that to texts sent in the 15
+  minutes before the deploy. A recorded recipient that no longer exists falls back
+  to the phone-matched contact, with a WARN.
+- The job reads the recipient BEFORE its execution marker (`retrySend.ts:129-146`),
+  as it reads the original, so a failed read is redelivered instead of dropping
+  the retry.
+- The manual Retry route passes the recorded recipient too (`api.ts:1642-1651`),
+  so a staff member's Retry on a property send is judged against the contact it
+  was sent to; it stays a person's send (`automated: false`, as today).
+- Scope: item 3 of `ai-mode-switch-gates-all-automation`, for the 30003 retry
+  only. The rest of that issue - system texts that never read the switch, the
+  breaker's own stop, a visible control - stays Work Package 2's.
+
 ## 4. Every surface the plan must cover
 
 The plan enumerates each as a task or a watch item (research sweep, review
-rounds 1-4, and the draft 6 revision):
+rounds 1-4, and the draft 6 and 7 revisions):
 
 - **Writers of automatic retries:** relay claim and enqueue (`twilio.ts:2781`,
   `:2842`), and the claim's close of a rung it created (`closeRetryLegEnqueueFailed`,
@@ -403,16 +475,22 @@ rounds 1-4, and the draft 6 revision):
   optional deadline (`relayFanOut.ts:1360`, the bounded `acquire` in
   `app/src/lib/tokenBucket.ts`); one-to-one enqueue (`twilio.ts:3364`); one-to-one
   send and lineage (`retrySend.ts:200-229`), through the `sendMessage` input and
-  append path (`sendMessage.ts:193-241`, `:398-428`); handler registration
+  append path (`sendMessage.ts:194-253`, `:422-452`), which also writes D14's
+  `automated` and `recipient_contact_id` on EVERY one-to-one send (the repository's
+  `NewMessage`, `messagesRepo.ts:638` onward, its append at `:2224-2284`, and
+  `MessageItem`, `:970-1166`); handler registration
   (`app/src/jobs/registerHandlers.ts:47`, `:60`); the lane backoff overrides
   (`scripts/e2e-session.mjs:254-272`, the relay one and the new one-to-one one).
-  Manual: the route's checks and append (`api.ts:1571-1595`, `:1651`).
+  Manual: the route's checks, its new recipient read, and its send
+  (`api.ts:1571-1595`, `:1642-1651`).
 - **Where the new checks and reads land:** the relay claim (`twilio.ts:2759-2781`),
   including its gate-preview conversation and suppression reads (D3 step 1); the
   relay job's gates (`relayRetryLeg.ts:491-555`); the one-to-one decision, before
-  the status write (`twilio.ts:3251`), and the arm's enqueue after it
-  (`:3350-3369`); the one-to-one job's read of the original
-  (`retrySend.ts:112-120`).
+  the status write (`twilio.ts:3251`), with its conversation, phone-matched
+  contact and recorded-recipient reads, sharing its predicates with the send
+  path's gates (`sendMessage.ts:298-391`), and the arm's enqueue after it
+  (`:3350-3369`); the one-to-one job's reads of the original and of its recorded
+  recipient, both before the execution marker (`retrySend.ts:112-146`).
 - **Readers of retry lineage:** server `twilio.ts:2757`, `:2761`, `:2776`, `:2825`,
   `:3129`, `:3353`; `relayRetryLeg.ts:268-292`, `:372`; `messagesRepo.ts:2265-2284`,
   `:2335`, `:2912-2918`; `contactTimeline.ts:442`. Dashboard `types.ts:2308-2315`,
@@ -427,9 +505,15 @@ rounds 1-4, and the draft 6 revision):
   (`Timeline.tsx:859-899`, `:2101-2104`).
 - **Readers of the 30003 copy:** `deliveryStatus.ts:778` and `:859-861` (the relay
   map entry, kept) via the Timeline chip, reason, rollup, row and spoken summary;
-  EmailCard; `DeliveryBadge.tsx:31`; StatChips. Tests: those in D11, plus
+  EmailCard; the property-send results row (`DeliveryBadge.tsx:36`, through
+  `shareRecipientReason`, `broadcastFormat.ts:151-161`, which hands a failed row
+  to `deliveryReason`); StatChips. Tests: those in D11, plus
   `deliveryStatus.test.ts:761-767` (rewritten), `StatChips.test.tsx:129`,
-  `Timeline.email.test.tsx:114`, `Timeline.delivery.test.tsx:528-536` and `:593`.
+  `Timeline.email.test.tsx:114`, `Timeline.delivery.test.tsx:528-536` and `:593`,
+  and any `broadcastFormat.test.ts` case that pins a failed 30003 row's reason.
+  The no-tail fallback entry lands in `INTERNAL_CODE_REASONS`
+  (`deliveryStatus.ts:913-935`), directly above Branch A's `SHARE_SKIP_REASONS`
+  (`:948-960`), a separate map this branch does not touch.
 - **Vocabulary:** the `RelayRetryCloseCode` union (`relayRetryLeg.ts:91-97`) and its
   gate-case table (`app/test/relayRetryLeg.test.ts:307` onward) gain
   `retry_window_closed`; the `RelayRetryClaimOutcome` union's exhaustive test
@@ -444,36 +528,40 @@ rounds 1-4, and the draft 6 revision):
   (`app/test/helpers/twilioWebhookHarness.ts:1213-1219`) mirrors it; the harness
   copy of `annotateMessage` (`:1338`), for the enqueue-failure correction; and the
   harness fake `append`, an explicit field allowlist (`:1081-1152`) that would
-  silently drop the new append-time fields and let a "carried origin" test pass
-  vacuously through D5.
+  silently drop the new append-time fields - the lineage and window origin, and
+  D14's `automated` and `recipient_contact_id` - and let a "carried origin" or
+  "follows the original send" test pass vacuously through its fallback.
 - **Seeds and dev seams:** none write retry fields today (research sweep); the
   plan confirms none are added.
 
 ## 5. Concurrent work
 
-Both branches below are at the spec stage in other sessions and keep moving; the
-plan re-reads them before it is written. The couplings are stated as requirements
-on ANY path, so they hold whatever those branches' mechanics become. Whichever
-branch lands second carries each one.
+The agreed order (`docs/superpowers/reviews/2026-09-24-share-skip-fix/branch-split.md`):
+share-skip-fix Branch A (merged) -> THIS branch -> send-outcome-reconcile Stage 1
+-> reconcile's `retrySend` adoption together with share-skip-fix Branch B. The
+couplings are stated as requirements on ANY path, so they hold whatever the later
+branches' mechanics become; each later branch carries the ones its stage meets.
 
-- **`feat/share-skip-fix`** (v5 @`3a6a1a06`, at its human gate):
-  - It edits the same one-to-one retry send call (`retrySend.ts:200-207`) and the
-    same retry route (`api.ts:1564-1661`): both retries will carry the share, so
-    `retrySend.ts` and `api.ts` merge textually with D6 and D10.
-  - Copy on the share results row: its table keeps "Phone unreachable - will
-    retry" for "30003 with retries remaining" and adds "Phone unreachable -
-    retries exhausted". "Retries remaining" by count no longer means a retry is
-    scheduled (D3a, the window), so its derivation follows D8's rule instead: the
-    failed message's live `retry_due_at`, which its results path already reads the
-    message to find. The row's wording stays that branch's.
-  - It plans the same one-to-one backoff seam as D13.
-  - Its lean seed gains a switched-off (manual-mode) tenant conversation for its
-    e2e checks; this branch's one-to-one e2e (test intention 8) must not use it,
-    because D3a skips the retry there by design.
-  - Its import change creates one-to-one rows in `auto`; section 2's manual-mode
-    statement then describes pre-existing rows only. D3a reads the live switch,
-    so both orders hold.
-  - It accepts the manual double send as today's behavior; D10 narrows it.
+- **share-skip-fix Branch A** - MERGED (`main` @`da04d0cb`, synced here at
+  `f49a2fe9`). It changed no 30003 wording, none of `deliveryReason`'s options or
+  check order, and no retry code. What this branch meets:
+  - `sendMessage.ts`: its `recipient` input and the gates that judge it (I8,
+    `:242-252`, `:319-351`). D14 persists that recipient and reuses it on the
+    retry.
+  - `deliveryStatus.ts`: its `SHARE_SKIP_REASONS` map beside
+    `INTERNAL_CODE_REASONS` (section 4).
+  - `broadcastFormat.ts`: `shareRecipientReason` renders a FAILED share row with
+    `deliveryReason`, so on this branch a share recipient's 30003 reads the plain
+    "Phone unreachable (error 30003)" even while a retry is scheduled -
+    under-promising, never false (D8).
+  - The lean seed's deliberately switched-off `conv-0002`, which this branch's
+    e2e never uses (D13).
+  - Its staff shares go out as a person's send (`created_via: 'dashboard'` on the
+    broadcast, `broadcastFanOut.ts:463-468`); D14 makes their retries follow.
+- **share-skip-fix Branch B** (stub `docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md`),
+  after reconcile: reading the failed message's live `retry_due_at` on the share
+  results row is its job (moved from Branch A in the split record), under D8's
+  rule - never the retry count. It reuses this branch's backoff seam (D13).
 - **`feat/send-outcome-reconcile`** (revision 5, @`616d120d`, its review closed)
   plans edits to `relayRetryLeg.ts`, `relayFanOut.ts` (`sendOneRelayLeg`, split
   into prepare / send / record phases with a claim on a per-recipient
@@ -491,7 +579,10 @@ branch lands second carries each one.
      re-enqueues once - runs the same job handler, so D4's job-time check
      bounds it.
   2. Any path that appends a one-to-one retry row (its "adopt") carries
-     `retry_of`, `retry_attempt` and `retry_window_start` at append (D2, D6).
+     `retry_of`, `retry_attempt` and `retry_window_start` at append (D2, D6), and
+     the `automated` and `recipient_contact_id` the retry was sent with (D14) -
+     for a share, consistent with Branch A's `created_via`, which the adoption
+     already reads to stamp the audit row's `automated`.
   3. Any path that DEFERS a one-to-one retry, or leaves its outcome pending past
      `retry_due_at` (a deferral, or an `unknown` send outcome awaiting reconcile
      checks at about 5 seconds, 30 seconds and 4 minutes), applies D3a's window
@@ -525,10 +616,12 @@ branch lands second carries each one.
      that branch renders a rung closed `send_unconfirmed` as "Not confirmed" and
      not a failure; this one treats `retry_window_closed` as carrying no display
      code. Both special cases must survive the merge, each with its test.
-- **All three branches reach the share results row.** Its copy table is
-  share-skip-fix's; reconcile adds a "Not confirmed" chip and an `unconfirmed`
-  stats bucket for `send_unconfirmed` (its D22); this branch sets the rule that
-  its 30003 promise follows `retry_due_at` (D8).
+- **All three branches reach the share results row.** Its copy is
+  share-skip-fix's (`shareRecipientReason`); reconcile adds a "Not confirmed" chip
+  and an `unconfirmed` stats bucket for `send_unconfirmed` (its D22), which needs
+  its own arm in `shareRecipientReason` or it falls through to `deliveryReason`;
+  this branch sets the rule that the row's 30003 promise follows `retry_due_at`
+  (D8), and Branch B applies it.
 - **A joint gap neither spec closes:** when reconcile rules a one-to-one retry
   `unresolved`, its D16 leaves the original "visibly undelivered" - so the Retry
   button is live - while its own D20 hides Retry on an unresolved relay or
@@ -568,16 +661,31 @@ branch lands second carries each one.
    in the same conditional write as the failure and the transition's one SSE
    carries both, then the arm enqueues; a redelivered callback that transitions
    nothing writes, logs and enqueues nothing more. `group_text` gets no stamp and
-   no enqueue (WARN); so does a manual-mode, opted-out, kill-switched or
-   soft-deleted-contact thread (WARN); a failed conversation or contact read, or
-   a missing origin, stamps and enqueues (WARN); exhausted retries log ERROR as
-   today, with no stamp; past the window: no stamp, no enqueue (ERROR); a failed
-   enqueue re-writes `retry_due_at` to an expired time and emits.
+   no enqueue (WARN); so does an opted-out or kill-switched thread, a soft-deleted
+   recipient, a manual-mode thread for an AUTOMATED original, and a missing
+   consent for a PERSON'S original (WARN); a person's original on a manual-mode
+   (breaker-tripped) thread stamps and enqueues; the recorded recipient is the one
+   judged, so a soft-deleted duplicate contact on the same phone does not decline
+   it; a failed conversation or contact read, or a missing origin, stamps and
+   enqueues (WARN); exhausted retries log ERROR as today, with no stamp; past the
+   window: no stamp, no enqueue (ERROR); a failed enqueue re-writes
+   `retry_due_at` to an expired time and emits. The decision and the send path
+   refuse exactly the same cases (one table drives both tests).
 5. One-to-one job: past the window it ends without sending; the new retry row
    carries `retry_of`, `retry_attempt` and `retry_window_start` at append, with
-   nothing annotated afterwards.
+   nothing annotated afterwards. D14: a person's original is re-sent
+   `automated: false` (not refused `manual_mode`, not breaker-counted) with its
+   recorded recipient; an automated original is re-sent automated; a row without
+   `automated` is re-sent automated with no recipient; a recorded recipient that
+   no longer exists falls back to the phone lookup (WARN); a failed recipient read
+   throws before the execution marker, so the job is redelivered; each retry row
+   records the `automated` and `recipient_contact_id` it was sent with.
 6. Manual route: 409 `retry_pending` before `retry_due_at + grace` (server clock),
-   allowed after; a manual retry row has no `retry_window_start`.
+   allowed after; a manual retry row has no `retry_window_start`; it passes the
+   recorded recipient and stays `automated: false`.
+6a. `sendMessage`: every one-to-one append records `automated` (true, false, and
+   the default false) and, only when a recipient was passed,
+   `recipient_contact_id`.
 7. Dashboard:
    - `deliveryReason` with `retryScheduled`, code 30003 and no `relay` promises,
      ahead of the media map (an MMS one-to-one 30003 still promises); a relay leg
@@ -595,10 +703,11 @@ branch lands second carries each one.
      for the same real duration as a correct one.
    - `retry_pending` maps to its message; the native group-text tests are
      inverted; the mirrored grace constant is pinned.
-8. E2E, using the one-to-one backoff seam and a tenant whose conversation is not
-   in manual mode: a 30003 on a one-to-one text shows "Phone unreachable - will
+8. E2E, using the one-to-one backoff seam and the lean seed's `conv-0001` (never
+   `conv-0002`, D13): a 30003 on a one-to-one text shows "Phone unreachable - will
    retry (error 30003)" with no Retry button, then the retry's own bubble replaces
-   it (no one-to-one retry spec exists today). The relay 30003 spec still passes.
+   it (no one-to-one retry spec exists today). The relay 30003 spec and Branch A's
+   `share-skip-fix.spec.ts` still pass.
 
 ## 7. Settled at Cameron's gate (2026-09-25)
 
@@ -617,7 +726,8 @@ branch lands second carries each one.
 - **One rule across specs:** the share results row's "will retry" follows D8 (a
   scheduled retry), not share-skip-fix's retry count - his answer that "will
   retry" appears only when a retry will actually be attempted. Until
-  share-skip-fix reads `retry_due_at`, that row shows no promise (section 5, D8).
+  share-skip-fix Branch B reads `retry_due_at`, that row shows no promise
+  (section 5, D8).
 - **Sequencing,** agreed with both other planners: share-skip-fix's narrowed
   Branch A first; then THIS branch; then send-outcome-reconcile's Stage 1; then
   its `retrySend` adoption and share-skip-fix's Branch B, each planned on the code
@@ -631,14 +741,23 @@ branch lands second carries each one.
   can see).
 - **The reverse guard stays dropped:** he would rather risk a double text than a
   message never delivered.
+- **After Branch A merged (his mission brief, 2026-09-25):** the retry follows
+  the original send - its `automated` flag and its recipient (D14); `main` is
+  merged into this branch again before handback if it moves; drafts 6 and 7 are
+  reviewed inside the plan review rather than in a fifth spec round.
 
 ## 8. Out of scope
 
 - A real retry for native group texts.
 - Alarm thresholds (Q4's original question) and a manual retry for relay legs.
 - Polling for sent-but-unconfirmed legs.
-- The share results row's copy table (share-skip-fix's surface; D8 sets only the
-  rule it follows).
+- The share results row's copy and its read of `retry_due_at` (share-skip-fix
+  Branch B's; D8 sets only the rule it follows).
+- The rest of `ai-mode-switch-gates-all-automation` (Work Package 2): system texts
+  that never read the switch, the breaker's own stop, a visible control. D14
+  delivers only item 3, for the 30003 retry.
+- Retrying a 30007 (carrier filtering), which is never retried by design - the
+  watch item Branch A left on its new one-to-one default text.
 - A conditional-claim fix for the remaining manual double-send windows
   (`manual-retry-double-send-residual-windows`).
 - The relay stranded-claim window (`relay-retry-stranded-claim-window`, low).
@@ -659,8 +778,9 @@ Each is filed or accepted here, so it outlives this spec's freeze.
   reconcile, the bubble keeps "will retry" although its text may already be out.
   One field keys both the copy and the guard, and the guard is what prevents a
   double send.
-- **A promise with nothing behind it:** a retry the breaker refuses at send time
-  (live state D3a cannot preview), one D3a let through on a failed read that the
+- **A promise with nothing behind it:** an automated retry the breaker refuses at
+  send time (live state D3a cannot preview; a person's retry is never metered, D14),
+  one D3a let through on a failed read that the
   job then refuses, one the job declines at send time (D4), and one whose enqueue
   failed when the correction write failed too each keep "will retry", and hide
   the Retry button, until the promise expires - at most the longest backoff plus
@@ -677,3 +797,7 @@ Each is filed or accepted here, so it outlives this spec's freeze.
   claimed before this deploy, or an origin that does not parse is not windowed,
   so that retry's send has no deadline. Production writes `sentAt` on every fanned
   leg, and pre-deploy rungs finish within minutes of the deploy.
+- **A text sent before this deploy** (accepted, D14) carries no `automated`, so its
+  retry goes out automated with its recipient found by phone, as today - a
+  person's text on a breaker-tripped thread in the 15 minutes before the deploy
+  is still refused `manual_mode`, and the D3a decision says so honestly.

@@ -64,3 +64,23 @@ His words, then what changed in draft 6.
 5. **Sequencing:** agreed with share-skip-fix's planner - its Branch A first, then
    this branch, then send-outcome-reconcile. Its Stage 1 / `retrySend`-adoption
    split (2026-09-25) is recorded in the spec's section 5.
+
+## Mission brief and answers after Branch A merged (2026-09-25)
+
+1. **The retry follows the original send.** His brief: "Decide in your spec
+   whether the retry carries the original send's automated flag (and
+   recipient); say which," under his standing rule quoted in
+   `docs/issues/ai-mode-switch-gates-all-automation.md`: "If somebody sends a
+   message, I want it to be retried until it's exhausted or fails." The planner
+   decided both (spec D14) and put it to him as a question; he gave the go
+   without objecting.
+2. **Sync:** "Don't skip the final merge for this, do another one if it moves
+   before you're done." `main` was merged into the branch at `f49a2fe9`; it is
+   merged again before handback if it has moved.
+3. **Review of the post-gate drafts:** "Yes you can review the other drafts
+   inside the plan review." Drafts 6 and 7 get no fifth spec round; the plan
+   reviewers' brief names the changed decisions.
+4. **Standing instruction:** the final handback ends with a "Relay for SOR"
+   section - one fenced, ASCII-only block with full W:\ paths - carrying Branch
+   A's five items for send-outcome-reconcile unchanged plus this branch's own
+   hand-off (see the mission's handback when it is written).

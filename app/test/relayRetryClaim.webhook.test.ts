@@ -1025,7 +1025,7 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
 
   it('retry-send-window D3: a TEAM send declined at the claim keeps its mirrored shape and its gate code', async () => {
     const sentAt = minutesAgo(1);
-    await seedSource({
+    const root = await seedSource({
       direction: 'outbound',
       author: 'teammate',
       senderKey: TEAM_SENDER_KEY,
@@ -1057,6 +1057,14 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
       expect.objectContaining({ retryClaim: 'gate_refused', retryAttempt: 1, closeCode: 'retry_member_removed' }),
     );
     expect(failureLines(ERROR)).toHaveLength(0);
+    // Spec section 6 intention 2 ("the slot on the root is unchanged in every case"): this callback's own status write only.
+    expect(slotOf(root)).toEqual({
+      status: 'undelivered',
+      requestedTransport: 'sms',
+      transportAggregationState: 'attempted',
+      errorCode: '30003',
+      sentAt,
+    });
   });
 
   it.each([false, true])(

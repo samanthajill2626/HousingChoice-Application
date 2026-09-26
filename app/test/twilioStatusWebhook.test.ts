@@ -24,11 +24,15 @@ import {
   RETRY_SEND_JOB,
   retryBackoffMs,
 } from '../src/jobs/retrySend.js';
-import { createLogger } from '../src/lib/logger.js';
+import { createLogger, type Logger } from '../src/lib/logger.js';
 import type { MessageItem, MessagesRepo } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
 import type { BroadcastItem } from '../src/repos/broadcastsRepo.js';
-import { createSendMessageService } from '../src/services/sendMessage.js';
+import {
+  createSendMessageService,
+  type SendMessageInput,
+  type SendMessageService,
+} from '../src/services/sendMessage.js';
 import { loadConfig } from '../src/lib/config.js';
 import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
@@ -1523,6 +1527,338 @@ describe('messaging.retrySend job (worker side)', () => {
 
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('original message not found'));
     expect(warn).toBeDefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // retry-send-window (plan Task 11): the job's window check (D4), the lineage
+  // written WITH the row (D6) and the retry that follows the original send
+  // (D14). These enqueue the job DIRECTLY - no webhook - so the job's own gates
+  // are under test. The job's clock is injected (spec D13) and every send time
+  // is pinned relative to it.
+  // ---------------------------------------------------------------------------
+  const JOB_NOW = Date.parse('2026-09-25T15:00:00.000Z');
+  const jobIso = (ms: number): string => new Date(ms).toISOString();
+
+  function wireJobs(): {
+    outbound: InProcessOutboundQueueAdapter;
+    capture: LogCapture;
+    logger: Logger;
+  } {
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
+    const capture = createLogCapture();
+    const logger = createLogger({ destination: capture.stream });
+    configureJobsLogger(logger);
+    return { outbound, capture, logger };
+  }
+
+  /** A spy send service: records every input and answers a fake outcome. */
+  function spySend(calls: SendMessageInput[]): SendMessageService {
+    return async (input) => {
+      calls.push(input);
+      return {
+        conversationId: input.conversationId,
+        providerSid: `SMretry${calls.length}`,
+        tsMsgId: `${jobIso(JOB_NOW)}#SMretry${calls.length}`,
+        status: 'queued',
+      };
+    };
+  }
+
+  /** The REAL send service over the world fakes - the append path is under test. */
+  function realSend(world: FakeWorld, logger: Logger): SendMessageService {
+    return createSendMessageService({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+    });
+  }
+
+  it('retry-send-window D4: past the 15-minute window the job ends the chain WITHOUT sending (ERROR naming window_closed)', async () => {
+    const { outbound, capture, logger } = wireJobs();
+    const world = createFakeWorld();
+    const seeded = await seedOutbound(world, 'SMlate01', { provider_ts: jobIso(JOB_NOW - 16 * 60_000) });
+    const calls: SendMessageInput[] = [];
+    registerRetrySendJobHandler({
+      sendMessage: spySend(calls),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMlate01', conversationId: seeded.conversationId, attempt: 1 });
+    await outbound.settle();
+
+    expect(calls).toHaveLength(0);
+    const closed = capture.atLevel(ERROR).filter((l) => l['retryDecision'] === 'window_closed');
+    expect(closed).toHaveLength(1);
+    expect(closed[0]!['msg']).toBe('retrySend: retry window closed - retry chain ended without sending');
+    // The check sits AFTER the execution marker (D4): a redelivery ends there.
+    expect(world.jobExecutionMarkers.size).toBe(1);
+  });
+
+  it('retry-send-window D2/D4: attempt 2 measures from the CHAIN origin (retry_window_start), not the row own send time', async () => {
+    const { outbound, logger } = wireJobs();
+    const world = createFakeWorld();
+    // A retry row sent 30 seconds ago whose chain began 16 minutes ago.
+    const seeded = await seedOutbound(world, 'SMchain01', {
+      provider_ts: jobIso(JOB_NOW - 30_000),
+      retry_attempt: 1,
+      retry_window_start: jobIso(JOB_NOW - 16 * 60_000),
+    });
+    const calls: SendMessageInput[] = [];
+    registerRetrySendJobHandler({
+      sendMessage: spySend(calls),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMchain01', conversationId: seeded.conversationId, attempt: 2 });
+    await outbound.settle();
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('retry-send-window D5: a row with no usable origin WARNs and still sends (fail open), passing no retry_window_start', async () => {
+    const { outbound, capture, logger } = wireJobs();
+    const world = createFakeWorld();
+    const seeded = await seedOutbound(world, 'SMnots01', { provider_ts: jobIso(JOB_NOW - 30_000) });
+    delete (seeded as { provider_ts?: string }).provider_ts;
+    const calls: SendMessageInput[] = [];
+    registerRetrySendJobHandler({
+      sendMessage: spySend(calls),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMnots01', conversationId: seeded.conversationId, attempt: 1 });
+    await outbound.settle();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty('retryWindowStart');
+    expect(
+      capture
+        .atLevel(WARN)
+        .filter((l) => l['msg'] === 'retrySend: no usable window origin - sending without a window check (fail open)'),
+    ).toHaveLength(1);
+  });
+
+  it('retry-send-window D14 + D6: a row with NO automated flag (sent before this deploy) is re-sent automated with no recipient, its lineage passed INTO the send', async () => {
+    const { outbound, logger } = wireJobs();
+    const world = createFakeWorld();
+    const seeded = await seedOutbound(world, 'SMlegacy01', { provider_ts: jobIso(JOB_NOW - 30_000) });
+    const calls: SendMessageInput[] = [];
+    registerRetrySendJobHandler({
+      sendMessage: spySend(calls),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMlegacy01', conversationId: seeded.conversationId, attempt: 1 });
+    await outbound.settle();
+
+    expect(calls).toEqual([
+      {
+        conversationId: seeded.conversationId,
+        body: 'outbound body',
+        automated: true,
+        author: 'teammate',
+        retryOf: seeded.tsMsgId,
+        retryAttempt: 1,
+        retryWindowStart: seeded.provider_ts,
+      },
+    ]);
+  });
+
+  it('retry-send-window D14: a recorded recipient that no longer exists WARNs and falls back to the phone lookup - no recipient passed', async () => {
+    const { outbound, capture, logger } = wireJobs();
+    const world = createFakeWorld();
+    const seeded = await seedOutbound(world, 'SMgone01', {
+      provider_ts: jobIso(JOB_NOW - 30_000),
+      automated: false,
+      recipient_contact_id: 'c-gone',
+    });
+    const calls: SendMessageInput[] = [];
+    registerRetrySendJobHandler({
+      sendMessage: spySend(calls),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMgone01', conversationId: seeded.conversationId, attempt: 1 });
+    await outbound.settle();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty('recipient');
+    expect(calls[0]?.automated).toBe(false);
+    const warn = capture
+      .atLevel(WARN)
+      .find((l) => l['msg'] === 'retrySend: recorded recipient no longer exists - retrying to the phone-matched contact');
+    expect(warn?.['recipientContactId']).toBe('c-gone');
+  });
+
+  it('retry-send-window D14: a THROWING recipient read fails the delivery BEFORE the execution marker, so SQS redelivers it', async () => {
+    const { logger } = wireJobs();
+    const world = createFakeWorld();
+    const seeded = await seedOutbound(world, 'SMrcpt01', {
+      provider_ts: jobIso(JOB_NOW - 30_000),
+      automated: false,
+      recipient_contact_id: 'c-real',
+    });
+    world.contactsRepo.getById = async () => {
+      throw new Error('recipient read exploded');
+    };
+    registerRetrySendJobHandler({
+      sendMessage: async () => {
+        throw new Error('must not be reached - the recipient read precedes the marker and the send');
+      },
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+    // A delayed enqueue records the envelope without dispatching it, so the
+    // test dispatches it itself and sees the rejection.
+    const envelope = await enqueue(
+      RETRY_SEND_JOB,
+      { providerSid: 'SMrcpt01', conversationId: seeded.conversationId, attempt: 1 },
+      { runAt: new Date(Date.now() + 60_000) },
+    );
+
+    await expect(dispatchJob(JSON.parse(JSON.stringify(envelope)))).rejects.toThrow('recipient read exploded');
+    expect(world.jobExecutionMarkers.size).toBe(0); // no marker: the redelivery runs the job again
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it("retry-send-window D14: a PERSON'S original is re-sent automated:false with its recorded recipient - not refused manual_mode, never breaker-counted", async () => {
+    const { outbound, capture, logger } = wireJobs();
+    const world = createFakeWorld();
+    // The phone lookup finds a NO-consent duplicate first; the recorded
+    // recipient is the real, consenting contact (share-skip-fix I8).
+    world.contacts.push({ contactId: 'c-dup', type: 'tenant', phone: TENANT_PHONE });
+    world.contacts.push({
+      contactId: 'c-real',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      consent_method: 'verbal_in_person',
+    });
+    const seeded = await seedOutbound(world, 'SMperson01', {
+      provider_ts: jobIso(JOB_NOW - 30_000),
+      automated: false,
+      recipient_contact_id: 'c-real',
+    });
+    world.conversations.get(seeded.conversationId)!.ai_mode = 'manual'; // the breaker tripped
+    let breakerCounts = 0;
+    world.conversationsRepo.incrementAutomatedSendCount = async () => {
+      breakerCounts += 1;
+      return 1;
+    };
+    registerRetrySendJobHandler({
+      sendMessage: realSend(world, logger),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMperson01', conversationId: seeded.conversationId, attempt: 1 });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(1);
+    expect(breakerCounts).toBe(0);
+    const retried = world.messages.find((m) => m.retry_of === seeded.tsMsgId)!;
+    expect(retried).toMatchObject({ automated: false, recipient_contact_id: 'c-real' });
+    const sentAudit = world.auditEvents.filter((e) => e.event_type === 'message_sent');
+    expect(sentAudit).toHaveLength(1);
+    expect(sentAudit[0]!.payload).toMatchObject({ automated: false });
+    expect(capture.lines.some((l) => String(l['msg']).includes('send refused'))).toBe(false);
+  });
+
+  it('retry-send-window D14: an AUTOMATED original is re-sent automated and breaker-metered, with no recipient', async () => {
+    const { outbound, logger } = wireJobs();
+    const world = createFakeWorld();
+    const seeded = await seedOutbound(world, 'SMauto01', {
+      provider_ts: jobIso(JOB_NOW - 30_000),
+      automated: true,
+    });
+    let breakerCounts = 0;
+    world.conversationsRepo.incrementAutomatedSendCount = async () => {
+      breakerCounts += 1;
+      return 1;
+    };
+    registerRetrySendJobHandler({
+      sendMessage: realSend(world, logger),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMauto01', conversationId: seeded.conversationId, attempt: 1 });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(1);
+    expect(breakerCounts).toBe(1);
+    const retried = world.messages.find((m) => m.retry_of === seeded.tsMsgId)!;
+    expect(retried.automated).toBe(true);
+    expect(retried.recipient_contact_id).toBeUndefined();
+  });
+
+  it('retry-send-window D6: the new row carries its lineage, window origin, automated flag and recipient FROM THE APPEND - nothing is annotated after the send', async () => {
+    const { outbound, logger } = wireJobs();
+    const world = createFakeWorld();
+    world.contacts.push({
+      contactId: 'c-real',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      consent_method: 'verbal_in_person',
+    });
+    const origin = jobIso(JOB_NOW - 2 * 60_000);
+    // The original is itself attempt 1 of a chain that began two minutes ago.
+    const seeded = await seedOutbound(world, 'SMchain02', {
+      provider_ts: jobIso(JOB_NOW - 30_000),
+      retry_attempt: 1,
+      retry_window_start: origin,
+      automated: false,
+      recipient_contact_id: 'c-real',
+    });
+    let annotates = 0;
+    world.messagesRepo.annotateMessage = async () => {
+      annotates += 1;
+    };
+    registerRetrySendJobHandler({
+      sendMessage: realSend(world, logger),
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      now: () => JOB_NOW,
+      logger,
+    });
+
+    await enqueue(RETRY_SEND_JOB, { providerSid: 'SMchain02', conversationId: seeded.conversationId, attempt: 2 });
+    await outbound.settle();
+
+    const retried = world.messages.find((m) => m.retry_of === seeded.tsMsgId)!;
+    expect(retried).toMatchObject({
+      retry_of: seeded.tsMsgId,
+      retry_attempt: 2,
+      retry_window_start: origin, // the CHAIN origin, never this row's own send (D2)
+      automated: false,
+      recipient_contact_id: 'c-real',
+    });
+    expect(annotates).toBe(0);
   });
 });
 

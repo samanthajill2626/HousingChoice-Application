@@ -45,6 +45,7 @@ import { relayRetryBackoffMs } from '../lib/relayRetryClaim.js';
 import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../lib/relayRetryGates.js';
 import {
   parseRetryWindowOrigin,
+  RETRY_WINDOW_CLOSED_CODE,
   retryFitsSendWindow,
   retrySendDeadlineMs,
   withinRetrySendWindow,
@@ -98,6 +99,8 @@ export interface RelayRetryLegPayload {
  * A2P meter, or a transient re-run that would land past the window.
  * Kept for data and logs; the dashboard's relay join gives it NO display
  * code, so the leg reads as the original 30003 - a plain failed attempt.
+ * Typed from RETRY_WINDOW_CLOSED_CODE (lib/retrySendWindow.ts), the app's one
+ * copy of the value, which every site below writes and logs.
  *
  * `contact_opted_out` is deliberately NOT in this set: the dashboard drops that
  * code from the relay rollup entirely, so a refusal stamped with it would
@@ -107,7 +110,7 @@ export type RelayRetryCloseCode =
   | RelayRetryGateCode
   | 'enqueue_failed'
   | 'transient_cap'
-  | 'retry_window_closed';
+  | typeof RETRY_WINDOW_CLOSED_CODE;
 
 export interface RelayRetryLegJobDeps {
   adapter?: MessagingAdapter & CarrierMessageSender;
@@ -587,14 +590,14 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
         'relayRetryLeg: no usable send-window origin on the retry row - window not checked (spec D5)',
       );
     } else if (!withinRetrySendWindow({ originMs, nowMs: Date.now() })) {
-      await refuseGate('retry_window_closed');
+      await refuseGate(RETRY_WINDOW_CLOSED_CODE);
       // ERROR (D9): the member never got the text - a dead end like the cap,
       // not a human action like the four gates above.
       log.error(
         {
           ...memberLog,
           retryClaim: 'window_closed',
-          closeCode: 'retry_window_closed',
+          closeCode: RETRY_WINDOW_CLOSED_CODE,
           windowCheck: 'gate',
         },
         'relayRetryLeg: retry refused - past the 15-minute send window',
@@ -675,12 +678,12 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       // same close as the window gate above - and NEVER the transient branch
       // below, whose re-enqueue assumes a provider refusal and would try again
       // past the window. ERROR (D9); refuseGate announces the root once.
-      await refuseGate('retry_window_closed');
+      await refuseGate(RETRY_WINDOW_CLOSED_CODE);
       log.error(
         {
           ...memberLog,
           retryClaim: 'window_closed',
-          closeCode: 'retry_window_closed',
+          closeCode: RETRY_WINDOW_CLOSED_CODE,
           windowCheck: 'send_deadline',
         },
         'relayRetryLeg: send-window deadline passed while waiting for the A2P meter - nothing sent, retry leg closed',
@@ -724,12 +727,12 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
         originMs !== undefined &&
         !retryFitsSendWindow({ originMs, nowMs: Date.now(), backoffMs: transientDelayMs })
       ) {
-        await closeTerminally('retry_window_closed');
+        await closeTerminally(RETRY_WINDOW_CLOSED_CODE);
         log.error(
           {
             ...memberLog,
             retryClaim: 'window_closed',
-            closeCode: 'retry_window_closed',
+            closeCode: RETRY_WINDOW_CLOSED_CODE,
             windowCheck: 'transient_reschedule',
             errorCode: outcome.errorCode,
             transientPass: claim.attempt,

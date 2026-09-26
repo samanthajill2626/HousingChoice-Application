@@ -952,7 +952,8 @@ const INTERNAL_CODE_REASONS: Record<string, string> = {
   // carrying NO display code, so the leg keeps its original 30003 and reads the
   // plain failed attempt (relayRetryJoin.ts, the terminal step). The entry is
   // the fallback for a future surface that renders a rung's code directly, and
-  // keeps this map's no-tail rule total.
+  // keeps this map's no-tail rule total. The key is the app's
+  // RETRY_WINDOW_CLOSED_CODE, pinned by relayWindowCloseMirror.test.ts.
   retry_window_closed: 'Not retried - message too old',
 };
 

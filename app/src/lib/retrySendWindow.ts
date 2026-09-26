@@ -31,6 +31,18 @@ export const RETRY_PROMISE_GRACE_MS = 2 * 60_000;
 /** Written over retry_due_at when a promise must be withdrawn (D7 enqueue failure). */
 export const RETRY_PROMISE_WITHDRAWN_AT = '1970-01-01T00:00:00.000Z';
 
+/**
+ * D3/D4/D8: the close code a WINDOW decline writes on a relay retry rung - the
+ * relay claim (D3) or the relay job (D4) found the retry would go out more
+ * than RETRY_SEND_WINDOW_MS after the member's original leg send. The ONE copy
+ * in the app: the job's RelayRetryCloseCode and the claim's decline types
+ * derive from it, and every write, compare and log site uses it. The
+ * dashboard's hand copies (relayRetryJoin.ts WINDOW_CLOSED_CODE and the
+ * INTERNAL_CODE_REASONS key in deliveryStatus.ts) are pinned to it by
+ * dashboard/src/routes/contact/relayWindowCloseMirror.test.ts.
+ */
+export const RETRY_WINDOW_CLOSED_CODE = 'retry_window_closed' as const;
+
 /** ms since epoch, or undefined when absent / not a string / unparseable (D5 fail-open).
  *  Accepts ISO 8601 and RFC 2822 (Date.parse). */
 export function parseRetryWindowOrigin(value: unknown): number | undefined {

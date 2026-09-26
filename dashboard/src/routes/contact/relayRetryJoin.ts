@@ -98,9 +98,10 @@ const TERMINAL_RUNG_STATUSES: ReadonlySet<DeliveryStatus> = new Set<DeliveryStat
  *  minutes after the original. Kept on the rung for data and logs, and
  *  deliberately carrying NO display code here: the ruling is that a declined
  *  late retry reads as a plain failed attempt, so the original leg's own 30003
- *  stands. A copy of the app's `RelayRetryCloseCode` member
- *  (app/src/jobs/relayRetryLeg.ts); the dashboard cannot import app code. */
-const WINDOW_CLOSED_CODE = 'retry_window_closed';
+ *  stands. A copy of the app's RETRY_WINDOW_CLOSED_CODE
+ *  (app/src/lib/retrySendWindow.ts), since the dashboard cannot import app
+ *  code; exported so relayWindowCloseMirror.test.ts pins the two together. */
+export const WINDOW_CLOSED_CODE = 'retry_window_closed';
 
 /** The bucket key: the ROOT row plus the member key. Exported so no consumer
  *  builds it by hand - a key built the other way round silently finds nothing. */

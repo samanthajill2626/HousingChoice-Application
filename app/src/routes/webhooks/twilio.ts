@@ -149,6 +149,7 @@ import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../../lib/rela
 import {
   parseRetryWindowOrigin,
   RETRY_PROMISE_WITHDRAWN_AT,
+  RETRY_WINDOW_CLOSED_CODE,
   retryFitsSendWindow,
 } from '../../lib/retrySendWindow.js';
 import { resolveMessage } from '../../messages/index.js';
@@ -408,11 +409,12 @@ interface RelayRetryClaimResult {
   attempt?: number;
   /**
    * retry-send-window D3: the code a declined rung was APPENDED with (a gate
-   * code, or `retry_window_closed`) - set on exactly `gate_refused` and
-   * `window_closed`, the two claim-time declines. The failure marker carries
-   * it, as the enqueue-failure line carries the code its close wrote.
+   * code, or `retry_window_closed` - RETRY_WINDOW_CLOSED_CODE) - set on exactly
+   * `gate_refused` and `window_closed`, the two claim-time declines. The
+   * failure marker carries it, as the enqueue-failure line carries the code
+   * its close wrote.
    */
-  closeCode?: RelayRetryGateCode | 'retry_window_closed';
+  closeCode?: RelayRetryGateCode | typeof RETRY_WINDOW_CLOSED_CODE;
 }
 
 /**
@@ -2856,7 +2858,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       const onRootLeg = rootTsMsgId === ptr.tsMsgId;
       const originRaw: unknown = onRootLeg ? slot.sentAt : src.relay_retry_window_start;
       const originMs = parseRetryWindowOrigin(originRaw);
-      let decline: RelayRetryGateCode | 'retry_window_closed' | undefined;
+      let decline: RelayRetryGateCode | typeof RETRY_WINDOW_CLOSED_CODE | undefined;
       let originGap: 'missing' | 'unparseable' | undefined;
       if (gate.refused) {
         decline = gate.code;
@@ -2875,7 +2877,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       ) {
         // Then the window (D1, D3 step 2): now + backoff + RETRY_JOB_GRACE_MS
         // must still fit inside origin + RETRY_SEND_WINDOW_MS.
-        decline = 'retry_window_closed';
+        decline = RETRY_WINDOW_CLOSED_CODE;
       }
       // The rung's member slot. An OPEN rung is seeded `queued` for its job,
       // as always. A DECLINED rung is appended ALREADY CLOSED, with exactly the
@@ -3006,7 +3008,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         // standing. Step 9's SSE fires after that one write.
         announceRootClaim();
         return {
-          outcome: decline === 'retry_window_closed' ? 'window_closed' : 'gate_refused',
+          outcome: decline === RETRY_WINDOW_CLOSED_CODE ? 'window_closed' : 'gate_refused',
           attempt,
           closeCode: decline,
         };

@@ -15,7 +15,10 @@
 // Intersection is reset when the sentinel unmounts. A real
 // IntersectionObserver delivers entries asynchronously (a task after the next
 // rendering update); consumption-at-arrival makes the rule independent of
-// that timing.
+// that timing. The default observer drains its queued entries (takeRecords)
+// on every re-observe and before disconnect, and reports nothing once
+// disconnected, so the residual is now only a report the browser delivers
+// between takeRecords and observe, if any.
 import { useEffect, useRef, useState } from 'react';
 
 export interface AutoLoadObserver {
@@ -39,8 +42,12 @@ const NO_REPORT: Report = { intersecting: false, seq: 0 };
 
 const defaultFactory: AutoLoadObserverFactory = (onReport, root) => {
   if (typeof IntersectionObserver === 'undefined') return undefined;
+  // False once disconnected: a callback the browser had already scheduled
+  // before the effect's cleanup reports nothing (AD-5).
+  let live = true;
   const io = new IntersectionObserver(
     (entries) => {
+      if (!live) return;
       const last = entries[entries.length - 1];
       if (last !== undefined) onReport(last.isIntersecting);
     },
@@ -49,11 +56,19 @@ const defaultFactory: AutoLoadObserverFactory = (onReport, root) => {
   return {
     observe: (el) => io.observe(el),
     // unobserve + observe queues a fresh initial entry for the element.
+    // unobserve() leaves entries already queued in place, so takeRecords()
+    // drains them first: an entry computed before this commit can never be
+    // delivered after the re-observe as if it were fresh (AD-5).
     reobserve: (el) => {
       io.unobserve(el);
+      io.takeRecords();
       io.observe(el);
     },
-    disconnect: () => io.disconnect(),
+    disconnect: () => {
+      live = false;
+      io.takeRecords();
+      io.disconnect();
+    },
   };
 };
 

@@ -86,6 +86,19 @@ describe('seed data field casing', () => {
     expect(typeof tenant!['voucherSize']).toBe('number');
   });
 
+  it('share-skip-fix: seeds a tenant whose one-to-one conversation is switched off (the e2e proof for a person-sent share)', () => {
+    const contacts = SEED['contacts'] ?? [];
+    const dario = contacts.find((c) => c['contactId'] === 'contact-tenant-0002');
+    expect(dario).toMatchObject({ type: 'tenant', phone: '+15550100004', firstName: 'Dario', voucherSize: 1 });
+    expect(typeof dario?.['consent_method']).toBe('string');
+    const conv = SEED.conversations.find((c) => c['conversationId'] === 'conv-0002');
+    expect(conv).toMatchObject({ type: 'tenant_1to1', ai_mode: 'manual', participant_phone: '+15550100004', status: 'open' });
+    expect(conv?.participants).toEqual([{ contactId: 'contact-tenant-0002', phone: '+15550100004' }]);
+    // Tasha stays the newest inbox row (A29): every other conversation is older than hers.
+    const tasha = SEED.conversations.find((c) => c['conversationId'] === 'conv-0001');
+    expect(String(conv?.['last_activity_at']) < String(tasha?.['last_activity_at'])).toBe(true);
+  });
+
   it('every seed unit uses the canonical field names the app reads', () => {
     expect(units.length).toBeGreaterThanOrEqual(1);
     for (const u of units) {

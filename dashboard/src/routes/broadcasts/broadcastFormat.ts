@@ -8,9 +8,15 @@ import type {
   AudienceFilter,
   BroadcastRecipient,
   BroadcastRecipientView,
+  BroadcastStats,
   BroadcastStatus,
 } from '../../api/index.js';
-import { presentDeliveryStatus, type DeliveryPresentation } from '../contact/deliveryStatus.js';
+import {
+  deliveryReason,
+  presentDeliveryStatus,
+  shareSkipReason,
+  type DeliveryPresentation,
+} from '../contact/deliveryStatus.js';
 import { contactDisplayName } from '../contact/format.js';
 
 /** The voucher-size chip choices (bedroomSize 0..4; "4+" means 4-or-more). */
@@ -80,10 +86,36 @@ export const BROADCAST_STATUS_TONE: Readonly<Record<BroadcastStatus, BroadcastSt
   failed: 'danger',
 };
 
-/** The recipient-status → comms DeliveryPresentation map. `skipped` has no comms
- *  equivalent (opted out between resolve + send) — present it explicitly; every
- *  other recipient status maps onto the shared delivery model (queued → sent →
- *  delivered | failed).
+/** share-skip-fix D6: the share's label for the list row and the results
+ *  header. A finished share (`sent`) whose EVERY recipient was skipped reached
+ *  nobody, and "Sent" would be a lie (Sam's #5: one-to-one shares that read
+ *  Sent with a Skipped row). Presentation ONLY: the stored status, the list's
+ *  status filter and the tab it lists under are unchanged. A share with any
+ *  sent / delivered / failed / queued slot keeps its status label. */
+export function presentShareLabel(
+  status: BroadcastStatus,
+  stats?: BroadcastStats,
+): { label: string; tone: BroadcastStatusTone } {
+  if (status === 'sent' && stats !== undefined && stats.audience > 0) {
+    if (skippedTotal(stats) >= stats.audience) return { label: 'Not sent', tone: 'neutral' };
+  }
+  return { label: BROADCAST_STATUS_LABELS[status], tone: BROADCAST_STATUS_TONE[status] };
+}
+
+/** Every skipped recipient across the three skip buckets - the ONE dashboard
+ *  definition of "skipped", shared by the Skipped chip and the "Not sent" label
+ *  so a fourth bucket changes both at once. `skipped_other` is optional (stats
+ *  persisted before 2026-09-25 lack it). */
+export function skippedTotal(stats: BroadcastStats): number {
+  return stats.skipped_opted_out + stats.skipped_no_consent + (stats.skipped_other ?? 0);
+}
+
+/** The recipient-status -> comms DeliveryPresentation map. `skipped` has no comms
+ *  equivalent (nothing was sent: a fan-out fence or the send wrapper refused the
+ *  recipient), so it is presented explicitly; WHY it was skipped rides the
+ *  slot's errorCode and is rendered beside the label by shareRecipientReason
+ *  below (spec D7). Every other recipient status maps onto the shared delivery
+ *  model (queued -> sent -> delivered | failed).
  *
  *  The 'sent' nuance: the fan-out stamps a slot 'sent' at DISPATCH (its
  *  idempotency claim), which is EARLIER than the message's own queued → sent
@@ -107,6 +139,25 @@ export function presentRecipientStatus(
   return (
     presentDeliveryStatus(status) ?? { label: 'Sending…', tone: 'neutral', isFailure: false }
   );
+}
+
+/** The reason a share recipient was NOT texted or NOT delivered - one sentence
+ *  per row, for skipped AND failed slots (spec D7). Skipped rows read the
+ *  share-skip map in deliveryStatus.ts; failed rows keep the shared
+ *  deliveryReason (carrier codes, the fan-out's transient_cap / enqueue_failed,
+ *  and the 30003 wording, which is owned elsewhere), with `no_contact` - the
+ *  fan-out's own "nothing to send to" - as the one share-specific failure line.
+ *  Undefined for queued / sent / delivered. */
+export function shareRecipientReason(
+  status: BroadcastRecipient['status'],
+  errorCode: string | undefined,
+): string | undefined {
+  if (status === 'skipped') return shareSkipReason(errorCode);
+  if (status === 'failed') {
+    if (errorCode === 'no_contact') return 'No contact or phone on file';
+    return deliveryReason(errorCode) ?? 'Delivery failed';
+  }
+  return undefined;
 }
 
 /** Split a results recipients-map key into its contactId / phone form. A key is

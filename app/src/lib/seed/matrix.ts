@@ -1223,6 +1223,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
         failed: 1,
         skipped_opted_out: 1,
         skipped_no_consent: 2,
+        skipped_other: 0,
         queued: 0,
       },
       recipients: {
@@ -1233,6 +1234,9 @@ function buildBroadcasts(): Record<string, unknown>[] {
       broadcastId: 'broadcast-mx-draft-01',
       status: 'draft',
       created_by: 'user-0002',
+      // share-skip-fix D4: a staff-created draft - sent from the dashboard it
+      // is a person's send (reaches a switched-off conversation like any other).
+      created_via: 'dashboard',
       created_at: D.T5,
       _listPartition: 'broadcasts', // byCreated GSI membership
       unitId: 'unit-mx-tourable-02',
@@ -1244,7 +1248,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
         excludeUnreachable: false,
       },
       body_template: 'Hi {firstName}! A 2BR in DeKalb is now available — text back if interested.',
-      stats: { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      stats: { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, skipped_other: 0, queued: 0 },
       recipients: {},
     },
   ];

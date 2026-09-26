@@ -2897,6 +2897,7 @@ export function createFakeWorld(): FakeWorld {
         ...(input.seedContactIds !== undefined &&
           input.seedContactIds.length > 0 && { seed_contact_ids: input.seedContactIds }),
         ...(input.audienceMode !== undefined && { audience_mode: input.audienceMode }),
+        ...(input.createdVia !== undefined && { created_via: input.createdVia }),
       };
       broadcasts.set(item.broadcastId, item);
       return { ...item };
@@ -3008,12 +3009,16 @@ export function createFakeWorld(): FakeWorld {
       return pageBroadcasts(all, opts);
     },
     async priorRecipientContactIds(unitId) {
-      // Union of every sent/sending broadcast's recipients KEYS for the unit.
+      // Union of every sent/sending broadcast's NON-SKIPPED recipient keys for
+      // the unit (share-skip-fix D5) - mirrors the real repo exactly.
       const prior = new Set<string>();
       for (const b of broadcasts.values()) {
         if (b.unitId !== unitId) continue;
         if (b.status !== 'sent' && b.status !== 'sending') continue;
-        for (const key of Object.keys(b.recipients ?? {})) prior.add(key);
+        for (const [key, slot] of Object.entries(b.recipients ?? {})) {
+          if (slot.status === 'skipped') continue;
+          prior.add(key);
+        }
       }
       return prior;
     },

@@ -447,6 +447,11 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
 
     const created = await broadcasts.create({
       created_by: actor,
+      // share-skip-fix D4: only an authenticated staff session reaches this
+      // route (sessionMiddleware + requireAuth on /api), so the share is a
+      // person's share - recorded here, ONCE, so the send job never has to look
+      // the creator up. A removed teammate's draft keeps the record.
+      createdVia: 'dashboard',
       audience_filter: filter,
       body_template: template,
       estimatedAudience,

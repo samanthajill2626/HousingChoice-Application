@@ -10,7 +10,7 @@ import { expectTodayReady } from '../../support/today.js';
 // The round-trip this spec drives, in order:
 //   0. Pre-delete: Tasha's row IS in the inbox (so step 2 is a real before/after).
 //   1. Soft-delete her from the contact page (kebab -> confirm dialog).
-//   2. Her row leaves the inbox (on the lean seed the inbox goes empty).
+//   2. Her row leaves the inbox (the other lean rows stay; see expectTashaHidden).
 //   3. She texts back -> the SAME thread resurfaces, chipped "Deleted".
 //   4. Opening it shows the new message but NO composer - a note offering to
 //      restore stands in its place. Seeing before deciding.

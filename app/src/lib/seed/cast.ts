@@ -111,7 +111,7 @@ const listingSendId = (unit: string, tenant: string) => `${unitId(unit)}#${conta
 
 // ---------------------------------------------------------------------------
 // Phone numbers — +1555010010X block (0101..0109)
-// Never collides with lean (+15550100001-3) or matrix (+15550200XXX).
+// Never collides with lean (+15550100001-4) or matrix (+15550200XXX).
 // ---------------------------------------------------------------------------
 const PHONES = {
   unknownTexter:     '+15550100101',

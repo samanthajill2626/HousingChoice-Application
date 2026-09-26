@@ -120,8 +120,8 @@ test('the Unknown tab is the contact triage queue: an honest empty state, then t
 
   // (1) Empty queue = the NORMAL zero state: the per-filter empty copy, and
   // never the load-failure banner (design requirement 5). The lean seed holds
-  // exactly three contacts (tenant/landlord/partner) and ZERO unknowns, so the
-  // tab is genuinely empty here rather than empty by accident.
+  // exactly four contacts (two tenants, a landlord, a partner) and ZERO unknowns,
+  // so the tab is genuinely empty here rather than empty by accident.
   await page.goto(`${NEXT}/inbox?filter=unknown`);
   await expect(page.getByRole('tab', { name: 'Unknown' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('No unknown numbers')).toBeVisible();

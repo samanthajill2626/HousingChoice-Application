@@ -1,9 +1,10 @@
-// BroadcastStatusPill — the draft/sending/sent/failed lifecycle pill (list rows
+// BroadcastStatusPill - the draft/sending/sent/failed lifecycle pill (list rows
 // + the Results header). Text-first (status by label, colour is reinforcement
 // only). Tokens via the shared DeliveryBadge module's tone classes would conflate
-// delivery + lifecycle, so this carries its own small style.
-import type { BroadcastStatus } from '../../api/index.js';
-import { BROADCAST_STATUS_LABELS, BROADCAST_STATUS_TONE } from './broadcastFormat.js';
+// delivery + lifecycle, so this carries its own small style. With `stats`, an
+// all-skipped finished share reads "Not sent" (share-skip-fix D6).
+import type { BroadcastStats, BroadcastStatus } from '../../api/index.js';
+import { presentShareLabel } from './broadcastFormat.js';
 import styles from './BroadcastStatusPill.module.css';
 
 const TONE_CLASS: Record<string, string> = {
@@ -13,9 +14,15 @@ const TONE_CLASS: Record<string, string> = {
   danger: styles.danger ?? '',
 };
 
-export function BroadcastStatusPill({ status }: { status: BroadcastStatus }): React.JSX.Element {
-  const tone = BROADCAST_STATUS_TONE[status];
-  return (
-    <span className={`${styles.pill} ${TONE_CLASS[tone]}`}>{BROADCAST_STATUS_LABELS[status]}</span>
-  );
+/** The lifecycle pill. With `stats`, an all-skipped finished share reads
+ *  "Not sent" (share-skip-fix D6); without them, the plain status label. */
+export function BroadcastStatusPill({
+  status,
+  stats,
+}: {
+  status: BroadcastStatus;
+  stats?: BroadcastStats;
+}): React.JSX.Element {
+  const { label, tone } = presentShareLabel(status, stats);
+  return <span className={`${styles.pill} ${TONE_CLASS[tone]}`}>{label}</span>;
 }

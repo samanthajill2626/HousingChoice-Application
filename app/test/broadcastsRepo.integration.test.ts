@@ -144,6 +144,33 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
     expect(after?.stats.delivered).toBe(1);
   });
 
+  it('share-skip-fix D7: bumpStats ADDs skipped_other onto a persisted stats map that predates the field (a share mid-send at deploy)', async () => {
+    const created = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'Hi [TenantName]',
+    });
+    await broadcasts.markSending(created.broadcastId, { 'c-1': { status: 'queued' } });
+    // Simulate the pre-deploy shape: the field is absent from the stored map.
+    await doc.send(
+      new UpdateCommand({
+        TableName: broadcastsTable,
+        Key: { broadcastId: created.broadcastId },
+        UpdateExpression: 'REMOVE stats.skipped_other',
+      }),
+    );
+    // Precondition: the stored map really lacks the key, so the ADD below
+    // exercises the absent-nested-counter path (not an ADD onto a seeded 0).
+    const { Item: stored } = await doc.send(
+      new GetCommand({ TableName: broadcastsTable, Key: { broadcastId: created.broadcastId }, ConsistentRead: true }),
+    );
+    expect((stored as { stats: Record<string, unknown> }).stats).not.toHaveProperty('skipped_other');
+    expect((stored as { stats: Record<string, unknown> }).stats).toHaveProperty('queued', 1);
+    const bumped = await broadcasts.bumpStats(created.broadcastId, { skipped_other: 1, queued: -1 });
+    expect(bumped.stats.skipped_other).toBe(1);
+    expect(bumped.stats.queued).toBe(0);
+  });
+
   // --- messages relay delivery_recipients (latent overlap-bug site) ---------
 
   it('relay inbound source: seed delivery_recipients {} → setRecipientDelivery → updateRecipientDeliveryStatus forward-only — no ValidationException', async () => {
@@ -327,6 +354,34 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
     });
     const prior = await broadcasts.priorRecipientContactIds(unitId);
     expect(prior.size).toBe(0);
+  });
+
+  it('share-skip-fix D5: prior recipients = any NON-skipped slot in a sent/sending share; a skipped slot never counts, a failed one still does', async () => {
+    const unitId = 'unit-d5';
+    const filter = { contact_type: 'tenant' as const, excludeOptedOut: true, excludeUnreachable: true };
+    // Share A (sent): one sent, one failed, one skipped, one skipped-in-A-but-sent-in-B.
+    const a = await broadcasts.create({ created_by: 'usr_test', unitId, audience_filter: filter, body_template: 'Hi [TenantName]' });
+    await broadcasts.markSending(a.broadcastId, {
+      'c-sent': { status: 'queued' },
+      'c-failed': { status: 'queued' },
+      'c-skipped': { status: 'queued' },
+      'c-both': { status: 'queued' },
+    });
+    await broadcasts.setRecipient(a.broadcastId, 'c-sent', { status: 'sent' });
+    await broadcasts.setRecipient(a.broadcastId, 'c-failed', { status: 'failed', errorCode: '30007' });
+    await broadcasts.setRecipient(a.broadcastId, 'c-skipped', { status: 'skipped', errorCode: 'manual_mode' });
+    await broadcasts.setRecipient(a.broadcastId, 'c-both', { status: 'skipped', errorCode: 'manual_mode' });
+    await broadcasts.markSent(a.broadcastId);
+    // Share B (sending): c-both was sent this time; c-legacy is a code-less legacy skip.
+    const b = await broadcasts.create({ created_by: 'usr_test', unitId, audience_filter: filter, body_template: 'Hi [TenantName]' });
+    await broadcasts.markSending(b.broadcastId, { 'c-both': { status: 'queued' }, 'c-legacy': { status: 'queued' } });
+    await broadcasts.setRecipient(b.broadcastId, 'c-both', { status: 'sent' });
+    await broadcasts.setRecipient(b.broadcastId, 'c-legacy', { status: 'skipped' });
+    // Share C (draft): its slots never count, as before.
+    await broadcasts.create({ created_by: 'usr_test', unitId, audience_filter: filter, body_template: 'Hi [TenantName]' });
+
+    const prior = await broadcasts.priorRecipientContactIds(unitId);
+    expect([...prior].sort()).toEqual(['c-both', 'c-failed', 'c-sent']);
   });
 
   it('conditional delete: a DRAFT deletes; a SENT broadcast is refused (not_draft) and survives', async () => {

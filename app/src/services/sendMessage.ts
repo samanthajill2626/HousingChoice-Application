@@ -26,6 +26,7 @@ import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createContactsRepo,
   isDeleted,
+  type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import {
@@ -238,6 +239,17 @@ export interface SendMessageInput {
    * send. (The 30003 auto-retry annotates retry_of itself; it doesn't use this.)
    */
   retryOf?: string;
+  /**
+   * share-skip-fix I8: the contact the CALLER already resolved as the
+   * recipient (the broadcast fan-out's fenced tenant), handed over as the
+   * item so this path does no second read. When set, the deleted and
+   * JIT-consent gates judge THIS contact rather than whichever contact the
+   * phone lookup returns first (duplicate contacts on one phone), and the
+   * opt-out gate refuses on EITHER contact's flag. Absent on every other send.
+   * So the deleted and consent gates judge the caller's already-resolved
+   * snapshot (redundant with the fan-out's own fence); opt-out stays fresh.
+   */
+  recipient?: ContactItem;
 }
 
 export interface SendMessageOutcome {
@@ -272,7 +284,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const events = deps.events ?? appEvents;
 
   return async function sendMessage(input) {
-    const { conversationId, body, mediaUrls, attachments, automated = false, author = 'teammate', from, broadcastId, retryOf } = input;
+    const { conversationId, body, mediaUrls, attachments, automated = false, author = 'teammate', from, broadcastId, retryOf, recipient } = input;
     mergeContext({ conversationId });
 
     const conversation = await conversations.getById(conversationId);
@@ -304,12 +316,24 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // (1) Opt-out gate — suppression beats everything (doc §7.1 / 21610).
     // EITHER flag refuses: the conversation-level flag covers STOPs from
     // phones with no contact record yet (auto-capture is M1.2).
-    const contact = await contacts.findByPhone(participantPhone);
-    if (isOptedOut(conversation.sms_opt_out, contact?.sms_opt_out)) {
+    const phoneContact = await contacts.findByPhone(participantPhone);
+    // The contact the deleted + consent gates judge: the caller's resolved
+    // recipient when given (share-skip-fix I8), else the phone-matched one.
+    const contact = recipient ?? phoneContact;
+    if (
+      isOptedOut(conversation.sms_opt_out, phoneContact?.sms_opt_out) ||
+      recipient?.sms_opt_out === true
+    ) {
       log.warn(
         {
           conversationId,
           contactId: contact?.contactId,
+          // Which record carried the flag: the phone-matched contact and the
+          // caller's recipient can differ (duplicate contacts on one phone).
+          phoneContactId: phoneContact?.contactId,
+          phoneContactOptOut: phoneContact?.sms_opt_out === true,
+          recipientContactId: recipient?.contactId,
+          recipientOptOut: recipient?.sms_opt_out === true,
           conversationOptOut: conversation.sms_opt_out === true,
         },
         'send refused: sms_opt_out is set (conversation and/or contact)',

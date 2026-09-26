@@ -5,7 +5,7 @@
 // is shown and a note explains the [FlyerLink] is attached automatically.
 import { useId, useRef } from 'react';
 import { BROADCAST_MERGE_FIELDS } from '../../api/index.js';
-import { DEFAULT_SEND_TEMPLATE } from './resolveTemplate.js';
+import { DEFAULT_SEND_TEMPLATE, ONE_TO_ONE_SEND_TEMPLATE } from './resolveTemplate.js';
 import styles from './MessageEditor.module.css';
 
 const MAX_TEMPLATE_LEN = 1600;
@@ -18,7 +18,8 @@ export interface MessageEditorProps {
   propertyLabel?: string;
   /** Resolved mode (a single recipient): the value is the FINAL rendered message,
    *  not a template. Hide the merge-field chips AND the flyer note (there are no
-   *  tokens left to insert); keep the labeled textarea + live count. */
+   *  tokens left to insert); keep the labeled textarea + live count. The
+   *  placeholder is the one-to-one default (share-skip-fix D8). */
   resolved?: boolean;
 }
 
@@ -81,7 +82,7 @@ export function MessageEditor({
         rows={6}
         maxLength={MAX_TEMPLATE_LEN}
         value={value}
-        placeholder={DEFAULT_SEND_TEMPLATE}
+        placeholder={resolved ? ONE_TO_ONE_SEND_TEMPLATE : DEFAULT_SEND_TEMPLATE}
         onChange={(e) => onChange(e.target.value)}
       />
       <div className={styles.footRow}>

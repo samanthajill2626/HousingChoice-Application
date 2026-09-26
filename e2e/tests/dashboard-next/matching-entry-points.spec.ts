@@ -6,9 +6,10 @@ import { expectTodayReady } from '../../support/today.js';
 // property to tenants" flow, end to end against the real backend:
 //   1. From a TENANT contact page ("Properties sent" card -> "+ Send"): a seeded
 //      1:1 send. The composer opens seeds-only (no filters), the operator picks a
-//      property, the message auto-resolves to that single tenant, Preview shows
-//      exactly one pre-checked row, Send lands it in the tenant's outbox and on
-//      the "Properties sent" card.
+//      property, the message auto-fills with the one-to-one default (the
+//      property's one-line address + the flyer link, share-skip-fix D8), Preview
+//      shows exactly one pre-checked row, Send lands it in the tenant's outbox and
+//      on the "Properties sent" card.
 //   2. From a PROPERTY detail page ("Sent to tenants" card -> "+ Send"): the
 //      audience-filtered composer with the unit pre-filled, curated down to one
 //      hand-picked tenant (Deselect all -> add one via search) -> Send -> the
@@ -128,12 +129,15 @@ test.describe('Matching entry points - tenant file + property page', () => {
     await page.getByRole('combobox', { name: 'Property' }).fill(line1);
     await page.getByRole('option', { name: new RegExp(`${stamp} Matching Entry`) }).click();
 
-    // The message now holds the FINAL resolved text (no token template): it greets
-    // the tenant by first name and carries the flyer link. No unresolved [TenantName].
+    // The message now holds the FINAL resolved one-to-one text (share-skip-fix
+    // D8): the property's one-line address, a space, the flyer link - and
+    // nothing else. No greeting, no [TenantName] token. The link is the SERVER's
+    // (?cta=text), which replaces the same-origin fallback once the draft exists.
     const message = page.getByLabel('Message');
-    await expect(message).toHaveValue(/Hi /, { timeout: 10_000 });
-    await expect(message).toHaveValue(new RegExp(`/p/${unitId}`));
-    await expect(message).not.toHaveValue(/\[TenantName\]/);
+    await expect(message).toHaveValue(
+      new RegExp(`^${stamp} Matching Entry Ave, Atlanta, GA 30314 \\S+/p/${unitId}\\?cta=text$`),
+      { timeout: 10_000 },
+    );
 
     // Preview -> exactly one pre-checked recipient row (the seeded tenant) -> Send.
     const previewBtn = page.getByRole('button', { name: 'Preview recipients' });

@@ -5,6 +5,8 @@
 // a stable `code`. Relative URLs only (Vite proxies /api /auth /public /__dev
 // to the app in dev; same-origin in prod).
 
+import { noteServerDate } from './serverClock.js';
+
 /** A failed API call. `code` is the server's machine-readable { error } value
  *  (e.g. 'forbidden', 'unauthorized') when present, else a synthetic code;
  *  `status` is the HTTP status (0 = network failure). */
@@ -115,6 +117,12 @@ export async function requestWithStatus<T>(
     throw new ApiError(0, 'network_error', 'Network request failed');
   }
 
+  // retry-send-window D8: EVERY response - ok or not, JSON or not - re-estimates
+  // the server's clock from its `Date` header, and does so BEFORE the body is
+  // parsed, so the items this response carries are judged against the clock it
+  // brought (see serverClock.ts for why the header is fresh). A network failure
+  // has no response and changes nothing.
+  noteServerDate(res.headers.get('Date'));
   const parsed = await parseBody(res);
   if (!res.ok) {
     throw errorFrom(res.status, parsed);

@@ -4409,7 +4409,8 @@ Expected: FAIL on all four new cases - the append carries no `automated`, no `re
   /**
    * True for a send GATED like a machine's: the circuit breaker meters it and
    * manual mode refuses it (reminders, the missed-call and welcome texts, AI in
-   * Phase 2). A person's send is false: always allowed, never counted. The
+   * Phase 2). A person's send is false: never metered and never refused by
+   * manual mode, but judged by the just-in-time consent gate. The
    * automatic 30003 retry passes the ORIGINAL send's value (retry-send-window
    * D14), so a person's text is retried as a person's send - the flag says how
    * a send is gated, not who initiated it. Persisted on every row this wrapper
@@ -10407,7 +10408,8 @@ results row under D8's rule (never the retry count); reuse the seam above.
   `ai-mode-switch-gates-all-automation` (item 3 delivered for the 30003 retry).
 - Reconciled with spec section 9: `manual-retry-double-send-residual-windows`
   (revision 5 @616d120d, gap 2's "once the promise has expired", refs as paths).
-- Filed new: none.
+- Filed new: `vitest-config-globalsetup-fail-soft-comment` (low; a stale comment
+  found in plan review round 1, filed at 1c0c7ab3).
 
 ## Deferred and accepted
 
@@ -10501,3 +10503,8 @@ is gone; Task 3 pins the moved pool-number throw. Task 3 inserts 79 lines at
 `app/test/relayRetryLeg.test.ts:379`, so Tasks 5 and 6's citations past `:378`
 in that file are 79 lines early - their quoted anchors still match. The planner
 applied every other accepted finding (see the adjudications' edit column).
+
+Plan v3 (after plan review round 2, `plan-review-r2.md`, adjudications in
+`plan-review-r2-adjudications.md`): precision only - Task 8's `automated` doc
+names the consent gate; Task 21's handback names the one issue filed. The
+round changed no decision, so the review is closed.

@@ -8,7 +8,7 @@ spec-gate answers of 2026-09-25 (the adversarial review closed at round 4,
 the merged Branch A and adds D14 (a retry follows the original send); draft 7.1
 adds precision edits from the plan drafting
 (`plan-draft-<A|B1|B2|C|D>-findings.md`); draft 7.2 takes plan review round 1
-(`plan-review-r1-*.md`). Code citations are at `f49a2fe9`.
+(`plan-review-r1-*.md`) and draft 7.3 round 2 (`plan-review-r2.md`). Code citations are at `f49a2fe9`.
 
 | sev | issue | this branch |
 | --- | --- | --- |
@@ -563,9 +563,11 @@ rounds 1-4, and the draft 6 and 7 revisions):
 
 ## 5. Concurrent work
 
-The agreed order (`docs/superpowers/reviews/2026-09-24-share-skip-fix/branch-split.md`):
-share-skip-fix Branch A (merged) -> THIS branch -> send-outcome-reconcile Stage 1
--> reconcile's `retrySend` adoption together with share-skip-fix Branch B. The
+The agreed order (`docs/superpowers/reviews/2026-09-24-share-skip-fix/branch-split.md`,
+refined by Cameron's 2026-09-25 ruling recorded in send-outcome-reconcile's
+revision 6 @`b93ab376`): share-skip-fix Branch A (merged) -> THIS branch ->
+send-outcome-reconcile Stage 1 -> send-outcome-reconcile Stage 1b (the `retrySend`
+adoption, its own worktree) -> share-skip-fix Branch B. The
 couplings are stated as requirements on ANY path, so they hold whatever the later
 branches' mechanics become; each later branch carries the ones its stage meets.
 
@@ -589,7 +591,8 @@ branches' mechanics become; each later branch carries the ones its stage meets.
   after reconcile: reading the failed message's live `retry_due_at` on the share
   results row is its job (moved from Branch A in the split record), under D8's
   rule - never the retry count. It reuses this branch's backoff seam (D13).
-- **`feat/send-outcome-reconcile`** (revision 5, @`616d120d`, its review closed)
+- **`feat/send-outcome-reconcile`** (revision 6, @`b93ab376`; its review closed at
+  revision 5)
   plans edits to `relayRetryLeg.ts`, `relayFanOut.ts` (`sendOneRelayLeg`, split
   into prepare / send / record phases with a claim on a per-recipient
   send-attempt record before every provider call), `retrySend.ts`,
@@ -598,9 +601,9 @@ branches' mechanics become; each later branch carries the ones its stage meets.
   fences off `routes/webhooks/twilio.ts` entirely, so it does not touch this
   branch's claim or 30003-arm changes. Its planner has since split it
   (2026-09-25): Stage 1 keeps the relay retry rung and defers adopting
-  `retrySend`, which becomes later work of its own. Stage 1 carries requirements
-  1 and 6 for the relay rung, and 5 and 7; the `retrySend` adoption carries 1 and
-  6 for the one-to-one retry, and 2, 3 and 4, plus the joint gap below.
+  `retrySend` to its own Stage 1b. Stage 1 carries requirements 1 and 6 for the
+  relay rung, and 5 and 7; Stage 1b (the `retrySend` adoption) carries 1 and 6
+  for the one-to-one retry, and 2, 3 and 4, plus the joint gap below.
   Requirements on any path it adds:
   1. A retry it re-drives later - a relay rung, or the one-to-one rung it
      re-enqueues once - runs the same job handler, so D4's job-time check
@@ -756,8 +759,9 @@ branches' mechanics become; each later branch carries the ones its stage meets.
   (section 5, D8).
 - **Sequencing,** agreed with both other planners: share-skip-fix's narrowed
   Branch A first; then THIS branch; then send-outcome-reconcile's Stage 1; then
-  its `retrySend` adoption and share-skip-fix's Branch B, each planned on the code
-  that exists by then. It works because reconcile has no plan yet and can be
+  its Stage 1b, the `retrySend` adoption; then share-skip-fix's Branch B - each
+  planned on the code that exists by then (Cameron's 2026-09-25 refinement,
+  recorded in reconcile's revision 6). It works because reconcile has no plan yet and can be
   planned against code that already holds this branch's small insertions. The
   condition: reconcile's spec does not mention this branch at all, so each of its
   plans takes in the section 5 requirements its stage carries (section 5) before

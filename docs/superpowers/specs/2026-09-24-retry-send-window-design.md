@@ -5,8 +5,9 @@ cut from `main` @`685f2ede`, synced with `main` @`da04d0cb` at `f49a2fe9` after
 share-skip-fix Branch A merged. Status: DRAFT 7 - draft 6 took Cameron's
 spec-gate answers of 2026-09-25 (the adversarial review closed at round 4,
 `docs/superpowers/reviews/2026-09-24-retry-send-window/`); draft 7 reconciles with
-the merged Branch A and adds D14 (a retry follows the original send). Code
-citations are at `f49a2fe9`.
+the merged Branch A and adds D14 (a retry follows the original send); draft 7.1
+adds precision edits from the plan drafting
+(`plan-draft-<A|B1|B2|C|D>-findings.md`). Code citations are at `f49a2fe9`.
 
 | sev | issue | this branch |
 | --- | --- | --- |
@@ -157,7 +158,10 @@ order - the job's gates first, as the job itself runs them:
    (`relayRetryLeg.ts:491-555`): the conversation (its status, its roster, and the
    member's current number, compared by digest) and the member's suppression, in
    the job's own order - group open, on the roster, number unchanged, not opted
-   out - so "that gate's code" is deterministic when two apply. Everything needed
+   out - so "that gate's code" is deterministic when two apply (the job's own
+   "open group with no pool number" check now follows the four gates, so a
+   pool-less group whose member also fails a gate closes with that gate's
+   code instead of throwing). Everything needed
    is already in scope at the claim (`relayMemberKey`, `isMemberSuppressed`,
    `normalizeToE164`, `relayRetryDigest`, the contacts and conversations
    repositories, and the claim's own `destDigest`). If a gate would refuse, the
@@ -200,9 +204,10 @@ message recorded one, its recipient (D14). In order:
 1. A `group_text` conversation: no retry (D11); WARN.
 2. A retry the send path would refuse right now, judged as D14 will send it:
    the kill switch; an opt-out (the conversation's flag, the phone-matched
-   contact's or the recipient's); a soft-deleted recipient (the send path's
-   `isDeleted` gate, `sendMessage.ts:348`, which the shared scheduled-send preview
-   omits by design); for an automated original, manual mode; for a person's
+   contact's or the recipient's); a soft-deleted contact - the recorded recipient,
+   else the phone-matched contact, the send path's own rule (its `isDeleted`
+   gate, `sendMessage.ts:348`, which the shared scheduled-send preview omits by
+   design); for an automated original, manual mode; for a person's
    original, no recorded consent (the JIT gate, `sendMessage.ts:362`). The
    decision and the send path's gates (`sendMessage.ts:298-391`) share one set of
    predicates, so they cannot drift (the existing
@@ -247,8 +252,9 @@ scheduling).
   (nothing was attempted), and is never mapped to `transient`, whose branch
   assumes a provider refusal. The fan-out passes no deadline and is unchanged.
   The transient re-enqueue
-  (`relayRetryLeg.ts:643-646`) re-checks and closes instead of re-enqueueing once
-  past the window.
+  (`relayRetryLeg.ts:643-646`) is a scheduling decision: it re-checks with the
+  scheduling rule (`now + transient backoff + RETRY_JOB_GRACE_MS` inside the
+  window) and closes `retry_window_closed` instead of re-enqueueing when it fails.
 - One-to-one job: checks before `sendMessage` and ends the chain without sending.
   The one-to-one send does not wait on the bucket.
 
@@ -356,7 +362,10 @@ and the exhausted-retries line today:
 - relay job: the `retry_window_closed` close (the gate or the bounded acquire's
   timeout), ERROR;
 - one-to-one arm and job: one ERROR line each, naming `window_closed`.
-WARN, not ERROR: a D3a skip; a relay claim that finds a job gate would refuse
+WARN, not ERROR: a D3a skip (including one on a thread whose retries are also
+exhausted - D3a's order puts the refusal first); a one-to-one message whose
+conversation no longer exists (the level it logs at today); a relay claim that
+finds a job gate would refuse
 (`gate_refused`, D3); `already_claimed`; a missing or unparseable origin (D5); and
 a failed read in the one-to-one decision (D3a, which then schedules). A failed read
 in the relay claim's preview is the existing `claim_failed`, ERROR (D3). A failed
@@ -772,7 +781,7 @@ Each is filed or accepted here, so it outlives this spec's freeze.
   `sent`, `messagesRepo.ts:133-142`), so no Retry can find the failure without its
   promise. A Retry can still double-send after an expired promise while the
   automatic job is running late; from a stale tab on an original an automatic
-  retry already replaced; and while a retry's outcome is pending, unless the path
+  retry already replaced, once the promise has expired; and while a retry's outcome is pending, unless the path
   that left it pending honors section 5's requirement 3.
 - **Pending reconcile copy** (accepted): while a retry's outcome is pending
   reconcile, the bubble keeps "will retry" although its text may already be out.
@@ -781,8 +790,11 @@ Each is filed or accepted here, so it outlives this spec's freeze.
 - **A promise with nothing behind it:** an automated retry the breaker refuses at
   send time (live state D3a cannot preview; a person's retry is never metered, D14),
   one D3a let through on a failed read that the
-  job then refuses, one the job declines at send time (D4), and one whose enqueue
-  failed when the correction write failed too each keep "will retry", and hide
+  job then refuses, one the job declines at send time (D4), one whose enqueue
+  failed when the correction write failed too, and one whose process died between
+  the stamped status write and the enqueue (Twilio's redelivery then finds nothing
+  to transition; today the same crash loses the retry silently) each keep "will
+  retry", and hide
   the Retry button, until the promise expires - at most the longest backoff plus
   `RETRY_PROMISE_GRACE_MS` (6 minutes) after the failure.
 - **A relay claim fault** (`claim_failed`): a read or write in the claim throws,
@@ -790,9 +802,12 @@ Each is filed or accepted here, so it outlives this spec's freeze.
   - the one path where a relay leg learns of its retry late. The claim's
   recovery by redelivery predates this branch (`twilio.ts:3000-3007`).
 - **Stranded claim-time close:** an abrupt kill between a declined rung's append
-  and its close leaves an open rung that is never enqueued - the same
-  few-millisecond window, and the same stranding, as the append-to-enqueue gap in
-  `relay-retry-stranded-claim-window` (low). Nothing new to file.
+  and its close, or a close write that fails, leaves an open rung that is never
+  enqueued - the same stranding as the append-to-enqueue gap in
+  `relay-retry-stranded-claim-window` (low), and no redelivery repairs it (the
+  deduped append returns first). A failed close keeps its outcome, answers 200 and
+  logs one ERROR naming the rung left open, like the enqueue-failure close.
+  Recorded in that issue.
 - **No usable origin** (accepted, D5): a relay slot without `sentAt`, a rung
   claimed before this deploy, or an origin that does not parse is not windowed,
   so that retry's send has no deadline. Production writes `sentAt` on every fanned

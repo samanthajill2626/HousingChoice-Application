@@ -376,6 +376,85 @@ describe('relay.retryLeg (30003 ladder)', () => {
     },
   );
 
+  // --- retry-send-window D3: the no-pool-number throw now FOLLOWS the four gates ---
+  //
+  // The job used to throw "has no pool number" between the group-open gate and
+  // the roster gate. It now runs all four gates first - the order the claim's
+  // preview shares - so both halves are pinned: on an OPEN group with NO pool
+  // number, a gate that refuses still closes the rung with its own code, and
+  // with every gate passing the job still throws, after the suppression read.
+
+  it.each<[string, (world: FakeWorld) => void, string]>([
+    [
+      'removed member',
+      (w) => {
+        const conv = w.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).filter((m) => m.contactId !== BOB_KEY);
+      },
+      'retry_member_removed',
+    ],
+    [
+      'changed number',
+      (w) => {
+        const conv = w.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).map((m) =>
+          m.contactId === BOB_KEY ? { ...m, phone: BOB_NEW } : m,
+        );
+      },
+      'retry_number_changed',
+    ],
+    [
+      'opted out',
+      (w) => {
+        w.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: true });
+      },
+      'retry_opted_out',
+    ],
+  ])(
+    'closes an OPEN group with NO pool number by its refusing gate (%s) - the gates run before the pool-number throw',
+    async (_name, arrange, code) => {
+      seedRelay(world, { pool_number: undefined });
+      const row = seedRetryRow(world);
+      arrange(world);
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
+      const terminal = warnLogs().filter((l) => l['closeCode'] === code);
+      expect(terminal).toHaveLength(1);
+      expect(terminal[0]).toMatchObject({ retryClaim: 'gate_refused' });
+      // No throw: a deferred job that throws is logged at ERROR by the queue
+      // adapter, and the rung would be left `queued`.
+      expect(errorLogs()).toHaveLength(0);
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+    },
+  );
+
+  it('still THROWS for an OPEN group with NO pool number once all four gates pass - after the suppression read, nothing sent', async () => {
+    seedRelay(world, { pool_number: undefined });
+    const row = seedRetryRow(world);
+    const suppressionRead = vi.spyOn(world.contactsRepo, 'getById');
+    register();
+
+    await expect(
+      dispatchJob({
+        jobId: 'job-poolless-1',
+        jobName: RELAY_RETRY_LEG_JOB,
+        payload: payloadFor(row),
+        enqueuedAt: new Date().toISOString(),
+      } as never),
+    ).rejects.toThrow(/has no pool number/);
+    // The throw now comes AFTER the fourth gate's read ...
+    expect(suppressionRead).toHaveBeenCalledWith(BOB_KEY);
+    // ... and still sends and closes nothing: no gate code describes it.
+    expect(world.sent).toHaveLength(0);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(persistedEmits()).toHaveLength(0);
+  });
+
   it('never stamps contact_opted_out on an opt-out refusal (the rollup drops that code)', async () => {
     seedRelay(world);
     const row = seedRetryRow(world);

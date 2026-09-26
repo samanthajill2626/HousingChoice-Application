@@ -34,20 +34,15 @@ import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { normalizeToE164 } from '../lib/phone.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
-import { relayRetryBackoffMs, relayRetryDigest } from '../lib/relayRetryClaim.js';
+import { relayRetryBackoffMs } from '../lib/relayRetryClaim.js';
+import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../lib/relayRetryGates.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
-import {
-  createConversationsRepo,
-  type ConversationParticipant,
-  type ConversationsRepo,
-} from '../repos/conversationsRepo.js';
+import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createMessagesRepo,
   mediaAttachmentsOf,
-  relayMemberKey,
   type MessageItem,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
@@ -79,7 +74,9 @@ export interface RelayRetryLegPayload {
 
 /**
  * Every terminal code this job can write to a retry leg's slot (spec D15/D14/
- * D10). The four `retry_*` values are D9's gate refusals and each has operator
+ * D10). The four gate `retry_*` values are D9's gate refusals - typed once as
+ * `RelayRetryGateCode`, beside the shared evaluator that both this job and the
+ * status webhook's claim run (retry-send-window D3) - and each has operator
  * copy in the dashboard's internal-code map; `enqueue_failed` and
  * `transient_cap` already existed there and keep their meanings - retries did
  * not run vs. retries ran and the transient budget is spent.
@@ -88,13 +85,7 @@ export interface RelayRetryLegPayload {
  * code from the relay rollup entirely, so a refusal stamped with it would
  * silently vanish from the surface this feature exists to make truthful.
  */
-export type RelayRetryCloseCode =
-  | 'retry_group_closed'
-  | 'retry_member_removed'
-  | 'retry_number_changed'
-  | 'retry_opted_out'
-  | 'enqueue_failed'
-  | 'transient_cap';
+export type RelayRetryCloseCode = RelayRetryGateCode | 'enqueue_failed' | 'transient_cap';
 
 export interface RelayRetryLegJobDeps {
   adapter?: MessagingAdapter & CarrierMessageSender;
@@ -256,6 +247,15 @@ function parseRelayRetryLegPayload(payload: unknown): RelayRetryLegPayload {
 function logSafeStoredMemberKey(memberKey: string): string {
   return memberKey.startsWith('phone#') ? 'phone-only-member' : memberKey;
 }
+
+/** The WARN message each gate refusal logs - one per code, unchanged since the
+ *  gates moved into `evaluateRelayRetryGates` (retry-send-window D3). */
+const GATE_REFUSAL_MESSAGES: Record<RelayRetryGateCode, string> = {
+  retry_group_closed: 'relayRetryLeg: retry refused - relay group is not open',
+  retry_member_removed: 'relayRetryLeg: retry refused - member is no longer on the roster',
+  retry_number_changed: 'relayRetryLeg: retry refused - destination number changed since the claim',
+  retry_opted_out: 'relayRetryLeg: retry refused - member opted out',
+};
 
 /** The lineage a retry row MUST carry for this job to be able to run at all. */
 interface RetryRowLineage {
@@ -479,80 +479,57 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       announceRootClose();
     }
 
-    // 4. The gates (spec D9), in order. Each refusal writes its OWN close code,
-    // logs a WARN with the `gate_refused` cause, and ENDS the chain - no further
-    // rung is claimed. WARN, not the spec's D23 ERROR, by Cameron's ruling on the
-    // handback's open question Q1 (2026-09-24): a closed group, a removed member,
-    // a changed number and an opt-out are deliberate human actions, not faults -
-    // the 21610 carve-out's reasoning - and at ERROR an operator who closed a
-    // group with several rungs pending could trip the ErrorLogs burst alarm on
-    // their own action. The send-time refusal below (e.g. `breaker_open`) is a
-    // system condition and stays ERROR.
+    // 4. The gates (spec D9), in order, through the ONE evaluator the status
+    // webhook's claim also previews them with (retry-send-window D3), so the
+    // claim and this job can never disagree about which gate refuses, or which
+    // code wins when two apply. Each refusal writes its OWN close code, logs a
+    // WARN with the `gate_refused` cause, and ENDS the chain - no further rung
+    // is claimed. WARN, not the spec's D23 ERROR, by Cameron's ruling on the
+    // handback's open question Q1 (2026-09-24): a closed group, a removed
+    // member, a changed number and an opt-out are deliberate human actions,
+    // not faults - the 21610 carve-out's reasoning - and at ERROR an operator
+    // who closed a group with several rungs pending could trip the ErrorLogs
+    // burst alarm on their own action. The send-time refusal below (e.g.
+    // `breaker_open`) is a system condition and stays ERROR.
     const conversation = await conversationsRepo.getById(conversationId);
-    if (conversation === undefined || conversation.status !== 'open') {
-      // Same authoritative check the fan-out uses: `status`, not pool_number
-      // presence (a pool number is KEPT on close for burn-multiplexing). An
-      // absent conversation is not open either, and the four codes are a closed
-      // set - "group closed" is the truthful one of them.
-      await refuseGate('retry_group_closed');
+    const gate = await evaluateRelayRetryGates({
+      conversation,
+      memberKey,
+      rootTsMsgId,
+      destDigest,
+      // The evaluator reads nothing itself: this is the job's ONE suppression
+      // read, the one `suppressionChecked: true` below relies on (R2, W4).
+      isSuppressed: (candidate) => isMemberSuppressed(contactsRepo, conversationsRepo, candidate),
+    });
+    if (gate.refused) {
+      await refuseGate(gate.code);
       log.warn(
         {
           ...ladder,
+          // The STORED key's log-safe form: equal to `logSafeMemberKey` of the
+          // roster member it matches, and the only form left once the member
+          // is gone from the roster.
           memberKey: logSafeStoredMemberKey(memberKey),
           retryClaim: 'gate_refused',
-          closeCode: 'retry_group_closed',
-          status: conversation?.status,
+          closeCode: gate.code,
+          ...(gate.code === 'retry_group_closed' && { status: conversation?.status }),
         },
-        'relayRetryLeg: retry refused - relay group is not open',
+        GATE_REFUSAL_MESSAGES[gate.code],
       );
       return;
     }
-    const poolNumber = conversation.pool_number;
+    // An OPEN relay group with no pool number cannot send at all, and no gate
+    // code describes it honestly. Throw rather than mis-stamp one of the four.
+    // Checked AFTER all four gates (retry-send-window D3, the order the claim
+    // previews): an open, pool-less group that ALSO refuses a gate closes with
+    // that gate's code instead of throwing. relayRetryLeg.test.ts pins both
+    // halves.
+    const poolNumber = gate.conversation.pool_number;
     if (typeof poolNumber !== 'string' || poolNumber.length === 0) {
-      // An OPEN relay group with no pool number cannot send at all, and no gate
-      // code describes it honestly. Throw rather than mis-stamp one of the four.
       throw new Error(`relayRetryLeg: relay conversation ${conversationId} has no pool number`);
     }
-
-    const roster = (conversation.participants ?? []) as ConversationParticipant[];
-    const member = roster.find((candidate) => relayMemberKey(candidate) === memberKey);
-    if (member === undefined) {
-      await refuseGate('retry_member_removed');
-      log.warn(
-        {
-          ...ladder,
-          memberKey: logSafeStoredMemberKey(memberKey),
-          retryClaim: 'gate_refused',
-          closeCode: 'retry_member_removed',
-        },
-        'relayRetryLeg: retry refused - member is no longer on the roster',
-      );
-      return;
-    }
+    const member = gate.member;
     const memberLog = { ...ladder, memberKey: logSafeMemberKey(member) };
-
-    // Compare DIGESTS, never the raw number (spec D5): the handset is not stored
-    // anywhere on the row, and a member whose phone changed must never silently
-    // receive an old message at the new number. An unnormalisable current number
-    // can produce no matching digest, so it refuses here too.
-    const currentE164 = normalizeToE164(member.phone);
-    if (currentE164 === undefined || relayRetryDigest(rootTsMsgId, currentE164) !== destDigest) {
-      await refuseGate('retry_number_changed');
-      log.warn(
-        { ...memberLog, retryClaim: 'gate_refused', closeCode: 'retry_number_changed' },
-        'relayRetryLeg: retry refused - destination number changed since the claim',
-      );
-      return;
-    }
-
-    if (await isMemberSuppressed(contactsRepo, conversationsRepo, member)) {
-      await refuseGate('retry_opted_out');
-      log.warn(
-        { ...memberLog, retryClaim: 'gate_refused', closeCode: 'retry_opted_out' },
-        'relayRetryLeg: retry refused - member opted out',
-      );
-      return;
-    }
 
     // The fan-out's media-without-store ERROR, twinned (code review R1, F4).
     // `hasForwardableMedia` above folds "no store" into the transport intent, so

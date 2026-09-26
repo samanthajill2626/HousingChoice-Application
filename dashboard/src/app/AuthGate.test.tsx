@@ -1,8 +1,10 @@
-// The store clear must run AFTER the deleted subtree's cleanups (React deletes
-// parent-first; a cleanup in a parent would run before a child's unmount save
-// and the save would repopulate the store). A passive effect in the surviving
-// AuthGate runs after every deleted child's cleanup. Proven here with a child
-// that saves from a LAYOUT-effect cleanup, the same phase useInbox saves in.
+// The store clear must run AFTER the Inbox's unmount save. React runs every
+// LAYOUT cleanup of a deleted subtree before any PASSIVE cleanup or effect, so
+// a passive effect in the surviving AuthGate runs after that save (a layout
+// cleanup). Only a LAYOUT cleanup in a deleted parent would run before it
+// (layout cleanups run parent-first), and the save would then repopulate the
+// store. Proven here with a child that saves from a LAYOUT-effect cleanup, the
+// same phase useInbox saves in.
 import { act, render, screen } from '@testing-library/react';
 import { useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

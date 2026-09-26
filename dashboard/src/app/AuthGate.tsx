@@ -4,10 +4,12 @@
 // authenticated surface can assume a logged-in principal.
 //
 // It also owns the inbox list store's lifetime (spec 5.8): when the session
-// goes anonymous the store is cleared from a PASSIVE effect, which React runs
-// after every deleted child's cleanup - so the Inbox's own unmount save (a
-// layout cleanup) has already happened and cannot repopulate the store. A
-// cleanup in a deleted parent (AppFrame) would run BEFORE that save.
+// goes anonymous the store is cleared from a PASSIVE effect in this surviving
+// gate. React runs every LAYOUT cleanup of the deleted subtree before any
+// PASSIVE cleanup or effect, so the Inbox's own unmount save (a layout
+// cleanup) has already happened and cannot repopulate the store. What would
+// run first is a LAYOUT cleanup in a deleted parent (AppFrame): layout
+// cleanups run parent-first, so the Inbox's save would follow and refill it.
 import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { Spinner } from '../ui/index.js';

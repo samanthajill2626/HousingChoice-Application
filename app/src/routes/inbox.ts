@@ -2021,13 +2021,15 @@ export async function aggregateInbox(
         //     dashboard's edit form). The row leaves the block behind the
         //     cursor and joins a block not yet read, so it ships on TWO pages.
         //     The dashboard keys the wire row by contactId (useInbox `rowKey`
-        //     -> `c:<contactId>`), so that is a doubled row under a duplicate
-        //     React key - ugly, but VISIBLE.
+        //     -> `c:<contactId>`), and its appendPage dedupes a loaded page by
+        //     that key, so the second copy is DROPPED: the stale page-one copy
+        //     (still showing Needs triage) silently wins until the next head
+        //     read.
         //   * 'active' -> 'needs_review' (un-triage) is the RARE one and moves
         //     the row backward into a block already read, so it ships on NO
         //     page. INVISIBLE, and no guard here can see it.
         //
-        // THE THRESHOLD IS THE REQUEST `limit` (30 from the dashboard,
+        // THE THRESHOLD IS THE REQUEST `limit` (100 from the dashboard,
         // useInbox), NOT UNKNOWN_QUEUE_PAGE_SIZE - a queue only has to exceed
         // ONE PAGE for a second request to exist. AND THE WINDOW IS THE
         // OPERATOR'S GAP BETWEEN LOAD-MORE CLICKS - seconds to minutes, not the

@@ -1110,9 +1110,21 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
         }),
       );
       expect(failureLines(WARN)).toHaveLength(0);
-      if (!versioned) {
-        expect(slotOf(root)).toEqual({ status: 'undelivered', errorCode: '30003', sentAt });
-      }
+      // The member's slot on the ROOT holds exactly what this callback's own
+      // status write left - the failure over the seeded slot - in BOTH shapes:
+      // the claim never writes it (spec D3). The fixture leg SID yields no
+      // observed transport, so no actualTransport is written either.
+      expect(slotOf(root)).toEqual(
+        versioned
+          ? {
+              status: 'undelivered',
+              requestedTransport: 'sms',
+              transportAggregationState: 'attempted',
+              errorCode: '30003',
+              sentAt,
+            }
+          : { status: 'undelivered', errorCode: '30003', sentAt },
+      );
     },
   );
 

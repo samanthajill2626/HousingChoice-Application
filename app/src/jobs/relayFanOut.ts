@@ -32,7 +32,7 @@ import {
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { TokenBucket } from '../lib/tokenBucket.js';
+import { TokenBucketBusyError, type TokenBucket } from '../lib/tokenBucket.js';
 import {
   createConversationsRepo,
   getOwner,
@@ -1223,9 +1223,23 @@ export type RelayLegPayload = Pick<
  * continuation, `sent` counts toward the completion log. `providerSid` is
  * present on `sent` only; `errorCode` carries the code that was persisted to
  * the member's slot on `suppressed`, `refused`, `filtered` and `transient`.
+ *
+ * `deadline_exceeded` (retry-send-window spec D4) is reachable ONLY for a
+ * caller that passed `sendDeadlineMs` - the 30003 retry job; the fan-out never
+ * does. The bounded token-bucket wait ran out: NOTHING was written (no slot,
+ * no aggregation state) and nothing was sent, so the caller owns the close. It
+ * is terminal for a retry rung - never a `transient` to re-defer, whose branch
+ * assumes a provider refusal and would re-open a send past the window.
  */
 export interface RelayLegSendOutcome {
-  kind: 'sent' | 'skipped_terminal' | 'suppressed' | 'refused' | 'filtered' | 'transient';
+  kind:
+    | 'sent'
+    | 'skipped_terminal'
+    | 'suppressed'
+    | 'refused'
+    | 'filtered'
+    | 'transient'
+    | 'deadline_exceeded';
   providerSid?: string;
   errorCode?: string;
 }
@@ -1247,9 +1261,11 @@ export interface RelayLegSendOutcome {
  * is neither a refusal, nor 30007, nor transient still THROWS out of here, as
  * it did out of the loop.
  *
- * `suppressionChecked` (optional, default false) is the one behavioural knob,
- * and the fan-out never passes it - see its own doc below for why a caller that
- * has just run the same check must not let this unit run it a second time.
+ * `suppressionChecked` and `sendDeadlineMs` (both optional) are the two
+ * behavioral knobs, and the fan-out passes neither - see each one's own doc
+ * below: why a caller that has just run the same suppression check must not
+ * let this unit run it a second time, and why a retry rung's wait on the A2P
+ * meter is bounded by its send window.
  */
 export async function sendOneRelayLeg(args: {
   messages: MessagesRepo;
@@ -1297,6 +1313,16 @@ export async function sendOneRelayLeg(args: {
    * ladder whose gate refusal is itself the D9 answer.
    */
   suppressionChecked?: boolean;
+  /**
+   * retry-send-window spec D4: the epoch-ms instant after which this leg must
+   * NOT go out - the 30003 retry job's send-window end (origin + 15 minutes).
+   * When set, the token-bucket wait is BOUNDED by it (`acquire(1,
+   * { timeoutMs })`, the group-send precedent) instead of lasting as long as
+   * the shared A2P meter takes, and a timeout returns `deadline_exceeded`
+   * before any write. Unset - the fan-out, and a retry rung with no usable
+   * origin - the acquire is unbounded exactly as before.
+   */
+  sendDeadlineMs?: number;
 }): Promise<RelayLegSendOutcome> {
   const {
     messages,
@@ -1314,6 +1340,7 @@ export async function sendOneRelayLeg(args: {
     sourceMedia,
     transport,
     suppressionChecked = false,
+    sendDeadlineMs,
   } = args;
   const hasMedia = sourceMedia.length > 0;
 
@@ -1357,7 +1384,25 @@ export async function sendOneRelayLeg(args: {
     return { kind: 'suppressed', errorCode: 'contact_opted_out' };
   }
 
-  await tokenBucket?.acquire(1);
+  if (tokenBucket !== undefined) {
+    if (sendDeadlineMs === undefined) {
+      await tokenBucket.acquire(1);
+    } else {
+      // retry-send-window D4. BOUNDED for a caller with a send deadline, and
+      // the timeout is an OUTCOME, not a throw: this acquire sits outside the
+      // send's only try below, this unit lets unclassified errors escape, and
+      // the retry job - its execution marker already set - has no catch
+      // around this call, so a thrown TokenBucketBusyError would strand the
+      // rung at `queued`. It returns BEFORE the presign, the `attempted`
+      // aggregation write and the provider call: nothing was attempted.
+      try {
+        await tokenBucket.acquire(1, { timeoutMs: Math.max(0, sendDeadlineMs - Date.now()) });
+      } catch (err) {
+        if (err instanceof TokenBucketBusyError) return { kind: 'deadline_exceeded' };
+        throw err;
+      }
+    }
+  }
   let legMediaUrls: string[] | undefined;
   if (hasMedia && mediaStore) {
     legMediaUrls = await Promise.all(

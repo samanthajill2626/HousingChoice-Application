@@ -46,6 +46,7 @@ import { createLogger } from '../src/lib/logger.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../src/lib/messageTransport.js';
 import { TokenBucket } from '../src/lib/tokenBucket.js';
 import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
+import { RETRY_SEND_WINDOW_MS } from '../src/lib/retrySendWindow.js';
 import { SendRefusedError } from '../src/services/sendMessage.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
@@ -1187,6 +1188,103 @@ describe('relay.retryLeg (30003 ladder)', () => {
     expect(outbound.delayed).toHaveLength(1);
     expect(slotOf(row.tsMsgId)?.status).toBe('queued');
     expect(persistedEmits()).toHaveLength(0);
+  });
+
+  // --- retry-send-window D4: the bounded token-bucket acquire ---
+
+  /**
+   * One token, refilled at 1 per 1,000 seconds: once drawn, the next draw waits
+   * about 16.7 minutes - longer than any window has left. `sleep` THROWS, so
+   * an unbounded acquire fails the test at once instead of hanging it for the
+   * whole wait.
+   */
+  async function drainedBucket(): Promise<TokenBucket> {
+    const bucket = new TokenBucket({
+      capacity: 1,
+      refillPerSec: 0.001,
+      maxJitterMs: 0,
+      sleep: async () => {
+        throw new Error('the retry leg slept on the A2P meter - its acquire must be bounded');
+      },
+    });
+    await bucket.acquire(1); // take the only token
+    return bucket;
+  }
+
+  it.each([true, false])(
+    'retry-send-window D4: a bounded acquire that outlasts the window closes retry_window_closed through refuseGate - nothing sent, never transient (versioned=%s)',
+    async (versioned) => {
+      seedRelay(world);
+      const origin = minutesAgo(1);
+      const row = seedRetryRow(world, { versioned, windowStart: origin });
+      const bucket = await drainedBucket();
+      const aggregate = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const claimPass = vi.spyOn(world.messagesRepo, 'claimFanoutPass');
+      register({ tokenBucket: bucket });
+
+      await runHandler(payloadFor(row));
+
+      // The job handed the unit the window's end as its deadline.
+      expect(legArgs(0).sendDeadlineMs).toBe(Date.parse(origin) + RETRY_SEND_WINDOW_MS);
+      expect(world.sent).toHaveLength(0);
+      // Returned BEFORE the unit's `attempted` write, and closed - never left queued.
+      expect(aggregate.mock.calls.some((call) => call[3] === 'attempted')).toBe(false);
+      expect(slotOf(row.tsMsgId)).toEqual(
+        versioned
+          ? {
+              status: 'failed',
+              requestedTransport: 'sms',
+              transportAggregationState: 'excluded',
+              errorCode: 'retry_window_closed',
+            }
+          : { status: 'failed', errorCode: 'retry_window_closed' },
+      );
+      // Never the transient branch: no pass claimed, nothing re-enqueued.
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(outbound.delayed).toHaveLength(0);
+      expect(errorLogs()).toContainEqual(
+        expect.objectContaining({
+          event: 'relay_retry_leg',
+          retryClaim: 'window_closed',
+          closeCode: 'retry_window_closed',
+          windowCheck: 'send_deadline',
+        }),
+      );
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+    },
+  );
+
+  it('retry-send-window D4: a rung inside the window draws its token with a wait bounded by the window end, and sends', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+    const bucket = new TokenBucket({ capacity: 5, refillPerSec: 5, maxJitterMs: 0 });
+    const acquire = vi.spyOn(bucket, 'acquire');
+    register({ tokenBucket: bucket });
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent).toHaveLength(1);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    const [count, opts] = acquire.mock.calls[0]!;
+    expect(count).toBe(1);
+    // About 14 of the window's 15 minutes are left.
+    expect(opts?.timeoutMs).toBeGreaterThan(13 * 60_000);
+    expect(opts?.timeoutMs).toBeLessThanOrEqual(14 * 60_000);
+  });
+
+  it('retry-send-window D5: a rung with no usable origin gets NO send deadline - its acquire stays unbounded', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    const bucket = new TokenBucket({ capacity: 5, refillPerSec: 5, maxJitterMs: 0 });
+    const acquire = vi.spyOn(bucket, 'acquire');
+    register({ tokenBucket: bucket });
+
+    await runHandler(payloadFor(row));
+
+    expect(legArgs(0).sendDeadlineMs).toBeUndefined();
+    expect(acquire.mock.calls).toEqual([[1]]);
+    expect(world.sent).toHaveLength(1);
   });
 
   // --- Malformed input is a programming error, not a gate refusal ---

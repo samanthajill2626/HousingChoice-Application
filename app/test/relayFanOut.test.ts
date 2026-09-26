@@ -36,6 +36,7 @@ import {
   type RelayComposeInputs,
 } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
+import { TokenBucket } from '../src/lib/tokenBucket.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
@@ -2315,5 +2316,55 @@ describe('relay.intro / relay.memberAdded on an OWNED group', () => {
     expect(world.sent.find((s) => s.to === LANDLORD)!.body).toBe(
       'Hey, adding Tina to the group as the tenant.',
     );
+  });
+});
+
+// retry-send-window (spec D4): the BOUNDED acquire belongs to the 30003 retry
+// job alone. The fan-out passes no send deadline, so its per-leg acquire stays
+// exactly as unbounded as before - a pin, green before and after that change.
+describe('relay.fanOut token-bucket acquire (retry-send-window D4)', () => {
+  let world: FakeWorld;
+  let outbound: InProcessOutboundQueueAdapter;
+  let bucket: TokenBucket;
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    bucket = new TokenBucket({ capacity: 10, refillPerSec: 10, maxJitterMs: 0 });
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      tokenBucket: bucket,
+      logger,
+    });
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
+  });
+
+  afterEach(() => {
+    _resetForTests();
+    vi.restoreAllMocks();
+  });
+
+  it('draws one token per leg with NO timeout - the fan-out passes no send deadline', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+    const acquire = vi.spyOn(bucket, 'acquire');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
+    // Exactly `acquire(1)` per leg - no options object, so no bound.
+    expect(acquire.mock.calls).toEqual([[1], [1]]);
   });
 });

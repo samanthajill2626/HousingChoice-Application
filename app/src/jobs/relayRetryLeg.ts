@@ -46,6 +46,7 @@ import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../lib/relayRe
 import {
   parseRetryWindowOrigin,
   retryFitsSendWindow,
+  retrySendDeadlineMs,
   withinRetrySendWindow,
 } from '../lib/retrySendWindow.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
@@ -93,7 +94,8 @@ export interface RelayRetryLegPayload {
  * not run vs. retries ran and the transient budget is spent.
  *
  * `retry_window_closed` (retry-send-window D4) is the send-window close: the
- * window gate below, or a transient re-run that would land past the window.
+ * window gate below, the send deadline passing while the rung waits on the
+ * A2P meter, or a transient re-run that would land past the window.
  * Kept for data and logs; the dashboard's relay join gives it NO display
  * code, so the leg reads as the original 30003 - a plain failed attempt.
  *
@@ -641,6 +643,11 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       // the row reads "Not sent - opted out" for a leg that was sent. One read,
       // one answer, no window.
       suppressionChecked: true,
+      // retry-send-window D4: the window's end, so the unit's wait on the
+      // shared A2P meter is BOUNDED by it - a rung queued behind a burst must
+      // not go out after origin + 15 minutes. Omitted when the row has no
+      // usable origin (D5): that rung is not windowed.
+      ...(originMs !== undefined && { sendDeadlineMs: retrySendDeadlineMs(originMs) }),
     });
 
     // 6. The outcome.
@@ -657,6 +664,26 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       log.info(
         { ...memberLog, providerSid: outcome.providerSid },
         'relayRetryLeg: retry leg sent',
+      );
+      return;
+    }
+
+    if (outcome.kind === 'deadline_exceeded') {
+      // retry-send-window D4: the send deadline (origin + 15 minutes) passed
+      // while this rung waited on the shared A2P meter. Nothing was sent and
+      // nothing written, so this is a PRE-send refusal - `refuseGate`, the
+      // same close as the window gate above - and NEVER the transient branch
+      // below, whose re-enqueue assumes a provider refusal and would try again
+      // past the window. ERROR (D9); refuseGate announces the root once.
+      await refuseGate('retry_window_closed');
+      log.error(
+        {
+          ...memberLog,
+          retryClaim: 'window_closed',
+          closeCode: 'retry_window_closed',
+          windowCheck: 'send_deadline',
+        },
+        'relayRetryLeg: send-window deadline passed while waiting for the A2P meter - nothing sent, retry leg closed',
       );
       return;
     }

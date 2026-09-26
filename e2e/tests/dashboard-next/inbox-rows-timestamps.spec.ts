@@ -10,10 +10,19 @@
 // app's inbound pipeline captures a `type:'unknown'` stub contact for a number
 // it has never seen, so the row is a contact row carrying the Needs triage
 // chip. Rows are therefore found by the formatted phone, never by the persona
-// label, and nothing here asserts a row's kind or the shape of its href. Under
-// filter=all at ?limit=N the lean world renders N contact rows PLUS the seeded
-// group text and the connecting relay group; the counts below say "+ 2" for
-// those.
+// label, and nothing here asserts a row's kind or the shape of its href.
+//
+// The lean world alone renders FOUR inbox rows (app/src/lib/seed/lean.ts, all
+// 2026-06-01 UTC): two one-to-one contact rows, Tasha (14:05) and Dario
+// (13:20, the seed's OLDEST conversation), and two multi-party rows, the group
+// text (13:45) and the connecting relay group (13:30). Every minted party is
+// newer than all four. Under filter=all only the contact rows are paged: page
+// one at ?limit=N holds the N newest contact rows (all of them, when fewer)
+// PLUS both multi-party rows, and a cursor page holds contact rows only. The
+// client sorts every rendered row newest first, so Dario's row is the LAST
+// row, below the multi-party rows, and at a small limit it arrives on the last
+// page. The counts below say "+ Tasha + Dario" for the seeded contacts and
+// "+ 2" for the multi-party rows.
 //
 // Minted numbers are +1 555 <block><4 stamp digits><2-digit index>. The block
 // digit (6-9) is never 0, so a minted number can never collide with the lean
@@ -155,7 +164,7 @@ test.describe('inbox rows and timestamps', () => {
     await expect(time).toHaveText(/^\d{1,2}:\d{2} [AP]M$/);
 
     // The lean seed's June rows show a date (year-agnostic so the spec survives
-    // January): the 1:1 and the group text.
+    // January): Tasha's 1:1 and the group text.
     await expect(page.getByRole('link', { name: /Tasha Nguyen/ }).locator('time')).toHaveText(
       /^[A-Z][a-z]{2} \d{1,2}(, \d{4})?$/,
     );
@@ -172,33 +181,36 @@ test.describe('inbox rows and timestamps', () => {
 
     // At limit=2 the four-row page one leaves the sentinel in view, so
     // auto-load chains to the end as soon as the page loads (spec 5.2, by
-    // design at a tiny limit): 3 parties + Tasha + 2 multi-party rows.
-    await expect(rows(page)).toHaveCount(6, { timeout: 15_000 });
+    // design at a tiny limit): 3 parties + Tasha + Dario = 5 contacts in pages
+    // of 2, 2, 1, + 2 multi-party rows on page one = 7.
+    await expect(rows(page)).toHaveCount(7, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
     expect(seen.filter((r) => r.cursor).length).toBeGreaterThan(0);
 
     // A live update: a fourth party texts. The list is never detached, the
     // head read replaces page one, and auto-load rebuilds the pages from the
-    // fresh chain.
+    // fresh chain: 4 parties + Tasha + Dario = 6 contacts in pages of 2, 2, 2,
+    // + 2 = 8.
     const listHandle = await page.getByRole('list', { name: 'Conversations' }).elementHandle();
     const mark = seen.length;
     const [number4] = await seedParties(request, 1, stamp, 8);
     await expect(rowFor(page, number4!)).toBeVisible({ timeout: 15_000 });
-    await expect(rows(page)).toHaveCount(7, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(8, { timeout: 15_000 });
     // SC-13: the refresh put the new row at the top.
     await expect(rows(page).first().getByRole('link')).toHaveText(new RegExp(displayOf(number4!).replace(/[()]/g, '\\$&')));
     await expect(loadMore(page)).toHaveCount(0);
     expect(await listHandle!.evaluate((el) => el.isConnected)).toBe(true);
     expectHeadFirst(seen, mark, 'after the inbound at limit=2', true);
 
-    // At the DEFAULT limit a page one holds everything: a further inbound adds
-    // its row at the top, removes nothing, and issues no cursor request.
+    // At the DEFAULT limit a page one holds everything (6 contacts + 2 = 8): a
+    // further inbound adds its row at the top (7 contacts + 2 = 9), removes
+    // nothing, and issues no cursor request.
     await page.goto(`${NEXT}/inbox`);
-    await expect(rows(page)).toHaveCount(7, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(8, { timeout: 15_000 });
     const mark2 = seen.length;
     const [number5] = await seedParties(request, 1, stamp, 7);
     await expect(rowFor(page, number5!)).toBeVisible({ timeout: 15_000 });
-    await expect(rows(page)).toHaveCount(8);
+    await expect(rows(page)).toHaveCount(9);
     await expect(rows(page).first().getByRole('link')).toHaveText(new RegExp(displayOf(number5!).replace(/[()]/g, '\\$&')));
     await page.waitForTimeout(1000);
     expect(seen.slice(mark2).filter((r) => r.cursor)).toHaveLength(0);
@@ -211,9 +223,11 @@ test.describe('inbox rows and timestamps', () => {
     await seedParties(request, 6, stamp, 9);
     const seen = trackInboxRequests(page);
 
-    // Everything fits in page one at limit=10: 7 contacts + 2.
+    // Everything fits in page one at limit=10: 6 parties + Tasha + Dario = 8
+    // contacts (fewer than 10), + 2 = 10. The LAST row is Dario's (the oldest),
+    // so both clicks below open his contact page.
     await page.goto(`${NEXT}/inbox?limit=10`);
-    await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(10, { timeout: 15_000 });
     await scrollToBottom(page);
     const saved = await scroller(page).evaluate((el) => el.scrollTop);
     expect(saved).toBeGreaterThan(0);
@@ -237,7 +251,7 @@ test.describe('inbox rows and timestamps', () => {
     await page.waitForURL(/\/inbox/);
     // Restored instantly: the rows are there and the position is back. A fresh
     // mount would sit at 0 behind a spinner.
-    await expect(rows(page)).toHaveCount(9);
+    await expect(rows(page)).toHaveCount(10);
     const restored = await scroller(page).evaluate((el) => el.scrollTop);
     expect(Math.abs(restored - saved)).toBeLessThanOrEqual(8);
     expect(await rowHrefs(page), 'the restore shows the same rows').toEqual(shown);
@@ -246,7 +260,7 @@ test.describe('inbox rows and timestamps', () => {
     await expect.poll(() => seen.slice(mark).filter((r) => !r.cursor).length, { timeout: 10_000 }).toBeGreaterThan(0);
     await page.waitForTimeout(800);
     expect(seen.slice(mark).filter((r) => r.cursor)).toHaveLength(0);
-    await expect(rows(page)).toHaveCount(9);
+    await expect(rows(page)).toHaveCount(10);
     expect(await rowHrefs(page), 'the reconciled list holds the same rows').toEqual(shown);
     const settled = await scroller(page).evaluate((el) => el.scrollTop);
     expect(Math.abs(settled - saved)).toBeLessThanOrEqual(8);
@@ -254,8 +268,10 @@ test.describe('inbox rows and timestamps', () => {
     // The Option B trade, pinned deliberately: at limit=2 the restore shows all
     // rows instantly, then the head read rebuilds from page one and auto-load
     // reloads the rest (a head read FIRST, cursor requests only after it).
+    // The 8 contacts page as 2, 2, 2, 2 (Tasha and Dario on the last page),
+    // + 2 on page one = 10.
     await page.goto(`${NEXT}/inbox?limit=2`);
-    await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(10, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
     const mark2 = seen.length;
     await rows(page).last().getByRole('link').click();
@@ -263,9 +279,9 @@ test.describe('inbox rows and timestamps', () => {
     await expect(inboxList(page)).toHaveCount(0); // the route committed (see above)
     await page.goBack();
     await page.waitForURL(/\/inbox/);
-    await expect(rows(page)).toHaveCount(9);
+    await expect(rows(page)).toHaveCount(10);
     await expect.poll(() => seen.slice(mark2).filter((r) => r.cursor).length, { timeout: 15_000 }).toBeGreaterThan(0);
-    await expect(rows(page)).toHaveCount(9, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(10, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0, { timeout: 15_000 });
     expectHeadFirst(seen, mark2, 'after the return at limit=2', true);
   });
@@ -347,8 +363,9 @@ test.describe('inbox rows and timestamps', () => {
   test('5. a failed background refresh keeps the rows and shows a banner whose Retry clears it', async ({ page, request }) => {
     const stamp = `${Date.now()}`.slice(-6);
     await seedParties(request, 1, stamp, 9);
+    // 1 party + Tasha + Dario = 3 contacts, + 2 = 5.
     await page.goto(`${NEXT}/inbox`);
-    await expect(rows(page)).toHaveCount(4, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(5, { timeout: 15_000 });
 
     // Fail HEAD reads only (no cursor in the query); leave the badge count alone.
     const failHead = (url: URL): boolean => url.pathname.endsWith('/api/inbox') && !url.searchParams.has('cursor');
@@ -356,14 +373,15 @@ test.describe('inbox rows and timestamps', () => {
     const [number2] = await seedParties(request, 1, stamp, 8);
     const banner = page.getByRole('status').filter({ hasText: "Couldn't refresh the inbox." });
     await expect(banner).toBeVisible({ timeout: 15_000 });
-    await expect(rows(page)).toHaveCount(4);
+    await expect(rows(page)).toHaveCount(5);
     await expect(rowFor(page, number2!)).toHaveCount(0);
 
     await page.unroute(failHead);
     await banner.getByRole('button', { name: 'Retry refresh' }).click();
     await expect(banner).toHaveCount(0, { timeout: 15_000 });
     await expect(rowFor(page, number2!)).toBeVisible();
-    await expect(rows(page)).toHaveCount(5);
+    // 2 parties + Tasha + Dario = 4 contacts, + 2 = 6.
+    await expect(rows(page)).toHaveCount(6);
   });
 
   test('6. auto-load does not chain at the group wall: one cursor request per scroll', async ({ page, request }) => {
@@ -376,7 +394,11 @@ test.describe('inbox rows and timestamps', () => {
     // A 15-row page is about 850px (a 56.5px row pitch at this width, measured
     // 2026-09-25), taller than the viewport plus the 400px margin, so a
     // committed page pushes the sentinel out (spec 5.2).
-    // 35 parties + Tasha = 36 contacts: pages of 15, 15, 6; + 2 multi-party.
+    // 35 parties + Tasha + Dario = 37 contacts: pages of 15, 15, 7, + 2
+    // multi-party rows on page one: 17, then 32, then 39. Pages one and two
+    // are minted parties only, so they sort wholly above the group wall; on
+    // page three the last five parties and Tasha sort above it and Dario (the
+    // oldest row) below it.
     await page.goto(`${NEXT}/inbox?limit=15`);
     await expect(rows(page)).toHaveCount(17, { timeout: 15_000 });
     const mark = seen.length;
@@ -387,7 +409,7 @@ test.describe('inbox rows and timestamps', () => {
     await expect(rows(page)).toHaveCount(32);
 
     await scrollToBottom(page);
-    await expect(rows(page)).toHaveCount(38, { timeout: 15_000 });
+    await expect(rows(page)).toHaveCount(39, { timeout: 15_000 });
     await expect(loadMore(page)).toHaveCount(0);
     await page.waitForTimeout(800);
     expect(seen.slice(mark).filter((r) => r.cursor)).toHaveLength(2);

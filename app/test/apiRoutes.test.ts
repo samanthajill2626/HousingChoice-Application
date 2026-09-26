@@ -9,6 +9,7 @@ import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { OUTBOUND_MMS_MAX_MEDIA_PER_MESSAGE } from '../src/lib/outboundMediaLimits.js';
+import { RETRY_PROMISE_GRACE_MS, RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 import {
   CircuitBreakerOpenError,
   ContactDeletedError,
@@ -18,6 +19,7 @@ import {
   type SendMessageInput,
 } from '../src/services/sendMessage.js';
 import type { ConversationsRepo } from '../src/repos/conversationsRepo.js';
+import type { ContactsRepo } from '../src/repos/contactsRepo.js';
 import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -388,6 +390,7 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
   function makeRetryApp(
     original: unknown,
     mediaStore?: import('../src/adapters/mediaStore.js').MediaStore,
+    contactsRepo?: Pick<ContactsRepo, 'getById'>,
   ) {
     const calls: SendMessageInput[] = [];
     const app = buildApp({
@@ -401,6 +404,8 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
           },
         } as unknown as import('../src/repos/messagesRepo.js').MessagesRepo,
         ...(mediaStore !== undefined && { mediaStore }),
+        // retry-send-window D14: the recorded-recipient read (by id).
+        ...(contactsRepo !== undefined && { contactsRepo: contactsRepo as unknown as ContactsRepo }),
         sendMessageService: async (input) => {
           calls.push(input);
           return {
@@ -472,6 +477,114 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
       expect(res.body).toEqual({ error: 'not_failed' });
       expect(calls).toHaveLength(0);
     }
+  });
+
+  it('retry-send-window D10: 409 retry_pending while an automatic retry is scheduled - before retry_due_at and inside the grace after it', async () => {
+    for (const offsetMs of [30_000, -60_000]) {
+      const { app, calls } = makeRetryApp({
+        ...FAILED_ORIGINAL,
+        retry_due_at: new Date(Date.now() + offsetMs).toISOString(),
+      });
+      const res = await request(app)
+        .post('/api/conversations/conv-1/messages/SMorig/retry')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send();
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'retry_pending' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('retry-send-window D10: the Retry goes through once the promise has expired, or after it was withdrawn', async () => {
+    for (const due of [
+      new Date(Date.now() - RETRY_PROMISE_GRACE_MS - 60_000).toISOString(),
+      RETRY_PROMISE_WITHDRAWN_AT,
+    ]) {
+      const { app, calls } = makeRetryApp({ ...FAILED_ORIGINAL, retry_due_at: due });
+      const res = await request(app)
+        .post('/api/conversations/conv-1/messages/SMorig/retry')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send();
+      expect(res.status).toBe(201);
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  it('retry-send-window D10: the not-failed check still answers first', async () => {
+    const { app, calls } = makeRetryApp({
+      ...FAILED_ORIGINAL,
+      delivery_status: 'delivered',
+      retry_due_at: new Date(Date.now() + 30_000).toISOString(),
+    });
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'not_failed' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('retry-send-window D14: passes the RECORDED recipient (read by id), stays automated:false, and never copies retry_window_start or retry_attempt', async () => {
+    const real = {
+      contactId: 'c-real',
+      type: 'tenant' as const,
+      phone: '+15550100001',
+      consent_method: 'verbal_in_person' as const,
+    };
+    const reads: string[] = [];
+    const { app, calls } = makeRetryApp(
+      {
+        ...FAILED_ORIGINAL,
+        recipient_contact_id: 'c-real',
+        retry_window_start: '2026-06-12T08:58:00.000Z',
+        retry_attempt: 2,
+      },
+      undefined,
+      {
+        async getById(contactId: string) {
+          reads.push(contactId);
+          return contactId === 'c-real' ? real : undefined;
+        },
+      },
+    );
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+    expect(res.status).toBe(201);
+    expect(reads).toEqual(['c-real']);
+    expect(calls).toEqual([
+      {
+        conversationId: 'conv-1',
+        body: 'this failed',
+        automated: false,
+        author: 'teammate',
+        retryOf: '2026-06-12T09:00:00.000Z#SMorig',
+        recipient: real,
+      },
+    ]);
+  });
+
+  it('retry-send-window D14: a recorded recipient that no longer exists sends with NO recipient (the phone-matched contact is judged)', async () => {
+    const { app, calls } = makeRetryApp({ ...FAILED_ORIGINAL, recipient_contact_id: 'c-gone' }, undefined, {
+      async getById() {
+        return undefined;
+      },
+    });
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(201);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty('recipient');
   });
 
   it('409 not_retryable when the original is an email (never re-send an email down the SMS path)', async () => {

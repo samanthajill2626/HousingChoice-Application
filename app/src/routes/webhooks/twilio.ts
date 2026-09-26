@@ -120,6 +120,7 @@ import { createPushService, type PushService } from '../../services/pushService.
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
+  resolveSendRetryBackoffMs,
 } from '../../jobs/retrySend.js';
 import { enqueueImmediate } from '../../jobs/jobs.js';
 import {
@@ -3522,11 +3523,16 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
               );
               break;
             }
-            await enqueueSendRetry({
-              providerSid: MessageSid,
-              conversationId: message.conversationId,
-              attempt: priorAttempt + 1,
-            });
+            // The retry runs one resolved backoff from now (the lane seam,
+            // retry-send-window D13); the job is scheduled at exactly that instant.
+            await enqueueSendRetry(
+              {
+                providerSid: MessageSid,
+                conversationId: message.conversationId,
+                attempt: priorAttempt + 1,
+              },
+              new Date(Date.now() + resolveSendRetryBackoffMs(priorAttempt + 1)),
+            );
             break;
           }
           case '30005':

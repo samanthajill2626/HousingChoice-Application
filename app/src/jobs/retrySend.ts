@@ -69,11 +69,49 @@ export function parseRetrySendPayload(payload: unknown): RetrySendPayload {
   return { providerSid: p.providerSid, conversationId: p.conversationId, attempt: p.attempt };
 }
 
-/** Producer side (status webhook): schedule ONE backed-off retry. */
-export async function enqueueSendRetry(payload: RetrySendPayload): Promise<void> {
-  await enqueue(RETRY_SEND_JOB, payload, {
-    runAt: new Date(Date.now() + retryBackoffMs(payload.attempt)),
-  });
+/**
+ * The lane's one-to-one backoff override (retry-send-window D13). LANE-ONLY:
+ * set in scripts/e2e-session.mjs's childEnv, never in dev or prod, and absent
+ * from every `.env*`. The relay ladder's twin is E2E_RELAY_RETRY_BACKOFF_MS
+ * (relayRetryLeg.ts), and this one takes the SAME two guards.
+ */
+const SEND_RETRY_BACKOFF_ENV_KEY = 'E2E_SEND_RETRY_BACKOFF_MS';
+
+/**
+ * retryBackoffMs(attempt) unless the lane override applies: env
+ * E2E_SEND_RETRY_BACKOFF_MS (positive integer) honored ONLY when
+ * JOBS_QUEUE_URL is unset (the relay seam's guard).
+ *
+ * JOBS_QUEUE_URL IS the topology: every deployed environment sets it
+ * (Terraform's jobs module), and the one-to-one retry is scheduled by the
+ * status webhook in the APP process - so without the guard a stray value in a
+ * deployed environment would reshape every real retry, texting a tenant again
+ * seconds after a failure. The hermetic lane and local dev leave it unset; an
+ * EMPTY value counts as unset. Anything that does not parse to a positive
+ * integer is ignored. Read from `process.env`, not config, on purpose: this is
+ * a leaf on the enqueue path and the queue URL is only tested for presence.
+ * The status webhook computes the retry's run time from this one function, so
+ * the schedule and the promise it writes share the lane's value.
+ */
+export function resolveSendRetryBackoffMs(attempt: number): number {
+  const queueUrl = process.env['JOBS_QUEUE_URL'];
+  if (typeof queueUrl !== 'string' || queueUrl.length === 0) {
+    const parsed = Number.parseInt(process.env[SEND_RETRY_BACKOFF_ENV_KEY] ?? '', 10);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return retryBackoffMs(attempt);
+}
+
+/**
+ * Producer side (status webhook): schedule ONE retry at an explicit run time.
+ * The caller decides `runAt` (now plus the resolved backoff) and writes the
+ * same instant as the failed message's `retry_due_at`, so the promise on
+ * screen and the job's schedule are one value (retry-send-window D7).
+ * `payload.attempt` rides along for the job's cap; it no longer picks the
+ * delay here.
+ */
+export async function enqueueSendRetry(payload: RetrySendPayload, runAt: Date): Promise<void> {
+  await enqueue(RETRY_SEND_JOB, payload, { runAt });
 }
 
 export interface RetrySendJobDeps {

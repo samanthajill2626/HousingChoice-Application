@@ -171,6 +171,13 @@ interface TimelineMessage extends TimelineBase {
   /** tsMsgId of the FAILED message a retry supersedes — the client hides the
    *  superseded predecessor so a delivered retry replaces the stale bubble. */
   retry_of?: string;
+  /** retry-send-window D7: the run time of the automatic one-to-one 30003
+   *  retry this FAILED message waits on, written in the same conditional write
+   *  as the failure (see MessageItem.retry_due_at). The client promises "will
+   *  retry" and hides Retry only while it is live on the server's clock; the
+   *  manual Retry route's D10 guard reads the same field. Absent when no retry
+   *  was scheduled. */
+  retry_due_at?: string;
   fromPhone?: string;
   toPhone?: string;
   // --- Email channel v1 (type:'email' items) -----------------------------------
@@ -440,6 +447,9 @@ function toTimelineMessage(
     delivery_status: m.delivery_status,
     ...(m.error_code !== undefined && { error_code: m.error_code }),
     ...(m.retry_of !== undefined && { retry_of: m.retry_of }),
+    // retry-send-window D7/D8: projected verbatim, the withdrawn sentinel
+    // (1970-01-01) included - the client reads that as an expired promise.
+    ...(typeof m.retry_due_at === 'string' && { retry_due_at: m.retry_due_at }),
     ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
     ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
     // `imported_from` is an undeclared rider the importer PUTs on the item

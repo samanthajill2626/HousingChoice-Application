@@ -2298,12 +2298,14 @@ export interface Message extends MessageTransportFields {
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
   // --- Relay 30003 retry lineage (spec D11) --------------------------------
   // The stored twins of messagesRepo's MessageItem.relay_retry_*, declared here
-  // because the endpoint returns stored rows as-is. Only these FOUR of the six
+  // because the endpoint returns stored rows as-is. Only these FOUR of the seven
   // stored values are DECLARED - `relay_retry_dest_digest` (the claim identity)
-  // and `relay_retry_leg_body` (the composed leg copy) have no client use, so
+  // and `relay_retry_leg_body` (the composed leg copy) have no client use, and
+  // `relay_retry_window_start` (retry-send-window's 15-minute window origin) is
+  // stored for the server's window checks and deliberately not declared, so
   // nothing here names them. That is a projection claim, not a transport one:
-  // GET /conversations/:id/messages returns the row as-is (D11 says so), so both
-  // arrive in the JSON either way and an interface is not a wire boundary.
+  // GET /conversations/:id/messages returns the row as-is (D11 says so), so all
+  // three arrive in the JSON either way and an interface is not a wire boundary.
   /** D11: the ROOT source row's tsMsgId this retry row chains to. */
   relay_retry_of?: string;
   /** D11: the member key of the leg being retried. */
@@ -2492,19 +2494,30 @@ export interface TimelineMessage extends TimelineBase, MessageTransportFields {
   /** tsMsgId of the FAILED message this one supersedes (a retry). The timeline
    *  hides the superseded predecessor so a delivered retry replaces it. */
   retry_of?: string;
+  /** retry-send-window D7/D8: the run time of the automatic one-to-one 30003
+   *  retry this FAILED message is waiting on - written with the failure, so the
+   *  bubble learns "will retry" at once. The promise is live only while the
+   *  SERVER clock is before this plus RETRY_PROMISE_GRACE_MS
+   *  (routes/contact/retryPromise.ts); a failed enqueue rewrites it to
+   *  1970-01-01T00:00:00.000Z (already expired). Absent when no retry was
+   *  scheduled (declined, exhausted, a relay or group row). */
+  retry_due_at?: string;
   // --- Relay 30003 retry lineage (spec D11/D17) -----------------------------
-  // The four of the six stored lineage values this client PROJECTS. A relay
+  // The four of the seven stored lineage values this client PROJECTS. A relay
   // retry is a NEW source row addressed to one member, and these are its
   // lineage back to the leg it retries. NOT `retry_of`: that field supersedes
   // its predecessor, and stamping it here would DELETE the original the retry
   // is meant to render beside (D20).
   //
   // `relay_retry_dest_digest` and `relay_retry_leg_body` are simply not
-  // projected - neither has a client use (D11). They DO reach the browser:
-  // GET /conversations/:id/messages returns the stored row as-is (D11), so both
-  // are in the JSON on every relay thread load whether or not any interface
-  // declares them. Withholding them here keeps them out of the rendered model,
-  // which is a different and smaller claim than keeping them off the wire.
+  // projected - neither has a client use (D11) - and neither is
+  // `relay_retry_window_start`: retry-send-window's window origin is stored for
+  // the server's window checks (the claim and the retry job) and deliberately
+  // not projected. They DO reach the browser: GET /conversations/:id/messages
+  // returns the stored row as-is (D11), so all three are in the JSON on every
+  // relay thread load whether or not any interface declares them. Withholding
+  // them here keeps them out of the rendered model, which is a different and
+  // smaller claim than keeping them off the wire.
   /** D11: the ROOT source row's tsMsgId - the key the thread-level join buckets on. */
   relay_retry_of?: string;
   /** D11: the member key of the leg being retried; it matches the ORIGINAL's slot map, which is what the join keys on. */

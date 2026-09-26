@@ -36,6 +36,8 @@ import {
 // the REAL projected payload, because nothing else in this mission spans the
 // projection/presenter boundary. Established practice - see consentDrift.test.ts.
 import { presentCallState } from '../../dashboard/src/routes/contact/presentCallState.js';
+import type { TimelineMessage as DashboardTimelineMessage } from '../../dashboard/src/api/types.js';
+import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 
 const TENANT = 'c-tenant';
 const PHONE_A = '+15550100001';
@@ -360,6 +362,44 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     const retry = items.find((i) => i.tsMsgId === '2026-06-16T10:05:00.000Z#SM-retry')!;
     expect(original.retry_of).toBeUndefined(); // the original carries no lineage
     expect(retry.retry_of).toBe(failedTsMsgId); // the retry points back at it
+  });
+
+  it('retry-send-window D7: projects retry_due_at verbatim on a failed message that carries a promise, and nothing on one without', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await seedMessage('conv-a', '2026-06-16T10:00:00.000Z', 'SM-promised', {
+      direction: 'outbound',
+      body: 'will retry',
+      deliveryStatus: 'failed',
+    });
+    await seedMessage('conv-a', '2026-06-16T10:01:00.000Z', 'SM-withdrawn', {
+      direction: 'outbound',
+      body: 'enqueue failed',
+      deliveryStatus: 'failed',
+    });
+    await seedMessage('conv-a', '2026-06-16T10:02:00.000Z', 'SM-plain', {
+      direction: 'outbound',
+      body: 'declined',
+      deliveryStatus: 'failed',
+    });
+    // retry_due_at is written by the failure's status write (or the withdrawal
+    // annotate), never at append - so stamp the stored rows directly.
+    const DUE = '2026-06-16T10:01:00.000Z';
+    world.messages.find((m) => m.provider_sid === 'SM-promised')!.retry_due_at = DUE;
+    world.messages.find((m) => m.provider_sid === 'SM-withdrawn')!.retry_due_at =
+      RETRY_PROMISE_WITHDRAWN_AT;
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    expect(res.status).toBe(200);
+    // Typed as the DASHBOARD's TimelineMessage: `npm run typecheck` fails here
+    // until the client type declares the field (this task's cross-package half).
+    const items = res.body.items as DashboardTimelineMessage[];
+    expect(items.find((i) => i.tsMsgId.endsWith('#SM-promised'))!.retry_due_at).toBe(DUE);
+    // The withdrawn sentinel is projected as-is; the client reads it as expired.
+    expect(items.find((i) => i.tsMsgId.endsWith('#SM-withdrawn'))!.retry_due_at).toBe(
+      RETRY_PROMISE_WITHDRAWN_AT,
+    );
+    expect(items.find((i) => i.tsMsgId.endsWith('#SM-plain'))!).not.toHaveProperty('retry_due_at');
   });
 
   it('emits imported:true only on a row the importer stamped', async () => {

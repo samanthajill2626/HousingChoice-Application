@@ -12,6 +12,25 @@ import { isoOf } from '../../lib/time.js';
 
 const NBSP_LIKE = /[\u202f\u00a0]/g;
 
+// Built ONCE, at module load (AD-1). A Date.prototype.toLocale*String call
+// with an options bag constructs a fresh DateTimeFormat every time, and each
+// row formats twice per Inbox render; reusing four formatters keeps a render
+// of hundreds of rows cheap. Same locale and options, so the same strings.
+const TIME_FMT = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
+const MONTH_DAY_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+const MONTH_DAY_YEAR_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+const FULL_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
 function parse(iso: string): Date | undefined {
   const d = new Date(isoOf(iso));
   return Number.isNaN(d.getTime()) ? undefined : d;
@@ -33,30 +52,16 @@ function sameLocalDay(a: Date, b: Date): boolean {
 export function formatInboxTime(iso: string, now: Date): string {
   const d = parse(iso);
   if (d === undefined) return '';
-  if (sameLocalDay(d, now)) {
-    return plainSpaces(d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }));
-  }
+  if (sameLocalDay(d, now)) return plainSpaces(TIME_FMT.format(d));
   const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
   if (sameLocalDay(d, yesterday)) return 'Yesterday';
-  if (d.getFullYear() === now.getFullYear()) {
-    return plainSpaces(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
-  }
-  return plainSpaces(
-    d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-  );
+  if (d.getFullYear() === now.getFullYear()) return plainSpaces(MONTH_DAY_FMT.format(d));
+  return plainSpaces(MONTH_DAY_YEAR_FMT.format(d));
 }
 
 /** The full stamp for the row's hover title, e.g. "Sep 12, 2026, 2:14 PM". */
 export function formatInboxTimeFull(iso: string): string {
   const d = parse(iso);
   if (d === undefined) return '';
-  return plainSpaces(
-    d.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    }),
-  );
+  return plainSpaces(FULL_FMT.format(d));
 }

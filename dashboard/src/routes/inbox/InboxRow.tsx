@@ -6,7 +6,7 @@
 // preview, and a red count. Unknown rows get an amber "Needs triage" chip and
 // route to the triage list. No dangerouslySetInnerHTML — text renders as React
 // children (XSS-safe).
-import { useRef, useState } from 'react';
+import { memo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { InboxChannel, InboxRow as InboxRowData } from '../../api/index.js';
 import styles from './InboxRow.module.css';
@@ -48,7 +48,9 @@ function hrefFor(row: InboxRowData): string {
   return `/contacts/unknown?phone=${encodeURIComponent(row.phone ?? '')}`;
 }
 
-export function InboxRow({
+// Memoized (AD-1): every Inbox render re-renders all rows, but unpatched row
+// objects keep their identity and the callbacks are stable useCallbacks.
+export const InboxRow = memo(function InboxRow({
   row,
   onOpen,
   onMarkRead,
@@ -161,4 +163,4 @@ export function InboxRow({
       </div>
     </li>
   );
-}
+});

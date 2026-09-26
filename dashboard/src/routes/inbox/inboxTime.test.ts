@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock, type MockInstance } from 'vitest';
 import { formatInboxTime, formatInboxTimeFull } from './inboxTime.js';
 
 // Every instant is built with the LOCAL-time constructor so the tier logic is
@@ -72,11 +72,22 @@ describe('formatInboxTimeFull', () => {
 
 // Whether en-US emits U+202F (narrow no-break space) before AM/PM depends on
 // the host's ICU, and this runner's emits a plain space, so nothing above
-// reaches the normalization. These stub the Date formatters with the ICU 72+
-// shape; the call count proves the output came through the stub. The two
-// characters are built from char codes so this file stays ASCII.
+// reaches the normalization. These stub the module's shared formatters with
+// the ICU 72+ shape; the call counts prove the output came through the stub.
+// The two characters are built from char codes so this file stays ASCII.
 const NNBSP = String.fromCharCode(0x202f);
 const NBSP = String.fromCharCode(0x00a0);
+
+/** Stub what every shared formatter returns. `format` is an ACCESSOR on
+ *  Intl.DateTimeFormat.prototype (its getter returns a bound function) that
+ *  lib.es5 types as a method, hence the cast: the spy sits on the getter. */
+function stubFormat(out: string): { getter: MockInstance<() => unknown>; format: Mock<() => string> } {
+  const format = vi.fn(() => out);
+  const getter = vi
+    .spyOn(Intl.DateTimeFormat.prototype as unknown as { format: unknown }, 'format', 'get')
+    .mockReturnValue(format);
+  return { getter, format };
+}
 
 describe('no-break space normalization', () => {
   afterEach(() => {
@@ -84,14 +95,16 @@ describe('no-break space normalization', () => {
   });
 
   it('formatInboxTime turns a U+202F before PM into a plain space', () => {
-    const spy = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockReturnValue(`2:14${NNBSP}PM`);
+    const { getter, format } = stubFormat(`2:14${NNBSP}PM`);
     expect(formatInboxTime(iso(new Date(2026, 8, 25, 14, 14)), now)).toBe('2:14 PM');
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(getter).toHaveBeenCalledTimes(1);
+    expect(format).toHaveBeenCalledTimes(1);
   });
 
   it('formatInboxTimeFull turns U+202F and U+00A0 into plain spaces', () => {
-    const spy = vi.spyOn(Date.prototype, 'toLocaleString').mockReturnValue(`Sep${NBSP}12, 2026, 2:14${NNBSP}PM`);
+    const { getter, format } = stubFormat(`Sep${NBSP}12, 2026, 2:14${NNBSP}PM`);
     expect(formatInboxTimeFull(iso(new Date(2026, 8, 12, 14, 14)))).toBe('Sep 12, 2026, 2:14 PM');
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(getter).toHaveBeenCalledTimes(1);
+    expect(format).toHaveBeenCalledTimes(1);
   });
 });

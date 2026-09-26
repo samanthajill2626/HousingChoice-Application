@@ -286,6 +286,17 @@ test.describe('inbox rows and timestamps', () => {
     await registerParty(request, { label: `Long ${stamp}`, role: 'tenant', number: longNumber });
     await sendAsParty(request, { from: longNumber, body: 'a long name' });
     const longRow = page.getByRole('link', { name: /Bartholomew Montgomery-Fitzgerald-Longname/ });
+    const longName = longRow.getByText(`Bartholomew Montgomery-Fitzgerald-Longname-${stamp}`, { exact: true });
+    // A LONG PREVIEW (build review R2-1): a party whose inbound is about 300
+    // characters. The preview is the whole latest message on one line, so its
+    // max-content width dwarfs the row; the head must not yield its width to
+    // it. Its number takes its own block.
+    const longBodyNumber = mintNumber(7, stamp, 0);
+    const longBody = 'Checking in about the two bedroom unit and the move in date. '.repeat(5).trim();
+    await registerParty(request, { label: `Party ${stamp} 7-0`, role: 'tenant', number: longBodyNumber });
+    await sendAsParty(request, { from: longBodyNumber, body: longBody });
+    const longBodyRow = rowFor(page, longBodyNumber);
+    const longBodyName = longBodyRow.getByText(displayOf(longBodyNumber), { exact: true });
 
     async function timeInsideRow(link: Locator, where: string): Promise<{ row: { x: number; y: number; width: number; height: number }; time: { x: number; y: number; width: number; height: number } }> {
       const li = link.locator('xpath=ancestor::li[1]');
@@ -317,11 +328,20 @@ test.describe('inbox rows and timestamps', () => {
     await timeInsideRow(stubRow, 'one-line at 768 (stub)');
     await expect(longRow).toBeVisible();
     await timeInsideRow(longRow, 'one-line at 768 (long name)');
+    // The name is the row's identity: beside a 300-character preview it keeps
+    // a visible width (the head never shrinks below min(content, 45%)), and a
+    // long name keeps a visible part under the cap.
+    await expect(longBodyRow).toBeVisible({ timeout: 15_000 });
+    expect(await longBodyName.evaluate((el) => el.clientWidth), 'one-line at 768 (300-char preview): name width').toBeGreaterThan(0);
+    expect(await longName.evaluate((el) => el.clientWidth), 'one-line at 768 (long name): name width').toBeGreaterThan(0);
 
     await page.setViewportSize(WIDE_RESTORE);
     const tashaName = page.getByRole('link', { name: /Tasha Nguyen/ }).getByText('Tasha Nguyen', { exact: true });
     await expect(tashaName).toBeVisible();
     expect(await tashaName.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    // ...and a 300-character preview does not ellipsize an ordinary name either
+    // (Tasha's seeded preview is 72 characters, too short to press on it).
+    expect(await longBodyName.evaluate((el) => el.scrollWidth <= el.clientWidth), 'wide (300-char preview): name not ellipsized').toBe(true);
   });
 
   test('5. a failed background refresh keeps the rows and shows a banner whose Retry clears it', async ({ page, request }) => {

@@ -63,13 +63,18 @@
   background: var(--c-dot-unknown);
 }
 
-/* The name can shrink on one line (spec 5.4): the cap resolves against the
-   link, the head's flex container; chips and tags never shrink. */
+/* The head on one line (spec 5.4) is min(content, 45%) of the link - the cap
+   resolves against the link, the head's flex container - and NEVER shrinks
+   below that: the preview absorbs the row's overflow. With `flex: 0 1 auto`
+   the preview's nowrap max-content (the whole latest message) took the
+   head's share, and the name - the row's identity - paid for it: 24 of 95px
+   at 1280 beside a 300-character text, 0 beside an email body (build review
+   R2-1). Only a name longer than the cap is ellipsized. */
 .head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   max-width: 45%;
 }
@@ -89,6 +94,13 @@
   color: var(--c-text-subtle);
   white-space: nowrap;
 }
+/* The placement and Deleted tags YIELD BEFORE THE NAME (build review R2-2):
+   a stage label runs to 29 characters ("Awaiting receipt confirmation"), and
+   a tag that never shrank filled the capped head at 768px and on phones and
+   cut the name to 0. flex-shrink 100 hands a tag nearly all of the head's
+   shortfall, so it ellipsizes first and the name keeps its width. The
+   channel and triage chips never shrink: they are short, and triage is an
+   affordance. */
 .tag {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -97,6 +109,10 @@
   color: var(--c-text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 100;
 }
 .triage {
   padding: 1px var(--sp-2);
@@ -110,7 +126,7 @@
 }
 
 /* Deleted-contact resurfacing: danger-tinted so the row reads as "deleted, but
-   they messaged you". */
+   they messaged you". Yields before the name like `.tag` (R2-2). */
 .deletedTag {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -120,6 +136,10 @@
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 100;
 }
 
 .preview {

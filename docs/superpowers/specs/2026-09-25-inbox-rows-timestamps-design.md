@@ -449,11 +449,16 @@ New pure module `dashboard/src/routes/inbox/inboxTime.ts`:
   rows (`.unread .time`): `color: var(--c-text); font-weight:
   var(--fw-semibold)`.
 - THE NAME CAN SHRINK in the one-line layout. `.head` (a direct child of the
-  link) becomes `flex: 0 1 auto; min-width: 0; max-width: 45%` - the
-  percentage resolves against the link, its flex container - and `.name`
-  becomes `min-width: 0; overflow: hidden; text-overflow: ellipsis` (it keeps
-  `white-space: nowrap`). Chips and tags keep `white-space: nowrap` and never
-  shrink. An ordinary name in a wide row is NOT ellipsized (its head is far
+  link) becomes `flex: 0 0 auto; min-width: 0; max-width: 45%` - the
+  percentage resolves against the link, its flex container - so the head is
+  min(content, 45%) and never shrinks further: the preview absorbs the row's
+  overflow (build review R2-1: with `flex: 0 1 auto` a long preview squeezed
+  the name to nothing). `.name` becomes `min-width: 0; overflow: hidden;
+  text-overflow: ellipsis` (it keeps `white-space: nowrap`). The channel and
+  triage chips keep `white-space: nowrap` and never shrink; the placement and
+  Deleted tags keep it too but ellipsize before the name (`min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; flex-shrink: 100`, build review
+  R2-2). An ordinary name in a wide row is NOT ellipsized (its head is far
   below 45%); only a long name in a tight row is. The preview, the count and
   the time therefore always keep their room and the time is never clipped by
   `.row { overflow: hidden }`.
@@ -485,10 +490,14 @@ New pure module `dashboard/src/routes/inbox/inboxTime.ts`:
   use is a phone-only query for modals; this row's question is "is there room
   for one line", which is the shell's breakpoint, so the two are not aligned
   on purpose.
-- `title` on the `<time>` gives the full stamp on hover and on long-press in
-  mobile browsers that surface titles. The accessible name of the row link now
-  ends with the label text (it is link content), which is intended: a screen
-  reader hears the name, chip, preview, count, then the time.
+- `title` on the `<time>` carries the full stamp for hover and for long-press
+  in mobile browsers that surface titles, but a pointer reaches it only on
+  rows that offer no action: on every other row the revealed actions overlay
+  covers the time (build review AD-3, filed as
+  `inbox-time-title-unreachable-under-actions-overlay`). The accessible name
+  of the row link now ends with the label text (it is link content), which is
+  intended: a screen reader hears the name, chip, preview, count, then the
+  time.
 - The row's existing accessible-name consumers (Playwright locators using
   `getByRole('link', { name: /Name/ })`) keep matching because they are
   substring regexes; `inbox-nav-badge.spec.ts`'s strict-mode note about the

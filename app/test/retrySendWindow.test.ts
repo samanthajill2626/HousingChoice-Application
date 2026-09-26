@@ -8,6 +8,7 @@ import {
   RETRY_PROMISE_WITHDRAWN_AT,
   RETRY_SEND_WINDOW_MS,
   isRetryPromiseLive,
+  oneToOneRetryWindowOrigin,
   parseRetryWindowOrigin,
   retryFitsSendWindow,
   retrySendDeadlineMs,
@@ -60,6 +61,52 @@ describe('parseRetryWindowOrigin (spec D2, D5)', () => {
     ['a boolean', true],
   ])('returns undefined for a non-string origin: %s', (_label, value) => {
     expect(parseRetryWindowOrigin(value)).toBeUndefined();
+  });
+});
+
+// The ONE-TO-ONE origin rule (spec D2), shared by the 30003 decision and the
+// retry job so the two cannot drift. It returns the RAW stored value: the job
+// carries it onto the retry row as retryWindowStart, and the caller parses it.
+describe('oneToOneRetryWindowOrigin (spec D2): retry_window_start ?? provider_ts, raw', () => {
+  const CHAIN_FIRST_SEND = '2026-09-25T11:50:00.000Z';
+  const OWN_SEND = '2026-09-25T11:59:30.000Z';
+
+  it('a retry row: retry_window_start (the chain FIRST send) wins over the row own provider_ts', () => {
+    expect(
+      oneToOneRetryWindowOrigin({ retry_window_start: CHAIN_FIRST_SEND, provider_ts: OWN_SEND }),
+    ).toBe(CHAIN_FIRST_SEND);
+  });
+
+  it('a first send (no retry_window_start): the row own provider_ts', () => {
+    expect(oneToOneRetryWindowOrigin({ provider_ts: OWN_SEND })).toBe(OWN_SEND);
+  });
+
+  it('both absent: undefined, which the caller treats as no usable origin (D5 fail-open)', () => {
+    expect(oneToOneRetryWindowOrigin({})).toBeUndefined();
+    expect(parseRetryWindowOrigin(oneToOneRetryWindowOrigin({}))).toBeUndefined();
+  });
+
+  it('returns the value RAW, never normalized: an RFC 2822 origin comes back as stored', () => {
+    const rfc = 'Fri, 25 Sep 2026 11:50:00 GMT';
+    expect(oneToOneRetryWindowOrigin({ retry_window_start: rfc, provider_ts: OWN_SEND })).toBe(rfc);
+  });
+
+  // The `??` edge: only an ABSENT retry_window_start falls through. A present
+  // but empty or unparseable one is returned as is, so the window check fails
+  // OPEN on it (D5) instead of silently measuring from this row's own send.
+  it.each<[string, string]>([
+    ['an empty', ''],
+    ['an unparseable', 'not-a-date'],
+  ])('%s retry_window_start does NOT fall back to provider_ts', (_label, value) => {
+    expect(oneToOneRetryWindowOrigin({ retry_window_start: value, provider_ts: OWN_SEND })).toBe(value);
+    expect(
+      parseRetryWindowOrigin(oneToOneRetryWindowOrigin({ retry_window_start: value, provider_ts: OWN_SEND })),
+    ).toBeUndefined();
+  });
+
+  it('a stored NULL retry_window_start falls through to provider_ts, exactly like an absent one', () => {
+    const stored = { retry_window_start: null as unknown as string, provider_ts: OWN_SEND };
+    expect(oneToOneRetryWindowOrigin(stored)).toBe(OWN_SEND);
   });
 });
 

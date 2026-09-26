@@ -39,6 +39,24 @@ export function parseRetryWindowOrigin(value: unknown): number | undefined {
   return Number.isFinite(ms) ? ms : undefined;
 }
 
+/**
+ * D2, one-to-one: where a message's retry chain started - `retry_window_start`
+ * on a retry row (the chain's FIRST send), else the row's own `provider_ts`.
+ * The ONE copy of the rule, read by the 30003 decision and by the retry job.
+ * Returns the RAW stored value: the job carries it onto the retry row as
+ * retryWindowStart, and callers parse it with parseRetryWindowOrigin. `??` on
+ * purpose: only an absent (undefined or null) `retry_window_start` falls
+ * through - an empty or unparseable one does not, so the check fails open on
+ * it (D5) rather than silently measuring from this row's own send. The
+ * parameter is structural so this module stays import-free.
+ */
+export function oneToOneRetryWindowOrigin(message: {
+  retry_window_start?: string;
+  provider_ts?: string;
+}): string | undefined {
+  return message.retry_window_start ?? message.provider_ts;
+}
+
 /** Scheduling (D3, D3a): nowMs + backoffMs + RETRY_JOB_GRACE_MS <= originMs + RETRY_SEND_WINDOW_MS */
 export function retryFitsSendWindow(args: {
   originMs: number;

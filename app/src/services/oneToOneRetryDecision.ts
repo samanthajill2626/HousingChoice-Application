@@ -40,7 +40,11 @@
 // No logging (the arm logs the verdict; the job WARNs on a recorded recipient
 // that no longer exists) and no clock (the caller passes nowMs, spec D13).
 import { MAX_SEND_RETRY_ATTEMPTS, resolveSendRetryBackoffMs } from '../jobs/retrySend.js';
-import { parseRetryWindowOrigin, retryFitsSendWindow } from '../lib/retrySendWindow.js';
+import {
+  oneToOneRetryWindowOrigin,
+  parseRetryWindowOrigin,
+  retryFitsSendWindow,
+} from '../lib/retrySendWindow.js';
 import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../repos/conversationsRepo.js';
 import type { MessageItem } from '../repos/messagesRepo.js';
@@ -122,7 +126,7 @@ export async function decideOneToOneRetry(args: {
   }
   const attempt = priorAttempt + 1;
   const backoffMs = resolveSendRetryBackoffMs(attempt);
-  const originMs = parseRetryWindowOrigin(message.retry_window_start ?? message.provider_ts);
+  const originMs = parseRetryWindowOrigin(oneToOneRetryWindowOrigin(message));
   if (originMs !== undefined && !retryFitsSendWindow({ originMs, nowMs, backoffMs })) {
     return { kind: 'decline', reason: 'window_closed', level: 'error' };
   }

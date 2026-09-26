@@ -30,7 +30,11 @@ import {
 } from '../services/sendMessage.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
-import { parseRetryWindowOrigin, withinRetrySendWindow } from '../lib/retrySendWindow.js';
+import {
+  oneToOneRetryWindowOrigin,
+  parseRetryWindowOrigin,
+  withinRetrySendWindow,
+} from '../lib/retrySendWindow.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { defineJobHandler, enqueue } from './jobs.js';
 
@@ -226,9 +230,10 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     // the marker). The grace was spent when the webhook scheduled this retry
     // (D3a), so nothing may go out past origin + 15 minutes. The origin is the
     // chain's FIRST send (D2): retry_window_start on a retry row, else this
-    // row's own provider_ts. A missing or unparseable origin fails OPEN (D5):
-    // the retry goes out unwindowed, with a WARN naming the gap.
-    const windowStart = original.retry_window_start ?? original.provider_ts;
+    // row's own provider_ts - the rule the 30003 decision reads too, one copy
+    // in lib/retrySendWindow.ts. A missing or unparseable origin fails OPEN
+    // (D5): the retry goes out unwindowed, with a WARN naming the gap.
+    const windowStart = oneToOneRetryWindowOrigin(original);
     const originMs = parseRetryWindowOrigin(windowStart);
     if (originMs === undefined) {
       log.warn(

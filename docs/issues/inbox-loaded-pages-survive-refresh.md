@@ -19,12 +19,16 @@ as she scrolls. If her scroll position was among the dropped rows the browser
 clamps it to the new bottom and auto-load fetches the next page once. This
 begins at row 101 at the default page size.
 
-**The boundary-page reload cost (build review AD-15, 2026-09-25).** For a
-reader parked past page one, EVERY complete head read (every inbox-affecting
-SSE event) drops the tail, the sentinel lands inside the 400px margin, and the
-epoch re-check fetches the next page again: two requests and up to 100 rows
-removed and re-added per event, invisible except as cost. A tiny `?limit`
-re-chains the whole list on every event (the e2e spec pins this at
+**The boundary-page reload cost (build review AD-15, 2026-09-25; corrected
+at round 2, R2-7).** For a reader parked past page one, EVERY complete head
+read (every inbox-affecting SSE event) drops the tail and the browser clamps
+her scroll position to the bottom of page one: she is returned to about row
+100 on every event, which is the visible cost spec section 8 states. Auto-load
+then re-fetches the next page once (the sentinel is inside the 400px margin
+and the head read moved the epoch), and that page appends BELOW her, so it
+does not bring her back. Only a reader parked near row 100 sees nothing. Each
+event costs two requests and up to 100 rows removed and re-added. A tiny
+`?limit` re-chains the whole list on every event (the e2e spec pins this at
 `limit=2`). Keeping the loaded pages is what removes it.
 
 **Why it was deferred.** Keeping those rows correctly was designed across

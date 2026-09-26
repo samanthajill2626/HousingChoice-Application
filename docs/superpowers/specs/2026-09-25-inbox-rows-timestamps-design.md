@@ -350,11 +350,12 @@ a mark-read/unread commit, the reset, or a failure); `Inbox.tsx` owns the DOM
     enabling commit). The default observer factory also drains the
     observer's queued entries with `takeRecords()` before it re-observes and
     before it disconnects, and ignores a callback that arrives after its
-    cleanup (build review AD-5). Residual, stated rather than hidden: an
-    entry the browser delivers between that drain and the following
-    `observe` would arrive as a fresh report of old geometry; whether
-    Chromium can deliver one is UNVERIFIED, and the cost would be one extra
-    page in a rare timing, bounded and self-correcting.
+    cleanup (build review AD-5). The drain and the re-observe are
+    synchronous calls, so no entry can be queued between them: the default
+    factory leaves no residual of its own (build review R2-7). What remains
+    is a browser that delivers an entry for a registration it was told to
+    drop, which the IntersectionObserver spec forbids; its cost would be one
+    extra page in a rare timing, bounded and self-correcting.
   - `intersecting` is reset to `false` whenever the sentinel unmounts
     (`hasMore` went false), from the effect that owns the observer; when the
     sentinel returns, the new observer's first callback sets it again.
@@ -516,7 +517,11 @@ interface ListState {
                           // order, plus any rows an incomplete head read merged in since (5.6)
   tail: InboxRowData[];   // rows from loadMore pages, in load order, deduplicated by rowKey;
                           // emptied by every complete head read (5.6)
-  cursor: string | null;  // the position after the last row of head ++ tail;
+  cursor: string | null;  // the position after the last row of head ++ tail, except after an
+                          // incomplete head read over a fully loaded list (a null cursor; 5.6
+                          // branch I, AD-4), which takes the read's cursor: it continues after
+                          // P, so the next page re-delivers rows the list already holds
+                          // (appendPage's dedupe drops them);
                           // null means the loaded list reaches the end of the feed
   groupsTruncated: boolean;
   truncated: boolean;
@@ -1125,7 +1130,10 @@ at both widths.
   operator's view when a row is inserted above it: after this change an
   inserted row shifts her reading position by one row height, the same as
   the Messages app. Accepted; anchoring is what would make auto-load chain
-  (5.2).
+  (5.2). With no anchor candidate, any notice or banner that appears above
+  the list (the refresh banner, a truncation notice) likewise shifts the
+  list by its height, and back when it goes (build review round 2, the AD-2
+  addendum).
 - A relay or group row absent from a complete head read is dropped, as today;
   a swallowed relay-list failure hides the relay rows until the next read, as
   today. Unchanged behavior, stated so nobody reads it as new.
@@ -1145,7 +1153,11 @@ at both widths.
   cursor, INCLUDING null", stranded a fully loaded list behind the "older
   unread threads not shown here" notice with no Load more once a truncated or
   short head read arrived with a cursor; a null cursor now takes the read's,
-  at the cost of re-reading at most one page of rows the list already holds.
+  at the cost of re-reading rows the list already holds: at most one page
+  for auto-load, which disarms on a page that adds no new row, while a
+  manual Load more through a list loaded over N pages re-walks up to N-1
+  already-loaded pages, each click adding nothing visible (build review
+  R2-7).
 
 ## 9. Issues to file and resolve
 

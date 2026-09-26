@@ -17,8 +17,10 @@
 // rendering update); consumption-at-arrival makes the rule independent of
 // that timing. The default observer drains its queued entries (takeRecords)
 // on every re-observe and before disconnect, and reports nothing once
-// disconnected, so the residual is now only a report the browser delivers
-// between takeRecords and observe, if any.
+// disconnected. The drain and the re-observe are synchronous calls, so no
+// entry can be queued between them: this factory leaves no residual of its
+// own. What remains is a browser that delivers an entry for a registration
+// it was told to drop, which the IntersectionObserver spec forbids (R2-7).
 import { useEffect, useRef, useState } from 'react';
 
 export interface AutoLoadObserver {

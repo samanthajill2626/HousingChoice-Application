@@ -1325,7 +1325,7 @@ describe('useInbox - page one persists (spec 5.5-5.8)', () => {
   it('markUnread rolls the row back to read when the request fails', async () => {
     getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })], null));
     markInboxUnread.mockRejectedValueOnce(new ApiError(500, 'http_500', 'no'));
-    render(<Probe filter="all" limit={2} />);
+    const { unmount } = render(<Probe filter="all" limit={2} />);
     await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
     act(() => screen.getByRole('button', { name: 'unread:c:c1' }).click());
     expect(screen.getByTestId('unread')).toHaveTextContent('1');
@@ -1333,6 +1333,11 @@ describe('useInbox - page one persists (spec 5.5-5.8)', () => {
       await new Promise((r) => setTimeout(r, 20));
     });
     expect(screen.getByTestId('unread')).toHaveTextContent('0');
+    // The rollback also leaves no patch for the UNMOUNT save to fold in: the
+    // saved row keeps its pre-patch count. (Read before the unmount this was
+    // vacuous - the head read wrote 0 and a rollback commits nothing; a patch
+    // left in pendingRef while the rendered state is clean fails it here.)
+    unmount();
     expect(loadInboxList(KEY)?.head[0]?.unreadCount).toBe(0);
   });
 

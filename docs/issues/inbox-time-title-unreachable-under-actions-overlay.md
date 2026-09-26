@@ -16,7 +16,8 @@ A mouse cannot reach it on any row that offers an action - every unread row
 (Mark read) and every read row that is not deleted or closed (Mark unread) -
 which is almost every row.
 
-The mechanism (build review AD-3, from the CSS geometry; no browser was run):
+The mechanism (build review AD-3, from the CSS geometry; measured in a browser
+at round 2, below):
 
 - `.actions` (`InboxRow.module.css:166`) is an absolutely positioned
   descendant of `.row`, so it paints and hit-tests ABOVE the non-positioned
@@ -30,6 +31,12 @@ The mechanism (build review AD-3, from the CSS geometry; no browser was run):
 - The only way to put the pointer over the time is to hover the row, which
   turns the overlay on over it. The element under the pointer is then
   `.actions`, and the browser shows no tooltip.
+
+**Measured (build review round 2, `code-review-r2.md` section 3, Chromium
+with the shipped CSS).** The revealed overlay is 85.6 px wide with Mark read
+and 99.6 px wide with Mark unread, starting 12 px inside the row's right
+edge, and it covered the time box on every row measured at 360, 768 and
+1280 px. The tooltip is unreachable wherever the row offers an action.
 
 Spec `2026-09-25-inbox-rows-timestamps-design.md` 5.4 and section 8 accepted
 the overlay COVERING the time while revealed (Sam approved the aligned-column

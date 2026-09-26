@@ -80,9 +80,17 @@ Build strictly in task order; one writer on the tree.
 Stated aloud - the branch is not shippable between these points, and the per-task test runs are scoped so each task still ends green on its OWN tests and on `npm run typecheck`:
 - Between Task 4 and Task 16, a rung closed `retry_window_closed` renders through the relay join as an unmapped code until Task 15 adds its fallback copy and Task 16 makes the join fall back to the original 30003.
 - Between Task 15 and Tasks 17-18, four dashboard tests that pin the old shared 30003 wording are red by design (Task 15 names them: `Timeline.delivery.test.tsx:516` and `:577`, `Timeline.email.test.tsx:96`, `StatChips.test.tsx:134`); Tasks 17 and 18 move them, and Task 18 ends with the whole dashboard suite green.
-- Between Task 10 and Task 17, a live promise is written but the one-to-one chip does not read it yet, so the bubble shows the plain failure - under-promising only.
+- Between Task 10 and Task 14, the one-to-one chip still renders today's code-keyed "will retry" on EVERY 30003 (`deliveryStatus.ts:778`), declined retries included - over-promising, as today. From Task 15 until Task 17 the chip reads the new base wording but does not read the promise yet - under-promising only.
+- Between Task 12 and Task 17, the server refuses a manual Retry with 409 `retry_pending` while the dashboard still shows the Retry button during the wait and maps that 409 to the generic "Couldn't send" copy (`Timeline.tsx:130`) until Task 17 maps it.
 
-Line numbers in every task are at `f49a2fe9`. Earlier tasks shift them; every edit is anchored on its quoted old text, which wins over the number.
+Line numbers in every task are at `f49a2fe9` (Tasks 10-11 say `fd38ba73`, a docs-only commit whose code is identical). Earlier tasks shift them; every edit is anchored on its quoted old text, which wins over the number.
+
+Watch items - readers of retry lineage the spec (section 4) lists, checked in plan review round 1 and needing NO code change (a builder who touches one re-checks it):
+- `app/src/routes/webhooks/twilio.ts:3129` (the relay-escalation gate on `relay_retry_of`) and `app/src/repos/messagesRepo.ts:2335` (the media-pointer guard): read fields this branch does not change.
+- `dashboard/src/routes/contact/relayRetryJoin.ts:135-164` and `:453`: read `relay_retry_*` lineage only; Task 16 changes the terminal step alone.
+- `dashboard/src/routes/conversation/useRelayThread.ts:101-142` (a fixed field list shared with `useGroupThread` via `buildRelayItems`): drops `retry_due_at` and `relay_retry_window_start` - harmless, and it keeps a fail-open stamp on a group text off the group view.
+- `dashboard/src/routes/contact/Timeline.tsx:1077`, `:1975-1984`, `:2004-2019` (the `retry_of` supersession collapse): D6 writes `retry_of` at append instead of milliseconds later, so the collapse is unchanged.
+- `dashboard/src/api/types.ts:2308-2315` and `:2509-2515` (the relay lineage fields on the wire types): unchanged; Task 13 adds `retry_due_at` only.
 
 ---
 
@@ -111,7 +119,7 @@ Line numbers in every task are at `f49a2fe9`. Earlier tasks shift them; every ed
 - [ ] **Step 0: Install dependencies (the worktree has no node_modules)**
 
 Run from the worktree root `W:\tmp\retry-send-window`: `npm ci`
-Expected: exit 0; `node_modules` populated at the root and in the workspaces. Every app suite this slice touches (Tasks 1, 3, 4, 5, 6) runs on the in-memory `createFakeWorld` (`app/test/helpers/twilioWebhookHarness.ts:414`) and needs no DynamoDB Local - `app/test/globalSetup.ts` is fail-soft when Docker is down. Start `npm run db:start` before the other slices' integration suites and before `npm test`.
+Expected: exit 0; `node_modules` populated at the root and in the workspaces. Then start DynamoDB Local: `npm run db:start` (Docker must be running). `app/test/globalSetup.ts:14-17` and `:69-88` FAIL every app vitest run without it - pure unit files included - unless `ALLOW_SKIP_DYNAMO_TESTS=1`, which is not a completion gate. Keep it up for the whole build.
 
 - [ ] **Step 1: Write the failing test (spec D1-D5, D10; test intention 1)**
 
@@ -1160,8 +1168,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- app/src/repos/messag
 
 **Files:**
 - Create: `app/src/lib/relayRetryGates.ts`
-- Modify: `app/src/jobs/relayRetryLeg.ts:34-53` (imports), `:80-97` (`RelayRetryCloseCode` by reference), after `:256-258` (a per-code WARN message map), `:482-555` (the four gates become one `evaluateRelayRetryGates` call)
-- Test: `app/test/relayRetryGates.test.ts` (new). `app/test/relayRetryLeg.test.ts` is NOT edited: its gate-case table (`:307-377`) and the gate-adjacent cases (`:379-423`, `:472-507`, `:801-829`, `:977-1000`) must stay green unchanged - they are the behavior-preservation proof.
+- Modify: `app/src/jobs/relayRetryLeg.ts:34-53` (imports), `:80-97` (`RelayRetryCloseCode` by reference), after `:256-258` (a per-code WARN message map), `:482-555` (the four gates become one `evaluateRelayRetryGates` call; the no-pool-number throw moves after them)
+- Test: `app/test/relayRetryGates.test.ts` (new). `app/test/relayRetryLeg.test.ts` - four new cases inserted before the test `'never stamps contact_opted_out on an opt-out refusal (the rollup drops that code)'` (`:379`), pinning the moved pool-number throw. Every pre-existing case in that file stays byte-identical and green: its gate-case table (`:307-377`) and the gate-adjacent cases (`:379-423`, `:472-507`, `:801-829`, `:977-1000`) are the proof that the extraction preserves every refusal.
 
 **Interfaces:**
 - Consumes: `isMemberSuppressed(contacts: ContactsRepo, conversations: ConversationsRepo, member: ConversationParticipant): Promise<boolean>` - it lives in `app/src/services/relayAnnouncements.ts:64-100` (re-exported by `app/src/jobs/relayFanOut.ts:76`); the job imports it from the service (`relayRetryLeg.ts:54`) and calls it as `isMemberSuppressed(contactsRepo, conversationsRepo, member)` (`:548`). `relayMemberKey` (`app/src/repos/messagesRepo.ts:193-197`), `normalizeToE164` (`app/src/lib/phone.ts`), `relayRetryDigest(rootTsMsgId, destinationE164)` (`app/src/lib/relayRetryClaim.ts:25-30`).
@@ -1180,7 +1188,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- app/src/repos/messag
     isSuppressed: (member: ConversationParticipant) => Promise<boolean>;
   }): Promise<RelayRetryGateResult>;
   ```
-  and `RelayRetryCloseCode = RelayRetryGateCode | 'enqueue_failed' | 'transient_cap'` (Task 5 adds `'retry_window_closed'`). The job keeps its refusal writes (`refuseGate`), its per-gate WARN lines (Q1 ruling) and its "open group with no pool number -> throw", now after a non-refused result.
+  and `RelayRetryCloseCode = RelayRetryGateCode | 'enqueue_failed' | 'transient_cap'` (Task 5 adds `'retry_window_closed'`). The job keeps its refusal writes (`refuseGate`), its per-gate WARN lines (Q1 ruling) and its "open group with no pool number -> throw".
+- Behavior change (the only one in this task; spec D3, plan review R1 finding 7): the job threw "has no pool number" between the group-open gate and the roster gate (`relayRetryLeg.ts:510-515`); it now throws only after a non-refused result from all four gates - the order the claim previews (Task 4). An OPEN group with no pool number whose member fails gate 2, 3 or 4 therefore closes the rung with that gate's code instead of throwing; with every gate passing it still throws, now after the suppression read. Step 2 pins both halves.
 
 - [ ] **Step 1: Write the failing evaluator test (spec D3)**
 
@@ -1342,12 +1351,104 @@ describe('evaluateRelayRetryGates (retry-send-window D3)', () => {
 });
 ```
 
-- [ ] **Step 2: Run it to verify it fails, and record the job suite baseline**
+- [ ] **Step 2: Pin the moved pool-number throw, both halves (spec D3; plan review R1 finding 7)**
+
+In `app/test/relayRetryLeg.test.ts`, insert the cases below immediately before the existing test at line 379. The file has no pool-less case today, and every pre-existing case stays as it is.
+
+Old:
+```ts
+  it('never stamps contact_opted_out on an opt-out refusal (the rollup drops that code)', async () => {
+```
+New:
+```ts
+  // --- retry-send-window D3: the no-pool-number throw now FOLLOWS the four gates ---
+  //
+  // The job used to throw "has no pool number" between the group-open gate and
+  // the roster gate. It now runs all four gates first - the order the claim's
+  // preview shares - so both halves are pinned: on an OPEN group with NO pool
+  // number, a gate that refuses still closes the rung with its own code, and
+  // with every gate passing the job still throws, after the suppression read.
+
+  it.each<[string, (world: FakeWorld) => void, string]>([
+    [
+      'removed member',
+      (w) => {
+        const conv = w.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).filter((m) => m.contactId !== BOB_KEY);
+      },
+      'retry_member_removed',
+    ],
+    [
+      'changed number',
+      (w) => {
+        const conv = w.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).map((m) =>
+          m.contactId === BOB_KEY ? { ...m, phone: BOB_NEW } : m,
+        );
+      },
+      'retry_number_changed',
+    ],
+    [
+      'opted out',
+      (w) => {
+        w.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: true });
+      },
+      'retry_opted_out',
+    ],
+  ])(
+    'closes an OPEN group with NO pool number by its refusing gate (%s) - the gates run before the pool-number throw',
+    async (_name, arrange, code) => {
+      seedRelay(world, { pool_number: undefined });
+      const row = seedRetryRow(world);
+      arrange(world);
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
+      const terminal = warnLogs().filter((l) => l['closeCode'] === code);
+      expect(terminal).toHaveLength(1);
+      expect(terminal[0]).toMatchObject({ retryClaim: 'gate_refused' });
+      // No throw: a deferred job that throws is logged at ERROR by the queue
+      // adapter, and the rung would be left `queued`.
+      expect(errorLogs()).toHaveLength(0);
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+    },
+  );
+
+  it('still THROWS for an OPEN group with NO pool number once all four gates pass - after the suppression read, nothing sent', async () => {
+    seedRelay(world, { pool_number: undefined });
+    const row = seedRetryRow(world);
+    const suppressionRead = vi.spyOn(world.contactsRepo, 'getById');
+    register();
+
+    await expect(
+      dispatchJob({
+        jobId: 'job-poolless-1',
+        jobName: RELAY_RETRY_LEG_JOB,
+        payload: payloadFor(row),
+        enqueuedAt: new Date().toISOString(),
+      } as never),
+    ).rejects.toThrow(/has no pool number/);
+    // The throw now comes AFTER the fourth gate's read ...
+    expect(suppressionRead).toHaveBeenCalledWith(BOB_KEY);
+    // ... and still sends and closes nothing: no gate code describes it.
+    expect(world.sent).toHaveLength(0);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(persistedEmits()).toHaveLength(0);
+  });
+
+  it('never stamps contact_opted_out on an opt-out refusal (the rollup drops that code)', async () => {
+```
+
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `cd app; npx vitest run test/relayRetryGates.test.ts test/relayRetryLeg.test.ts`
-Expected: `relayRetryGates.test.ts` FAILS - it cannot import `../src/lib/relayRetryGates.js` (module not found). `relayRetryLeg.test.ts` PASSES (the unchanged baseline this task must keep).
+Expected: `relayRetryGates.test.ts` FAILS - it cannot import `../src/lib/relayRetryGates.js` (module not found). In `relayRetryLeg.test.ts` the four new cases FAIL, because today the job throws "has no pool number" right after the group-open gate: the three refusing-gate cases end with the rung still `queued` and an ERROR from the queue adapter, and the throw case never reaches the suppression read. Every pre-existing case PASSES.
 
-- [ ] **Step 3: Create the evaluator (spec D3)**
+- [ ] **Step 4: Create the evaluator (spec D3)**
 
 Create `app/src/lib/relayRetryGates.ts`:
 
@@ -1427,7 +1528,7 @@ export async function evaluateRelayRetryGates(args: {
 }
 ```
 
-- [ ] **Step 4: Make the job call it, behavior-preserving (spec D3; the job D9 gates)**
+- [ ] **Step 5: Make the job call it; the pool-number throw moves after the gates (spec D3; the job D9 gates)**
 
 In `app/src/jobs/relayRetryLeg.ts`:
 
@@ -1577,8 +1678,10 @@ const GATE_REFUSAL_MESSAGES: Record<RelayRetryGateCode, string> = {
     }
     // An OPEN relay group with no pool number cannot send at all, and no gate
     // code describes it honestly. Throw rather than mis-stamp one of the four.
-    // (Checked after all four gates now: an open, pool-less group that ALSO
-    // refuses a gate closes with that gate's code instead of throwing.)
+    // Checked AFTER all four gates (retry-send-window D3, the order the claim
+    // previews): an open, pool-less group that ALSO refuses a gate closes with
+    // that gate's code instead of throwing. relayRetryLeg.test.ts pins both
+    // halves.
     const poolNumber = gate.conversation.pool_number;
     if (typeof poolNumber !== 'string' || poolNumber.length === 0) {
       throw new Error(`relayRetryLeg: relay conversation ${conversationId} has no pool number`);
@@ -1589,27 +1692,32 @@ const GATE_REFUSAL_MESSAGES: Record<RelayRetryGateCode, string> = {
 
 The rest of the handler (the media-without-store ERROR, the send, the outcomes) is unchanged: it still reads `member`, `poolNumber` and `memberLog`.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd app; npx vitest run test/relayRetryGates.test.ts test/relayRetryLeg.test.ts test/relayRetryClaim.webhook.test.ts`
-Expected: PASS - the new evaluator suite, and both existing relay-retry suites with NO edits (same codes, same WARN fields, same single root SSE per refusal, the suppression flip read counted once).
+Expected: PASS - the new evaluator suite; `relayRetryLeg.test.ts`, every pre-existing case unchanged (same codes, same WARN fields, same single root SSE per refusal, the suppression flip read counted once) plus the four pool-less cases; `relayRetryClaim.webhook.test.ts` unchanged.
 
-- [ ] **Step 6: Typecheck and commit**
+- [ ] **Step 7: Typecheck and commit**
 
 ```bash
 npm run typecheck
 git status
-git add app/src/lib/relayRetryGates.ts app/src/jobs/relayRetryLeg.ts app/test/relayRetryGates.test.ts
-git commit -m "refactor(relay-retry): one gate evaluator for the retry job and the claim (spec D3)
+git add app/src/lib/relayRetryGates.ts app/src/jobs/relayRetryLeg.ts app/test/relayRetryGates.test.ts app/test/relayRetryLeg.test.ts
+git commit -m "feat(relay-retry): one gate evaluator for the retry job and the claim; the pool-number throw follows the gates (spec D3)
 
 The retry job's four gates - group open, on the roster, number unchanged by
 digest, not opted out - move into evaluateRelayRetryGates, in the job's order,
 reading nothing but the injected suppression check. The job keeps its refusal
 writes, its WARN lines and its no-pool-number throw; RelayRetryCloseCode now
-names the gate codes by reference. Behavior unchanged; the claim adopts the
-evaluator next.
+names the gate codes by reference.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- app/src/lib/relayRetryGates.ts app/src/jobs/relayRetryLeg.ts app/test/relayRetryGates.test.ts
+One behavior change, pinned by four new job cases: the open-group-without-
+pool-number throw now runs after all four gates, the order the claim will
+preview. Such a group whose member fails a gate closes with that gate's code
+instead of throwing; with every gate passing the job still throws, now after
+the suppression read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- app/src/lib/relayRetryGates.ts app/src/jobs/relayRetryLeg.ts app/test/relayRetryGates.test.ts app/test/relayRetryLeg.test.ts
 ```
 
 ---
@@ -1618,16 +1726,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- app/src/lib/relayRet
 
 **Files:**
 - Modify: `app/src/lib/relayRetryClaim.ts:47-90` (`RelayRetryClaimOutcome` gains `'window_closed'`; `gate_refused` gets its doc)
-- Modify: `app/src/routes/webhooks/twilio.ts` - `:139-145` (imports), `:387-392` (`RelayRetryClaimResult.closeCode`), `:394-445` (`isTerminalRelayLegFailure` doc and WARN set), `:618-658` (`closeRetryLegEnqueueFailed` -> `closeClaimedRetryLeg` with the code as a parameter), `:2665-2668` (claim doc), before `:2781` (new step 7a), `:2826-2830` (the append carries `relayRetryWindowStart`), `:2831-2840` (dedupe, D5 WARN, the declined exit), `:2861-2867` (renamed call), `:2893-2906` (step 9 through a shared emit), `:3077-3079` (the failure marker carries `closeCode`). Do NOT edit `:316-341` or the one-to-one arm - Task 10 owns them.
-- Test: `app/test/relayRetryClaim.test.ts:51-88`; `app/test/relayRetryClaim.webhook.test.ts` - `:39` (import), after `:69` (constants and `minutesAgo`), `:71-79` (`SourceOptions.carolSlot`), `:178` (Carol's slot), after `:258` (`runScheduledRung`), before the final `});` at `:827` (new section).
+- Modify: `app/src/routes/webhooks/twilio.ts` - `:72-79` (import the `RelayRecipientDelivery` type), `:139-145` (imports), `:387-392` (`RelayRetryClaimResult.closeCode`), `:394-445` (`isTerminalRelayLegFailure` doc and WARN set), `:2665-2669` (claim doc), before `:2781` (new step 7a: the gate preview, the origin, the decision and the rung's slot), `:2802-2812` (the append seeds that slot), `:2826-2830` (the append carries `relayRetryWindowStart`), `:2831-2840` (dedupe, the D5 WARN, the declined exit), `:2893-2906` (step 9 through a shared emit), `:3077-3079` (the failure marker carries `closeCode`). NOT edited: `closeRetryLegEnqueueFailed` (`:618-658`) and its one call (`:2861-2867`) stay exactly as they are - still the claim's only close, used for `enqueue_failed` alone. Do NOT edit `:316-341` or the one-to-one arm - Task 10 owns them.
+- Test: `app/test/relayRetryClaim.test.ts:51-88`; `app/test/relayRetryClaim.webhook.test.ts` - `:19` (the vitest import gains `vi`), `:39` (import), after `:69` (constants and `minutesAgo`), `:71-79` (`SourceOptions.carolSlot`), `:178` (Carol's slot), after `:258` (`runScheduledRung`), before the final `});` at `:827` (new section).
 
 **Interfaces:**
 - Consumes: Task 1 `parseRetryWindowOrigin(value: unknown): number | undefined`, `retryFitsSendWindow(args: { originMs: number; nowMs: number; backoffMs: number }): boolean`. Task 2 `NewMessage.relayRetryWindowStart?: string` (written as `relay_retry_window_start`), `MessageItem.relay_retry_window_start?: string`, and the harness fake `append` carrying it (`app/test/helpers/twilioWebhookHarness.ts:1081-1152`). Task 3 `evaluateRelayRetryGates(...)`, `RelayRetryGateCode`. Existing `resolveRelayRetryBackoff(deps?: Pick<RelayRetryLegJobDeps, 'backoffMs'>): (attempt: number) => number` (`app/src/jobs/relayRetryLeg.ts:214-218`, the chain `enqueueRelayRetryLeg` schedules with, `:225-234`); `isMemberSuppressed` (already imported, `twilio.ts:83-87`).
+- Consumes (verified, the reason a closed rung can be ONE write): `messages.append` (`app/src/repos/messagesRepo.ts:2214-2253`) writes `delivery_recipients` verbatim, in the same `TransactWriteCommand` as the `sid#` pointer that IS the claim (`:2336-2360`). Its only shape check, `assertTransportPersistenceShape` (`:917-968`), looks at transport fields alone: a recipient transport field requires schema version 1 (a versioned rung carries it; a legacy closed slot has none) and an aggregation state must be `planned`, `attempted` or `excluded` (`:959-966`). It never inspects a slot's `status` or `errorCode`, so a `failed` / `excluded` slot is accepted at creation. The harness fake `append` stores `deliveryRecipients` as given (`twilioWebhookHarness.ts:1125-1127`).
 - Produces:
   - `RelayRetryClaimOutcome` gains `'window_closed'` (13 -> 14 values).
-  - `closeClaimedRetryLeg(conversationId: string, retryTsMsgId: string, memberKey: string, versioned: boolean, requestedTransport: MessageTransport | undefined, code: 'enqueue_failed' | RelayRetryGateCode | 'retry_window_closed'): Promise<void>` - the same writes as before.
   - `isTerminalRelayLegFailure` WARN set gains `'gate_refused'` (`window_closed` stays ERROR).
-  - `RelayRetryClaimResult.closeCode?: RelayRetryGateCode | 'retry_window_closed'` (module-private; the marker line carries it).
+  - `RelayRetryClaimResult.closeCode?: RelayRetryGateCode | 'retry_window_closed'` (module-private), set on exactly the two decline outcomes; the failure marker carries it.
+  - A DECLINED rung is APPENDED already closed, in the claim's one append transaction, never enqueued, with the member slot a job-time refusal (`refuseGate`, `relayRetryLeg.ts:449-467`) leaves for the same code: legacy `{ status: 'failed', errorCode }`; versioned `{ status: 'failed', requestedTransport?, transportAggregationState: 'excluded', errorCode }`. Every other field is what an open rung carries, the row-level `delivery_status: 'queued'` included, because the refusal's writers touch nothing but the member slot: `setRecipientDelivery` (`messagesRepo.ts:3562-3583`, SET `delivery_recipients.<key>`), `setRecipientTransportAggregationState` (`:3233-3302`, SET `delivery_recipients.<key>.transportAggregationState`), `applyRecipientSendResult` (`:3374-3514`, SET/REMOVE under `delivery_recipients.<key>` only). No second write, so no open rung ever exists to be stranded or read as "Retrying".
+  - `closeRetryLegEnqueueFailed` - unchanged; the claim's only close, for `enqueue_failed` only.
   - Every rung the claim creates carries `relay_retry_window_start` (ISO) when the origin parses: rung 1 = the ROOT member slot's `sentAt`; rungs 2-3 = the previous rung row's `relay_retry_window_start`, never re-derived.
 
 - [ ] **Step 1: Widen the exhaustive outcome test (spec D3, D9)**
@@ -1655,7 +1765,7 @@ New:
 ```ts
       // Code review R1, F2: an internal fault WHILE claiming - the helper threw.
       claim_failed: true,
-      // retry-send-window D3/D9: the claim created the rung already closed
+      // retry-send-window D3/D9: the claim appended the rung already closed
       // because it could not go out inside the 15-minute send window.
       window_closed: true,
     };
@@ -1679,13 +1789,24 @@ New:
 
 In `app/test/relayRetryClaim.webhook.test.ts`:
 
-(a) After line 39 (`import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';`) add:
+(a) Replace line 19:
+
+Old:
+```ts
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+```
+New:
+```ts
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+```
+
+(b) After line 39 (`import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';`) add:
 
 ```ts
 import type { RelayRetryGateCode } from '../src/lib/relayRetryGates.js';
 ```
 
-(b) After line 69 (`const PLACEMENT_ID = 'placement-relay-1';`) add:
+(c) After line 69 (`const PLACEMENT_ID = 'placement-relay-1';`) add:
 
 ```ts
 /** Bob's number after a change (the changed-number gate, retry-send-window D3). */
@@ -1701,7 +1822,7 @@ function minutesAgo(minutes: number): string {
 }
 ```
 
-(c) `SourceOptions` - replace lines 77-79:
+(d) `SourceOptions` - replace lines 77-79:
 
 Old:
 ```ts
@@ -1713,7 +1834,7 @@ New:
 ```ts
   /** Bob's slot as the fan-out left it, BEFORE the failure callback. */
   bobSlot?: RelayRecipientDelivery;
-  /** Carol's slot, likewise (retry-send-window: the same-shape comparison). */
+  /** Carol's slot, likewise (retry-send-window: the same-data comparison). */
   carolSlot?: RelayRecipientDelivery;
 }
 ```
@@ -1729,7 +1850,7 @@ New:
         [CAROL_KEY]: opts.carolSlot ?? (versioned ? versionedSlot('sent') : { status: 'sent' }),
 ```
 
-(d) After `failNextLeg` (after line 258, the function's closing `  }`) add:
+(e) After `failNextLeg` (after line 258, the function's closing `  }`) add:
 
 ```ts
 
@@ -1751,7 +1872,7 @@ New:
   }
 ```
 
-(e) Before the final `});` of the file (line 827, right after the test `'still escalates a different member failing mid-ladder'`) add:
+(f) Before the final `});` of the file (line 827, right after the test `'still escalates a different member failing mid-ladder'`) add:
 
 ```ts
 
@@ -1822,7 +1943,7 @@ New:
   ];
 
   it.each(claimGateCases)(
-    'retry-send-window D3: when %s, rung 1 is created already CLOSED with that gate code and nothing is enqueued',
+    'retry-send-window D3: when %s, rung 1 is APPENDED already CLOSED with that gate code and nothing is enqueued',
     async (_label, arrange, code) => {
       const sentAt = minutesAgo(1);
       const root = await seedSource({ bobSlot: { status: 'sent', sentAt } });
@@ -1833,7 +1954,7 @@ New:
       const rows = retryRows();
       expect(rows).toHaveLength(1);
       // ONE data shape: the rung exists with its full lineage and origin, and
-      // is created closed with the code the job itself would have written.
+      // is appended closed with the code the job itself would have written.
       expect(rows[0]).toMatchObject({
         relay_retry_of: root,
         relay_retry_attempt: 1,
@@ -1843,7 +1964,7 @@ New:
       expect(slotOf(rows[0]!.tsMsgId)).toEqual({ status: 'failed', errorCode: code });
       expect(scheduledRetryJobs()).toHaveLength(0);
       expect(world.sent).toHaveLength(0);
-      // WARN (Cameron's Q1 ruling), carrying the code the claim WROTE.
+      // WARN (Cameron's Q1 ruling), carrying the code the rung was appended with.
       expect(failureLines(WARN)).toContainEqual(
         expect.objectContaining({ retryClaim: 'gate_refused', retryAttempt: 1, closeCode: code }),
       );
@@ -1889,7 +2010,7 @@ New:
   });
 
   it.each([2, 3])(
-    'retry-send-window D3: a member who opts out mid-ladder gets rung %i created CLOSED at the claim, carrying the ROOT origin',
+    'retry-send-window D3: a member who opts out mid-ladder gets rung %i appended CLOSED at the claim, carrying the ROOT origin',
     async (rung) => {
       const sentAt = minutesAgo(1);
       await seedSource({ bobSlot: { status: 'sent', sentAt } });
@@ -1959,7 +2080,7 @@ New:
   });
 
   it.each([false, true])(
-    'retry-send-window D3: a rung that would send past the window is created CLOSED retry_window_closed - one ERROR, nothing enqueued (versioned=%s)',
+    'retry-send-window D3: a rung that would send past the window is APPENDED CLOSED retry_window_closed - one write, one ERROR, nothing enqueued (versioned=%s)',
     async (versioned) => {
       // One minute of window left; rung 1 needs 60s backoff + 60s grace.
       const sentAt = minutesAgo(14);
@@ -1969,6 +2090,12 @@ New:
           ? { status: 'sent', requestedTransport: 'sms', transportAggregationState: 'attempted', sentAt }
           : { status: 'sent', sentAt },
       });
+      // The three writers a job-time refusal uses. The root leg's own writes
+      // go through updateRecipientDeliveryStatus / setRecipientActualTransport,
+      // so any call to these would be a second write on the rung.
+      const setSlot = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+      const setState = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const applyResult = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
 
       await postRootFailure();
 
@@ -1976,7 +2103,7 @@ New:
       expect(rows).toHaveLength(1);
       expect(rows[0]!.relay_retry_window_start).toBe(sentAt);
       // The SAME slot the job's own window refusal leaves (Task 5 pins the job
-      // side to this identical literal).
+      // side to this identical literal) - written by the append alone.
       expect(slotOf(rows[0]!.tsMsgId)).toEqual(
         versioned
           ? {
@@ -1987,6 +2114,9 @@ New:
             }
           : { status: 'failed', errorCode: 'retry_window_closed' },
       );
+      expect(setSlot).not.toHaveBeenCalled();
+      expect(setState).not.toHaveBeenCalled();
+      expect(applyResult).not.toHaveBeenCalled();
       expect(scheduledRetryJobs()).toHaveLength(0);
       expect(world.sent).toHaveLength(0);
       // D9: ONE ERROR line - the marker, through isTerminalRelayLegFailure.
@@ -2067,7 +2197,7 @@ New:
   );
 
   it.each([false, true])(
-    'retry-send-window D3: a claim-time close leaves the SAME slot the job refusal leaves for that code (versioned=%s)',
+    'retry-send-window D3: a claim-time decline appends the SAME rung data the job refusal leaves for that code (versioned=%s)',
     async (versioned) => {
       const sentAt = minutesAgo(1);
       const legSlot = (): RelayRecipientDelivery =>
@@ -2077,20 +2207,43 @@ New:
       await seedSource({ versioned, bobSlot: legSlot(), carolSlot: legSlot() });
       // Carol's leg fails while the group is OPEN: her rung is claimed open.
       await postStatus(failureParams({ MessageSid: CAROL_LEG_SID, To: CAROL }));
-      // The group closes. Bob's leg fails now: the CLAIM declines his rung.
+      // The group closes. Bob's leg fails now: the CLAIM declines his rung and
+      // appends it already closed - it is never enqueued, so only Carol's
+      // rung is waiting. (Before this task both rungs were enqueued and the
+      // job refused both, which would make the comparison below vacuous.)
       world.conversations.get(CONV)!.status = 'closed';
       await postRootFailure();
+      expect(scheduledRetryJobs()).toHaveLength(1);
+      const bobRung = retryRows().find((r) => r.relay_retry_member_key === BOB_KEY)!;
+      expect(slotOf(bobRung.tsMsgId, BOB_KEY)).toMatchObject({
+        status: 'failed',
+        errorCode: 'retry_group_closed',
+      });
       // Carol's rung runs, and the JOB refuses it at its own gate.
       await outbound.deliverDelayed(dispatchJob);
       await outbound.settle();
-
-      const bobRung = retryRows().find((r) => r.relay_retry_member_key === BOB_KEY)!;
       const carolRung = retryRows().find((r) => r.relay_retry_member_key === CAROL_KEY)!;
-      const closedAtClaim = slotOf(bobRung.tsMsgId, BOB_KEY);
-      const closedByJob = slotOf(carolRung.tsMsgId, CAROL_KEY);
-      expect(closedAtClaim).toMatchObject({ status: 'failed', errorCode: 'retry_group_closed' });
-      expect(closedAtClaim).toEqual(closedByJob);
-      expect(bobRung.delivery_status).toBe(carolRung.delivery_status);
+
+      /** A rung's data minus what is per-member by construction - its key,
+       *  provider identity, timestamps and destination digest - with the
+       *  member slot read under the rung's own key. */
+      const rungData = (row: MessageItem, key: string) => {
+        const {
+          tsMsgId: _tsMsgId,
+          provider_sid: _providerSid,
+          provider_ts: _providerTs,
+          created_at: _createdAt,
+          relay_retry_member_key: _memberKey,
+          relay_retry_dest_digest: _destDigest,
+          delivery_recipients: slots,
+          ...rest
+        } = row;
+        return { ...rest, slot: slots?.[key] };
+      };
+      // Field by field - the row-level delivery_status included - the rung the
+      // claim appended closed equals the rung the job closed.
+      expect(rungData(bobRung, BOB_KEY)).toEqual(rungData(carolRung, CAROL_KEY));
+      expect(bobRung.delivery_status).toBe('queued');
       expect(world.sent).toHaveLength(0);
     },
   );
@@ -2098,44 +2251,62 @@ New:
   it.each<[string, number, boolean, RelayRetryGateCode | 'retry_window_closed']>([
     ['a gate decline', 1, true, 'retry_group_closed'],
     ['a window decline', 14, false, 'retry_window_closed'],
-  ])('retry-send-window D3: on %s the ROOT SSE fires once, AFTER the close', async (_label, sentMinutesAgo, closeGroup, code) => {
-    // The crash-recovery shape (the slot is already terminal on 30003):
-    // nothing transitions, so the tail's own emit cannot fire and the ONLY
-    // root emit is the claim's.
-    const root = await seedSource({
-      bobSlot: { status: 'undelivered', errorCode: '30003', sentAt: minutesAgo(sentMinutesAgo) },
-    });
-    if (closeGroup) world.conversations.get(CONV)!.status = 'closed';
-    const rootEmits = (): number =>
-      world.emitted.filter(
-        (e) =>
-          e.event === 'message.persisted' &&
-          (e.payload as { tsMsgId?: string }).tsMsgId === root,
-      ).length;
-    // The legacy close is a `setRecipientDelivery` write: record how many
-    // root emits had already happened when it ran.
-    let emitsAtClose = -1;
-    const realSet = world.messagesRepo.setRecipientDelivery.bind(world.messagesRepo);
-    world.messagesRepo.setRecipientDelivery = async (conversationId, tsMsgId, memberKey, delivery) => {
-      emitsAtClose = rootEmits();
-      return realSet(conversationId, tsMsgId, memberKey, delivery);
-    };
+  ])(
+    'retry-send-window D3: on %s the rung is APPENDED closed - one write, nothing closes it after - and the ROOT SSE fires once, after that write',
+    async (_label, sentMinutesAgo, closeGroup, code) => {
+      // The crash-recovery shape (the slot is already terminal on 30003):
+      // nothing transitions, so the tail's own emit cannot fire and the ONLY
+      // root emit is the claim's.
+      const root = await seedSource({
+        bobSlot: { status: 'undelivered', errorCode: '30003', sentAt: minutesAgo(sentMinutesAgo) },
+      });
+      if (closeGroup) world.conversations.get(CONV)!.status = 'closed';
+      const rootEmits = (): number =>
+        world.emitted.filter(
+          (e) =>
+            e.event === 'message.persisted' &&
+            (e.payload as { tsMsgId?: string }).tsMsgId === root,
+        ).length;
+      // Record what the rung's append carried, and how many root emits had
+      // already happened when it ran.
+      let appendedSlot: RelayRecipientDelivery | undefined;
+      let emitsAtAppend = -1;
+      const realAppend = world.messagesRepo.append.bind(world.messagesRepo);
+      world.messagesRepo.append = async (message) => {
+        if (message.relayRetryOf !== undefined) {
+          appendedSlot = message.deliveryRecipients?.[BOB_KEY];
+          emitsAtAppend = rootEmits();
+        }
+        return realAppend(message);
+      };
+      const setSlot = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+      const setState = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const applyResult = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
 
-    await postRootFailure();
+      await postRootFailure();
 
-    expect(slotOf(retryRows()[0]!.tsMsgId)).toEqual({ status: 'failed', errorCode: code });
-    expect(emitsAtClose).toBe(0);
-    expect(rootEmits()).toBe(1);
-    expect(scheduledRetryJobs()).toHaveLength(0);
-  });
+      // The append itself carried the final closed slot ...
+      expect(appendedSlot).toEqual({ status: 'failed', errorCode: code });
+      expect(slotOf(retryRows()[0]!.tsMsgId)).toEqual({ status: 'failed', errorCode: code });
+      // ... and no second write touched the rung afterwards.
+      expect(setSlot).not.toHaveBeenCalled();
+      expect(setState).not.toHaveBeenCalled();
+      expect(applyResult).not.toHaveBeenCalled();
+      // The claim's root SSE fires once, AFTER that one write.
+      expect(emitsAtAppend).toBe(0);
+      expect(rootEmits()).toBe(1);
+      expect(scheduledRetryJobs()).toHaveLength(0);
+    },
+  );
 
-  it('retry-send-window D3: a duplicate callback for an OPEN rung answers already_claimed and closes nothing, whatever its own preview says', async () => {
+  it('retry-send-window D3: a duplicate callback for an OPEN rung answers already_claimed and changes nothing, whatever its own preview says', async () => {
     await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(1) } });
     await postRootFailure();
     const rung = retryRows()[0]!;
     expect(slotOf(rung.tsMsgId)).toEqual({ status: 'queued' });
     // Between the two deliveries the group closes, so THIS callback's own
-    // preview declines. It must not close the rung an earlier callback opened.
+    // preview declines. Its append dedupes: the rung an earlier callback
+    // opened stays open and enqueued.
     world.conversations.get(CONV)!.status = 'closed';
 
     await postRootFailure();
@@ -2155,8 +2326,8 @@ New:
     await postRootFailure();
     const rung = retryRows()[0]!;
     expect(slotOf(rung.tsMsgId)).toEqual({ status: 'failed', errorCode: 'retry_group_closed' });
-    // The group reopens: THIS callback's preview would pass. It must not
-    // enqueue (or reopen) the rung an earlier callback closed.
+    // The group reopens: THIS callback's preview would pass. Its append
+    // dedupes: the rung an earlier callback closed stays closed.
     world.conversations.get(CONV)!.status = 'open';
 
     await postRootFailure();
@@ -2195,43 +2366,12 @@ New:
     expect(retryRows()).toHaveLength(1);
     expect(scheduledRetryJobs()).toHaveLength(1);
   });
-
-  it('retry-send-window D3: keeps gate_refused and names the stranded rung at ERROR when the claim-time close throws', async () => {
-    await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(1) } });
-    world.conversations.get(CONV)!.status = 'closed';
-    // The LEGACY close is `setRecipientDelivery`; the root leg's own write goes
-    // through `updateRecipientDeliveryStatus` and is untouched.
-    world.messagesRepo.setRecipientDelivery = async () => {
-      throw new Error('close failed');
-    };
-
-    // Still a 200: the rung exists, and a redelivery could not close it - its
-    // deduped append returns before any close.
-    await postRootFailure();
-
-    const rows = retryRows();
-    expect(rows).toHaveLength(1);
-    expect(slotOf(rows[0]!.tsMsgId)).toEqual({ status: 'queued' });
-    expect(scheduledRetryJobs()).toHaveLength(0);
-    const marker = failureLines(WARN).find((l) => l['retryClaim'] === 'gate_refused');
-    expect(marker).toBeDefined();
-    // No close was WRITTEN, so no close code rides the marker.
-    expect(marker!['closeCode']).toBeUndefined();
-    expect(failureLines(ERROR).some((l) => l['retryClaim'] === 'claim_failed')).toBe(false);
-    const detail = capture
-      .atLevel(ERROR)
-      .find((l) => l['retryClaim'] === 'gate_refused' && l['retryTsMsgId'] === rows[0]!.tsMsgId);
-    expect(detail).toBeDefined();
-    expect(detail!['closeCode']).toBeUndefined();
-    expect(JSON.stringify(detail)).toContain('close failed');
-    expect(JSON.stringify(detail)).not.toContain(BOB);
-  });
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `cd app; npx vitest run test/relayRetryClaim.test.ts test/relayRetryClaim.webhook.test.ts`
-Expected: `relayRetryClaim.test.ts` PASSES at runtime (the union check is compile-time: `npm run typecheck` reports `window_closed` as an unknown property of `Record<RelayRetryClaimOutcome, true>` until Step 4). `relayRetryClaim.webhook.test.ts`: every new `retry-send-window` case FAILS (the rung is created open and enqueued, carries no `relay_retry_window_start`, and no gap WARN is logged; the preview-read case gets a 200) EXCEPT the open-rung duplicate case, a pin that already passes. Every pre-existing case passes.
+Expected: `relayRetryClaim.test.ts` PASSES at runtime (the union check is compile-time: `npm run typecheck` reports `window_closed` as an unknown property of `Record<RelayRetryClaimOutcome, true>` until Step 4). `relayRetryClaim.webhook.test.ts`: every new `retry-send-window` case FAILS - the rung is appended OPEN and enqueued (so the same-data case sees two scheduled rungs, and the one-write case sees a `queued` slot in the append), it carries no `relay_retry_window_start`, no gap WARN is logged, and the preview-read case gets a 200 - EXCEPT the open-rung duplicate case, a pin that already passes. Every pre-existing case passes.
 
 - [ ] **Step 4: Widen the outcome union (spec D3, D9)**
 
@@ -2247,7 +2387,7 @@ New:
    * A job gate refuses the rung: group closed, member removed, number changed
    * or opted out. The relay JOB logs it when its send-time gate refuses; since
    * retry-send-window D3 the CLAIM returns it too, when its gate preview sees
-   * that refusal coming and creates the rung already closed with the gate's
+   * that refusal coming and appends the rung already closed with the gate's
    * code. WARN on both ends (Cameron's Q1 ruling, 2026-09-24): a deliberate
    * human action, not a fault.
    */
@@ -2266,7 +2406,7 @@ New:
   | 'code_not_retryable'
   | 'enqueue_failed'
   /**
-   * retry-send-window D3: the claim created rung N already CLOSED with
+   * retry-send-window D3: the claim appended rung N already CLOSED with
    * `retry_window_closed`, because it could not go out inside the send window
    * (its send time plus RETRY_JOB_GRACE_MS lands after the member's original
    * leg send plus 15 minutes). Nothing is enqueued. ERROR (D9): the member
@@ -2280,7 +2420,33 @@ New:
 
 In `app/src/routes/webhooks/twilio.ts`:
 
-(a) Imports. Replace line 139:
+(a) Imports. Replace lines 72-79:
+
+Old:
+```ts
+import {
+  createMessagesRepo,
+  mediaAttachmentsOf,
+  relayMemberKey,
+  type DeliveryStatus,
+  type MediaAttachment,
+  type MessagesRepo,
+} from '../../repos/messagesRepo.js';
+```
+New:
+```ts
+import {
+  createMessagesRepo,
+  mediaAttachmentsOf,
+  relayMemberKey,
+  type DeliveryStatus,
+  type MediaAttachment,
+  type MessagesRepo,
+  type RelayRecipientDelivery,
+} from '../../repos/messagesRepo.js';
+```
+
+Replace line 139:
 
 Old:
 ```ts
@@ -2317,9 +2483,10 @@ interface RelayRetryClaimResult {
   /** The 1-based rung, present only where a retry ROW exists for it. */
   attempt?: number;
   /**
-   * retry-send-window D3: the code a claim-time close WROTE on the rung it
-   * created (a gate code, or `retry_window_closed`). Present only when that
-   * close landed - the enqueue-failure line's own rule for `closeCode`.
+   * retry-send-window D3: the code a declined rung was APPENDED with (a gate
+   * code, or `retry_window_closed`) - set on exactly `gate_refused` and
+   * `window_closed`, the two claim-time declines. The failure marker carries
+   * it, as the enqueue-failure line carries the code its close wrote.
    */
   closeCode?: RelayRetryGateCode | 'retry_window_closed';
 }
@@ -2351,7 +2518,7 @@ New:
 ```ts
  *   - `gate_refused` stays WARN (retry-send-window spec D3, by Cameron's Q1
  *     ruling of 2026-09-24). The claim now previews the retry job's four gates
- *     and, when one would refuse, creates the rung already closed with that
+ *     and, when one would refuse, appends the rung already closed with that
  *     gate's code. A closed group, a removed member, a changed number and an
  *     opt-out are deliberate human actions, not faults - the job's own refusal
  *     of the same rung has logged WARN since that ruling, and the claim seeing
@@ -2388,67 +2555,7 @@ New:
   );
 ```
 
-(d) The close helper - replace lines 618-658 (the D14 doc comment and the whole `closeRetryLegEnqueueFailed` function) with:
-
-```ts
-  /**
-   * Close a retry rung THIS claim just created, terminally, without it ever
-   * being enqueued. Three reasons share one shape:
-   *
-   *   - `enqueue_failed` (D14): the rung could not be enqueued. Never the cap's
-   *     `transient_cap` - one code for both would tell an operator retries ran
-   *     when none did.
-   *   - a job-gate code (retry-send-window spec D3): the claim's gate preview
-   *     saw the retry job would refuse the rung - group closed, member removed,
-   *     number changed, opted out - so it is created closed with that code
-   *     rather than reading "Retrying" until the job refuses it.
-   *   - `retry_window_closed` (retry-send-window D3): the rung could not go out
-   *     inside the 15-minute send window.
-   *
-   * The writes are the job's pre-send refusal (`refuseGate` in
-   * `jobs/relayRetryLeg.ts`) exactly - aggregation `excluded`, then the failed
-   * slot - through the fan-out's EXPORTED transport-aware persist path, so a
-   * legacy retry row still takes `markRecipient`'s whole-slot write while a
-   * versioned one takes `applyRecipientSendResult`. That is what makes a
-   * claim-time close hold the same data a job-time refusal leaves for the same
-   * code.
-   */
-  async function closeClaimedRetryLeg(
-    conversationId: string,
-    retryTsMsgId: string,
-    memberKey: string,
-    versioned: boolean,
-    requestedTransport: MessageTransport | undefined,
-    code: 'enqueue_failed' | RelayRetryGateCode | 'retry_window_closed',
-  ): Promise<void> {
-    const legPayload: RelayLegPayload = {
-      relayConversationId: conversationId,
-      sourceTsMsgId: retryTsMsgId,
-      attempt: 1,
-    };
-    // `intent` is structurally required by RelayTransportMode but is never READ
-    // on this path (`persistRelayRecipientResult` branches on `kind` alone), so
-    // the slot's own requested transport is the honest value to carry.
-    const transport: RelayTransportMode = versioned
-      ? { kind: 'versioned', intent: { requestedTransport: requestedTransport ?? 'sms' } }
-      : { kind: 'legacy' };
-    if (transport.kind === 'versioned') {
-      await setVersionedAggregationState(messages, legPayload, memberKey, 'excluded', [
-        'excluded',
-        'attempted',
-      ]);
-    }
-    await persistRelayRecipientResult(
-      messages,
-      legPayload,
-      memberKey,
-      { status: 'failed', errorCode: code },
-      transport,
-    );
-  }
-```
-
-(e) The claim's doc. Replace lines 2665-2669:
+(d) The claim's doc. Replace lines 2665-2669:
 
 Old:
 ```ts
@@ -2468,13 +2575,13 @@ New:
      * It also DECIDES, before the rung exists, whether the rung will be
      * attempted (retry-send-window spec D3): the retry job's four gates are
      * previewed through the job's own evaluator, then the 15-minute send window
-     * is checked, and a rung that either check refuses is created already
-     * CLOSED with that code and never enqueued - so the leg shows at once
-     * whether a retry is coming.
+     * is checked, and a rung that either check refuses is APPENDED already
+     * CLOSED - in that same single write - and never enqueued, so the leg
+     * shows at once whether a retry is coming.
      *
 ```
 
-(f) Step 7a. Replace lines 2780-2781:
+(e) Step 7a. Replace lines 2780-2781:
 
 Old:
 ```ts
@@ -2488,11 +2595,11 @@ New:
       // 7a. Decide NOW whether rung N will be attempted (retry-send-window spec
       // D3), so the leg shows at once whether a retry is coming - never
       // "Retrying" for the 1 to 4 minutes before the job refuses a rung the
-      // claim could already see was doomed. The decision is recorded on the
-      // rung appended below, which is created CLOSED when it is a decline: ONE
-      // data shape (the one a job-time refusal already leaves), and the
-      // append's SID dedupe still answers a duplicate callback with no separate
-      // lookup. The member's slot on the ROOT is never touched here.
+      // claim could already see was doomed. The decision is known BEFORE the
+      // append, so it is recorded IN the append: a declined rung is written
+      // already closed, ONE data shape (the one a job-time refusal already
+      // leaves), and the append's SID dedupe still answers a duplicate callback
+      // with no separate lookup. The member's slot on the ROOT is never touched.
       //
       // First the job's four gates, in the job's own order (group open, on the
       // roster, number unchanged, not opted out), through the SAME evaluator
@@ -2542,7 +2649,66 @@ New:
         // must still fit inside origin + RETRY_SEND_WINDOW_MS.
         decline = 'retry_window_closed';
       }
+      // The rung's member slot. An OPEN rung is seeded `queued` for its job,
+      // as always. A DECLINED rung is appended ALREADY CLOSED, with exactly the
+      // slot the job's own pre-send refusal (`refuseGate` in
+      // `jobs/relayRetryLeg.ts`) leaves for that code - in this one write, not
+      // a second one, so no open rung ever exists to be stranded or to be read
+      // as "Retrying" by a refetch. The refusal's writers touch nothing but
+      // this slot (`setRecipientTransportAggregationState`,
+      // `applyRecipientSendResult`, `setRecipientDelivery` in
+      // `repos/messagesRepo.ts`), so every other field of the rung - its
+      // row-level `delivery_status` included - is the same either way; and
+      // `append`'s shape check covers transport fields only, so it accepts a
+      // closed slot.
+      let rungSlot: RelayRecipientDelivery;
+      if (decline === undefined) {
+        rungSlot = versioned
+          ? {
+              status: 'queued',
+              ...(requestedTransport !== undefined && { requestedTransport }),
+              // `attempted` is reachable ONLY from `planned`, so a slot seeded
+              // without it throws on the first retry send.
+              transportAggregationState: 'planned',
+            }
+          : { status: 'queued' };
+      } else if (versioned) {
+        // The versioned refusal's two writes - aggregation `excluded`, then
+        // the failed slot with the code - folded into the one.
+        rungSlot = {
+          status: 'failed',
+          ...(requestedTransport !== undefined && { requestedTransport }),
+          transportAggregationState: 'excluded',
+          errorCode: decline,
+        };
+      } else {
+        // `markRecipient`'s whole-slot write: nothing else survives in it.
+        rungSlot = { status: 'failed', errorCode: decline };
+      }
       const appended = await messages.append({
+```
+
+(f) The append seeds the decided slot. Replace lines 2802-2812:
+
+Old:
+```ts
+        deliveryRecipients: {
+          [ptr.memberKey]: versioned
+            ? {
+                status: 'queued' as const,
+                ...(requestedTransport !== undefined && { requestedTransport }),
+                // `attempted` is reachable ONLY from `planned`, so a slot seeded
+                // without it throws on the first retry send.
+                transportAggregationState: 'planned' as const,
+              }
+            : { status: 'queued' as const },
+        },
+```
+New:
+```ts
+        // The member slot step 7a decided: open for its job, or - for a
+        // decline - already closed, in this same write.
+        deliveryRecipients: { [ptr.memberKey]: rungSlot },
 ```
 
 (g) The append carries the origin. Replace lines 2826-2830:
@@ -2589,11 +2755,11 @@ New:
 ```ts
       if (appended.deduped) {
         // A sibling callback won the create. The ladder is running - or its
-        // rung was already created CLOSED - so claim nothing further and do not
-        // re-emit for it. And close NOTHING, whatever this callback's own
-        // preview decided (retry-send-window D3): this return comes before both
-        // exits below, so a duplicate can never close a rung an earlier
-        // callback opened, nor open one it closed.
+        // rung was already appended CLOSED - so claim nothing further and do
+        // not re-emit for it. The dedupe also means THIS callback wrote
+        // nothing, whatever its own preview decided (retry-send-window D3): a
+        // duplicate can never close a rung an earlier callback opened, nor
+        // open one it closed.
         return { outcome: 'already_claimed', attempt };
       }
       const retryTsMsgId = appended.tsMsgId;
@@ -2624,52 +2790,18 @@ New:
       };
 
       if (decline !== undefined) {
-        // 8a. A DECLINED rung (retry-send-window D3): close the rung this claim
-        // just created and enqueue NOTHING. The close is the one step 8 makes
-        // for a rung it could not enqueue, which writes exactly what the job's
-        // own pre-send refusal writes - so the rung holds the same data a
-        // job-time refusal leaves for that code, and the dashboard join renders
-        // both alike: a gate code reads "Not retried - ...", and
-        // `retry_window_closed` leaves the original's 30003 standing.
-        const closeCode = decline;
-        const declined: RelayRetryClaimOutcome =
-          closeCode === 'retry_window_closed' ? 'window_closed' : 'gate_refused';
-        // Guarded SEPARATELY, like step 8's close (code review R2, W2): the
-        // claim HAS decided and its row exists, so a throw here must not report
-        // `claim_failed` - and a redelivery could not repair it anyway, because
-        // its deduped append returns before any close. The rung is left open
-        // and never enqueued (the stranding `relay-retry-stranded-claim-window`
-        // already records for a kill between append and enqueue); this ERROR
-        // names it, and the marker then carries no `closeCode`.
-        let closed = false;
-        try {
-          await closeClaimedRetryLeg(
-            ptr.conversationId,
-            retryTsMsgId,
-            ptr.memberKey,
-            versioned,
-            requestedTransport,
-            closeCode,
-          );
-          closed = true;
-        } catch (err) {
-          log.error(
-            {
-              err,
-              conversationId: ptr.conversationId,
-              retryTsMsgId,
-              rootTsMsgId,
-              attempt,
-              memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
-              retryClaim: declined,
-            },
-            'relay retry claim: closing a declined rung failed - retry leg left open and never enqueued',
-          );
-        }
-        // Step 9, AFTER the close: a client woken by it refetches the rung
-        // already closed, so the screen never sees a declined rung open.
+        // 8a. A DECLINED rung (retry-send-window D3). The append above wrote it
+        // already CLOSED, in the one transaction that IS the claim, so there is
+        // nothing to enqueue and nothing left to close. The dashboard join
+        // renders it exactly as a rung the job refused: a gate code reads "Not
+        // retried - ...", and `retry_window_closed` leaves the original's 30003
+        // standing. Step 9's SSE fires after that one write.
         announceRootClaim();
-        return { outcome: declined, attempt, ...(closed && { closeCode }) };
+        return {
+          outcome: decline === 'retry_window_closed' ? 'window_closed' : 'gate_refused',
+          attempt,
+          closeCode: decline,
+        };
       }
 
       // 8. Hand the rung to the queue. The claim defeats duplicate CALLBACKS;
@@ -2677,31 +2809,9 @@ New:
       let outcome: RelayRetryClaimOutcome = 'claimed';
 ```
 
-(i) The enqueue-failure close. Replace lines 2861-2867:
+The enqueue that follows (`:2841-2891`), with `closeRetryLegEnqueueFailed` on its failure, is unchanged.
 
-Old:
-```ts
-          await closeRetryLegEnqueueFailed(
-            ptr.conversationId,
-            retryTsMsgId,
-            ptr.memberKey,
-            versioned,
-            requestedTransport,
-          );
-```
-New:
-```ts
-          await closeClaimedRetryLeg(
-            ptr.conversationId,
-            retryTsMsgId,
-            ptr.memberKey,
-            versioned,
-            requestedTransport,
-            'enqueue_failed',
-          );
-```
-
-(j) Step 9 - replace lines 2900-2906:
+(i) Step 9 - replace lines 2900-2906:
 
 Old:
 ```ts
@@ -2721,7 +2831,7 @@ New:
 
 (The step-9 comment at `:2893-2899` stays as it is, directly above.)
 
-(k) The failure marker carries the written code. Replace lines 3077-3079:
+(j) The failure marker carries the code. Replace lines 3077-3079:
 
 Old:
 ```ts
@@ -2733,8 +2843,8 @@ New:
 ```ts
           retryClaim: retryClaim.outcome,
           ...(retryClaim.attempt !== undefined && { retryAttempt: retryClaim.attempt }),
-          // retry-send-window D3: the code a claim-time close WROTE on the rung
-          // it created - present only when that close landed.
+          // retry-send-window D3: the code a declined rung was appended with -
+          // present on `gate_refused` and `window_closed` only.
           ...(retryClaim.closeCode !== undefined && { closeCode: retryClaim.closeCode }),
         };
 ```
@@ -2744,7 +2854,7 @@ The severity call below it is unchanged: `isTerminalRelayLegFailure` now answers
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd app; npx vitest run test/relayRetryClaim.test.ts test/relayRetryClaim.webhook.test.ts test/twilioStatusWebhook.test.ts test/relayRetryLeg.test.ts test/relayRetryGates.test.ts`
-Expected: PASS. The pre-existing claim cases (fixtures without a slot `sentAt`) pass through D5 unchanged, and the relay severity battery in `twilioStatusWebhook.test.ts:1256-1419` is unchanged (its rung-3 case stops at the cap, before the preview).
+Expected: PASS. The pre-existing claim cases (fixtures without a slot `sentAt`) pass through D5 unchanged, the enqueue-failure cases (`'closes the retry leg enqueue_failed when the enqueue throws'`, its versioned twin and `'keeps enqueue_failed when the enqueue-failure close throws as well'`) still exercise the untouched `closeRetryLegEnqueueFailed`, and the relay severity battery in `twilioStatusWebhook.test.ts:1256-1419` is unchanged (its rung-3 case stops at the cap, before the preview).
 
 - [ ] **Step 6b: Pin the plan's Review Focus case 3**
 
@@ -2793,12 +2903,13 @@ git commit -m "feat(relay-retry): the claim decides at once - gate preview and s
 After the cap check the 30003 claim previews the retry job's four gates
 through the shared evaluator, then checks the 15-minute send window from the
 member's original leg send, carried on every rung as relay_retry_window_start.
-A declined rung is created already closed - with the gate code (gate_refused,
-WARN) or retry_window_closed (window_closed, ERROR) - and never enqueued; the
-root SSE fires after the close; a duplicate callback still answers
-already_claimed before any close; a missing or unparseable origin fails open
-with a WARN. closeRetryLegEnqueueFailed becomes closeClaimedRetryLeg with the
-code as a parameter.
+A declined rung is appended already closed, in the claim's one append, with
+the member slot the job's own refusal leaves for that code - the gate code
+(gate_refused, WARN) or retry_window_closed (window_closed, ERROR) - and is
+never enqueued: no second write, so no open rung to strand. The root SSE fires
+after that append; a duplicate callback still answers already_claimed first; a
+missing or unparseable origin fails open with a WARN.
+closeRetryLegEnqueueFailed is unchanged and remains the claim's only close.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- app/src/lib/relayRetryClaim.ts app/src/routes/webhooks/twilio.ts app/test/relayRetryClaim.test.ts app/test/relayRetryClaim.webhook.test.ts
 ```
@@ -4049,8 +4160,10 @@ Append at the end of the file (after `:922`). It builds the real wrapper with th
 // wrapper. ONE table (helpers/sendRefusalCases.ts) drives both: every row runs
 // through the pure preview AND through createSendMessageService with this
 // file's fakes, and the refusal code must match (undefined = the send went
-// out). A gate added to, reordered in or removed from sendMessage without the
-// same change to the preview turns this red.
+// out). A gate reordered in or removed from sendMessage turns a row red; a NEW
+// gate turns nothing red until a row exercises it - add its row with the gate.
+// The same table drives the retry decision's own test
+// (test/oneToOneRetryDecision.test.ts), so the decision cannot drift either.
 // ---------------------------------------------------------------------------
 describe('previewSendRefusal parity with the send wrapper (retry-send-window D3a)', () => {
   it.each(SEND_REFUSAL_CASES)('$name', async (c) => {
@@ -4200,7 +4313,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- app/src/services/sen
 ### Task 8: The send wrapper records the send's flags and the retry lineage at append (spec D6, D14, D12)
 
 **Files:**
-- Modify: `app/src/services/sendMessage.ts:210-212` (`automated` doc), `:235-241` (`retryOf` doc, D12, plus the two new inputs), `:249-252` (`recipient` doc), `:287` (destructuring), `:450-451` (the append)
+- Modify: `app/src/services/sendMessage.ts:207-212` (`automated` doc), `:235-241` (`retryOf` doc, D12, plus the two new inputs), `:249-252` (`recipient` doc), `:287` (destructuring), `:450-451` (the append)
 - Test: `app/test/sendMessage.test.ts` (a new `describe` at the end of the file, after Task 7's parity block)
 
 **Interfaces:**
@@ -4290,21 +4403,17 @@ Expected: FAIL on all four new cases - the append carries no `automated`, no `re
 
 - [ ] **Step 3: Implement (`app/src/services/sendMessage.ts`)**
 
-3a. The `automated` doc (spec D14). Old (`:210-212`):
+3a. The `automated` doc (spec D14, D12: under D14 its first sentence, "True for machine-initiated sends", stops being true - the automatic retry of a person's send is machine-initiated and passes false). Select `:207-212` - from the `  /**` whose next line begins `   * True for machine-initiated sends` through `  automated?: boolean;` (line `:208` carries a non-ASCII dash, so select the range rather than retyping it) - and replace the six lines with:
 
 ```ts
-   * dashboard route sends are human (false): always allowed, never counted.
-   */
-  automated?: boolean;
-```
-
-New:
-
-```ts
-   * dashboard route sends are human (false): always allowed, never counted.
-   * retry-send-window D14: persisted on every row this wrapper appends as
-   * `automated` (false included - the default is a person's send), so the
-   * automatic 30003 retry of the row is sent the same way.
+  /**
+   * True for a send GATED like a machine's: the circuit breaker meters it and
+   * manual mode refuses it (reminders, the missed-call and welcome texts, AI in
+   * Phase 2). A person's send is false: always allowed, never counted. The
+   * automatic 30003 retry passes the ORIGINAL send's value (retry-send-window
+   * D14), so a person's text is retried as a person's send - the flag says how
+   * a send is gated, not who initiated it. Persisted on every row this wrapper
+   * appends as `automated` (false included - the default is a person's send).
    */
   automated?: boolean;
 ```
@@ -5178,12 +5287,12 @@ Create `app/src/services/oneToOneRetryDecision.ts`:
 // redelivered callback does nothing twice.
 //
 // ORDER (spec D3a - the send path's own gates, as it runs them):
-//   1. the conversation row     - missing: decline, ERROR (a real anomaly)
+//   1. the conversation row     - missing: decline, WARN (the level it logs at today)
 //   2. group_text               - no retry exists for a native group text (D11), WARN
 //   3. relay_group / no phone   - not a one-to-one SMS thread, WARN
 //   4. the send path's refusals - previewSendRefusal, the SAME predicates as
 //      sendMessage's gates (pinned by the parity table in
-//      test/sendRefusalPreview.test.ts), judged for the ORIGINAL's `automated`
+//      test/sendMessage.test.ts), judged for the ORIGINAL's `automated`
 //      flag (absent = automated, D14) and its recorded recipient (absent, or an
 //      id that resolves to nothing = the phone-matched contact), WARN
 //   5. the cap                  - retry_attempt >= MAX_SEND_RETRY_ATTEMPTS, ERROR
@@ -5845,11 +5954,11 @@ import {
 //     conditional write as retry_due_at (D7), so the screen never sees the
 //     failure without its decision. The 30003 arm below logs the verdict once,
 //     on the transition: a dead end (retries exhausted, the 15-minute send
-//     window closed, the conversation row missing) is its own ERROR line; a
-//     retry the send path would refuse right now (kill switch, opt-out, a
-//     deleted recipient, manual mode for an automated original, no consent for
-//     a person's original), a native group text and a thread that is not a
-//     one-to-one SMS thread are WARN.
+//     window closed) is its own ERROR line; a retry the send path would
+//     refuse right now (kill switch, opt-out, a deleted recipient, manual mode
+//     for an automated original, no consent for a person's original), a native
+//     group text, a thread that is not a one-to-one SMS thread and a missing
+//     conversation row are WARN.
 //   - NATIVE GROUP TEXT: no retry exists (D11). The decision refuses to
 //     schedule one for a `group_text` conversation, and sendMessage refuses the
 //     send anyway (GroupTextSendNotSupportedError) should a failed read let one
@@ -5860,6 +5969,32 @@ import {
 //     comment names which claim outcomes stay WARN.
 //
 // The set's VALUES are unchanged.
+```
+
+(B2) The `isTerminalDeliveryFailure` doc (spec D12). Replace the six-line doc comment directly above `export function isTerminalDeliveryFailure(` (HEAD `:345-350`, from `/**` to ` */`; it carries a non-ASCII arrow, so select it rather than retyping) with:
+
+```ts
+/**
+ * True when an undelivered/failed delivery callback is a TERMINAL, operator-
+ * actionable failure (log at ERROR). False for 30003, the one code with an
+ * automatic retry, whose per-callback marker stays WARN whether or not a retry
+ * is attempted (retry-send-window D9: the retry decision logs its own line),
+ * and for a provider-side opt-out (21610). A failure with no code, or any
+ * unrecognized code, is treated as terminal (fail loud, not silent).
+ */
+```
+
+(B3) The one-to-one delivery-failure marker comment (spec D12). Replace the seven-line comment that ends with the line `    // IDs/codes only, never the body (PII).` (unique in the file; HEAD `:3272-3278`, starting at `    // Delivery-failure marker (doc` - the one-to-one path's, not the relay one at `:3019`; it carries non-ASCII characters, so select it rather than retyping) with:
+
+```ts
+    // Delivery-failure marker (doc section 9 "Send failures / delivery errors"):
+    // a callback that resolves to undelivered/failed is a countable failed
+    // delivery. Severity follows the taxonomy above - a TERMINAL failure is an
+    // ERROR (feeds the error-logs alarm + Recent Errors panel); a 30003 (retried
+    // or not - the retry decision logs its own line, retry-send-window D9) or a
+    // provider-side opt-out (21610) stays WARN. The `event` field is unchanged,
+    // so the DeliveryFailures count metric (keyed on `event`, not level) is
+    // unaffected. IDs/codes only, never the body (PII).
 ```
 
 (C) The status write (`:3251`). Replace
@@ -6039,7 +6174,7 @@ with:
 Run: `cd app; npx vitest run test/oneToOneRetryDecision.test.ts test/twilioStatusWebhook.test.ts test/relayRetryClaim.webhook.test.ts test/deliveryFailureSeverity.test.ts`
 Expected: PASS.
 
-- [ ] **Step 8b: Pin the plan's Review Focus cases 1, 2, 4 and 5**
+- [ ] **Step 8b: Pin the plan's Review Focus cases 1, 2, 4 and 5, and run the shared refusal table through the decision**
 
 Add to `app/test/twilioStatusWebhook.test.ts`, inside the same `describe` as the test `'30003 (transient) stamps retry_due_at IN the failure write, emits ONE SSE that already sees both, then enqueues EXACTLY ONE backed-off retry (retry-send-window D3a/D7)'` (it has `makeWebhookHarness`, `seedOutbound`, `signedTwilioPost`, `STATUS_PATH`, `statusParams` and the `outbound` queue in scope):
 
@@ -6121,8 +6256,34 @@ Add to `app/test/oneToOneRetryDecision.test.ts`, inside its top-level `describe`
   });
 ```
 
+Also add to `app/test/oneToOneRetryDecision.test.ts` the parity run over the ONE shared table (spec test intention 4, "one table drives both tests"): add `import { SEND_REFUSAL_CASES } from './helpers/sendRefusalCases.js';` beside the file's other imports, and inside its top-level `describe`:
+
+```ts
+  // retry-send-window D3a: the SAME table the preview/send-path parity test runs
+  // (test/sendMessage.test.ts), through the decision: every row the send path
+  // refuses, the decision declines with the same code; every row it sends, the
+  // decision retries.
+  it.each(SEND_REFUSAL_CASES)('parity with the send path: $name', async (c) => {
+    const message = failed({
+      automated: c.automated,
+      ...(c.recipient !== undefined && { recipient_contact_id: c.recipient.contactId }),
+    });
+    const verdict = await decide(message, {
+      conversation: thread({
+        ai_mode: c.conversation.ai_mode,
+        ...(c.conversation.sms_opt_out !== undefined && { sms_opt_out: c.conversation.sms_opt_out }),
+      }),
+      ...(c.phoneContact !== undefined && { phoneContact: c.phoneContact }),
+      ...(c.recipient !== undefined && { byId: { [c.recipient.contactId]: c.recipient } }),
+      smsSendingEnabled: c.smsSendingEnabled,
+    });
+    if (c.expected === undefined) expect(verdict).toEqual(retryAt(1));
+    else expect(verdict).toEqual(declined(c.expected, 'warn'));
+  });
+```
+
 Run: `cd app; npx vitest run test/oneToOneRetryDecision.test.ts test/twilioStatusWebhook.test.ts`
-Expected: PASS. Each pins behavior Steps 3 and 7 already deliver: case 1 through the forward-only write (`allowedPriorStatuses`: `undelivered` follows only `queued` or `sent`), case 2 through the transition gate, case 4 through D2 and D14, case 5 through the decision's two-status trigger. Each fails if its guard regresses.
+Expected: PASS. The parity rows pass because the decision calls `previewSendRefusal` with the row's own inputs (Task 7's parity test pins the preview to the send path). Each other case pins behavior Steps 3 and 7 already deliver: case 1 through the forward-only write (`allowedPriorStatuses`: `undelivered` follows only `queued` or `sent`), case 2 through the transition gate, case 4 through D2 and D14, case 5 through the decision's two-status trigger. Each fails if its guard regresses.
 
 - [ ] **Step 9: Typecheck, ASCII check and commit**
 
@@ -7958,7 +8119,7 @@ Expected: typecheck exit 0; eslint reports no error on any line this task added 
 - Test: `dashboard/src/routes/contact/Timeline.delivery.test.tsx:1014` (new cases after `projects a terminal close code onto the row and the chip reason`, `:987-1014`)
 
 **Interfaces:**
-- Consumes: the rung close Tasks 4 and 5 write for a window decline - the claim through `closeClaimedRetryLeg(..., 'retry_window_closed')` and the job through `refuseGate('retry_window_closed')`, both the pre-send refusal shape (`app/src/jobs/relayRetryLeg.ts:449-467`, `app/src/routes/webhooks/twilio.ts:627-660`): the rung's slot is `{ status: 'failed', errorCode: 'retry_window_closed' }`, aggregation `excluded` on a versioned row. Task 15's `INTERNAL_CODE_REASONS.retry_window_closed` (never reached by the join after this task).
+- Consumes: the rung close Tasks 4 and 5 write for a window decline - the claim appends the declined rung already closed (Task 4) and the job closes it through `refuseGate('retry_window_closed')`, both the pre-send refusal shape (`app/src/jobs/relayRetryLeg.ts:449-467`; the claim's closed append is Task 4 Step 7a): the rung's slot is `{ status: 'failed', errorCode: 'retry_window_closed' }`, aggregation `excluded` on a versioned row. Task 15's `INTERNAL_CODE_REASONS.retry_window_closed` (never reached by the join after this task).
 - Produces: `projectRelayLegs` (signature unchanged) - a last rung closed `retry_window_closed` leaves the original slot's `errorCode` in place (`retryState: 'terminal'`); every other close code is projected as today.
 
 - [ ] **Step 1: Write the failing join tests (spec D8)**
@@ -9553,13 +9714,12 @@ Expected: `git status` shows only the new spec as untracked before the add (the 
 - Modify: `docs/issues/group-text-30003-leg-retry-promise-unverified.md` (frontmatter lines 6-10; Resolution inserted above line 13)
 - Modify: `docs/issues/quiet-hours-ungated-automated-paths.md` (frontmatter lines 9-10; insert after line 51)
 - Modify: `docs/issues/ai-mode-switch-gates-all-automation.md` (frontmatter lines 8-9; insert after line 60)
-- Modify: `docs/issues/relay-retry-stranded-claim-window.md` (frontmatter line 9; insert after line 24)
 - Modify: `docs/issues/manual-retry-double-send-residual-windows.md` (frontmatter lines 8-9; lines 28-29; line 47)
 - Modify: `e2e/support/selectors.md` (row 48; row 49; new row after 49)
 - Modify: `e2e/tests/dashboard-next/relay-30003-retry.spec.ts` (lines 20-23, comment only)
 
 **Interfaces:**
-- Consumes (names only, from the skeleton contract): `retry_due_at`, `retry_window_start`, `relay_retry_window_start`, `automated`, `recipient_contact_id`; close code `retry_window_closed`; outcomes `window_closed`, `gate_refused`; helper `closeClaimedRetryLeg` (`app/src/routes/webhooks/twilio.ts`); `RETRY_SEND_WINDOW_MS` (`app/src/lib/retrySendWindow.ts`); `app/src/services/oneToOneRetryDecision.ts`; `dashboard/src/routes/contact/retryPromise.ts`; copy `Phone unreachable (error 30003)`, `Phone unreachable - will retry (error 30003)`, `Not retried - message too old`, `A retry is already scheduled for this message.`; the seam `E2E_SEND_RETRY_BACKOFF_MS`.
+- Consumes (names only, from the skeleton contract): `retry_due_at`, `retry_window_start`, `relay_retry_window_start`, `automated`, `recipient_contact_id`; close code `retry_window_closed`; outcomes `window_closed`, `gate_refused`; `RETRY_SEND_WINDOW_MS` (`app/src/lib/retrySendWindow.ts`); `app/src/services/oneToOneRetryDecision.ts`; `dashboard/src/routes/contact/retryPromise.ts`; copy `Phone unreachable (error 30003)`, `Phone unreachable - will retry (error 30003)`, `Not retried - message too old`, `A retry is already scheduled for this message.`; the seam `E2E_SEND_RETRY_BACKOFF_MS`.
 - Produces: no code. Documentation only.
 
 Dates: every `2026-09-25` below is the day this plan was written. If `date +%F` prints a later day when the task runs, write that day instead in every frontmatter `updated:` / `resolved:` value and every bold date this task adds.
@@ -9570,9 +9730,10 @@ Spec section 9's residuals and where each is recorded after this task:
 |---|---|
 | Manual double send (late job, stale tab, pending outcome) + section 5's joint `unresolved` gap | `manual-retry-double-send-residual-windows` (Step 5 reconciles it) |
 | Pending reconcile copy | accepted in the spec; carried as section 5 requirements 3-4 for reconcile's `retrySend` adoption (handback) |
-| A promise with nothing behind it (breaker refusal, fail-open refused, job-time decline, failed correction write) | accepted in the spec; handback lists it |
+| A promise with nothing behind it (breaker refusal, fail-open refused, job-time decline, failed correction write, a crash or throw between the stamped write and the enqueue, a provider error on the retry's own send) | accepted in the spec; handback lists it |
 | A relay claim fault (`claim_failed`) | accepted, predates this branch; handback lists it |
-| Stranded claim-time close | `relay-retry-stranded-claim-window` (Step 4 adds the note) |
+| A human action reversed inside the backoff (D3) | accepted in the spec; handback lists it |
+| A relay leg's slot written before its claim decides (section 1) | accepted in the spec; handback lists it |
 | No usable origin (D5) | accepted in the spec; handback lists it |
 | A text sent before this deploy (D14) | accepted in the spec; handback lists it |
 
@@ -9724,39 +9885,15 @@ with:
    stops on a manual-mode thread.
 ```
 
-- [ ] **Step 4: Note the claim-time close window in `relay-retry-stranded-claim-window` (spec header table; D3; section 9 "Stranded claim-time close")**
+- [ ] **Step 4: Leave `relay-retry-stranded-claim-window` unchanged (spec header table; D3)**
 
-In `docs/issues/relay-retry-stranded-claim-window.md`, replace `updated: 2026-09-24` with `updated: 2026-09-25`. Then replace:
+A declined rung is appended already closed in the claim's single append transaction (spec D3, Task 4), so the claim adds no new stranding site and the issue needs no edit. Confirm nothing touched it:
 
-```
-the warning against re-enqueueing on `already_claimed`.
-
-**Problem.** The 30003 retry claim commits the retry ROW and its
+```bash
+git diff --stat -- docs/issues/relay-retry-stranded-claim-window.md
 ```
 
-with:
-
-```
-the warning against re-enqueueing on `already_claimed`.
-
-**Same window, a second site (2026-09-25, `feat/retry-send-window`, spec D3
-and section 9).** The claim now also decides at once whether the rung it
-creates will be attempted: when one of the job's gates would refuse it, or its
-send would land past the 15-minute retry window, it creates the rung and then
-CLOSES it (`closeClaimedRetryLeg` in `app/src/routes/webhooks/twilio.ts`, the
-helper that already closed a rung the claim could not enqueue). The append and
-the close are two writes, so an abrupt kill between them - or a close write
-that fails, which the claim logs as one ERROR naming the rung left open, keeping
-its outcome and answering 200 - leaves an OPEN rung that is never enqueued: the
-same stranding as the append-to-enqueue gap below (`Retrying`, then `Queued -
-not confirmed`). A redelivered callback cannot repair it: the claim's append
-dedupes on the rung's SID and returns `already_claimed` before its own decision
-can close anything. Nothing new is filed; the durable-rung fix below covers this site
-too, since a declined rung could be written closed inside the append
-transaction itself.
-
-**Problem.** The 30003 retry claim commits the retry ROW and its
-```
+Expected: no output.
 
 - [ ] **Step 5: Reconcile `manual-retry-double-send-residual-windows` with spec section 9 (draft 7)**
 
@@ -9906,21 +10043,21 @@ Run (Git Bash, worktree root):
 
 ```bash
 npm run issues
-for f in docs/issues/group-text-30003-leg-retry-promise-unverified.md docs/issues/quiet-hours-ungated-automated-paths.md docs/issues/ai-mode-switch-gates-all-automation.md docs/issues/relay-retry-stranded-claim-window.md docs/issues/manual-retry-double-send-residual-windows.md e2e/tests/dashboard-next/relay-30003-retry.spec.ts; do printf '%s ' "$f"; tr -d '\11\12\15\40-\176' < "$f" | wc -c; done
+for f in docs/issues/group-text-30003-leg-retry-promise-unverified.md docs/issues/quiet-hours-ungated-automated-paths.md docs/issues/ai-mode-switch-gates-all-automation.md docs/issues/manual-retry-double-send-residual-windows.md e2e/tests/dashboard-next/relay-30003-retry.spec.ts; do printf '%s ' "$f"; tr -d '\11\12\15\40-\176' < "$f" | wc -c; done
 git diff -U0 e2e/support/selectors.md | grep '^+' | grep -v '^+++' | tr -d '\11\12\15\40-\176' | wc -c
 npx eslint e2e/tests/dashboard-next/relay-30003-retry.spec.ts
 ```
 
-Expected: `npm run issues` regenerates the gitignored `docs/issues/INDEX.md`, lists `group-text-30003-leg-retry-promise-unverified` under Closed, and prints no warning naming any of the five files; each of the six files prints `0` (all six were fully ASCII before the edits); the selectors added-lines check prints `0` (that file carries pre-existing non-ASCII on other lines, so only added lines are checked); eslint exit 0. `INDEX.md` is never staged.
+Expected: `npm run issues` regenerates the gitignored `docs/issues/INDEX.md`, lists `group-text-30003-leg-retry-promise-unverified` under Closed, and prints no warning naming any of the four issue files; each of the five files prints `0` (all five were fully ASCII before the edits); the selectors added-lines check prints `0` (that file carries pre-existing non-ASCII on other lines, so only added lines are checked); eslint exit 0. `INDEX.md` is never staged.
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git status
-git add docs/issues/group-text-30003-leg-retry-promise-unverified.md docs/issues/quiet-hours-ungated-automated-paths.md docs/issues/ai-mode-switch-gates-all-automation.md docs/issues/relay-retry-stranded-claim-window.md docs/issues/manual-retry-double-send-residual-windows.md e2e/support/selectors.md e2e/tests/dashboard-next/relay-30003-retry.spec.ts
-git commit -m "docs(retry-send-window): close the group-text 30003 promise issue; annotate quiet-hours, ai-mode and stranded-claim; reconcile the double-send residuals; selectors prose family and one-to-one row
+git add docs/issues/group-text-30003-leg-retry-promise-unverified.md docs/issues/quiet-hours-ungated-automated-paths.md docs/issues/ai-mode-switch-gates-all-automation.md docs/issues/manual-retry-double-send-residual-windows.md e2e/support/selectors.md e2e/tests/dashboard-next/relay-30003-retry.spec.ts
+git commit -m "docs(retry-send-window): close the group-text 30003 promise issue; annotate quiet-hours and ai-mode; reconcile the double-send residuals; selectors prose family and one-to-one row
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- docs/issues/group-text-30003-leg-retry-promise-unverified.md docs/issues/quiet-hours-ungated-automated-paths.md docs/issues/ai-mode-switch-gates-all-automation.md docs/issues/relay-retry-stranded-claim-window.md docs/issues/manual-retry-double-send-residual-windows.md e2e/support/selectors.md e2e/tests/dashboard-next/relay-30003-retry.spec.ts
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- docs/issues/group-text-30003-leg-retry-promise-unverified.md docs/issues/quiet-hours-ungated-automated-paths.md docs/issues/ai-mode-switch-gates-all-automation.md docs/issues/manual-retry-double-send-residual-windows.md e2e/support/selectors.md e2e/tests/dashboard-next/relay-30003-retry.spec.ts
 ```
 
 Expected: `git status` before the add lists exactly these seven files as modified.
@@ -10110,7 +10247,9 @@ checked nothing in `scripts/e2e-session.mjs` (`.mjs`; AGENTS.md "Known hole").
 | D14 a retry follows the original send | 2, 7, 8, 10, 11, 12 | <shas> |
 | Test intentions 1 / 2 / 3 / 4 / 5 / 6 / 6a / 7 / 8 | 1 / 3-4 / 5-6 / 7, 10 / 11 / 12 / 8 / 14-18 / 19 | <shas> |
 
-## Relay for SOR (send-outcome-reconcile) and share-skip-fix Branch B
+## Facts for the planner's Relay for SOR (send-outcome-reconcile) and share-skip-fix Branch B
+
+The planner writes the final "Relay for SOR" block (Cameron's standing instruction, `rulings.md`: one fenced ASCII block, full W:\ paths, Branch A's items for SOR carried unchanged); this section gives it the facts, verbatim from the code.
 
 ### Files changed, by area
 
@@ -10178,16 +10317,17 @@ window fit, and `enqueueSendRetry(payload, runAt)` schedules at that run time, s
 ### New codes and values
 
 - Close code `retry_window_closed` (`RelayRetryCloseCode`,
-  `app/src/jobs/relayRetryLeg.ts`), written by the claim-time close and by the
+  `app/src/jobs/relayRetryLeg.ts`), appended closed by the claim and written by the
   job (its window gate, and a bounded-acquire timeout). The union also takes the
   gate codes by reference from `RelayRetryGateCode`
   (`app/src/lib/relayRetryGates.ts`).
 - Claim outcome `window_closed` (`RelayRetryClaimOutcome`,
   `app/src/lib/relayRetryClaim.ts`, 13 -> 14 values; ERROR). `gate_refused` is
   now produced at claim time and logged WARN (`isTerminalRelayLegFailure`).
-- `closeRetryLegEnqueueFailed` is now `closeClaimedRetryLeg(..., code:
-  'enqueue_failed' | RelayRetryGateCode | 'retry_window_closed')`
-  (`app/src/routes/webhooks/twilio.ts`), same writes.
+- A claim-time decline APPENDS the rung already closed (gate code or
+  `retry_window_closed`) in the claim's one append; `closeRetryLegEnqueueFailed`
+  (`app/src/routes/webhooks/twilio.ts`) is unchanged and remains the claim's only
+  close.
 - `sendOneRelayLeg` (`app/src/jobs/relayFanOut.ts`): new arg `sendDeadlineMs?:
   number`; new result `'deadline_exceeded'`, returned BEFORE any `attempted`
   write: <state its exact place in the return union from the Task 6 code>. The
@@ -10249,7 +10389,8 @@ write the `file:line` found.
    by a writer other than the recipient's own attempt: under SOR's D8 they read
    the attempt record first and close only if it is absent or
    `done`/`retryable`. The window checks run BEFORE SOR's claim (in `retrySend`
-   too). The claim-time close writes through the same helper as `enqueue_failed`.
+   too). A claim-time decline is a closed APPEND, not a close: no attempt record
+   can exist for it.
 7. `relayRetryJoin.ts`'s terminal step: SOR's `send_unconfirmed` special case
    and this branch's `retry_window_closed` (no display code) both survive the
    merge, each with its test.
@@ -10263,8 +10404,7 @@ results row under D8's rule (never the retry count); reuse the seam above.
 
 - Closed: `group-text-30003-leg-retry-promise-unverified`.
 - Annotated: `quiet-hours-ungated-automated-paths` (item 3),
-  `ai-mode-switch-gates-all-automation` (item 3 delivered for the 30003 retry),
-  `relay-retry-stranded-claim-window` (the claim-time close window).
+  `ai-mode-switch-gates-all-automation` (item 3 delivered for the 30003 retry).
 - Reconciled with spec section 9: `manual-retry-double-send-residual-windows`
   (revision 5 @616d120d, gap 2's "once the promise has expired", refs as paths).
 - Filed new: none.
@@ -10274,8 +10414,10 @@ results row under D8's rule (never the retry count); reuse the seam above.
 - Accepted residuals (spec section 9): pending-reconcile copy; a promise with
   nothing behind it (at most the longest backoff plus RETRY_PROMISE_GRACE_MS,
   6 minutes); a relay claim fault (`claim_failed`, recovered by redelivery); no
-  usable origin (D5); a text sent before this deploy (D14).
-- Recorded in issues: the double-send windows; the stranded claim-time close.
+  usable origin (D5); a text sent before this deploy (D14); a human action
+  reversed inside the backoff (D3); a relay leg's slot written before its claim
+  decides (section 1).
+- Recorded in issues: the double-send windows.
 - Out of scope (spec section 8): a real native group-text retry; alarm
   thresholds and a manual relay retry; polling unconfirmed legs; the share
   results row's copy and its `retry_due_at` read (Branch B); the rest of
@@ -10306,13 +10448,13 @@ Expected: `0`; `git status` shows only the handback (the logs sit in the gitigno
 
 ---
 
-## Self-review notes (planner, plan v1)
+## Self-review notes (planner, plan v1; v2 below)
 
 Assembled from five slice drafts written in parallel against one skeleton of
 locked interfaces; each drafter's findings are in the records folder
 (`plan-draft-A|B1|B2|C|D-findings.md`). Checked after assembly: every spec
 decision D1-D14 is cited by at least one task; no placeholder; every shared name
-(`closeClaimedRetryLeg`, `evaluateRelayRetryGates`, the `retrySendWindow`
+(`evaluateRelayRetryGates`, the `retrySendWindow`
 helpers, `resolveSendRetryBackoffMs`, `enqueueSendRetry(payload, runAt)`,
 `previewSendRefusal`, `decideOneToOneRetry`, `serverNowMs` / `noteServerDate`,
 `retryScheduled`, `deadline_exceeded`, the five row fields) is spelled the same
@@ -10335,8 +10477,6 @@ Drafter choices accepted as written:
 - The relay transient re-enqueue re-checks with the SCHEDULING rule (A F2).
 - The job's no-pool-number throw now follows the four gates (A F4; spec D3 says
   so since draft 7.1).
-- A claim-time close that throws keeps its outcome, answers 200 and logs one
-  ERROR naming the open rung (A F1; spec section 9 since draft 7.1).
 - The server clock comes from the `Date` header: CloudFront serves `/api/*` with
   CachingDisabled, the app sets no Cache-Control on API JSON, and nothing in the
   client handles 304s itself (C finding 1). The Timeline takes ONE `serverNowMs()`
@@ -10351,3 +10491,13 @@ Spec draft 7.1 (same review scope as drafts 6 and 7) folded in the drafting
 findings: D3a's deleted gate wording, the job's pool-number check order (D3),
 the transient re-check's rule (D4), two WARN cases (D9), and section 9's
 stale-tab qualifier, crash-before-enqueue and failed-close residuals.
+
+Plan v2 (after adversarial plan review round 1, `plan-review-r1-a.md`,
+`plan-review-r1-b.md`, adjudications in `plan-review-r1-adjudications.md`):
+Tasks 3 and 4 rewritten by the slice-A drafter - a claim-time decline is now
+APPENDED already closed in one write (the round's one decision change), so
+`closeRetryLegEnqueueFailed` keeps its name and job, and the failed-close path
+is gone; Task 3 pins the moved pool-number throw. Task 3 inserts 79 lines at
+`app/test/relayRetryLeg.test.ts:379`, so Tasks 5 and 6's citations past `:378`
+in that file are 79 lines early - their quoted anchors still match. The planner
+applied every other accepted finding (see the adjudications' edit column).

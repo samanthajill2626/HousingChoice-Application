@@ -634,11 +634,10 @@ branches' mechanics become; each later branch carries the ones its stage meets.
      The window checks run BEFORE that branch's claim (in `retrySend` too), so a
      decline never holds a claim; if the plan puts the acquire after the claim,
      the timeout also finishes the attempt record as a terminal non-send, which
-     needs an outcome value in that branch's record vocabulary. The claim-time
-     close (D3) writes through the same helpers as the claim's existing
-     `enqueue_failed` close, for a rung never enqueued, so no attempt record can
-     exist for it: whatever that branch does for the `enqueue_failed` close
-     applies unchanged.
+     needs an outcome value in that branch's record vocabulary. A claim-time
+     decline (D3) is not a close at all: the rung is appended already closed and
+     never enqueued, so no attempt record can exist for it; the claim's
+     `enqueue_failed` close is unchanged.
   7. Both branches edit the join's terminal step (`relayRetryJoin.ts:405-415`):
      that branch renders a rung closed `send_unconfirmed` as "Not confirmed" and
      not a failure; this one treats `retry_window_closed` as carrying no display

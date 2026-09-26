@@ -125,16 +125,17 @@ describe('DeliveryBadge', () => {
     expect(screen.getByText(/Phone unreachable/i)).toBeInTheDocument();
   });
 
-  // Slice 5a. The badge calls the shared deliveryReason with NO options, so it
-  // has no product input and the relay 30003 override cannot reach it - which is
-  // what makes "none for 30003" free at this site rather than something to guard.
-  // It must stay free: a broadcast recipient's 30003 IS retried, so the promise
-  // is true here. The assertion is the substring the override removes; the test
-  // above only proves the sentence STARTS the same way, which both copies do.
-  it('keeps the retry promise on a broadcast recipient 30003 - the override is relay-scoped', () => {
+  // retry-send-window D8. The badge renders a failed property-send row through
+  // shareRecipientReason, which calls the shared deliveryReason with NO options:
+  // the recipient slot carries no `retry_due_at`, so the row cannot know whether
+  // a retry is scheduled and promises none - under-promising, never false.
+  // Reading the failed message's live stamp is share-skip-fix Branch B's, under
+  // the same rule. (This test pinned "will retry" here until the retry send
+  // window: the promise was keyed on the code alone.)
+  it('reads a property-send recipient 30003 as the plain failure - the row promises no retry', () => {
     const { container } = render(<DeliveryBadge status="failed" errorCode="30003" />);
-    expect(container.textContent ?? '').toContain('will retry');
-    expect(container.textContent ?? '').toContain('(error 30003)');
+    expect(container.textContent ?? '').toContain('Phone unreachable (error 30003)');
+    expect(container.textContent ?? '').not.toContain('will retry');
   });
 
   // POSITION 4 of the four surfaces the fan-out close codes reach

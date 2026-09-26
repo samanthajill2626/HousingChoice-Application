@@ -153,8 +153,11 @@ describe('shareRecipientReason (share-skip-fix D7)', () => {
     expect(shareRecipientReason('failed', 'transient_cap')).toBe('Sending gave up after repeated carrier deferrals');
     expect(shareRecipientReason('failed', 'enqueue_failed')).toBe('Sending could not be scheduled');
     expect(shareRecipientReason('failed', undefined)).toBe('Delivery failed');
-    // The 30003 wording is the shared map's, untouched here (owned by feat/retry-send-window).
-    expect(shareRecipientReason('failed', '30003')).toMatch(/^Phone unreachable/);
+    // retry-send-window D8: a failed share row reads the PLAIN 30003. The slot
+    // carries no retry_due_at, so the row cannot know a retry is scheduled and
+    // promises none (under-promising, never false); reading the failed message's
+    // live stamp is share-skip-fix Branch B's, under the same rule.
+    expect(shareRecipientReason('failed', '30003')).toBe('Phone unreachable (error 30003)');
   });
 
   it('no reason for the in-flight and success states', () => {

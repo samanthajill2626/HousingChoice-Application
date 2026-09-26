@@ -8,7 +8,8 @@ spec-gate answers of 2026-09-25 (the adversarial review closed at round 4,
 the merged Branch A and adds D14 (a retry follows the original send); draft 7.1
 adds precision edits from the plan drafting
 (`plan-draft-<A|B1|B2|C|D>-findings.md`); draft 7.2 takes plan review round 1
-(`plan-review-r1-*.md`) and draft 7.3 round 2 (`plan-review-r2.md`). Code citations are at `f49a2fe9`.
+(`plan-review-r1-*.md`) and draft 7.3 round 2 (`plan-review-r2.md`); draft 7.4 takes the planner's
+independent review of the build (`planner-review-adjudications.md`). Code citations are at `f49a2fe9`.
 
 | sev | issue | this branch |
 | --- | --- | --- |
@@ -474,7 +475,11 @@ to exhaustion regardless of any AI or automation setting").
 - A row without `automated` (sent before this deploy) is retried as today:
   automated, recipient by phone. The window confines that to texts sent in the 15
   minutes before the deploy. A recorded recipient that no longer exists falls back
-  to the phone-matched contact, with a WARN.
+  to the phone-matched contact, with a WARN. So does one that no longer HOLDS the
+  thread's number (primary or secondary) - the text still goes to the number, so
+  the gates judge whoever holds it now: the send wrapper ignores such a recipient
+  for every gate, records none, and WARNs, and the D3a preview mirrors it (draft
+  7.4, the planner's independent review, `planner-review-adjudications.md` ADV-1).
 - The job reads the recipient BEFORE its execution marker (`retrySend.ts:129-146`),
   as it reads the original, so a failed read is redelivered instead of dropping
   the retry.

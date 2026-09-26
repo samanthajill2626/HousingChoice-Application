@@ -6,6 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-09-01
+updated: 2026-09-26
 refs: app/src/routes/api.ts:1794, app/src/repos/messagesRepo.ts:121, app/src/routes/webhooks/twilio.ts:2353, dashboard/src/routes/contact/Timeline.tsx:862
 ---
 
@@ -55,6 +56,22 @@ time. That site is deliberately excluded from M5's relay override - it reads the
 MESSAGE's `error_code`, and the only code that reaches it today is the
 native-group-text aggregate, whose 30003 retry is real, so passing the relay
 flag there would drop the promise from a group text that genuinely retries.
+
+**UPDATE 2026-09-26 (`feat/retry-send-window`, spec
+`docs/superpowers/specs/2026-09-24-retry-send-window-design.md`).** The
+paragraph above and point 1 below reason from two premises that no longer
+hold; they stay as the reasoning of their time. First, the base 30003 copy
+promises nothing now - "Phone unreachable (error 30003)" - and "will retry"
+shows only on a ONE-TO-ONE bubble whose failed message carries a live
+`retry_due_at` (D8), so a carrier code on the hub row would print a plain
+failure, not a retry promise. Second, no native group text retries (D11): the
+one-to-one 30003 arm declines a `group_text` conversation, and the send path
+refuses one if that decision failed open, so there is no group-text promise
+at the message-level chip left to protect. The chip still passes no `relay`
+flag, for a different reason: `relay` wins over `retryScheduled` in
+`deliveryReason`, so passing it would switch off the one-to-one promise that
+chip now carries (D8). A fix here still decides both points below, on those
+grounds.
 
 Concretely, a fix must decide BOTH of these before it writes anything:
 

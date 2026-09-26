@@ -7,7 +7,7 @@ status: open
 area: app/messaging
 created: 2026-09-24
 updated: 2026-09-26
-refs: app/src/routes/api.ts, app/src/services/oneToOneRetryDecision.ts, app/src/routes/webhooks/twilio.ts, app/src/jobs/retrySend.ts, app/src/lib/retrySendWindow.ts, dashboard/src/routes/contact/retryPromise.ts, dashboard/src/routes/contact/Timeline.tsx, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
+refs: app/src/routes/api.ts, app/src/services/oneToOneRetryDecision.ts, app/src/routes/webhooks/twilio.ts, app/src/jobs/retrySend.ts, app/src/lib/retrySendWindow.ts, app/src/adapters/scheduler.ts, dashboard/src/routes/contact/retryPromise.ts, dashboard/src/routes/contact/Timeline.tsx, docs/superpowers/specs/2026-09-24-retry-send-window-design.md, docs/superpowers/reviews/2026-09-24-retry-send-window/build-review-adversarial.md
 ---
 
 **Problem.** `feat/retry-send-window` (spec D7, D10) hides the manual Retry button
@@ -22,7 +22,8 @@ texted the member twice.
 follow only `queued` or `sent`, `app/src/repos/messagesRepo.ts:133-142`), so no
 press can find the failure without its promise - including when the webhook's
 reads failed, which now attempts the retry AND stamps it (spec D3a). The guard is
-still time-based, and these gaps remain:
+still time-based, and it is withdrawn at once when the retry's enqueue fails
+(spec D7); these five gaps remain:
 
 1. A late job: the promise expired while the automatic job is still queued or
    running, and a press lands before it sends.
@@ -38,6 +39,27 @@ still time-based, and these gaps remain:
    D16 leaves the original visibly undelivered with the Retry button live, although
    the retry's text may have gone out (its D20 hides Retry for the same verdict on
    relay and broadcast slots).
+5. An enqueue that THROWS after SQS actually accepted the job. `SendMessage` on a
+   standard queue is not idempotent, so a lost response (the SDK's own retries
+   timing out too) reads as a failure while the job is queued. The 30003 arm then
+   withdraws the promise (`retry_due_at` is rewritten to the epoch sentinel
+   `RETRY_PROMISE_WITHDRAWN_AT`, spec D7), the Retry button appears at once, a
+   staff press sends, and the queued job also sends - it does not read
+   `retry_due_at`. Wider than gap 1: Retry appears immediately, not after the due
+   time plus the grace. Before `feat/retry-send-window` the same press was always
+   a double text, so this is a residual, not a regression. Found and reproduced by
+   the build's adversarial review (F1 in
+   `docs/superpowers/reviews/2026-09-24-retry-send-window/build-review-adversarial.md`).
+
+   KEPT DELIBERATELY, under Cameron's spec-gate ruling 4
+   (`docs/superpowers/reviews/2026-09-24-retry-send-window/rulings.md`): "The
+   dropped guard is fine, I would rather err on the side of a double-text than a
+   message not delivered at all." Spec D7 withdraws the PROMISE, not the retry.
+   Making the job refuse on the withdrawal sentinel would be a reverse
+   double-send guard: in this ambiguous case it would drop a real retry whenever
+   nobody presses Retry. What would close it is the claim-based fix under
+   "Suggested fix" below: with the manual route and the job contending on one
+   claim, whichever sends second refuses.
 
 Gaps 3 and 4 belong to reconcile's `retrySend` adoption, planned after
 `feat/retry-send-window` merges.

@@ -31,3 +31,14 @@ cannot mint those rows.
 `listShown`), the spec (5.4, Status, 7.3). One commit plus its report. The
 diff is small enough that the orchestrator reads it itself before the final
 gates; the live self-QA measures the result.
+
+## Addendum (orchestrator, 2026-09-26) - the live self-QA's finding (SQ-1)
+
+Measuring the shipped chip rule on lane 16 (full profile) showed the one
+thing the round-3 harness could not: with the Needs triage chip yielding at
+`flex-shrink: 100`, the phone-named stub row's number still lost its LAST
+DIGIT to the ellipsis at 360 and 768 (a ~1% share of the shortfall, a
+sub-pixel overflow). Fixed on the same tree as a rigid `.numberName`
+(`flex-shrink: 0`) for a name matching the formatted-number shape, pinned in
+both row test files, spec 5.4 amended, re-measured live (108/108 px, last
+glyph visible, the chip at 47-58 px). See `self-qa.md`.

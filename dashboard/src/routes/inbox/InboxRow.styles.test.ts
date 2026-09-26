@@ -54,4 +54,11 @@ describe('InboxRow.module.css', () => {
   it('the actions box is an overlay that takes no layout width', () => {
     expect(bodyOf('.actions')).toMatch(/position:\s*absolute\s*;/);
   });
+
+  // Live self-QA 2026-09-26: with the yielding chips at flex-shrink 100 the
+  // name still kept a ~1% share of the shortfall, overflowed by a sub-pixel,
+  // and text-overflow swallowed the last digit of a phone-named row.
+  it('a phone-named row never shrinks its number', () => {
+    expect(bodyOf('.numberName')).toMatch(/flex-shrink:\s*0\s*;/);
+  });
 });

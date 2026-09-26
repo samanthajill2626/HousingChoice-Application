@@ -462,7 +462,12 @@ New pure module `dashboard/src/routes/inbox/inboxTime.ts`:
   name - or an unknown row's number - is the row's identity; the placement
   tag carries its full label as a `title`. A `min-width: 0` on a yielding
   chip is a defect: it lets a short tag collapse to a box showing one
-  clipped letter (build review R3-1). An ordinary name in a wide row is NOT
+  clipped letter (build review R3-1). A row named by its formatted number
+  (the stub contact a first inbound creates) never shrinks its name
+  (`.numberName`, `flex-shrink: 0`): the number is short and every digit is
+  the identity, and with an ordinary `flex-shrink: 1` the name kept a ~1%
+  share of the shortfall, overflowed by a sub-pixel and lost its last digit
+  to the ellipsis (live self-QA, 2026-09-26). An ordinary name in a wide row is NOT
   ellipsized (its head is far below 45%); only a long name in a tight row
   is. The count and the time always keep their room; the preview absorbs the
   overflow, and the time is never clipped by `.row { overflow: hidden }`.

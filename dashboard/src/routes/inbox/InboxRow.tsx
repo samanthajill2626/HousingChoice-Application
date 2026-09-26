@@ -69,6 +69,9 @@ export const InboxRow = memo(function InboxRow({
   // Both multi-party kinds get the same people glyph; the CHIP is what tells
   // them apart (a masked relay thread vs a native carrier group text).
   const isMultiParty = isRelay || isGroupText;
+  // A row named by its formatted number (the stub contact a first inbound
+  // creates) keeps every digit: `.numberName` never shrinks (spec 5.4).
+  const isPhoneName = /^\(\d{3}\) \d{3}-\d{4}$/.test(row.name);
   // The last-activity label (spec 5.3/5.4): computed at render; tests pin the
   // clock with vi.setSystemTime. An unparseable instant renders no element.
   const timeLabel = formatInboxTime(row.lastActivityAt, new Date());
@@ -108,7 +111,9 @@ export const InboxRow = memo(function InboxRow({
         <Link className={styles.main} to={hrefFor(row)} onClick={() => onOpen(row)}>
           {row.role ? <span className={`${styles.dot} ${styles[`dot_${row.role}`] ?? ''}`} aria-hidden="true" /> : null}
           <span className={styles.head}>
-            <span className={`${styles.name} ${unread ? styles.bold : ''}`}>
+            <span
+              className={`${styles.name} ${unread ? styles.bold : ''} ${isPhoneName ? styles.numberName : ''}`}
+            >
               {isMultiParty ? <span aria-hidden="true">👥 </span> : null}
               {row.name}
             </span>

@@ -86,6 +86,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* A row named by its formatted number ("(555) 123-4567", the stub contact a
+   first inbound creates) never shrinks: the number is short and every digit is
+   the row's identity. Without this the name keeps a ~1% share of the head's
+   shortfall next to a yielding chip (flex-shrink 1 vs 100), overflows by a
+   sub-pixel, and text-overflow swallows the LAST DIGIT (live self-QA,
+   2026-09-26: "(555) 937-520..." at 360 and 768). The yielding chips take the
+   whole shortfall instead, down to their 4em floor. */
+.numberName {
+  flex-shrink: 0;
+}
 .bold {
   font-weight: var(--fw-bold);
 }

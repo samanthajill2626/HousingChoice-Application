@@ -329,3 +329,15 @@ describe('InboxRow - Deleted chip (deleted-contact resurfacing)', () => {
     expect(screen.queryByText('Deleted')).toBeNull();
   });
 });
+
+describe('InboxRow - a phone-named row keeps every digit (spec 5.4)', () => {
+  // The stub contact a first inbound creates is named by its formatted number;
+  // that name carries the `numberName` class so it never yields to a chip.
+  it('marks a formatted-number name and not an ordinary name', () => {
+    renderRow(mkRow({ name: '(555) 123-4567', role: 'unknown', needsTriage: true }));
+    const numberName = screen.getByText('(555) 123-4567');
+    expect(numberName.className).toMatch(/numberName/);
+    cleanupAndRender(mkRow());
+    expect(screen.getByText('Tasha Williams').className).not.toMatch(/numberName/);
+  });
+});

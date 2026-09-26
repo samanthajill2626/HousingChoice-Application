@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8.5 - APPROVED for build as DRAFT 8.4 (Cameron ruled 2026-09-25 that only back and history navigations restore, 5.8); build-review refinements recorded in code-review-r1-adjudications.md (5.6 cursor rule, 5.8 wording, 5.2 residual)
+Status: DRAFT 8.5 - APPROVED for build as DRAFT 8.4 (Cameron ruled 2026-09-25 that only back and history navigations restore, 5.8); build-review refinements recorded in code-review-r1-adjudications.md (5.6 cursor rule, 5.8 wording, 5.2 residual); round-2 and round-3 adjudications changed the row CSS Sam approved (5.4: the head never yields to the preview; the chip rule with its floor)
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -455,14 +455,17 @@ New pure module `dashboard/src/routes/inbox/inboxTime.ts`:
   min(content, 45%) and never shrinks further: the preview absorbs the row's
   overflow (build review R2-1: with `flex: 0 1 auto` a long preview squeezed
   the name to nothing). `.name` becomes `min-width: 0; overflow: hidden;
-  text-overflow: ellipsis` (it keeps `white-space: nowrap`). The channel and
-  triage chips keep `white-space: nowrap` and never shrink; the placement and
-  Deleted tags keep it too but ellipsize before the name (`min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; flex-shrink: 100`, build review
-  R2-2). An ordinary name in a wide row is NOT ellipsized (its head is far
-  below 45%); only a long name in a tight row is. The preview, the count and
-  the time therefore always keep their room and the time is never clipped by
-  `.row { overflow: hidden }`.
+  text-overflow: ellipsis` (it keeps `white-space: nowrap`). The channel
+  chip, the relay Closed tag and the Deleted chip are short fixed-vocabulary
+  state markers and never shrink. The placement tag and the Needs triage
+  chip yield BEFORE the name, never below 4em (`min-width: 4em`), because the
+  name - or an unknown row's number - is the row's identity; the placement
+  tag carries its full label as a `title`. A `min-width: 0` on a yielding
+  chip is a defect: it lets a short tag collapse to a box showing one
+  clipped letter (build review R3-1). An ordinary name in a wide row is NOT
+  ellipsized (its head is far below 45%); only a long name in a tight row
+  is. The count and the time always keep their room; the preview absorbs the
+  overflow, and the time is never clipped by `.row { overflow: hidden }`.
 - THE ACTIONS BOX LEAVES THE LAYOUT. `.actions` becomes an overlay: `position:
   absolute; right: var(--sp-3); top: 50%; transform: translateY(-50%)`, with a
   `background: var(--c-surface)` and a small left padding so it reads as a
@@ -1080,8 +1083,11 @@ head read on every mount).
    before texting from its number (so the inbound folds into a contact row
    named by it and the shrinking head rule of 5.4 is exercised). Then at
    `WIDE_RESTORE`: Tasha's name is not ellipsized (`scrollWidth <=
-   clientWidth` on the name). A row with a PLACEMENT TAG is a seed-profile
-   matter and is covered in the live self-QA (7.4) at the 768px band.
+   clientWidth` on the name). The test also mints a party whose inbound is
+   about 300 characters (build review R2-1) and asserts that its name keeps a
+   width above 0 at 768 and is not ellipsized at `WIDE_RESTORE`. A row with a
+   PLACEMENT TAG is a seed-profile matter and is covered in the live self-QA
+   (7.4) at the 768px band.
 5. Refresh failure banner. `page.route` returns 500 for the head read only
    (match on the absence of `cursor` in the query), triggered by an inbound;
    rows remain, the banner and `Retry refresh` appear; un-route and click Retry

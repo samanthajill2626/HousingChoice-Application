@@ -155,7 +155,8 @@ export function Inbox(): React.JSX.Element {
   const restoredRef = useRef(false);
   const noteScrollTop = inbox.noteScrollTop;
   const hasRows = inbox.rows.length > 0;
-  // The <ul> below renders exactly when this is true.
+  // The <ul> below renders on this very boolean (build review R3-4), so the
+  // scroll-root effect keyed on it cannot drift from the element it waits for.
   const listShown = inbox.status === 'ready' && inbox.rows.length > 0;
 
   // Resolve the scroll container once the list is RENDERED; keep its scrollTop
@@ -375,7 +376,7 @@ export function Inbox(): React.JSX.Element {
         </div>
       ) : null}
 
-      {inbox.status === 'ready' && inbox.rows.length > 0 ? (
+      {listShown ? (
         <ul className={styles.rows} aria-label="Conversations" ref={listRef}>
           {inbox.rows.map((row) => (
             <InboxRow

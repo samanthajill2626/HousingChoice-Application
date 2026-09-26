@@ -116,7 +116,14 @@ export const InboxRow = memo(function InboxRow({
             {/* RELAY-only lifecycle: a native group text has no closed state in
                 v1 (spec 10) and its rows carry no `status` at all. */}
             {isRelay && row.status === 'closed' ? <span className={styles.tag}>Closed</span> : null}
-            {row.placementContext ? <span className={styles.tag}>{row.placementContext.label}</span> : null}
+            {/* The placement tag yields before the name down to a 4em floor
+                (build review R3-1), so it carries its full stage label as a
+                title: recoverable on hover once truncated. */}
+            {row.placementContext ? (
+              <span className={styles.placementTag} title={row.placementContext.label}>
+                {row.placementContext.label}
+              </span>
+            ) : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
             {row.deleted ? <span className={styles.deletedTag}>Deleted</span> : null}
           </span>

@@ -203,6 +203,11 @@ describe('InboxRow', () => {
     expect(screen.getByText('Closed')).toBeInTheDocument();
   });
 
+  it('renders the placement tag with its full stage label as a title (it truncates before the name, R3-1)', () => {
+    renderRow(mkRow({ placementContext: { placementId: 'p1', label: 'Awaiting receipt confirmation' } }));
+    expect(screen.getByText('Awaiting receipt confirmation')).toHaveAttribute('title', 'Awaiting receipt confirmation');
+  });
+
   describe('the last-activity time (spec 5.4)', () => {
     // setup.ts pins Date to 2026-07-01T12:00:00Z; the fixture row is
     // 2026-06-17, earlier the same year -> "Jun 17".

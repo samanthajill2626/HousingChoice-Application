@@ -89,18 +89,24 @@
 .bold {
   font-weight: var(--fw-bold);
 }
+/* THE CHIP RULE (build review R3-1), one rule for every chip in the head:
+   - The channel chip (`.channel`), the relay Closed tag (`.tag`) and the
+     Deleted chip (`.deletedTag`) are short fixed-vocabulary state markers and
+     NEVER shrink (no flex-shrink, no min-width: 0 - rigid as on main).
+   - The placement tag (`.placementTag`, an unbounded stage label of up to 29
+     characters) and the Needs triage chip (`.triage`) YIELD BEFORE THE NAME,
+     never below 4em: the name - or an unknown row's number - is the row's
+     identity, and the meaning of these two chips survives truncation.
+     flex-shrink 100 hands them nearly all of the head's shortfall.
+   - The 4em floor is load-bearing. With `min-width: 0` a yielding chip took
+     ~99% of the shortfall until its content box reached 0, so a short tag
+     collapsed to an 18px box showing one clipped letter (round-3
+     measurement). A yielding chip never takes `min-width: 0`. */
 .channel {
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
   white-space: nowrap;
 }
-/* The placement and Deleted tags YIELD BEFORE THE NAME (build review R2-2):
-   a stage label runs to 29 characters ("Awaiting receipt confirmation"), and
-   a tag that never shrank filled the capped head at 768px and on phones and
-   cut the name to 0. flex-shrink 100 hands a tag nearly all of the head's
-   shortfall, so it ellipsizes first and the name keeps its width. The
-   channel and triage chips never shrink: they are short, and triage is an
-   affordance. */
 .tag {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -109,11 +115,26 @@
   color: var(--c-text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
-  min-width: 0;
+}
+/* The `.tag` look (declarations duplicated: this module does not use
+   `composes`) plus the yielding rule and its floor. The row sets `title` to
+   the full label, so a truncated stage label is recoverable on hover. */
+.placementTag {
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  min-width: 4em;
   overflow: hidden;
   text-overflow: ellipsis;
   flex-shrink: 100;
 }
+/* Yields with the 4em floor (the chip rule above; R3-1, R2-6): it sits on
+   every unknown row beside the amber dot, and while rigid it cut the number
+   to its area code on every unread unknown row at 360px. */
 .triage {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -123,10 +144,14 @@
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   white-space: nowrap;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 100;
 }
 
 /* Deleted-contact resurfacing: danger-tinted so the row reads as "deleted, but
-   they messaged you". Yields before the name like `.tag` (R2-2). */
+   they messaged you". A rigid state marker (the chip rule above). */
 .deletedTag {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -136,10 +161,6 @@
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   white-space: nowrap;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex-shrink: 100;
 }
 
 .preview {

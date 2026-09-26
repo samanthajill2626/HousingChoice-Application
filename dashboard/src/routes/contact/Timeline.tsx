@@ -51,6 +51,8 @@ import {
   relayRetryKey,
 } from './relayRetryJoin.js';
 import type { EffectiveRelayLeg, RelayRetryRow } from './relayRetryJoin.js';
+import { isRetryPromiseLive } from './retryPromise.js';
+import { serverNowMs } from '../../api/serverClock.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
 import { presentRelayExternalCaller } from './presentRelayExternalCaller.js';
@@ -125,6 +127,12 @@ function sendFailureMessage(err: unknown): string {
         return 'Sending is backed up right now - try again in a moment.';
       case 'group_text_media_not_supported':
         return 'Group texts are text only for now - remove the attachment to send.';
+      // retry-send-window D10: the manual Retry route refuses while an automatic
+      // retry of this message is still scheduled. The button is hidden then, so
+      // a stale tab is what reads this - never the generic "couldn't send",
+      // which would invite pressing again.
+      case 'retry_pending':
+        return 'A retry is already scheduled for this message.';
     }
   }
   return "Couldn't send — please try again.";
@@ -766,13 +774,35 @@ function bubbleClocks(
 }
 
 /**
+ * retry-send-window D8/D10: does this bubble show a LIVE one-to-one retry
+ * promise? ONE predicate, read at three places so they cannot disagree: the
+ * message-level chip's copy ("Phone unreachable - will retry"), the Retry
+ * button (hidden while this is true), and the ticker's run condition (armed
+ * while this is true, so the promise expires on screen without a reload).
+ *
+ * `promiseNowMs` is the SERVER-clock snapshot the timeline takes where it
+ * decides arming (the `tickerArmed` memo), never the browser clock: the server
+ * wrote the stamp, and the manual Retry route's 409 guard reads the server's
+ * clock too. An EMAIL row renders an EmailCard, which promises nothing; an
+ * inbound or unfailed bubble has nothing to promise about. The error code is
+ * deliberately NOT checked: the server's guard does not check it either, and
+ * the Retry button follows the guard.
+ */
+function showsRetryPromise(msg: TimelineMessage, promiseNowMs: number): boolean {
+  if (msg.type === 'email' || msg.direction !== 'outbound') return false;
+  if (presentDeliveryStatus(msg.delivery_status)?.isFailure !== true) return false;
+  return isRetryPromiseLive(msg.retry_due_at, promiseNowMs);
+}
+
+/**
  * THE TICKER'S RUN CONDITION, per message: does this bubble render at least one
- * outbound leg that CAN still go stale but has not yet?
+ * outbound leg that CAN still go stale but has not yet - or a one-to-one retry
+ * promise that has not yet expired (clause 7)?
  *
  * It is a PREDICATE over the presenter's own two functions, never a shape test.
  * FIVE distinct non-terminations have been shipped-and-caught behind this one
- * line and a SIXTH was designed out before it could ship - six in total, each
- * closed by a specific clause here:
+ * line, and a SIXTH and a SEVENTH were designed out before they could ship -
+ * seven in total, each closed by a specific clause here:
  *
  *  1. "any non-terminal leg" - a STALE leg stays non-terminal for ever, so the
  *     interval would run permanently on exactly the threads this feature
@@ -816,6 +846,18 @@ function bubbleClocks(
  *     half of `canEverGoStale`. It needs no server fault to reach - the reading
  *     clock is the VIEWER's, so a browser more than a budget slow puts every
  *     fresh rung in the future and pinned `Retrying` with a live interval.
+ *  7. a PROMISE judged on the wrong clock (retry-send-window D8). A one-to-one
+ *     bubble has no recipient map, so no leg clause can arm for it, and its
+ *     "will retry" copy and hidden Retry button change only when
+ *     `retry_due_at + RETRY_PROMISE_GRACE_MS` passes on the SERVER's clock.
+ *     Judged on the browser clock, a fast browser disarms while the promise is
+ *     still live, and the promise never leaves the screen. Closed by the
+ *     promise clause below, which asks `showsRetryPromise` - the predicate the
+ *     bubble renders from - against the server-clock snapshot the bubble reads
+ *     (`promiseNowMs`, taken in the `tickerArmed` memo). It TERMINATES because
+ *     that snapshot advances with real time and a promise past its grace can
+ *     never be live again, so the tick that crosses the edge both drops the
+ *     copy and disarms.
  *
  * `canEverGoStale` and `isStaleLeg` derive their clock from one shared private
  * helper inside the presenter, so they cannot disagree about which clock a slot
@@ -824,7 +866,7 @@ function bubbleClocks(
  * boundary - never back.
  *
  * The gate mirrors what the bubble actually RENDERS: a leg nothing presents
- * cannot change any pixel, so it must not buy an interval. SIX clauses carry
+ * cannot change any pixel, so it must not buy an interval. SEVEN clauses carry
  * that mirror, and each one names a real rendering decision made elsewhere:
  *
  *  - OUTBOUND or an inbound multi-party source, and a non-empty filtered
@@ -845,10 +887,16 @@ function bubbleClocks(
  *    row is hidden. It is the THREAD-level index that carries it: `hasTickableLeg`
  *    walks `visible`, and D20 has already filtered the retry rows out of that
  *    set, so a bubble cannot find its own retries from its props.
+ *  - a LIVE ONE-TO-ONE RETRY PROMISE on an outbound failed bubble
+ *    (retry-send-window D8), which the bubble renders twice - the chip's "will
+ *    retry" and the Retry button's absence - and the only clause a bubble with
+ *    NO recipient map can meet.
  *
  * `retries` is that index (`indexRelayRetries`, thread level, memoized on
  * `items`), and it is REQUIRED for the same reason `tickNow` is: an omitted one
  * would silently disable the retry half of the escalation rather than fail.
+ * `promiseNowMs` is the thread's server-clock snapshot, required for the same
+ * reason.
  */
 /** The retry index a NON-relay roster gets: empty, and the SAME object every
  *  time, so the memo that produces it and the ticker memo that reads it both
@@ -860,8 +908,15 @@ function hasTickableLeg(
   msg: TimelineMessage,
   tickNow: number,
   retries: Map<string, RelayRetryRow[]>,
+  promiseNowMs: number,
 ): boolean {
   if (msg.type === 'email') return false;
+  // Clause 7 (retry-send-window D8): a LIVE ONE-TO-ONE RETRY PROMISE, asked
+  // through the SAME predicate the bubble renders from, against the SAME
+  // server-clock snapshot it reads. Ahead of the leg clauses because a
+  // one-to-one bubble has no recipient map - every one of them returns false
+  // for it.
+  if (showsRetryPromise(msg, promiseNowMs)) return true;
   if (msg.delivery_status === 'queued_pending') return false;
   if (msg.direction !== 'outbound' && msg.relay_sender_key === undefined) return false;
   const recipientEntries = includedRecipientEntries(msg.delivery_recipients);
@@ -901,6 +956,7 @@ function hasTickableLeg(
 function MessageBubble({
   msg,
   onRetry,
+  promiseNowMs,
   relayRoster,
   retryIndex,
   rosterKind = 'relay',
@@ -926,6 +982,12 @@ function MessageBubble({
    *  read directly: see `bubbleNowMs` below, which is the value this bubble
    *  actually presents against. */
   tickNow: number;
+  /** retry-send-window D8: the thread's SERVER-clock snapshot, taken where the
+   *  ticker decides arming (the `tickerArmed` memo) and handed down beside
+   *  `tickNow`, so this bubble's retry promise - its copy and the hidden Retry
+   *  button - and the interval that re-renders it read ONE value. Required,
+   *  like `tickNow`. */
+  promiseNowMs: number;
 }): React.JSX.Element {
   const [revealed, setRevealed] = useState(false);
   const outbound = msg.direction === 'outbound';
@@ -970,14 +1032,27 @@ function MessageBubble({
   // that path breaks is deliberately unnamed - see
   // docs/issues/mms-silent-drop-dish-textnow.md.
   const isMms = msg.type === 'mms';
+  // retry-send-window D8/D10: is an automatic retry of THIS message still
+  // promised? Judged by the one predicate the ticker also arms on, against the
+  // thread's server-clock snapshot, never the browser clock. It drives the
+  // chip's copy below and hides the Retry button while it holds.
+  const retryPromiseLive = showsRetryPromise(msg, promiseNowMs);
   // DELIBERATELY no `relay` flag here, and this is the one place in this
   // component where that is a decision rather than an omission. This site reads
-  // the MESSAGE's own error_code, not a leg's. A relay source message never gets
-  // one (the relay path writes SLOTS only); the code that does reach it is the
-  // native-group-text aggregate, whose 30003 retry is real (D20). Passing
-  // `rosterKind` here would drop the promise from a group text that genuinely
-  // retries - the exact inversion D20 forbids.
-  const reason = delivery?.isFailure ? deliveryReason(msg.error_code, { media: isMms }) : undefined;
+  // the MESSAGE's own error_code, not a leg's: a relay source message never gets
+  // one (the relay path writes SLOTS only), so what reaches it is a one-to-one
+  // failure or the native-group-text aggregate. And `relay` WINS over
+  // `retryScheduled` in deliveryReason (retry-send-window D8): passing
+  // `rosterKind === 'relay'` here - the default roster kind, which every contact
+  // page renders with - would switch the one-to-one promise off everywhere. A
+  // native group text's aggregate reads the plain failure: its row can carry a
+  // stamp only when the one-to-one decision failed open (D3a, D11), and no
+  // screen renders that stamp - the contact timeline skips group_text
+  // conversations (app/src/routes/contactTimeline.ts), and the group view's
+  // fixed field list drops `retry_due_at` (conversation/useRelayThread.ts).
+  const reason = delivery?.isFailure
+    ? deliveryReason(msg.error_code, { media: isMms, retryScheduled: retryPromiseLive })
+    : undefined;
   // The product flag for every LEG-scoped reason in this bubble: the rollup, the
   // accessible-name recital and the per-recipient row. ONE PROP, derived twice
   // from the same value - this flag serves the rollup and the row, and the
@@ -1269,10 +1344,12 @@ function MessageBubble({
             // directly above it. One `isMms` feeds the rollup, this row and the
             // accessible name, so the three cannot disagree.
             //
-            // `relay` is the second flag on exactly the same footing (D19/D21):
-            // a relay leg's 30003 keeps its carrier code and drops the "will
-            // retry" tail, because no relay retry is scheduled - while a native
-            // group text, whose 30003 retry IS real, keeps the promise.
+            // `relay` is the second flag on exactly the same footing (D19/D21).
+            // No LEG ever promises a retry: a relay leg's retry is the join's
+            // own `Retrying` state, never copy keyed on the code, and a native
+            // group-text leg has no retry at all (retry-send-window D11) - so
+            // both read the plain "Phone unreachable (error 30003)". Neither
+            // passes `retryScheduled`, which belongs to the one-to-one chip.
             //
             // A presentation carrying its OWN reason wins over both, and two do:
             // `Retrying` (D19) and the `unconfirmed` state (R2, W5). Neither
@@ -1338,7 +1415,10 @@ function MessageBubble({
               : `${optedOutCount} members opted out — not relayed to them.`}
         </p>
       ) : null}
-      {delivery?.isFailure && onRetry ? (
+      {/* retry-send-window D10: no Retry while an automatic retry of this
+       *  message is promised - the server refuses a manual one over the same
+       *  window (409 retry_pending), and a press mid-wait was the double text. */}
+      {delivery?.isFailure && onRetry && !retryPromiseLive ? (
         <button
           type="button"
           className={styles.retry}
@@ -1719,6 +1799,7 @@ function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
 function StreamItem({
   item,
   onRetry,
+  promiseNowMs,
   relayRoster,
   retryIndex,
   rosterKind,
@@ -1736,6 +1817,10 @@ function StreamItem({
    *  not optional: an undefined clock means "staleness off" downstream, so a
    *  missed prop would silently disable the escalation rather than fail. */
   tickNow: number;
+  /** The thread's server-clock snapshot, passed straight through to
+   *  MessageBubble. Required for the same reason `tickNow` is - see its prop
+   *  there. */
+  promiseNowMs: number;
 }): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
@@ -1747,6 +1832,7 @@ function StreamItem({
           msg={item}
           onRetry={onRetry}
           tickNow={tickNow}
+          promiseNowMs={promiseNowMs}
           retryIndex={retryIndex}
           {...(relayRoster !== undefined && { relayRoster })}
           {...(rosterKind !== undefined && { rosterKind })}
@@ -2053,8 +2139,9 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // per bubble, bumping the `tickNow` every MessageBubble already reads.
   //
   // ARMED ONLY while some RENDERED leg can still cross the 15-minute boundary,
-  // or while a LIVE RETRY RUNG for one of those legs can still resolve (D18) -
-  // see `hasTickableLeg` for the six non-terminations that predicate closes.
+  // while a LIVE RETRY RUNG for one of those legs can still resolve (D18), or
+  // while a one-to-one bubble shows a LIVE retry promise (retry-send-window D8)
+  // - see `hasTickableLeg` for the seven non-terminations that predicate closes.
   // `visible` (not `items`) is what the stream actually renders, and `tickNow` is
   // in the deps precisely so that the moment the last eligible leg goes stale the
   // condition flips false, the effect cleans up, and the interval STOPS. That
@@ -2098,10 +2185,25 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       return now - prev >= STALE_TICK_MS ? now : prev;
     });
   }, [visible]);
-  const tickerArmed = useMemo(
-    () => visible.some((i) => i.kind === 'message' && hasTickableLeg(i, tickNow, retryIndex)),
-    [visible, tickNow, retryIndex],
-  );
+  // retry-send-window D8: the SERVER-clock snapshot every bubble's one-to-one
+  // retry promise is judged against, taken HERE, where arming is decided, and
+  // handed down beside `tickNow`. One value for both, so the interval and the
+  // bubbles it re-renders cannot disagree about whether a promise is live - not
+  // even for a bubble re-rendered on its own by a reveal click. The browser's
+  // clock would be wrong both ways: running fast, it disarms while the promise
+  // is still live on the server's clock and the promise never leaves the
+  // screen; running slow, it keeps the promise up for as long as the skew.
+  // Re-taken on every tick and whenever the rendered set or the retry index
+  // changes, so it is never older than the items it judges.
+  const { armed: tickerArmed, promiseNowMs } = useMemo(() => {
+    const snapshot = serverNowMs();
+    return {
+      armed: visible.some(
+        (i) => i.kind === 'message' && hasTickableLeg(i, tickNow, retryIndex, snapshot),
+      ),
+      promiseNowMs: snapshot,
+    };
+  }, [visible, tickNow, retryIndex]);
   useEffect(() => {
     if (!tickerArmed) return undefined;
     const bump = (): void => {
@@ -2531,6 +2633,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                     item={item}
                     onRetry={onRetrySurfaced}
                     tickNow={tickNow}
+                    promiseNowMs={promiseNowMs}
                     retryIndex={retryIndex}
                     {...(relayRoster !== undefined && { relayRoster })}
                     rosterKind={rosterKind}

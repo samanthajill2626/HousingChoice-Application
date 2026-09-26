@@ -137,3 +137,32 @@ with table prefix `hc-local-16-` and launcher pid 67396.
   dropped them.
 - **The pre-existing act() warning** in `useInbox.test.tsx` ("drops an
   in-flight loadMore...") is not from this wave.
+
+## Addendum (orchestrator, 2026-09-26) - how the wave was committed
+
+The dashboard-suite gate command was denied to the implementer by the
+auto-mode classifier (reason text "Irreversible Local Destruction", most
+likely from a `git checkout --` of its own byte-copied files in the preceding
+command). The implementer committed nothing and reported. The orchestrator
+then ran the gates itself on the uncommitted tree from
+W:\tmp\inbox-rows-timestamps, bare, redirected to `.superpowers/sdd/fw2-gate-*`:
+
+- `npm run test -w @housingchoice/dashboard`: EXIT=0, 198 test files passed
+  (the touched files alone: InboxRow 23, Inbox 59, useInbox 62).
+- `npm run typecheck`: EXIT=0.
+
+and committed the three verified patches in order with `git apply --cached`
+(the working tree matched HEAD exactly afterwards, only this report untracked):
+
+- fd64976d fix(inbox): the row head never yields to the preview; long tags
+  yield before the name (R2-1, R2-2)
+- afa482f0 fix(inbox): resolve the scroll root from the rendered list; a day
+  change refreshes memoized rows (R2-3, R2-4)
+- cdae0d97 docs(inbox): make the round-2 texts true (R2-7); file the
+  time-zone note (R2-5)
+- 6024b619 this report
+
+The `Co-Authored-By` trailers name the implementer's model, which wrote the
+changes; each commit body says the orchestrator committed it. Round 3
+(`code-review-r3.md`) later found that the R2-2 tag rule blanks short tags;
+see `code-review-r3-adjudications.md`.

@@ -15,6 +15,7 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
+import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo, minuteBucket } from '../src/repos/conversationsRepo.js';
@@ -208,6 +209,122 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
       await expect(
         messages.annotateMessage(convId, '2026-06-12T10:04:00.000Z#SMnope', { retryAttempt: 1 }),
       ).rejects.toThrow();
+    });
+
+    // --- retry-send-window (spec D6, D7, D14) ---------------------------------
+    it('retry-send-window D6/D14: append writes the one-to-one lineage, the window origin and the send flags - automated FALSE included', async () => {
+      const res = await messages.append({
+        ...outbound(convId, 'SMrswappend1', '2026-06-12T10:20:00.000Z', 'retry body'),
+        retryOf: '2026-06-12T10:03:00.000Z#SMfail1',
+        retryAttempt: 2,
+        retryWindowStart: '2026-06-12T10:03:00.000Z',
+        automated: false,
+        recipientContactId: 'contact-rsw-1',
+      });
+      const row = await messages.getByTsMsgId(convId, res.tsMsgId);
+      expect(row).toMatchObject({
+        retry_of: '2026-06-12T10:03:00.000Z#SMfail1',
+        retry_attempt: 2,
+        retry_window_start: '2026-06-12T10:03:00.000Z',
+        recipient_contact_id: 'contact-rsw-1',
+      });
+      // `false` must be STORED, not dropped: a row without the flag is retried
+      // as automated (the pre-deploy default, spec D14).
+      expect(row).toHaveProperty('automated', false);
+    });
+
+    it('retry-send-window D14: append writes automated TRUE, and none of the new fields when they are absent', async () => {
+      const auto = await messages.append({
+        ...outbound(convId, 'SMrswappend2', '2026-06-12T10:21:00.000Z', 'a reminder'),
+        automated: true,
+      });
+      expect(await messages.getByTsMsgId(convId, auto.tsMsgId)).toHaveProperty('automated', true);
+
+      const plain = await messages.append(outbound(convId, 'SMrswappend3', '2026-06-12T10:22:00.000Z', 'plain'));
+      const row = await messages.getByTsMsgId(convId, plain.tsMsgId);
+      for (const field of [
+        'retry_attempt',
+        'retry_window_start',
+        'automated',
+        'recipient_contact_id',
+        'relay_retry_window_start',
+        'retry_due_at',
+      ]) {
+        expect(row).not.toHaveProperty(field);
+      }
+    });
+
+    it('retry-send-window D7: updateDeliveryStatus lands retry_due_at in the SAME conditional write as the transition, and a redelivery moves nothing', async () => {
+      await messages.append(outbound(convId, 'SMrswdue1', '2026-06-12T10:23:00.000Z', 'will fail'));
+      expect(
+        await messages.updateDeliveryStatus('SMrswdue1', 'failed', '30003', {
+          retryDueAt: '2026-06-12T10:24:00.000Z',
+        }),
+      ).toBe(true);
+      expect(await messages.getByProviderSid('SMrswdue1')).toMatchObject({
+        delivery_status: 'failed',
+        error_code: '30003',
+        retry_due_at: '2026-06-12T10:24:00.000Z',
+      });
+      // Twilio redelivers the same callback: no transition, so no new promise.
+      expect(
+        await messages.updateDeliveryStatus('SMrswdue1', 'failed', '30003', {
+          retryDueAt: '2026-06-12T10:30:00.000Z',
+        }),
+      ).toBe(false);
+      expect((await messages.getByProviderSid('SMrswdue1'))?.retry_due_at).toBe(
+        '2026-06-12T10:24:00.000Z',
+      );
+    });
+
+    it('retry-send-window D7: a REGRESSING failure writes no retry_due_at, and the no-options call shape writes none', async () => {
+      await messages.append(outbound(convId, 'SMrswdue2', '2026-06-12T10:25:00.000Z', 'delivered first'));
+      expect(await messages.updateDeliveryStatus('SMrswdue2', 'delivered')).toBe(true);
+      expect(
+        await messages.updateDeliveryStatus('SMrswdue2', 'undelivered', '30003', {
+          retryDueAt: '2026-06-12T10:26:00.000Z',
+        }),
+      ).toBe(false);
+      const regressed = await messages.getByProviderSid('SMrswdue2');
+      expect(regressed?.delivery_status).toBe('delivered');
+      expect(regressed).not.toHaveProperty('retry_due_at');
+
+      await messages.append(outbound(convId, 'SMrswdue3', '2026-06-12T10:26:00.000Z', 'plain failure'));
+      expect(await messages.updateDeliveryStatus('SMrswdue3', 'failed', '30003')).toBe(true);
+      expect(await messages.getByProviderSid('SMrswdue3')).not.toHaveProperty('retry_due_at');
+      // An unknown SID stays a quiet no-op with options too.
+      expect(
+        await messages.updateDeliveryStatus('SMrswghost', 'failed', '30003', {
+          retryDueAt: '2026-06-12T10:27:00.000Z',
+        }),
+      ).toBe(false);
+    });
+
+    it('retry-send-window D7: builds the conditional write with retry_due_at and NO error code', async () => {
+      await messages.append(outbound(convId, 'SMrswdue4', '2026-06-12T10:27:00.000Z', 'no code'));
+      expect(
+        await messages.updateDeliveryStatus('SMrswdue4', 'failed', undefined, {
+          retryDueAt: '2026-06-12T10:28:00.000Z',
+        }),
+      ).toBe(true);
+      const row = await messages.getByProviderSid('SMrswdue4');
+      expect(row?.retry_due_at).toBe('2026-06-12T10:28:00.000Z');
+      expect(row).not.toHaveProperty('error_code');
+    });
+
+    it('retry-send-window D7: annotateMessage re-writes retry_due_at - the enqueue-failure withdrawal', async () => {
+      await messages.append(outbound(convId, 'SMrswann1', '2026-06-12T10:28:00.000Z', 'withdraw me'));
+      await messages.updateDeliveryStatus('SMrswann1', 'failed', '30003', {
+        retryDueAt: '2026-06-12T10:29:00.000Z',
+      });
+      await messages.annotateMessage(convId, '2026-06-12T10:28:00.000Z#SMrswann1', {
+        retryDueAt: RETRY_PROMISE_WITHDRAWN_AT,
+      });
+      expect(await messages.getByProviderSid('SMrswann1')).toMatchObject({
+        retry_due_at: RETRY_PROMISE_WITHDRAWN_AT,
+        delivery_status: 'failed', // the failure itself is untouched
+        body: 'withdraw me',
+      });
     });
 
     it('listByConversation pages newest-first and never returns sid pointer items', async () => {

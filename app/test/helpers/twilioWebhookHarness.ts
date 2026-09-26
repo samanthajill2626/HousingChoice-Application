@@ -1127,11 +1127,27 @@ export function createFakeWorld(): FakeWorld {
         }),
         // Share-broadcast (M1.8a): preserve the broadcast id stamp.
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
-        // Manual-retry lineage: preserve retry_of so the timeline serializer can
-        // emit it (mirrors the real repo's append passthrough).
+        // Retry lineage (the manual Retry AND the automatic 30003 retry):
+        // preserve retry_of so the timeline serializer can emit it (mirrors the
+        // real repo's append passthrough).
         ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
-        // Relay 30003 retry lineage (spec D11/D12): preserve the six values the
-        // real repo persists (messagesRepo.ts:2218-2233). Without them a claim
+        // retry-send-window D6/D14: the append-time attempt number, the chain's
+        // window origin and the send's own flags - automated FALSE included.
+        // The real repo persists all four; a fake that dropped them would let a
+        // "carried origin" or "follows the original send" test pass VACUOUSLY
+        // through its fallback (retry_window_start ?? provider_ts,
+        // automated ?? true). Pinned by twilioWebhookHarnessRetryFields.test.ts.
+        ...(message.retryAttempt !== undefined && { retry_attempt: message.retryAttempt }),
+        ...(message.retryWindowStart !== undefined && {
+          retry_window_start: message.retryWindowStart,
+        }),
+        ...(message.automated !== undefined && { automated: message.automated }),
+        ...(message.recipientContactId !== undefined && {
+          recipient_contact_id: message.recipientContactId,
+        }),
+        // Relay 30003 retry lineage (spec D11/D12): preserve the six lineage
+        // values the real repo persists, plus retry-send-window's window origin
+        // (the relay block of messagesRepo.ts `append`). Without them a claim
         // written through this fake reads back with NO lineage at all, and the
         // retry job throws on the row it was handed.
         ...(message.relayRetryOf !== undefined && { relay_retry_of: message.relayRetryOf }),
@@ -1149,6 +1165,9 @@ export function createFakeWorld(): FakeWorld {
         }),
         ...(message.relayRetryLegBody !== undefined && {
           relay_retry_leg_body: message.relayRetryLegBody,
+        }),
+        ...(message.relayRetryWindowStart !== undefined && {
+          relay_retry_window_start: message.relayRetryWindowStart,
         }),
         // Voice call (M1.9a): preserve the metadata-only call fields so tests
         // can assert masked/CallSid-idempotent/forward-only behavior.
@@ -1210,12 +1229,16 @@ export function createFakeWorld(): FakeWorld {
       );
       if (msg) msg.ses_message_id = providerSid;
     },
-    async updateDeliveryStatus(sid, status, errorCode) {
+    async updateDeliveryStatus(sid, status, errorCode, options) {
       const existing = findBySid(sid);
       if (!existing) return false;
       if (!allowedPriorStatuses(status).includes(existing.delivery_status)) return false;
       existing.delivery_status = status;
       if (errorCode !== undefined) existing.error_code = errorCode;
+      // retry-send-window D7: mirror the real repo's ONE conditional write -
+      // retry_due_at lands only on a transition; a redelivered or regressing
+      // callback returned false above and wrote nothing.
+      if (options?.retryDueAt !== undefined) existing.retry_due_at = options.retryDueAt;
       return true;
     },
     async updateCallStatus(callSid, fields, options) {
@@ -1341,6 +1364,8 @@ export function createFakeWorld(): FakeWorld {
       if (annotations.mediaAttachments !== undefined) item.media_attachments = annotations.mediaAttachments;
       if (annotations.retryOf !== undefined) item.retry_of = annotations.retryOf;
       if (annotations.retryAttempt !== undefined) item.retry_attempt = annotations.retryAttempt;
+      // retry-send-window D7: the enqueue-failure withdrawal.
+      if (annotations.retryDueAt !== undefined) item.retry_due_at = annotations.retryDueAt;
     },
     async putMediaPointers() {
       // The fake DERIVES the media index from the stored messages (below), so

@@ -1,8 +1,10 @@
 // RecipientPreview tests (§8) — the editable curated recipient list. Covers:
 // every candidate rendered individually with a checkbox; already-sent rows
-// unchecked + amber-flagged; Select-all SKIPS already-sent; Deselect-all clears;
+// unchecked + amber-flagged UNLESS seeded; Select-all skips UNSEEDED
+// already-sent rows (seeded ones stay checked); Deselect-all clears;
 // search-within filters; add-a-tenant appends (annotated via
-// priorRecipientContactIds); remove/uncheck; Send posts the EXACT checked
+// priorRecipientContactIds; a hand-add is a seed, so it starts checked even
+// when flagged); remove/uncheck; Send posts the EXACT checked
 // recipientContactIds; 400 empty_audience / over-cap / 409 inline (409 offers a
 // Results link); Delete draft (409 → Results).
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -212,6 +214,43 @@ describe('RecipientPreview — bulk select', () => {
     expect(within(tasha).getByRole('checkbox')).not.toBeChecked();
     expect(within(bo).getByRole('checkbox')).not.toBeChecked();
   });
+
+  it('share-skip-fix D5: Select all keeps SEEDED already-sent rows checked (preview seeds and hand-adds), still skips unseeded ones', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Tasha' }),
+          candidate({ contactId: 'c2', firstName: 'Bo', phone: '+14040000002', alreadySentThisProperty: true }),
+          candidate({ contactId: 'c3', firstName: 'Seeded', phone: '+14040000003', alreadySentThisProperty: true, seeded: true }),
+        ],
+        priorRecipientContactIds: ['c2', 'c3', 'cX'],
+      }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'Prior', lastName: 'Sent' })],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Prior');
+    await u.click(await screen.findByRole('option', { name: /Prior Sent/ }));
+    const list = screen.getByRole('list', { name: 'Candidate recipients' });
+    const box = (name: string) =>
+      within(within(list).getByText(name).closest('li') as HTMLElement).getByRole('checkbox');
+
+    await u.click(screen.getByRole('button', { name: 'Deselect all' }));
+    expect(box('Seeded')).not.toBeChecked();
+    expect(box('Prior Sent')).not.toBeChecked();
+
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(box('Tasha')).toBeChecked();
+    expect(box('Bo')).not.toBeChecked(); // unseeded + already sent: skipped, as before
+    expect(box('Seeded')).toBeChecked(); // a preview seed
+    expect(box('Prior Sent')).toBeChecked(); // a hand-add is a seed too
+  });
+
+  it('share-skip-fix D5: the note states the seeded-row rule', () => {
+    renderPreview({ preview: previewOf({ candidates: [candidate()] }) });
+    expect(
+      screen.getByText('Flagged tenants you picked stay checked; "Select all" skips the others.'),
+    ).toBeInTheDocument();
+  });
 });
 
 describe('RecipientPreview — search-within', () => {
@@ -248,7 +287,7 @@ describe('RecipientPreview — add a tenant', () => {
     expect(within(list).getByText('Added')).toBeInTheDocument();
   });
 
-  it('annotates a manually-added tenant already-sent via priorRecipientContactIds (unchecked)', async () => {
+  it('share-skip-fix D5: a hand-added tenant who is already-sent is flagged AND starts CHECKED (a hand-pick is a seed)', async () => {
     const u = userEvent.setup();
     renderPreview({
       preview: previewOf({
@@ -262,8 +301,61 @@ describe('RecipientPreview — add a tenant', () => {
 
     const list = screen.getByRole('list', { name: 'Candidate recipients' });
     const row = within(list).getByText('Prior Sent').closest('li') as HTMLElement;
-    expect(within(row).getByRole('checkbox')).not.toBeChecked();
+    expect(within(row).getByRole('checkbox')).toBeChecked();
     expect(within(row).getByText('Already sent')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 2 tenants' })).toBeInTheDocument();
+  });
+
+  it('share-skip-fix D5: picking a tenant ALREADY listed (unseeded, flagged, unchecked) promotes that row to a seed - checked, still flagged, kept by Select all', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Tasha', seeded: true }),
+          candidate({
+            contactId: 'c2',
+            firstName: 'Bo',
+            lastName: 'Flag',
+            phone: '+14040000002',
+            alreadySentThisProperty: true,
+          }),
+        ],
+        priorRecipientContactIds: ['c2'],
+        seedContactIds: ['c1'],
+      }),
+      tenantCandidates: [
+        tenant({ contactId: 'c2', firstName: 'Bo', lastName: 'Flag', phone: '+14040000002' }),
+      ],
+    });
+    const list = screen.getByRole('list', { name: 'Candidate recipients' });
+    const box = () =>
+      within(within(list).getByText('Bo Flag').closest('li') as HTMLElement).getByRole('checkbox');
+    // The filter proposed Bo, flagged and unseeded: unchecked (the soft opt-in).
+    expect(box()).not.toBeChecked();
+
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Bo');
+    await u.click(await screen.findByRole('option', { name: /Bo Flag/ }));
+
+    // Promoted in place (no duplicate row): checked, and the flag still shows.
+    expect(within(list).getAllByText('Bo Flag')).toHaveLength(1);
+    expect(box()).toBeChecked();
+    const row = within(list).getByText('Bo Flag').closest('li') as HTMLElement;
+    expect(within(row).getByText('Already sent')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 2 tenants' })).toBeInTheDocument();
+    // Persisted exactly like a hand-add: appended to the draft's seed list.
+    await waitFor(() => expect(updateBroadcastSeeds).toHaveBeenCalledWith('bcast_1', ['c1', 'c2']));
+
+    // A seed stays checked through "Select all".
+    await u.click(screen.getByRole('button', { name: 'Deselect all' }));
+    expect(box()).not.toBeChecked();
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(box()).toBeChecked();
+
+    // Picking it again (now a seed) re-persists nothing.
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Bo');
+    await u.click(await screen.findByRole('option', { name: /Bo Flag/ }));
+    expect(box()).toBeChecked();
+    expect(updateBroadcastSeeds).toHaveBeenCalledTimes(1);
   });
 
   it('does NOT add an opted-out tenant — surfaces an inline reason instead', async () => {
@@ -499,8 +591,9 @@ describe('RecipientPreview — seeded recipients', () => {
   });
 });
 
-// ── Resolved 1:1 guard (C1): the body names ONE tenant, so it must reach exactly
-// that tenant — the add-a-tenant search is hidden and Send is blocked otherwise. ──
+// -- Resolved 1:1 guard (C1): the message was composed for ONE tenant, so it must
+// reach exactly that tenant - the add-a-tenant search is hidden and Send is
+// blocked otherwise. --
 describe('RecipientPreview — resolved 1:1 audience guard', () => {
   const resolvedFor = { contactId: 'c1', name: 'Brianna Smith' };
 

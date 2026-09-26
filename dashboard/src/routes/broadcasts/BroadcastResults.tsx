@@ -135,7 +135,7 @@ export function BroadcastResults(): React.JSX.Element {
       <header className={styles.header}>
         <div className={styles.headTop}>
           <h1 className={styles.title}>{reachLabel}</h1>
-          <BroadcastStatusPill status={results.status} />
+          <BroadcastStatusPill status={results.status} stats={results.stats} />
         </div>
         <p className={styles.meta}>Started {formatBroadcastDate(results.created_at)}</p>
         {results.last_error !== undefined ? (

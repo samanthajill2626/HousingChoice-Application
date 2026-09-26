@@ -2887,9 +2887,10 @@ export type BroadcastMergeField = (typeof BROADCAST_MERGE_FIELDS)[number];
 export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
 
 /** The delivery rollup carried on a summary / results row. Disjoint buckets:
- *  queued + sent + delivered + failed + skipped_opted_out + skipped_no_consent
- *  == audience (the server derives these from the recipients map). MIRRORS
- *  app/src/repos/broadcastsRepo.ts BroadcastStats - keep in sync. */
+ *  queued + sending + sent + delivered + failed + skipped_opted_out +
+ *  skipped_no_consent + skipped_other == audience (the server derives these
+ *  from the recipients map). MIRRORS app/src/repos/broadcastsRepo.ts
+ *  BroadcastStats - keep in sync. */
 export interface BroadcastStats {
   /** The resolved audience size at send time. */
   audience: number;
@@ -2900,6 +2901,9 @@ export interface BroadcastStats {
   skipped_opted_out: number;
   /** Recipients fenced out for missing SMS consent (staff can record consent). */
   skipped_no_consent: number;
+  /** Every other skip (switch off, breaker, deleted, unreachable, kill switch).
+   *  Optional: persisted stats written before 2026-09-25 lack it - default 0. */
+  skipped_other?: number;
   /** Still on OUR box: awaiting the paced fan-out or a deferred retry. */
   queued: number;
   /** Dispatched to Twilio, carrier not yet confirmed (no carrierSentAt).
@@ -2947,7 +2951,12 @@ export interface BroadcastRecipient {
   tsMsgId?: string;
   /** ISO - when the carrier's own 'sent' status callback landed (webhook rollup). */
   carrierSentAt?: string;
-  /** Twilio error class on a failure (mapped to a reason for display). */
+  /** Why the slot did not simply send (mapped to a reason for display). On a
+   *  FAILED slot: the Twilio error class (or an internal code, e.g.
+   *  no_contact). On a SKIPPED slot: the skip reason - opted_out, unreachable,
+   *  contact_deleted, no_consent, or a send-wrapper refusal code
+   *  (contact_opted_out, manual_mode, sms_sending_disabled, ...). MIRRORS the
+   *  app's BroadcastRecipient.errorCode. */
   errorCode?: string;
   /** Resolved contact first name (absent for phone-only / deleted contacts). */
   firstName?: string;

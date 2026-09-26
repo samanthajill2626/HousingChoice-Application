@@ -105,7 +105,7 @@ const UNREAD_WARN_INTERVAL_MS = 5 * 60_000;
  * fixture, a backfill Scan, or a future pointer shape can never be mistaken
  * for a conversation.
  */
-const POINTER_PARTITION_PREFIXES = ['phone#', 'email#', 'token#'] as const;
+export const POINTER_PARTITION_PREFIXES = ['phone#', 'email#', 'token#'] as const;
 
 /**
  * ONE process-wide rate-limited WARN whose DESTINATION logger is chosen PER

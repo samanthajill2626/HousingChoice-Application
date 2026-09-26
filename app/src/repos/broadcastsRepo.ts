@@ -91,7 +91,8 @@ export interface BroadcastStats {
   delivered: number;
   /** Sends that failed (carrier filter / invalid number / cap). */
   failed: number;
-  /** Recipients skipped at send time for opt-out/unreachable (no token spent). */
+  /** Recipients skipped at send time for opt-out (no token spent), plus legacy
+   *  reason-less skips (opt-out or unreachable, recorded before 2026-09-25). */
   skipped_opted_out: number;
   /**
    * A2P/CTIA (spec §4): recipients skipped because they have NO recorded SMS
@@ -100,6 +101,15 @@ export interface BroadcastStats {
    * (which re-includes them on a re-send).
    */
   skipped_no_consent: number;
+  /**
+   * share-skip-fix D7: every OTHER skip - the switch off (`manual_mode`), the
+   * breaker, a deleted contact, an unreachable number, the kill switch, any
+   * future refusal code. Kept apart from `skipped_opted_out` so an opt-out is
+   * an opt-out and nothing else is filed under it. Optional because persisted
+   * stats rows written before the field existed lack it (readers default 0;
+   * the fan-out's ADD creates it on such a row).
+   */
+  skipped_other?: number;
   /** Recipients still queued ON OUR BOX (pre-send seed / awaiting the paced
    *  fan-out / transient deferral awaiting a retry continuation). */
   queued: number;
@@ -126,6 +136,16 @@ export interface BroadcastRecipient {
    * own "sent". See carrierSentAt for the carrier-confirmed instant.
    */
   status: 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
+  /**
+   * Why the slot did not simply send. FAILED: the Twilio error class, or an
+   * internal code (no_contact, transient_cap, enqueue_failed). SKIPPED
+   * (share-skip-fix D7): the skip reason - a fan-out fence (opted_out,
+   * unreachable, contact_deleted, no_consent) or the send wrapper's refusal
+   * code (SendRefusedError.code: contact_opted_out, manual_mode,
+   * sms_sending_disabled, ...). A first-fence skip (opt-out or unreachable)
+   * recorded before 2026-09-25 has none. QUEUED: the transient code a
+   * deferred slot is awaiting a retry for.
+   */
   errorCode?: string;
   /**
    * ISO - set when the CARRIER's non-terminal 'sent' status callback lands
@@ -141,6 +161,8 @@ export interface BroadcastItem {
   broadcastId: string;
   /** The acting user's userId (audit/attribution; no longer an index key). */
   created_by: string;
+  /** share-skip-fix D4: the creation path; `'dashboard'` = a person's share. See CreateBroadcastInput.createdVia. */
+  created_via?: 'dashboard';
   /** byCreated GSI range (ISO 8601). */
   created_at: string;
   /**
@@ -188,6 +210,18 @@ export interface ListBroadcastsOpts {
   exclusiveStartKey?: Record<string, unknown>;
 }
 
+/** The two consent refusal codes: the fan-out's own fence and the send wrapper's JIT gate. */
+export function isNoConsentCode(code: string | undefined): boolean {
+  return code === 'no_consent' || code === 'contact_no_consent';
+}
+
+/** The opt-out codes, plus NO code: a skipped slot recorded before 2026-09-25
+ *  carried no reason and was an opt-out or an unreachable number - filed under
+ *  opted-out, as it always was. */
+export function isOptedOutCode(code: string | undefined): boolean {
+  return code === undefined || code === 'opted_out' || code === 'contact_opted_out';
+}
+
 /**
  * S4 (broadcast live progress): the SINGLE SOURCE OF TRUTH for the disjoint stat
  * buckets, derived from the recipients map so a recipient is counted in EXACTLY
@@ -205,8 +239,12 @@ export interface ListBroadcastsOpts {
  *     sent      = status 'sent' AND carrierSentAt (carrier-confirmed)
  *     delivered = slots with status 'delivered'
  *     failed    = slots with status 'failed'
- *     skipped_no_consent = 'skipped' slots with errorCode 'no_consent'
- *     skipped_opted_out  = every remaining 'skipped' slot
+ *     skipped_no_consent = 'skipped' slots with errorCode no_consent | contact_no_consent
+ *     skipped_opted_out  = 'skipped' slots with errorCode opted_out | contact_opted_out,
+ *                          or NO errorCode (a legacy first-fence skip: opt-out or
+ *                          unreachable, recorded without a reason before 2026-09-25)
+ *     skipped_other      = every remaining 'skipped' slot (manual_mode, breaker_open,
+ *                          contact_deleted, unreachable, sms_sending_disabled, ...)
  *   queued/sending stay separate so a stuck send is diagnosable: stuck on our
  *   box vs stuck at the carrier are different failures.
  *   Legacy cumulative persisted stats are IGNORED when the map is present, so
@@ -226,6 +264,7 @@ export function deriveBroadcastStats(
   let failed = 0;
   let skipped_no_consent = 0;
   let skipped_opted_out = 0;
+  let skipped_other = 0;
   for (const key of keys) {
     const slot = recipients[key]!;
     switch (slot.status) {
@@ -247,8 +286,9 @@ export function deriveBroadcastStats(
         failed += 1;
         break;
       case 'skipped':
-        if (slot.errorCode === 'no_consent') skipped_no_consent += 1;
-        else skipped_opted_out += 1;
+        if (isNoConsentCode(slot.errorCode)) skipped_no_consent += 1;
+        else if (isOptedOutCode(slot.errorCode)) skipped_opted_out += 1;
+        else skipped_other += 1;
         break;
     }
   }
@@ -261,6 +301,7 @@ export function deriveBroadcastStats(
     failed,
     skipped_opted_out,
     skipped_no_consent,
+    skipped_other,
   };
 }
 
@@ -273,6 +314,7 @@ export function zeroStats(): BroadcastStats {
     failed: 0,
     skipped_opted_out: 0,
     skipped_no_consent: 0,
+    skipped_other: 0,
     queued: 0,
     sending: 0,
   };
@@ -290,6 +332,13 @@ export interface CreateBroadcastInput {
   estimatedAudience?: number;
   seedContactIds?: string[];
   audienceMode?: BroadcastAudienceMode;
+  /**
+   * share-skip-fix D4: `'dashboard'` when the authenticated dashboard draft
+   * route created this share. The send job sends such a share as a PERSON'S
+   * send (no switch, no breaker). Absent = automated (a draft created before
+   * 2026-09-25, or by any other path, including a future engine).
+   */
+  createdVia?: 'dashboard';
 }
 
 export interface BroadcastsRepo {
@@ -313,9 +362,11 @@ export interface BroadcastsRepo {
    */
   listByUnit(unitId: string, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
   /**
-   * The set of contactKeys already sent a broadcast for this unit — the union
-   * of every sent/sending broadcast's `recipients` map KEYS for the unit. The
-   * composer flags these (soft, opt-in resend; never a server-side exclusion).
+   * The set of contactKeys already sent a broadcast for this unit: the recipient
+   * keys with a NON-SKIPPED slot, unioned across every sent/sending broadcast
+   * for the unit (share-skip-fix D5 - a `skipped` slot means no text was
+   * attempted, so it never counts; `failed` still does). The composer flags
+   * these (soft, opt-in resend; never a server-side exclusion).
    * Degrades SAFELY: if the byUnit GSI is absent (an un-applied env) or the
    * query throws/returns nothing, returns an EMPTY set (nothing flagged) — the
    * already-sent protection is best-effort until the operator applies the GSI.
@@ -494,6 +545,7 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
         ...(input.seedContactIds !== undefined &&
           input.seedContactIds.length > 0 && { seed_contact_ids: input.seedContactIds }),
         ...(input.audienceMode !== undefined && { audience_mode: input.audienceMode }),
+        ...(input.createdVia !== undefined && { created_via: input.createdVia }),
       };
       await doc.send(
         new PutCommand({
@@ -523,9 +575,10 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
 
     async priorRecipientContactIds(unitId) {
       // Best-effort union of every sent/sending broadcast's recipients KEYS for
-      // this unit. The byUnit GSI keeps this O(matches) not a Scan. Degrade
-      // SAFELY: a missing GSI (un-applied env) or any query error → empty set
-      // (nothing flagged); log IDs/counts only (NEVER recipient phones/keys).
+      // this unit, skipped slots excluded (share-skip-fix D5, below). The byUnit
+      // GSI keeps this O(matches) not a Scan. Degrade SAFELY: a missing GSI
+      // (un-applied env) or any query error -> empty set (nothing flagged); log
+      // IDs/counts only (NEVER recipient phones/keys).
       const prior = new Set<string>();
       try {
         let exclusiveStartKey: Record<string, unknown> | undefined;
@@ -535,7 +588,23 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
           });
           for (const b of page.items) {
             if (b.status !== 'sent' && b.status !== 'sending') continue;
-            for (const key of Object.keys(b.recipients ?? {})) prior.add(key);
+            for (const [key, slot] of Object.entries(b.recipients ?? {})) {
+              // share-skip-fix D5 (interim rule): a SKIPPED slot means no text was
+              // attempted for that tenant, so it must not flag them "Already sent"
+              // (Sam's #5: the skipped tenant then started unchecked on the next
+              // share). queued / sent / delivered still count; FAILED still counts
+              // on purpose, as an INTERIM over-approximation: a 30003 failure may
+              // have been delivered by the automatic retry this share never hears
+              // about (30003 is the only retried code; no_contact, transient_cap,
+              // enqueue_failed and the carrier rejections were never delivered and
+              // count anyway - spec section 8 records the tradeoff, and Branch B's
+              // attempts rule replaces it). This is the ONE runtime place the rule
+              // lives - the route's per-candidate flag and the hand-add annotation
+              // both read this set - and app/test/helpers/twilioWebhookHarness.ts
+              // mirrors it for the in-memory world, so the two change together.
+              if (slot.status === 'skipped') continue;
+              prior.add(key);
+            }
           }
           exclusiveStartKey = page.lastEvaluatedKey;
         } while (exclusiveStartKey !== undefined);

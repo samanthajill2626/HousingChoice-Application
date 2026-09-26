@@ -658,6 +658,71 @@ describe('sendMessage service', () => {
         ContactOptedOutError,
       );
     });
+
+    it('share-skip-fix I8: a `recipient` item makes the consent + deleted gates judge THAT contact, not the phone-matched one', async () => {
+      // The phone lookup finds a NO-consent duplicate; the caller resolved the
+      // real recipient separately and hands it over.
+      const f = makeFakes({
+        contact: { contactId: 'c-dup', type: 'tenant', phone: '+15550100001' }, // no consent_method
+      });
+      const real: ContactItem = { contactId: 'c-real', type: 'tenant', phone: '+15550100001', consent_method: 'verbal_in_person' };
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false }),
+      ).rejects.toBeInstanceOf(ContactNoConsentError);
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: real }),
+      ).resolves.toMatchObject({ providerSid: 'SMfake-1' });
+      // A deleted RECIPIENT is refused even when the phone-matched contact is live and consenting.
+      const g = makeFakes();
+      const gone: ContactItem = { ...real, contactId: 'c-gone', deleted_at: '2026-09-01T00:00:00.000Z' };
+      await expect(
+        g.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: gone }),
+      ).rejects.toBeInstanceOf(ContactDeletedError);
+      // The recipient's own opt-out refuses too (either contact's flag wins).
+      const h = makeFakes();
+      await expect(
+        h.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: { ...real, sms_opt_out: true } }),
+      ).rejects.toBeInstanceOf(ContactOptedOutError);
+    });
+
+    it('share-skip-fix I8: an OPTED-OUT phone-matched contact refuses even when the resolved recipient is clean (Do Not Contact)', async () => {
+      // Staff Do Not Contact sets only the phone-matched contact's flag; the
+      // caller hands over a different, clean recipient on the same phone. The
+      // opt-out gate reads the phone lookup's flag, never only the recipient's.
+      const f = makeFakes({
+        contact: { contactId: 'c-dnc', type: 'tenant', phone: '+15550100001', consent_method: 'inbound_text', sms_opt_out: true },
+      });
+      const real: ContactItem = { contactId: 'c-real', type: 'tenant', phone: '+15550100001', consent_method: 'verbal_in_person' };
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: real }),
+      ).rejects.toBeInstanceOf(ContactOptedOutError);
+      expect(f.sent).toHaveLength(0);
+      expect(f.appended).toHaveLength(0);
+    });
+
+    it('share-skip-fix I8: a DELETED phone-matched contact does not block a live recipient on the same phone', async () => {
+      // The deleted and consent gates judge `recipient ?? phoneContact`, so a
+      // soft-deleted duplicate the phone lookup finds first must not refuse the
+      // live, consenting recipient the caller resolved.
+      const f = makeFakes({
+        contact: {
+          contactId: 'c-gone',
+          type: 'tenant',
+          phone: '+15550100001',
+          consent_method: 'inbound_text',
+          deleted_at: '2026-09-01T00:00:00.000Z',
+        },
+      });
+      const real: ContactItem = { contactId: 'c-real', type: 'tenant', phone: '+15550100001', consent_method: 'verbal_in_person' };
+      // Control: with no recipient the phone-matched contact IS judged, and refused.
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false }),
+      ).rejects.toBeInstanceOf(ContactDeletedError);
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: real }),
+      ).resolves.toMatchObject({ providerSid: 'SMfake-1' });
+      expect(f.sent).toHaveLength(1);
+    });
   });
 
   it('writes a message_sent audit event after a successful send (IDs only, never the body)', async () => {

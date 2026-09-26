@@ -1005,6 +1005,7 @@ function statsForRecipients(
     failed: status === 'failed' ? recipientCount : 0,
     skipped_opted_out: 0,
     skipped_no_consent: 0,
+    skipped_other: 0,
   };
 }
 
@@ -1026,6 +1027,8 @@ function buildBroadcast(
   return {
     broadcastId: performanceId('broadcast', index),
     created_by: 'user-0001',
+    // share-skip-fix D4: these model staff-created shares (a person's send).
+    created_via: 'dashboard',
     created_at: at(anchorMs, -index * MINUTE_MS),
     updated_at: at(anchorMs, -index * MINUTE_MS),
     _listPartition: 'broadcasts',

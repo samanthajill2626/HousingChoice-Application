@@ -243,7 +243,13 @@ describe.skipIf(!reachable)('import:apply', () => {
     const conv = await doc.send(
       new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
     );
-    expect(conv.Item).toMatchObject({ type: 'unknown_1to1', participant_phone: PHONES.tenantBusy });
+    expect(conv.Item).toMatchObject({
+      type: 'unknown_1to1',
+      participant_phone: PHONES.tenantBusy,
+      // share-skip-fix D3: a one-to-one row imports switched ON. The group row
+      // stays manual (see the group_text byte-identical test below).
+      ai_mode: 'auto',
+    });
     // 3 messages across CN001+CN002, plus 1 call.
     expect(await countMessages(id)).toBe(4);
   });

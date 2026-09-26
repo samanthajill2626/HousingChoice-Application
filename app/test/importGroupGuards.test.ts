@@ -198,6 +198,27 @@ describe('import upsertConversation - group_text type guard (T7.1)', () => {
     for (const c of oneToOne) expect(c.input.ConditionExpression).toBeUndefined();
   });
 
+  it('binds :aiMode to auto on the 1:1 path and manual on the group path (share-skip-fix D3)', async () => {
+    const { doc, sent } = stubDoc();
+    await runApply({ doc, plan, review: cleanReview(), importedAt });
+    const updates = sent.filter((c) => c.name === 'UpdateCommand');
+    const oneToOne = updates.filter((c) =>
+      String(c.input.UpdateExpression ?? '').includes('participant_phone = :participantPhone'),
+    );
+    const groups = groupUpdates(sent).filter((u) =>
+      String(u.UpdateExpression ?? '').includes('ai_mode = if_not_exists(ai_mode, :aiMode)'),
+    );
+    expect(oneToOne.length).toBeGreaterThan(0);
+    for (const c of oneToOne) {
+      expect(String(c.input.UpdateExpression)).toContain('ai_mode = if_not_exists(ai_mode, :aiMode)');
+      expect((c.input.ExpressionAttributeValues as Record<string, unknown>)[':aiMode']).toBe('auto');
+    }
+    expect(groups.length).toBeGreaterThan(0);
+    for (const u of groups) {
+      expect((u.ExpressionAttributeValues as Record<string, unknown>)[':aiMode']).toBe('manual');
+    }
+  });
+
   it('a workbook `drop` NEVER truncates a GROUP roster - it is reported instead', async () => {
     // A group thread's IDENTITY IS ITS FULL SORTED ROSTER, so a roster written
     // with one member filtered out cannot describe its own thread: conversion

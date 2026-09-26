@@ -935,6 +935,37 @@ const INTERNAL_CODE_REASONS: Record<string, string> = {
 };
 
 /**
+ * share-skip-fix D7: the staff-facing reason for a SKIPPED share recipient,
+ * keyed by the slot's errorCode - the send wrapper's refusal code
+ * (app/src/services/sendMessage.ts SendRefusedError codes) or the fan-out's
+ * own fence code (app/src/jobs/broadcastFanOut.ts: opted_out, unreachable,
+ * contact_deleted, no_consent). STAFF-FACING DASHBOARD COPY, beside the other
+ * reason wording above - never the message catalog. A skipped slot recorded
+ * before 2026-09-25 carries no code and was an opt-out or an unreachable
+ * number, unknown which - say exactly that. Read through `shareSkipReason`,
+ * an own-property lookup (errorCode is wire data, never a trusted key).
+ */
+const SHARE_SKIP_REASONS: Record<string, string> = {
+  manual_mode: 'Automatic texts were off for this conversation',
+  opted_out: 'Opted out of texts',
+  contact_opted_out: 'Opted out of texts',
+  unreachable: "Number can't receive texts",
+  no_consent: 'No texting consent recorded',
+  contact_no_consent: 'No texting consent recorded',
+  contact_deleted: 'Contact was deleted',
+  breaker_open: 'Stopped by the automatic-text safety limit',
+  sms_sending_disabled: 'Texting is turned off',
+};
+
+const LEGACY_SHARE_SKIP_REASON = 'Opted out or number unreachable';
+
+/** The sentence for a skipped share recipient's errorCode (see SHARE_SKIP_REASONS). */
+export function shareSkipReason(errorCode: string | undefined): string {
+  if (errorCode === undefined || errorCode.length === 0) return LEGACY_SHARE_SKIP_REASON;
+  return ownReason(SHARE_SKIP_REASONS, errorCode) ?? `Not sent (${errorCode})`;
+}
+
+/**
  * Twilio error code → a human reason that ALWAYS surfaces the raw code number
  * (mapped or not), so an operator never has to leave the thread to learn WHY a
  * send failed. Absent code ⇒ undefined (caller shows just the "Failed" label).

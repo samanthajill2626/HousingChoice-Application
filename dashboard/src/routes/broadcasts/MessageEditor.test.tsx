@@ -7,6 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import { MessageEditor } from './MessageEditor.js';
+import { DEFAULT_SEND_TEMPLATE, ONE_TO_ONE_SEND_TEMPLATE } from './resolveTemplate.js';
 
 /** A controlled harness so onChange edits flow back into the textarea (the real
  *  composer owns the value; the component is fully controlled). */
@@ -91,5 +92,14 @@ describe('MessageEditor - resolved mode (single recipient)', () => {
     // The labeled textarea and live count remain.
     expect(screen.getByLabelText('Message')).toBeInTheDocument();
     expect(screen.getByText('32/1600')).toBeInTheDocument();
+  });
+});
+
+describe('MessageEditor - placeholder (share-skip-fix D8)', () => {
+  it('shows the one-to-one template in resolved mode and the blast template otherwise', () => {
+    const { rerender } = render(<MessageEditor value="" onChange={() => {}} resolved />);
+    expect(screen.getByLabelText('Message')).toHaveAttribute('placeholder', ONE_TO_ONE_SEND_TEMPLATE);
+    rerender(<MessageEditor value="" onChange={() => {}} />);
+    expect(screen.getByLabelText('Message')).toHaveAttribute('placeholder', DEFAULT_SEND_TEMPLATE);
   });
 });

@@ -45,15 +45,44 @@ x ... withdraws the promise when the job does not send (window_closed)
 + "liveAfterGivingUp": true,   "refreshed": false
 ```
 
-**Accepted for `feat/retry-send-window`, on purpose.** The spec's section 9
-residual "A promise with nothing behind it" accepts exactly this class - an
-automated retry the breaker refuses at send time, one the job declines at send
-time (D4), and the rest of that list "each keep 'will retry', and hide the
-Retry button, until the promise expires". Changing it there would have been a
-spec deviation (new writes and emits from the worker after the job's execution
-marker) for a bounded benefit (about 3 minutes at most, on rare exits only), so
-the build review filed it instead of fixing it (adjudication A2 in
-`docs/superpowers/reviews/2026-09-24-retry-send-window/build-review-adjudications.md`).
+**What the spec accepts, and what it does not.** The spec's section 9 residual
+"A promise with nothing behind it" accepts only PART of this class (re-review
+F1 in `docs/superpowers/reviews/2026-09-24-retry-send-window/build-rereview.md`,
+adjudicated in `build-rereview-adjudications.md` in the same folder). The exits
+fall into two groups:
+
+- **(a) Accepted by section 9, on purpose.** An automated retry the breaker
+  refuses at send time (live state the webhook's decision cannot preview,
+  D3a); a retry the decision let through on a failed conversation or contact
+  read, which the job then refuses; a retry the job declines at send time
+  because it ran late (the D4 window); and a retry whose own send fails at the
+  provider. Section 9 says these "each keep 'will retry', and hide the Retry
+  button, until the promise expires". (It also accepts two webhook-side cases
+  that are not job exits: an enqueue failure whose correction write failed
+  too, and a crash or throw between the stamped status write and the enqueue.)
+- **(b) Newly found by the build review - not covered by the spec, and not yet
+  ruled.** A refusal whose cause arose DURING the 60-240 s backoff, after the
+  decision's reads succeeded: the member texts STOP, texting is turned off (the
+  kill switch), manual mode is set on the thread of an automated original, the
+  contact is soft-deleted, or a person's original loses its consent. The
+  decision previews each of these at the moment of the failure (D3a, which
+  calls the breaker "the one refusal the arm cannot preview" - true only at
+  that moment), and section 9 lists none of them. The adversarial review found
+  these exits (its F2). Also in this group: the job's two exits on the original
+  itself - it is missing, or it is not outbound. Group (b) is Cameron's call.
+  His spec-gate answer 3 bears on it - the spec records it as "'will retry'
+  appears only when a retry will actually be attempted" (spec section 0; his
+  own words are answer 3 in `rulings.md`, same folder) - and at the job's
+  refusal the system knows no retry will be attempted, yet the promise stays
+  up for up to about 3 minutes.
+
+For both groups the build's recommendation is to keep this FILED, not to change
+code on `feat/retry-send-window`: the fix is new worker writes and emits after
+the job's execution marker, beyond the approved spec, to end a stale promise at
+most about 3 minutes sooner, on rare exits only. That is the outcome of
+adjudication A2 in `build-review-adjudications.md` (same folder); its recorded
+reason - that section 9 accepts exactly this class - is corrected by row 4.2 of
+`build-rereview-adjudications.md`.
 
 The relay side already does the opposite: the relay retry job announces every
 terminal close at once (`announceRootClose` in

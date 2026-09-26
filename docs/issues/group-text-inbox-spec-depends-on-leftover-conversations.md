@@ -6,8 +6,17 @@ severity: low
 status: open
 area: e2e
 created: 2026-09-25
-refs: e2e/tests/dashboard-next/group-text-inbox.spec.ts:33, e2e/tests/dashboard-next/group-text-inbox.spec.ts:96, app/src/lib/seed/lean.ts:228, app/src/routes/inbox.ts
+updated: 2026-09-26
+refs: e2e/tests/dashboard-next/group-text-inbox.spec.ts:33, e2e/tests/dashboard-next/group-text-inbox.spec.ts:96, app/src/lib/seed/lean.ts:228, app/src/lib/seed/lean.ts:275, app/src/routes/inbox.ts
 ---
+
+**Update (2026-09-26).** `main` now seeds a second open 1:1 in the lean
+world (Dario, `app/src/lib/seed/lean.ts:275-288`, the share-skip-fix
+fixture), so `filter=all&limit=1` pages again and the guard at `:96` passes
+right after a reseed (verified on a hermetic lane after the merge). The
+dependence has MOVED rather than gone: the guard now rests on Dario staying
+in the `open` partition, not on data the test controls. The suggested fix
+below still applies; the severity stays low.
 
 **Problem.** The test at `group-text-inbox.spec.ts:33` ("the Groups filter is
 a real deep link, pages on its own cursor, and refuses a foreign one") needs a

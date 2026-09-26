@@ -34,7 +34,7 @@ import {
   type SendMessageService,
 } from '../src/services/sendMessage.js';
 import { loadConfig } from '../src/lib/config.js';
-import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
+import { RETRY_PROMISE_WITHDRAWN_AT, RETRY_SEND_WINDOW_MS } from '../src/lib/retrySendWindow.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import {
   createFakeWorld,
@@ -1601,6 +1601,41 @@ describe('messaging.retrySend job (worker side)', () => {
     // The check sits AFTER the execution marker (D4): a redelivery ends there.
     expect(world.jobExecutionMarkers.size).toBe(1);
   });
+
+  // D13: the job's window check pinned at its EXACT boundary, as the helpers'
+  // and the decision's are. Strict at job time (D4): an origin exactly
+  // RETRY_SEND_WINDOW_MS before the job clock still sends; one millisecond
+  // older ends the chain with the window_closed ERROR instead.
+  it.each<[string, number, number]>([
+    ['EXACTLY RETRY_SEND_WINDOW_MS before the job clock sends once', 0, 1],
+    ['one millisecond earlier sends nothing', 1, 0],
+  ])(
+    'retry-send-window D4/D13: the job window boundary is exact and strict - an origin %s',
+    async (_label, extraMs, expectedSends) => {
+      const { outbound, capture, logger } = wireJobs();
+      const world = createFakeWorld();
+      const sid = `SMwinedge${extraMs}`;
+      const seeded = await seedOutbound(world, sid, {
+        provider_ts: jobIso(JOB_NOW - RETRY_SEND_WINDOW_MS - extraMs),
+      });
+      const calls: SendMessageInput[] = [];
+      registerRetrySendJobHandler({
+        sendMessage: spySend(calls),
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        now: () => JOB_NOW,
+        logger,
+      });
+
+      await enqueue(RETRY_SEND_JOB, { providerSid: sid, conversationId: seeded.conversationId, attempt: 1 });
+      await outbound.settle();
+
+      expect(calls).toHaveLength(expectedSends);
+      expect(capture.atLevel(ERROR).filter((l) => l['retryDecision'] === 'window_closed')).toHaveLength(
+        1 - expectedSends,
+      );
+    },
+  );
 
   it('retry-send-window D2/D4: attempt 2 measures from the CHAIN origin (retry_window_start), not the row own send time', async () => {
     const { outbound, logger } = wireJobs();

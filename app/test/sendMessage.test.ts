@@ -31,7 +31,9 @@ import {
   SmsSendingDisabledError,
   createSendMessageService,
 } from '../src/services/sendMessage.js';
+import { previewSendRefusal } from '../src/services/sendRefusalPreview.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
+import { SEND_REFUSAL_CASES } from './helpers/sendRefusalCases.js';
 import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 const ERROR = 50;
@@ -918,5 +920,52 @@ describe('deleted-contact send guard (2026-08-03 spec)', () => {
     await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
       ContactOptedOutError,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retry-send-window D3a: PARITY between previewSendRefusal and the real send
+// wrapper. ONE table (helpers/sendRefusalCases.ts) drives both: every row runs
+// through the pure preview AND through createSendMessageService with this
+// file's fakes, and the refusal code must match (undefined = the send went
+// out). A gate reordered in or removed from sendMessage turns a row red; a NEW
+// gate turns nothing red until a row exercises it - add its row with the gate.
+// The same table drives the retry decision's own test
+// (test/oneToOneRetryDecision.test.ts), so the decision cannot drift either.
+// ---------------------------------------------------------------------------
+describe('previewSendRefusal parity with the send wrapper (retry-send-window D3a)', () => {
+  it.each(SEND_REFUSAL_CASES)('$name', async (c) => {
+    const preview = previewSendRefusal({
+      smsSendingEnabled: c.smsSendingEnabled,
+      conversation: c.conversation,
+      phoneContact: c.phoneContact,
+      recipient: c.recipient,
+      automated: c.automated,
+    });
+
+    const f = makeFakes({
+      conversation: c.conversation,
+      contact: c.phoneContact ?? null,
+      env: { SMS_SENDING_ENABLED: c.smsSendingEnabled ? 'true' : 'false' },
+    });
+    let thrown: SendRefusedError['code'] | undefined;
+    try {
+      await f.service({
+        conversationId: 'conv-1',
+        body: 'parity',
+        automated: c.automated,
+        recipient: c.recipient,
+      });
+    } catch (err) {
+      if (!(err instanceof SendRefusedError)) throw err;
+      thrown = err.code;
+    }
+
+    // Compile-time half: every preview code IS a code the wrapper throws.
+    const previewAsSendCode: SendRefusedError['code'] | undefined = preview;
+    expect(previewAsSendCode).toBe(thrown);
+    expect(preview).toBe(c.expected);
+    // A refused row never reached the provider; a sent row did, exactly once.
+    expect(f.sent).toHaveLength(c.expected === undefined ? 1 : 0);
   });
 });

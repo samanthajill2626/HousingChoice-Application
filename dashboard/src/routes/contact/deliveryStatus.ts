@@ -775,7 +775,11 @@ export function presentLegDelivery(
  * (the caller shows just the "Failed" label then).
  */
 const ERROR_CODE_REASONS: Record<string, string> = {
-  '30003': 'Phone unreachable — will retry',
+  // retry-send-window D8: the BASE 30003 wording promises nothing. Only
+  // RETRY_SCHEDULED_REASONS below promises, and only while a retry is actually
+  // scheduled - never from the code alone, which was false after the last
+  // retry, on manual-mode threads and on every native group text.
+  '30003': 'Phone unreachable',
   '30005': 'Number is invalid',
   '30006': 'That number is a landline',
   '30007': 'Carrier filtered the message',
@@ -818,40 +822,41 @@ const MMS_ERROR_CODE_REASONS: Record<string, string> = {
 };
 
 /**
+ * retry-send-window D8: the ONE-TO-ONE retry promise. Read only when the caller
+ * says a retry IS scheduled (`retryScheduled`: the failed message carries a
+ * live `retry_due_at` on the server's clock - see retryPromise.ts) and the leg
+ * is NOT a relay leg. Checked FIRST, ahead of the media map, so an MMS
+ * one-to-one bubble with a live stamp still promises: no media override holds
+ * 30003 today, and the order keeps the promise first if one ever does.
+ *
+ * 30003 is the whole map because it is the only code the automatic retry runs
+ * for. The copy is ASCII (the old base entry's em dash was not carried over),
+ * and the `(error <code>)` tail comes from the shared template.
+ */
+const RETRY_SCHEDULED_REASONS: Record<string, string> = {
+  '30003': 'Phone unreachable - will retry',
+};
+
+/**
  * Overrides that apply ONLY to a RELAY leg, checked after MMS_ERROR_CODE_REASONS
  * and before ERROR_CODE_REASONS.
  *
- * 30003 is the whole map, and the reason is D19: NO RELAY RETRY EXISTS. The
- * status webhook returns on the relay-pointer branch before it ever reaches the
- * 1:1 30003 retry enqueue, and the retry-counter branch that added this map adds
- * no relay retry either. So "will retry" on a relay leg is a promise the product
- * cannot keep - it was false before this change and it is false after it - and
- * staff read it as "leave this alone, it is still going".
+ * 30003 is the whole map, and since the retry send window it reads EXACTLY as
+ * the base entry does ("Phone unreachable"). It stays because `relay` is what
+ * fences a relay leg off from the one-to-one promise (retry-send-window D8):
+ * `deliveryReason` reads RETRY_SCHEDULED_REASONS only when `relay` is NOT set,
+ * so a relay leg can never promise a retry through `retryScheduled`. A relay
+ * 30003 IS retried - the relay retry ladder - but that promise is the retry
+ * join's own `Retrying` state (relayRetryJoin.ts), decided from the rung,
+ * never copy keyed on the code. A rung the window declined reads this same
+ * plain failure; one a gate declined reads its "Not retried - ..." close from
+ * INTERNAL_CODE_REASONS.
  *
- * NATIVE GROUP TEXT IS EXCLUDED, AND ITS STATED RATIONALE WAS WRONG. The
- * exclusion (D20) rested on "a group text's 30003 retry is real, because the
- * webhook's 30003 arm carries no group_text guard where the 30005/30006 and
- * 21610 arms do". The first half is true and the conclusion does not follow:
- * the retry IS enqueued, and then it CANNOT SUCCEED. `retrySend`'s handler
- * calls `sendMessage`, which throws `GroupTextSendNotSupportedError` for any
- * `conversation.type === 'group_text'` (app/src/services/sendMessage.ts:293);
- * the handler catches `SendRefusedError`, logs, and stops the chain. So a
- * native group-text leg promises a retry that never sends, exactly as a relay
- * leg does.
+ * A native group-text leg is NOT a relay leg and has no retry at all (D11): it
+ * takes the base entry, which promises nothing either.
  *
- * The exclusion is KEPT anyway, deliberately (Cameron, 2026-09-01): the promise
- * is equally false on `main`, so leaving it costs nothing new, and widening the
- * override reaches a render path this branch fenced off. It is tracked as
- * `group-text-30003-leg-retry-promise-unverified`, now PROVEN rather than
- * suspected. Anyone extending this map should start there - and should expect
- * the three tests that pin the group-text carve-out to flip, since they
- * currently encode this rationale rather than the behaviour.
- *
- * The 1:1 entry above stays byte-for-byte as it is, em dash and all: a 1:1
- * 30003 retry genuinely does send.
- *
- * THE CARRIER CODE IS KEPT. Only the promise is dropped: 30003 is a real number
- * an operator can look up, unlike the app-invented codes in
+ * THE CARRIER CODE IS KEPT. Only a promise is ever dropped: 30003 is a real
+ * number an operator can look up, unlike the app-invented codes in
  * INTERNAL_CODE_REASONS. Nothing here appends it - the `(error <code>)` template
  * at the end of `deliveryReason` does, which is why the string below stops at the
  * observation.
@@ -860,19 +865,28 @@ const RELAY_ERROR_CODE_REASONS: Record<string, string> = {
   '30003': 'Phone unreachable',
 };
 
-/** What SCOPES a reason to the leg that actually failed. Both flags are hints,
- *  not routing: an unmapped code reads the same whatever they say.
+/** What SCOPES a reason to the leg that actually failed. All three flags are
+ *  hints, not routing: an unmapped code reads the same whatever they say.
  *
- *  `media` and `relay` are independent, and their ORDER is decided in
- *  `deliveryReason` rather than here - see the chain there. */
+ *  `retryScheduled`, `media` and `relay` are independent, and their ORDER is
+ *  decided in `deliveryReason` rather than here - see the chain there. */
 export interface DeliveryReasonOptions {
   /** The failing leg carried media - an MMS bubble or a relay MMS rollup. */
   media?: boolean;
   /** The failing leg is a RELAY fan-out leg, as opposed to a native group text,
    *  a 1:1 message, an email or a broadcast recipient. Set from the timeline's
    *  `rosterKind`; absent everywhere the presenter has no product input, which is
-   *  exactly the set of positions D19 leaves alone. */
+   *  exactly the set of positions D19 leaves alone. It WINS over
+   *  `retryScheduled`: a relay leg never promises through that option. */
   relay?: boolean;
+  /** retry-send-window D8: an automatic retry of THIS failed one-to-one message
+   *  is scheduled - it carries a live `retry_due_at` on the server's clock
+   *  (`isRetryPromiseLive`, retryPromise.ts). Read only for 30003, and only when
+   *  `relay` is not set. Set by exactly one caller, the one-to-one bubble's
+   *  message-level chip in Timeline.tsx; every other surface (legs, rollups,
+   *  the email card, the property-send results row) omits it and reads the
+   *  plain failure. */
+  retryScheduled?: boolean;
 }
 
 /**
@@ -932,6 +946,14 @@ const INTERNAL_CODE_REASONS: Record<string, string> = {
   retry_member_removed: 'Not retried - no longer in this group',
   retry_number_changed: 'Not retried - number changed since',
   retry_opted_out: 'Not retried - opted out',
+  // retry-send-window D8: the close a WINDOW decline writes (the relay claim or
+  // the job found the retry would go out more than 15 minutes after the
+  // original). No current surface prints it: the retry join treats this code as
+  // carrying NO display code, so the leg keeps its original 30003 and reads the
+  // plain failed attempt (relayRetryJoin.ts, the terminal step). The entry is
+  // the fallback for a future surface that renders a rung's code directly, and
+  // keeps this map's no-tail rule total.
+  retry_window_closed: 'Not retried - message too old',
 };
 
 /**
@@ -987,9 +1009,18 @@ export function deliveryReason(
   if (errorCode === undefined || errorCode.length === 0) return undefined;
   const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
   if (internal !== undefined) return internal;
-  // THE ORDER IS LOAD-BEARING, and it is pinned by a test because nothing
-  // observable depends on it today: media FIRST, relay SECOND, base LAST. The
-  // two override maps are disjoint right now (media holds 30005/30006, relay
+  // THE ORDER IS LOAD-BEARING, and it is pinned by tests: the one-to-one
+  // PROMISE first, media SECOND, relay THIRD, base LAST.
+  //
+  // The promise (retry-send-window D8) goes ahead of the media map so an MMS
+  // one-to-one bubble with a live `retry_due_at` still promises, and it is
+  // skipped outright whenever `relay` is set: a relay leg never promises through
+  // `retryScheduled` - its promise is the retry join's `Retrying` state. That
+  // fence is why the relay map, whose 30003 now reads exactly like the base,
+  // still exists.
+  //
+  // Media before relay is pinned because nothing observable depends on it today:
+  // the two override maps are disjoint right now (media holds 30005/30006, relay
   // holds 30003), so either order gives the same answers - which is precisely
   // why it has to be decided before the maps grow. Consulted the other way
   // round, a relay map that ever gained a 30005 would silently un-hedge the
@@ -999,6 +1030,9 @@ export function deliveryReason(
   // move; the relay override is about what THIS APP will not do next. When both
   // apply, the carrier's reading is the one staff need first.
   const mapped =
+    (opts.retryScheduled === true && opts.relay !== true
+      ? ownReason(RETRY_SCHEDULED_REASONS, errorCode)
+      : undefined) ??
     (opts.media === true ? ownReason(MMS_ERROR_CODE_REASONS, errorCode) : undefined) ??
     (opts.relay === true ? ownReason(RELAY_ERROR_CODE_REASONS, errorCode) : undefined) ??
     ownReason(ERROR_CODE_REASONS, errorCode);

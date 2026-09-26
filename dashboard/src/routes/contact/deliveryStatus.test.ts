@@ -413,18 +413,23 @@ describe('presentRelayDelivery', () => {
     expect(presented?.reason).not.toMatch(/retry/i);
   });
 
-  // D20, at the rollup. The identical slot map WITHOUT the relay flag is a
-  // native group text, whose 30003 retry is real, and it must read exactly as it
-  // does on main - em dash and all.
-  it('keeps the retry promise on a native group-text rollup', () => {
-    expect(
-      presentRelayDelivery([{ status: 'delivered' }, { status: 'undelivered', errorCode: '30003' }]),
-    ).toEqual({
+  // retry-send-window D11, at the rollup. The identical slot map WITHOUT the
+  // relay flag is a native group text, which has no retry at all - the
+  // one-to-one arm refuses to schedule one for a group_text conversation - so it
+  // promises none and reads exactly as the relay rollup above. (Until the retry
+  // send window this test pinned the promise here; it was never true.)
+  it('promises no retry on a native group-text rollup either', () => {
+    const presented = presentRelayDelivery([
+      { status: 'delivered' },
+      { status: 'undelivered', errorCode: '30003' },
+    ]);
+    expect(presented).toEqual({
       label: 'delivered 1/2 - 1 failed',
       tone: 'danger',
       isFailure: true,
-      reason: `Phone unreachable ${EM_DASH} will retry (error 30003)`,
+      reason: 'Phone unreachable (error 30003)',
     });
+    expect(presented?.reason).not.toMatch(/retry/i);
   });
 
   it('excludes opted-out members from the count — the opt-out note explains them, and N/M must stay reachable', () => {
@@ -660,11 +665,10 @@ describe('presentRelayDelivery', () => {
   });
 });
 
-/** The separator in the SHIPPED 1:1 30003 entry: one U+2014 EM DASH with an
- *  ASCII space on each side. Spelled as an escape so every line this slice added
- *  stays ASCII (AGENTS.md) and so the character is never copied into new copy -
- *  the relay override below uses a plain hyphen, like every newer string in the
- *  presenter module. */
+/** The separator the 1:1 30003 entry SHIPPED with before the retry send window:
+ *  one U+2014 EM DASH. Spelled as an escape so every line stays ASCII
+ *  (AGENTS.md), and kept only so a test can prove the new 30003 copy no longer
+ *  carries it (retry-send-window D8: new and touched copy is ASCII). */
 const EM_DASH = String.fromCharCode(0x2014);
 
 describe('deliveryReason', () => {
@@ -718,37 +722,84 @@ describe('deliveryReason', () => {
     );
   });
 
-  // D19. No relay retry exists: the status webhook returns on the relay-pointer
-  // branch BEFORE the 1:1 retry enqueue, and this branch adds no relay retry. So
-  // "will retry" on a relay leg is a promise the product cannot keep, in both
-  // worlds. The override drops the promise and KEEPS the carrier code - 30003 is
-  // a real number an operator can look up - and the `(error <code>)` tail comes
-  // from the shared template, so there is no second copy of the string to drift.
+  // A relay leg's reason never promises a retry. A relay 30003 IS retried - the
+  // relay retry ladder - but that promise is the retry join's own `Retrying`
+  // state, decided from the rung, never copy keyed on the code. The override
+  // KEEPS the carrier code - 30003 is a real number an operator can look up -
+  // and the `(error <code>)` tail comes from the shared template, so there is
+  // no second copy of the string to drift.
   it('drops the retry promise on a RELAY leg while keeping the carrier code', () => {
     const relay = deliveryReason('30003', { relay: true }) as string;
     expect(relay).toBe('Phone unreachable (error 30003)');
     expect(relay).not.toMatch(/retry/i);
   });
 
-  // D20. Native group text is deliberately NOT included - its 30003 arm carries
-  // no group_text guard, so a group-text leg reaches the retry enqueue exactly as
-  // a 1:1 does and the promise is TRUE there. The shipped 1:1 entry carries a
-  // U+2014 em dash; written as an escape so this source line stays ASCII
-  // (AGENTS.md), and NOT copied into any new string.
-  it('keeps the retry promise everywhere else - 1:1 and native group text', () => {
-    const base = `Phone unreachable ${EM_DASH} will retry (error 30003)`;
+  // retry-send-window D8 and D11: WITHOUT `retryScheduled` no surface promises
+  // a retry - not a one-to-one bubble whose retry was declined, exhausted or
+  // never scheduled, and not a native group text, which has no retry at all.
+  // This test pinned the opposite until the retry send window: the promise was
+  // keyed on the code alone, and it was false after the last retry, on
+  // manual-mode threads and on every native group text.
+  it('promises nothing without retryScheduled - one-to-one and native group text alike', () => {
+    const base = 'Phone unreachable (error 30003)';
     expect(deliveryReason('30003')).toBe(base);
     expect(deliveryReason('30003', { relay: false })).toBe(base);
+    expect(deliveryReason('30003', { retryScheduled: false })).toBe(base);
+    expect(deliveryReason('30003', { media: true })).toBe(base);
   });
 
-  // THE ORDER, pinned before either map can grow: media FIRST, relay SECOND,
-  // base LAST. The two override maps are disjoint today (media holds 30005/30006,
-  // relay holds 30003), so nothing observable depends on the order - which is
-  // exactly why it has to be a test rather than a comment. Consulted the other
-  // way round, a relay map that ever gained a 30005 would silently invert the
-  // prod-2026-08-24 MMS hedge on the surface whose own comment
-  // (Timeline.tsx:1037-1042) calls that contradiction the thing it exists to
-  // prevent.
+  // retry-send-window D8: the ONE-TO-ONE promise, read only while the failed
+  // message carries a live `retry_due_at` - the caller's `retryScheduled`.
+  it('promises the retry with retryScheduled on a 30003 that is not a relay leg', () => {
+    const promise = 'Phone unreachable - will retry (error 30003)';
+    expect(deliveryReason('30003', { retryScheduled: true })).toBe(promise);
+    expect(deliveryReason('30003', { retryScheduled: true, relay: false })).toBe(promise);
+  });
+
+  // An MMS one-to-one bubble with a live stamp still promises. The chain checks
+  // the promise AHEAD of the media map, but no media override holds 30003 today,
+  // so this test cannot observe that order - it pins only that `media: true`
+  // does not suppress the promise. The order keeps the promise first if a media
+  // 30003 entry ever appears.
+  it('keeps the promise on an MMS one-to-one 30003 - media: true does not suppress the promise', () => {
+    expect(deliveryReason('30003', { media: true, retryScheduled: true })).toBe(
+      'Phone unreachable - will retry (error 30003)',
+    );
+  });
+
+  // 30003 is the only code the automatic retry runs for, so it is the only code
+  // the option moves - and the internal map still early-returns ahead of it.
+  it('moves no other code, and no internal code, when retryScheduled is set', () => {
+    expect(deliveryReason('30005', { media: true, retryScheduled: true })).toBe(
+      "Attachment didn't get through, texts may still work (error 30005)",
+    );
+    expect(deliveryReason('30007', { retryScheduled: true })).toBe(
+      'Carrier filtered the message (error 30007)',
+    );
+    expect(deliveryReason('99999', { retryScheduled: true })).toBe('Delivery failed (error 99999)');
+    expect(deliveryReason('transient_cap', { retryScheduled: true })).toBe(
+      'Sending gave up after repeated carrier deferrals',
+    );
+    expect(deliveryReason(undefined, { retryScheduled: true })).toBeUndefined();
+  });
+
+  // New and touched copy is ASCII (spec D8): the old entry's separator was a
+  // U+2014 em dash, and neither sentence may carry it forward.
+  it('writes the 30003 copy in ASCII, with and without the promise', () => {
+    for (const reason of [deliveryReason('30003'), deliveryReason('30003', { retryScheduled: true })]) {
+      expect(reason).not.toContain(EM_DASH);
+      expect(reason).toMatch(/^[ -~]+$/);
+    }
+  });
+
+  // THE ORDER, pinned before any map can grow: the one-to-one PROMISE first (and
+  // only without `relay`), media SECOND, relay THIRD, base LAST. The media and
+  // relay override maps are disjoint today (media holds 30005/30006, relay holds
+  // 30003), so nothing observable depends on THEIR order - which is exactly why
+  // it has to be a test rather than a comment. Consulted the other way round, a
+  // relay map that ever gained a 30005 would silently invert the prod-2026-08-24
+  // MMS hedge on the surface whose own comment (the Timeline's per-recipient
+  // row) calls that contradiction the thing it exists to prevent.
   it('lets the MEDIA hedge win over the relay override on an attachment leg', () => {
     expect(deliveryReason('30005', { media: true, relay: true })).toBe(
       "Attachment didn't get through, texts may still work (error 30005)",
@@ -758,12 +809,16 @@ describe('deliveryReason', () => {
     );
   });
 
-  it('falls through the media map to the relay override for a 30003 attachment leg', () => {
-    // The other half of the order: the media map holds no 30003, so a relay MMS
-    // leg misses it and lands on the relay copy - never on the base "will retry".
-    expect(deliveryReason('30003', { media: true, relay: true })).toBe(
-      'Phone unreachable (error 30003)',
-    );
+  // The other half of the order (retry-send-window D8): `relay` WINS over
+  // `retryScheduled`. A relay leg never promises through the one-to-one option -
+  // its promise is the join's `Retrying` state - so the option is skipped
+  // outright whenever `relay` is set, on an attachment leg too: the media map
+  // holds no 30003, so a relay MMS leg lands on the relay copy.
+  it('lets relay win over retryScheduled - a relay leg never promises, attachment or not', () => {
+    const relay = 'Phone unreachable (error 30003)';
+    expect(deliveryReason('30003', { relay: true, retryScheduled: true })).toBe(relay);
+    expect(deliveryReason('30003', { media: true, relay: true, retryScheduled: true })).toBe(relay);
+    expect(deliveryReason('30003', { media: true, relay: true })).toBe(relay);
   });
 
   it('leaves every OTHER code alone on a relay leg', () => {
@@ -849,6 +904,9 @@ describe('deliveryReason', () => {
       // with `map[code]` it would hand a relay leg a FUNCTION where the signature
       // promises a string.
       expect(deliveryReason(code, { relay: true })).toBe(`Delivery failed (error ${code})`);
+      // The one-to-one promise map is a bare object literal as well, read the
+      // same own-property way.
+      expect(deliveryReason(code, { retryScheduled: true })).toBe(`Delivery failed (error ${code})`);
     }
   });
 });
@@ -1645,12 +1703,16 @@ describe('presentLegDelivery - retry states on one recipient row (D19)', () => {
   });
 });
 
-describe('deliveryReason - the four retry close codes (D15)', () => {
+describe('deliveryReason - the relay retry close codes (D15, retry-send-window D8)', () => {
   const RETRY_CODES: Array<[string, string]> = [
     ['retry_group_closed', 'Not retried - group closed'],
     ['retry_member_removed', 'Not retried - no longer in this group'],
     ['retry_number_changed', 'Not retried - number changed since'],
     ['retry_opted_out', 'Not retried - opted out'],
+    // retry-send-window D8: the WINDOW decline's close. No current surface
+    // prints it (the retry join gives it no display code), but the no-tail
+    // rule holds for it like every other code this app invents.
+    ['retry_window_closed', 'Not retried - message too old'],
   ];
 
   it.each(RETRY_CODES)('renders %s as prose with no (error N) tail', (code, copy) => {
@@ -1664,5 +1726,6 @@ describe('deliveryReason - the four retry close codes (D15)', () => {
   it.each(RETRY_CODES)('renders %s the same with no product options at all', (code, copy) => {
     expect(deliveryReason(code)).toBe(copy);
     expect(deliveryReason(code, { media: true })).toBe(copy);
+    expect(deliveryReason(code, { retryScheduled: true })).toBe(copy);
   });
 });

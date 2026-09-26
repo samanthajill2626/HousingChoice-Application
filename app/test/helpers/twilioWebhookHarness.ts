@@ -1362,8 +1362,6 @@ export function createFakeWorld(): FakeWorld {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       if (!item) throw new Error(`annotateMessage: no message ${conversationId}/${tsMsgId}`);
       if (annotations.mediaAttachments !== undefined) item.media_attachments = annotations.mediaAttachments;
-      if (annotations.retryOf !== undefined) item.retry_of = annotations.retryOf;
-      if (annotations.retryAttempt !== undefined) item.retry_attempt = annotations.retryAttempt;
       // retry-send-window D7: the enqueue-failure withdrawal.
       if (annotations.retryDueAt !== undefined) item.retry_due_at = annotations.retryDueAt;
     },

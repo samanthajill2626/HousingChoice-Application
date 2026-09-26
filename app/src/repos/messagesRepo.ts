@@ -1227,8 +1227,10 @@ export interface MessageItem {
  */
 export interface MessageAnnotations {
   mediaAttachments?: MediaAttachment[];
-  retryOf?: string;
-  retryAttempt?: number;
+  // No retry lineage here, deliberately: retry_of / retry_attempt /
+  // retry_window_start are written ONLY at append (NewMessage.retryOf and
+  // siblings, retry-send-window D6). An annotate-after path would reopen the
+  // race D6 closed - a fast 30003 reading the retry row before its lineage.
   /**
    * retry-send-window D7: re-write `retry_due_at`. The status webhook sets it
    * to RETRY_PROMISE_WITHDRAWN_AT when the retry's enqueue fails, so a promise
@@ -1474,7 +1476,7 @@ export interface MessagesRepo {
    * UnprocessedKeys retry. Missing ids are simply absent from the map.
    */
   getManyByTsMsgIds(conversationId: string, tsMsgIds: string[]): Promise<Map<string, MessageItem>>;
-  /** Stamp operational metadata (media S3 keys / retry lineage / the retry promise's retry_due_at) onto a message. */
+  /** Stamp operational metadata (media S3 keys / the retry promise's retry_due_at) onto a message. Never retry lineage: that is append-only (D6). */
   annotateMessage(conversationId: string, tsMsgId: string, annotations: MessageAnnotations): Promise<void>;
   /**
    * Newest-first page of ONE conversation's media pointers (2026-08-18) - the
@@ -3008,14 +3010,6 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         sets.push('media_attachments = :mediaAttachments');
         values[':mediaAttachments'] = annotations.mediaAttachments;
       }
-      if (annotations.retryOf !== undefined) {
-        sets.push('retry_of = :retryOf');
-        values[':retryOf'] = annotations.retryOf;
-      }
-      if (annotations.retryAttempt !== undefined) {
-        sets.push('retry_attempt = :retryAttempt');
-        values[':retryAttempt'] = annotations.retryAttempt;
-      }
       // retry-send-window D7: the enqueue-failure withdrawal re-writes the
       // promise to an already-expired instant.
       if (annotations.retryDueAt !== undefined) {
@@ -3037,8 +3031,6 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           conversationId,
           tsMsgId,
           mediaKeyCount: annotations.mediaAttachments?.length,
-          retryOf: annotations.retryOf,
-          retryAttempt: annotations.retryAttempt,
           retryDueAt: annotations.retryDueAt,
         },
         'message annotated',

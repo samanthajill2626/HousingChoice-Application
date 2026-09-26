@@ -1367,9 +1367,11 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     );
   });
 
-  it('retry-send-window D3: a gate-preview read that THROWS is claim_failed - one ERROR, a 5xx, no rung - and the redelivery claims', async () => {
+  it('retry-send-window D3 (planner review): a gate-preview read that THROWS fails OPEN - the rung is claimed open and enqueued, one WARN, no claim_failed', async () => {
     await seedSource({ bobSlot: { status: 'sent', sentAt: minutesAgo(1) } });
-    // The suppression read (the evaluator's one read) fails ONCE.
+    // The suppression read (the evaluator's one read) fails ONCE. Twilio does
+    // not redeliver a 5xx status callback by default (retry policy `ct`), so a
+    // claim that failed here would lose the ladder for good.
     const realGetById = world.contactsRepo.getById.bind(world.contactsRepo);
     let failed = false;
     world.contactsRepo.getById = async (contactId) => {
@@ -1382,15 +1384,17 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
 
     const res = await signedTwilioPost(app, STATUS_PATH, failureParams());
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
     expect(failed).toBe(true);
-    expect(retryRows()).toHaveLength(0);
-    expect(capture.atLevel(ERROR)).toHaveLength(1);
-    expect(failureLines(ERROR)).toContainEqual(expect.objectContaining({ retryClaim: 'claim_failed' }));
-
-    await postRootFailure(); // Twilio's redelivery re-runs the claim
-
-    expect(retryRows()).toHaveLength(1);
+    const rows = retryRows();
+    expect(rows).toHaveLength(1);
+    expect(slotOf(rows[0]!.tsMsgId)?.status).toBe('queued');
     expect(scheduledRetryJobs()).toHaveLength(1);
+    expect(failureLines(ERROR).some((l) => l['retryClaim'] === 'claim_failed')).toBe(false);
+    expect(
+      capture
+        .atLevel(WARN)
+        .some((l) => String(l['msg']).includes('gate preview read failed - rung claimed open')),
+    ).toBe(true);
   });
 });

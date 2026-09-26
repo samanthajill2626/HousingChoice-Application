@@ -1610,7 +1610,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // retry-send-window D14: a staff Retry of a property send is judged against
     // the contact the original was fenced to (share-skip-fix I8), read by id; a
     // recorded recipient that no longer exists falls back to the phone-matched
-    // contact. It stays a person's send (automated: false below) and never
+    // contact, and sendMessage judges it only while it still holds this thread's
+    // number. It stays a person's send (automated: false below) and never
     // copies the original's retry_window_start: a human chose to send now (D2),
     // so this row starts a window of its own.
     const recipientContactId = original.recipient_contact_id;

@@ -69,7 +69,8 @@ the switch.
    the consent gate does - to exhaustion inside the 15-minute retry window
    (Cameron's ruling, same branch), and an automated original is retried
    automated and breaker-metered, as before. The manual Retry route passes the
-   recorded recipient too. A text sent before that deploy carries no flag and
+   recorded recipient too; a recipient that no longer holds the thread's number
+   is ignored and the number's current holder is judged. A text sent before that deploy carries no flag and
    is retried as before (automated, recipient by phone). Everything else here
    stays Work Package 2's - including, under item 2, the automatic retry of an
    AUTOMATED original (a tour reminder, the missed-call text), which still

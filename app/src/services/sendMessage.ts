@@ -271,7 +271,10 @@ export interface SendMessageInput {
    * So the deleted and consent gates judge the caller's already-resolved
    * snapshot (redundant with the fan-out's own fence); opt-out stays fresh.
    * retry-send-window D14: its id is persisted as `recipient_contact_id`, so a
-   * retry of the row can judge the SAME contact (read back by id).
+   * retry of the row can judge the SAME contact (read back by id) - but ONLY
+   * while that contact still holds this thread's number (contactHoldsPhone): a
+   * recipient that moved off it is ignored for every gate, the phone-matched
+   * contact is judged, no id is recorded, and a WARN names it.
    */
   recipient?: ContactItem;
 }

@@ -185,7 +185,8 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     // original was fenced to (share-skip-fix I8), read by id BEFORE the
     // execution marker - a read that throws fails this delivery and SQS
     // redelivers it, instead of dropping the retry behind a marker. A recorded
-    // recipient that no longer exists falls back to the phone-matched contact.
+    // recipient that no longer exists falls back to the phone-matched contact,
+    // and sendMessage judges it only while it still holds the thread's number.
     const recipientContactId = original.recipient_contact_id;
     let recipient: ContactItem | undefined;
     if (typeof recipientContactId === 'string' && recipientContactId.length > 0) {

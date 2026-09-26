@@ -17,8 +17,9 @@
 //   4. the send path's refusals - previewSendRefusal, the SAME predicates as
 //      sendMessage's gates (pinned by the parity table in
 //      test/sendMessage.test.ts), judged for the ORIGINAL's `automated`
-//      flag (absent = automated, D14) and its recorded recipient (absent, or an
-//      id that resolves to nothing = the phone-matched contact), WARN
+//      flag (absent = automated, D14) and its recorded recipient (absent, an
+//      id that resolves to nothing, or a contact that no longer holds the
+//      thread's number = the phone-matched contact), WARN
 //   5. the cap                  - retry_attempt >= MAX_SEND_RETRY_ATTEMPTS, ERROR
 //   6. the window               - the retry must go out by origin + 15 minutes
 //      with RETRY_JOB_GRACE_MS to spare; origin = retry_window_start ??

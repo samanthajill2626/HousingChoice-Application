@@ -2838,14 +2838,34 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // the backoff. A read that THROWS here is the existing `claim_failed`
       // (ERROR, a 5xx, and Twilio's redelivery re-runs the claim), like every
       // read above.
-      const conversation = await conversations.getById(ptr.conversationId);
-      const gate = await evaluateRelayRetryGates({
-        conversation,
-        memberKey: ptr.memberKey,
-        rootTsMsgId,
-        destDigest,
-        isSuppressed: (member) => isMemberSuppressed(contacts, conversations, member),
-      });
+      // The gate preview FAILS OPEN (planner review): Twilio does not redeliver
+      // a 5xx status callback by default (its retry policy is `ct` - connection
+      // failures only), so a claim that threw here would lose this leg's retry
+      // for good. The preview is only an early answer - the retry job re-runs
+      // every gate at send time - so a failed read claims the rung open, as the
+      // one-to-one decision fails open.
+      let gate: Awaited<ReturnType<typeof evaluateRelayRetryGates>> | undefined;
+      try {
+        const conversation = await conversations.getById(ptr.conversationId);
+        gate = await evaluateRelayRetryGates({
+          conversation,
+          memberKey: ptr.memberKey,
+          rootTsMsgId,
+          destDigest,
+          isSuppressed: (member) => isMemberSuppressed(contacts, conversations, member),
+        });
+      } catch (err) {
+        log.warn(
+          {
+            err,
+            conversationId: ptr.conversationId,
+            rootTsMsgId,
+            attempt,
+            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
+          },
+          'relay retry claim: gate preview read failed - rung claimed open; the retry job re-checks every gate (fail open)',
+        );
+      }
       // D2: where this ladder's window started. Step 6 fell back to
       // `ptr.tsMsgId` for the root key exactly when this callback is for the
       // ROOT's own leg - rung 1 - whose origin is that member slot's `sentAt`:
@@ -2860,7 +2880,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       const originMs = parseRetryWindowOrigin(originRaw);
       let decline: RelayRetryGateCode | typeof RETRY_WINDOW_CLOSED_CODE | undefined;
       let originGap: 'missing' | 'unparseable' | undefined;
-      if (gate.refused) {
+      if (gate !== undefined && gate.refused) {
         decline = gate.code;
       } else if (originMs === undefined) {
         // D5: no usable origin fails OPEN - the rung is claimed without a

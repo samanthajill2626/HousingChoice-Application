@@ -2500,7 +2500,11 @@ export interface TimelineMessage extends TimelineBase, MessageTransportFields {
    *  SERVER clock is before this plus RETRY_PROMISE_GRACE_MS
    *  (routes/contact/retryPromise.ts); a failed enqueue rewrites it to
    *  1970-01-01T00:00:00.000Z (already expired). Absent when no retry was
-   *  scheduled (declined, exhausted, a relay or group row). */
+   *  scheduled (declined or exhausted). A relay row never carries one; a native
+   *  group-text row can (a failed read fails open, D3a), but no screen renders
+   *  it - the contact timeline skips group_text conversations
+   *  (app/src/routes/contactTimeline.ts), and the group view's fixed field list
+   *  drops the field (routes/conversation/useRelayThread.ts). */
   retry_due_at?: string;
   // --- Relay 30003 retry lineage (spec D11/D17) -----------------------------
   // The four of the seven stored lineage values this client PROJECTS. A relay

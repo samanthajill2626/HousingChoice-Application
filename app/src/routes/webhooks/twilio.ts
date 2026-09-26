@@ -3695,8 +3695,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // no build can settle whether a classic callback for a group leg
             // still lands here live, so the arm is written as if it can. IF one
             // does, it resolves to the GROUP thread, which carries NO
-            // participant_phone - so the lookup below finds no contact and the
-            // whole case degrades to a log line. That outcome is CORRECT (there is
+            // participant_phone - so there is no member phone to look up: the
+            // branch below breaks before the lookup, and the case degrades to one
+            // log line. That outcome is CORRECT (there is
             // no single member to flag: a group failure says nothing about any one
             // number), but it is a distinct situation from "we have a number and
             // no contact record", so it says so and logs ONCE per sid instead of

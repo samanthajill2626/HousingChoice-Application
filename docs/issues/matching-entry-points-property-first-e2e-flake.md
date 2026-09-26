@@ -3,11 +3,11 @@ id: matching-entry-points-property-first-e2e-flake
 title: matching-entry-points "Send a property" spec flakes - typeahead dropdown intercepts the unit-row click
 type: bug
 severity: med
-status: resolved
+status: open
 area: e2e
 created: 2026-07-21
 resolved: 2026-08-21
-updated: 2026-08-21
+updated: 2026-09-26
 refs: e2e/tests/dashboard-next/matching-entry-points.spec.ts:265, dashboard/src/routes/broadcasts/BroadcastComposer.tsx
 ---
 
@@ -112,3 +112,28 @@ names the row it could not reach.
 Verified: 3 passed. Note this cannot be *proved* by a passing run - the flake
 was intermittent - but the wait removes the only mechanism the evidence ever
 implicated, and the assertion makes a recurrence self-describing.
+
+**Recurrence (2026-09-26, `feat/inbox-rows-timestamps` planner review) -
+REOPENED.** Two sightings on one day with the exact intercept signature, and
+the 2026-08-21 hardening did NOT hold: the `toHaveCount(0)` precondition
+PASSED (the failure is the click timeout naming the row, not "the typeahead
+dropdown never closed"), so the late search response re-opened the list
+AFTER the assertion and the `<li role=option>` intercepted the row click for
+the full 60s budget (110 retries). Once inside a full `npm run e2e` (a run
+that had grown slower than the same tree's green run an hour earlier, on a
+machine at 49% CPU with a DynamoDB Local container 38 hours old), and once
+in a SOLO two-file run of this spec and `scheduled-visibility.spec.ts`
+(7 passed, this one failed). The branch under test touches nothing on this
+path (inbox, auth gate, perf harness only; `BroadcastComposer.tsx` is on
+its exclusion list), and the same runtime code passed this spec in three
+full runs the same day (b242b7d6 twice, 967ef4ab once).
+
+What this proves: the assertion closes the window only when the search
+response has ALREADY landed; a response that lands after the assertion
+still re-opens the list. The component-side fix in "Suggested fix" (a
+dismissed-at generation counter, so a response for a query dismissed before
+it landed cannot open the list) is the one that removes the mechanism. A
+spec-side stopgap that also works: after the assertion, wait for the search
+request to settle (`page.waitForResponse` on the units search, or
+`toHaveCount(0)` re-checked after a short settle) before the click.
+

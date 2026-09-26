@@ -236,4 +236,11 @@ left as written; the corrected values are:
 
 ## Verdict
 
-MERGE-READY-PLACEHOLDER
+MERGE-READY, UNMERGED (planner, 2026-09-26). The planner's independent
+review, own gates, live QA, fix wave (bc1efe1e) and adjudications are in
+`planner-review-verdict.md`, `planner-review-adjudications.md`,
+`planner-live-qa.md`, `planner-review-conformance.md` and
+`planner-review-adversarial.md` beside this file. Gate 4 on bc1efe1e came
+back 282/284 twice with untouched, tracked flaky specs (named in the
+verdict); the identical runtime code passed 284/284 on 967ef4ab the same
+day. Cameron merges.

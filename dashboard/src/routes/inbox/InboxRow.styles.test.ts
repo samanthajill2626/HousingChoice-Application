@@ -53,6 +53,10 @@ describe('InboxRow.module.css', () => {
 
   it('the actions box is an overlay that takes no layout width', () => {
     expect(bodyOf('.actions')).toMatch(/position:\s*absolute\s*;/);
+    // ... positioned against the ROW. Without this the overlay would anchor
+    // to the nearest positioned ancestor outside the row (planner review,
+    // adversarial 11).
+    expect(bodyOf('.row')).toMatch(/position:\s*relative\s*;/);
   });
 
   // Live self-QA 2026-09-26: with the yielding chips at flex-shrink 100 the

@@ -20,3 +20,14 @@ it, so this was accepted.
 **Suggested fix.** If a measured Unread page is slow for Sam, apply the same
 prefetch pass to the unread candidates: the caches are already shared
 closures, so only the window and the `stop` flag are new.
+
+**Also sequential on All (planner review 2026-09-26, adversarial 3).** The
+`filter=all` prefetch warms the contact, conversation-set and latest-message
+caches, but the placement label (`placementLabel`, a per-request VALUE cache
+over `placements.getById`) is still read inside the decision loop, one await
+per distinct placement on the page. A page of 100 rows where most contacts sit
+in a placement adds up to 100 sequential reads on top of the prefetched ones.
+The same promise-cache treatment (warm it from the prefetch chain once the
+contact's newest conversation is known) removes it; the equivalence suite in
+`app/test/inboxFeed.test.ts` is the guard. No measurement of the magnitude
+exists: the hermetic perf seed carries no placement-tagged inbox rows.

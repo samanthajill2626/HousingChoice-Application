@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8.5 - APPROVED for build as DRAFT 8.4 (Cameron ruled 2026-09-25 that only back and history navigations restore, 5.8); build-review refinements recorded in code-review-r1-adjudications.md (5.6 cursor rule, 5.8 wording, 5.2 residual); round-2 and round-3 adjudications changed the row CSS Sam approved (5.4: the head never yields to the preview; the chip rule with its floor)
+Status: DRAFT 8.6 - APPROVED for build as DRAFT 8.4 (Cameron ruled 2026-09-25 that only back and history navigations restore, 5.8); build-review refinements recorded in code-review-r1-adjudications.md (5.6 cursor rule, 5.8 wording, 5.2 residual); round-2 and round-3 adjudications changed the row CSS Sam approved (5.4: the head never yields to the preview; the chip rule with its floor); DRAFT 8.6 (planner review 2026-09-26) writes back what the build shipped, no decision changed: 5.3 formatters, 5.10 cache key and overshoot, 5.11 perf command and reason, 5.8 link list, section 2 facts
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -137,7 +137,8 @@ as today's 30-row page. That server slice is separable (section 5.10).
   `deriveLatest` falls back to that image's `last_message_preview`). A 100-row
   page is roughly 300 sequential DynamoDB round trips. The `emittedContacts`
   dedupe check and add live INSIDE `rowForConversation`, as does the
-  `dropped(...)` telemetry.
+  `dropped(...)` telemetry except the `filtered` count, which the pager loop
+  writes.
 - The row is a single flex line at every width: dot, `.head` (name, chip,
   tags; `flex: 0 0 auto`, name `white-space: nowrap`), preview (ellipsized),
   count, then the `.actions` box (Mark read / Mark unread). The actions box is
@@ -155,7 +156,9 @@ as today's 30-row page. That server slice is separable (section 5.10).
   emit U+202F before `AM`/`PM` on ICU 72+ hosts; the app already normalizes
   that in `app/src/lib/localTime.ts` (`toAscii`). Node 24.14.1 emits U+0020;
   the Playwright-bundled Chromium is unverified.
-- The session identity is `me.userId` (`useMe` / `AuthContext`). `AuthGate`
+- The session identity is `me.userId` from `AuthContext` (the page reads
+  `useOptionalAuth()?.me?.userId ?? 'anon'`; `useMe` is the voice-profile
+  hook, not the operator identity). `AuthGate`
   renders its children only while authenticated; `useAuth()` throws without a
   provider, and the existing inbox hook tests mount no provider.
 - The page-performance harness (`e2e/performance/`) reads the inbox as a
@@ -296,8 +299,9 @@ as today's 30-row page. That server slice is separable (section 5.10).
 - `selectFilter` and the groups-truncation link (`/inbox?filter=groups`) both
   preserve a `limit` param that is present, so a tuned link keeps its size
   across tabs. `Inbox.tsx` builds that link from the current params instead of
-  a hard-coded string. The sidebar's Inbox link and the nav badge navigate to
-  a bare `/inbox` and therefore reset to the default: the knob is a URL you
+  a hard-coded string. The sidebar's Inbox link and the nav badge's `NavLink`
+  (the badge itself does not navigate) go to a bare `/inbox` and therefore
+  reset to the default: the knob is a URL you
   open (or bookmark), not a setting.
 - Every `getInbox` call from the hook uses the hook's `limit`: the initial
   load, Retry, the SSE reconcile, the mount reconcile, and `loadMore`.
@@ -411,16 +415,21 @@ New pure module `dashboard/src/routes/inbox/inboxTime.ts`:
 
 - `formatInboxTime(iso: string, now: Date): string` returns the tier label per
   decision 2 using LOCAL calendar days (`getFullYear/getMonth/getDate` of both
-  instants), never UTC days and never a 24-hour window. `2:14 PM` is
-  `toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })`;
-  `Sep 12` is `toLocaleDateString('en-US', { month: 'short', day: 'numeric' })`;
-  `Sep 12, 2025` adds `year: 'numeric'`. An unparseable instant returns `''`
+  instants), never UTC days and never a 24-hour window. `2:14 PM` is the
+  `en-US` `{ hour: 'numeric', minute: '2-digit' }` format; `Sep 12` is
+  `{ month: 'short', day: 'numeric' }`; `Sep 12, 2025` adds `year: 'numeric'`.
+  The formatters are four `Intl.DateTimeFormat` instances built ONCE at
+  module load (build review AD-1: a `toLocale*String` call with an options
+  bag constructs a formatter per call, and a render of hundreds of rows
+  formats each row twice); same locale and options, so the same strings. The
+  side effect, a time zone fixed at page load, is filed as
+  `inbox-time-formatters-pin-time-zone-at-load`. An unparseable instant returns `''`
   (the `formatTime` contract in `contact/format.ts`), and the row then renders
   no `<time>` element at all rather than an empty one.
-- `formatInboxTimeFull(iso: string): string` returns
-  `toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric',
-  hour: 'numeric', minute: '2-digit' })`, e.g. `Sep 12, 2026, 2:14 PM`, for the
-  hover title; `''` when unparseable.
+- `formatInboxTimeFull(iso: string): string` returns the `en-US`
+  `{ month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric',
+  minute: '2-digit' }` format, e.g. `Sep 12, 2026, 2:14 PM`, for the hover
+  title; `''` when unparseable.
 - Both accept a clean ISO instant. `lastActivityAt` is always a clean instant
   (the conversation's `last_activity_at`, not a `#`-suffixed sort key), so
   `isoOf` is applied only for symmetry with the other formatters.
@@ -754,8 +763,9 @@ snapshot: {
   explicit 0 is load-bearing: `main.content` keeps whatever `scrollTop` the
   previous page left (nothing in the shell resets it), and a restored list is
   tall on its first render, so nothing clamps that offset the way today's
-  spinner does. A `PUSH` arrival (the sidebar's Inbox link, the nav badge, a
-  programmatic navigate) therefore restores the ROWS instantly but starts at
+  spinner does. A `PUSH` arrival (the sidebar's Inbox link, the nav badge's
+  `NavLink`, the two QuickReply "back to inbox" links, a programmatic
+  navigate) therefore restores the ROWS instantly but starts at
   the top: an operator who clicks Inbox because the badge says there is new
   unread must land on the new rows, not at row 180. The container is resolved
   the same way 5.2 does.
@@ -806,7 +816,9 @@ the reads it awaits come from:
 - Three per-request caches memoize PROMISES keyed by their input, storing the
   in-flight promise before awaiting it, so two callers for one key share one
   read (this also closes the check-then-await-then-set race):
-  - `resolveContact(phone, email)`, keyed `${phone}|${email}`, which performs
+  - `resolveContact(phone, email)`, keyed `JSON.stringify([phone ?? null,
+    email ?? null])` (a joined string would conflate an absent value with an
+    empty one, and they take different branches), which performs
     EXACTLY today's block - `findByPhone`, then `findByEmail` only if that
     found nothing, inside one try/catch that resolves to `undefined` with the
     same WARN on any error. `rowForConversation` calls it in place of its
@@ -829,7 +841,14 @@ the reads it awaits come from:
   before starting each chain; the loop sets it when the page fills or the
   chunk is exhausted, so no chain starts after the page is done (chains
   already in flight finish and are discarded). Prefetch results are never
-  read directly; the loop hits the caches.
+  read directly; the loop hits the caches. Two consequences, both accepted
+  (planner review 2026-09-26): up to `HYDRATE_CONCURRENCY` chains may read
+  past the row that filled the page, and a read that fails in one of them
+  logs its best-effort WARN after the `inbox feed assembled` line, for a row
+  that is not on the page. The `inboxPrefetch: false` seam turns off only the
+  prefetch PASS: the equivalence suite's "off" arm still reads through the
+  memoized caches, which is the shipped code's own sequential path, not
+  main's uncached one.
 - The loop therefore performs the same awaits in the same order and takes the
   same branches; the only difference is that most awaits resolve immediately.
   Prefetches for conversations the loop never consumes are wasted reads,
@@ -891,13 +910,16 @@ The design keeps its invariants without changing the harness:
   still counts exactly one page request. The hermetic `npm run perf:pages`
   run in the gates is the arbiter; a violation means the dashboard is wrong.
 - Auto-load fires only when the sentinel is within 400px of the viewport
-  bottom; the perf seed's `filter=all` page is 100 rows tall, so it does not
-  fire without a scroll, and the harness never scrolls. Its Unread/Unknown
+  bottom, and only while there is more: the perf seed's `filter=all` page is
+  SHORT with no cursor, so no sentinel renders and nothing can fire (and the
+  harness never scrolls). Its Unread/Unknown
   surfaces return short pages WITHOUT a cursor on the perf seed (the routes
   file records the budget exit as unreachable there), so `hasMore` is false and
   no sentinel renders.
-- The hermetic `npm run perf:pages` self-QA is a gate for this mission (run
-  from the worktree, bare, after the e2e gate). If it reports a count or
+- The hermetic `npm run perf:pages` self-QA is a gate for this mission, run
+  from the worktree as `npm run perf:pages -- hermetic --self-qa=full
+  --cold-repeats=1 --warm-repeats=1` (the bare form does not run: the runner
+  requires a target), on the final code commit. If it reports a count or
   cursor violation, the fix is in the harness's expectation only if the request
   pattern above is what it observed; otherwise the dashboard is wrong.
 

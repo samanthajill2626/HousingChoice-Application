@@ -2558,6 +2558,23 @@ describe('aggregateInbox - prefetch equivalence (spec 5.10)', () => {
     // of the code (one row consumed + at most HYDRATE_CONCURRENCY chains in
     // flight when `stop` is set), not of promise timing.
     await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations, slowReads: true }, calls, undefined, { inboxPrefetch: true }));
+    // SETTLE before judging the count (planner review, adversarial 4). The
+    // response returns while up to HYDRATE_CONCURRENCY chains are still in
+    // flight, and a prefetch that KEPT SCHEDULING after the page filled shows
+    // up only as reads that keep arriving after the response, one macrotask
+    // each. Judged at the moment of return, the bound below could not fail
+    // with both `prefetch?.stop()` calls deleted (that mutant read 9 at return
+    // and the whole chunk afterwards), so the count must be stable first.
+    let last = -1;
+    let stable = 0;
+    while (stable < 10) {
+      await new Promise((r) => setTimeout(r, 3));
+      if (calls.listByConversation === last) stable += 1;
+      else {
+        stable = 0;
+        last = calls.listByConversation;
+      }
+    }
     // The prefetch read AHEAD of the one consumed row (the line that is red
     // with no prefetch pass: the sequential loop reads exactly one) ...
     expect(calls.listByConversation).toBeGreaterThan(1);

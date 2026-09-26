@@ -208,6 +208,16 @@ describe('mergeHeadRead - branch I (incomplete head)', () => {
     expect(ids(next.head)).toEqual(['c:z', 'g:r1', 'c:a']);
     expect(next.cursor).toBe('OLD');
   });
+
+  it('on Groups, group rows ARE the paged rows: a short page with a cursor merges in and keeps the old cursor', () => {
+    const s = state({ head: [relay('r1'), groupText('g1')], tail: [relay('r9')], cursor: 'TAIL', autoLoadArmed: true });
+    // two group rows at limit 3 is SHORT (2 < 3) with a cursor: branch I
+    const next = mergeHeadRead(s, page([relay('r2'), relay('r1')], 'CUR'), 'groups', 3);
+    expect(ids(next.head)).toEqual(['g:r2', 'g:r1', 'gt:g1']);
+    expect(ids(next.tail)).toEqual(['g:r9']);
+    expect(next.cursor).toBe('TAIL');
+    expect(next.autoLoadArmed).toBe(true);
+  });
 });
 
 describe('dedupeConversations', () => {

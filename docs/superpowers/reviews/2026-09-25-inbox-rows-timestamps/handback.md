@@ -219,6 +219,21 @@ is written in the loop). Details: `research-drift-worklist.md`.
 - Not yet applied to prod data or infra: nothing. No new dependency, no env
   change, no infra. **NO infra/post-merge ops.**
 
+## Planner corrections (independent review, 2026-09-26)
+
+The conformance reviewer re-counted the handback's figures against the tree
+(`planner-review-conformance.md`, finding 7). The builder's text above is
+left as written; the corrected values are:
+
+- 15 issue files changed, not 16.
+- The +10186/-463 figure covers code, spec and plan; with the review records
+  the branch is +18045/-463 against main.
+- 45 branch commits follow the spec/plan commit a554dcd5, not 96.
+- The relay-spec re-run at 23:32 reused live lane 16 while HEAD was
+  dc0390e4; it was not a fresh lane at HEAD. It passed 6/6 there, and the
+  spec passed again inside both full runs (b242b7d6 by the build, 967ef4ab
+  by the planner), which is what carries the claim.
+
 ## Verdict
 
 MERGE-READY-PLACEHOLDER

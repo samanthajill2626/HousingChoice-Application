@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard/inbox
 created: 2026-09-25
-refs: dashboard/src/routes/inbox/InboxRow.tsx:128, dashboard/src/routes/inbox/InboxRow.module.css:150, dashboard/src/routes/inbox/InboxRow.module.css:166, docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/code-review-r1-adversarial.md
+refs: dashboard/src/routes/inbox/InboxRow.tsx:147, dashboard/src/routes/inbox/InboxRow.module.css:201, dashboard/src/routes/inbox/InboxRow.module.css:217, docs/superpowers/reviews/2026-09-25-inbox-rows-timestamps/code-review-r1-adversarial.md
 ---
 
 **Problem.** Every inbox row's `<time>` carries the full stamp as its `title`
@@ -19,7 +19,7 @@ which is almost every row.
 The mechanism (build review AD-3, from the CSS geometry; measured in a browser
 at round 2, below):
 
-- `.actions` (`InboxRow.module.css:166`) is an absolutely positioned
+- `.actions` (`InboxRow.module.css:217`) is an absolutely positioned
   descendant of `.row`, so it paints and hit-tests ABOVE the non-positioned
   row link. It sits at `right: var(--sp-3)` (12px) with a 12px `padding-left`
   and an opaque background, and takes `pointer-events: auto` on `.row:hover`

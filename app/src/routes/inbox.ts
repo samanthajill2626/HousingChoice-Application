@@ -261,9 +261,11 @@ export const GROUP_PAGE_ONE_LIMIT = 50;
  * fixed 8,192 bytes and fronts every deployed environment, so an oversized
  * cursor would fail in dev/prod but not locally. 100 ids (~4.7KB of JSON ->
  * ~6.3KB base64url) plus the rest of the request line stays inside that quota
- * with margin, and ends the feed at ~4 pages (120+ unread contact rows), which
- * has no product meaning to exceed: the badge caps at 100 and triage is
- * top-down.
+ * with margin, and ends the feed once MORE than 100 ids sit behind the cursor:
+ * at the dashboard's 100-row page (useInbox DEFAULT_PAGE_LIMIT) that is the end
+ * of page two, about 200 unread contact rows (page four at a tuned 30-row
+ * page), which has no product meaning to exceed: the badge caps at 100 and
+ * triage is top-down.
  *
  * THE SERVER NEVER MINTS A CURSOR IT WOULD REJECT - past this, the page returns
  * `nextCursor: null` AND `truncated: true` rather than a cursor the decoder

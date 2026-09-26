@@ -20,15 +20,17 @@ import {
   MAX_SEND_RETRY_ATTEMPTS,
   parseRetrySendPayload,
   registerRetrySendJobHandler,
+  resolveSendRetryBackoffMs,
   RETRY_SEND_JOB,
   retryBackoffMs,
 } from '../src/jobs/retrySend.js';
 import { createLogger } from '../src/lib/logger.js';
-import type { MessageItem } from '../src/repos/messagesRepo.js';
+import type { MessageItem, MessagesRepo } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
 import type { BroadcastItem } from '../src/repos/broadcastsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { loadConfig } from '../src/lib/config.js';
+import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import {
   createFakeWorld,
@@ -45,7 +47,15 @@ const ERROR = 50;
 const STATUS_PATH = '/webhooks/twilio/status';
 const DIRECT_RCS_SID = `SM${'6'.repeat(32)}`;
 
-/** Seed one outbound message (the thing callbacks are about) into the world. */
+/**
+ * Seed one outbound message (the thing callbacks are about) into the world.
+ *
+ * retry-send-window D13: the send time is REALISTIC - 30 seconds before the
+ * wall clock the webhook's decision reads - because a 30003 now measures the
+ * 15-minute retry window from it; the old fixed 2026-06-12 date would close
+ * the window on every retry test. `overrides.provider_ts` sets it explicitly
+ * (and the tsMsgId prefix follows it).
+ */
 async function seedOutbound(
   world: FakeWorld,
   sid: string,
@@ -56,7 +66,7 @@ async function seedOutbound(
     participantPhone,
     'tenant_1to1',
   );
-  const providerTs = '2026-06-12T10:00:00.000Z';
+  const providerTs = overrides.provider_ts ?? new Date(Date.now() - 30_000).toISOString();
   await world.messagesRepo.append({
     conversationId: conversation.conversationId,
     providerSid: sid,
@@ -420,19 +430,57 @@ describe('POST /webhooks/twilio/status — transitions', () => {
   });
 
   describe('error-class handling (doc §7.1)', () => {
-    it('30003 (transient) enqueues EXACTLY ONE backed-off retry job through jobs.enqueue()', async () => {
-      const { app, world } = makeWebhookHarness();
+    it('30003 (transient) stamps retry_due_at IN the failure write, emits ONE SSE that already sees both, then enqueues EXACTLY ONE backed-off retry (retry-send-window D3a/D7)', async () => {
+      const { app, world, capture } = makeWebhookHarness();
       const seeded = await seedOutbound(world, 'SMout0001');
+      // Record every status write and every annotate: D7 is ONE conditional
+      // write carrying the failure AND the stamp, with no second write after.
+      const statusWrites: Parameters<MessagesRepo['updateDeliveryStatus']>[] = [];
+      const realUpdate = world.messagesRepo.updateDeliveryStatus.bind(world.messagesRepo);
+      world.messagesRepo.updateDeliveryStatus = async (...args) => {
+        statusWrites.push(args);
+        return realUpdate(...args);
+      };
+      let annotates = 0;
+      const realAnnotate = world.messagesRepo.annotateMessage.bind(world.messagesRepo);
+      world.messagesRepo.annotateMessage = async (...args) => {
+        annotates += 1;
+        return realAnnotate(...args);
+      };
+      // What the row holds at the instant of each message.persisted emit.
+      const atEmit: { status: string | undefined; due: string | undefined }[] = [];
+      world.events.on('message.persisted', () => {
+        const row = world.messages.find((m) => m.provider_sid === 'SMout0001');
+        atEmit.push({ status: row?.delivery_status, due: row?.retry_due_at });
+      });
 
+      const before = Date.now();
       const res = await signedTwilioPost(
         app,
         STATUS_PATH,
         statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
       );
+      const after = Date.now();
       expect(res.status).toBe(200);
 
+      const row = (await world.messagesRepo.getByProviderSid('SMout0001'))!;
+      const due = row.retry_due_at!;
+      // The run time = the decision's clock + the resolved backoff for attempt 1.
+      expect(Date.parse(due)).toBeGreaterThanOrEqual(before + resolveSendRetryBackoffMs(1));
+      expect(Date.parse(due)).toBeLessThanOrEqual(after + resolveSendRetryBackoffMs(1));
+      expect(statusWrites).toEqual([['SMout0001', 'undelivered', '30003', { retryDueAt: due }]]);
+      expect(annotates).toBe(0);
+      expect(atEmit).toEqual([{ status: 'undelivered', due }]);
+      // A clean retry logs one INFO line and no decision WARN or ERROR.
+      expect(
+        capture.lines.filter((l) => l['msg'] === 'one-to-one 30003 retry scheduled'),
+      ).toHaveLength(1);
+      expect(
+        capture.lines.some((l) => l['retryDecision'] !== undefined || l['failOpen'] !== undefined),
+      ).toBe(false);
+
       // Routed through the SQS path with an exact DelaySeconds backoff (60s for
-      // attempt 1) — recorded as a delayed outbound job, NOT an EventBridge
+      // attempt 1), recorded as a delayed outbound job - NOT an EventBridge
       // schedule, and NOT clamped to a 60s floor.
       expect(outbound.delayed).toHaveLength(1);
       const { envelope, delaySeconds } = outbound.delayed[0]!;
@@ -444,21 +492,32 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       });
       // context envelope: the recovered conversationId rides the job
       expect(envelope.correlationContext.conversationId).toBe(seeded.conversationId);
-      // backed off exactly 60s for attempt 1 (retryBackoffMs(1) = 60_000)
-      expect(delaySeconds).toBe(retryBackoffMs(1) / 1000);
+      // enqueued at the SAME run time the stamp promised
+      expect(delaySeconds).toBe(resolveSendRetryBackoffMs(1) / 1000);
       // the payload never carries the message body (PII rides the DB, not the wire)
       expect(JSON.stringify(envelope.payload)).not.toContain('outbound body');
     });
 
-    it('a REDELIVERED 30003 callback does not enqueue a second retry (transition no-op gates side effects)', async () => {
-      const { app, world } = makeWebhookHarness();
+    it('a REDELIVERED 30003 callback writes, logs and enqueues nothing more - the transition gates every side effect (retry-send-window D3a)', async () => {
+      const { app, world, capture } = makeWebhookHarness();
       await seedOutbound(world, 'SMout0001');
       const params = statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' });
 
       await signedTwilioPost(app, STATUS_PATH, params);
+      const stamped = (await world.messagesRepo.getByProviderSid('SMout0001'))?.retry_due_at;
+      expect(stamped).toBeDefined();
+      const emitsAfterFirst = world.emitted.filter((e) => e.event === 'message.persisted').length;
+
       await signedTwilioPost(app, STATUS_PATH, params); // Twilio redelivery
 
       expect(outbound.delayed).toHaveLength(1);
+      expect((await world.messagesRepo.getByProviderSid('SMout0001'))?.retry_due_at).toBe(stamped);
+      expect(world.emitted.filter((e) => e.event === 'message.persisted')).toHaveLength(
+        emitsAfterFirst,
+      );
+      expect(
+        capture.lines.filter((l) => l['msg'] === 'one-to-one 30003 retry scheduled'),
+      ).toHaveLength(1);
     });
 
     it('30003 past the attempt cap ERRORs (now terminal) and does NOT enqueue', async () => {
@@ -475,6 +534,331 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       // Exhausting retries makes the transient failure TERMINAL → it graduates to error.
       const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('exhausted retries'));
       expect(err).toBeDefined();
+    });
+
+    // retry-send-window D3a/D9/D11/D14: EVERY decline leaves the failure plain -
+    // no retry_due_at and no enqueue - and logs exactly ONE line naming the
+    // reason at the decision's level. One harness per case (each owns its log
+    // capture); the beforeEach gives each a fresh outbound queue.
+    const DECLINES: {
+      reason: string;
+      name: string;
+      level: number;
+      msg: string;
+      env?: Record<string, string>;
+      arrange: (world: FakeWorld) => Promise<void>;
+    }[] = [
+      {
+        reason: 'conversation_missing',
+        name: 'the conversation row is gone',
+        level: WARN,
+        msg: 'one-to-one 30003 retry not scheduled: conversation_missing',
+        arrange: async (world) => {
+          const seeded = await seedOutbound(world, 'SMout0001');
+          world.conversations.delete(seeded.conversationId);
+        },
+      },
+      {
+        reason: 'not_one_to_one',
+        name: 'the row sits on a relay_group thread',
+        level: WARN,
+        msg: 'one-to-one 30003 retry not scheduled: not_one_to_one',
+        arrange: async (world) => {
+          const seeded = await seedOutbound(world, 'SMout0001');
+          world.conversations.get(seeded.conversationId)!.type = 'relay_group';
+        },
+      },
+      {
+        reason: 'sms_sending_disabled',
+        name: 'the SMS kill switch is off',
+        level: WARN,
+        msg: 'one-to-one 30003 retry not scheduled: sms_sending_disabled',
+        env: { SMS_SENDING_ENABLED: 'false' },
+        arrange: async (world) => {
+          await seedOutbound(world, 'SMout0001');
+        },
+      },
+      {
+        reason: 'contact_opted_out',
+        name: 'the conversation is opted out',
+        level: WARN,
+        msg: 'one-to-one 30003 retry not scheduled: contact_opted_out',
+        arrange: async (world) => {
+          const seeded = await seedOutbound(world, 'SMout0001');
+          world.conversations.get(seeded.conversationId)!.sms_opt_out = true;
+        },
+      },
+      {
+        reason: 'contact_deleted',
+        name: 'the recorded recipient is soft-deleted',
+        level: WARN,
+        msg: 'one-to-one 30003 retry not scheduled: contact_deleted',
+        arrange: async (world) => {
+          // The phone lookup finds a LIVE, consenting contact first (the fake
+          // findByPhone returns the first on the phone), so only the RECORDED
+          // recipient, read by id, can decline this retry.
+          world.contacts.push({
+            contactId: 'c-live',
+            type: 'tenant',
+            phone: TENANT_PHONE,
+            consent_method: 'verbal_in_person',
+          });
+          world.contacts.push({
+            contactId: 'c-gone',
+            type: 'tenant',
+            phone: TENANT_PHONE,
+            consent_method: 'verbal_in_person',
+            deleted_at: '2026-09-01T00:00:00.000Z',
+          });
+          await seedOutbound(world, 'SMout0001', { automated: false, recipient_contact_id: 'c-gone' });
+        },
+      },
+      {
+        reason: 'manual_mode',
+        name: 'an AUTOMATED original sits on a manual-mode (breaker-tripped) thread',
+        level: WARN,
+        msg: 'one-to-one 30003 retry not scheduled: manual_mode',
+        arrange: async (world) => {
+          const seeded = await seedOutbound(world, 'SMout0001', { automated: true });
+          world.conversations.get(seeded.conversationId)!.ai_mode = 'manual';
+        },
+      },
+      {
+        reason: 'contact_no_consent',
+        name: "a PERSON'S original went to a contact with no recorded consent",
+        level: WARN,
+        msg: 'one-to-one 30003 retry not scheduled: contact_no_consent',
+        arrange: async (world) => {
+          world.contacts.push({ contactId: 'c-nc', type: 'tenant', phone: TENANT_PHONE });
+          await seedOutbound(world, 'SMout0001', { automated: false });
+        },
+      },
+      {
+        reason: 'window_closed',
+        name: 'the original went out 20 minutes ago',
+        level: ERROR,
+        msg: 'one-to-one 30003 retry not scheduled: window_closed',
+        arrange: async (world) => {
+          await seedOutbound(world, 'SMout0001', {
+            provider_ts: new Date(Date.now() - 20 * 60_000).toISOString(),
+          });
+        },
+      },
+      {
+        reason: 'cap_exhausted',
+        name: 'the retries are exhausted',
+        level: ERROR,
+        // The pre-existing exhausted-retries line, kept byte-for-byte (its
+        // tail carries a non-ASCII dash, so this matches the ASCII prefix).
+        msg: 'transient delivery failure exhausted retries',
+        arrange: async (world) => {
+          await seedOutbound(world, 'SMout0001', { retry_attempt: MAX_SEND_RETRY_ATTEMPTS });
+        },
+      },
+    ];
+
+    it.each(DECLINES)(
+      'retry-send-window: $reason ($name) leaves a plain failure - no stamp, no enqueue, one line',
+      async ({ level, msg, env, arrange }) => {
+        const { app, world, capture } = makeWebhookHarness(env !== undefined ? { env } : {});
+        await arrange(world);
+
+        const res = await signedTwilioPost(
+          app,
+          STATUS_PATH,
+          statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+        );
+        expect(res.status).toBe(200);
+
+        const row = (await world.messagesRepo.getByProviderSid('SMout0001'))!;
+        expect(row.delivery_status).toBe('undelivered');
+        expect(row.error_code).toBe('30003');
+        expect(row.retry_due_at).toBeUndefined();
+        expect(outbound.delayed).toHaveLength(0);
+        expect(capture.atLevel(level).filter((l) => String(l['msg']).startsWith(msg))).toHaveLength(1);
+      },
+    );
+
+    it("retry-send-window D14: a PERSON'S original on a manual-mode (breaker-tripped) thread IS retried - stamped and enqueued", async () => {
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({
+        contactId: 'contact-T',
+        type: 'tenant',
+        phone: TENANT_PHONE,
+        consent_method: 'verbal_in_person',
+      });
+      const seeded = await seedOutbound(world, 'SMout0001', { automated: false });
+      world.conversations.get(seeded.conversationId)!.ai_mode = 'manual';
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+      );
+
+      expect((await world.messagesRepo.getByProviderSid('SMout0001'))?.retry_due_at).toBeDefined();
+      expect(outbound.delayed).toHaveLength(1);
+    });
+
+    it('retry-send-window D14: the RECORDED recipient is judged - a soft-deleted duplicate contact on the same phone does not decline the retry', async () => {
+      const { app, world } = makeWebhookHarness();
+      // The fake findByPhone returns the FIRST contact on the phone: push the
+      // soft-deleted, no-consent duplicate first, the real recipient second.
+      world.contacts.push({
+        contactId: 'c-dup',
+        type: 'tenant',
+        phone: TENANT_PHONE,
+        deleted_at: '2026-09-01T00:00:00.000Z',
+      });
+      world.contacts.push({
+        contactId: 'c-real',
+        type: 'tenant',
+        phone: TENANT_PHONE,
+        consent_method: 'verbal_in_person',
+      });
+      await seedOutbound(world, 'SMout0001', { automated: false, recipient_contact_id: 'c-real' });
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+      );
+
+      expect((await world.messagesRepo.getByProviderSid('SMout0001'))?.retry_due_at).toBeDefined();
+      expect(outbound.delayed).toHaveLength(1);
+    });
+
+    it('retry-send-window D3a: a contact read that THROWS fails open - stamped, enqueued, one WARN naming the gap', async () => {
+      const { app, world, capture } = makeWebhookHarness();
+      await seedOutbound(world, 'SMout0001');
+      world.contactsRepo.findByPhone = async () => {
+        throw new Error('contacts read exploded');
+      };
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+      );
+
+      expect((await world.messagesRepo.getByProviderSid('SMout0001'))?.retry_due_at).toBeDefined();
+      expect(outbound.delayed).toHaveLength(1);
+      const warns = capture.atLevel(WARN).filter((l) => l['failOpen'] === 'read_failed');
+      expect(warns).toHaveLength(1);
+      expect(warns[0]!['msg']).toBe(
+        'one-to-one 30003 retry scheduled without its checks: a conversation or contact read failed (fail open)',
+      );
+    });
+
+    it('retry-send-window D5: a row with no usable send time fails open - stamped, enqueued, one WARN naming the gap', async () => {
+      const { app, world, capture } = makeWebhookHarness();
+      const seeded = await seedOutbound(world, 'SMout0001');
+      delete (seeded as { provider_ts?: string }).provider_ts;
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+      );
+
+      expect((await world.messagesRepo.getByProviderSid('SMout0001'))?.retry_due_at).toBeDefined();
+      expect(outbound.delayed).toHaveLength(1);
+      const warns = capture.atLevel(WARN).filter((l) => l['failOpen'] === 'no_origin');
+      expect(warns).toHaveLength(1);
+      expect(warns[0]!['msg']).toBe(
+        'one-to-one 30003 retry scheduled without a window check: the message has no usable send time (fail open)',
+      );
+    });
+
+    it('retry-send-window D7: a FAILED enqueue withdraws the promise at once - expired stamp, one more SSE - and keeps the arm ERROR', async () => {
+      const { app, world, capture } = makeWebhookHarness();
+      const seeded = await seedOutbound(world, 'SMout0001');
+      configureOutboundQueue({
+        async enqueue() {
+          throw new Error('queue down');
+        },
+      });
+
+      const res = await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+      );
+      expect(res.status).toBe(200); // a side effect never 5xxs the callback
+
+      const row = (await world.messagesRepo.getByProviderSid('SMout0001'))!;
+      expect(row.delivery_status).toBe('undelivered');
+      expect(row.retry_due_at).toBe(RETRY_PROMISE_WITHDRAWN_AT);
+      const emits = world.emitted.filter(
+        (e) =>
+          e.event === 'message.persisted' &&
+          (e.payload as { tsMsgId: string }).tsMsgId === seeded.tsMsgId,
+      );
+      expect(emits).toHaveLength(2); // the transition's, then the withdrawal's
+      expect(
+        capture.atLevel(ERROR).filter((l) => l['msg'] === 'delivery-error side effect failed'),
+      ).toHaveLength(1);
+      expect(capture.lines.some((l) => l['msg'] === 'one-to-one 30003 retry scheduled')).toBe(false);
+    });
+
+    it('Review Focus 1: a 30003 failure that arrives AFTER the text was delivered stamps nothing, enqueues nothing and logs no decision', async () => {
+      const { app, world, capture } = makeWebhookHarness();
+      await seedOutbound(world, 'SMout0001');
+      await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'delivered' }));
+
+      const res = await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }),
+      );
+      expect(res.status).toBe(200);
+
+      const row = (await world.messagesRepo.getByProviderSid('SMout0001'))!;
+      expect(row.delivery_status).toBe('delivered');
+      expect(row.retry_due_at).toBeUndefined();
+      expect(outbound.delayed).toHaveLength(0);
+      expect(
+        capture.lines.some(
+          (l) =>
+            l['retryDecision'] !== undefined ||
+            l['failOpen'] !== undefined ||
+            l['msg'] === 'one-to-one 30003 retry scheduled',
+        ),
+      ).toBe(false);
+    });
+
+    it('Review Focus 2: two deliveries of the same 30003 callback processed concurrently stamp once and enqueue exactly one retry', async () => {
+      const { app, world } = makeWebhookHarness();
+      await seedOutbound(world, 'SMout0001');
+      const params = statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' });
+
+      const [first, second] = await Promise.all([
+        signedTwilioPost(app, STATUS_PATH, params),
+        signedTwilioPost(app, STATUS_PATH, params),
+      ]);
+      expect([first.status, second.status]).toEqual([200, 200]);
+
+      const row = (await world.messagesRepo.getByProviderSid('SMout0001'))!;
+      expect(row.delivery_status).toBe('undelivered');
+      expect(row.retry_due_at).toBeDefined();
+      expect(outbound.delayed).toHaveLength(1);
+    });
+
+    it('Review Focus 5: a 30003 reported as failed (not undelivered) is decided, stamped and retried the same way', async () => {
+      const { app, world } = makeWebhookHarness();
+      await seedOutbound(world, 'SMout0001');
+
+      const res = await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'failed', ErrorCode: '30003' }),
+      );
+      expect(res.status).toBe(200);
+
+      const row = (await world.messagesRepo.getByProviderSid('SMout0001'))!;
+      expect(row.delivery_status).toBe('failed');
+      expect(row.retry_due_at).toBeDefined();
+      expect(outbound.delayed).toHaveLength(1);
     });
 
     it('30005 (invalid number) flags the CONTACT sms_unreachable and never retries', async () => {
@@ -1418,12 +1802,16 @@ describe('relay delivery-failure severity (D23)', () => {
     );
   });
 
-  // Sec 7 intention 14 names "the 1:1 AND native-group-text paths"; only the 1:1
-  // half had a case (code review R1, F3). A group leg resolves as a MESSAGE, not
-  // through a relaysid pointer, so it never reaches the relay branch at all: the
-  // shared set decides it, 30003 is still a carve-out there, and no retryClaim
-  // is attached to anything.
-  it('leaves a native group-text 30003 receipt unchanged', async () => {
+  // retry-send-window D11 - INVERTED from "leaves a native group-text 30003
+  // receipt unchanged". A group leg resolves as a MESSAGE, not through a
+  // relaysid pointer, so it never reaches the relay branch: the shared set still
+  // keeps its delivery_failed marker at WARN with no retryClaim. What changed is
+  // the arm: no retry exists for a native group text, so the one-to-one decision
+  // declines it (WARN, group_text) - no retry_due_at stamp and NO enqueue, where
+  // the arm used to enqueue a retry that sendMessage then refused.
+  it('keeps a native group-text 30003 marker at WARN and schedules NO retry (retry-send-window D11)', async () => {
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     const { app, world, capture } = makeWebhookHarness();
     world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
     const group = await world.conversationsRepo.createGroupTextThread({
@@ -1436,7 +1824,9 @@ describe('relay delivery-failure severity (D23)', () => {
     await world.messagesRepo.append({
       conversationId: group.item.conversationId,
       providerSid: 'SMgroup30003',
-      providerTs: '2026-06-12T10:00:00.000Z',
+      // A realistic send time, inside the retry window: the decline must come
+      // from group_text, never from the window (spec D13).
+      providerTs: new Date(Date.now() - 30_000).toISOString(),
       type: 'sms',
       direction: 'outbound',
       author: 'teammate',
@@ -1461,6 +1851,14 @@ describe('relay delivery-failure severity (D23)', () => {
     expect(warn).toBeDefined();
     expect(warn!['relay']).toBeUndefined();
     expect(warn!['retryClaim']).toBeUndefined();
+    // D11: no retry exists for a native group text - no promise, no job.
+    const row = await world.messagesRepo.getByProviderSid('SMgroup30003');
+    expect(row?.delivery_status).toBe('undelivered');
+    expect(row?.retry_due_at).toBeUndefined();
+    expect(outbound.delayed).toHaveLength(0);
+    const declined = capture.atLevel(WARN).filter((l) => l['retryDecision'] === 'group_text');
+    expect(declined).toHaveLength(1);
+    expect(declined[0]!['msg']).toBe('one-to-one 30003 retry not scheduled: group_text');
   });
 
   // The 1:1 and native-group-text paths are FENCED and must not move: they still

@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8.4 - reviews closed; Cameron ruled 2026-09-25 that only back and history navigations restore (5.8); APPROVED for build
+Status: DRAFT 8.5 - build-review refinements (5.6 cursor rule, 5.8 wording)
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -597,10 +597,12 @@ exit or a truncated page, on any tab), so absence proves nothing:
 ```
 head   := dedupeByRowKey([ ...P, ...head.filter(r => !inP.has(rowKey(r))) ])
 tail   := tail.filter(r => !inP.has(rowKey(r)))
-cursor := (head.length + tail.length was > 0 before this read) ? cursor : C   // keep the old
-                                                                            // cursor, INCLUDING null;
-                                                                            // a list that had nothing
-                                                                            // takes the read's cursor
+cursor := (head.length + tail.length was > 0 before this read && cursor !== null) ? cursor : C
+          // keep the old cursor when it is NON-NULL (it continues the loaded tail); a
+          // null cursor takes the read's cursor, so a feed that grew past a fully
+          // loaded list stays reachable (the next page re-delivers rows the list
+          // holds; appendPage's rowKey dedupe absorbs them); a list that had nothing
+          // takes the read's cursor
 autoLoadArmed := unchanged (or P.length > 0 when the list was empty)
 flags  := from the page
 then dedupeConversations, P's rows winning
@@ -668,10 +670,12 @@ snapshot: {
 
 - `save(key, snapshot)`, `load(key)`, `clear()`. `clear()` runs from a
   PASSIVE effect in `AuthGate` that fires when the session transitions to
-  unauthenticated. React deletes parent-first, so a cleanup in `AppFrame`
-  would run BEFORE the Inbox's unmount save and the save would repopulate the
-  store; a passive effect in the surviving parent runs after every deleted
-  child's cleanup, so it runs after the save. The operator id in the key is
+  unauthenticated. React runs every LAYOUT cleanup of a deleted subtree
+  before any PASSIVE cleanup or effect, so the clear (a passive effect in the
+  surviving `AuthGate`) runs after the Inbox's unmount save (a layout
+  cleanup); only a LAYOUT cleanup in a deleted parent such as `AppFrame`
+  would run before that save (layout cleanups run parent-first), and the save
+  would then repopulate the store. The operator id in the key is
   the second lock, and `aliveRef` (5.5) is the third: a request that settles
   after unmount cannot write. A full page load starts empty by construction.
 - WHEN TO SAVE: only from `commitList` (5.5), gated on `statusRef.current
@@ -1123,6 +1127,12 @@ at both widths.
 - `limit=100` on the Unread tab sits exactly at `SEEN_SET_MAX`; the strict `>`
   comparison keeps page two reachable. The issue's reachability paragraph is
   updated to say the dashboard now requests 100 (section 9).
+- The 5.6 branch I cursor rule was refined at build review (AD-4 in
+  `code-review-r1-adjudications.md`) because its first letter, "keep the old
+  cursor, INCLUDING null", stranded a fully loaded list behind the "older
+  unread threads not shown here" notice with no Load more once a truncated or
+  short head read arrived with a cursor; a null cursor now takes the read's,
+  at the cost of re-reading at most one page of rows the list already holds.
 
 ## 9. Issues to file and resolve
 

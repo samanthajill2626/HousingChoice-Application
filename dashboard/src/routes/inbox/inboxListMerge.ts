@@ -120,8 +120,11 @@ export function mergeHeadRead(
     };
   }
 
-  // Branch I: merge in, remove nothing, keep the old cursor (including null)
-  // when the list had rows; an empty list takes the read's cursor.
+  // Branch I: merge in, remove nothing. A list with rows keeps its old cursor
+  // when it is NON-NULL (it continues the loaded tail); a null cursor takes
+  // the read's cursor, so a feed that grew past a fully loaded list stays
+  // reachable (the next page re-delivers rows the list holds; appendPage's
+  // rowKey dedupe absorbs them). An empty list takes the read's cursor too.
   const inP = freshKeys;
   const mergedHead = dedupeByRowKey([...P, ...state.head.filter((r) => !inP.has(rowKey(r)))]);
   const keptTail = state.tail.filter((r) => !inP.has(rowKey(r)));
@@ -129,7 +132,7 @@ export function mergeHeadRead(
   return {
     head: split.head,
     tail: split.tail,
-    cursor: hadRows ? state.cursor : C,
+    cursor: hadRows && state.cursor !== null ? state.cursor : C,
     groupsTruncated,
     truncated,
     autoLoadArmed: hadRows ? state.autoLoadArmed : P.length > 0,

@@ -143,8 +143,26 @@ describe('mergeHeadRead - branch I (incomplete head)', () => {
     const s = state({ head: [contact('a')], tail: [contact('t1')], cursor: null });
     const next = mergeHeadRead(s, page([contact('z')], null, { truncated: true }), 'unread', 100);
     expect(ids(baseOf(next))).toEqual(['c:z', 'c:a', 'c:t1']);
+    // A null old cursor takes the read's cursor (AD-4), and the read's is null.
     expect(next.cursor).toBeNull();
     expect(next.truncated).toBe(true);
+  });
+
+  // AD-4 (build review): only a NON-NULL old cursor is kept. A fully loaded
+  // list (null cursor) takes the read's cursor, so a feed that grew past it
+  // stays reachable instead of showing "older threads not shown" with no Load
+  // more; the next page re-delivers rows the list holds, and appendPage's
+  // rowKey dedupe absorbs them.
+  it('a list with rows and a NULL cursor takes the read cursor; a non-null cursor is kept', () => {
+    const loaded = state({ head: [contact('a')], tail: [contact('t1')], cursor: null });
+    const truncatedRead = mergeHeadRead(loaded, page([contact('z')], 'MORE', { truncated: true }), 'unread', 100);
+    expect(truncatedRead.cursor).toBe('MORE');
+    expect(ids(baseOf(truncatedRead))).toEqual(['c:z', 'c:a', 'c:t1']);
+    const shortRead = mergeHeadRead(loaded, page([contact('z')], 'MORE'), 'unknown', 100);
+    expect(shortRead.cursor).toBe('MORE');
+    const partial = state({ head: [contact('a')], tail: [contact('t1')], cursor: 'TAIL' });
+    const kept = mergeHeadRead(partial, page([contact('z')], 'MORE', { truncated: true }), 'unread', 100);
+    expect(kept.cursor).toBe('TAIL');
   });
 
   it('a zero-row budget exit with rows present changes nothing but the flags', () => {

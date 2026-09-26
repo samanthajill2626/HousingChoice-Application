@@ -1,6 +1,6 @@
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
-Status: DRAFT 8.5 - build-review refinements (5.6 cursor rule, 5.8 wording)
+Status: DRAFT 8.5 - APPROVED for build as DRAFT 8.4 (Cameron ruled 2026-09-25 that only back and history navigations restore, 5.8); build-review refinements recorded in code-review-r1-adjudications.md (5.6 cursor rule, 5.8 wording, 5.2 residual)
 Date: 2026-09-25
 Revised: 2026-09-25
 Branch: `feat/inbox-rows-timestamps`
@@ -347,8 +347,11 @@ a mark-read/unread commit, the reset, or a failure); `Inbox.tsx` owns the DOM
     epoch) neither re-observes nor fires.
   - before it re-observes, the hook discards any report it has recorded but
     not yet consumed (React may batch a crossing into the same render as the
-    enabling commit). Residual, stated rather than hidden: a real observer
-    entry queued before the `unobserve` and delivered after the following
+    enabling commit). The default observer factory also drains the
+    observer's queued entries with `takeRecords()` before it re-observes and
+    before it disconnects, and ignores a callback that arrives after its
+    cleanup (build review AD-5). Residual, stated rather than hidden: an
+    entry the browser delivers between that drain and the following
     `observe` would arrive as a fresh report of old geometry; whether
     Chromium can deliver one is UNVERIFIED, and the cost would be one extra
     page in a rare timing, bounded and self-correcting.
@@ -937,8 +940,9 @@ Invariants the plan must carry as explicit tasks or watch items:
   complete head replaces head, tail and cursor, re-arms from `P`, and drops
   additive rows absent from `P`; the Unknown queue-order case (the list is
   exactly the fresh page one). Branch I on every filter - a short-with-cursor
-  head merges its rows in and removes nothing, keeps the old cursor including
-  null, and a zero-row budget exit with rows present changes nothing and
+  head merges its rows in and removes nothing, keeps a non-null old cursor
+  and takes the read's cursor when the old one was null (5.6, build review
+  AD-4), and a zero-row budget exit with rows present changes nothing and
   flags nothing; with an empty list it yields the page as-is. Conversion
   dedupe: a `gt:` row in `P` drops a `g:` row of the same conversation in
   either branch.

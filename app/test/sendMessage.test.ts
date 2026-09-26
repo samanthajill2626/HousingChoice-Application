@@ -969,3 +969,73 @@ describe('previewSendRefusal parity with the send wrapper (retry-send-window D3a
     expect(f.sent).toHaveLength(c.expected === undefined ? 1 : 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// retry-send-window D6 + D14 (spec test intention 6a): what the wrapper writes
+// at append so a retry can follow the original send. `automated` goes on EVERY
+// row (the default false included), the caller's recipient by id only when one
+// was named, and the automatic retry's lineage - attempt and window origin - at
+// append rather than annotated afterwards.
+// ---------------------------------------------------------------------------
+describe('append-time retry lineage and the send flags (retry-send-window D6, D14)', () => {
+  it('records automated on EVERY append: the default false, an explicit false and true', async () => {
+    const f = makeFakes();
+    await f.service({ conversationId: 'conv-1', body: 'default' });
+    await f.service({ conversationId: 'conv-1', body: 'person', automated: false });
+    await f.service({ conversationId: 'conv-1', body: 'machine', automated: true });
+    // toHaveProperty WITH the value: an ABSENT flag must fail here, because a
+    // row without it is retried as automated (D14's pre-deploy default).
+    expect(f.appended[0]).toHaveProperty('automated', false);
+    expect(f.appended[1]).toHaveProperty('automated', false);
+    expect(f.appended[2]).toHaveProperty('automated', true);
+  });
+
+  it('records recipientContactId ONLY when the caller named a recipient', async () => {
+    const f = makeFakes();
+    const real: ContactItem = {
+      contactId: 'c-real',
+      type: 'tenant',
+      phone: '+15550100001',
+      consent_method: 'verbal_in_person',
+    };
+    await f.service({ conversationId: 'conv-1', body: 'fenced', automated: false, recipient: real });
+    await f.service({ conversationId: 'conv-1', body: 'by phone' });
+    expect(f.appended[0]).toHaveProperty('recipientContactId', 'c-real');
+    expect(f.appended[1]).not.toHaveProperty('recipientContactId');
+  });
+
+  it('passes retryOf, retryAttempt and retryWindowStart into the append, and none of them on a normal send', async () => {
+    const f = makeFakes();
+    await f.service({
+      conversationId: 'conv-1',
+      body: 'retry body',
+      automated: true,
+      retryOf: '2026-06-12T09:58:00.000Z#SMorig',
+      retryAttempt: 2,
+      retryWindowStart: '2026-06-12T09:58:00.000Z',
+    });
+    await f.service({ conversationId: 'conv-1', body: 'normal' });
+    expect(f.appended[0]).toMatchObject({
+      retryOf: '2026-06-12T09:58:00.000Z#SMorig',
+      retryAttempt: 2,
+      retryWindowStart: '2026-06-12T09:58:00.000Z',
+      automated: true,
+    });
+    for (const field of ['retryOf', 'retryAttempt', 'retryWindowStart']) {
+      expect(f.appended[1]).not.toHaveProperty(field);
+    }
+  });
+
+  it('the manual Retry shape (retryOf alone, a person send) carries no attempt and no window origin (D2)', async () => {
+    const f = makeFakes();
+    await f.service({
+      conversationId: 'conv-1',
+      body: 'again',
+      automated: false,
+      retryOf: '2026-06-12T09:58:00.000Z#SMorig',
+    });
+    expect(f.appended[0]).toMatchObject({ retryOf: '2026-06-12T09:58:00.000Z#SMorig', automated: false });
+    expect(f.appended[0]).not.toHaveProperty('retryAttempt');
+    expect(f.appended[0]).not.toHaveProperty('retryWindowStart');
+  });
+});

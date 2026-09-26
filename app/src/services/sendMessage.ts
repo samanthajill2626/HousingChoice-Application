@@ -205,9 +205,14 @@ export interface SendMessageInput {
    */
   attachments?: MediaAttachment[];
   /**
-   * True for machine-initiated sends (reminders, AI in Phase 2) — these are
-   * what the circuit breaker meters and what manual mode refuses. M1.1's
-   * dashboard route sends are human (false): always allowed, never counted.
+   * True for a send GATED like a machine's: the circuit breaker meters it and
+   * manual mode refuses it (reminders, the missed-call and welcome texts, AI in
+   * Phase 2). A person's send is false: never metered and never refused by
+   * manual mode, but judged by the just-in-time consent gate. The
+   * automatic 30003 retry passes the ORIGINAL send's value (retry-send-window
+   * D14), so a person's text is retried as a person's send - the flag says how
+   * a send is gated, not who initiated it. Persisted on every row this wrapper
+   * appends as `automated` (false included - the default is a person's send).
    */
   automated?: boolean;
   /**
@@ -233,12 +238,28 @@ export interface SendMessageInput {
    */
   broadcastId?: string;
   /**
-   * Manual retry (dashboard Retry button): the tsMsgId of the FAILED message this
-   * send supersedes. Persisted as `retry_of` on the new message so the contact
-   * timeline collapses the stale failed bubble. ADDITIVE — absent on a normal
-   * send. (The 30003 auto-retry annotates retry_of itself; it doesn't use this.)
+   * Retry lineage: the tsMsgId of the FAILED message this send supersedes,
+   * persisted as `retry_of` on the new message AT APPEND so the contact
+   * timeline collapses the stale failed bubble. The manual Retry route passes
+   * it alone; the automatic 30003 retry (messaging.retrySend) passes it with
+   * retryAttempt and retryWindowStart (retry-send-window D6). Absent on a
+   * normal send.
    */
   retryOf?: string;
+  /**
+   * retry-send-window D6: the 1-based attempt number of an automatic 30003
+   * retry, persisted as `retry_attempt` AT APPEND so a fast 30003 on the new
+   * message reads the chain's depth (the cap) with no annotate-after race.
+   * Absent on every other send, the manual Retry included.
+   */
+  retryAttempt?: number;
+  /**
+   * retry-send-window D2/D6: the ORIGIN of the automatic retry chain - the
+   * first send's provider_ts - persisted as `retry_window_start`, so attempts 2
+   * and 3 measure the 15-minute window from the first send. A manual Retry
+   * never passes it: a human chose to send now.
+   */
+  retryWindowStart?: string;
   /**
    * share-skip-fix I8: the contact the CALLER already resolved as the
    * recipient (the broadcast fan-out's fenced tenant), handed over as the
@@ -248,6 +269,8 @@ export interface SendMessageInput {
    * opt-out gate refuses on EITHER contact's flag. Absent on every other send.
    * So the deleted and consent gates judge the caller's already-resolved
    * snapshot (redundant with the fan-out's own fence); opt-out stays fresh.
+   * retry-send-window D14: its id is persisted as `recipient_contact_id`, so a
+   * retry of the row can judge the SAME contact (read back by id).
    */
   recipient?: ContactItem;
 }
@@ -284,7 +307,20 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const events = deps.events ?? appEvents;
 
   return async function sendMessage(input) {
-    const { conversationId, body, mediaUrls, attachments, automated = false, author = 'teammate', from, broadcastId, retryOf, recipient } = input;
+    const {
+      conversationId,
+      body,
+      mediaUrls,
+      attachments,
+      automated = false,
+      author = 'teammate',
+      from,
+      broadcastId,
+      retryOf,
+      retryAttempt,
+      retryWindowStart,
+      recipient,
+    } = input;
     mergeContext({ conversationId });
 
     const conversation = await conversations.getById(conversationId);
@@ -447,8 +483,18 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       // this recipient's broadcast slot by the SID alone (additive — absent on
       // 1:1 / relay sends).
       ...(broadcastId !== undefined && { broadcastId }),
-      // Manual-retry lineage (additive — absent on a normal send).
+      // Retry lineage, stamped AT APPEND (retry-send-window D6): the manual
+      // Retry passes retryOf alone; the automatic 30003 retry passes all three,
+      // so a fast 30003 on the retry can never read a row without its attempt
+      // number or its chain's window origin. Absent on a normal send.
       ...(retryOf !== undefined && { retryOf }),
+      ...(retryAttempt !== undefined && { retryAttempt }),
+      ...(retryWindowStart !== undefined && { retryWindowStart }),
+      // retry-send-window D14: the send's own flags, so its automatic retry is
+      // sent the same way - `automated` on EVERY row (false included: the
+      // input's default is a person's send) and the caller's recipient by id.
+      automated,
+      ...(recipient !== undefined && { recipientContactId: recipient.contactId }),
     });
 
     // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and

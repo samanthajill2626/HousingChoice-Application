@@ -9,7 +9,10 @@
 // Every row is a one-to-one thread (the channel guards are the caller's, never
 // the preview's), a fresh breaker (one send never trips it), the phone-matched
 // contact, and an optional caller-resolved recipient on the SAME phone - the
-// duplicate-contacts shape share-skip-fix I8 exists for.
+// duplicate-contacts shape share-skip-fix I8 exists for. The last group names a
+// recipient that has since MOVED OFF the thread's number (a retry replaying the
+// recipient recorded at the original send): the wrapper ignores it and judges
+// the phone-matched contact, the person the text will actually reach.
 import type { ContactItem } from '../../src/repos/contactsRepo.js';
 import type { ConversationMode } from '../../src/repos/conversationsRepo.js';
 import type { SendRefusalCode } from '../../src/services/sendRefusalPreview.js';
@@ -29,6 +32,10 @@ export interface SendRefusalCase {
 }
 
 const PHONE = '+15550100001';
+/** The thread's number in every row: previewSendRefusal's participantPhone. */
+export const SEND_REFUSAL_PHONE = PHONE;
+/** A number a recorded recipient moved to after the original send. */
+const OTHER_PHONE = '+15550100099';
 const DELETED_AT = '2026-09-01T00:00:00.000Z';
 
 /** A live, consenting tenant - the phone-matched contact unless a row says otherwise. */
@@ -169,5 +176,31 @@ export const SEND_REFUSAL_CASES: readonly SendRefusalCase[] = [
     phoneContact: NO_CONSENT,
     automated: true,
     expected: 'manual_mode',
+  }),
+  // --- a recipient that no longer holds the thread's number -----------------
+  // (retry-send-window planner review: a retry replays the recipient recorded
+  // at the original send; its consent and deletion must not stand in for the
+  // number's current holder.)
+  row('recipient moved off this number, no-consent phone contact: a person send refuses', {
+    phoneContact: NO_CONSENT,
+    recipient: { ...RECIPIENT, phone: OTHER_PHONE },
+    expected: 'contact_no_consent',
+  }),
+  row('recipient moved off this number and opted out, live phone contact: a person send sends', {
+    recipient: { ...RECIPIENT, phone: OTHER_PHONE, sms_opt_out: true },
+  }),
+  row('recipient moved off this number and soft-deleted, live phone contact: a person send sends', {
+    recipient: { ...RECIPIENT, phone: OTHER_PHONE, deleted_at: DELETED_AT },
+  }),
+  row('recipient holds this number as a SECONDARY phone: still judged (a consenting recipient sends)', {
+    phoneContact: NO_CONSENT,
+    recipient: {
+      ...RECIPIENT,
+      phone: OTHER_PHONE,
+      phones: [
+        { phone: OTHER_PHONE, primary: true },
+        { phone: PHONE, primary: false },
+      ],
+    },
   }),
 ];

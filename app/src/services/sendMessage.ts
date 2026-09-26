@@ -24,6 +24,7 @@ import {
 } from '../adapters/messaging.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
+  contactHoldsPhone,
   createContactsRepo,
   isDeleted,
   type ContactItem,
@@ -353,12 +354,27 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // EITHER flag refuses: the conversation-level flag covers STOPs from
     // phones with no contact record yet (auto-capture is M1.2).
     const phoneContact = await contacts.findByPhone(participantPhone);
+    // A named recipient (share-skip-fix I8) stands for this thread only while it
+    // still HOLDS the thread's number. A retry (messaging.retrySend, the manual
+    // Retry route) replays the recipient recorded at the original send, and that
+    // contact may have moved off the number since; the text still goes to the
+    // number, so the gates then judge whoever holds it now, like any other send
+    // (retry-send-window planner review).
+    const heldRecipient =
+      recipient !== undefined && contactHoldsPhone(recipient, participantPhone) ? recipient : undefined;
+    if (recipient !== undefined && heldRecipient === undefined) {
+      log.warn(
+        { conversationId, recipientContactId: recipient.contactId, phoneContactId: phoneContact?.contactId },
+        'send: the named recipient no longer holds this thread number - judging the phone-matched contact',
+      );
+    }
     // The contact the deleted + consent gates judge: the caller's resolved
-    // recipient when given (share-skip-fix I8), else the phone-matched one.
-    const contact = recipient ?? phoneContact;
+    // recipient when it still holds the number (share-skip-fix I8), else the
+    // phone-matched one.
+    const contact = heldRecipient ?? phoneContact;
     if (
       isOptedOut(conversation.sms_opt_out, phoneContact?.sms_opt_out) ||
-      recipient?.sms_opt_out === true
+      heldRecipient?.sms_opt_out === true
     ) {
       log.warn(
         {
@@ -368,8 +384,8 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
           // caller's recipient can differ (duplicate contacts on one phone).
           phoneContactId: phoneContact?.contactId,
           phoneContactOptOut: phoneContact?.sms_opt_out === true,
-          recipientContactId: recipient?.contactId,
-          recipientOptOut: recipient?.sms_opt_out === true,
+          recipientContactId: heldRecipient?.contactId,
+          recipientOptOut: heldRecipient?.sms_opt_out === true,
           conversationOptOut: conversation.sms_opt_out === true,
         },
         'send refused: sms_opt_out is set (conversation and/or contact)',
@@ -494,7 +510,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       // sent the same way - `automated` on EVERY row (false included: the
       // input's default is a person's send) and the caller's recipient by id.
       automated,
-      ...(recipient !== undefined && { recipientContactId: recipient.contactId }),
+      ...(heldRecipient !== undefined && { recipientContactId: heldRecipient.contactId }),
     });
 
     // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and

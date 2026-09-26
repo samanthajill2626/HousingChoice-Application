@@ -352,6 +352,17 @@ export function contactPhones(contact: Pick<ContactItem, 'phone' | 'phones'>): C
 }
 
 /**
+ * Does this contact CURRENTLY hold `phone` (E.164), as its primary or a
+ * secondary number? Pure. The send wrapper uses it to decide whether a named
+ * recipient still stands for a thread's number: a recipient recorded at the
+ * original send (share-skip-fix I8) and replayed by a later retry may have
+ * moved off it since (retry-send-window planner review).
+ */
+export function contactHoldsPhone(contact: Pick<ContactItem, 'phone' | 'phones'>, phone: string): boolean {
+  return contactPhones(contact).some((entry) => entry.phone === phone);
+}
+
+/**
  * The phones[] a WRITER must persist (BE1/C1): the stored array (copied) when
  * present and non-empty, else the legacy scalar materialized as the primary
  * entry, keeping its firstSeenAt (created_at) and stamping lastSeenAt.

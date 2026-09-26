@@ -33,7 +33,7 @@ import {
 } from '../src/services/sendMessage.js';
 import { previewSendRefusal } from '../src/services/sendRefusalPreview.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
-import { SEND_REFUSAL_CASES } from './helpers/sendRefusalCases.js';
+import { SEND_REFUSAL_CASES, SEND_REFUSAL_PHONE } from './helpers/sendRefusalCases.js';
 import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 const ERROR = 50;
@@ -940,6 +940,7 @@ describe('previewSendRefusal parity with the send wrapper (retry-send-window D3a
       conversation: c.conversation,
       phoneContact: c.phoneContact,
       recipient: c.recipient,
+      participantPhone: SEND_REFUSAL_PHONE,
       automated: c.automated,
     });
 
@@ -1002,6 +1003,40 @@ describe('append-time retry lineage and the send flags (retry-send-window D6, D1
     await f.service({ conversationId: 'conv-1', body: 'by phone' });
     expect(f.appended[0]).toHaveProperty('recipientContactId', 'c-real');
     expect(f.appended[1]).not.toHaveProperty('recipientContactId');
+  });
+
+  it('ignores a named recipient that no longer holds the thread number: judges the phone-matched contact, records none, WARNs (retry-send-window planner review)', async () => {
+    // A retry replays the recipient recorded at the original send; that contact
+    // may have moved off this number since. The text still goes to the
+    // thread's number, so consent is judged on whoever holds it now.
+    const holderWithoutConsent: ContactItem = {
+      contactId: 'c-holder',
+      type: 'tenant',
+      phone: '+15550100001',
+    };
+    const moved: ContactItem = {
+      contactId: 'c-moved',
+      type: 'tenant',
+      phone: '+15550100099',
+      consent_method: 'verbal_in_person',
+    };
+    const refused = makeFakes({ contact: holderWithoutConsent });
+    await expect(
+      refused.service({ conversationId: 'conv-1', body: 'retry', automated: false, recipient: moved }),
+    ).rejects.toMatchObject({ code: 'contact_no_consent' });
+    expect(refused.sent).toHaveLength(0);
+    expect(
+      refused.capture.lines.some(
+        (l) =>
+          l['recipientContactId'] === 'c-moved' &&
+          String(l['msg']).includes('no longer holds this thread number'),
+      ),
+    ).toBe(true);
+
+    const sent = makeFakes();
+    await sent.service({ conversationId: 'conv-1', body: 'retry', automated: false, recipient: moved });
+    expect(sent.sent).toHaveLength(1);
+    expect(sent.appended[0]).not.toHaveProperty('recipientContactId');
   });
 
   it('passes retryOf, retryAttempt and retryWindowStart into the append, and none of them on a normal send', async () => {

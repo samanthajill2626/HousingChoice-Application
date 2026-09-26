@@ -2,9 +2,12 @@
 // D10). A failed one-to-one message promises "will retry" only while it carries
 // a live `retry_due_at` - the run time of the automatic retry the webhook
 // scheduled, written in the same conditional write as the failure (D7) - never
-// from the retry count. The Retry button is hidden for exactly as long, and the
-// manual Retry route refuses with 409 `retry_pending` over the same window on
-// the server's clock (`isRetryPromiseLive` in app/src/lib/retrySendWindow.ts).
+// from the retry count. The Retry button is hidden while the promise is live.
+// The manual Retry route refuses with 409 `retry_pending` over the same window
+// on the server's clock (`isRetryPromiseLive` in app/src/lib/retrySendWindow.ts);
+// the screen re-judges it on the Timeline's 60-second ticker, so the promise and
+// the hidden button can outlast the server's guard by up to one tick - the bound
+// spec section 1 states ("plus one ticker interval").
 
 /**
  * MIRROR of RETRY_PROMISE_GRACE_MS in app/src/lib/retrySendWindow.ts - the

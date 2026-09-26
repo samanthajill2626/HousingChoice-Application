@@ -1597,8 +1597,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // retry-send-window D10: while an automatic 30003 retry is scheduled for
     // this message - its promise, retry_due_at plus RETRY_PROMISE_GRACE_MS, is
     // still ahead on THIS server's clock - a manual Retry would text the member
-    // twice. Refuse it; the dashboard hides the button over the same window and
-    // maps this code to its own sentence. An expired or withdrawn promise
+    // twice. Refuse it; the dashboard hides the button over the same window (it
+    // re-judges it on a 60-second ticker, so it can lag this guard by up to one
+    // tick) and maps this code to its own sentence. An expired or withdrawn promise
     // (RETRY_PROMISE_WITHDRAWN_AT) lets the Retry through; the windows the
     // time-based guard leaves are filed as
     // manual-retry-double-send-residual-windows.

@@ -567,7 +567,7 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
   // that passes `retryScheduled`. A one-to-one bubble promises a retry ONLY
   // while it carries a live `retry_due_at`, judged on the server's clock (no API
   // response is seen in this file, so the estimate IS the pinned clock), and the
-  // Retry button is hidden for exactly as long. Every case renders with the
+  // Retry button is hidden while it is live. Every case renders with the
   // DEFAULT rosterKind, which is 'relay' (the default in the `Timeline` props
   // destructure) - on purpose: the chip must never pass `relay`, which wins over
   // `retryScheduled` and would switch the promise off on every contact page.

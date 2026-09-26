@@ -821,6 +821,13 @@ describe('deliveryReason', () => {
     expect(deliveryReason('30003', { media: true, relay: true })).toBe(relay);
   });
 
+  it('keeps the relay 30003 copy identical to the base 30003 copy (the relay map must not drift)', () => {
+    // The relay map keeps its own 30003 entry (spec D8) so `relay` can win over
+    // `retryScheduled`; its words must stay the base words - an edit to one
+    // alone would split what a relay leg and a one-to-one bubble say.
+    expect(deliveryReason('30003', { relay: true })).toBe(deliveryReason('30003'));
+  });
+
   it('leaves every OTHER code alone on a relay leg', () => {
     expect(deliveryReason('30005', { relay: true })).toBe('Number is invalid (error 30005)');
     expect(deliveryReason('30006', { relay: true })).toBe('That number is a landline (error 30006)');

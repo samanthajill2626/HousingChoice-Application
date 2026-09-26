@@ -5,7 +5,7 @@
 // preview and the send path agree on every row.
 import { describe, expect, it } from 'vitest';
 import { previewSendRefusal, type SendRefusalCode } from '../src/services/sendRefusalPreview.js';
-import { LIVE_CONTACT, SEND_REFUSAL_CASES } from './helpers/sendRefusalCases.js';
+import { LIVE_CONTACT, SEND_REFUSAL_CASES, SEND_REFUSAL_PHONE } from './helpers/sendRefusalCases.js';
 
 describe('previewSendRefusal (retry-send-window D3a step 2)', () => {
   it.each(SEND_REFUSAL_CASES)('$name', (c) => {
@@ -15,6 +15,7 @@ describe('previewSendRefusal (retry-send-window D3a step 2)', () => {
         conversation: c.conversation,
         phoneContact: c.phoneContact,
         recipient: c.recipient,
+        participantPhone: SEND_REFUSAL_PHONE,
         automated: c.automated,
       }),
     ).toBe(c.expected);
@@ -27,6 +28,7 @@ describe('previewSendRefusal (retry-send-window D3a step 2)', () => {
         conversation: { ai_mode: 'auto' },
         phoneContact: LIVE_CONTACT,
         recipient: undefined,
+        participantPhone: SEND_REFUSAL_PHONE,
         automated: true,
       }),
     ).toBeUndefined();

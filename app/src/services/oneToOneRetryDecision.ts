@@ -114,6 +114,7 @@ export async function decideOneToOneRetry(args: {
         conversation,
         phoneContact,
         recipient,
+        participantPhone,
         automated: message.automated ?? true,
       });
       if (refusal !== undefined) return { kind: 'decline', reason: refusal, level: 'warn' };

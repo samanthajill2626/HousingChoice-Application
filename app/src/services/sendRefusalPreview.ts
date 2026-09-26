@@ -20,7 +20,7 @@
 //     the promise expires (spec section 9);
 //   - `conversation_not_found`: the caller already holds the conversation.
 import { hasSmsConsent } from '../lib/smsCompliance.js';
-import { isDeleted, type ContactItem } from '../repos/contactsRepo.js';
+import { contactHoldsPhone, isDeleted, type ContactItem } from '../repos/contactsRepo.js';
 import type { ConversationItem } from '../repos/conversationsRepo.js';
 import { isKillSwitchOff, isManualMode, isOptedOut } from './scheduledSendSuppression.js';
 
@@ -35,7 +35,8 @@ export type SendRefusalCode =
 /**
  * Pure: what sendMessage's gates ((0a) through (2), in that order) would refuse
  * for this conversation, phone-matched contact, optional recipient and
- * automated flag. Excludes the channel guards (the caller handles relay_group /
+ * automated flag. A recipient that no longer holds `participantPhone` is ignored,
+ * as the wrapper ignores it. Excludes the channel guards (the caller handles relay_group /
  * group_text / no participant_phone) and the breaker (live state). Codes equal
  * the SendRefusedError codes sendMessage throws; undefined = the send goes out.
  */
@@ -44,22 +45,29 @@ export function previewSendRefusal(args: {
   conversation: Pick<ConversationItem, 'sms_opt_out' | 'ai_mode'>;
   phoneContact: ContactItem | undefined;
   recipient: ContactItem | undefined;
+  /** The thread's number (conversation.participant_phone). */
+  participantPhone: string;
   automated: boolean;
 }): SendRefusalCode | undefined {
-  const { smsSendingEnabled, conversation, phoneContact, recipient, automated } = args;
+  const { smsSendingEnabled, conversation, phoneContact, recipient, participantPhone, automated } = args;
+  // A named recipient counts only while it still holds the thread's number -
+  // the wrapper's own rule (sendMessage.ts); a stale one is ignored entirely.
+  const heldRecipient =
+    recipient !== undefined && contactHoldsPhone(recipient, participantPhone) ? recipient : undefined;
   // (0a) The A2P kill switch, ahead of everything (explicit false only).
   if (isKillSwitchOff(smsSendingEnabled)) return 'sms_sending_disabled';
   // (1) Opt-out: the conversation's flag, the phone-matched contact's, OR the
   // recipient's - either contact's flag refuses (duplicate contacts on one phone).
   if (
     isOptedOut(conversation.sms_opt_out, phoneContact?.sms_opt_out) ||
-    recipient?.sms_opt_out === true
+    heldRecipient?.sms_opt_out === true
   ) {
     return 'contact_opted_out';
   }
   // The contact the deleted and consent gates judge: the recipient when the
-  // caller named one, else the phone-matched contact (share-skip-fix I8).
-  const judged = recipient ?? phoneContact;
+  // caller named one that still holds the number, else the phone-matched
+  // contact (share-skip-fix I8).
+  const judged = heldRecipient ?? phoneContact;
   // (1b) Soft-deleted - harder than no-consent, softer than opt-out.
   if (judged !== undefined && isDeleted(judged)) return 'contact_deleted';
   // (1.5) JIT consent - a PERSON'S send only; no contact record means no gate.

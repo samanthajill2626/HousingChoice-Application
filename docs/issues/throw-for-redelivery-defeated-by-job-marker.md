@@ -150,7 +150,7 @@ Each is filed as its own issue (design Sec 9); none is edited on this branch:
 | F1 | `relay.numberReady` post-flip enqueues | [relay-number-ready-post-flip-enqueue-loss](./relay-number-ready-post-flip-enqueue-loss.md) | not a send |
 | F2 | `relay.intro` | [relay-intro-lost-under-job-marker](./relay-intro-lost-under-job-marker.md) | send-shaped + pre-send reads |
 | F3 | `relay.memberAdded` | [relay-member-added-lost-under-job-marker](./relay-member-added-lost-under-job-marker.md) | send-shaped + pre-send reads |
-| F4 | `messaging.retrySend` | [retry-send-lost-under-job-marker](./retry-send-lost-under-job-marker.md) | the post-RSW adoption |
+| F4 | `messaging.retrySend` | [retry-send-lost-under-job-marker](./retry-send-lost-under-job-marker.md) | Stage 1b of the same mission, its own worktree after Stage 1 lands |
 | F5 | `call.missedAutoText` | [missed-call-autotext-pre-send-failure-not-retried](./missed-call-autotext-pre-send-failure-not-retried.md) | send-shaped |
 | F6 | tour reminder poll (1:1, group, Send now) | [tour-reminder-lost-on-post-claim-send-error](./tour-reminder-lost-on-post-claim-send-error.md) | send-shaped |
 | F7 | placement nudge poll | [placement-nudge-lost-on-post-claim-send-error](./placement-nudge-lost-on-post-claim-send-error.md) | send-shaped |

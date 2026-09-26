@@ -167,15 +167,19 @@ carries because it lands after the other two:
      `send_unconfirmed` and RSW's "no display code" for `retry_window_closed`
      must both survive the merge, each with its test.
 3. **This branch** (Stage 1) merges third.
-4. **After it:** the `retrySend` adoption (which carries, for the one-to-one
-   retry, RSW #1 and #6 - a re-driven rung runs the same handler so the
-   job-time window check bounds it, and the window checks run before the
-   claim - plus #2, #3 and #4 - lineage on an adopted retry row,
+4. **Stage 1b - THIS mission's, in its own worktree after Stage 1 lands
+   (Cameron's ruling, 2026-09-25):** the `retrySend` adoption - the one-to-one
+   30003 automatic retry moved onto the send-attempt record. It carries, for
+   the one-to-one retry, RSW #1 and #6 (a re-driven rung runs the same
+   handler so the job-time window check bounds it; the window checks run
+   before the claim) plus #2, #3 and #4 (lineage on an adopted retry row,
    `retry_due_at` refreshed while a 1:1 outcome is pending, the promise copy
-   following `retry_due_at` - and closes the joint gap RSW records as
-   `manual-retry-double-send-residual-windows`),
-   and share-skip-fix's Branch B (the counted-as-sent attempts rule), both
-   planned on this branch's attempt record rather than a second one.
+   following `retry_due_at`), and closes the joint gap RSW records as
+   `manual-retry-double-send-residual-windows`. Its spec is a short addendum
+   to this one, planned on the record as built.
+5. **After Stage 1b:** share-skip-fix's Branch B (the counted-as-sent
+   attempts rule) waits for it and consumes the finished record; it owns no
+   part of the adoption.
 
 ## 3. Decisions: classification at the send boundary
 
@@ -774,11 +778,13 @@ The 2026-09-24 sweep found the same claim-then-throw shape at nine more sites.
 None is edited here; each is filed as its own issue, citing the sweep's
 findings by file:line, and grouped for the follow-on:
 
-- **The `retrySend` adoption**, first after RSW (Sec 2a): its record keyed on
-  the original message and the rung, one deferral, adoption with RSW's
-  lineage, `retry_due_at` kept truthful while an outcome is pending, and the
-  joint gap RSW files as `manual-retry-double-send-residual-windows`. Until
-  then a 1:1 retry that errors under the job marker is lost exactly as today.
+- **Stage 1b, this mission's (Sec 2a): the `retrySend` adoption** - its
+  record keyed on the original message and the rung, one deferral, adoption
+  with RSW's lineage, `retry_due_at` kept truthful while an outcome is
+  pending, and the joint gap RSW files as
+  `manual-retry-double-send-residual-windows`. Filed as
+  `retry-send-lost-under-job-marker`. Until it lands, a 1:1 retry that errors
+  under the job marker is lost exactly as today.
 - **Send-shaped** (adopt the D1-D3 core and the D8a record; small edits once
   they exist): `call.missedAutoText`, the tour reminder poll (1:1 and group),
   the placement nudge poll, `relay.intro` and `relay.memberAdded` via

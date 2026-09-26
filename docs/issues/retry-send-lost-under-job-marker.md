@@ -1,6 +1,6 @@
 ---
 id: retry-send-lost-under-job-marker
-title: An automatic 30003 retry (retrySend) that errors after its job marker is claimed is silently lost; its adoption into the send-outcome core is deferred work with stated requirements
+title: An automatic 30003 retry (retrySend) that errors after its job marker is claimed is silently lost; its adoption into the send-outcome core is that mission's Stage 1b, with stated requirements
 type: bug
 severity: med
 status: open
@@ -59,10 +59,15 @@ for every `sendMessage` caller including this one: its D3 stops failures AFTER
 the row is written (the inbox touch and audit at `sendMessage.ts:432-433`) from
 failing the send.
 
+**Owner (Cameron's ruling, 2026-09-25): the send-outcome-reconcile mission,
+as its Stage 1b** - its own worktree, cut after Stage 1 (`feat/send-outcome-
+reconcile`) lands and after `feat/retry-send-window` has merged. Not
+share-skip-fix's Branch B, which waits for this and consumes the finished
+record.
+
 **Suggested fix.** Group: send-shaped - adopt the send-outcome core (the D1-D3
 classifier and typed `sendMessage` errors) and the send-attempt record (D8a)
-once `feat/send-outcome-reconcile` lands, AFTER `feat/retry-send-window` has
-merged. See the
+on the record as Stage 1 built it. See the
 [send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md),
 Sec 2a item 4, the D16 note and Sec 9. What SOR states for this adoption:
 

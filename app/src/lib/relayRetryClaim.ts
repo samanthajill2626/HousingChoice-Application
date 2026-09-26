@@ -42,7 +42,12 @@ export function relayRetryProviderSid(digest: string, attempt: number): string {
  * disagree about the name of an outcome, and so neither has to import the other.
  *
  * `claimed` and `already_claimed` mean a ladder is (or already was) running;
- * every other value is a decline or a terminal close.
+ * every other value is a decline or a terminal close. One exception:
+ * `already_claimed` also answers a DUPLICATE callback for a rung the claim
+ * appended CLOSED (`gate_refused` / `window_closed`, retry-send-window D3) -
+ * the append's SID dedupe answers it without reading the rung - so on its
+ * own it does not mean a ladder ran; the first callback's line has the
+ * decline.
  */
 export type RelayRetryClaimOutcome =
   | 'claimed'

@@ -1010,7 +1010,9 @@ function MessageBubble({
     .join(' - ');
 
   // Delivery state is meaningful only for OUTBOUND; seed/legacy rows (no status)
-  // show no chip. Failures expose a reason (when error_code is present) + Retry.
+  // show no chip. Failures expose a reason (when error_code is present) + Retry,
+  // except that Retry is not rendered while an automatic retry is still
+  // promised (retry-send-window D10; the gate is at the Retry button below).
   // The timestamp goes in so a `sent` that never advanced stops reading as
   // "Sent" once it has gone quiet - a carrier that discards a message sends no
   // receipt and no error, so the age of the row is the ONLY signal there is.

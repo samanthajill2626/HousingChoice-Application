@@ -20,6 +20,12 @@ export interface InboxRowProps {
    *  Optional so existing callers (and tests) that only mark read keep working;
    *  when absent a read row simply shows no action. */
   onMarkUnread?: (row: InboxRowData) => void;
+  /** The local day the list rendered on (`Date#toDateString()`), from Inbox.
+   *  NEVER READ HERE: it is a memo-busting input only (build review R2-4), so
+   *  the first list render after local midnight re-renders every row and each
+   *  relabels ("11:58 PM" -> "Yesterday"). The row still computes `now` at
+   *  render; this prop only makes sure that render happens. */
+  dayKey?: string;
 }
 
 const CHANNEL_LABEL: Record<InboxChannel, string> = {
@@ -49,7 +55,8 @@ function hrefFor(row: InboxRowData): string {
 }
 
 // Memoized (AD-1): every Inbox render re-renders all rows, but unpatched row
-// objects keep their identity and the callbacks are stable useCallbacks.
+// objects keep their identity and the callbacks are stable useCallbacks. The
+// `dayKey` prop changes once a day, which is what relabels them all (R2-4).
 export const InboxRow = memo(function InboxRow({
   row,
   onOpen,

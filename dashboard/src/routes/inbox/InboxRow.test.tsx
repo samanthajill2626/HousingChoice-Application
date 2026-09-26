@@ -268,6 +268,49 @@ describe('InboxRow', () => {
       expect(screen.getByRole('button', { name: 'Mark Tasha Williams read' })).toBeInTheDocument();
     });
   });
+
+  // Build review R2-4: the row is memoized, so a render after local midnight
+  // relabels it only when a prop changed. Inbox hands every row the local day
+  // as `dayKey`, which changes exactly once a day. Local wall-clock instants,
+  // so both pins hold in any runner time zone.
+  describe('the day key (R2-4)', () => {
+    const beforeMidnight = new Date(2026, 6, 1, 23, 59, 30);
+    const afterMidnight = new Date(2026, 6, 2, 0, 0, 30);
+    // ONE row object for every render, as an unpatched row keeps its identity.
+    const row = mkRow({ unreadCount: 0, lastActivityAt: new Date(2026, 6, 1, 23, 59, 0).toISOString() });
+
+    function tree(dayKey: string): React.JSX.Element {
+      return (
+        <MemoryRouter>
+          <ul>
+            <InboxRow row={row} dayKey={dayKey} onOpen={onOpen} onMarkRead={onMarkRead} />
+          </ul>
+        </MemoryRouter>
+      );
+    }
+    function timeText(): string | null | undefined {
+      return screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time')?.textContent;
+    }
+
+    it('a new dayKey after local midnight relabels the same row object', () => {
+      vi.setSystemTime(beforeMidnight);
+      const view = render(tree(new Date().toDateString()));
+      expect(timeText()).toBe('11:59 PM');
+      vi.setSystemTime(afterMidnight);
+      view.rerender(tree(new Date().toDateString()));
+      expect(timeText()).toBe('Yesterday');
+    });
+
+    it('the same dayKey keeps the memoized label (the stale label the prop exists to refresh)', () => {
+      vi.setSystemTime(beforeMidnight);
+      const dayKey = new Date().toDateString();
+      const view = render(tree(dayKey));
+      expect(timeText()).toBe('11:59 PM');
+      vi.setSystemTime(afterMidnight);
+      view.rerender(tree(dayKey));
+      expect(timeText()).toBe('11:59 PM');
+    });
+  });
 });
 
 describe('InboxRow - Deleted chip (deleted-contact resurfacing)', () => {

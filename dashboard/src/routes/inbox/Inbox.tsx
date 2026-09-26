@@ -155,18 +155,25 @@ export function Inbox(): React.JSX.Element {
   const restoredRef = useRef(false);
   const noteScrollTop = inbox.noteScrollTop;
   const hasRows = inbox.rows.length > 0;
+  // The <ul> below renders exactly when this is true.
+  const listShown = inbox.status === 'ready' && inbox.rows.length > 0;
 
-  // Resolve the scroll container once the list exists; keep its scrollTop
-  // reported to the hook through a passive listener.
+  // Resolve the scroll container once the list is RENDERED; keep its scrollTop
+  // reported to the hook through a passive listener. Keyed on the list being
+  // rendered, not on rows existing (build review R2-3): a Load more page can
+  // commit rows while the error surface hides the list (a head read failed
+  // with nothing rendered), and an effect keyed on `hasRows` ran then, found
+  // no <ul>, and never ran again when Retry brought the list back - that
+  // mount had no scroll listener and no observer root.
   useLayoutEffect(() => {
-    if (!hasRows || listRef.current === null || scrollRootRef.current !== null) return;
+    if (!listShown || listRef.current === null || scrollRootRef.current !== null) return;
     const root = scrollParentOf(listRef.current);
     scrollRootRef.current = root;
     // No react-hooks/set-state-in-effect suppression: plugin 7.1.1 accepts a
     // setState that sits under a ref-derived condition OR stores a value read
     // from a ref, and this one does both (an unused directive is reported).
     setScrollRoot(root);
-  }, [hasRows]);
+  }, [listShown]);
 
   useEffect(() => {
     const root = scrollRootRef.current;
@@ -198,6 +205,13 @@ export function Inbox(): React.JSX.Element {
     epoch: inbox.pageEpoch,
     onLoad: inbox.loadMore,
   });
+
+  // The local day, recomputed on every render and handed to each row (build
+  // review R2-4). The rows are memoized, so without it a render after local
+  // midnight relabeled only the rows whose objects had changed; a new day
+  // key re-renders every row once, and on any other render it is unchanged
+  // and the memo holds.
+  const dayKey = new Date().toDateString();
 
   return (
     <div className={styles.page}>
@@ -367,6 +381,7 @@ export function Inbox(): React.JSX.Element {
             <InboxRow
               key={rowKey(row)}
               row={row}
+              dayKey={dayKey}
               onOpen={inbox.markRead}
               onMarkRead={inbox.markRead}
               onMarkUnread={inbox.markUnread}

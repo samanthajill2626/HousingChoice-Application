@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EventStreamHandlers } from '../../api/index.js';
@@ -34,7 +34,7 @@ vi.mock('../../app/UnreadContext.js', () => ({
   useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
 }));
 
-import { useInbox, rowKey } from './useInbox.js';
+import { DEFAULT_PAGE_LIMIT, useInbox, rowKey } from './useInbox.js';
 // The REAL component, for the composed cases at the bottom of this file: the
 // truncation flag only misfires where the hook's server statement meets the
 // component's render of the client-filtered list.
@@ -1358,5 +1358,68 @@ describe('useInbox - page one persists (spec 5.5-5.8)', () => {
       await new Promise((r) => setTimeout(r, 20));
     });
     expect(loadInboxList(KEY)).toBeUndefined();
+  });
+});
+
+// Build review R2-3: "error with rows" IS reachable. The real Inbox through the
+// real hook, because the defect lives where the two meet: the page resolves
+// its scroll root from the rendered <ul>, and the hook can commit rows while
+// the error surface hides that list.
+describe('useInbox + Inbox - the scroll root after an error with rows (R2-3)', () => {
+  const KEY = inboxListKey('anon', 'unknown', DEFAULT_PAGE_LIMIT);
+  // jsdom has no document.scrollingElement; the page falls back to the root.
+  const scroller = (): HTMLElement => (document.scrollingElement ?? document.documentElement) as HTMLElement;
+  function renderInbox(): ReturnType<typeof render> {
+    return render(
+      <MemoryRouter initialEntries={['/inbox?filter=unknown']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+  }
+
+  it('COMPOSED: a page that lands under the error surface, then Retry: the scroll position is still reported and saved', async () => {
+    // An empty page with a cursor (the Unknown tab's budget exit).
+    getInbox.mockResolvedValueOnce(pageOf([], 'BUDGET'));
+    const view = renderInbox();
+    const loadMore = await screen.findByRole('button', { name: 'Load more' });
+    // Load more; its page hangs on the wire.
+    let releasePage: (v: InboxPage) => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise<InboxPage>((res) => {
+          releasePage = res;
+        }),
+    );
+    act(() => loadMore.click());
+    // A live update's head read FAILS with no rows rendered: the error arm,
+    // which commits nothing (so the page in flight is not reconcile-stale).
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await screen.findByRole('button', { name: 'Retry' }, { timeout: 2000 });
+    // The page commits its rows into the list the error surface hides.
+    await act(async () => {
+      releasePage(pageOf([mkRow({ contactId: 'c1' })], null));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.queryByRole('list', { name: 'Conversations' })).toBeNull();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    // Retry brings the list back.
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    act(() => screen.getByRole('button', { name: 'Retry' }).click());
+    await screen.findByRole('list', { name: 'Conversations' });
+    scroller().scrollTop = 250;
+    fireEvent.scroll(scroller());
+    view.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(250);
+  });
+
+  it('COMPOSED (control): a plain load reports and saves the scroll position', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    const view = renderInbox();
+    await screen.findByRole('list', { name: 'Conversations' });
+    scroller().scrollTop = 250;
+    fireEvent.scroll(scroller());
+    view.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(250);
   });
 });

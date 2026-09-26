@@ -736,3 +736,27 @@ describe('Inbox - the auto-load wiring', () => {
     expect(seenAutoLoad?.onLoad).toBe(loadMore);
   });
 });
+
+// Build review R2-4, the page's half: the rows are memoized, so the page hands
+// each one the local day. A list render after local midnight then relabels a
+// row whose object did not change (the same state object is returned twice).
+describe('Inbox - the day key', () => {
+  it('a render after local midnight relabels an unchanged row', () => {
+    vi.setSystemTime(new Date(2026, 6, 1, 23, 59, 30));
+    state = baseState({
+      rows: [mkRow({ unreadCount: 0, lastActivityAt: new Date(2026, 6, 1, 23, 59, 0).toISOString() })],
+      serverRowCount: 1,
+    });
+    const view = renderInbox();
+    const timeText = (): string | null | undefined =>
+      screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time')?.textContent;
+    expect(timeText()).toBe('11:59 PM');
+    vi.setSystemTime(new Date(2026, 6, 2, 0, 0, 30));
+    view.rerender(
+      <MemoryRouter initialEntries={['/inbox']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    expect(timeText()).toBe('Yesterday');
+  });
+});

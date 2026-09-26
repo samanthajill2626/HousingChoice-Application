@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   aggregateInbox,
   countUnreadRows,
+  HYDRATE_CONCURRENCY,
   InboxBadRequestError,
   type InboxPage,
   type InboxRouterDeps,
@@ -2561,7 +2562,7 @@ describe('aggregateInbox - prefetch equivalence (spec 5.10)', () => {
     // with no prefetch pass: the sequential loop reads exactly one) ...
     expect(calls.listByConversation).toBeGreaterThan(1);
     // ... but stopped scheduling when the page filled.
-    expect(calls.listByConversation).toBeLessThanOrEqual(9);
+    expect(calls.listByConversation).toBeLessThanOrEqual(HYDRATE_CONCURRENCY + 1);
     // And the sequential arm reads exactly one.
     const sequential = emptyCallCounts();
     await aggregateInbox({ filter: 'all', limit: 1 }, makeDeps({ contacts, conversations, slowReads: true }, sequential, undefined, { inboxPrefetch: false }));

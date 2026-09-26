@@ -21,6 +21,15 @@ describe('formatInboxTime', () => {
     expect(formatInboxTime(iso(new Date(2026, 8, 24, 9, 0)), now)).toBe('Yesterday');
   });
 
+  // SC-11: Dec 31 vs Jan 1 across a local year boundary. Yesterday is decided
+  // by the local DAY before the year is looked at, so Dec 31 reads Yesterday
+  // on Jan 1, never "Dec 31, 2026".
+  it('Yesterday across a local year boundary: Dec 31 on Jan 1', () => {
+    const newYear = new Date(2027, 0, 1, 0, 30);
+    expect(formatInboxTime(iso(new Date(2026, 11, 31, 23, 59)), newYear)).toBe('Yesterday');
+    expect(formatInboxTime(iso(new Date(2027, 0, 1, 0, 1)), newYear)).toBe('12:01 AM');
+  });
+
   it('earlier this local year -> month and day', () => {
     expect(formatInboxTime(iso(new Date(2026, 8, 12, 9, 0)), now)).toBe('Sep 12');
     expect(formatInboxTime(iso(new Date(2026, 0, 1, 0, 0)), now)).toBe('Jan 1');

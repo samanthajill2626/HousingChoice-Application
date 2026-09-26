@@ -40,7 +40,7 @@ import { useInbox, rowKey } from './useInbox.js';
 // component's render of the client-filtered list.
 import { Inbox } from './Inbox.js';
 import { StrictMode } from 'react';
-import { clearInboxLists, loadInboxList, saveInboxList } from './inboxListStore.js';
+import { clearInboxLists, inboxListKey, loadInboxList, saveInboxList } from './inboxListStore.js';
 
 function mkRow(over: Partial<InboxRow> = {}): InboxRow {
   return {
@@ -181,12 +181,17 @@ describe('useInbox', () => {
     rerender(<Probe filter="groups" />);
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
     expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+    // SC-8: the key effect cleared loadingMore for the new tab. The stale
+    // page's `finally` skips the clear, so without it Load more (and
+    // auto-load, which needs !loadingMore) would be dead here for good.
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('false');
 
     act(() => releaseMore());
     await new Promise((r) => setTimeout(r, 20));
     // No contamination, and no cursor from a partition this filter cannot read.
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('false');
   });
 
   // Adversarial 29. `loadMore`'s `stale()` guard consulted the FILTER axis only,
@@ -348,9 +353,15 @@ describe('useInbox', () => {
     // Mark read resolves and commits (generation bump).
     act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
     await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
-    // The stale refetch now resolves — the generation guard must discard it.
-    act(() => releaseStale());
-    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    // The stale refetch now resolves - the generation guard must discard it.
+    // SC-10: released inside an async act that outlasts its continuation, then
+    // asserted once. A waitFor here would check once synchronously and pass
+    // BEFORE the stale page could commit, so deleting the guard went unseen.
+    await act(async () => {
+      releaseStale();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
   });
 });
 
@@ -921,7 +932,7 @@ describe('useInbox - the unread feed truncation flag', () => {
 });
 
 describe('useInbox - page one persists (spec 5.5-5.8)', () => {
-  const KEY = 'anon:all:2';
+  const KEY = inboxListKey('anon', 'all', 2);
   function snapshot(rows: InboxRow[], cursor: string | null, scrollTop = 0) {
     return { head: rows, tail: [], cursor, groupsTruncated: false, truncated: false, scrollTop };
   }
@@ -1213,5 +1224,139 @@ describe('useInbox - page one persists (spec 5.5-5.8)', () => {
     const second = render(<Probe filter="all" limit={2} restoreScroll={false} />);
     second.unmount();
     expect(loadInboxList(KEY)?.scrollTop).toBe(0);
+  });
+
+  // SC-3 (invariant 7): the unmount save is gated on `ready`, so a mount that
+  // missed the store and never saw its first page commit saves nothing - not
+  // on the StrictMode simulated unmount, not on the real one. An empty
+  // snapshot here would restore as a 'ready' empty list on the next visit.
+  it('the unmount save writes nothing before the first page commits (StrictMode store miss, hanging read)', () => {
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    const { unmount } = render(
+      <StrictMode>
+        <Probe filter="all" limit={2} />
+      </StrictMode>,
+    );
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    unmount();
+    expect(loadInboxList(KEY)).toBeUndefined();
+  });
+
+  // SC-6 (spec 5.8, the filter-effect rule): the effect records the key it
+  // just handled in BOTH branches, so a restored mount that leaves its tab and
+  // comes back resets instead of skipping the reset with the other tab's rows.
+  it('a restored mount that switches tab and back resets to the spinner, never showing the other tab rows', async () => {
+    saveInboxList(KEY, snapshot([mkRow({ contactId: 'r1' })], null));
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'r1' })], null));
+    const { rerender } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'u1', unreadCount: 1 })], null));
+    rerender(<Probe filter="unread" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('c:u1'));
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    rerender(<Probe filter="all" limit={2} />);
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    expect(screen.getByTestId('count')).toHaveTextContent('0');
+    expect(screen.getByTestId('ids').textContent).toBe('');
+  });
+
+  // SC-7 (spec 5.7): a filter change clears the banner with the rest of the
+  // reset, before the new tab's first page lands.
+  it('the reset clears refreshFailed: a banner raised on one tab is gone while the next tab loads', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    const { rerender } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(screen.getByTestId('refreshFailed')).toHaveTextContent('true'), { timeout: 2000 });
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    rerender(<Probe filter="unread" limit={2} />);
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    expect(screen.getByTestId('refreshFailed')).toHaveTextContent('false');
+  });
+
+  // SC-7 (slice C gaps): the reset also drops the old tab's pending patches
+  // and zeroes the scroll seed. Neither is rendered, so the new tab's first
+  // SAVE is where a leftover would show: a patch folded into a row it never
+  // touched, and the old tab's scroll position.
+  it('the reset clears the pending patches and the scroll seed: the next tab saves neither', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })], null));
+    markInboxRead.mockImplementationOnce(() => new Promise<void>(() => {}));
+    const { rerender } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    act(() => {
+      screen.getByRole('button', { name: 'scroll' }).click();
+      screen.getByRole('button', { name: 'read:c:c1' }).click();
+    });
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })], null));
+    rerender(<Probe filter="unread" limit={2} />);
+    const unreadKey = inboxListKey('anon', 'unread', 2);
+    await waitFor(() => expect(loadInboxList(unreadKey)).toBeDefined());
+    expect(loadInboxList(unreadKey)?.head[0]?.unreadCount).toBe(2);
+    expect(loadInboxList(unreadKey)?.scrollTop).toBe(0);
+  });
+
+  // SC-9 (section 6: markUnread's commit is a commitList writer). The row
+  // flips at once, the settled POST commits it to the render AND the store,
+  // and a patch commit is not a page commit, so the epoch stays put.
+  it('markUnread flips the row at once, then commits it to the render and the store without moving the epoch', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })], null));
+    let settle: () => void = () => {};
+    markInboxUnread.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          settle = () => res();
+        }),
+    );
+    render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'unread:c:c1' }).click());
+    expect(screen.getByTestId('unread')).toHaveTextContent('1');
+    expect(markInboxUnread).toHaveBeenCalledWith({ contactId: 'c1' });
+    await act(async () => {
+      settle();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByTestId('unread')).toHaveTextContent('1');
+    expect(loadInboxList(KEY)?.head[0]?.unreadCount).toBe(1);
+    expect(screen.getByTestId('epoch')).toHaveTextContent('1');
+  });
+
+  it('markUnread rolls the row back to read when the request fails', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })], null));
+    markInboxUnread.mockRejectedValueOnce(new ApiError(500, 'http_500', 'no'));
+    render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'unread:c:c1' }).click());
+    expect(screen.getByTestId('unread')).toHaveTextContent('1');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
+    expect(loadInboxList(KEY)?.head[0]?.unreadCount).toBe(0);
+  });
+
+  // The sign-out ordering case: the unmount save ran, AuthGate cleared the
+  // store, and only THEN does the POST settle. Nothing may write the store
+  // again. (The commit's own alive gate and commitList's back each other up.)
+  it('a markUnread that settles after unmount and the sign-out clear saves nothing', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })], null));
+    let settle: () => void = () => {};
+    markInboxUnread.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          settle = () => res();
+        }),
+    );
+    const { unmount } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    act(() => screen.getByRole('button', { name: 'unread:c:c1' }).click());
+    unmount();
+    clearInboxLists();
+    await act(async () => {
+      settle();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(loadInboxList(KEY)).toBeUndefined();
   });
 });

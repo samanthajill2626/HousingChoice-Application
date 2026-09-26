@@ -109,6 +109,39 @@ describe('useAutoLoad', () => {
     expect(onLoad).toHaveBeenCalledTimes(1);
   });
 
+  // SC-1: the failed-page shape AFTER an epoch move. At the mount epoch the
+  // handled epoch already equals the current one, so only a later epoch proves
+  // that a re-enable at an already-handled epoch neither re-observes nor fires.
+  it('after an epoch move, re-enabling at the SAME epoch (a failed page) neither re-observes nor fires', () => {
+    current = true;
+    const { rerender } = render(<Harness enabled epoch={1} />);
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    rerender(<Harness enabled={false} epoch={1} />); // the page is in flight
+    rerender(<Harness enabled epoch={2} />); // it committed, a short page: still in view
+    expect(reobserved).toBe(1);
+    expect(onLoad).toHaveBeenCalledTimes(2);
+    rerender(<Harness enabled={false} epoch={2} />); // the next page is in flight...
+    rerender(<Harness enabled epoch={2} />); // ...and FAILED: enabled again, no epoch move
+    expect(reobserved).toBe(1);
+    expect(onLoad).toHaveBeenCalledTimes(2);
+  });
+
+  // SC-2: the discarded-page shape with the epoch moving WHILE disabled (a head
+  // read commits while loadingMore is still true): nothing re-observes until
+  // the hook is enabled again, and then the fresh report fires once.
+  it('an epoch that moves while DISABLED re-observes only once enabled, then fires once if still in view', () => {
+    const { rerender } = render(<Harness enabled epoch={1} />);
+    act(() => cross(true));
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    rerender(<Harness enabled={false} epoch={1} />); // loadingMore: the page is in flight
+    rerender(<Harness enabled={false} epoch={2} />); // a head read committed and discarded it
+    expect(reobserved).toBe(0);
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    rerender(<Harness enabled epoch={2} />); // loadingMore cleared; the sentinel is still in view
+    expect(reobserved).toBe(1);
+    expect(onLoad).toHaveBeenCalledTimes(2);
+  });
+
   it('a crossing during a load is discarded; the commit re-observes and fires once if still in view', () => {
     const { rerender } = render(<Harness enabled epoch={1} />);
     act(() => cross(true));

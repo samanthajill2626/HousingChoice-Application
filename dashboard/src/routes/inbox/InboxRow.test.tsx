@@ -238,9 +238,11 @@ describe('InboxRow', () => {
           lastActivityAt: '2026-06-25T10:00:00.000Z',
         }),
       );
-      expect(screen.getByRole('link', { name: /With Ana/ }).querySelector('time')).toHaveTextContent(
-        /^Jun 25$/,
-      );
+      const relayTime = screen.getByRole('link', { name: /With Ana/ }).querySelector('time');
+      expect(relayTime).toHaveTextContent(/^Jun 25$/);
+      // SC-12: the same dateTime and full-stamp title as a contact row.
+      expect(relayTime).toHaveAttribute('dateTime', '2026-06-25T10:00:00.000Z');
+      expect(relayTime?.getAttribute('title')).toMatch(/^Jun 25, 2026, \d{1,2}:\d{2} [AP]M$/);
       cleanupAndRender(
         mkRow({
           kind: 'group_text',
@@ -250,9 +252,10 @@ describe('InboxRow', () => {
           lastActivityAt: '2025-12-18T10:00:00.000Z',
         }),
       );
-      expect(screen.getByRole('link', { name: /Ana & Ben/ }).querySelector('time')).toHaveTextContent(
-        /^Dec 18, 2025$/,
-      );
+      const groupTime = screen.getByRole('link', { name: /Ana & Ben/ }).querySelector('time');
+      expect(groupTime).toHaveTextContent(/^Dec 18, 2025$/);
+      expect(groupTime).toHaveAttribute('dateTime', '2025-12-18T10:00:00.000Z');
+      expect(groupTime?.getAttribute('title')).toMatch(/^Dec 18, 2025, \d{1,2}:\d{2} [AP]M$/);
     });
 
     it('renders NO <time> for an unparseable instant', () => {

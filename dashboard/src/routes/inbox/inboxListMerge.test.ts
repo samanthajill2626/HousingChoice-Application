@@ -101,6 +101,22 @@ describe('mergeHeadRead - branch C (complete head)', () => {
     expect(next.cursor).toBe('NEW');
   });
 
+  // SC-5: only the All tab treats relay and group rows as additive. On Unread
+  // and Unknown they count toward the limit like any paged row, so a contact
+  // plus a group row FILL a limit-2 page: branch C, the tail and the old
+  // cursor go. Counting them as additive there would call every full page
+  // incomplete and never drop a stale row.
+  it.each([
+    ['unread', groupText('g1')],
+    ['unknown', relay('r1')],
+  ] as const)('on %s, a relay or group row is a PAGED row: a full page with a cursor is complete', (filter, multi) => {
+    const s = state({ head: [contact('old')], tail: [contact('t1')], cursor: 'OLD' });
+    const next = mergeHeadRead(s, page([contact('n1'), multi], 'NEW'), filter, 2);
+    expect(ids(next.head)).toEqual(['c:n1', rowKey(multi)]);
+    expect(next.tail).toEqual([]);
+    expect(next.cursor).toBe('NEW');
+  });
+
   it('drops additive rows absent from the page, as today', () => {
     const s = state({ head: [contact('n1'), relay('r1')], cursor: null });
     const next = mergeHeadRead(s, page([contact('n1')], null), 'all', 100);

@@ -9,6 +9,7 @@ import type { InboxRow as InboxRowData } from '../../api/index.js';
 // hunting every verbatim copy of it. `inboxFilters.ts` is the one source; these
 // tests assert that what the page renders is what that module returns.
 import { emptyClearedCopy, emptyCopy, emptyMoreCopy } from './inboxFilters.js';
+import { clearInboxLists } from './inboxListStore.js';
 import type { InboxState } from './useInbox.js';
 
 let state: InboxState;
@@ -58,6 +59,22 @@ vi.mock('./useInbox.js', async () => {
     },
   };
 });
+
+// SC-4: the options the page hands to useAutoLoad, recorded by a PASS-THROUGH
+// mock - the real hook still runs (jsdom has no IntersectionObserver, so it
+// installs nothing either way).
+type AutoLoadOptions = Parameters<typeof import('./useAutoLoad.js').useAutoLoad>[0];
+let seenAutoLoad: AutoLoadOptions | undefined;
+vi.mock('./useAutoLoad.js', async () => {
+  const actual = await vi.importActual<typeof import('./useAutoLoad.js')>('./useAutoLoad.js');
+  return {
+    ...actual,
+    useAutoLoad: (opts: AutoLoadOptions) => {
+      seenAutoLoad = opts;
+      actual.useAutoLoad(opts);
+    },
+  };
+});
 import { Inbox, limitFromParam } from './Inbox.js';
 
 function mkRow(over: Partial<InboxRowData> = {}): InboxRowData {
@@ -83,11 +100,14 @@ function renderInbox(entry = '/inbox'): ReturnType<typeof render> {
 }
 
 beforeEach(() => {
+  // Spec 7.1: every inbox test file that mounts the page clears the store.
+  clearInboxLists();
   state = baseState();
   seenFilter = undefined;
   seenLimit = undefined;
   seenOperator = undefined;
   seenRestoreScroll = undefined;
+  seenAutoLoad = undefined;
   noteScrollTop.mockReset();
   markRead.mockReset();
   loadMore.mockReset();
@@ -594,7 +614,11 @@ describe('Inbox - page size, banner, sentinel, scroll (spec 5.1/5.2/5.7/5.8)', (
   it('renders the sentinel only while hasMore', () => {
     state = baseState({ rows: [mkRow()], serverRowCount: 1, hasMore: true });
     const { container } = renderInbox();
-    expect(container.querySelector('[data-autoload-sentinel]')).not.toBeNull();
+    const sentinel = container.querySelector('[data-autoload-sentinel]');
+    expect(sentinel).not.toBeNull();
+    // Spec 5.2 (SC-12, slice D gap 9): hidden from assistive tech; the Load
+    // more button stays the accessible affordance.
+    expect(sentinel).toHaveAttribute('aria-hidden', 'true');
     cleanup();
     state = baseState({ rows: [mkRow()], serverRowCount: 1, hasMore: false });
     const { container: c2 } = renderInbox();
@@ -642,5 +666,73 @@ describe('Inbox - page size, banner, sentinel, scroll (spec 5.1/5.2/5.7/5.8)', (
     expect(seenRestoreScroll).toBe(false);
     expect(scroller.scrollTop).toBe(0);
     expect(noteScrollTop).toHaveBeenCalledWith(0);
+  });
+
+  // Slice D gap 6: the restore is latched once per mount. Rows that leave and
+  // come back (the Unread tab cleared, then refilled by a head read) must not
+  // re-apply the saved position over where the operator has scrolled since.
+  it('applies the scroll restore once: rows that leave and return do not re-apply it', () => {
+    const scroller = (document.scrollingElement ?? document.documentElement) as HTMLElement;
+    scroller.scrollTop = 999;
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, restoredScrollTop: 500 });
+    const view = renderInbox('/inbox?filter=unread');
+    expect(scroller.scrollTop).toBe(500);
+    scroller.scrollTop = 120;
+    state = baseState({ rows: [], serverRowCount: 1, restoredScrollTop: 500 });
+    view.rerender(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    state = baseState({ rows: [mkRow({ contactId: 'c2', name: 'Rene Okafor' })], serverRowCount: 1, restoredScrollTop: 500 });
+    view.rerender(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('link', { name: /Rene Okafor/ })).toBeInTheDocument();
+    expect(scroller.scrollTop).toBe(120);
+    expect(noteScrollTop).toHaveBeenCalledTimes(1);
+  });
+
+  // Slice D gap 7: only a STORE-backed mount restores. A fresh mount's rows
+  // (restoredScrollTop null) leave the container alone, even on POP.
+  it('a fresh (store-miss) POP mount neither writes scrollTop nor reports one', () => {
+    const scroller = (document.scrollingElement ?? document.documentElement) as HTMLElement;
+    scroller.scrollTop = 999;
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, restoredScrollTop: null });
+    renderInbox();
+    expect(seenRestoreScroll).toBe(true);
+    expect(scroller.scrollTop).toBe(999);
+    expect(noteScrollTop).not.toHaveBeenCalled();
+  });
+
+  // Slice D gap 8: the passive scroll listener keeps the hook's scroll ref
+  // current, which is what the unmount save writes (spec 5.8).
+  it('a scroll event on the resolved container reports its scrollTop to the hook', () => {
+    const scroller = (document.scrollingElement ?? document.documentElement) as HTMLElement;
+    state = baseState({ rows: [mkRow()], serverRowCount: 1 });
+    renderInbox();
+    scroller.scrollTop = 250;
+    fireEvent.scroll(scroller);
+    expect(noteScrollTop).toHaveBeenLastCalledWith(250);
+  });
+});
+
+// SC-4 (spec 5.2, invariant 2): the page wires the hook's arming into
+// useAutoLoad as `enabled = hasMore && autoLoadArmed && !loadingMore`, hands
+// it the page epoch, and hands it the hook's own loadMore.
+describe('Inbox - the auto-load wiring', () => {
+  it.each([
+    [true, true, false, true],
+    [false, true, false, false],
+    [true, false, false, false],
+    [true, true, true, false],
+  ])('hasMore=%s armed=%s loadingMore=%s -> enabled=%s, with the epoch and loadMore passed through', (hasMore, autoLoadArmed, loadingMore, enabled) => {
+    state = baseState({ rows: [mkRow()], serverRowCount: 1, hasMore, autoLoadArmed, loadingMore, pageEpoch: 7 });
+    renderInbox();
+    expect(seenAutoLoad?.enabled).toBe(enabled);
+    expect(seenAutoLoad?.epoch).toBe(7);
+    expect(seenAutoLoad?.onLoad).toBe(loadMore);
   });
 });

@@ -120,6 +120,13 @@ async function scrollToTop(page: Page): Promise<void> {
   });
 }
 
+/** The rows' link targets, sorted: WHICH rows are on screen, order aside. */
+async function rowHrefs(page: Page): Promise<string[]> {
+  return inboxList(page)
+    .getByRole('link')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? '').sort());
+}
+
 test.describe('inbox rows and timestamps', () => {
   test.beforeEach(async ({ page, request }) => {
     await reseed(request);
@@ -178,6 +185,8 @@ test.describe('inbox rows and timestamps', () => {
     const [number4] = await seedParties(request, 1, stamp, 8);
     await expect(rowFor(page, number4!)).toBeVisible({ timeout: 15_000 });
     await expect(rows(page)).toHaveCount(7, { timeout: 15_000 });
+    // SC-13: the refresh put the new row at the top.
+    await expect(rows(page).first().getByRole('link')).toHaveText(new RegExp(displayOf(number4!).replace(/[()]/g, '\\$&')));
     await expect(loadMore(page)).toHaveCount(0);
     expect(await listHandle!.evaluate((el) => el.isConnected)).toBe(true);
     expectHeadFirst(seen, mark, 'after the inbound at limit=2', true);
@@ -208,6 +217,8 @@ test.describe('inbox rows and timestamps', () => {
     await scrollToBottom(page);
     const saved = await scroller(page).evaluate((el) => el.scrollTop);
     expect(saved).toBeGreaterThan(0);
+    // SC-13: which rows are shown, so "the same rows" below is not a count only.
+    const shown = await rowHrefs(page);
 
     const mark = seen.length;
     await rows(page).last().getByRole('link').click();
@@ -229,12 +240,14 @@ test.describe('inbox rows and timestamps', () => {
     await expect(rows(page)).toHaveCount(9);
     const restored = await scroller(page).evaluate((el) => el.scrollTop);
     expect(Math.abs(restored - saved)).toBeLessThanOrEqual(8);
+    expect(await rowHrefs(page), 'the restore shows the same rows').toEqual(shown);
     // A head read followed the return, and no cursor request did; the rows and
     // the position are unchanged once it settles (spec 7.3).
     await expect.poll(() => seen.slice(mark).filter((r) => !r.cursor).length, { timeout: 10_000 }).toBeGreaterThan(0);
     await page.waitForTimeout(800);
     expect(seen.slice(mark).filter((r) => r.cursor)).toHaveLength(0);
     await expect(rows(page)).toHaveCount(9);
+    expect(await rowHrefs(page), 'the reconciled list holds the same rows').toEqual(shown);
     const settled = await scroller(page).evaluate((el) => el.scrollTop);
     expect(Math.abs(settled - saved)).toBeLessThanOrEqual(8);
 
@@ -283,6 +296,7 @@ test.describe('inbox rows and timestamps', () => {
       expect(time!.width, `${where}: time has width`).toBeGreaterThan(0);
       expect(time!.x + time!.width, `${where}: time inside row (right edge)`).toBeLessThanOrEqual(row!.x + row!.width + 1);
       expect(time!.x, `${where}: time inside row (left edge)`).toBeGreaterThanOrEqual(row!.x - 1);
+      expect(time!.y, `${where}: time inside row (top edge)`).toBeGreaterThanOrEqual(row!.y - 1);
       return { row: row!, time: time! };
     }
 

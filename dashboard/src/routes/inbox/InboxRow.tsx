@@ -6,10 +6,11 @@
 // preview, and a red count. Unknown rows get an amber "Needs triage" chip and
 // route to the triage list. No dangerouslySetInnerHTML — text renders as React
 // children (XSS-safe).
-import { useRef, useState } from 'react';
+import { memo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { InboxChannel, InboxRow as InboxRowData } from '../../api/index.js';
 import styles from './InboxRow.module.css';
+import { formatInboxTime, formatInboxTimeFull } from './inboxTime.js';
 
 export interface InboxRowProps {
   row: InboxRowData;
@@ -19,6 +20,12 @@ export interface InboxRowProps {
    *  Optional so existing callers (and tests) that only mark read keep working;
    *  when absent a read row simply shows no action. */
   onMarkUnread?: (row: InboxRowData) => void;
+  /** The local day the list rendered on (`Date#toDateString()`), from Inbox.
+   *  NEVER READ HERE: it is a memo-busting input only (build review R2-4), so
+   *  the first list render after local midnight re-renders every row and each
+   *  relabels ("11:58 PM" -> "Yesterday"). The row still computes `now` at
+   *  render; this prop only makes sure that render happens. */
+  dayKey?: string;
 }
 
 const CHANNEL_LABEL: Record<InboxChannel, string> = {
@@ -47,7 +54,10 @@ function hrefFor(row: InboxRowData): string {
   return `/contacts/unknown?phone=${encodeURIComponent(row.phone ?? '')}`;
 }
 
-export function InboxRow({
+// Memoized (AD-1): every Inbox render re-renders all rows, but unpatched row
+// objects keep their identity and the callbacks are stable useCallbacks. The
+// `dayKey` prop changes once a day, which is what relabels them all (R2-4).
+export const InboxRow = memo(function InboxRow({
   row,
   onOpen,
   onMarkRead,
@@ -59,6 +69,13 @@ export function InboxRow({
   // Both multi-party kinds get the same people glyph; the CHIP is what tells
   // them apart (a masked relay thread vs a native carrier group text).
   const isMultiParty = isRelay || isGroupText;
+  // A row named by its formatted number (the stub contact a first inbound
+  // creates) keeps every digit: `.numberName` never shrinks (spec 5.4).
+  const isPhoneName = /^\(\d{3}\) \d{3}-\d{4}$/.test(row.name);
+  // The last-activity label (spec 5.3/5.4): computed at render; tests pin the
+  // clock with vi.setSystemTime. An unparseable instant renders no element.
+  const timeLabel = formatInboxTime(row.lastActivityAt, new Date());
+  const timeFull = formatInboxTimeFull(row.lastActivityAt);
   // The channel/kind chip: contact/unknown rows show the latest item's channel
   // (Text/Photo/Call); a multi-party row has no channel - show what it IS.
   const kindLabel = isRelay
@@ -94,7 +111,9 @@ export function InboxRow({
         <Link className={styles.main} to={hrefFor(row)} onClick={() => onOpen(row)}>
           {row.role ? <span className={`${styles.dot} ${styles[`dot_${row.role}`] ?? ''}`} aria-hidden="true" /> : null}
           <span className={styles.head}>
-            <span className={`${styles.name} ${unread ? styles.bold : ''}`}>
+            <span
+              className={`${styles.name} ${unread ? styles.bold : ''} ${isPhoneName ? styles.numberName : ''}`}
+            >
               {isMultiParty ? <span aria-hidden="true">👥 </span> : null}
               {row.name}
             </span>
@@ -102,7 +121,14 @@ export function InboxRow({
             {/* RELAY-only lifecycle: a native group text has no closed state in
                 v1 (spec 10) and its rows carry no `status` at all. */}
             {isRelay && row.status === 'closed' ? <span className={styles.tag}>Closed</span> : null}
-            {row.placementContext ? <span className={styles.tag}>{row.placementContext.label}</span> : null}
+            {/* The placement tag yields before the name down to a 4em floor
+                (build review R3-1), so it carries its full stage label as a
+                title: recoverable on hover once truncated. */}
+            {row.placementContext ? (
+              <span className={styles.placementTag} title={row.placementContext.label}>
+                {row.placementContext.label}
+              </span>
+            ) : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
             {row.deleted ? <span className={styles.deletedTag}>Deleted</span> : null}
           </span>
@@ -116,6 +142,11 @@ export function InboxRow({
             <span className={styles.count} aria-label={`${row.unreadCount} unread`}>
               {row.unreadCount}
             </span>
+          ) : null}
+          {timeLabel !== '' ? (
+            <time className={styles.time} dateTime={row.lastActivityAt} title={timeFull}>
+              {timeLabel}
+            </time>
           ) : null}
         </Link>
 
@@ -151,4 +182,4 @@ export function InboxRow({
       </div>
     </li>
   );
-}
+});

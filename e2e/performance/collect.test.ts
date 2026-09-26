@@ -270,7 +270,7 @@ describe('checked-in background policy', () => {
       }],
     });
     value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
-    start(value, 'unread-page', 10.1, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30');
+    start(value, 'unread-page', 10.1, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100');
     value.loadingFinished('sample-1', { requestId: 'unread-page', timestamp: 10.2, encodedDataLength: 20 });
 
     const ended = value.endSample('sample-1');
@@ -286,7 +286,7 @@ describe('checked-in background policy', () => {
 
   it('classifies closed Inbox page and badge tuples before evidence redaction', () => {
     const firstPartyOrigin = 'http://127.0.0.1:9111';
-    const unreadPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30';
+    const unreadPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
     const badge = 'http://127.0.0.1:9111/api/inbox/unread-count';
     expect(classifyInboxRequest(unreadPage, {
       endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
@@ -296,14 +296,26 @@ describe('checked-in background policy', () => {
     expect(classifyInboxRequest(badge, {
       endpointTemplate: '/api/inbox/unread-count', queryKeys: [], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
     })).toBe('inbox_badge');
-    // The retired shape. A page read at limit=100 is a CONTRACT MISMATCH now, not
-    // a badge: the dashboard never asks /api/inbox for 100 rows, and letting this
-    // tuple keep the badge class would hide a real page regression behind a shell
-    // classification.
-    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&limit=100', {
-      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
-    })).toBeNull();
-    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&filter=all&limit=30', {
+    // The dashboard pages at 100 since feat/inbox-rows-timestamps (2026-09-25),
+    // DEFAULT_PAGE_LIMIT in dashboard/src/routes/inbox/useInbox.ts. Every
+    // filter's page read classifies at 100; a 30-row read is the retired shape
+    // and a contract mismatch now.
+    for (const [filter, requestClass] of [
+      ['all', 'inbox_page_all'],
+      ['unread', 'inbox_page_unread'],
+      ['unknown', 'inbox_page_unknown'],
+      ['groups', 'inbox_page_groups'],
+    ] as const) {
+      expect(classifyInboxRequest(`http://127.0.0.1:9111/api/inbox?filter=${filter}&limit=100`, {
+        endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+      })).toBe(requestClass);
+      expect(classifyInboxRequest(`http://127.0.0.1:9111/api/inbox?filter=${filter}&limit=30`, {
+        endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+      })).toBeNull();
+    }
+    // Refused by ARITY (two filters), not by size: at the page size the arity
+    // guard is the only thing that can refuse it, so this pin stays on the guard.
+    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&filter=all&limit=100', {
       endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
     })).toBeNull();
 
@@ -317,7 +329,9 @@ describe('checked-in background policy', () => {
     cold.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
     start(cold, 'page', 10.3, unreadPage);
     cold.loadingFinished('sample-1', { requestId: 'page', timestamp: 10.4, encodedDataLength: 30 });
-    start(cold, 'bad', 10.5, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30&cursor=private-cursor');
+    // A Load more read at the page size: refused by arity (the cursor is a third
+    // key), so the size cannot be what refuses it.
+    start(cold, 'bad', 10.5, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100&cursor=private-cursor');
     cold.loadingFinished('sample-1', { requestId: 'bad', timestamp: 10.6, encodedDataLength: 40 });
     const ended = cold.endSample('sample-1');
     expect(ended.requests.map((request) => [request.inboxRequestClass, request.requestRole, request.unmatchedApi])).toEqual([
@@ -439,7 +453,7 @@ describe('checked-in background policy', () => {
       firstPartyOrigin: 'http://127.0.0.1:9111', surfaceId: 'inbox-all', behaviorFamily: 'inbox', mode: 'warm', repeat: 0, expectedGets: gets,
     });
     value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
-    const url = 'http://127.0.0.1:9111/api/inbox?filter=all&limit=30';
+    const url = 'http://127.0.0.1:9111/api/inbox?filter=all&limit=100';
     start(value, 'first', 10.1, url);
     value.loadingFinished('sample-1', { requestId: 'first', timestamp: 10.2, encodedDataLength: 10 });
     value.markTerminalVisible('sample-1');

@@ -1,4 +1,7 @@
-/* InboxRow — a contact/unknown comms row. All values from ui/tokens.css. */
+/* InboxRow - a contact/unknown/group comms row. All values from ui/tokens.css.
+   Spec 5.4: one line on desktop with the time at the far right; two lines under
+   the shell's narrow breakpoint; the actions box is an OVERLAY that takes no
+   layout width so the times line up in one column on every row. */
 .rowItem {
   list-style: none;
   margin-bottom: var(--sp-2);
@@ -60,23 +63,59 @@
   background: var(--c-dot-unknown);
 }
 
+/* The head on one line (spec 5.4) is min(content, 45%) of the link - the cap
+   resolves against the link, the head's flex container - and NEVER shrinks
+   below that: the preview absorbs the row's overflow. With `flex: 0 1 auto`
+   the preview's nowrap max-content (the whole latest message) took the
+   head's share, and the name - the row's identity - paid for it: 24 of 95px
+   at 1280 beside a 300-character text, 0 beside an email body (build review
+   R2-1). Only a name longer than the cap is ellipsized. */
 .head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   flex: 0 0 auto;
+  min-width: 0;
+  max-width: 45%;
 }
 .name {
   font-weight: var(--fw-medium);
   color: var(--c-text);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A row named by its formatted number ("(555) 123-4567", the stub contact a
+   first inbound creates) never shrinks: the number is short and every digit is
+   the row's identity. Without this the name keeps a ~1% share of the head's
+   shortfall next to a yielding chip (flex-shrink 1 vs 100), overflows by a
+   sub-pixel, and text-overflow swallows the LAST DIGIT (live self-QA,
+   2026-09-26: "(555) 937-520..." at 360 and 768). The yielding chips take the
+   whole shortfall instead, down to their 4em floor. */
+.numberName {
+  flex-shrink: 0;
 }
 .bold {
   font-weight: var(--fw-bold);
 }
+/* THE CHIP RULE (build review R3-1), one rule for every chip in the head:
+   - The channel chip (`.channel`), the relay Closed tag (`.tag`) and the
+     Deleted chip (`.deletedTag`) are short fixed-vocabulary state markers and
+     NEVER shrink (no flex-shrink, no min-width: 0 - rigid as on main).
+   - The placement tag (`.placementTag`, an unbounded stage label of up to 29
+     characters) and the Needs triage chip (`.triage`) YIELD BEFORE THE NAME,
+     never below 4em: the name - or an unknown row's number - is the row's
+     identity, and the meaning of these two chips survives truncation.
+     flex-shrink 100 hands them nearly all of the head's shortfall.
+   - The 4em floor is load-bearing. With `min-width: 0` a yielding chip took
+     ~99% of the shortfall until its content box reached 0, so a short tag
+     collapsed to an 18px box showing one clipped letter (round-3
+     measurement). A yielding chip never takes `min-width: 0`. */
 .channel {
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
+  white-space: nowrap;
 }
 .tag {
   padding: 1px var(--sp-2);
@@ -87,6 +126,25 @@
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
+/* The `.tag` look (declarations duplicated: this module does not use
+   `composes`) plus the yielding rule and its floor. The row sets `title` to
+   the full label, so a truncated stage label is recoverable on hover. */
+.placementTag {
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 100;
+}
+/* Yields with the 4em floor (the chip rule above; R3-1, R2-6): it sits on
+   every unknown row beside the amber dot, and while rigid it cut the number
+   to its area code on every unread unknown row at 360px. */
 .triage {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -96,11 +154,14 @@
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   white-space: nowrap;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 100;
 }
 
-/* Deleted-contact resurfacing: a soft-deleted contact's thread resurfaces in
-   the inbox while an unread post-deletion inbound exists. Danger-tinted so the
-   row reads as "deleted, but they messaged you". */
+/* Deleted-contact resurfacing: danger-tinted so the row reads as "deleted, but
+   they messaged you". A rigid state marker (the chip rule above). */
 .deletedTag {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -136,12 +197,32 @@
   font-weight: var(--fw-semibold);
 }
 
-/* Inline actions — present + focusable always; visible on hover / focus / swipe. */
-.actions {
-  display: flex;
+/* The last-activity time: a right-aligned column; 5rem holds "Dec 18, 2025". */
+.time {
   flex: 0 0 auto;
+  min-width: 5rem;
+  text-align: right;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+.unread .time {
+  color: var(--c-text);
+  font-weight: var(--fw-semibold);
+}
+
+/* Inline actions - an OVERLAY over the row's right end. Present + focusable
+   always; visible on hover / focus-within / swipe. No layout width, so the
+   time column is straight whatever button the row offers. */
+.actions {
+  position: absolute;
+  right: var(--sp-3);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
   gap: var(--sp-1);
-  padding-right: var(--sp-3);
+  padding-left: var(--sp-3);
+  background: var(--c-surface);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
@@ -169,4 +250,40 @@
 .action:focus-visible {
   outline: 2px solid var(--c-focus-ring);
   outline-offset: 1px;
+}
+
+/* Narrow: the shell's own breakpoint (below it the sidebar is a drawer). Two
+   rows: name/chips/time on top, preview/count below. */
+@media (max-width: 767.98px) {
+  .main {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    column-gap: var(--sp-2);
+    row-gap: 2px;
+    align-items: center;
+  }
+  .dot {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .head {
+    grid-column: 2;
+    grid-row: 1;
+    max-width: none;
+  }
+  .time {
+    grid-column: 3;
+    grid-row: 1;
+    min-width: 0;
+  }
+  .preview {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .count {
+    grid-column: 3;
+    grid-row: 2;
+    justify-self: end;
+  }
 }

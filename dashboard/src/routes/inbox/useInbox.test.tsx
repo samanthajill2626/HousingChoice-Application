@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EventStreamHandlers } from '../../api/index.js';
@@ -7,6 +7,7 @@ import type { InboxFilter, InboxPage, InboxRow } from '../../api/index.js';
 
 const getInbox = vi.fn();
 const markInboxRead = vi.fn();
+const markInboxUnread = vi.fn();
 const markConversationRead = vi.fn();
 const noteRowsCleared = vi.fn();
 const rollbackRowsCleared = vi.fn();
@@ -18,6 +19,7 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getInbox: (...a: unknown[]) => getInbox(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
+    markInboxUnread: (...a: unknown[]) => markInboxUnread(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     useEventStream: (h: EventStreamHandlers) => {
       sse = h;
@@ -32,11 +34,13 @@ vi.mock('../../app/UnreadContext.js', () => ({
   useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
 }));
 
-import { useInbox, rowKey } from './useInbox.js';
+import { DEFAULT_PAGE_LIMIT, useInbox, rowKey } from './useInbox.js';
 // The REAL component, for the composed cases at the bottom of this file: the
 // truncation flag only misfires where the hook's server statement meets the
 // component's render of the client-filtered list.
 import { Inbox } from './Inbox.js';
+import { StrictMode } from 'react';
+import { clearInboxLists, inboxListKey, loadInboxList, saveInboxList } from './inboxListStore.js';
 
 function mkRow(over: Partial<InboxRow> = {}): InboxRow {
   return {
@@ -57,12 +61,23 @@ function pageOf(rows: InboxRow[], nextCursor: string | null = null): InboxPage {
 }
 
 // Minimal probe: render hook state + expose its actions as buttons we can click.
-function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
-  const s = useInbox(filter);
+function Probe({
+  filter,
+  limit,
+  operatorId,
+  restoreScroll,
+}: {
+  filter: InboxFilter;
+  limit?: number;
+  operatorId?: string;
+  restoreScroll?: boolean;
+}): React.JSX.Element {
+  const s = useInbox(filter, limit, operatorId, restoreScroll);
   return (
     <div>
       <span data-testid="status">{s.status}</span>
       <span data-testid="count">{s.rows.length}</span>
+      <span data-testid="ids">{s.rows.map((r) => rowKey(r)).join(',')}</span>
       <span data-testid="unread">{s.rows.map((r) => r.unreadCount).join(',')}</span>
       <span data-testid="hasMore">{String(s.hasMore)}</span>
       <span data-testid="groupsTruncated">{String(s.groupsTruncated)}</span>
@@ -70,11 +85,17 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="serverRowCount">{String(s.serverRowCount)}</span>
       <span data-testid="groupRowsShown">{String(s.groupRowsShown)}</span>
       <span data-testid="loadingMore">{String(s.loadingMore)}</span>
+      <span data-testid="refreshFailed">{String(s.refreshFailed)}</span>
+      <span data-testid="armed">{String(s.autoLoadArmed)}</span>
+      <span data-testid="epoch">{String(s.pageEpoch)}</span>
+      <span data-testid="restoredScrollTop">{String(s.restoredScrollTop)}</span>
       <button onClick={() => s.loadMore()}>more</button>
       <button onClick={() => s.retry()}>retry</button>
+      <button onClick={() => s.noteScrollTop(321)}>scroll</button>
       {s.rows.map((r) => (
         <span key={rowKey(r)}>
           <button onClick={() => s.markRead(r)}>read:{rowKey(r)}</button>
+          <button onClick={() => s.markUnread(r)}>unread:{rowKey(r)}</button>
         </span>
       ))}
     </div>
@@ -82,8 +103,10 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
 }
 
 beforeEach(() => {
+  clearInboxLists();
   getInbox.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
+  markInboxUnread.mockReset().mockResolvedValue(undefined);
   markConversationRead.mockReset().mockResolvedValue(undefined);
   noteRowsCleared.mockReset();
   rollbackRowsCleared.mockReset();
@@ -158,12 +181,17 @@ describe('useInbox', () => {
     rerender(<Probe filter="groups" />);
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
     expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+    // SC-8: the key effect cleared loadingMore for the new tab. The stale
+    // page's `finally` skips the clear, so without it Load more (and
+    // auto-load, which needs !loadingMore) would be dead here for good.
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('false');
 
     act(() => releaseMore());
     await new Promise((r) => setTimeout(r, 20));
     // No contamination, and no cursor from a partition this filter cannot read.
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('false');
   });
 
   // Adversarial 29. `loadMore`'s `stale()` guard consulted the FILTER axis only,
@@ -325,9 +353,15 @@ describe('useInbox', () => {
     // Mark read resolves and commits (generation bump).
     act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
     await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
-    // The stale refetch now resolves — the generation guard must discard it.
-    act(() => releaseStale());
-    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    // The stale refetch now resolves - the generation guard must discard it.
+    // SC-10: released inside an async act that outlasts its continuation, then
+    // asserted once. A waitFor here would check once synchronously and pass
+    // BEFORE the stale page could commit, so deleting the guard went unseen.
+    await act(async () => {
+      releaseStale();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
   });
 });
 
@@ -768,17 +802,10 @@ describe('useInbox - the unread feed truncation flag', () => {
     expect(screen.getByTestId('count')).toHaveTextContent('1');
   });
 
-  // RE-REVIEW, the residue BOTH reviewers and I missed on the first pass: the
-  // strand needs no filter change at all, and its end state is worse than the
-  // symptom this branch set out to fix - a permanent spinner, and Retry does not
-  // exist under `status: loading`, so there is no affordance left.
-  //
-  // The structural point: `fetchFirstPage` treats "a mutation committed while I
-  // was on the wire" as DISCARD MY PAGE AND SET NO STATE. That is only safe when
-  // some other fetch is guaranteed to follow - true for a background reconcile
-  // over a list already on screen, FALSE for any fetch that set 'loading' first
-  // (the filter effect, and retry). Nothing re-issues those.
-  it('a mark-read committing under RETRY does not strand the tab on a spinner', async () => {
+  // THE GENERATION GUARD PROTECTS A LIST, NOT A SPINNER (see fetchHead). A
+  // mutation committing under a head read that set `loading` must not strand
+  // the tab: nothing re-issues a discarded page there. Same filter throughout.
+  it('a mark-read committing under RETRY (no rows rendered) does not strand the tab on a spinner', async () => {
     getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
     let releaseRead: () => void = () => {};
     markInboxRead.mockImplementationOnce(
@@ -793,28 +820,30 @@ describe('useInbox - the unread feed truncation flag', () => {
     // Mark read; the POST hangs.
     act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
 
-    // A background reconcile fails BEFORE the POST resolves, so the generation
-    // has not moved yet and the error state is legitimately reached.
-    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
-    act(() => {
-      sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never);
-    });
-    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
+    // A complete head read returns ZERO rows: the list empties (still ready).
+    getInbox.mockResolvedValueOnce(pageOf([], null));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(screen.getByTestId('serverRowCount')).toHaveTextContent('0'), { timeout: 2000 });
 
-    // The operator hits Retry. Its page is on the wire...
+    // Now a head read FAILS with no rows rendered: today's error arm.
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-2' } as never));
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'), { timeout: 2000 });
+
+    // Retry with no rows sets loading; its page is on the wire...
     let releaseRetry: () => void = () => {};
     getInbox.mockImplementationOnce(
       () =>
         new Promise((res) => {
-          releaseRetry = () => res(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+          releaseRetry = () => res(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })]));
         }),
     );
     act(() => screen.getByRole('button', { name: 'retry' }).click());
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
 
-    // ...and the mark-read commits first, legitimately bumping the generation
-    // for THIS filter. Retry's own page must still land: discarding it leaves
-    // nothing on screen and nothing in flight.
+    // ...and the mark-read commits first, bumping the generation for THIS
+    // filter. Retry's page must still land: discarding it leaves nothing on
+    // screen and nothing in flight.
     await act(async () => {
       releaseRead();
       await Promise.resolve();
@@ -899,5 +928,503 @@ describe('useInbox - the unread feed truncation flag', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     expect(screen.getByText(/couldn.t load your inbox/i)).toBeInTheDocument();
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('useInbox - page one persists (spec 5.5-5.8)', () => {
+  const KEY = inboxListKey('anon', 'all', 2);
+  function snapshot(rows: InboxRow[], cursor: string | null, scrollTop = 0) {
+    return { head: rows, tail: [], cursor, groupsTruncated: false, truncated: false, scrollTop };
+  }
+
+  it('every head read and every page requests the hook limit', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'CUR'));
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c2' })], null));
+    render(<Probe filter="all" limit={7} />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('2'));
+    expect((getInbox.mock.calls[0]?.[0] as { limit: number }).limit).toBe(7);
+    expect((getInbox.mock.calls[1]?.[0] as { limit: number }).limit).toBe(7);
+  });
+
+  it('a store hit renders ready on the first paint, unarmed, and issues exactly one live head read under StrictMode', async () => {
+    saveInboxList(KEY, snapshot([mkRow({ contactId: 'r1' }), mkRow({ contactId: 'r2' })], 'OLD', 55));
+    let release: (v: InboxPage) => void = () => {};
+    getInbox.mockImplementation(() => new Promise<InboxPage>((res) => { release = res; }));
+    render(
+      <StrictMode>
+        <Probe filter="all" limit={2} />
+      </StrictMode>,
+    );
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('ids')).toHaveTextContent('c:r1,c:r2');
+    expect(screen.getByTestId('armed')).toHaveTextContent('false');
+    expect(screen.getByTestId('restoredScrollTop')).toHaveTextContent('55');
+    // StrictMode issued two calls; the first was aborted by the simulated
+    // cleanup. Exactly one is live: resolving it commits.
+    const live = getInbox.mock.calls.filter((c) => !(c[1] as AbortSignal | undefined)?.aborted);
+    expect(live).toHaveLength(1);
+    act(() => release(pageOf([mkRow({ contactId: 'n1' }), mkRow({ contactId: 'n2' })], 'NEW')));
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('c:n1,c:n2'));
+    expect(screen.getByTestId('armed')).toHaveTextContent('true');
+  });
+
+  it("the restore's complete head read replaces the whole restored list and issues no cursor request", async () => {
+    const restoredRows = [mkRow({ contactId: 'r1' }), mkRow({ contactId: 'r2' }), mkRow({ contactId: 'r3' }), mkRow({ contactId: 'r4' })];
+    saveInboxList(KEY, snapshot(restoredRows, 'TAIL'));
+    getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'n1' }), mkRow({ contactId: 'r1' })], 'NEW'));
+    render(<Probe filter="all" limit={2} />);
+    expect(screen.getByTestId('count')).toHaveTextContent('4');
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('c:n1,c:r1'));
+    expect(getInbox).toHaveBeenCalledTimes(1);
+    expect((getInbox.mock.calls[0]?.[0] as { cursor?: string }).cursor).toBeUndefined();
+  });
+
+  it('a commit saves the committed value: a loaded page saves its rows AND its cursor together', async () => {
+    getInbox
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'C1'))
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c2', lastActivityAt: '2026-06-17T09:00:00.000Z' })], 'C2'));
+    render(<Probe filter="all" limit={1} />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+    expect(loadInboxList('anon:all:1')?.cursor).toBe('C1');
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('2'));
+    const saved = loadInboxList('anon:all:1');
+    expect(saved?.tail.map((r) => r.contactId)).toEqual(['c2']);
+    expect(saved?.cursor).toBe('C2');
+  });
+
+  it('a reset writes no snapshot: switching filters leaves the new key empty until its page commits', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    let release: (v: InboxPage) => void = () => {};
+    const { rerender } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    getInbox.mockImplementation(() => new Promise<InboxPage>((res) => { release = res; }));
+    rerender(<Probe filter="unread" limit={2} />);
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    expect(loadInboxList('anon:unread:2')).toBeUndefined();
+    expect(loadInboxList(KEY)?.head.map((r) => r.contactId)).toEqual(['c1']);
+    act(() => release(pageOf([mkRow({ contactId: 'u1' })], null)));
+    await waitFor(() => expect(loadInboxList('anon:unread:2')).toBeDefined());
+  });
+
+  it('a loadMore that settles after unmount neither commits nor saves', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'C1'));
+    let release: (v: InboxPage) => void = () => {};
+    const { unmount } = render(<Probe filter="all" limit={1} />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+    getInbox.mockImplementation(() => new Promise<InboxPage>((res) => { release = res; }));
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    unmount();
+    const before = loadInboxList('anon:all:1');
+    await act(async () => {
+      release(pageOf([mkRow({ contactId: 'c2' })], 'C2'));
+      await Promise.resolve();
+    });
+    expect(loadInboxList('anon:all:1')).toEqual(before);
+    expect(before?.cursor).toBe('C1');
+  });
+
+  it('is alive again after a StrictMode replay: a later page commit saves', async () => {
+    getInbox
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'C1'))
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'C1'))
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c2', lastActivityAt: '2026-06-17T09:00:00.000Z' })], null));
+    render(
+      <StrictMode>
+        <Probe filter="all" limit={1} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('2'));
+    expect(loadInboxList('anon:all:1')?.cursor).toBeNull();
+  });
+
+  it('the unmount save folds in a pending patch made in the same act and the reported scrollTop', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })], null));
+    let settle: () => void = () => {};
+    markInboxRead.mockImplementation(() => new Promise<void>((res) => { settle = res; }));
+    const { unmount } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    act(() => {
+      screen.getByRole('button', { name: 'scroll' }).click();
+      screen.getByRole('button', { name: 'read:c:c1' }).click();
+      unmount();
+    });
+    const saved = loadInboxList(KEY);
+    expect(saved?.head[0]?.unreadCount).toBe(0);
+    expect(saved?.scrollTop).toBe(321);
+    settle();
+  });
+
+  it('loadMore dedupes against the list by rowKey and by conversationId across kinds, and arms only on new rows', async () => {
+    const relay = mkRow({ kind: 'relay_group', contactId: undefined, conversationId: 'x', name: 'With x', status: 'open' });
+    const group = { ...relay, kind: 'group_text' as const, status: undefined };
+    getInbox
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' }), relay], 'C1'))
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' }), group], 'C2'))
+      .mockResolvedValueOnce(pageOf([], 'C3'));
+    render(<Probe filter="all" limit={1} />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('2'));
+    expect(screen.getByTestId('ids')).toHaveTextContent('c:c1,gt:x');
+    expect(screen.getByTestId('armed')).toHaveTextContent('true');
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('3'));
+    expect(screen.getByTestId('armed')).toHaveTextContent('false');
+    expect(screen.getByTestId('hasMore')).toHaveTextContent('true');
+  });
+
+  it('pageEpoch bumps on head and page commits, not on a mark-read commit, a reset or a failure', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 1 })], 'C1'));
+    const { rerender } = render(<Probe filter="all" limit={1} />);
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    expect(screen.getByTestId('epoch')).toHaveTextContent('1');
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('loadingMore')).toHaveTextContent('false'));
+    expect(screen.getByTestId('epoch')).toHaveTextContent('1');
+    // A reset carries the epoch (never back to 0); the new filter's first
+    // page then bumps it.
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'u1' })], null));
+    rerender(<Probe filter="unread" limit={1} />);
+    expect(screen.getByTestId('epoch')).toHaveTextContent('1');
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('2'));
+  });
+
+  it('a failed background head read with rows rendered keeps the rows and raises refreshFailed; a 404 does the same', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(screen.getByTestId('refreshFailed')).toHaveTextContent('true'), { timeout: 2000 });
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    getInbox.mockRejectedValueOnce(new ApiError(404, 'http_404', 'gone'));
+    act(() => screen.getByRole('button', { name: 'retry' }).click());
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(3));
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('refreshFailed')).toHaveTextContent('true');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+  });
+
+  // Worklist S5 item 1 (spec decision 7, 5.7, invariant 4). The failure path
+  // refuses on the FILTER axis only. A mark-read that commits while a
+  // background head read is on the wire bumps the generation; if that read
+  // then FAILS, the rows stay AND the banner shows. A generation check on the
+  // failure path returns before the rows-rendered check and leaves a silently
+  // stale list: no banner, so no Retry refresh either.
+  it('a head read that fails after a mark-read committed under it keeps the rows and still raises refreshFailed', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })], null));
+    let releaseRead: () => void = () => {};
+    markInboxRead.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          releaseRead = () => res();
+        }),
+    );
+    render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // Mark read; the POST hangs.
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+
+    // A background head read starts and hangs: it captured the PRE-commit
+    // generation.
+    let failHead: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((_res, rej) => {
+          failHead = () => rej(new ApiError(500, 'http_500', 'boom'));
+        }),
+    );
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2), { timeout: 2000 });
+
+    // The POST commits first and bumps the generation. The store holds the
+    // committed list, so the commit is visible there (the patch alone is not
+    // saved until a commit).
+    await act(async () => {
+      releaseRead();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(loadInboxList(KEY)?.head[0]?.unreadCount).toBe(0));
+
+    // ...and only then does the head read fail.
+    await act(async () => {
+      failHead();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    expect(screen.getByTestId('refreshFailed')).toHaveTextContent('true');
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
+  });
+
+  it('Retry with rows rendered never shows the spinner and clears the banner when the read commits', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(screen.getByTestId('refreshFailed')).toHaveTextContent('true'), { timeout: 2000 });
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c9' })], null));
+    act(() => screen.getByRole('button', { name: 'retry' }).click());
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    await waitFor(() => expect(screen.getByTestId('refreshFailed')).toHaveTextContent('false'));
+    expect(screen.getByTestId('ids')).toHaveTextContent('c:c9');
+  });
+
+  // Review Focus 3: a zero-row budget exit with rows rendered is not a failure.
+  it('an incomplete head read (zero rows with a cursor) changes nothing and raises no banner', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'C1'));
+    render(<Probe filter="unknown" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    getInbox.mockResolvedValueOnce(pageOf([], 'BUDGET'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('2'));
+    expect(screen.getByTestId('refreshFailed')).toHaveTextContent('false');
+    expect(screen.getByTestId('ids')).toHaveTextContent('c:c1');
+    expect(screen.getByTestId('hasMore')).toHaveTextContent('true');
+  });
+
+  it('a failed initial load with no rows still yields error', async () => {
+    getInbox.mockRejectedValue(new ApiError(500, 'http_500', 'boom'));
+    render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
+    expect(screen.getByTestId('refreshFailed')).toHaveTextContent('false');
+  });
+
+  it('keys the store by operator: another operator never sees the saved list', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    const { unmount } = render(<Probe filter="all" limit={2} operatorId="u1" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    unmount();
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c2' })], null));
+    render(<Probe filter="all" limit={2} operatorId="u2" />);
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('c:c2'));
+  });
+
+  it('seeds the scroll ref from the snapshot only when restoreScroll is set, so an immediate unmount saves the shown position', async () => {
+    saveInboxList(KEY, snapshot([mkRow({ contactId: 'r1' })], null, 77));
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    const first = render(<Probe filter="all" limit={2} restoreScroll />);
+    first.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(77);
+    saveInboxList(KEY, snapshot([mkRow({ contactId: 'r1' })], null, 77));
+    const second = render(<Probe filter="all" limit={2} restoreScroll={false} />);
+    second.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(0);
+  });
+
+  // SC-3 (invariant 7): the unmount save is gated on `ready`, so a mount that
+  // missed the store and never saw its first page commit saves nothing - not
+  // on the StrictMode simulated unmount, not on the real one. An empty
+  // snapshot here would restore as a 'ready' empty list on the next visit.
+  it('the unmount save writes nothing before the first page commits (StrictMode store miss, hanging read)', () => {
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    const { unmount } = render(
+      <StrictMode>
+        <Probe filter="all" limit={2} />
+      </StrictMode>,
+    );
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    unmount();
+    expect(loadInboxList(KEY)).toBeUndefined();
+  });
+
+  // SC-6 (spec 5.8, the filter-effect rule): the effect records the key it
+  // just handled in BOTH branches, so a restored mount that leaves its tab and
+  // comes back resets instead of skipping the reset with the other tab's rows.
+  it('a restored mount that switches tab and back resets to the spinner, never showing the other tab rows', async () => {
+    saveInboxList(KEY, snapshot([mkRow({ contactId: 'r1' })], null));
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'r1' })], null));
+    const { rerender } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'u1', unreadCount: 1 })], null));
+    rerender(<Probe filter="unread" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('c:u1'));
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    rerender(<Probe filter="all" limit={2} />);
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    expect(screen.getByTestId('count')).toHaveTextContent('0');
+    expect(screen.getByTestId('ids').textContent).toBe('');
+  });
+
+  // SC-7 (spec 5.7): a filter change clears the banner with the rest of the
+  // reset, before the new tab's first page lands.
+  it('the reset clears refreshFailed: a banner raised on one tab is gone while the next tab loads', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    const { rerender } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await waitFor(() => expect(screen.getByTestId('refreshFailed')).toHaveTextContent('true'), { timeout: 2000 });
+    getInbox.mockImplementation(() => new Promise<InboxPage>(() => {}));
+    rerender(<Probe filter="unread" limit={2} />);
+    expect(screen.getByTestId('status')).toHaveTextContent('loading');
+    expect(screen.getByTestId('refreshFailed')).toHaveTextContent('false');
+  });
+
+  // SC-7 (slice C gaps): the reset also drops the old tab's pending patches
+  // and zeroes the scroll seed. Neither is rendered, so the new tab's first
+  // SAVE is where a leftover would show: a patch folded into a row it never
+  // touched, and the old tab's scroll position.
+  it('the reset clears the pending patches and the scroll seed: the next tab saves neither', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })], null));
+    markInboxRead.mockImplementationOnce(() => new Promise<void>(() => {}));
+    const { rerender } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    act(() => {
+      screen.getByRole('button', { name: 'scroll' }).click();
+      screen.getByRole('button', { name: 'read:c:c1' }).click();
+    });
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })], null));
+    rerender(<Probe filter="unread" limit={2} />);
+    const unreadKey = inboxListKey('anon', 'unread', 2);
+    await waitFor(() => expect(loadInboxList(unreadKey)).toBeDefined());
+    expect(loadInboxList(unreadKey)?.head[0]?.unreadCount).toBe(2);
+    expect(loadInboxList(unreadKey)?.scrollTop).toBe(0);
+  });
+
+  // SC-9 (section 6: markUnread's commit is a commitList writer). The row
+  // flips at once, the settled POST commits it to the render AND the store,
+  // and a patch commit is not a page commit, so the epoch stays put.
+  it('markUnread flips the row at once, then commits it to the render and the store without moving the epoch', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })], null));
+    let settle: () => void = () => {};
+    markInboxUnread.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          settle = () => res();
+        }),
+    );
+    render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'unread:c:c1' }).click());
+    expect(screen.getByTestId('unread')).toHaveTextContent('1');
+    expect(markInboxUnread).toHaveBeenCalledWith({ contactId: 'c1' });
+    await act(async () => {
+      settle();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByTestId('unread')).toHaveTextContent('1');
+    expect(loadInboxList(KEY)?.head[0]?.unreadCount).toBe(1);
+    expect(screen.getByTestId('epoch')).toHaveTextContent('1');
+  });
+
+  it('markUnread rolls the row back to read when the request fails', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })], null));
+    markInboxUnread.mockRejectedValueOnce(new ApiError(500, 'http_500', 'no'));
+    const { unmount } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'unread:c:c1' }).click());
+    expect(screen.getByTestId('unread')).toHaveTextContent('1');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
+    // The rollback also leaves no patch for the UNMOUNT save to fold in: the
+    // saved row keeps its pre-patch count. (Read before the unmount this was
+    // vacuous - the head read wrote 0 and a rollback commits nothing; a patch
+    // left in pendingRef while the rendered state is clean fails it here.)
+    unmount();
+    expect(loadInboxList(KEY)?.head[0]?.unreadCount).toBe(0);
+  });
+
+  // The sign-out ordering case: the unmount save ran, AuthGate cleared the
+  // store, and only THEN does the POST settle. Nothing may write the store
+  // again. (The commit's own alive gate and commitList's back each other up.)
+  it('a markUnread that settles after unmount and the sign-out clear saves nothing', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 0 })], null));
+    let settle: () => void = () => {};
+    markInboxUnread.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          settle = () => res();
+        }),
+    );
+    const { unmount } = render(<Probe filter="all" limit={2} />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    act(() => screen.getByRole('button', { name: 'unread:c:c1' }).click());
+    unmount();
+    clearInboxLists();
+    await act(async () => {
+      settle();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(loadInboxList(KEY)).toBeUndefined();
+  });
+});
+
+// Build review R2-3: "error with rows" IS reachable. The real Inbox through the
+// real hook, because the defect lives where the two meet: the page resolves
+// its scroll root from the rendered <ul>, and the hook can commit rows while
+// the error surface hides that list.
+describe('useInbox + Inbox - the scroll root after an error with rows (R2-3)', () => {
+  const KEY = inboxListKey('anon', 'unknown', DEFAULT_PAGE_LIMIT);
+  // jsdom has no document.scrollingElement; the page falls back to the root.
+  const scroller = (): HTMLElement => (document.scrollingElement ?? document.documentElement) as HTMLElement;
+  function renderInbox(): ReturnType<typeof render> {
+    return render(
+      <MemoryRouter initialEntries={['/inbox?filter=unknown']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+  }
+
+  it('COMPOSED: a page that lands under the error surface, then Retry: the scroll position is still reported and saved', async () => {
+    // An empty page with a cursor (the Unknown tab's budget exit).
+    getInbox.mockResolvedValueOnce(pageOf([], 'BUDGET'));
+    const view = renderInbox();
+    const loadMore = await screen.findByRole('button', { name: 'Load more' });
+    // Load more; its page hangs on the wire.
+    let releasePage: (v: InboxPage) => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise<InboxPage>((res) => {
+          releasePage = res;
+        }),
+    );
+    act(() => loadMore.click());
+    // A live update's head read FAILS with no rows rendered: the error arm,
+    // which commits nothing (so the page in flight is not reconcile-stale).
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never));
+    await screen.findByRole('button', { name: 'Retry' }, { timeout: 2000 });
+    // The page commits its rows into the list the error surface hides.
+    await act(async () => {
+      releasePage(pageOf([mkRow({ contactId: 'c1' })], null));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.queryByRole('list', { name: 'Conversations' })).toBeNull();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    // Retry brings the list back.
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    act(() => screen.getByRole('button', { name: 'Retry' }).click());
+    await screen.findByRole('list', { name: 'Conversations' });
+    scroller().scrollTop = 250;
+    fireEvent.scroll(scroller());
+    view.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(250);
+  });
+
+  it('COMPOSED (control): a plain load reports and saves the scroll position', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], null));
+    const view = renderInbox();
+    await screen.findByRole('list', { name: 'Conversations' });
+    scroller().scrollTop = 250;
+    fireEvent.scroll(scroller());
+    view.unmount();
+    expect(loadInboxList(KEY)?.scrollTop).toBe(250);
   });
 });

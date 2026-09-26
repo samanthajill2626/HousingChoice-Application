@@ -3,7 +3,7 @@ id: group-reply-live-rollup-full-suite-flake
 title: Live group delivery rollup can miss SSE completion under full-suite load
 type: bug
 severity: med
-status: resolved
+status: open
 area: e2e/messaging
 created: 2026-08-21
 resolved: 2026-08-24
@@ -51,3 +51,24 @@ waive this assertion: a recurring failure can represent a real missing live even
 provider receipt callback through `message.persisted` and `/api/events` to the live
 rollup. Preserve the no-reload assertion. If the event is emitted and received, add
 diagnostics around client reconciliation before changing the timeout.
+
+**Recurrence (2026-09-26, `feat/inbox-rows-timestamps` planner review) -
+REOPENED on the exact signature.** A bare `npm run e2e` on bc1efe1e (28.0
+minutes; the same runtime code had run 284/284 in 24.9 minutes at 16:20Z on
+the same machine) failed BOTH group-text rollup assertions back to back:
+`group-text-per-recipient-delivery.spec.ts:63` ("the per-recipient rollup
+never settled at 2/3 LIVE (no reload)") and `group-text-reply-all.spec.ts:45`
+("the per-member delivery rollup never finalized LIVE (no reload) - the SSE
+push is missing"), each after its 60-second poll, the sends themselves
+succeeding. The isolated re-run of the two files passed 3/3 in 42.1s. The
+branch under test touches no messaging, SSE or group-text code (inbox, auth
+gate and perf harness only; `adapters/messaging.ts`, `relay*` jobs and the
+Twilio webhook are on its exclusion list). Machine conditions during the
+run: 15-49% CPU with about 32 node processes from other sessions (mostly
+idle `@playwright/mcp` servers), DynamoDB Local container 38 hours up at
+1.9 GiB. Same shape as the 2026-08-21 sighting: a slow full run, both group
+rollups, clean alone. The suggested trace (receipt callback ->
+`message.persisted` -> `/api/events` -> rollup) has still not been run on a
+failing instance; a `E2E_CHILD_LOG_DIR` run is NOT the tool for it (a
+timing symptom), a trace on first retry is.
+

@@ -8,15 +8,15 @@ import {
 } from '../src/lib/inboxDiagnostics.js';
 
 describe('createInboxProfilePlan', () => {
-  it('runs five comparable samples: four dashboard pages at 30 rows and the badge endpoint', () => {
+  it('runs five comparable samples: four dashboard pages at 100 rows and the badge endpoint', () => {
     const plan = createInboxProfilePlan();
 
     expect(plan).toHaveLength(25);
     expect(plan.filter((sample) => sample.repeat === 0)).toEqual([
-      { kind: 'inbox-page', caseId: 'all-page', filter: 'all', limit: 30, repeat: 0 },
-      { kind: 'inbox-page', caseId: 'unread-page', filter: 'unread', limit: 30, repeat: 0 },
-      { kind: 'inbox-page', caseId: 'unknown-page', filter: 'unknown', limit: 30, repeat: 0 },
-      { kind: 'inbox-page', caseId: 'groups-page', filter: 'groups', limit: 30, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'all-page', filter: 'all', limit: 100, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'unread-page', filter: 'unread', limit: 100, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'unknown-page', filter: 'unknown', limit: 100, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'groups-page', filter: 'groups', limit: 100, repeat: 0 },
       { kind: 'unread-badge-endpoint', caseId: 'unread-badge', repeat: 0 },
     ]);
     expect([...new Set(plan.map((sample) => sample.repeat))]).toEqual([0, 1, 2, 3, 4]);
@@ -34,9 +34,10 @@ describe('createInboxProfilePlan', () => {
       expect(entry).not.toHaveProperty('filter');
       expect(entry).not.toHaveProperty('limit');
     }
-    // Every remaining case is a dashboard PAGE read, all at the dashboard's 30.
+    // Every remaining case is a dashboard PAGE read, all at the dashboard's 100
+    // (DEFAULT_PAGE_LIMIT in dashboard/src/routes/inbox/useInbox.ts).
     expect([...new Set(plan.flatMap((entry) => (entry.kind === 'inbox-page' ? [entry.limit] : [])))])
-      .toEqual([30]);
+      .toEqual([100]);
   });
 });
 

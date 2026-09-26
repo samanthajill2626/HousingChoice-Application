@@ -6,17 +6,18 @@ severity: low
 status: open
 area: app/inbox
 created: 2026-08-26
-updated: 2026-09-02
+updated: 2026-09-25
 refs: app/src/routes/inbox.ts, app/src/lib/unknownQueue.ts, app/src/repos/contactsRepo.ts, dashboard/src/routes/inbox/useInbox.ts, app/test/inboxUnknownTab.test.ts
 ---
 
 **Downgraded med -> low, 2026-09-02 (human ruling, mission M6 rescope). The
 documented acceptance (option 3 below) STANDS; the snapshot predicate is NOT
 to be built.** Reachability, restated so the severity reads against it: the
-defect needs a queue longer than ONE dashboard page (30 live rows with an open
-non-relay thread) AND an operator status write in the gap between two Load
-more clicks. The live partitions were 16 unknown contacts in dev and 7 in prod
-on 2026-08-25, and the hermetic `lean` lane measured 0 on 2026-09-02
+defect needs a queue longer than ONE dashboard page (100 live rows with an
+open non-relay thread; 30 until 2026-09-25) AND an operator status write in
+the gap between two Load more clicks. The live partitions were 16 unknown
+contacts in dev and 7 in prod on 2026-08-25, and the hermetic `lean` lane
+measured 0 on 2026-09-02
 (`--audit-triage-partition --no-status-narrow`), so no multi-page walk exists
 anywhere today and condition 1 is unmet. The mechanism is real and proved (the
 probes below), which is why this stays OPEN rather than closing as wontfix. The
@@ -65,9 +66,12 @@ PROBE2 missing: [ 'c-a2' ]
 **Reachability - two conditions, both ordinary.**
 
 1. MORE THAN ONE PAGE: strictly more than the request `limit` live queue rows.
-   That is **30** from the dashboard (`dashboard/src/routes/inbox/useInbox.ts`),
-   NOT `UNKNOWN_QUEUE_PAGE_SIZE` (100) - an in-code comment claimed the larger
-   number until 2026-08-26. The repro above needs SEVEN rows at `limit=3`.
+   That is **100** from the dashboard (`DEFAULT_PAGE_LIMIT` in
+   `dashboard/src/routes/inbox/useInbox.ts`; 30 until 2026-09-25). It equals
+   `UNKNOWN_QUEUE_PAGE_SIZE` (100) only by coincidence: the threshold is the
+   request `limit`, never that constant - an in-code comment claimed the
+   server constant until 2026-08-26. The repro above needs SEVEN rows at
+   `limit=3`.
 2. A STATUS WRITE IN THE GAP: not a millisecond race between two sequential
    Queries (that window is the one `emitted` genuinely covers) but the
    OPERATOR'S OWN GAP BETWEEN LOAD-MORE CLICKS - seconds to minutes - and the
@@ -76,13 +80,18 @@ PROBE2 missing: [ 'c-a2' ]
    the only UI-reachable manufacturer of `(unknown, active)` at all.
 
 NOT reachable on today's data: the measured partitions are 16 dev / 7 prod
-(2026-08-25) against a page of 30, so no multi-page walk exists yet.
+(2026-08-25) against a page of 100 (30 when measured), so no multi-page walk
+exists yet.
 
 **The asymmetry, which is why this is filed at `med` and not higher.** The
 COMMON operator action - triaging, `needs_review -> active` - produces the
-DUPLICATE. A duplicate is at least visible: the dashboard keys the wire row
-`c:<contactId>` (`useInbox`, `rowKey`), so it renders as a doubled row under a
-duplicate React key. The RARE action - un-triaging, `active -> needs_review` -
+DUPLICATE. Until 2026-09-25 a duplicate was at least visible, as a doubled row
+under a duplicate React key. It no longer is (corrected 2026-09-25,
+`feat/inbox-rows-timestamps`): the dashboard keys the wire row `c:<contactId>`
+(`rowKey`) and its `appendPage` (`dashboard/src/routes/inbox/inboxListMerge.ts`)
+dedupes a loaded page by that key, so the second copy is dropped and the stale
+page-one copy (still showing Needs triage) silently wins until the next head
+read. The RARE action - un-triaging, `active -> needs_review` -
 produces the SKIP, and a skip is invisible: the feed reports the queue as fully
 drained while omitting a row, and only restarting the tab from page one recovers
 it.
@@ -140,7 +149,7 @@ one.
    here.
 
 **Reopen / escalate** when the live unknown partition exceeds one dashboard page
-(30 live rows with an open non-relay thread), which is when condition 1 stops
+(100 live rows with an open non-relay thread), which is when condition 1 stops
 being hypothetical. The count comes from
 `app/scripts/measure-unread-contact-coverage.ts --audit-triage-partition
 --no-status-narrow`.

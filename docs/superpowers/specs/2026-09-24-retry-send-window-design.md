@@ -9,7 +9,8 @@ the merged Branch A and adds D14 (a retry follows the original send); draft 7.1
 adds precision edits from the plan drafting
 (`plan-draft-<A|B1|B2|C|D>-findings.md`); draft 7.2 takes plan review round 1
 (`plan-review-r1-*.md`) and draft 7.3 round 2 (`plan-review-r2.md`); draft 7.4 takes the planner's
-independent review of the build (`planner-review-adjudications.md`). Code citations are at `f49a2fe9`.
+independent review of the build (`planner-review-adjudications.md`), and draft
+7.5 its re-review (the relay claim's gate preview fails open). Code citations are at `f49a2fe9`.
 
 | sev | issue | this branch |
 | --- | --- | --- |
@@ -75,8 +76,10 @@ Named exceptions, all in section 9: a retry with no usable origin - a relay
 slot without `sentAt`, a rung claimed before this deploy, an origin that does not
 parse - is not windowed (D5), so its send has no deadline; while a retry's
 outcome is pending reconcile, its promise stays up until it resolves (section 5,
-requirement 3); a relay claim that faults (`claim_failed`) shows the plain
-failure until Twilio's redelivery completes the claim (D3); and on a relay leg
+requirement 3); a relay claim that faults (`claim_failed`: its consistent
+re-read, its roster read or its append throws) loses that leg's retry, because
+Twilio does not redeliver a 5xx status callback by default (filed,
+`relay-retry-claim-assumes-5xx-redelivery`); and on a relay leg
 the member slot's failure is written a few database round trips BEFORE the claim
 decides (the claim must read the post-write slot), so a refetch that happens to
 land in that window shows the plain failure first. "At the same moment" is exact
@@ -196,9 +199,12 @@ with no separate lookup: a duplicate callback never changes a rung an earlier
 callback created, whatever its own preview decides. A declined rung is one write,
 so no store ever holds it open, and the claim's existing SSE for the root
 (`twilio.ts:2893-2905`) fires after it. The claim's enqueue-failure close
-(`closeRetryLegEnqueueFailed`) is unchanged and remains its only close. A preview read that FAILS is, like every other
-read in the claim, the existing `claim_failed`: ERROR, a 5xx and a Twilio
-redelivery that re-runs the claim (`twilio.ts:3000-3007`, `:3176-3198`). The
+(`closeRetryLegEnqueueFailed`) is unchanged and remains its only close. A preview read that FAILS fails OPEN (draft
+7.5, the planner's independent review): the rung is claimed open and enqueued
+with a WARN, and the job re-runs every gate at send time. Draft 6 made it the
+claim's existing `claim_failed` (a 5xx) on the premise that Twilio redelivers a
+5xx status callback; it does not by default (retry policy `ct`, connection
+failures only), so that choice would have lost the leg's retry for good. The
 member's slot on the root is untouched in every branch, and the job still runs
 every gate at send time, because a group can close during the wait.
 
@@ -827,10 +833,12 @@ Each is filed or accepted here, so it outlives this spec's freeze.
   retry", and hide
   the Retry button, until the promise expires - at most the longest backoff plus
   `RETRY_PROMISE_GRACE_MS` (6 minutes) after the failure.
-- **A relay claim fault** (`claim_failed`): a read or write in the claim throws,
-  and the leg shows the plain failure until Twilio's redelivery re-runs the claim
-  - the one path where a relay leg learns of its retry late. The claim's
-  recovery by redelivery predates this branch (`twilio.ts:3000-3007`).
+- **A relay claim fault** (`claim_failed`, filed as
+  `relay-retry-claim-assumes-5xx-redelivery`, med): when the claim's consistent
+  re-read, its roster read or its append throws, the webhook answers 5xx expecting
+  Twilio to redeliver, but Twilio's default retry policy never redelivers a 5xx,
+  so that leg's retry is lost. Predates this branch; this branch's own gate
+  preview fails open instead (D3).
 - **A relay leg's slot is written before its claim decides** (accepted, section
   1): the claim must read the post-write slot (`twilio.ts:2689-2694`), so the
   member slot's failure is stored a few database round trips before the rung,

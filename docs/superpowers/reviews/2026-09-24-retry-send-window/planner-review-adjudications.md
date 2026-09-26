@@ -33,3 +33,14 @@ handback only), or FILED.
 | CONF-1 | LOW: the during-backoff refusal class keeps "will retry" about 3 minutes and is not ruled | NOTE | Filed (`one-to-one-retry-promise-outlives-job-decline`, group b); open question for Cameron. |
 | CONF-2 | LOW: the 404 timeline fallback never carries `retry_due_at` | NOTE | The server's 409 guard holds; build review A3. |
 | CONF-3 | LOW: a rung whose gate passes in the window's last millisecond closes instead of sending | NOTE | Errs toward not sending late. |
+
+## Re-review of the planner's fix (the adversarial reviewer, continued)
+
+The same plan-blind reviewer re-reviewed commit `cec46afd` with the re-review
+charge (its section "Re-review of cec46afd" in `planner-review-adversarial.md`):
+two findings, both handled in a second planner wave, red first.
+
+| # | Finding | Verdict | What was done |
+| --- | --- | --- | --- |
+| RR-1 | LOW: the `recipient` contract comments still said the recorded recipient is always judged | FIX (comments) | `sendMessage.ts` (the `recipient` doc), `api.ts`, `retrySend.ts`, `oneToOneRetryDecision.ts` and `docs/issues/ai-mode-switch-gates-all-automation.md` now name the held-number rule. |
+| RR-2 | LOW (ADV-4 contested, and the reviewer is right): Twilio's default webhook retry policy is `ct` - connection failures only - so a 5xx status callback is never redelivered, and `claim_failed` is terminal; the claim's new gate-preview reads added fault points that lose a relay retry ladder | FIX + FILE | Verified against Twilio's connection-override docs ("Default: ct"); the repo sets no `#rp=` override. The claim's gate preview now FAILS OPEN: a thrown read claims the rung open with a WARN (the job re-runs every gate) - the rewritten test failed first against the old code (a 500 and `claim_failed`), then passed. The pre-existing reliance on redelivery (the claim's consistent re-read, roster read and append) is filed as `relay-retry-claim-assumes-5xx-redelivery` (med). Spec draft 7.5 corrects D3, section 1 and section 9. ADV-4's NOTE is withdrawn. |

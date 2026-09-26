@@ -285,3 +285,193 @@ must be.
   `E2E_SEND_RETRY_BACKOFF_MS` touches only the new spec; the fake Twilio has no
   default 30003.
 - All added lines are ASCII.
+
+---
+
+## Re-review of cec46afd
+
+Scope: the fix commit cec46afd, reviewed cold at branch head c8aef474. The
+commits after it (25d025d6, c8aef474) touch records only (`git show --stat`).
+Still plan-blind: the adjudications are taken from the coordinator's summary.
+One incidental `git grep` hit printed a single line of the adjudications file;
+it matched the summary and nothing else from `docs/superpowers/` was read.
+No app vitest suite and no e2e was run. The fix's dashboard side is comments
+plus one pin test, so no dashboard probe was needed.
+
+### A. The fix, reviewed cold
+
+**Every caller of the send wrapper's `recipient`.** There are exactly three
+(grep over `app/src`): `app/src/jobs/broadcastFanOut.ts:471`,
+`app/src/jobs/retrySend.ts:323` and `app/src/routes/api.ts:1683`. Every other
+`sendMessage` caller (tour reminders, placement nudges, the missed-call text,
+the welcome text, the composer send) passes none.
+- Property sends: the thread is resolved from the recipient's OWN number
+  (`broadcastFanOut.ts:451`, `createOrGetByParticipantPhone(contact.phone, ...)`).
+  That repo call queries and creates on that exact string
+  (`app/src/repos/conversationsRepo.ts:1252-1269`). The recipient item is read
+  whole (`getById`, or pointer-aware `findByPhone` for a `phone#` key,
+  `broadcastFanOut.ts:691-699`). So `contactHoldsPhone` is always true there:
+  share-skip-fix I8 is unchanged, and the new WARN cannot fire.
+- The retry job and the manual Retry route read the recorded recipient by id
+  just before the send, so the `phones` the check sees are current.
+- `recipient_contact_id` has three readers: the 30003 decision (through
+  `previewSendRefusal`, which now takes a REQUIRED `participantPhone`,
+  `oneToOneRetryDecision.ts:117`), the job and the route. The last two go
+  through the wrapper (`sendMessage.ts:363-374`). None bypasses the check.
+
+**The phone comparison (exact E.164 equality over `contactPhones`) is sound for
+every shape the repo writes.**
+- Create normalizes (`app/src/routes/contacts.ts:797-805`).
+- The phone routes normalize before `addPhone` / `setPhone` / `removePhone`
+  (`contacts.ts:2407`, `:2480`, `:2513`).
+- `persistPhones` writes `phones[]` and the scalar in one `UpdateCommand`
+  (`contactsRepo.ts:921`). `setPhone`'s promote ordering keeps the scalar
+  inside `phones[]`.
+- The importer writes both together (`app/src/lib/import/apply.ts:968-978`).
+- The contact PATCH parser accepts no `phone`.
+- `participant_phone` is the exact string from `createOrGetByParticipantPhone`,
+  or Twilio's E.164 `From`.
+- Precedent: the same predicate is already used at
+  `app/src/services/extraction/apply.ts:605`.
+
+**The WARN's PII.** It logs IDs only: `conversationId`, `recipientContactId`
+and `phoneContactId` (`sendMessage.ts:365-369`). Contact ids are UUIDs; imported
+ones are UUIDv5 hashes (`app/src/lib/import/ids.ts`). It is WARN, not ERROR,
+so it feeds no alarm.
+
+**Ignoring a moved recipient for the OPT-OUT gate too: right.**
+- The model is number-scoped. A STOP from a number is always written to that
+  number's own 1:1 conversation: `applyNumberSuppression` sets the conversation
+  flag unconditionally (`app/src/services/numberSuppression.ts:137-149`), and
+  the keyword path uses it (`app/src/routes/webhooks/twilio.ts:1186`). The
+  wrapper still reads that flag and the current holder's flag.
+- It restores main's behavior on both retry paths; main passed no recipient
+  there.
+- The only thing given up relative to the pre-fix branch is a CONTACT-ONLY
+  flag on the moved recipient:
+  - the manual Do-Not-Contact toggle (`contacts.ts:1961`), or
+  - a one-to-one 21610 receipt, which flags only the contact
+    (`twilio.ts:3775-3783`).
+
+  In the 21610 case, Twilio's own opt-out list blocks the send anyway. In the
+  toggle case, by our records the person at the number is no longer that
+  contact, and a fresh composer send to the number is judged the same way.
+- Caveat, pre-existing on main, not raised: a retry re-sends a body written for
+  the recorded recipient (share bodies render their first name,
+  `broadcastFanOut.ts:452`). After a reassignment it goes to the number's new
+  holder. The automatic path cannot realistically reach this inside its
+  15-minute window; the manual path is a staff press on a bubble whose text
+  staff can see.
+
+**Do the parity rows exercise the new rule? Yes.**
+- The three moved-off rows (`app/test/helpers/sendRefusalCases.ts:184-194`)
+  each flip between the pre-fix and post-fix rule:
+  - row 1: pre-fix sends on the consenting recipient; post-fix refuses on the
+    holder with no consent;
+  - rows 2 and 3: pre-fix refuses on the recipient's opt-out or deletion;
+    post-fix sends.
+- The secondary-phone row (`:195`) fails for an implementation that compares
+  only the scalar `phone`.
+- All three harnesses put the thread on the rows' number: the preview through
+  `SEND_REFUSAL_PHONE`, the wrapper fake (`app/test/sendMessage.test.ts:69`) and
+  the decision's `thread()` (`app/test/oneToOneRetryDecision.test.ts:20,43`).
+  (The last two couple by literal rather than by the exported constant. That is
+  test-only fragility, not a finding.)
+- The focused test (`sendMessage.test.ts:1008`) pins the WARN and the
+  unrecorded `recipientContactId`.
+
+**Verdict on the fix: correct, not merely plausible.** Its one gap is
+documentary (R1 below).
+
+### B. New findings
+
+#### R1. [LOW] The comments that define the `recipient` contract still say the recorded recipient is always judged
+
+**What is wrong.** The rule is now conditional (the recipient counts only while
+it holds the thread's number), but the contract comments were not touched.
+- `app/src/services/sendMessage.ts:264-275`, the `recipient` input doc, says:
+  "When set, the deleted and JIT-consent gates judge THIS contact ... the
+  opt-out gate refuses on EITHER contact's flag. Absent on every other send
+  ... a retry of the row can judge the SAME contact". "Absent on every other
+  send" was already false once this branch added two callers.
+- `app/src/repos/messagesRepo.ts:755-758` (`NewMessage.recipientContactId`)
+  says "so a retry judges that same contact. Absent when the phone lookup
+  decided". It is now also absent when the named recipient did not hold the
+  number.
+- `app/src/jobs/retrySend.ts:142-145` and `:184-188`,
+  `app/src/routes/api.ts:1609-1614` and
+  `app/src/services/oneToOneRetryDecision.ts:20-21` describe only the "no
+  longer exists" fallback.
+- `docs/issues/ai-mode-switch-gates-all-automation.md` (its 2026-09-26 block)
+  says the retry "is sent with the original's flag and recipient" and "the
+  manual Retry route passes the recorded recipient too".
+
+**Failure scenario.** The next caller of `recipient` (send-outcome-reconcile's
+`retrySend` adoption, or share-skip-fix Branch B) builds on the input doc and
+assumes the named contact is always the one judged.
+
+**Suggested fix.** One sentence at each site: "counts only while it holds the
+thread's number (`contactHoldsPhone`); otherwise the phone-matched contact is
+judged and nothing is recorded".
+
+#### R2. [LOW] ADV-4 contested: Twilio's documented default does NOT redeliver a 5xx
+
+**Evidence.**
+- Twilio's "Webhook connection overrides" documentation (fetched this pass)
+  sets the default retry policy `rp` to `ct` (connection/TLS failures only) and
+  the default retry count `rc` to 1. A 5xx response is retried only when the
+  URL carries `rp=5xx` or `rp=all`.
+- This app's delivery-status callback is the Messaging Service's
+  console-configured URL (`app/src/adapters/messaging.ts:12-17`). Nothing in
+  the repo sets a `#rp=` override (grep over code, infra, scripts and docs).
+
+**Why it matters.** The claim's fail-closed recovery is written as if a 5xx
+IS redelivered (`twilio.ts:2839-2840`, `:3155-3160`, `:3312-3313`, and
+`:3364-3367`: "Twilio redelivers on ANY 5xx"). The repo's own inbound path
+says the opposite (`twilio.ts:2521-2525`: "Twilio's redelivery is best-effort
+backup, not the recovery plan").
+
+Unless the console URL carries an override nobody has recorded,
+`claim_failed` is terminal. No rung is created, nothing redelivers, and the
+member's ladder is lost; the only trace is one ERROR marker. This branch adds
+throwable reads to that path: the conversation read plus `isMemberSuppressed`'s
+one or two contact reads and a participant-phone GSI query
+(`twilio.ts:2841-2848`). Meanwhile the one-to-one decision fails OPEN on the
+same class of read (`app/src/services/oneToOneRetryDecision.ts:28-37`).
+
+"Deliberate, recorded" shows the choice was made. It does not show that its
+premise holds.
+
+**Suggested fix (cheapest first).**
+1. Read the console URL and record the answer next to the claim comment. If it
+   already carries `rp=5xx`, I concede.
+2. Otherwise either add the override (a Twilio console change, for the human),
+   or make the new preview reads fail open (append the rung open and let the
+   job's gate decide), matching the one-to-one ruling.
+3. Either way, correct the four comments.
+
+### C. The adjudications
+
+- ADV-1 FIX: verified (section A).
+- ADV-2 FIX (comments only): conceded; `api.ts:1600-1602` and
+  `retryPromise.ts:5-10` now name the one-tick bound.
+- ADV-3 NOTE: conceded; the follow-up owns the share results row.
+- ADV-4 NOTE: contested (R2).
+- ADV-5 NOTE: conceded; the product owner ruled on the thresholds.
+- ADV-6 FIX: verified; `dashboard/src/routes/contact/deliveryStatus.test.ts:824`
+  fails on any one-sided edit to the 30003 copy.
+
+### D. Swept again and cleared
+
+- Every writer and reader of the new fields is unchanged since the first pass
+  except the fix's own. `recipient_contact_id` is now written only for a held
+  recipient (`sendMessage.ts:513`).
+- The fix touches only the app, so a deploy with mixed versions changes nothing
+  (the wrapper, the preview and the decision ship together).
+- Noticed in passing, pre-existing on main and NOT introduced here: a Retry
+  press refused with `contact_no_consent` shows nothing. `Timeline.tsx:91-95`
+  maps that code to an empty message and expects the parent to open the
+  consent modal. `ContactCommsPane` does that for sends only (`:228-242`); its
+  `onRetry` (`:304-308`) does not. The branch makes this LESS reachable for
+  shares (a consenting recipient who still holds the number is judged rather
+  than a first-hit duplicate). Worth filing separately.

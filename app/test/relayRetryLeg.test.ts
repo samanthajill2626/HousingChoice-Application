@@ -97,6 +97,15 @@ function legArgs(index: number): LegArgs {
   return legSend.calls[index] as LegArgs;
 }
 
+/**
+ * An ISO instant `minutes` before now: a rung's carried send-window origin
+ * (retry-send-window D2). Wall-clock relative, with a margin of 30 seconds or
+ * more against every boundary a test aims at.
+ */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
 /** Named so the spy's declaration can borrow its precise return type. */
 function spyOnTouchLastActivity(repo: ConversationsRepo) {
   return vi.spyOn(repo, 'touchLastActivity');
@@ -137,6 +146,10 @@ interface SeedRetryOptions {
   /** Transient passes already consumed on THIS row (spec D10's own budget). */
   fanoutAttempt?: number;
   legBody?: string;
+  /** retry-send-window D2: the origin the claim carried on the row
+   *  (`relay_retry_window_start`). Absent = a rung claimed before the window
+   *  shipped (D5). */
+  windowStart?: string;
 }
 
 /**
@@ -181,6 +194,7 @@ function seedRetryRow(world: FakeWorld, opts: SeedRetryOptions = {}): MessageIte
     relay_retry_dest_digest: relayRetryDigest(ROOT_TS_MSG_ID, destination),
     relay_retry_origin_direction: 'inbound',
     relay_retry_leg_body: opts.legBody ?? LEG_BODY,
+    ...(opts.windowStart !== undefined && { relay_retry_window_start: opts.windowStart }),
   };
   world.messages.push(row);
   return row;
@@ -304,7 +318,7 @@ describe('relay.retryLeg (30003 ladder)', () => {
 
   // --- D9: every attempt re-runs the gates; a refusal ends the chain ---
 
-  const gateCases: [string, (world: FakeWorld) => void, string][] = [
+  const gateCases: [string, (world: FakeWorld) => void, string, ('warn' | 'error')?][] = [
     [
       'closed group',
       (w) => {
@@ -337,11 +351,23 @@ describe('relay.retryLeg (30003 ladder)', () => {
       },
       'retry_opted_out',
     ],
+    [
+      // retry-send-window D4: the send window is the LAST gate, and the one
+      // that logs ERROR (D9) - the member never got the text, a dead end like
+      // the cap, not a deliberate human action like the four above.
+      'send window closed',
+      (w) => {
+        const row = w.messages.find((m) => m.relay_retry_of === ROOT_TS_MSG_ID)!;
+        row.relay_retry_window_start = minutesAgo(16);
+      },
+      'retry_window_closed',
+      'error',
+    ],
   ];
 
   it.each(gateCases)(
-    'refuses on %s, closes the retry leg with the gate code, and logs it at WARN',
-    async (_name, arrange, code) => {
+    'refuses on %s, closes the retry leg with its code, and logs it at the ruled level',
+    async (_name, arrange, code, level = 'warn') => {
       seedRelay(world);
       const row = seedRetryRow(world);
       arrange(world);
@@ -354,14 +380,17 @@ describe('relay.retryLeg (30003 ladder)', () => {
       expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
       // The chain ENDS: nothing further is scheduled, on either ladder.
       expect(outbound.delayed).toHaveLength(0);
-      // WARN, not ERROR: a gate refusal is a deliberate human action (Cameron's
-      // Q1 ruling, 2026-09-24), so it must never feed the ErrorLogs alarms.
-      const terminal = warnLogs().filter((l) => l['closeCode'] === code);
+      // WARN for the four human-action gates (Cameron's Q1 ruling,
+      // 2026-09-24), so they never feed the ErrorLogs alarms; ERROR for the
+      // send window (retry-send-window D9).
+      const terminal = (level === 'warn' ? warnLogs() : errorLogs()).filter(
+        (l) => l['closeCode'] === code,
+      );
       expect(terminal).toHaveLength(1);
       expect(terminal[0]).toMatchObject({
         event: 'relay_retry_leg',
         relay: true,
-        retryClaim: 'gate_refused',
+        retryClaim: level === 'warn' ? 'gate_refused' : 'window_closed',
         rootTsMsgId: ROOT_TS_MSG_ID,
         attempt: 1,
       });
@@ -499,6 +528,152 @@ describe('relay.retryLeg (30003 ladder)', () => {
 
     expect(world.sent).toHaveLength(0);
     expect(slotOf(row.tsMsgId)?.errorCode).toBe('retry_number_changed');
+  });
+
+  // --- retry-send-window D4/D5: the send window, the LAST gate ---
+
+  it('retry-send-window D4: sends a rung inside the window, with no window line at all', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent).toHaveLength(1);
+    expect(errorLogs()).toHaveLength(0);
+    expect(warnLogs().some((l) => l['windowOrigin'] !== undefined)).toBe(false);
+  });
+
+  it('retry-send-window D4: the window close leaves the same slot the claim-time window close leaves', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { versioned: true, windowStart: minutesAgo(16) });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    // The identical literal relayRetryClaim.webhook.test.ts pins for the
+    // claim's own window close of a versioned rung (spec D3's one data shape).
+    expect(slotOf(row.tsMsgId)).toEqual({
+      status: 'failed',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+      errorCode: 'retry_window_closed',
+    });
+    expect(world.sent).toHaveLength(0);
+    expect(bumps).toHaveLength(0);
+  });
+
+  it('retry-send-window D4: an opt-out is recorded ahead of a closed window - the window is the LAST gate', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(16) });
+    world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: true });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'retry_opted_out' });
+    expect(errorLogs()).toHaveLength(0);
+  });
+
+  // Worklist ruling R2: the order is four gates -> no-pool-number throw ->
+  // window gate. An OPEN group with no pool number cannot send at all, so its
+  // throw is checked BEFORE the window gate - a pin, green before and after
+  // the window gate lands, that fails the moment the window gate moves ahead
+  // of the throw.
+  it('retry-send-window D4 (pin): an OPEN group with NO pool number past the window still THROWS "has no pool number" - never retry_window_closed', async () => {
+    seedRelay(world, { pool_number: undefined });
+    const row = seedRetryRow(world, { windowStart: minutesAgo(16) });
+    const suppressionRead = vi.spyOn(world.contactsRepo, 'getById');
+    register();
+
+    await expect(
+      dispatchJob({
+        jobId: 'job-poolless-window-1',
+        jobName: RELAY_RETRY_LEG_JOB,
+        payload: payloadFor(row),
+        enqueuedAt: new Date().toISOString(),
+      } as never),
+    ).rejects.toThrow(/has no pool number/);
+    // All four gates passed first (the fourth gate's read ran) ...
+    expect(suppressionRead).toHaveBeenCalledWith(BOB_KEY);
+    // ... and the throw came before the window gate: nothing sent, the rung
+    // left queued, and no retry_window_closed written or logged.
+    expect(world.sent).toHaveLength(0);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(slotOf(row.tsMsgId)?.errorCode).toBeUndefined();
+    expect(capture.lines.some((l) => l['closeCode'] === 'retry_window_closed')).toBe(false);
+    expect(capture.lines.some((l) => l['retryClaim'] === 'window_closed')).toBe(false);
+    expect(persistedEmits()).toHaveLength(0);
+  });
+
+  it.each<[string, string | undefined]>([
+    ['missing', undefined],
+    ['unparseable', 'not-a-date'],
+  ])('retry-send-window D5: a rung with a %s origin still runs, with one WARN naming the gap', async (label, windowStart) => {
+    seedRelay(world);
+    // `missing` is every rung claimed before the window shipped. The lineage
+    // check must NOT throw on it: it runs after the execution marker, so a
+    // throw would drop the rung for good.
+    const row = seedRetryRow(world, windowStart === undefined ? {} : { windowStart });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent).toHaveLength(1);
+    expect(errorLogs()).toHaveLength(0);
+    const gap = warnLogs().filter((l) => l['windowOrigin'] !== undefined);
+    expect(gap).toHaveLength(1);
+    expect(gap[0]).toMatchObject({
+      event: 'relay_retry_leg',
+      windowOrigin: label,
+      rootTsMsgId: ROOT_TS_MSG_ID,
+      memberKey: BOB_KEY,
+    });
+  });
+
+  it('retry-send-window D4: a transient pass that could not re-run inside the window closes instead of re-enqueueing', async () => {
+    seedRelay(world);
+    // 30 seconds of window left: the job-time gate passes, but a 5s re-run
+    // plus the 60s scheduling grace would land past origin + 15 minutes.
+    const row = seedRetryRow(world, { windowStart: minutesAgo(14.5) });
+    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+      kind: 'transient',
+      errorCode: '429',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(outbound.delayed).toHaveLength(0);
+    expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'retry_window_closed' });
+    expect(errorLogs()).toContainEqual(
+      expect.objectContaining({
+        event: 'relay_retry_leg',
+        retryClaim: 'window_closed',
+        closeCode: 'retry_window_closed',
+        windowCheck: 'transient_reschedule',
+        transientPass: 1,
+      }),
+    );
+    expect(persistedEmits()).toHaveLength(1);
+    expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+  });
+
+  it('retry-send-window D4: a transient pass with room left in the window re-enqueues as before', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+      kind: 'transient',
+      errorCode: '429',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(outbound.delayed).toHaveLength(1);
+    expect(outbound.delayed[0]!.delaySeconds).toBe(5);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(errorLogs()).toHaveLength(0);
   });
 
   // --- D12: the send, and the leg copy frozen at claim time ---

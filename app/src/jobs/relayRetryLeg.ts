@@ -3,8 +3,14 @@
 // The claim lives in the status webhook (spec D3): it appends a NEW single-
 // recipient source row carrying the lineage of the leg that failed, and enqueues
 // this job with that row's key. This handler owns everything after the claim -
-// the four send gates, the send itself, the status-preserving activity bump, the
-// transient sub-ladder and the terminal closes.
+// the four send gates, the send window, the send itself, the status-preserving
+// activity bump, the transient sub-ladder and the terminal closes.
+//
+// Since retry-send-window (its spec D3/D4) the claim PREVIEWS the four gates -
+// through the same `evaluateRelayRetryGates` this job runs - and the 15-minute
+// send window, and creates a rung it can already see is doomed as CLOSED, never
+// enqueued. This job still re-runs every check at send time: a group can close,
+// and the window can run out, during the backoff.
 //
 // Three things about this file are easy to get wrong and are load-bearing:
 //
@@ -37,6 +43,11 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import { relayRetryBackoffMs } from '../lib/relayRetryClaim.js';
 import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../lib/relayRetryGates.js';
+import {
+  parseRetryWindowOrigin,
+  retryFitsSendWindow,
+  withinRetrySendWindow,
+} from '../lib/retrySendWindow.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -81,11 +92,20 @@ export interface RelayRetryLegPayload {
  * `transient_cap` already existed there and keep their meanings - retries did
  * not run vs. retries ran and the transient budget is spent.
  *
+ * `retry_window_closed` (retry-send-window D4) is the send-window close: the
+ * window gate below, or a transient re-run that would land past the window.
+ * Kept for data and logs; the dashboard's relay join gives it NO display
+ * code, so the leg reads as the original 30003 - a plain failed attempt.
+ *
  * `contact_opted_out` is deliberately NOT in this set: the dashboard drops that
  * code from the relay rollup entirely, so a refusal stamped with it would
  * silently vanish from the surface this feature exists to make truthful.
  */
-export type RelayRetryCloseCode = RelayRetryGateCode | 'enqueue_failed' | 'transient_cap';
+export type RelayRetryCloseCode =
+  | RelayRetryGateCode
+  | 'enqueue_failed'
+  | 'transient_cap'
+  | 'retry_window_closed';
 
 export interface RelayRetryLegJobDeps {
   adapter?: MessagingAdapter & CarrierMessageSender;
@@ -257,12 +277,21 @@ const GATE_REFUSAL_MESSAGES: Record<RelayRetryGateCode, string> = {
   retry_opted_out: 'relayRetryLeg: retry refused - member opted out',
 };
 
-/** The lineage a retry row MUST carry for this job to be able to run at all. */
+/** The lineage a retry row MUST carry for this job to be able to run at all -
+ *  plus the one field it may lack. */
 interface RetryRowLineage {
   rootTsMsgId: string;
   memberKey: string;
   destDigest: string;
   legBody: string;
+  /**
+   * retry-send-window D2/D5: the ladder's send-window origin as the claim
+   * stored it, or undefined. OPTIONAL on purpose - it is NOT in the `missing`
+   * list below. That check throws AFTER the execution marker is set, so
+   * requiring the field would silently drop every rung claimed before the
+   * window shipped; such a rung runs unwindowed instead, with a WARN.
+   */
+  windowStart: string | undefined;
 }
 
 function readRetryLineage(row: MessageItem, retryTsMsgId: string): RetryRowLineage {
@@ -288,6 +317,7 @@ function readRetryLineage(row: MessageItem, retryTsMsgId: string): RetryRowLinea
     memberKey: memberKey as string,
     destDigest: destDigest as string,
     legBody: legBody as string,
+    windowStart: row.relay_retry_window_start,
   };
 }
 
@@ -368,7 +398,10 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     // `relay_retry_of` is used ONLY as a STRING (the digest's first component).
     // The ROOT ROW is deliberately never read: requiring it to be readable would
     // add a close path for a row nothing else on this path needs.
-    const { rootTsMsgId, memberKey, destDigest, legBody } = readRetryLineage(row, retryTsMsgId);
+    const { rootTsMsgId, memberKey, destDigest, legBody, windowStart } = readRetryLineage(
+      row,
+      retryTsMsgId,
+    );
     const ladder = { ...base, rootTsMsgId, attempt: row.relay_retry_attempt };
     // Read HERE, where `row` is narrowed: the nested close helpers below cannot
     // see that narrowing (the same reason the repo/adapter locals above exist).
@@ -531,6 +564,42 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     const member = gate.member;
     const memberLog = { ...ladder, memberKey: logSafeMemberKey(member) };
 
+    // 4b. The send window (retry-send-window spec D4) - the LAST gate, after
+    // the opt-out, so a deliberate human action keeps its own "Not retried -
+    // ..." code when both apply. STRICT at send time: the claim already spent
+    // RETRY_JOB_GRACE_MS when it scheduled this rung, so the rule here is only
+    // "not after origin + 15 minutes". The origin is the one the claim carried
+    // on this row (the member's ORIGINAL leg send, spec D2) - never re-derived.
+    // A row without a usable one (claimed before the window shipped, or
+    // unparseable) is NOT windowed and runs, with a WARN naming the gap (D5).
+    //
+    // The no-pool-number throw above precedes this gate ON PURPOSE: an open
+    // group with no pool number cannot send at all, and its throw after the
+    // execution marker strands the rung whatever the window says, so the
+    // window gate is never asked to describe it. relayRetryLeg.test.ts pins
+    // this order.
+    const originMs = parseRetryWindowOrigin(windowStart);
+    if (originMs === undefined) {
+      log.warn(
+        { ...memberLog, windowOrigin: windowStart === undefined ? 'missing' : 'unparseable' },
+        'relayRetryLeg: no usable send-window origin on the retry row - window not checked (spec D5)',
+      );
+    } else if (!withinRetrySendWindow({ originMs, nowMs: Date.now() })) {
+      await refuseGate('retry_window_closed');
+      // ERROR (D9): the member never got the text - a dead end like the cap,
+      // not a human action like the four gates above.
+      log.error(
+        {
+          ...memberLog,
+          retryClaim: 'window_closed',
+          closeCode: 'retry_window_closed',
+          windowCheck: 'gate',
+        },
+        'relayRetryLeg: retry refused - past the 15-minute send window',
+      );
+      return;
+    }
+
     // The fan-out's media-without-store ERROR, twinned (code review R1, F4).
     // `hasForwardableMedia` above folds "no store" into the transport intent, so
     // without this line an MMS retry silently degrades to text - and on a
@@ -617,9 +686,34 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
         );
         return;
       }
+      // retry-send-window D4: re-enqueueing is a SCHEDULING decision, so it
+      // meets the claim's rule - the re-run must still fit the window with
+      // RETRY_JOB_GRACE_MS to spare. Past it the rung closes here instead of
+      // re-enqueueing a pass the job-time gate would only refuse. A POST-send
+      // close (this pass reached the provider), so `closeTerminally`, exactly
+      // as the cap branch above. No origin (D5): unwindowed, as before.
+      const transientDelayMs = transientBackoff(claim.attempt);
+      if (
+        originMs !== undefined &&
+        !retryFitsSendWindow({ originMs, nowMs: Date.now(), backoffMs: transientDelayMs })
+      ) {
+        await closeTerminally('retry_window_closed');
+        log.error(
+          {
+            ...memberLog,
+            retryClaim: 'window_closed',
+            closeCode: 'retry_window_closed',
+            windowCheck: 'transient_reschedule',
+            errorCode: outcome.errorCode,
+            transientPass: claim.attempt,
+          },
+          'relayRetryLeg: a transient re-run would land past the send window - retry leg closed',
+        );
+        return;
+      }
       try {
         await enqueue(RELAY_RETRY_LEG_JOB, payload, {
-          runAt: new Date(Date.now() + transientBackoff(claim.attempt)),
+          runAt: new Date(Date.now() + transientDelayMs),
         });
       } catch (err) {
         await closeTerminally('enqueue_failed');

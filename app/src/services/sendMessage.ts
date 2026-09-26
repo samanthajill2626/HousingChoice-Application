@@ -267,9 +267,11 @@ export interface SendMessageInput {
    * item so this path does no second read. When set, the deleted and
    * JIT-consent gates judge THIS contact rather than whichever contact the
    * phone lookup returns first (duplicate contacts on one phone), and the
-   * opt-out gate refuses on EITHER contact's flag. Absent on every other send.
-   * So the deleted and consent gates judge the caller's already-resolved
-   * snapshot (redundant with the fan-out's own fence); opt-out stays fresh.
+   * opt-out gate refuses on EITHER contact's flag - all of this only while the
+   * recipient still holds the thread's number (see the D14 note below).
+   * Absent on every other send. So the deleted and consent gates judge the
+   * caller's already-resolved snapshot (redundant with the fan-out's own
+   * fence); opt-out stays fresh.
    * retry-send-window D14: its id is persisted as `recipient_contact_id`, so a
    * retry of the row can judge the SAME contact (read back by id) - but ONLY
    * while that contact still holds this thread's number (contactHoldsPhone): a

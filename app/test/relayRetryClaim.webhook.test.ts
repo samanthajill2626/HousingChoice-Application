@@ -1394,7 +1394,7 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     expect(
       capture
         .atLevel(WARN)
-        .some((l) => String(l['msg']).includes('gate preview read failed - rung claimed open')),
+        .some((l) => String(l['msg']).includes('gate preview read failed - the gates are skipped here')),
     ).toBe(true);
   });
 });

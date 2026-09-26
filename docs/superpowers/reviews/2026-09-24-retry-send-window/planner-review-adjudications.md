@@ -44,3 +44,18 @@ two findings, both handled in a second planner wave, red first.
 | --- | --- | --- | --- |
 | RR-1 | LOW: the `recipient` contract comments still said the recorded recipient is always judged | FIX (comments) | `sendMessage.ts` (the `recipient` doc), `api.ts`, `retrySend.ts`, `oneToOneRetryDecision.ts` and `docs/issues/ai-mode-switch-gates-all-automation.md` now name the held-number rule. |
 | RR-2 | LOW (ADV-4 contested, and the reviewer is right): Twilio's default webhook retry policy is `ct` - connection failures only - so a 5xx status callback is never redelivered, and `claim_failed` is terminal; the claim's new gate-preview reads added fault points that lose a relay retry ladder | FIX + FILE | Verified against Twilio's connection-override docs ("Default: ct"); the repo sets no `#rp=` override. The claim's gate preview now FAILS OPEN: a thrown read claims the rung open with a WARN (the job re-runs every gate) - the rewritten test failed first against the old code (a 500 and `claim_failed`), then passed. The pre-existing reliance on redelivery (the claim's consistent re-read, roster read and append) is filed as `relay-retry-claim-assumes-5xx-redelivery` (med). Spec draft 7.5 corrects D3, section 1 and section 9. ADV-4's NOTE is withdrawn. |
+
+## Second re-review (commit 03609cde)
+
+| # | Finding | Verdict | What was done |
+| --- | --- | --- | --- |
+| RR2-1 | LOW: the fail-open WARN says "rung claimed open" before the window check and the append decide | FIX (log text) | The WARN now reads "gate preview read failed - the gates are skipped here; the retry job re-checks every gate (fail open)"; the test matches it. |
+| RR2-2 | LOW: comments and the new issue still contradict the code - the old "a throw here is claim_failed ... Twilio's redelivery" sentence, RR-1 leftovers in `sendMessage.ts` and `messagesRepo.ts`, and the issue pointing its fix at app-built callback URLs | FIX (text) | The stale claim comment is removed; the two recipient docs name the held-number rule; the issue now places the `rp=5xx` override on the Messaging Service's Delivery Status Callback URL (console / infrastructure, `app/src/adapters/messaging.ts:12-17`). |
+
+Process note: stopping the planner's gate script mid-`npm test` with the task
+manager's stop did NOT end the script on this Windows host - it went on into the
+e2e gate as an orphan (15:37). The orphan was tree-killed by its worktree PIDs
+(bash, playwright, the e2e-session launcher and its app / worker / vite, the
+browser), `npm run e2e:stop` exited 0 with no session left, and lane 6's four
+ports were proven free before any edit. The final gates were then run once, to
+completion, on the final commit.

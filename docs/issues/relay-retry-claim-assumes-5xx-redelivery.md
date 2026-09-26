@@ -32,9 +32,11 @@ re-runs every gate) - but the claim's other reads and its append predate it and
 still rely on the redelivery.
 
 **Suggested fix.** Either make the redelivery real - add a connection override
-with `rp=5xx` to the status callback URLs the app builds (every status callback
-is already idempotent on redelivery: the forward-only status writes and the
-claim's SID-deduped append) and pin it with a test - or stop depending on it:
+with `rp=5xx` to the Messaging Service's Delivery Status Callback URL, which is
+configured on the service (Twilio console / infrastructure), not built per
+message by the app (`app/src/adapters/messaging.ts:12-17`); every status
+callback is already idempotent on redelivery (the forward-only status writes and
+the claim's SID-deduped append) - or stop depending on it:
 answer 200 after a claim fault and schedule a claim retry through the jobs
 queue. Also correct the "Twilio still redelivers" comments, and re-check the
 one-to-one status path's own 5xx paths against the same default.

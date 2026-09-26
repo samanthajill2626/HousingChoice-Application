@@ -475,3 +475,137 @@ premise holds.
   `onRetry` (`:304-308`) does not. The branch makes this LESS reachable for
   shares (a consenting recipient who still holds the number is judged rather
   than a first-hit duplicate). Worth filing separately.
+
+---
+
+## Re-review of 03609cde
+
+**Scope.** The fix commit 03609cde, reviewed cold at branch head 1db4b77e.
+- bc66bd9f touches records only.
+- 1db4b77e (the main merge) brings in 30 code files (inbox rows and timestamps,
+  AuthGate, e2e performance). None overlaps a file this branch changes (`comm`
+  over the two name lists is empty).
+- I read `docs/issues/relay-retry-claim-assumes-5xx-redelivery.md`, as allowed;
+  nothing else under `docs/superpowers/`.
+- I ran no app vitest suite, no e2e run and no dashboard probe.
+
+### A. The fail-open wrap itself
+
+**Scope of the try.** The try (`app/src/routes/webhooks/twilio.ts:2848-2868`)
+covers two things only: the conversation read, and `evaluateRelayRetryGates`,
+whose only I/O is `isSuppressed` (a contact get or phone query plus a
+participant-phone query). The window check, the slot build and the append all
+stay outside it. So a throw from them is still `claim_failed`, as the new issue
+records.
+
+It does swallow EVERY throw, including a deterministic one. For example,
+`normalizeToE164` calls `raw.trim()` (`app/src/lib/phone.ts:33`), which throws
+a TypeError for a roster member whose `phone` is not a string. Such a fault is
+not lost, though:
+- the retry job runs the same evaluator after its execution marker
+  (`app/src/jobs/relayRetryLeg.ts:532-541`) and throws again;
+- the result is the job's own ERROR plus a rung stranded at `queued`, where
+  before it was one `claim_failed` ERROR and a plain failure;
+- it is reachable only on malformed roster data, which the fan-out would
+  already have choked on.
+
+Acceptable. Optional hardening: rethrow anything without an AWS `$metadata`,
+so a code defect stays `claim_failed`.
+
+**The WARN's PII.** It carries `conversationId`, `rootTsMsgId`, `attempt`, the
+log-safe member key (`logSafeStoredRelayMemberKey`) and `err`, which goes
+through the logger's Error serializer. There is no phone and no body. It is the
+same shape as the one-to-one decision's accepted fail-open WARN
+(`twilio.ts:3613-3617`, `failOpen: 'read_failed'`).
+
+**The `gate !== undefined && gate.refused` narrowing.** It is type-correct: the
+union narrows on `refused: true`, so `gate.code` is safe. With `gate`
+undefined, the chain falls through to the D5 origin gap and then the window
+check. A failed preview can therefore still end in a window decline and a
+CLOSED rung. That is right on the data, and it is what R4 below turns on.
+Nothing else in the claim reads `gate`.
+
+**Is a rung claimed open after a failed preview safe?** Yes.
+- The job re-runs all four gates and the window with fresh reads, after its
+  execution marker (`relayRetryLeg.ts:532-606`).
+- It passes `suppressionChecked: true` with its OWN suppression answer.
+- If the job's reads also fail, it throws after the marker: the rung is
+  stranded, and nothing is sent.
+- There is no double-send path: one append wins the SID claim, one job runs per
+  rung, and the marker stops redeliveries.
+- The only cost is D3's "at once" display for that rung: it reads `Retrying`
+  until the job refuses.
+- The rewritten test cannot pass vacuously. It requires `failed === true`, a
+  200, one open `queued` rung, one scheduled job, and the fail-open WARN text,
+  which only this catch emits (`app/test/relayRetryClaim.webhook.test.ts`, the
+  "(planner review)" case).
+
+**Verdict: the wrap is correct.** Its log line and its neighboring comment are
+not (R4, R5).
+
+### B. What else was missed
+
+- Does the new "Twilio does not redeliver" fact expose anything else in this
+  branch? No. The one-to-one decision already failed open. The 30003 arm
+  catches the enqueue failure and answers 200. The retry job depends on SQS
+  redelivery, not Twilio's, and SQS does redeliver.
+- The remaining 5xx paths predate this branch and are filed: the claim's
+  re-read, roster read and append (the new issue), and the one-to-one status
+  write and SID lookups (named at the end of that issue).
+- The merge's inbox feature reads its own inbox endpoints and bumps nothing this
+  branch reads. Automatic retries moving `last_activity_at` (and so the new inbox
+  row time) predate this branch.
+
+### C. New findings
+
+#### R4. [LOW] The fail-open WARN announces "rung claimed open" before the window check and the append have decided
+
+**What is wrong.** The catch logs 'relay retry claim: gate preview read failed -
+rung claimed open; the retry job re-checks every gate (fail open)'
+(`twilio.ts:2857-2868`). It does so BEFORE the window check (`:2883-2898`) and
+the append. The line can then contradict the outcome in two ways:
+- A late callback (outside the window's scheduling edge) makes the window
+  decline. The rung is appended CLOSED with `retry_window_closed`, and the
+  marker logs ERROR `window_closed`, next to a WARN saying it was claimed open.
+- A duplicate callback (undelivered and failed for one SID) whose append
+  dedupes claimed nothing, yet still logs "rung claimed open". The D5 origin-gap
+  WARN avoids exactly this by logging only after the append wins
+  (`twilio.ts:2996-3011`).
+
+**Failure scenario.** During a DynamoDB degradation, an operator reads a
+"claimed open" WARN and a `window_closed` ERROR for the same leg, and cannot
+tell which one is true.
+
+**Suggested fix.** Keep the error in a local in the catch. Log it after the
+append, with the real outcome, as the originGap WARN does. Or reword it to
+"gate preview skipped (read failed) - the retry job re-checks every gate".
+
+#### R5. [LOW] Comments and the new issue's suggested fix still contradict the code
+
+- `twilio.ts:2838-2840`: the fix left the old sentence "A read that THROWS here
+  is the existing `claim_failed` (ERROR, a 5xx, and Twilio's redelivery re-runs
+  the claim), like every read above." directly above the new comment that says
+  the opposite. Delete it.
+- RR-1 residue:
+  - `app/src/services/sendMessage.ts:270` still says "Absent on every other
+    send"; the retry job and the manual Retry route pass it too.
+  - `app/src/repos/messagesRepo.ts:755-758` (`NewMessage.recipientContactId`)
+    still says "so a retry judges that same contact. Absent when the phone
+    lookup decided". It is also absent when the named recipient did not hold
+    the number.
+- `docs/issues/relay-retry-claim-assumes-5xx-redelivery.md`, "Suggested fix",
+  says to add `rp=5xx` "to the status callback URLs the app builds ... and pin
+  it with a test". For messaging the app builds no status callback URL: the
+  Messaging Service's console-configured Delivery Status Callback serves every
+  message, and the adapter passes no per-message `statusCallback`
+  (`app/src/adapters/messaging.ts:12-17`, `:681-683`). No Terraform manages the
+  Messaging Service. The override is either a console change (for the human)
+  or a new per-message `statusCallback` in the adapter; only the second can be
+  pinned by a test. As written, the fix points at code that does not exist.
+
+### D. The adjudications
+
+- RR-1 FIX: accepted, with the residue in R5.
+- RR-2 FIX: verified (section A). The pre-existing reliance is filed as its own
+  issue, which I accept; its wording is corrected in R5.
+- Nothing else to contest.

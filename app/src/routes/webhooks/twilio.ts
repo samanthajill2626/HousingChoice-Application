@@ -2835,9 +2835,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // roster, number unchanged, not opted out), through the SAME evaluator
       // the job runs, so "that gate's code" is deterministic when two apply.
       // The job still re-runs every gate at send time: a group can close during
-      // the backoff. A read that THROWS here is the existing `claim_failed`
-      // (ERROR, a 5xx, and Twilio's redelivery re-runs the claim), like every
-      // read above.
+      // the backoff.
       // The gate preview FAILS OPEN (planner review): Twilio does not redeliver
       // a 5xx status callback by default (its retry policy is `ct` - connection
       // failures only), so a claim that threw here would lose this leg's retry
@@ -2863,7 +2861,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             attempt,
             memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
           },
-          'relay retry claim: gate preview read failed - rung claimed open; the retry job re-checks every gate (fail open)',
+          'relay retry claim: gate preview read failed - the gates are skipped here; the retry job re-checks every gate (fail open)',
         );
       }
       // D2: where this ladder's window started. Step 6 fell back to

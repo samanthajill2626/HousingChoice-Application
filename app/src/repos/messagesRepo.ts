@@ -754,8 +754,9 @@ export interface NewMessage {
   /**
    * retry-send-window D14: the contact the caller named as the recipient (the
    * send wrapper's `recipient`, share-skip-fix I8), stored as
-   * `recipient_contact_id` so a retry judges that same contact. Absent when the
-   * phone lookup decided.
+   * `recipient_contact_id` so a retry judges that same contact while it still
+   * holds the thread's number. Absent when the phone lookup decided, and when a
+   * named recipient no longer held the number (sendMessage ignored it).
    */
   recipientContactId?: string;
 

@@ -3,12 +3,37 @@ id: group-text-30003-leg-retry-promise-unverified
 title: A native group-text 30003 promises a retry that never sends, at BOTH the leg and message levels
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard/messaging
 created: 2026-09-01
-updated: 2026-09-01
-refs: app/src/services/sendMessage.ts:293, app/src/routes/webhooks/twilio.ts:2408, app/src/routes/webhooks/twilio.ts:2567, app/src/services/groupReceipts.ts:336, app/src/services/groupReceipts.ts:422, dashboard/src/routes/contact/deliveryStatus.ts:597, dashboard/src/routes/contact/Timeline.delivery.test.tsx:517
+updated: 2026-09-26
+resolved: 2026-09-26
+refs: app/src/services/sendMessage.ts:293, app/src/routes/webhooks/twilio.ts:2408, app/src/routes/webhooks/twilio.ts:2567, app/src/services/groupReceipts.ts:336, app/src/services/groupReceipts.ts:422, dashboard/src/routes/contact/deliveryStatus.ts:597, dashboard/src/routes/contact/Timeline.delivery.test.tsx:517, app/src/services/oneToOneRetryDecision.ts, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
 ---
+
+**Resolution (2026-09-26, `feat/retry-send-window`, spec
+`docs/superpowers/specs/2026-09-24-retry-send-window-design.md` D8, D11, D12).
+Closed: no native group text promises a retry any more, at either level.** The
+promise no longer follows the error code at all. "will retry" is shown only on
+a ONE-TO-ONE bubble whose failed message carries a live `retry_due_at` - the
+stamp the status webhook writes, in the same conditional write as the failure,
+only when it has decided a retry will be attempted (D3a, D7). Every other 30003
+reads the base wording, "Phone unreachable (error 30003)" (`ERROR_CODE_REASONS`
+in `dashboard/src/routes/contact/deliveryStatus.ts`), so the group-text leg
+row, the rollup and the message-level chip - whose code can be leg-derived
+through `rollUpAggregate`, as traced below - all state the failure and promise
+nothing. Server side, the one-to-one 30003 arm no longer schedules a retry for a
+`group_text` conversation whenever its conversation read succeeds (D11, one
+WARN, `app/src/services/oneToOneRetryDecision.ts`); if that read fails the
+decision fails open and the job's `sendMessage` still refuses the send
+(`GroupTextSendNotSupportedError`), as before. The tests that pinned the
+carve-out were INVERTED, not deleted (`deliveryStatus.test.ts`,
+`Timeline.delivery.test.tsx`), and the comments that carried the old rationale
+were rewritten (D12). The axis question under "Suggested fix" is settled by D8's
+rule rather than by a `leg` option: a promise follows a SCHEDULED retry, never a
+code or a product. The rollup still copies the worst leg's code onto a
+group-text message row; that is now harmless (it carries no promise). A real
+retry for native group texts stays out of scope (spec section 8).
 
 **Problem.** The "will retry" tail on a native group-text 30003 is FALSE, at
 both the leg and the message level, by two different mechanisms. Native group

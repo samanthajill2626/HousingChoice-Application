@@ -6,7 +6,8 @@ severity: med
 status: deferred
 area: app/messaging
 created: 2026-09-24
-refs: app/src/services/sendMessage.ts, app/src/services/scheduledSendSuppression.ts, app/src/lib/import/apply.ts
+updated: 2026-09-26
+refs: app/src/services/sendMessage.ts, app/src/services/scheduledSendSuppression.ts, app/src/lib/import/apply.ts, app/src/jobs/retrySend.ts, app/src/services/oneToOneRetryDecision.ts
 ---
 
 **Problem.** The architecture doc (section 6, "AI Conversation Layer") defines
@@ -58,6 +59,21 @@ the switch.
    text, the welcome text, automatic retries, and property sends staff create.
 3. A retry follows the original sender: a message a person sent is retried to
    exhaustion regardless of any AI or automation setting.
+   **Delivered for the one-to-one 30003 retry (2026-09-26,
+   `feat/retry-send-window`, spec D14).** Every one-to-one send now records on
+   its message row whether it was automated (`automated`, true or false) and,
+   when the caller named a recipient, that contact (`recipient_contact_id`).
+   The automatic retry is sent with the original's flag and recipient, and the
+   status webhook judges whether to schedule it the same way: a person's text
+   is retried as a person's send - manual mode and the breaker do not apply,
+   the consent gate does - to exhaustion inside the 15-minute retry window
+   (Cameron's ruling, same branch), and an automated original is retried
+   automated and breaker-metered, as before. The manual Retry route passes the
+   recorded recipient too. A text sent before that deploy carries no flag and
+   is retried as before (automated, recipient by phone). Everything else here
+   stays Work Package 2's - including, under item 2, the automatic retry of an
+   AUTOMATED original (a tour reminder, the missed-call text), which still
+   stops on a manual-mode thread.
 4. The runaway breaker gets its own stop, separate from the AI switch, with a
    visible resume action.
 5. A visible per-conversation control for the AI switch.

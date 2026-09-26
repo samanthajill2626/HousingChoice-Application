@@ -17,10 +17,14 @@ import { expectTodayReady } from '../../support/today.js';
 //
 // THIS FILE WAS `relay-30003-no-retry-promise.spec.ts`. It pinned the OPPOSITE
 // world - a 30003 that promised nothing because nothing retried. The promise it
-// pinned OUT is still pinned out: `will retry` was, and remains, a native
-// group-text string, and every `not.toContainText('will retry')` below is
-// inherited unchanged. What moved is the positive half: a relay 30003 no longer
-// reads `Undelivered`, it reads `Retrying` and then `Delivered on retry`.
+// pinned OUT is still pinned out, and every `not.toContainText('will retry')`
+// below is inherited unchanged. What changed around it: `will retry` is no
+// longer a native group-text string (no retry exists for a native group text,
+// retry-send-window D11); it now shows ONLY on a one-to-one bubble whose failed
+// message carries a live `retry_due_at`, i.e. a scheduled automatic retry
+// (retry-send-window D8, one-to-one-30003-retry.spec.ts). What moved here is
+// the positive half: a relay 30003 no longer reads `Undelivered`, it reads
+// `Retrying` and then `Delivered on retry`.
 //
 // THREE POSITIONS, NOT ONE (D21). One derived retry state feeds the rollup chip,
 // that chip's accessible-name recital and the per-recipient row, and the whole

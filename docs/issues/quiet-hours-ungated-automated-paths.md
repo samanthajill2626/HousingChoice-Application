@@ -6,8 +6,8 @@ severity: med
 status: open
 area: app
 created: 2026-08-03
-updated: 2026-09-02
-refs: app/src/jobs/relayNumberReady.ts:171, app/src/services/relayQueuedMessages.ts, app/src/jobs/retrySend.ts:73, app/src/jobs/relayRetryLeg.ts
+updated: 2026-09-26
+refs: app/src/jobs/relayNumberReady.ts:171, app/src/services/relayQueuedMessages.ts, app/src/jobs/retrySend.ts:73, app/src/jobs/relayRetryLeg.ts, app/src/lib/retrySendWindow.ts
 ---
 
 **Problem.** The quiet-hours feature
@@ -49,6 +49,23 @@ and none of them is gated:
    of reasoning; read "automatic delivery retries" as covering both paths. Note
    the retry job also carries a short TRANSIENT sub-ladder (5s then 10s) inside
    one rung, which does not extend the bound.
+
+   **2026-09-26 (feat/retry-send-window): automatic retries now END 15 minutes
+   after the original send.** The ~7-minute bound above held only when the
+   failure was reported promptly; a carrier can report 30003 hours or days
+   after the send, and either retry path then re-sent that late. Both paths now
+   refuse any automatic retry that would go out more than 15 minutes after the
+   original message went out (`RETRY_SEND_WINDOW_MS`,
+   `app/src/lib/retrySendWindow.ts`; spec
+   `docs/superpowers/specs/2026-09-24-retry-send-window-design.md` D1-D5). The
+   decision is made when the failure arrives, with a minute of grace for queue
+   delay, and checked again right before the send - including the relay job's
+   transient re-enqueue and its bounded token-bucket wait. So a retry can enter
+   quiet hours only when the original went out within 15 minutes of
+   quiet-start, which strengthens the "accept" recommendation for item 3. Also
+   since that branch the one-to-one retry is no longer always
+   `automated: true`: it is sent with the original's flag (spec D14), so a
+   person's text is retried as a person's send.
 
 None of these is a regression from the quiet-hours build (its exempt-files rule
 was honored; zero diff on all of them). This issue records the DECISION owed:

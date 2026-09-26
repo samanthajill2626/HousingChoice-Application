@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app/messaging
 created: 2026-09-24
-refs: app/src/routes/api.ts:1564, app/src/routes/webhooks/twilio.ts:3251, app/src/routes/webhooks/twilio.ts:3350, app/src/jobs/retrySend.ts:112, dashboard/src/routes/contact/Timeline.tsx:1341, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
+updated: 2026-09-26
+refs: app/src/routes/api.ts, app/src/services/oneToOneRetryDecision.ts, app/src/routes/webhooks/twilio.ts, app/src/jobs/retrySend.ts, app/src/lib/retrySendWindow.ts, dashboard/src/routes/contact/retryPromise.ts, dashboard/src/routes/contact/Timeline.tsx, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
 ---
 
 **Problem.** `feat/retry-send-window` (spec D7, D10) hides the manual Retry button
@@ -25,8 +26,10 @@ still time-based, and these gaps remain:
 
 1. A late job: the promise expired while the automatic job is still queued or
    running, and a press lands before it sends.
-2. A stale browser tab retrying an original that an automatic retry has already
-   replaced (the live screen hides replaced bubbles).
+2. A stale browser tab retrying, once the promise has expired, an original that
+   an automatic retry has already replaced (the live screen hides replaced
+   bubbles; before the promise expires the route refuses that press, 409
+   `retry_pending`).
 3. A one-to-one retry whose outcome is still pending past `retry_due_at` (for
    example an `unknown` send outcome awaiting reconcile checks), unless the path
    that leaves it pending refreshes `retry_due_at` as the retry-send-window spec's
@@ -44,7 +47,7 @@ before sending by the manual route and the automatic job alike, with consistent
 reads. The retry-send-window spec deliberately did not build it (Cameron's option
 1 was the time-based guard).
 
-**Suggested fix.** `feat/send-outcome-reconcile` (revision 4) introduces a
+**Suggested fix.** `feat/send-outcome-reconcile` (revision 6, @`b93ab376`) introduces a
 per-recipient send-attempt record with a conditional claim before every provider
 call, and keys `retrySend`'s record on the original message and the rung. That is
 most of the needed substrate: have the manual retry route claim against the same

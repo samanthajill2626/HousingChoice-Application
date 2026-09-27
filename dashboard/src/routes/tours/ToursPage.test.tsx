@@ -1105,6 +1105,33 @@ describe('ToursPage - Past view', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Could not mark toured: Could not check the tour');
   });
 
+  it('a MALFORMED re-read (a GET that resolves with no tour) reads Could not check the tour, is never PATCHed, and still ends the batch: one reload, every mark control enabled again', async () => {
+    const user = userEvent.setup();
+    readyPast([NOT_MARKED, NOT_MARKED_2]);
+    // The GET resolves, but there is nothing to compare: reading its status
+    // throws inside the guard phase. That must become the row's result and
+    // let the runner finish - never reject past the busy flag's release and
+    // leave every Past control in the tab disabled.
+    getTour.mockResolvedValue(undefined);
+    renderPage('/tours/past');
+    const item = within(screen.getByRole('region', { name: 'Past tours' })).getAllByRole('listitem')[0]!;
+    await user.click(within(item).getByRole('button', { name: `Mark toured: ${P1_LABEL}` }));
+
+    expect(await within(item).findByRole('alert')).toHaveTextContent('Could not mark toured: Could not check the tour');
+    expect(patchTour).not.toHaveBeenCalled();
+    expect(reloadPast).toHaveBeenCalledTimes(1);
+    // The flag was released: every mark control is live again, not wedged.
+    await waitFor(() => expect(screen.getByRole('button', { name: `Mark toured: ${P1_LABEL}` })).toBeEnabled());
+    expect(screen.getByRole('button', { name: `Mark toured: ${P4_LABEL}` })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Select all not marked' })).toBeEnabled();
+    for (const box of screen.getAllByRole('checkbox')) expect(box).toBeEnabled();
+    // Mark toured (0) is disabled only because nothing is selected: tick a
+    // row and the bulk button comes live.
+    expect(screen.getByRole('button', { name: 'Mark toured (0)' })).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: `Select tour for ${P1_LABEL}` }));
+    expect(screen.getByRole('button', { name: 'Mark toured (1)' })).toBeEnabled();
+  });
+
   it('shows the page error when the FIRST Past fetch fails', () => {
     readyAll([], []);
     pastRows = { status: 'error', past: [], reloadFailed: false };

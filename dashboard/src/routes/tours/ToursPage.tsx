@@ -426,37 +426,49 @@ function PastToursView({ contacts, units }: PastToursViewProps): React.JSX.Eleme
     const listed = new Map(pastTours.map((t) => [t.tourId, t]));
     const eligible = ids.filter((id) => notMarkedIds.includes(id));
     if (eligible.length === 0) return;
-    setBatchRunning(true);
-    setResults(new Map());
-    setSnapshot(listed);
-    const next = new Map<string, MarkResult>();
-    for (const id of eligible) {
-      let current: Tour;
-      try {
-        current = await getTour(id);
-      } catch {
-        next.set(id, { ok: false, message: 'Could not check the tour' });
-        continue;
+    try {
+      setBatchRunning(true);
+      setResults(new Map());
+      setSnapshot(listed);
+      const next = new Map<string, MarkResult>();
+      for (const id of eligible) {
+        // The guard phase - the re-read AND the status/time comparison - is
+        // one try: any throw in it (a failed GET, or an answer whose fields
+        // cannot be read) records this row and moves on, so no result is
+        // ever silent.
+        let unchanged: boolean;
+        try {
+          const current = await getTour(id);
+          unchanged =
+            current.status === 'scheduled' && current.scheduledAt === listed.get(id)?.scheduledAt;
+        } catch {
+          next.set(id, { ok: false, message: 'Could not check the tour' });
+          continue;
+        }
+        if (!unchanged) {
+          next.set(id, { ok: false, message: 'Changed since the list loaded' });
+          continue;
+        }
+        try {
+          await patchTour(id, { status: 'toured' });
+          next.set(id, { ok: true });
+        } catch {
+          next.set(id, { ok: false, message: 'The update failed' });
+        }
       }
-      if (current.status !== 'scheduled' || current.scheduledAt !== listed.get(id)?.scheduledAt) {
-        next.set(id, { ok: false, message: 'Changed since the list loaded' });
-        continue;
-      }
-      try {
-        await patchTour(id, { status: 'toured' });
-        next.set(id, { ok: true });
-      } catch {
-        next.set(id, { ok: false, message: 'The update failed' });
-      }
+      setResults(next);
+      setSelectedIds((prev) => {
+        const remaining = new Set(prev);
+        for (const [id, r] of next) if (r.ok) remaining.delete(id);
+        return remaining;
+      });
+      mountedPastReload?.();
+    } finally {
+      setBatchRunning(false);
     }
-    setResults(next);
-    setSelectedIds((prev) => {
-      const remaining = new Set(prev);
-      for (const [id, r] of next) if (r.ok) remaining.delete(id);
-      return remaining;
-    });
-    mountedPastReload?.();
-    setBatchRunning(false);
+    // The flag's one release point is that finally, reached on every path, so
+    // a throw anywhere in the batch cannot leave the tab's Past controls
+    // disabled. A hung request still holds the flag until it settles.
     // The refresh goes through the module's mounted-view slot, so it reaches
     // the Past view mounted NOW. After a tab switch, or a route change to a
     // tour page and back, mid-batch that is a remounted view (this closure's

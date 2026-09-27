@@ -11,9 +11,14 @@
 // setContact path the edit dialog uses). Without that handler the card is
 // read-only, mirroring how the sibling cards degrade without onEdit.
 //
-// Two staff saving at once is last-write-wins, like every contact field.
+// Stale-save guard (spec 3.9): every Save sends the staff_notes_updated_at the
+// editor OPENED with. If a colleague saved in between, the server refuses with
+// 409 staff_notes_stale and the current contact; the card then shows their
+// newer note above the box, keeps the user's draft, hands the current contact
+// up, and re-bases on THEIR stamp - so a second Save is a deliberate overwrite
+// of a note the user has now seen, and Cancel keeps theirs.
 import { useEffect, useId, useRef, useState } from 'react';
-import { updateContact, type Contact } from '../../api/index.js';
+import { ApiError, updateContact, type Contact } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Card, CardAction, EmptyRow, NotesText, responseClass } from './Card.js';
 import styles from './StaffNotesCard.module.css';
@@ -31,6 +36,16 @@ export interface StaffNotesCardProps {
 /** The one user-facing failure line. No server code or message is appended
  *  (raw error codes stay out of user copy). */
 const SAVE_FAILED = 'Could not save staff notes. Try again.';
+
+/** The current contact a stale-save refusal carries, or null for any other
+ *  failure (only a 409 `staff_notes_stale` with a contact body qualifies). */
+function staleContact(err: unknown): Contact | null {
+  if (!(err instanceof ApiError) || err.status !== 409 || err.code !== 'staff_notes_stale') return null;
+  const body = err.body;
+  if (typeof body !== 'object' || body === null) return null;
+  const contact = (body as { contact?: unknown }).contact;
+  return typeof contact === 'object' && contact !== null ? (contact as Contact) : null;
+}
 
 /** "Sep 26, 2026" (en-US short month, numeric day and year) or '' when absent
  *  or unparseable. Same shape the Closed tours rows use for a date. */
@@ -51,6 +66,11 @@ export function StaffNotesCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(stored);
   const [baseline, setBaseline] = useState(stored);
+  // The stamp the editor opened with (null = never saved) - the guard's
+  // expectation. Captured at edit start, re-based on a stale refusal.
+  const [baselineStamp, setBaselineStamp] = useState<string | null>(updatedAt ?? null);
+  // A colleague's newer note, shown after a stale refusal (null = no conflict).
+  const [conflict, setConflict] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -65,11 +85,14 @@ export function StaffNotesCard({
   const startEdit = (): void => {
     setDraft(stored);
     setBaseline(stored);
+    setBaselineStamp(updatedAt ?? null);
+    setConflict(null);
     setError(null);
     setEditing(true);
   };
   const cancel = (): void => {
     setEditing(false);
+    setConflict(null);
     setError(null);
   };
   const save = async (): Promise<void> => {
@@ -78,16 +101,32 @@ export function StaffNotesCard({
     // vs the text the editor OPENED with: a refetch can move the prop mid-edit; untouched never sends.
     if (draft.trim() === baseline.trim()) {
       setEditing(false);
+      setConflict(null);
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      const updated = await updateContact(contactId, { staff_notes: draft });
+      const updated = await updateContact(contactId, {
+        staff_notes: draft,
+        staff_notes_expected_updated_at: baselineStamp,
+      });
       onContactUpdated?.(updated);
       setEditing(false);
-    } catch {
-      setError(SAVE_FAILED);
+      setConflict(null);
+    } catch (err) {
+      const theirs = staleContact(err);
+      if (theirs === null) {
+        setError(SAVE_FAILED);
+      } else {
+        // Someone saved first. Show their note, keep the draft, re-base on
+        // THEIR version so the next Save is a deliberate, informed overwrite.
+        const theirText = typeof theirs.staff_notes === 'string' ? theirs.staff_notes : '';
+        onContactUpdated?.(theirs);
+        setBaseline(theirText);
+        setBaselineStamp(typeof theirs.staff_notes_updated_at === 'string' ? theirs.staff_notes_updated_at : null);
+        setConflict(theirText);
+      }
     } finally {
       setSaving(false);
     }
@@ -123,6 +162,19 @@ export function StaffNotesCard({
               a wrapping <label> would then carry the draft as part of its
               accessible text, so getByLabel('Staff notes', { exact: true })
               would miss a prefilled box. */}
+          {conflict !== null ? (
+            <div role="alert" className={styles.conflict}>
+              <p className={styles.conflictLead}>
+                Someone else saved these notes while you were editing. Their version is below; your
+                text is still in the box. Save again to replace theirs, or Cancel to keep theirs.
+              </p>
+              {conflict.trim().length > 0 ? (
+                <p className={styles.conflictText}>{conflict}</p>
+              ) : (
+                <p className={styles.conflictText}>They cleared the notes.</p>
+              )}
+            </div>
+          ) : null}
           <div className={styles.field}>
             <label htmlFor={textareaId} className={styles.srOnly}>
               Staff notes

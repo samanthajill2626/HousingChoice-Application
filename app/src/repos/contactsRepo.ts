@@ -613,6 +613,19 @@ export interface ListContactsOpts {
   excludeOrigin?: string;
 }
 
+/**
+ * Options for `update`. `expect` is an optimistic-concurrency guard on ONE
+ * attribute, evaluated in the SAME conditional UpdateItem as the write: the
+ * write lands only while the stored `attr` equals `value` (or is absent, for
+ * `value: null`). A mismatch throws ConditionalCheckFailedException exactly
+ * like an unknown contact does - the caller re-reads to tell "gone" from
+ * "stale". Used by the Staff notes stale-save guard (PATCH
+ * staff_notes_expected_updated_at, spec 3.9).
+ */
+export interface UpdateContactOptions {
+  expect?: { attr: string; value: string | null };
+}
+
 export interface ContactsRepo {
   /** Phone (E.164) → contact via the byPhone GSI; undefined when unknown. */
   findByPhone(phone: string): Promise<ContactItem | undefined>;
@@ -691,7 +704,7 @@ export interface ContactsRepo {
    * means). Returns the post-update item (ALL_NEW). Throws
    * ConditionalCheckFailedException for unknown contacts.
    */
-  update(contactId: string, patch: Record<string, unknown>): Promise<ContactItem>;
+  update(contactId: string, patch: Record<string, unknown>, opts?: UpdateContactOptions): Promise<ContactItem>;
 
   /**
    * BE1/C1: attach a number to a contact. `phone` MUST already be normalized
@@ -1274,7 +1287,7 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       return Attributes as ContactItem;
     },
 
-    async update(contactId, patch) {
+    async update(contactId, patch, opts) {
       // SET non-null fields; REMOVE explicit-null fields (the null → REMOVE
       // convention lets callers clear an attribute, e.g. role: null removes the
       // role attribute entirely rather than storing ''). Names are
@@ -1339,12 +1352,25 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       const clauses: string[] = [];
       if (sets.length > 0) clauses.push(`SET ${sets.join(', ')}`);
       if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
+      // The optional optimistic-concurrency guard (UpdateContactOptions): one
+      // more clause on the SAME condition, so no write can slip between a
+      // separate read and this one.
+      let condition = 'attribute_exists(contactId)';
+      if (opts?.expect !== undefined) {
+        names['#expectAttr'] = opts.expect.attr;
+        if (opts.expect.value === null) {
+          condition += ' AND attribute_not_exists(#expectAttr)';
+        } else {
+          values[':expectValue'] = opts.expect.value;
+          condition += ' AND #expectAttr = :expectValue';
+        }
+      }
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { contactId },
           UpdateExpression: clauses.join(' '),
-          ConditionExpression: 'attribute_exists(contactId)',
+          ConditionExpression: condition,
           ExpressionAttributeNames: names,
           // Omit ExpressionAttributeValues entirely when empty (REMOVE-only
           // update) — DynamoDB rejects an empty values map.

@@ -63,3 +63,30 @@
   margin: var(--sp-2) 0 0;
   font-size: var(--fs-xs);
 }
+
+/* Stale-save conflict (spec 3.9): a colleague's newer note, shown above the
+ * box after the server refused a stale save. Same danger-tinted frame as the
+ * error line's color, the note itself as preserved prose. */
+.conflict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+}
+
+.conflictLead {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.conflictText {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -4,7 +4,8 @@
 // "Last edited" line show -> a reload still shows them -> the AI-appended
 // "Preferences & notes" card is byte-identical throughout -> clear (cleanup:
 // the box reads as never set again; the server keeps a stamp by design).
-// Also proves the card in edit mode does not overflow at 360px.
+// Also proves the card in edit mode does not overflow at 360px, and (spec 3.9)
+// that a save from a stale page is refused with the newer note shown.
 //
 // getByLabel is a case-insensitive SUBSTRING match that also reads aria-label,
 // so every label here is `exact: true`: "Edit staff notes" / "Add staff notes"
@@ -99,5 +100,65 @@ test.describe('Tenant file - Staff notes card', () => {
     await expect(staffCard.getByText('No staff notes yet.')).toBeVisible();
     await expect(staffCard.getByText(marker)).toHaveCount(0);
     await expect(staffCard.getByText(/Last edited/)).toHaveCount(0);
+  });
+
+  // The stale-save guard (spec 3.9), end to end: two staff on the same tenant,
+  // both pages loaded BEFORE either saves (nothing refreshes staff notes on an
+  // open page). The second Save is refused, shows the first person's note,
+  // keeps the typed draft - and a deliberate second Save then wins.
+  test('a save from a stale page is refused and shows the newer note; saving again replaces it', async ({
+    page,
+    context,
+  }) => {
+    await devLogin(page);
+    const other = await context.newPage(); // same browser context = same session
+    await page.goto(`${NEXT}/contacts/${TENANT}`);
+    await other.goto(`${NEXT}/contacts/${TENANT}`);
+    const cardOn = (p: Page) =>
+      p.locator('section', { has: p.getByRole('heading', { name: /Staff notes/ }) });
+    const mine = cardOn(page);
+    const theirs = cardOn(other);
+    await expect(mine).toBeVisible();
+    await expect(theirs).toBeVisible();
+
+    // Both open their editors on the same (empty) box.
+    await mine.getByRole('button', { name: 'Add staff notes', exact: true }).click();
+    await mine.getByLabel('Staff notes', { exact: true }).fill('E2E mine - typed on the stale page');
+    await theirs.getByRole('button', { name: 'Add staff notes', exact: true }).click();
+    await theirs.getByLabel('Staff notes', { exact: true }).fill('E2E theirs - saved first');
+
+    // The colleague saves first; it lands.
+    await theirs.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(theirs.getByText('E2E theirs - saved first')).toBeVisible();
+
+    // My save is refused with their note shown and my draft kept.
+    await mine.getByRole('button', { name: 'Save', exact: true }).click();
+    const conflict = mine.getByRole('alert');
+    await expect(conflict).toContainText('Someone else saved these notes while you were editing.');
+    await expect(conflict).toContainText('E2E theirs - saved first');
+    await expect(mine.getByLabel('Staff notes', { exact: true })).toHaveValue(
+      'E2E mine - typed on the stale page',
+    );
+    // Nothing of mine reached the server: a fresh read still has theirs.
+    const between = await page.request.get(`${NEXT}/api/contacts/${TENANT}`);
+    expect(((await between.json()) as { contact: { staff_notes?: string } }).contact.staff_notes).toBe(
+      'E2E theirs - saved first',
+    );
+
+    // A deliberate second Save, now informed, wins.
+    await mine.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(mine.getByText('E2E mine - typed on the stale page')).toBeVisible();
+    await expect(mine.getByRole('alert')).toHaveCount(0);
+    const after = await page.request.get(`${NEXT}/api/contacts/${TENANT}`);
+    expect(((await after.json()) as { contact: { staff_notes?: string } }).contact.staff_notes).toBe(
+      'E2E mine - typed on the stale page',
+    );
+
+    // Cleanup: clear from the current page (its stamp is the newest).
+    await mine.getByRole('button', { name: 'Edit staff notes', exact: true }).click();
+    await mine.getByLabel('Staff notes', { exact: true }).fill('');
+    await mine.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(mine.getByText('No staff notes yet.')).toBeVisible();
+    await other.close();
   });
 });

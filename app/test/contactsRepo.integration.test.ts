@@ -453,6 +453,60 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     const listed = await contacts.listByType('tenant', { status: 'onboarding' });
     expect(listed.items.map((c) => c.contactId)).toContain(created.contactId);
   });
+
+  it('update with an `expect` guard writes only when the stored attribute still matches (the Staff notes stale-save guard)', async () => {
+    // The guard rides the SAME conditional UpdateItem as the write, so a
+    // concurrent save between the reader's load and its write cannot slip
+    // through the way a read-then-compare in the route would allow.
+    const created = await contacts.create({ type: 'tenant', status: 'onboarding' });
+
+    // Never set: expect null (attribute absent) lands.
+    const first = await contacts.update(
+      created.contactId,
+      { staff_notes: 'first', staff_notes_updated_at: '2026-09-27T10:00:00.000Z' },
+      { expect: { attr: 'staff_notes_updated_at', value: null } },
+    );
+    expect(first.staff_notes).toBe('first');
+
+    // Expect null again, but the stamp now exists: refused, item untouched.
+    await expect(
+      contacts.update(
+        created.contactId,
+        { staff_notes: 'lost', staff_notes_updated_at: '2026-09-27T10:05:00.000Z' },
+        { expect: { attr: 'staff_notes_updated_at', value: null } },
+      ),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+
+    // A stale stamp: refused, item untouched.
+    await expect(
+      contacts.update(
+        created.contactId,
+        { staff_notes: 'lost', staff_notes_updated_at: '2026-09-27T10:05:00.000Z' },
+        { expect: { attr: 'staff_notes_updated_at', value: '2026-09-27T09:00:00.000Z' } },
+      ),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    const unchanged = await contacts.getById(created.contactId, { consistentRead: true });
+    expect(unchanged?.staff_notes).toBe('first');
+    expect(unchanged?.staff_notes_updated_at).toBe('2026-09-27T10:00:00.000Z');
+
+    // The current stamp: lands.
+    const second = await contacts.update(
+      created.contactId,
+      { staff_notes: 'second', staff_notes_updated_at: '2026-09-27T10:10:00.000Z' },
+      { expect: { attr: 'staff_notes_updated_at', value: '2026-09-27T10:00:00.000Z' } },
+    );
+    expect(second.staff_notes).toBe('second');
+
+    // An unknown contact is still refused the same way (the route re-reads to
+    // tell "gone" from "stale").
+    await expect(
+      contacts.update(
+        'contact-does-not-exist',
+        { staff_notes: 'x' },
+        { expect: { attr: 'staff_notes_updated_at', value: null } },
+      ),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+  });
 });
 
 // Constant-only; runs with or without DynamoDB Local. The guard is only as good

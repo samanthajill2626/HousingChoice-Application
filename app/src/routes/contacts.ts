@@ -4,7 +4,7 @@
 //   GET   /api/contacts?type=&status=&phone=&limit=&cursor=  → { contacts, nextCursor }   (M1.5)
 //   POST  /api/contacts  { type, firstName, lastName, phone, … }  → 201 { contact } | 409  (M1.5)
 //   GET   /api/contacts/:contactId   → { contact }                                          (M1.4)
-//   PATCH /api/contacts/:contactId   { type?, firstName?, lastName?, voucherSize?, status?, notes?, staff_notes? }
+//   PATCH /api/contacts/:contactId   { type?, firstName?, lastName?, voucherSize?, status?, notes?, staff_notes?, staff_notes_expected_updated_at? }
 //                                    → { contact }                                          (M1.4)
 //
 // THE M1.5 SEAM the honest-identity deviation left (README 2026-06-12):
@@ -490,6 +490,13 @@ interface TriagePatch {
   changedFields: string[];
   /** True when this patch records SMS consent (route stamps consent_captured_by). */
   consentCaptured?: boolean;
+  /**
+   * The Staff notes stale-save guard (spec 3.9): the `staff_notes_updated_at`
+   * the caller's editor opened with (null = the box was never saved). Present
+   * ONLY when the body carried `staff_notes_expected_updated_at`; undefined
+   * means "no guard" (last-write-wins, every other caller). Never stored.
+   */
+  staffNotesExpected?: string | null;
 }
 
 /**
@@ -580,6 +587,17 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     if (typeof v !== 'string') return { error: 'staff_notes must be a string' };
     patch['staff_notes'] = v;
     changedFields.push('staff_notes');
+  }
+  // The stale-save guard's expectation (spec 3.9): the stamp the editor opened
+  // with, or null for a never-saved box. A guard, never a field - it is not
+  // copied into `patch` and does not count as a change on its own.
+  let staffNotesExpected: string | null | undefined;
+  if ('staff_notes_expected_updated_at' in b) {
+    const v = b['staff_notes_expected_updated_at'];
+    if (v !== null && typeof v !== 'string') {
+      return { error: 'staff_notes_expected_updated_at must be a string or null' };
+    }
+    staffNotesExpected = v;
   }
   // Landlord park reason (edit form). Free text captured when a landlord lead is
   // moved to `parked`. Normally written by the /tenant-status route on the parked
@@ -723,7 +741,12 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }
-  return { patch, changedFields, ...(consent.hasConsent && { consentCaptured: true }) };
+  return {
+    patch,
+    changedFields,
+    ...(consent.hasConsent && { consentCaptured: true }),
+    ...(staffNotesExpected !== undefined && { staffNotesExpected }),
+  };
 }
 
 /** A validated manual-create contact body (the fields actually persisted). */
@@ -1568,11 +1591,35 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
+    // The Staff notes stale-save guard (spec 3.9): only when this PATCH writes
+    // staff_notes AND the caller sent the stamp its editor opened with. It
+    // rides the same conditional write, so a colleague's save in between is
+    // refused rather than silently overwritten.
+    const staffNotesGuard =
+      'staff_notes' in parsed.patch && parsed.staffNotesExpected !== undefined
+        ? { attr: 'staff_notes_updated_at', value: parsed.staffNotesExpected }
+        : undefined;
+
     let updated;
     try {
-      updated = await contacts.update(contactId, parsed.patch);
+      updated = await contacts.update(
+        contactId,
+        parsed.patch,
+        staffNotesGuard !== undefined ? { expect: staffNotesGuard } : undefined,
+      );
     } catch (err) {
       if (err instanceof ConditionalCheckFailedException) {
+        // A guarded write fails the same way for "gone" and "stale": re-read
+        // (consistent) to tell them apart, and hand a stale caller the CURRENT
+        // contact so its editor can show the newer note.
+        if (staffNotesGuard !== undefined) {
+          const current = await contacts.getById(contactId, { consistentRead: true });
+          if (current) {
+            log.info({ contactId }, 'staff notes save refused: stale (a newer save landed first)');
+            res.status(409).json({ error: 'staff_notes_stale', contact: current });
+            return;
+          }
+        }
         res.status(404).json({ error: 'contact_not_found' });
         return;
       }

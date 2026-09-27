@@ -115,7 +115,11 @@ describe('StaffNotesCard - edit mode', () => {
 
     await waitFor(() => expect(onContactUpdated).toHaveBeenCalledWith(returned));
     expect(updateContact).toHaveBeenCalledTimes(1);
-    expect(updateContact).toHaveBeenCalledWith('c1', { staff_notes: 'Has a service dog. Call first.' });
+    // The stamp the editor opened with rides along (the stale-save guard, spec 3.9).
+    expect(updateContact).toHaveBeenCalledWith('c1', {
+      staff_notes: 'Has a service dog. Call first.',
+      staff_notes_expected_updated_at: '2026-09-26T15:00:00.000Z',
+    });
     // Back in read mode (the textarea is gone, the aside is back).
     expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit staff notes' })).toBeInTheDocument();
@@ -170,20 +174,132 @@ describe('StaffNotesCard - edit mode', () => {
     expect(screen.getByText('Y')).toBeInTheDocument();
   });
 
-  it('an EDITED draft still saves after the stored value moved under the open editor (last write wins)', async () => {
+  it('an EDITED draft sends the stamp the editor OPENED with, even after the stored value moved under it (the server decides)', async () => {
     const user = userEvent.setup();
     const onContactUpdated = vi.fn();
     updateContact.mockResolvedValue({ ...CONTACT, staff_notes: 'X2' });
     const { rerender } = render(
-      <StaffNotesCard contactId="c1" value="X" updatedAt={undefined} onContactUpdated={onContactUpdated} />,
+      <StaffNotesCard contactId="c1" value="X" updatedAt="2026-09-27T09:00:00.000Z" onContactUpdated={onContactUpdated} />,
     );
     await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
-    rerender(<StaffNotesCard contactId="c1" value="Y" updatedAt={undefined} onContactUpdated={onContactUpdated} />);
+    rerender(
+      <StaffNotesCard contactId="c1" value="Y" updatedAt="2026-09-27T09:30:00.000Z" onContactUpdated={onContactUpdated} />,
+    );
     await user.type(screen.getByLabelText('Staff notes'), '2');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(onContactUpdated).toHaveBeenCalledTimes(1));
     expect(updateContact).toHaveBeenCalledTimes(1);
-    expect(updateContact).toHaveBeenCalledWith('c1', { staff_notes: 'X2' });
+    expect(updateContact).toHaveBeenCalledWith('c1', {
+      staff_notes: 'X2',
+      staff_notes_expected_updated_at: '2026-09-27T09:00:00.000Z',
+    });
+  });
+
+  it('a never-saved box sends expected null', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...CONTACT, staff_notes: 'first' });
+    render(<StaffNotesCard contactId="c1" value={undefined} updatedAt={undefined} onContactUpdated={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Add staff notes' }));
+    await user.type(screen.getByLabelText('Staff notes'), 'first');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledTimes(1));
+    expect(updateContact).toHaveBeenCalledWith('c1', {
+      staff_notes: 'first',
+      staff_notes_expected_updated_at: null,
+    });
+  });
+
+  it('a 409 staff_notes_stale shows the colleague\'s newer note, keeps the draft, hands their contact up, and a second Save sends THEIR stamp', async () => {
+    const user = userEvent.setup();
+    const onContactUpdated = vi.fn();
+    const theirs: Contact = {
+      ...CONTACT,
+      staff_notes: 'Prefers texts after 5pm',
+      staff_notes_updated_at: '2026-09-27T09:30:00.000Z',
+    };
+    updateContact
+      .mockRejectedValueOnce(new ApiError(409, 'staff_notes_stale', 'staff_notes_stale', { error: 'staff_notes_stale', contact: theirs }))
+      .mockResolvedValueOnce({ ...theirs, staff_notes: 'Mine wins', staff_notes_updated_at: '2026-09-27T09:40:00.000Z' });
+    const { rerender } = render(
+      <StaffNotesCard
+        contactId="c1"
+        value={CONTACT.staff_notes}
+        updatedAt={CONTACT.staff_notes_updated_at}
+        onContactUpdated={onContactUpdated}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    const box = screen.getByLabelText('Staff notes');
+    await user.clear(box);
+    await user.type(box, 'Mine wins');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Someone else saved these notes while you were editing.');
+    expect(alert).toHaveTextContent('Prefers texts after 5pm');
+    // Still editing, the draft intact, their contact handed up to the file pane.
+    expect(screen.getByLabelText('Staff notes')).toHaveValue('Mine wins');
+    expect(onContactUpdated).toHaveBeenCalledWith(theirs);
+
+    // The parent applies it (as ContactDetail's setContact would), then Save again.
+    rerender(
+      <StaffNotesCard
+        contactId="c1"
+        value={theirs.staff_notes}
+        updatedAt={theirs.staff_notes_updated_at}
+        onContactUpdated={onContactUpdated}
+      />,
+    );
+    expect(screen.getByLabelText('Staff notes')).toHaveValue('Mine wins');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledTimes(2));
+    expect(updateContact).toHaveBeenLastCalledWith('c1', {
+      staff_notes: 'Mine wins',
+      staff_notes_expected_updated_at: '2026-09-27T09:30:00.000Z',
+    });
+    // Saved: back to read mode, the conflict panel gone.
+    await waitFor(() => expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('after a 409, Cancel keeps THEIR note (no request) and clears the conflict panel', async () => {
+    const user = userEvent.setup();
+    const theirs: Contact = { ...CONTACT, staff_notes: 'Theirs', staff_notes_updated_at: '2026-09-27T09:30:00.000Z' };
+    updateContact.mockRejectedValueOnce(
+      new ApiError(409, 'staff_notes_stale', 'staff_notes_stale', { error: 'staff_notes_stale', contact: theirs }),
+    );
+    render(<StaffNotesCard contactId="c1" value="Mine" updatedAt={undefined} onContactUpdated={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    await user.type(screen.getByLabelText('Staff notes'), ' more');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByRole('alert');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(updateContact).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
+  });
+
+  it('a 409 when the colleague CLEARED the box says so', async () => {
+    const user = userEvent.setup();
+    const theirs: Contact = { ...CONTACT, staff_notes: '', staff_notes_updated_at: '2026-09-27T09:30:00.000Z' };
+    updateContact.mockRejectedValueOnce(
+      new ApiError(409, 'staff_notes_stale', 'staff_notes_stale', { error: 'staff_notes_stale', contact: theirs }),
+    );
+    render(<StaffNotesCard contactId="c1" value="Mine" updatedAt="2026-09-27T09:00:00.000Z" onContactUpdated={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    await user.type(screen.getByLabelText('Staff notes'), ' more');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('They cleared the notes.');
+  });
+
+  it('a 409 that is NOT staff_notes_stale (or carries no contact) is the plain failure alert', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValueOnce(new ApiError(409, 'something_else', 'something_else', { error: 'something_else' }));
+    render(<StaffNotesCard contactId="c1" value="Mine" updatedAt={undefined} onContactUpdated={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    await user.type(screen.getByLabelText('Staff notes'), ' more');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save staff notes. Try again.');
   });
 
   it('while a save is in flight, Save and Cancel are disabled and the textarea is read-only', async () => {

@@ -2047,10 +2047,19 @@ export function createFakeWorld(): FakeWorld {
       delete contact.deleted_at;
       return contact;
     },
-    async update(contactId, patch) {
+    async update(contactId, patch, opts) {
       const contact = contacts.find((c) => c.contactId === contactId);
       if (!contact) {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
+      }
+      // Mirror the real repo's optional `expect` guard (UpdateContactOptions):
+      // refuse BEFORE any field is applied, as one conditional UpdateItem would.
+      if (opts?.expect !== undefined) {
+        const current = contact[opts.expect.attr];
+        const matches = opts.expect.value === null ? current === undefined : current === opts.expect.value;
+        if (!matches) {
+          throw conditionalCheckFailed(`update: expected ${opts.expect.attr} did not match on ${contactId}`);
+        }
       }
       const changesKind = patch.type !== undefined || patch.role !== undefined;
       for (const [key, value] of Object.entries(patch)) {

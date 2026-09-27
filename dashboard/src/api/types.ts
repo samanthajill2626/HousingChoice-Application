@@ -2106,6 +2106,12 @@ export interface ContactPatch {
   /** Staff notes (item 22). PATCH-allowlisted app-side; '' clears. The server
    *  stamps staff_notes_updated_at itself - never send one. */
   staff_notes?: string;
+  /** The Staff notes stale-save guard (spec 3.9): the staff_notes_updated_at
+   *  the editor OPENED with (null = the box had never been saved). When sent
+   *  with staff_notes, the server refuses a save that a colleague's newer save
+   *  beat with 409 `staff_notes_stale` + `{ contact }` (the current one).
+   *  A guard, never stored. Omit it for last-write-wins. */
+  staff_notes_expected_updated_at?: string | null;
   company?: string;
   housingAuthority?: string;
   /** The tenant's helper organization (see Contact.agency). PATCH-allowlisted

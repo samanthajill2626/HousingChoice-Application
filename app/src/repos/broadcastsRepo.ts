@@ -204,6 +204,12 @@ export interface BroadcastItem {
   fanout_attempt?: number;
   last_error?: string;
   updated_at?: string;
+  /**
+   * SOR (code review ADV-3, fix FW1-5): the op token of the finalizeStatus
+   * flip that won - how a flip that committed on an earlier SDK attempt is
+   * told from a genuine loser. Written only by that flip; nothing else reads it.
+   */
+  finalize_op?: string;
   [key: string]: unknown;
 }
 
@@ -930,10 +936,16 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
 
     async finalizeStatus(broadcastId, status, lastError) {
       // flipStatus's expression, conditioned on `sending`: N callers, ONE flip.
-      const sets = ['#s = :status', 'updated_at = :now'];
+      // Plus a fresh op token (code review ADV-3, fix FW1-5): the SDK's replay
+      // of a flip that COMMITTED fails its own condition, and only the token
+      // on the read-back tells that winner from a genuine loser - without it
+      // the real winner would skip the unit audit row and the terminal emit.
+      const op = randomUUID();
+      const sets = ['#s = :status', 'updated_at = :now', '#fop = :op'];
       const values: Record<string, unknown> = {
         ':status': status,
         ':now': new Date().toISOString(),
+        ':op': op,
         ':sending': 'sending',
       };
       if (lastError !== undefined) {
@@ -947,7 +959,7 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
             Key: { broadcastId },
             UpdateExpression: `SET ${sets.join(', ')}`,
             ConditionExpression: 'attribute_exists(broadcastId) AND #s = :sending',
-            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeNames: { '#s': 'status', '#fop': 'finalize_op' },
             ExpressionAttributeValues: values,
             ReturnValues: 'ALL_NEW',
           }),
@@ -959,6 +971,10 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
       }
       const item = await readById(broadcastId, true);
       if (item === undefined) throw new Error(`finalizeStatus: broadcast ${broadcastId} not found`);
+      if (item.finalize_op === op) {
+        log.info({ broadcastId, status }, 'broadcast status finalized (the flip committed on an earlier SDK attempt)');
+        return { won: true, item };
+      }
       log.info(
         { broadcastId, status, currentStatus: item.status },
         'broadcast finalize not taken - the broadcast is no longer sending',

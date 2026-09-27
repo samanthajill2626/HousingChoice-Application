@@ -781,6 +781,32 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
       await expect(broadcasts.finalizeStatus(`bcast-${randomUUID()}`, 'sent')).rejects.toThrow(/not found/);
     });
 
+    it('finalizeStatus is safe against the SDK\'s replay: a flip that committed on an earlier attempt reports won to ITS caller; a second finalizer still loses (FW1-5, ADV-3)', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      // zz-adv-5's method: the Update commits, then fails the way the SDK's replay of it would.
+      let replays = 1;
+      const send = doc.send.bind(doc) as unknown as (cmd: unknown) => Promise<unknown>;
+      const replaying = {
+        async send(cmd: unknown) {
+          const out = await send(cmd);
+          if (replays > 0 && cmd instanceof UpdateCommand) {
+            replays -= 1;
+            throw new ConditionalCheckFailedException({ message: 'The conditional request failed', $metadata: {} });
+          }
+          return out;
+        },
+      } as unknown as typeof doc;
+      const retried = createBroadcastsRepo({ doc: replaying, env: testEnv, logger });
+      const won = await retried.finalizeStatus(id, 'failed', "Couldn't confirm any text went out");
+      expect(replays).toBe(0);
+      expect(won).toMatchObject({ won: true, item: { status: 'failed', last_error: "Couldn't confirm any text went out" } });
+      const token = won.item['finalize_op'];
+      expect(typeof token).toBe('string');
+      // Any other finalizer - even through the same repo - is a genuine loser, and writes no token.
+      expect(await broadcasts.finalizeStatus(id, 'sent')).toMatchObject({ won: false, item: { status: 'failed', finalize_op: token } });
+      expect(await retried.finalizeStatus(id, 'sent')).toMatchObject({ won: false, item: { finalize_op: token } });
+    });
+
     it('getByIdConsistent reads what getById reads', async () => {
       const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
       expect(await broadcasts.getByIdConsistent(id)).toEqual(await broadcasts.getById(id));

@@ -516,11 +516,16 @@ function bid(ctx: BcCtx, name: string): string {
   return `b-${ctx.id}-${name}`;
 }
 
-/** An item without its wall clocks, deep-copied so a later write cannot reach it. */
+/**
+ * An item without its wall clocks, deep-copied so a later write cannot reach
+ * it. The finalize op token (FW1-5) is random in each implementation, so it is
+ * reduced to its presence: the fake is held to writing one exactly when the
+ * real repo does.
+ */
 function normalize(item: BroadcastItem | undefined): Record<string, unknown> | undefined {
   if (item === undefined) return undefined;
   const { created_at: _created, updated_at: _updated, ...rest } = item;
-  return structuredClone(rest);
+  return structuredClone({ ...rest, ...(rest['finalize_op'] !== undefined && { finalize_op: '<op>' }) });
 }
 
 function normalizeOutcome(result: { moved: boolean; item?: BroadcastItem }): Record<string, unknown> {

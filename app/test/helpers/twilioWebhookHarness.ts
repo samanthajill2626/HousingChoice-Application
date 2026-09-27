@@ -3231,12 +3231,15 @@ export function createFakeWorld(): FakeWorld {
       return recordBroadcastOutcome(broadcastId, contactKey, { status: 'failed', errorCode }, delta, ['queued']);
     },
     // SOR Task 6 (spec D16a): the flip only ONE caller wins - from `sending`.
+    // FW1-5: the winning flip stores its op token, as the real one does (the
+    // fake never retries, so it never reads the token back).
     async finalizeStatus(broadcastId, status, lastError) {
       const b = broadcasts.get(broadcastId);
       if (!b) throw new Error(`finalizeStatus: broadcast ${broadcastId} not found`);
       if (b.status !== 'sending') return { won: false, item: structuredClone(b) };
       b.status = status;
       if (lastError !== undefined) b.last_error = lastError;
+      b.finalize_op = randomUUID();
       b.updated_at = new Date().toISOString();
       return { won: true, item: structuredClone(b) };
     },

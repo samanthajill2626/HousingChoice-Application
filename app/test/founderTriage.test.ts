@@ -1270,6 +1270,71 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
       }
     });
 
+    // Fix wave R1, FW6 (plan Review Focus 2; spec 4.6 "a lookup that resolves
+    // AFTER the budget has nothing to append and nothing to log"). (e)'s hung
+    // head REJECTS once its signal fires, so only a late REJECTION was ever
+    // exercised; this head IGNORES the signal and RESOLVES after the budget -
+    // the late SUCCESS the result-returning lookup exists for. The router holds
+    // the store OBJECT (the harness passes world.mediaStore), so replacing the
+    // method on it is what the router calls - the (e2) mechanism.
+    it('(e3) a head that IGNORES its signal and RESOLVES after the budget -> spoken prompt, ONE WARN, and the late success appends and logs nothing', async () => {
+      seedGreeting();
+      const { app, capture } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
+      const original = world.mediaStore.head;
+      let lateHeadResolved = false;
+      world.mediaStore.head = () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            lateHeadResolved = true;
+            resolve({ contentType: 'audio/mpeg', size: 14 });
+          }, 150);
+        });
+      try {
+        const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+        expect(lateHeadResolved).toBe(false); // the response did not wait for it
+        expect(res.status).toBe(200);
+        expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+        expect(res.text).not.toContain('<Play>');
+        expect(greetingWarns(capture)).toHaveLength(1);
+        await new Promise((r) => setTimeout(r, 300));
+        // Not vacuous: the abandoned lookup DID succeed late - it went on to
+        // presign - and its result was discarded.
+        expect(lateHeadResolved).toBe(true);
+        expect(world.mediaPresigns).toHaveLength(1);
+        expect(greetingWarns(capture)).toHaveLength(1);
+        expect(capture.lines.some((l) => l['msg'] === 'voicemail greeting offered')).toBe(false);
+      } finally {
+        world.mediaStore.head = original;
+      }
+    });
+
+    // Fix wave R1, FW6 (review A8): the HEAD's AbortSignal must fire AT the
+    // budget - that is what releases a stuck S3 socket. (e) cannot see it: its
+    // WARN is the same whether the signal or withTimeout ends the lookup. This
+    // head hangs and IGNORES its signal, and records it; by the time the
+    // budget-bound response has arrived the signal must already be aborted. A
+    // signal wired to a longer timeout (e.g. the 2500 ms production constant)
+    // is still live then and fails here.
+    it('(e4) the signal handed to head is already ABORTED when the budget-bound response arrives', async () => {
+      seedGreeting();
+      const { app } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
+      const original = world.mediaStore.head;
+      let captured: AbortSignal | undefined;
+      world.mediaStore.head = (_key, opts) => {
+        captured = opts?.signal;
+        return new Promise(() => {}); // hangs; never looks at the signal
+      };
+      try {
+        const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+        expect(res.status).toBe(200);
+        expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+        expect(captured).toBeInstanceOf(AbortSignal);
+        expect(captured?.aborted).toBe(true);
+      } finally {
+        world.mediaStore.head = original;
+      }
+    });
+
     it('(f) greeting set, no media store -> spoken prompt + WARN', async () => {
       seedGreeting(false);
       const { app, capture } = await seedRingingBridgeWith({ withoutMediaStore: true });
@@ -1302,6 +1367,43 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
       expect(res.text).not.toContain('<Play>');
       expect(res.text).not.toContain('<Record');
       expect(world.mediaHeads).toHaveLength(0);
+    });
+
+    // Fix wave R1, FW4 (spec 4.2 fixed-key rule, plan Review Focus 5): the
+    // harness settings fake projects like the real repo, so a record naming a
+    // foreign key is NO greeting - the normal state, which logs nothing. The
+    // object at the foreign key EXISTS, so heading or playing it is observable.
+    it('(i) a record naming a FOREIGN key (a call recording) is no greeting: spoken prompt, NO head, NO greeting log line', async () => {
+      world.settings.voicemailGreeting = { ...GREETING, s3Key: 'recordings/CA1/RE1' };
+      world.mediaObjects.set('recordings/CA1/RE1', { body: Buffer.from('RECORDING-BYTES'), contentType: 'audio/mpeg' });
+      const { app, capture } = await seedRingingBridgeWith({});
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+      expect(res.text).not.toContain('<Play>');
+      expect(world.mediaHeads).toHaveLength(0);
+      expect(world.mediaPresigns).toHaveLength(0);
+      expect(capture.lines.some((l) => String(l['msg']).includes('voicemail greeting'))).toBe(false);
+    });
+
+    it('(i2) defense in depth: a settings read that hands back a FOREIGN key still heads and presigns only the FIXED key', async () => {
+      world.mediaObjects.set(GREETING.s3Key, { body: Buffer.from('greeting-bytes'), contentType: 'audio/mpeg' });
+      world.mediaObjects.set('recordings/CA1/RE1', { body: Buffer.from('RECORDING-BYTES'), contentType: 'audio/mpeg' });
+      const { app } = await seedRingingBridgeWith({});
+      // Stands in for a broken projection or a second writer of the map; the
+      // router holds the repo OBJECT (the (e2) mechanism). Every other reader
+      // of the settings reads named fields only, so they are unaffected.
+      const real = world.settingsRepo.getOrgSettings;
+      world.settingsRepo.getOrgSettings = async () => ({ ...(await real()), voicemailGreeting: { ...GREETING, s3Key: 'recordings/CA1/RE1' } });
+      try {
+        const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+        expect(res.status).toBe(200);
+        expect(res.text).toMatch(/<Play>https:\/\/fake-s3\.local\/settings\/voicemail-greeting\?X-Amz-Signature=/);
+        expect(world.mediaHeads).toEqual([{ key: GREETING.s3Key, signal: true }]);
+        expect(world.mediaPresigns).toEqual([{ key: GREETING.s3Key, ttlSeconds: 600 }]);
+      } finally {
+        world.settingsRepo.getOrgSettings = real;
+      }
     });
   });
 });

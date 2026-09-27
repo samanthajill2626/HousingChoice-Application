@@ -446,7 +446,11 @@ export function createSettingsRouter(deps: SettingsRouterDeps): Router {
 
   // GET /api/settings/voicemail-greeting/audio (spec 4.5): any logged-in user
   // (requireAuth from the /api mount) may play it; same streaming, range and
-  // cache posture as GET /api/calls/:callId/recording.
+  // cache posture as GET /api/calls/:callId/recording. It streams the FIXED
+  // key, never the record's s3Key: the projection already accepts only that
+  // key, and reading the constant here (defense in depth) means no projection
+  // change or second writer of the map can make this any-user route serve a
+  // call recording or an MMS object.
   router.get('/voicemail-greeting/audio', async (req, res) => {
     const current = await settings.getOrgSettings();
     const greeting = current.voicemailGreeting;
@@ -456,12 +460,12 @@ export function createSettingsRouter(deps: SettingsRouterDeps): Router {
     }
     await serveMediaObject(req, res, {
       mediaStore,
-      key: greeting.s3Key,
+      key: VOICEMAIL_GREETING_S3_KEY,
       defaultContentType: greeting.contentType,
       cacheControl: 'private, max-age=3600',
       notFoundError: 'greeting_not_found',
       log,
-      logContext: { s3Key: greeting.s3Key },
+      logContext: { s3Key: VOICEMAIL_GREETING_S3_KEY },
       messages: {
         missing: 'voicemail greeting record present but object not found in the media store',
         streaming: 'streaming the voicemail greeting to the dashboard',

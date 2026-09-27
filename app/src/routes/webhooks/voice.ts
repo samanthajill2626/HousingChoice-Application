@@ -39,6 +39,7 @@ import { createMediaStore, type MediaStore } from '../../adapters/mediaStore.js'
 import {
   VOICEMAIL_GREETING_LOOKUP_BUDGET_MS,
   VOICEMAIL_GREETING_PLAY_TTL_SECONDS,
+  VOICEMAIL_GREETING_S3_KEY,
   withTimeout,
 } from '../../lib/voicemailGreeting.js';
 import {
@@ -394,13 +395,17 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
 
   async function lookupVoicemailGreeting(signal: AbortSignal): Promise<GreetingLookup> {
     const org = await settings.getOrgSettings();
-    const greeting = org.voicemailGreeting;
-    if (greeting === undefined) return { kind: 'absent' };
-    if (!mediaStore) return { kind: 'no_store', s3Key: greeting.s3Key };
-    const head = await mediaStore.head(greeting.s3Key, { signal });
-    if (head === undefined) return { kind: 'missing', s3Key: greeting.s3Key };
-    const url = await mediaStore.presign(greeting.s3Key, VOICEMAIL_GREETING_PLAY_TTL_SECONDS);
-    return { kind: 'play', url, s3Key: greeting.s3Key };
+    if (org.voicemailGreeting === undefined) return { kind: 'absent' };
+    // The FIXED key, never the record's s3Key: the projection already accepts
+    // only that key, and heading/presigning the constant (defense in depth)
+    // means no projection change or second writer of the map can point <Play>
+    // at a call recording or an MMS object.
+    const s3Key = VOICEMAIL_GREETING_S3_KEY;
+    if (!mediaStore) return { kind: 'no_store', s3Key };
+    const head = await mediaStore.head(s3Key, { signal });
+    if (head === undefined) return { kind: 'missing', s3Key };
+    const url = await mediaStore.presign(s3Key, VOICEMAIL_GREETING_PLAY_TTL_SECONDS);
+    return { kind: 'play', url, s3Key };
   }
 
   /**

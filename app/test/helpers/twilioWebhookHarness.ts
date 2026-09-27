@@ -74,6 +74,7 @@ import type {
 } from '../../src/repos/suggestionResolutionRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
+  toVoicemailGreeting,
   type OrgSettings,
   type SettingsRepo,
 } from '../../src/repos/settingsRepo.js';
@@ -2300,9 +2301,22 @@ export function createFakeWorld(): FakeWorld {
   const groupTimestamps = new Map<string, string>();
   /** The abandoned-journal sweep's Scan cursor (log-hygiene spec 9.2). */
   let journalSweepCursor: string | undefined;
+  /**
+   * The READ projection, mirroring the real repo's toOrgSettings for the one
+   * field it validates as a whole (voicemail-greeting spec 4.2): a stored
+   * voicemailGreeting map is projected ONLY when well-formed and naming the
+   * fixed key (toVoicemailGreeting), so a test that plants a foreign key on
+   * `world.settings` sees "no greeting" exactly as production would. Every
+   * other field is returned as stored.
+   */
+  const readSettings = (): OrgSettings => {
+    const { voicemailGreeting: stored, ...rest } = settings;
+    const voicemailGreeting = toVoicemailGreeting(stored);
+    return { ...rest, ...(voicemailGreeting !== undefined && { voicemailGreeting }) };
+  };
   const settingsRepo: SettingsRepo = {
     async getOrgSettings() {
-      return { ...settings };
+      return readSettings();
     },
     async putOrgSettings(patch) {
       if (patch.missedCallAutoText !== undefined) settings.missedCallAutoText = patch.missedCallAutoText;
@@ -2331,7 +2345,8 @@ export function createFakeWorld(): FakeWorld {
           settings.voicemailGreeting = patch.voicemailGreeting;
         }
       }
-      return { ...settings };
+      // The real repo answers with toOrgSettings(ALL_NEW): the same projection.
+      return readSettings();
     },
     async claimGroupIdentityFingerprint() {
       // The fingerprint is a DEPLOYED-stack boot guard; no webhook path touches

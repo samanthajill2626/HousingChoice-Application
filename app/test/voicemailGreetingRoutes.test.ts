@@ -575,4 +575,36 @@ describe('GET /api/settings/voicemail-greeting/audio', () => {
     const { app } = makeWebhookHarness();
     expect((await request(app).get(AUDIO).set('x-origin-verify', ORIGIN_SECRET)).status).toBe(401);
   });
+
+  // Fix wave R1, FW4 (spec 4.2 fixed-key rule, plan Review Focus 5): the
+  // harness settings fake projects the record like the real repo, so a record
+  // naming any key but the fixed one is NO greeting here too. The object at the
+  // foreign key EXISTS, so serving it would be observable.
+  it('a record naming a FOREIGN key (a call recording) is no greeting: 404 greeting_not_found, never the recording bytes', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.mediaObjects.set('recordings/CA1/RE1', { body: Buffer.from('RECORDING-BYTES'), contentType: 'audio/mpeg' });
+    world.settings.voicemailGreeting = { ...GREETING, s3Key: 'recordings/CA1/RE1' };
+    const res = await bytesOf(request(app).get(AUDIO).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE));
+    expect(res.status).toBe(404);
+    expect(JSON.parse((res.body as Buffer).toString('utf8'))).toEqual({ error: 'greeting_not_found' });
+    const settings = await request(app).get('/api/settings').set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(settings.body.settings.voicemailGreeting).toBeUndefined();
+  });
+
+  it('defense in depth: even a settings read that hands back a FOREIGN key serves only the FIXED key', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.mediaObjects.set(KEY, { body: Buffer.from('GREETING-BYTES'), contentType: 'audio/mpeg' });
+    world.mediaObjects.set('recordings/CA1/RE1', { body: Buffer.from('RECORDING-BYTES'), contentType: 'audio/mpeg' });
+    // Stands in for a broken projection or a second writer of the map: the
+    // router holds the repo OBJECT, so replacing the method is what it calls.
+    const real = world.settingsRepo.getOrgSettings;
+    world.settingsRepo.getOrgSettings = async () => ({ ...(await real()), voicemailGreeting: { ...GREETING, s3Key: 'recordings/CA1/RE1' } });
+    try {
+      const res = await bytesOf(request(app).get(AUDIO).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE));
+      expect(res.status).toBe(200);
+      expect((res.body as Buffer).toString('utf8')).toBe('GREETING-BYTES');
+    } finally {
+      world.settingsRepo.getOrgSettings = real;
+    }
+  });
 });

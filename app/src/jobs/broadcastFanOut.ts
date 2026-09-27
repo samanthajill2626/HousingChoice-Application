@@ -678,9 +678,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      * reconcile, by the last pass or at the cap. One stranded in pass 2 or 3,
      * or in any re-drive pass, stays `attempting` and the share stays Sending
      * until the sweeper (`send-attempt-sweeper`; code review round 2, N-1 /
-     * F-2). So each arm's outcome line is logged only once its slot write
-     * resolved; the throw path logs instead that the rejection's slot write
-     * failed and the recipient is carried with the attempt still open (FW4-2).
+     * F-2). So each arm's outcome line is logged only once its guarded write
+     * resolved (the slot write, and in the known arms the stats bump beside
+     * it); the throw path logs instead that the rejection's slot or stats
+     * write failed and the recipient is carried with the attempt still open
+     * (FW4-2; code review round 3, D-2 / FW5-2).
      */
     async function onRejected(
       owner: BroadcastOwner,
@@ -751,11 +753,14 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         }
       }
       if (!slotWritten) {
-        // Code review round 2 (FW4-2): no outcome line above - the recipient has
-        // not failed; it is carried with the attempt still open (C-2).
+        // Code review round 2 (FW4-2), round 3 (D-2, FW5-2): no outcome line
+        // above - the rejection's slot or stats write threw (the known arms
+        // write the slot, then bump the stats; the other arm writes both in
+        // one), so the attempt stays open and the recipient is carried (C-2).
+        // When only the stats bump threw, the slot already reads failed (R2C-5).
         log.warn(
           { ...ctx, errorCode: code, status: classification.status },
-          'broadcastFanOut: provider rejection not recorded - its slot write failed; the recipient is carried with the attempt still open',
+          'broadcastFanOut: provider rejection - its slot or stats write failed; the recipient is carried with the attempt still open',
         );
         transientRemaining.push(owner.contactKey);
         return;

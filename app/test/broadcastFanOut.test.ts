@@ -1788,7 +1788,7 @@ describe('broadcast.send (M1.8a)', () => {
       expect(msgs.filter((m) => m.includes('send rejected by the provider - recipient failed, NOT retried'))).toHaveLength(1);
       expect(msgs.filter((m) => m.includes('carrier filtering (30007) - recipient failed, NOT retried'))).toHaveLength(1);
       expect(msgs.filter((m) => m.includes('invalid number/landline - recipient failed, contact flagged unreachable'))).toHaveLength(1);
-      expect(msgs.filter((m) => m.includes('rejection not recorded'))).toHaveLength(0);
+      expect(msgs.filter((m) => m.includes('slot or stats write failed'))).toHaveLength(0);
     });
 
     it('13c the adapter kill switch fails the recipient with its prose token (D5, D23)', async () => {
@@ -2267,12 +2267,14 @@ describe('broadcast.send (M1.8a)', () => {
       expect(continuationKeys()).toEqual(['t-1']);
       expect(errorLabels(capture)).toEqual(['rejectSlot']);
       expect(b.status).toBe('sending');
-      // FW4-2: no line says the recipient failed or is never retried; ONE WARN says the rejection's slot
-      // write failed and the recipient is carried with the attempt still open.
+      // FW4-2: no line says the recipient failed or is never retried; ONE WARN says the rejection's slot or
+      // stats write failed (FW5-2: here the one write that holds both) and the recipient is carried with the
+      // attempt still open.
       expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
-      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('rejection not recorded'));
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
       expect(carried).toHaveLength(1);
       expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '21211', status: 400 });
+      expect(String(carried[0]!['msg'])).toContain('the recipient is carried with the attempt still open');
     });
 
     it('C-2: the known arms (30007) keep the record open and carry the recipient when their slot write throws (FW2-2)', async () => {
@@ -2290,7 +2292,7 @@ describe('broadcast.send (M1.8a)', () => {
       expect(errorLabels(capture)).toEqual(['rejectSlot']);
       // FW4-2: the 30007 ERROR ("recipient failed, NOT retried") is not logged over a carried recipient.
       expect(capture.atLevel(50).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
-      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('rejection not recorded'));
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
       expect(carried).toHaveLength(1);
       expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30007' });
     });
@@ -2309,9 +2311,32 @@ describe('broadcast.send (M1.8a)', () => {
       expect(continuationKeys()).toEqual(['t-1']);
       expect(world.flagWrites.filter((f) => f.flag === 'sms_unreachable').map((f) => f.contactId)).toEqual(['t-1']);
       expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
-      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('rejection not recorded'));
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
       expect(carried).toHaveLength(1);
       expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30005' });
+    });
+
+    it('C-2 / FW5-2 (D-2): a 30007 whose STATS bump throws after its slot write keeps the slot failed/30007 and carries the recipient - the carry WARN names the slot or stats write, never "recipient failed"', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('filtered'), { status: 400, code: 30007 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'bumpStats').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      // The known arms write the slot, then bump the stats, in ONE guardWrite: the slot already reads failed.
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'failed', errorCode: '30007' });
+      // What the carry line says: the recipient is carried, with the attempt still open (R2C-5's residue).
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['rejectSlot']);
+      const msgs = [...capture.atLevel(40), ...capture.atLevel(50)].map((l) => String(l['msg']));
+      expect(msgs.filter((m) => m.includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30007' });
+      expect(String(carried[0]!['msg'])).toContain('the recipient is carried with the attempt still open');
     });
 
     it('C-2: a refusal whose skipped-slot write throws keeps the record open and carries the recipient; the ERROR names the refusal (FW2-2)', async () => {

@@ -2391,6 +2391,88 @@ describe('relay.fanOut (M1.7)', () => {
       expect(rearm.mock.invocationCallOrder[0]!).toBeLessThan(send.mock.invocationCallOrder[0]!);
       expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 1, attemptedAt: later });
     });
+
+    // --- code review C-2 / R-e (FW2-2): a terminal arm closes the record only
+    // after its slot write RESOLVED; a slot write that threw leaves the attempt
+    // open and the member stranded - carried to a pass that can still act.
+
+    it.each<[string, () => Promise<never>, string, string]>([
+      [
+        'a provider rejection (21211)',
+        async () => {
+          throw Object.assign(new Error('invalid'), { status: 400, code: 21211 });
+        },
+        'rejectSlot',
+        'errorCode',
+      ],
+      [
+        'carrier filtering (30007)',
+        async () => {
+          throw Object.assign(new Error('filtered'), { status: 400, code: 30007 });
+        },
+        'rejectSlot',
+        'errorCode',
+      ],
+      [
+        'a refusal',
+        async () => {
+          const { ContactOptedOutError } = await import('../src/services/sendMessage.js');
+          throw new ContactOptedOutError('conv-relay-1');
+        },
+        'refusedSlot',
+        'refusal',
+      ],
+    ])(
+      'C-2 (the relay twin of probe P1): %s whose slot write throws leaves the record attempting and the member stranded - carried, never closed over an open slot (FW2-2)',
+      async (_case, fail, label, codeField) => {
+        seedRelay(world, { participants: TWO });
+        const source = seedSource(world, 'hello', 'c-alice');
+        world.adapter.sendMessage = fail;
+        vi.spyOn(world.messagesRepo, 'setRecipientDelivery').mockRejectedValueOnce(new Error('dynamo down'));
+        await run(source);
+        expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 1 });
+        expect(slotOf(source, 'c-bob')?.status).toBe('queued');
+        expect(slotOf(source, 'c-bob')?.errorCode).toBeUndefined();
+        expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'], attempt: 2 });
+        const slotErrors = capture.atLevel(50).filter((l) => l['label'] === label);
+        expect(slotErrors).toHaveLength(1);
+        expect(slotErrors[0]![codeField]).toBeDefined();
+        expect(errorLabels()).toEqual([label]);
+      },
+    );
+
+    it('C-2: a second unknown whose unresolved slot close throws keeps the re-driven attempt open and strands the member - carried (FW2-2)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      unknownOn(new Set([BOB]));
+      vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent').mockRejectedValueOnce(new Error('dynamo down'));
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(sends).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(slotOf(source, 'c-bob')?.errorCode).toBeUndefined();
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'] });
+      expect(errorLabels()).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'second_unknown');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+    });
+
+    it('C-2: a reconcile enqueue that throws, whose unresolved slot close throws too, leaves the record reconciling - not carried, nothing closed (FW2-2)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB]));
+      refuseDelayedEnqueues();
+      vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent').mockRejectedValueOnce(new Error('dynamo down'));
+      await run(source);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      expect(slotOf(source, 'c-bob')?.errorCode).toBeUndefined();
+      expect(outbound.delayed).toHaveLength(0);
+      expect(errorLabels()).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'enqueue_failed');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+    });
   });
 });
 

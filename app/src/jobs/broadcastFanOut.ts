@@ -538,6 +538,8 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      * throws: an enqueue that fails closes the recipient unresolved on the spot
      * - the slot `failed` / send_unconfirmed FIRST, then the record done /
      * unresolved (D7, D13a) - so nothing waits on a chain that never started.
+     * A slot close that throws leaves the record `reconciling` (code review
+     * C-2): no pass can act on it, so it is the sweeper's, and not carried.
      */
     async function handOff(owner: BroadcastOwner, attemptedAt: string): Promise<void> {
       const ctx = recipientCtx(owner.contactKey);
@@ -547,7 +549,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           reconcileDelayMs(attemptedAt, 0, Date.now()),
         );
       } catch (err) {
-        await guardWrite(log, ctx, 'closeUnconfirmed', async () => {
+        const slotClosed = await guardWrite(log, ctx, 'closeUnconfirmed', async () => {
           const closed = await repo.closeRecipientIfQueued(
             payload.broadcastId,
             owner.contactKey,
@@ -556,12 +558,16 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           );
           if (closed.moved && closed.item) emitBroadcastProgress(events, payload.broadcastId, closed.item);
         });
-        await guardWrite(log, ctx, 'closeFromReconcile', () =>
-          attempts.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }),
-        );
+        if (slotClosed) {
+          await guardWrite(log, ctx, 'closeFromReconcile', () =>
+            attempts.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }),
+          );
+        }
         log.error(
           { err, ...ctx, cause: ENQUEUE_FAILED_CODE },
-          'broadcastFanOut: reconcile enqueue failed - recipient closed unresolved (send_unconfirmed)',
+          slotClosed
+            ? 'broadcastFanOut: reconcile enqueue failed - recipient closed unresolved (send_unconfirmed)'
+            : 'broadcastFanOut: reconcile enqueue failed and its unresolved close failed - the record stays reconciling for the sweeper',
         );
       }
     }
@@ -647,7 +653,13 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       else if (fence.note?.level === 'info') log.info({ ...ctx }, fence.note.msg);
     }
 
-    /** A provider rejection (D5): the recipient fails with the provider code; the record closes rejected. */
+    /**
+     * A provider rejection (D5): the recipient fails with the provider code; the
+     * record closes rejected - only once the slot write RESOLVED (code review
+     * C-2): a slot write that threw leaves the attempt open and the recipient
+     * carried, so a later pass meets it (deferred while fresh; taken over into
+     * reconcile when stale at the cap).
+     */
     async function onRejected(
       owner: BroadcastOwner,
       ref: AttemptRef,
@@ -656,9 +668,10 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     ): Promise<void> {
       const ctx = recipientCtx(owner.contactKey);
       const code = classification.code;
+      let slotWritten: boolean;
       if (code === CARRIER_FILTERED_CODE || (code !== undefined && UNREACHABLE_CODES.has(code))) {
         // Today's two arms, writes unchanged.
-        await guardWrite(log, ctx, 'rejectSlot', async () => {
+        slotWritten = await guardWrite(log, ctx, 'rejectSlot', async () => {
           await recordRecipient(repo, payload.broadcastId, owner.contactKey, { status: 'failed', errorCode: code });
           emitBroadcastProgress(
             events,
@@ -694,7 +707,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         // provider code fails the slot with no errorCode; the kill switch's
         // token has prose, so it is kept.
         const slotCode = isProviderCode(code) || code === SMS_SENDING_DISABLED_CODE ? code : undefined;
-        await guardWrite(log, ctx, 'rejectSlot', async () => {
+        slotWritten = await guardWrite(log, ctx, 'rejectSlot', async () => {
           const moved = await repo.recordRecipientOutcome(
             payload.broadcastId,
             owner.contactKey,
@@ -708,6 +721,10 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           { ...ctx, errorCode: code, status: classification.status },
           'broadcastFanOut: send rejected by the provider - recipient failed, NOT retried',
         );
+      }
+      if (!slotWritten) {
+        transientRemaining.push(owner.contactKey);
+        return;
       }
       // The record's cause keeps what the slot may not: the HTTP status of a code-less 4xx.
       const cause = code ?? (classification.status !== undefined ? String(classification.status) : undefined);
@@ -726,7 +743,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     async function onUnknown(owner: BroadcastOwner, ref: AttemptRef, secondUnknownWouldClose: boolean, err: unknown): Promise<void> {
       const ctx = recipientCtx(owner.contactKey);
       if (secondUnknownWouldClose) {
-        await guardWrite(log, ctx, 'closeUnconfirmed', async () => {
+        const slotClosed = await guardWrite(log, ctx, 'closeUnconfirmed', async () => {
           const closed = await repo.closeRecipientIfQueued(
             payload.broadcastId,
             owner.contactKey,
@@ -735,6 +752,15 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           );
           if (closed.moved && closed.item) emitBroadcastProgress(events, payload.broadcastId, closed.item);
         });
+        if (!slotClosed) {
+          // Code review C-2: the attempt stays open and the recipient is carried.
+          transientRemaining.push(owner.contactKey);
+          log.error(
+            { err, ...ctx, cause: 'second_unknown' },
+            'broadcastFanOut: unknown send outcome after a re-drive - its unresolved close failed; the attempt stays open and the recipient is carried',
+          );
+          return;
+        }
         await guardWrite(log, ctx, 'finishAttempt', () =>
           attempts.finishAttempt(owner, ref, { outcome: 'unresolved', cause: 'second_unknown' }),
         );
@@ -926,7 +952,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
             : isOptedOutCode(code)
               ? 'skipped_opted_out'
               : 'skipped_other';
-          await guardWrite(log, ctx, 'refusedSlot', async () => {
+          const slotWritten = await guardWrite(log, { ...ctx, refusal: code }, 'refusedSlot', async () => {
             await recordRecipient(repo, payload.broadcastId, contactKey, { status: 'skipped', errorCode: code });
             emitBroadcastProgress(
               events,
@@ -934,6 +960,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
               await repo.bumpStats(payload.broadcastId, { [bucket]: 1, queued: -1 }),
             );
           });
+          if (!slotWritten) {
+            // Code review C-2: the attempt stays open and the recipient is carried.
+            transientRemaining.push(contactKey);
+            return 'other';
+          }
           await guardWrite(log, ctx, 'finishAttempt', () =>
             attempts.finishAttempt(owner, held, { outcome: 'refused', cause: code }),
           );

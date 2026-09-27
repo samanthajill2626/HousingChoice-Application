@@ -1668,6 +1668,30 @@ describe('relay.retryLeg (30003 ladder)', () => {
       );
     });
 
+    it('C-2: a reconcile enqueue that throws, whose unresolved slot close throws too, leaves the rung reconciling - nothing closed, no root emit (FW2-2)', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      unknownSend();
+      refuseDelayedEnqueues();
+      vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent').mockRejectedValueOnce(new Error('dynamo down'));
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeFromReconcile');
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      expect(recordClose).not.toHaveBeenCalled();
+      expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+      expect(slotOf(row.tsMsgId)?.errorCode).toBeUndefined();
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toEqual([]);
+      expect(errorLogs().filter((l) => l['label'] === 'closeUnconfirmed')).toHaveLength(1);
+      expect(errorLogs()).toContainEqual(
+        expect.objectContaining({ event: 'relay_retry_leg', retryClaim: 'reconcile_enqueue_failed', cause: 'enqueue_failed' }),
+      );
+      expect(errorLogs().some((l) => l['closeCode'] !== undefined)).toBe(false);
+    });
+
     it('a stale attempt the unit takes over at its claim is handed to reconcile once and at once - no send, no close, no emit', async () => {
       seedRelay(world);
       const row = seedRetryRow(world);

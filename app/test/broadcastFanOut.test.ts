@@ -2222,6 +2222,96 @@ describe('broadcast.send (M1.8a)', () => {
         attemptedAt: later,
       });
     });
+
+    // --- code review C-2 / R-e (FW2-2): a terminal arm closes the record only
+    // after its slot write RESOLVED; a slot write that threw leaves the attempt
+    // open and the recipient carried, where a later pass can still act.
+
+    it('C-2 (probe P1): a 21211 whose reject-slot write throws leaves the record attempting and the recipient carried - never done/rejected over a queued slot (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('invalid'), { status: 400, code: 21211 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'recordRecipientOutcome').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['rejectSlot']);
+      expect(b.status).toBe('sending');
+    });
+
+    it('C-2: the known arms (30007) keep the record open and carry the recipient when their slot write throws (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('filtered'), { status: 400, code: 30007 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['rejectSlot']);
+    });
+
+    it('C-2: a refusal whose skipped-slot write throws keeps the record open and carries the recipient; the ERROR names the refusal (FW2-2)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      seedBroadcast(world, [t!]);
+      const conv = await world.conversationsRepo.createOrGetByParticipantPhone(t!.phone!, 'tenant_1to1');
+      await world.conversationsRepo.setMode(conv.conversationId, 'manual');
+      const capture = wire();
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      const slotErrors = capture.atLevel(50).filter((l) => l['label'] === 'refusedSlot');
+      expect(slotErrors).toHaveLength(1);
+      expect(slotErrors[0]).toMatchObject({ recipientKey: 't-1', refusal: 'manual_mode' });
+    });
+
+    it('C-2: a second unknown whose unresolved slot close throws keeps the re-driven attempt open and carries the recipient (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      await seedRedriven('t-1');
+      vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued').mockRejectedValueOnce(new Error('dynamo down'));
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(sends).toHaveLength(1);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'second_unknown');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+    });
+
+    it('C-2: a reconcile enqueue that throws, whose unresolved slot close throws too, leaves the record reconciling - not carried, nothing closed (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      refuseDelayedEnqueues();
+      vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(errorLabels(capture)).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'enqueue_failed');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+      expect(b.status).toBe('sending');
+    });
   });
 
   describe('finalize (spec D16a)', () => {

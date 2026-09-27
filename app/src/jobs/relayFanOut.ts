@@ -1210,18 +1210,24 @@ async function runRelayFanOutExecution(
         reconcileDelayMs(attemptedAt, 0, Date.now()),
       );
     } catch (err) {
-      await guardWrite(log, ctx, 'closeUnconfirmed', () =>
+      const slotClosed = await guardWrite(log, ctx, 'closeUnconfirmed', () =>
         messages.closeRelayRecipientIfUnsent(payload.relayConversationId, payload.sourceTsMsgId, owner.memberKey, {
           status: 'failed',
           errorCode: SEND_UNCONFIRMED_CODE,
         }),
       );
-      await guardWrite(log, ctx, 'closeFromReconcile', () =>
-        attempts.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }),
-      );
+      // Code review C-2: the record closes only once the slot write resolved; a
+      // reconciling record no pass can act on is the sweeper's, not carried.
+      if (slotClosed) {
+        await guardWrite(log, ctx, 'closeFromReconcile', () =>
+          attempts.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }),
+        );
+      }
       log.error(
         { err, ...ctx, cause: ENQUEUE_FAILED_CODE },
-        'relayFanOut: reconcile enqueue failed - member closed unresolved (send_unconfirmed)',
+        slotClosed
+          ? 'relayFanOut: reconcile enqueue failed - member closed unresolved (send_unconfirmed)'
+          : 'relayFanOut: reconcile enqueue failed and its unresolved close failed - the record stays reconciling for the sweeper',
       );
     }
   }
@@ -1380,8 +1386,9 @@ async function runRelayFanOutExecution(
           }
           break;
         case 'stranded':
-          // The hand-off write failed: the record stays attempting, the slot
-          // untouched. Carried with no slot write. The record ages from its
+          // A failure-arm write failed - the hand-off, or a terminal arm's slot
+          // write (code review C-2): the record stays attempting, the slot as
+          // it was. Carried with no slot write. The record ages from its
           // re-arm just before the send (code review ADV-1): a later pass that
           // meets it past the claim TTL takes it over into reconcile; one that
           // meets it fresh - the relay ladder's 5 s + 10 s is shorter than the
@@ -1570,11 +1577,13 @@ export type RelayLegPayload = Pick<
  *   (D7); `reason: 'takeover'` - a stale attempt was taken over (D8a) and
  *   `attemptRef` carries THAT attempt's clock. Both hand-off kinds always
  *   carry `attemptRef`: the record args are required (SOR Task 9).
- * - `stranded`: the hand-off write itself failed (D7a): the record stays
- *   attempting, the slot untouched; the caller carries the member with no
- *   slot write, and the claim refuses any re-send. `afterSend` - the send is
- *   KNOWN to have happened (a record-phase failure), so it does not count
- *   toward the outage brake.
+ * - `stranded`: a failure-arm write failed and the attempt is left open
+ *   (D7a): the hand-off write itself, or a terminal arm's slot write (code
+ *   review C-2 - the record is never closed over a slot left open). The
+ *   record stays attempting and the slot as it was; the caller carries the
+ *   member with no slot write, and the claim refuses any re-send. `afterSend`
+ *   - the send is KNOWN to have happened (a record-phase failure), so it does
+ *   not count toward the outage brake.
  */
 export interface RelayLegSendOutcome {
   kind:
@@ -1603,7 +1612,8 @@ export interface RelayLegSendOutcome {
 
 /**
  * D9: did this leg end in an UNKNOWN provider outcome? A hand-off, a strand
- * before any known send, a re-drive attempt's second unknown (closed
+ * before any known send (a terminal arm whose slot write failed included - a
+ * double fault), a re-drive attempt's second unknown (closed
  * send_unconfirmed - it counts, as the broadcast twin's does) and the lost
  * hand-off of an unknown all count toward the outage brake; everything else -
  * a takeover, a strand after a KNOWN send, a rejection, a retryable - resets.
@@ -2112,12 +2122,15 @@ export async function sendOneRelayLeg(args: {
       return { kind: 'stranded', afterSend: true };
     }
 
-    // phase === 'sending': the provider call threw.
+    // phase === 'sending': the provider call threw. Every TERMINAL arm below
+    // closes the record only once its slot write RESOLVED (code review C-2): a
+    // slot write that threw leaves the attempt open and the member stranded.
     if (err instanceof SendRefusedError) {
       const refusal = err.code;
-      await guardWrite(log, ctx, 'refusedSlot', () =>
+      const slotWritten = await guardWrite(log, { ...ctx, refusal }, 'refusedSlot', () =>
         persistRelayRecipientResult(messages, payload, key, { status: 'failed', errorCode: refusal }, transport),
       );
+      if (!slotWritten) return { kind: 'stranded' };
       await guardWrite(log, ctx, 'finishAttempt', () =>
         held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'refused', cause: refusal }),
       );
@@ -2136,9 +2149,10 @@ export async function sendOneRelayLeg(args: {
       const code = classification.code;
       if (code === CARRIER_FILTERED_CODE) {
         // Today's arm, write unchanged: never retried.
-        await guardWrite(log, ctx, 'rejectSlot', () =>
+        const slotWritten = await guardWrite(log, { ...ctx, errorCode: code }, 'rejectSlot', () =>
           persistRelayRecipientResult(messages, payload, key, { status: 'failed', errorCode: code }, transport),
         );
+        if (!slotWritten) return { kind: 'stranded' };
         await guardWrite(log, ctx, 'finishAttempt', () =>
           held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'rejected', cause: code }),
         );
@@ -2157,7 +2171,7 @@ export async function sendOneRelayLeg(args: {
       // switch's token has prose, so it is kept. Relay records the code only -
       // an MMS leg's 30005 says nothing about SMS reachability.
       const slotCode = isProviderCode(code) || code === SMS_SENDING_DISABLED_CODE ? code : undefined;
-      await guardWrite(log, ctx, 'rejectSlot', () =>
+      const slotWritten = await guardWrite(log, { ...ctx, errorCode: code }, 'rejectSlot', () =>
         persistRelayRecipientResult(
           messages,
           payload,
@@ -2166,6 +2180,7 @@ export async function sendOneRelayLeg(args: {
           transport,
         ),
       );
+      if (!slotWritten) return { kind: 'stranded' };
       // The record's cause keeps what the slot may not: the HTTP status of a code-less 4xx.
       const cause = code ?? (classification.status !== undefined ? String(classification.status) : undefined);
       await guardWrite(log, ctx, 'finishAttempt', () =>
@@ -2201,12 +2216,19 @@ export async function sendOneRelayLeg(args: {
       // D13a: at most ONE re-drive per member. A re-drive attempt whose
       // outcome is unknown AGAIN closes unresolved here, with no second
       // reconcile: the slot first (conditional on no known send), then the record.
-      await guardWrite(log, ctx, 'closeUnconfirmed', () =>
+      const slotClosed = await guardWrite(log, ctx, 'closeUnconfirmed', () =>
         messages.closeRelayRecipientIfUnsent(payload.relayConversationId, payload.sourceTsMsgId, key, {
           status: 'failed',
           errorCode: SEND_UNCONFIRMED_CODE,
         }),
       );
+      if (!slotClosed) {
+        log.error(
+          { err, ...ctx, cause: 'second_unknown' },
+          'relayFanOut: unknown send outcome after a re-drive - its unresolved close failed; the attempt stays open and the member is carried',
+        );
+        return { kind: 'stranded' };
+      }
       await guardWrite(log, ctx, 'finishAttempt', () =>
         held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'unresolved', cause: 'second_unknown' }),
       );

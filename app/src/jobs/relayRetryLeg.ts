@@ -604,7 +604,8 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
      * `failed` / send_unconfirmed FIRST (conditional: never over a send that
      * landed), then the record done / unresolved with cause enqueue_failed -
      * logs ERROR and announces the root, so nothing waits on a chain that
-     * never started (D7, D13a).
+     * never started (D7, D13a). A slot close that throws leaves the record
+     * reconciling and announces nothing (code review C-2).
      */
     async function handOff(attemptedAt: string): Promise<void> {
       try {
@@ -613,12 +614,22 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
           reconcileDelayMs(attemptedAt, 0, Date.now()),
         );
       } catch (err) {
-        await guardWrite(log, keyCtx, 'closeUnconfirmed', () =>
+        const slotClosed = await guardWrite(log, keyCtx, 'closeUnconfirmed', () =>
           messagesRepo.closeRelayRecipientIfUnsent(conversationId, retryTsMsgId, memberKey, {
             status: 'failed',
             errorCode: SEND_UNCONFIRMED_CODE,
           }),
         );
+        if (!slotClosed) {
+          // Code review C-2: the record closes only once the slot write
+          // resolved - the rung stays reconciling for the sweeper; nothing
+          // closed, so nothing announced.
+          log.error(
+            { err, ...keyCtx, retryClaim: 'reconcile_enqueue_failed', cause: ENQUEUE_FAILED_CODE },
+            'relayRetryLeg: reconcile enqueue failed and its unresolved close failed - the rung stays reconciling for the sweeper',
+          );
+          return;
+        }
         await guardWrite(log, keyCtx, 'closeFromReconcile', () =>
           attempts.closeFromReconcile(rungOwner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }),
         );

@@ -80,6 +80,11 @@ gate or production telemetry system. Run it from the repository root and seriali
 it with every `npm run e2e`, `npm run e2e:session`, or other profiler run in the same
 worktree.
 
+Known gap: the Tours page's Past tab (`/tours/past`, added 2026-09-27) is not a
+registered destination yet, so the profiler never measures it. It is excluded on
+purpose in `e2e/performance/routes.test.ts`; registering it is
+`docs/issues/perf-pages-tours-past-surface.md`.
+
 The three target commands are:
 
 ```powershell

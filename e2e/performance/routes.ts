@@ -128,7 +128,7 @@ export const CONTRACT_SOURCES = Object.freeze({
   contacts: 'dashboard/src/routes/contacts/useContacts.ts:14-99',
   units: 'dashboard/src/routes/listings/useListings.ts:10-60',
   today: 'dashboard/src/routes/today/useToday.ts:41-74',
-  tours: 'dashboard/src/routes/tours/useTours.ts:46-132',
+  tours: 'dashboard/src/routes/tours/useTours.ts:47-133',
   placements: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225',
   details: 'dashboard/src/routes/contact/ContactDetail.tsx:111-140; dashboard/src/routes/listing/useListing.ts:110-185',
   threads: 'dashboard/src/routes/tours/useTourChannels.ts:166-323; dashboard/src/routes/placements/usePlacementChannels.ts:167-333',
@@ -587,6 +587,14 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/listings/deleted', label: 'Deleted properties', source: source('/listings', L.properties, link('/listings/deleted'), UNIT_LIVE_WALK), terminal: unitListTerminal(true), gets: UNIT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, link('/tours/closed'), TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  // TODO(perf-pages-tours-past-surface): KNOWN GAP - there is NO row for
+  // /tours/past (the Tours page's Past tab, added 2026-09-27), so
+  // `npm run perf:pages` never measures it. It is excluded on purpose (the
+  // route pin in routes.test.ts lists it with the same issue), not forgotten.
+  // Registering it needs: a source (from /tours via the Past tab link), a
+  // terminal (the "Past tours" region settled), and its GETs - the Active
+  // window's two reads the page always issues, plus the Past range read and
+  // the status=toured read (docs/issues/perf-pages-tours-past-surface.md).
   row({ surfaceId: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: 'inbox-all', label: 'Inbox: All', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox' }), behaviorFamily: 'inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), destinationSelected: inboxDestinationSelected('All'), terminal: inboxTerminal('No conversations yet'), gets: inboxGets('inbox_page_all'), surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: 'inbox-unread', label: 'Inbox: Unread', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unread' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unread', inboxGets('inbox_page_unread')), destinationSelected: inboxDestinationSelected('Unread'), terminal: inboxTerminal("You're all caught up"), gets: inboxGets('inbox_page_unread'), surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -683,8 +691,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/listings': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
     '/listings/deleted': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
-    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:46-132; dashboard/src/routes/tours/ToursPage.tsx:630-634' },
-    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:46-132; dashboard/src/routes/tours/ToursPage.tsx:630-634' },
+    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:639-643' },
+    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:639-643' },
     '/placements': { base: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225' },
     'inbox-all': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
     'inbox-unread': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
@@ -713,7 +721,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
       reason: 'The sibling route changes the unmatched-email filter while the same EmailTriage tree keeps the contacts hook mounted, so only the filtered unmatched-email request is passive navigation work.',
     }),
     '/tours/closed': Object.freeze({
-      source: 'dashboard/src/routes/tours/ToursPage.tsx:630-647; dashboard/src/routes/tours/useTours.ts:121-150',
+      source: 'dashboard/src/routes/tours/ToursPage.tsx:639-656; dashboard/src/routes/tours/useTours.ts:122-151',
       reason: 'The sibling route enables useClosedTours while the active-tour and cross-reference hooks remain mounted, so only the status-filtered closed-tour request is passive navigation work.',
     }),
   } as const),
@@ -737,8 +745,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/listings': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
     '/listings/deleted': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
-    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:707-805',
-    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:707-805',
+    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:716-814',
+    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:716-814',
     '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
     'inbox-all': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
     'inbox-unread': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',

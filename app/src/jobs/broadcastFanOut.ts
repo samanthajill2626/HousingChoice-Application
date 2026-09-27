@@ -54,11 +54,13 @@
 // PII (doc Sec 9): NEVER log bodies/phones/names - broadcastId / recipient keys
 // (through safeRecipientKey) / counts / SIDs only, correlated via the pino
 // mixin (relayFanOut precedent).
+import { mapTwilioStatus } from '../adapters/messaging.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext } from '../lib/context.js';
-import { appEvents, type EventBus } from '../lib/events.js';
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { guardWrite } from '../lib/guardWrite.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import { buildUnitMergeContext, renderBody } from '../lib/mergeFields.js';
 import { bodyFingerprint, recipientDigest, safeRecipientKey } from '../lib/sendFingerprint.js';
@@ -84,6 +86,7 @@ import {
   type BroadcastsRepo,
 } from '../repos/broadcastsRepo.js';
 import {
+  contactHoldsPhone,
   createContactsRepo,
   isDeleted,
   type ContactItem,
@@ -91,10 +94,11 @@ import {
 } from '../repos/contactsRepo.js';
 import {
   createConversationsRepo,
+  type ConversationItem,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
-import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
 import {
   createSendAttemptsRepo,
   type AttemptRef,
@@ -214,8 +218,11 @@ function isTerminal(status: BroadcastRecipient['status'] | undefined): boolean {
  * app's SSE clients whenever EVENT_BRIDGE_URL is set (all deployed envs +
  * local runners). S3 polling + the DLR-rollup emits (webhooks = app process)
  * remain the liveness backstop for bare unset-URL runs.
+ *
+ * Exported for the send.reconcile job (SOR D15, D16): its adoption and its
+ * closes move a slot too, and emit the same DERIVED stats.
  */
-function emitBroadcastProgress(events: EventBus, broadcastId: string, item: BroadcastItem): void {
+export function emitBroadcastProgress(events: EventBus, broadcastId: string, item: BroadcastItem): void {
   events.emit('broadcast.updated', {
     broadcastId,
     status: item.status,
@@ -782,49 +789,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       } catch (acquireErr) {
         log.warn({ err: acquireErr, ...ctx }, 'broadcastFanOut: A2P token acquire failed after a recorded send (best-effort pacing)');
       }
-      // BE2/C2: a delivered property is a `listing_sent` milestone on the
-      // tenant's timeline. Prefer the unit (the thing sent) as the deep-link
-      // target; fall back to the broadcast when the broadcast has no unitId.
-      // Best-effort - a milestone failure must NEVER fail the send (the SMS is
-      // already out and the recipient slot recorded), so it is swallowed and
-      // logged.
-      const unitId = snapshot.unitId;
-      const hasUnit = typeof unitId === 'string' && unitId.length > 0;
-      try {
-        await activityEvents.record({
-          contactId: contact.contactId,
-          type: 'listing_sent',
-          label: 'Property sent',
-          refType: hasUnit ? 'unit' : 'broadcast',
-          refId: hasUnit ? unitId : payload.broadcastId,
-        });
-      } catch (milestoneErr) {
-        log.error(
-          { err: milestoneErr, ...ctx },
-          'broadcastFanOut: recording listing_sent milestone failed (best-effort)',
-        );
-      }
-      // BE4/C4: record the unit<->contact listing-send row so the "Sent to
-      // tenants" / "Properties sent" pages light up. ONLY when the broadcast
-      // targets a unit (a unit-less broadcast records nothing - there is no
-      // property to attribute). Best-effort and idempotent: the upsert is safe
-      // on SQS redelivery (and the job's terminal-recipient skip already
-      // prevents re-entry), and a failure must NEVER fail the send.
-      if (hasUnit) {
-        try {
-          await listingSends.recordSend({
-            contactId: contact.contactId,
-            unitId,
-            via: 'broadcast',
-            broadcastId: payload.broadcastId,
-          });
-        } catch (sendErr) {
-          log.error(
-            { err: sendErr, ...ctx },
-            'broadcastFanOut: recording listing-send row failed (best-effort)',
-          );
-        }
-      }
+      await recordPropertySent({ activityEvents, listingSends }, log, ctx, {
+        contactId: contact.contactId,
+        unitId: snapshot.unitId,
+        broadcastId: payload.broadcastId,
+      });
     }
 
     /**
@@ -1150,15 +1119,294 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
   });
 }
 
-/** Resolve the contact behind a contactKey (contactId else `phone#<E164>`). */
-async function resolveContact(
+/**
+ * Resolve the contact behind a contactKey (contactId else `phone#<E164>`).
+ * Strongly consistent where the repo offers it (build finding T10-3): a
+ * contactId is a primary-key read, read consistently so a STOP or a number
+ * change since send time is seen; the phone lookup has no consistent form.
+ * Exported for the send.reconcile job, which re-reads the recipient's CURRENT
+ * number through it (spec D12) and adopts onto the same contact (D15).
+ */
+export async function resolveContact(
   contacts: ContactsRepo,
   contactKey: string,
 ): Promise<ContactItem | undefined> {
   if (contactKey.startsWith('phone#')) {
     return contacts.findByPhone(contactKey.slice('phone#'.length));
   }
-  return contacts.getById(contactKey);
+  return contacts.getById(contactKey, { consistentRead: true });
+}
+
+/**
+ * The two rows a SENT property writes (BE2/C2, BE4/C4) - the pass after a
+ * recorded send and the reconcile's adoption of a sent or delivered message
+ * (SOR D15) alike. Each is best-effort: a failure is logged at ERROR and never
+ * fails the send (the SMS is out and its slot recorded).
+ */
+async function recordPropertySent(
+  repos: { activityEvents: ActivityEventsRepo; listingSends: ListingSendsRepo },
+  log: Logger,
+  ctx: Record<string, unknown>,
+  args: { contactId: string; unitId: string | undefined; broadcastId: string },
+): Promise<void> {
+  // BE2/C2: a delivered property is a `listing_sent` milestone on the
+  // tenant's timeline. Prefer the unit (the thing sent) as the deep-link
+  // target; fall back to the broadcast when the broadcast has no unitId.
+  const unitId = args.unitId;
+  const hasUnit = typeof unitId === 'string' && unitId.length > 0;
+  try {
+    await repos.activityEvents.record({
+      contactId: args.contactId,
+      type: 'listing_sent',
+      label: 'Property sent',
+      refType: hasUnit ? 'unit' : 'broadcast',
+      refId: hasUnit ? unitId : args.broadcastId,
+    });
+  } catch (milestoneErr) {
+    log.error(
+      { err: milestoneErr, ...ctx },
+      'broadcastFanOut: recording listing_sent milestone failed (best-effort)',
+    );
+  }
+  // BE4/C4: record the unit<->contact listing-send row so the "Sent to
+  // tenants" / "Properties sent" pages light up. ONLY when the broadcast
+  // targets a unit (a unit-less broadcast records nothing - there is no
+  // property to attribute). Idempotent: the upsert is safe on a redelivery.
+  if (hasUnit) {
+    try {
+      await repos.listingSends.recordSend({
+        contactId: args.contactId,
+        unitId,
+        via: 'broadcast',
+        broadcastId: args.broadcastId,
+      });
+    } catch (sendErr) {
+      log.error(
+        { err: sendErr, ...ctx },
+        'broadcastFanOut: recording listing-send row failed (best-effort)',
+      );
+    }
+  }
+}
+
+/**
+ * What the send.reconcile job's adoption of a broadcast recipient reads and
+ * writes (SOR spec D15): the reads the pass makes and the writes its success
+ * path - the send wrapper's append, the slot, the rows a sent property writes
+ * - would have made.
+ */
+export interface AdoptDeps {
+  broadcasts: BroadcastsRepo;
+  contacts: ContactsRepo;
+  conversations: ConversationsRepo;
+  messages: MessagesRepo;
+  activityEvents: ActivityEventsRepo;
+  listingSends: ListingSendsRepo;
+  audit: AuditRepo;
+  events: EventBus;
+  log: Logger;
+}
+
+/** The message the provider holds, as the reconcile read it (spec D17), for one broadcast recipient. */
+export interface AdoptBroadcastArgs {
+  broadcastId: string;
+  contactKey: string;
+  providerSid: string;
+  /** The provider's CREATION time - the clock the send wrapper stamps as provider_ts. */
+  providerTs: string;
+  /** The provider's RAW status (mapTwilioStatus maps it). */
+  providerStatus: string;
+  errorCode?: string;
+  body: string;
+  mediaCount: number;
+  /** The provider's date_sent, when it has one (the slot's carrierSentAt). */
+  sentAt?: string;
+}
+
+/**
+ * Is this 1:1 row THIS broadcast recipient's (plan Task 7, R2 #18)? Two shares
+ * to one tenant share a conversation, and two contacts on one phone in ONE
+ * share share it too - so the row must carry this share's `broadcast_id` AND
+ * name no other contact: its `recipient_contact_id` absent (the send wrapper
+ * records one only while the named contact holds the thread's number), this
+ * contact, or the row this recipient's slot already carries.
+ */
+export function isBroadcastRowFor(
+  row: Pick<MessageItem, 'broadcast_id' | 'recipient_contact_id' | 'tsMsgId'>,
+  owner: { broadcastId: string; contactId: string | undefined; slotTsMsgId: string | undefined },
+): boolean {
+  if (row.broadcast_id !== owner.broadcastId) return false;
+  return (
+    row.recipient_contact_id === undefined ||
+    row.recipient_contact_id === owner.contactId ||
+    (owner.slotTsMsgId !== undefined && owner.slotTsMsgId === row.tsMsgId)
+  );
+}
+
+/**
+ * SOR spec D15: record a message the provider ALREADY holds for one broadcast
+ * recipient, the way the pass's success path would have. Called by the
+ * send.reconcile job inside its candidate loop (and for a known SID); every
+ * write is idempotent, conditional or forward-only, so a re-run completes
+ * rather than duplicates.
+ *
+ * In this order:
+ *   1. FIRST the SID claim: the 1:1 row the send wrapper would have appended -
+ *      the share's stamp, `automated` from the share's `created_via` (a
+ *      dashboard share is a person's send), `recipient_contact_id` only while
+ *      the contact holds the thread's number - deduped on the SID. A dedupe is
+ *      not by itself "lost": the stored row is read consistently and a row
+ *      that is not this recipient's (isBroadcastRowFor) is `other_owner` -
+ *      someone else's message; the caller takes the next candidate.
+ *   2. THEN the slot, from `queued` only, with its conversationId + tsMsgId so
+ *      later receipts roll up, and its stats bump in the same write. The slot
+ *      status is the owner's own mapping: accepted/queued/sending/sent ->
+ *      `sent`, delivered/read -> `delivered`, undelivered/failed/canceled ->
+ *      `failed` with the provider's code; `carrierSentAt` from the provider's
+ *      date_sent. A slot that is no longer queued did not move: `skipped`.
+ *   3. THEN, only because the slot moved: the derived progress tick, the
+ *      message_sent audit row, the status-preserving inbox touch (never
+ *      backwards), the emits, and - only for an adopted sent/delivered - the
+ *      listing_sent milestone and the listing-send row. An adopted failure
+ *      takes the pass's own arm for 30005/30006 (flag the contact
+ *      sms_unreachable) and WARNs: the webhook's side effects for the code
+ *      (the 30003 ladder, 21610 bookkeeping, the metric) never ran for it.
+ *      Each is best-effort (logged at ERROR): a retry would find the slot
+ *      moved and skip them anyway.
+ */
+export async function adoptBroadcastRecipient(
+  deps: AdoptDeps,
+  args: AdoptBroadcastArgs,
+): Promise<'adopted' | 'other_owner' | 'skipped'> {
+  const { broadcastId, contactKey, providerSid } = args;
+  const ctx = { broadcastId, recipientKey: safeRecipientKey(contactKey), providerSid };
+  const broadcast = await deps.broadcasts.getByIdConsistent(broadcastId);
+  if (broadcast === undefined) {
+    throw new Error(`adoptBroadcastRecipient: broadcast ${broadcastId} not found`);
+  }
+  const contact = await resolveContact(deps.contacts, contactKey);
+  if (contact === undefined || typeof contact.phone !== 'string' || contact.phone.length === 0) {
+    // The pass fences a phone-less recipient before any claim, so a record
+    // cannot exist for one; refuse to guess where the message belongs.
+    throw new Error('adoptBroadcastRecipient: the recipient has no resolvable contact phone');
+  }
+  const conversation = await deps.conversations.createOrGetByParticipantPhone(contact.phone, 'tenant_1to1');
+  const participantPhone = conversation.participant_phone ?? contact.phone;
+  const automated = broadcast.created_via !== 'dashboard';
+  const rowStatus = mapTwilioStatus(args.providerStatus);
+  const failed = rowStatus === 'failed' || rowStatus === 'undelivered';
+  const errorCode = failed ? args.errorCode : undefined;
+  const transport = args.mediaCount > 0 ? 'mms' : 'sms';
+
+  // 1. The SID claim.
+  const appended = await deps.messages.append({
+    conversationId: conversation.conversationId,
+    providerSid,
+    providerTs: args.providerTs,
+    type: transport,
+    direction: 'outbound',
+    author: 'teammate',
+    body: args.body,
+    deliveryStatus: rowStatus,
+    ...(errorCode !== undefined && { errorCode }),
+    transportSchemaVersion: TRANSPORT_SCHEMA_VERSION,
+    requestedTransport: transport,
+    broadcastId,
+    automated,
+    ...(contactHoldsPhone(contact, participantPhone) && { recipientContactId: contact.contactId }),
+  });
+  if (appended.deduped) {
+    const row = await deps.messages.getByProviderSidConsistent(providerSid);
+    if (row === undefined) {
+      throw new Error(`adoptBroadcastRecipient: the row for ${providerSid} deduped but cannot be read back`);
+    }
+    const mine = isBroadcastRowFor(row, {
+      broadcastId,
+      contactId: contact.contactId,
+      slotTsMsgId: broadcast.recipients?.[contactKey]?.tsMsgId,
+    });
+    if (!mine) return 'other_owner';
+  }
+
+  // 2. The slot, from queued only, with its bump in the same write.
+  const slotStatus: 'sent' | 'delivered' | 'failed' = failed ? 'failed' : rowStatus === 'delivered' ? 'delivered' : 'sent';
+  const delta: Partial<BroadcastStats> =
+    slotStatus === 'failed'
+      ? { failed: 1, queued: -1 }
+      : slotStatus === 'delivered'
+        ? { delivered: 1, queued: -1 }
+        : { sent: 1, queued: -1 };
+  const recorded = await deps.broadcasts.recordRecipientOutcome(
+    broadcastId,
+    contactKey,
+    {
+      conversationId: appended.conversationId,
+      tsMsgId: appended.tsMsgId,
+      status: slotStatus,
+      ...(errorCode !== undefined && { errorCode }),
+      ...(args.sentAt !== undefined && { carrierSentAt: args.sentAt }),
+    },
+    delta,
+    ['queued'],
+  );
+  if (!recorded.moved) return 'skipped';
+
+  // 3. Only because the slot moved.
+  if (recorded.item) emitBroadcastProgress(deps.events, broadcastId, recorded.item);
+  try {
+    await deps.audit.append(`conversations#${appended.conversationId}`, 'message_sent', {
+      providerSid,
+      automated,
+      author: 'teammate',
+    });
+  } catch (err) {
+    deps.log.error({ err, ...ctx }, 'broadcastFanOut: adoption audit row failed (best-effort)');
+  }
+  // The status-preserving touch with no preview (the relay retry job's
+  // shape): never moves the inbox backwards (a read-then-write guard, build
+  // finding T10-12 - accepted residue).
+  let touched: ConversationItem | undefined;
+  try {
+    const current =
+      appended.conversationId === conversation.conversationId
+        ? conversation
+        : await deps.conversations.getById(appended.conversationId);
+    if (current !== undefined && (current.last_activity_at ?? '') < args.providerTs) {
+      touched = await deps.conversations.touchLastActivityPreservingStatus(appended.conversationId, undefined, args.providerTs);
+    }
+  } catch (err) {
+    deps.log.error({ err, ...ctx }, 'broadcastFanOut: adoption inbox touch failed (best-effort)');
+  }
+  deps.events.emit('message.persisted', {
+    conversationId: appended.conversationId,
+    tsMsgId: appended.tsMsgId,
+    direction: 'outbound',
+    deliveryStatus: rowStatus,
+  });
+  if (touched !== undefined) deps.events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+  if (slotStatus !== 'failed') {
+    // A message the carrier says never arrived must not count as a property sent.
+    await recordPropertySent(deps, deps.log, ctx, {
+      contactId: contact.contactId,
+      unitId: broadcast.unitId,
+      broadcastId,
+    });
+    return 'adopted';
+  }
+  if (errorCode !== undefined && UNREACHABLE_CODES.has(errorCode)) {
+    // The pass's own arm (every broadcast leg is SMS - see its
+    // TODO(mms-silent-drop-dish-textnow) note in onRejected).
+    try {
+      await deps.contacts.setFlag(contact.contactId, 'sms_unreachable');
+    } catch (flagErr) {
+      deps.log.error({ err: flagErr, ...ctx }, 'broadcastFanOut: failed to flag contact sms_unreachable');
+    }
+  }
+  deps.log.warn(
+    { ...ctx, event: 'send_reconcile', deliveryStatus: rowStatus, errorCode },
+    'broadcastFanOut: adopted terminal failure - webhook side effects skipped',
+  );
+  return 'adopted';
 }
 
 /** Resolved first name for [TenantName], or undefined. */

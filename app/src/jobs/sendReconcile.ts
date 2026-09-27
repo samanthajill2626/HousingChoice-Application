@@ -1,18 +1,93 @@
 // app/src/jobs/sendReconcile.ts
-// The `send.reconcile` job (SOR spec Sec 5, D11-D16): resolves a send whose
-// provider outcome was left ambiguous by looking the message up at the
-// provider. THIS FILE IS THE STUB the send sites enqueue through (SOR Task 7):
-// the job name, the payload shape, the owner reference and the check delays.
-// The handler itself is added by SOR Task 10; until then an enqueued
-// `send.reconcile` envelope has no handler.
+// The `send.reconcile` job (SOR spec Sec 5, D11-D16a): it resolves a send
+// whose provider outcome was left AMBIGUOUS (a timeout, a dropped socket, a
+// 5xx, a stale attempt taken over, a send that landed but was not recorded)
+// by looking the message up at the provider, and then ADOPTS it, RE-DRIVES the
+// recipient once, or closes it UNRESOLVED. The send sites (broadcastFanOut,
+// relayFanOut, relayRetryLeg) hand off to it through `enqueueSendReconcile`
+// after moving the recipient's send-attempt record to `reconciling`.
+//
+// NO RUN-ONCE MARKER (spec D11, build finding T10-6). The job never calls
+// `putJobExecutionMarker`, and that is deliberate: its enqueues are
+// at-least-once and every write it makes is idempotent or conditional on the
+// attempt record (state + attemptedAt), so a redelivery, a duplicate check or
+// two chains for one recipient converge on one outcome. A throw inside the job
+// is therefore a GENUINE retry on SQS (five failures reach the DLQ and page
+// through jobs-dlq-depth). On the hermetic lane a delayed in-process dispatch
+// is never redelivered (T10-11): nothing may depend on a retry there.
 //
 // The payload carries identifiers only (D12): the owner reference with the
 // HASHED recipient key, the attempt start every condition keys on, the check
-// number and, for relay, the continuation context. Never a body or a phone.
-import { hashRecipientKey } from '../lib/sendFingerprint.js';
-import { RECONCILE_CHECK_DELAYS_MS } from '../lib/sendOutcome.js';
-import type { SendAttemptOwner } from '../repos/sendAttemptsRepo.js';
-import { enqueue } from './jobs.js';
+// number and, for a relay leg, the fan-out's continuation context (its sender
+// key is carried verbatim - plan deviation 4). The raw recipient key is
+// resolved from the owner by its hash; everything else - the recipient digest,
+// the sender, the body hash, the media count, a known SID - is read from the
+// record at run time. Never a body or a phone in a payload or a log line
+// (D18): keys through safeRecipientKey, a provider error only under `err`.
+//
+// The flow of one check:
+//   resolve the owner -> the record (consistent); a record that is no longer
+//   this chain's (another state, another attempt) is superseded - and a `done`
+//   one of THIS attempt still runs afterClose (build ruling A7) -> record the
+//   check (from n or n+1: tolerant of its own duplicate) -> a KNOWN SID is
+//   fetched and adopted (no digest check); otherwise the D13 lookup lists the
+//   provider's messages to the recipient from the sender and adopts the first
+//   match it can claim -> the verdict: `found` closes the record adopted;
+//   `continue` schedules the next check; `never_sent` marks the record
+//   redriven and enqueues ONE re-drive; `unresolved` closes the slot
+//   send_unconfirmed and the record done. Every enqueue is wrapped: a throw
+//   closes the recipient (enqueue_failed after never_sent, else unresolved).
+//
+// IMPORT CYCLE (build finding T10-10): this module imports the three send
+// sites, and they import this module's enqueue helpers back. Nothing here or
+// there reads an imported value at module-evaluation time - every use sits
+// inside a function - so the ESM live bindings are settled before first use.
+// `npm run smoke` proves the compiled imports resolve under plain node.
+import {
+  createMessagingAdapter,
+  mapTwilioStatus,
+  type ListMessagesPage,
+  type MessagingAdapter,
+  type ProviderMessageSummary,
+} from '../adapters/messaging.js';
+import type { AppConfig } from '../lib/config.js';
+import { appEvents, type EventBus } from '../lib/events.js';
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { bodyFingerprint, hashRecipientKey, recipientDigest, safeRecipientKey } from '../lib/sendFingerprint.js';
+import {
+  ENQUEUE_FAILED_CODE,
+  RECONCILE_CHECK_DELAYS_MS,
+  RECONCILE_LIST_PAGE_SIZE,
+  RECONCILE_MAX_PAGES,
+  RECONCILE_WINDOW_LEAD_MS,
+  SEND_UNCONFIRMED_CODE,
+} from '../lib/sendOutcome.js';
+import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
+import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
+import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { createMessagesRepo, type DeliveryStatus, type MessagesRepo } from '../repos/messagesRepo.js';
+import {
+  attemptKey,
+  createSendAttemptsRepo,
+  type SendAttemptFacts,
+  type SendAttemptOwner,
+  type SendAttemptRecord,
+  type SendAttemptsRepo,
+} from '../repos/sendAttemptsRepo.js';
+import {
+  adoptBroadcastRecipient,
+  BROADCAST_SEND_JOB,
+  emitBroadcastProgress,
+  finalize,
+  isBroadcastRowFor,
+  resolveContact,
+  type AdoptDeps,
+  type BroadcastSendPayload,
+} from './broadcastFanOut.js';
+import { defineJobHandler, enqueue } from './jobs.js';
 
 export const SEND_RECONCILE_JOB = 'send.reconcile';
 
@@ -66,4 +141,649 @@ export function reconcileDelayMs(attemptedAt: string, checkNo: number, nowMs: nu
 /** EnqueueOptions is `{ runAt }` ONLY (jobs.ts): the delay becomes a runAt. */
 export async function enqueueSendReconcile(payload: SendReconcilePayload, delayMs: number): Promise<void> {
   await enqueue(SEND_RECONCILE_JOB, payload, { runAt: new Date(Date.now() + delayMs) });
+}
+
+// ---------------------------------------------------------------------------
+// The payload, validated field by field (an unknown field never rides along)
+// ---------------------------------------------------------------------------
+
+function requiredText(value: unknown, what: string): string {
+  if (typeof value !== 'string' || value.length === 0) throw new Error(`sendReconcile: ${what} is required`);
+  return value;
+}
+
+function parseOwnerRef(value: unknown): SendAttemptOwnerRef {
+  if (typeof value !== 'object' || value === null) throw new Error('sendReconcile: owner is required');
+  const o = value as Record<string, unknown>;
+  const recipientKeyHash = requiredText(o['recipientKeyHash'], 'owner.recipientKeyHash');
+  switch (o['kind']) {
+    case 'broadcast':
+      return { kind: 'broadcast', broadcastId: requiredText(o['broadcastId'], 'owner.broadcastId'), recipientKeyHash };
+    case 'relay_leg':
+      return {
+        kind: 'relay_leg',
+        relayConversationId: requiredText(o['relayConversationId'], 'owner.relayConversationId'),
+        sourceTsMsgId: requiredText(o['sourceTsMsgId'], 'owner.sourceTsMsgId'),
+        recipientKeyHash,
+      };
+    case 'relay_rung':
+      return {
+        kind: 'relay_rung',
+        relayConversationId: requiredText(o['relayConversationId'], 'owner.relayConversationId'),
+        retryTsMsgId: requiredText(o['retryTsMsgId'], 'owner.retryTsMsgId'),
+        recipientKeyHash,
+      };
+    default:
+      throw new Error('sendReconcile: owner.kind is not a send-attempt owner');
+  }
+}
+
+function parseContinuation(value: unknown): SendReconcilePayload['continuation'] {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null) throw new Error('sendReconcile: continuation must be an object');
+  const c = value as Record<string, unknown>;
+  const senderKey = requiredText(c['senderKey'], 'continuation.senderKey');
+  const override = c['senderNameOverride'];
+  return { senderKey, ...(typeof override === 'string' && override.length > 0 && { senderNameOverride: override }) };
+}
+
+/** Throws on anything that is not one reconcile check: a malformed payload is a job failure. */
+export function parseSendReconcilePayload(raw: unknown): SendReconcilePayload {
+  if (typeof raw !== 'object' || raw === null) throw new Error('sendReconcile: payload is not an object');
+  const p = raw as Record<string, unknown>;
+  const attemptedAt = p['attemptedAt'];
+  if (typeof attemptedAt !== 'string' || Number.isNaN(Date.parse(attemptedAt))) {
+    throw new Error('sendReconcile: attemptedAt must be an ISO instant');
+  }
+  const checkNo = p['checkNo'];
+  if (typeof checkNo !== 'number' || !Number.isInteger(checkNo) || checkNo < 0 || checkNo >= RECONCILE_CHECK_DELAYS_MS.length) {
+    throw new Error('sendReconcile: checkNo must be a check index');
+  }
+  const owner = parseOwnerRef(p['owner']);
+  const continuation = parseContinuation(p['continuation']);
+  return { owner, attemptedAt, checkNo, ...(continuation !== undefined && { continuation }) };
+}
+
+// ---------------------------------------------------------------------------
+// The job
+// ---------------------------------------------------------------------------
+
+export interface SendReconcileJobDeps {
+  config?: AppConfig;
+  adapter?: MessagingAdapter;
+  messagesRepo?: MessagesRepo;
+  broadcastsRepo?: BroadcastsRepo;
+  contactsRepo?: ContactsRepo;
+  conversationsRepo?: ConversationsRepo;
+  /** The per-recipient send-attempt records (spec D8a): the coordination state every write is fenced on. */
+  sendAttemptsRepo?: SendAttemptsRepo;
+  activityEventsRepo?: ActivityEventsRepo;
+  listingSendsRepo?: ListingSendsRepo;
+  auditRepo?: AuditRepo;
+  events?: EventBus;
+  logger?: Logger;
+}
+
+/** Everything one check reads and writes through. */
+interface Ctx {
+  log: Logger;
+  events: EventBus;
+  adapter: MessagingAdapter;
+  messages: MessagesRepo;
+  broadcasts: BroadcastsRepo;
+  contacts: ContactsRepo;
+  conversations: ConversationsRepo;
+  attempts: SendAttemptsRepo;
+  adopt: AdoptDeps;
+}
+
+/** The owner as the job re-reads it: the RAW recipient key resolved from the payload's hash. */
+interface Resolved {
+  owner: SendAttemptOwner;
+  /** The raw recipient key: it addresses the slot; logged only through safeRecipientKey. */
+  key: string;
+  /** broadcast: the consistent snapshot the key was resolved from. */
+  broadcast?: BroadcastItem;
+  /** broadcast: the recipient's contact, read once per check (null = none). */
+  contact?: ContactItem | null;
+}
+
+/** The causes an `unresolved` verdict names in its ONE ERROR (spec D16). */
+type UnresolvedCause =
+  | 'no_sender'
+  | 'digest_mismatch'
+  | 'provider_unreachable'
+  | 'page_bound'
+  | 'unidentified_candidate'
+  | 'same_fingerprint_sibling'
+  | 'sid_held_elsewhere'
+  | 'second_unknown'
+  | 'enqueue_failed';
+
+type Found = { kind: 'found'; sid: string; adoption: 'adopted' | 'skipped'; status: DeliveryStatus };
+
+type Verdict =
+  | (Found & { path: 'known_sid' | 'lookup' })
+  | { kind: 'continue'; reason: 'provider_error' | 'nothing_adoptable'; err?: unknown }
+  | { kind: 'never_sent' }
+  | { kind: 'unresolved'; cause: UnresolvedCause; extra?: Record<string, unknown> };
+
+/** Who holds a provider SID (D13): nobody, this owner, a system send, or another owner. */
+type Held = { kind: 'free' } | { kind: 'mine' } | { kind: 'system' | 'other'; holder: string };
+
+type LogBase = Record<string, unknown>;
+
+/**
+ * Register the `send.reconcile` handler. Called by registerAllJobHandlers, so
+ * the app's in-process path and the worker both carry it. Lazy: config, the
+ * adapter and the repos touch DynamoDB and the provider only on the first run.
+ */
+export function registerSendReconcileJobHandler(deps: SendReconcileJobDeps = {}): void {
+  const log = deps.logger ?? defaultLogger;
+  const events = deps.events ?? appEvents;
+  let ctx: Ctx | undefined;
+
+  function context(): Ctx {
+    if (ctx !== undefined) return ctx;
+    const repoDeps = { logger: deps.logger };
+    const messages = deps.messagesRepo ?? createMessagesRepo(repoDeps);
+    const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo(repoDeps);
+    const contacts = deps.contactsRepo ?? createContactsRepo(repoDeps);
+    const conversations = deps.conversationsRepo ?? createConversationsRepo(repoDeps);
+    ctx = {
+      log,
+      events,
+      adapter: deps.adapter ?? createMessagingAdapter({ ...(deps.config !== undefined && { config: deps.config }), logger: deps.logger }),
+      messages,
+      broadcasts,
+      contacts,
+      conversations,
+      attempts: deps.sendAttemptsRepo ?? createSendAttemptsRepo(repoDeps),
+      adopt: {
+        broadcasts,
+        contacts,
+        conversations,
+        messages,
+        activityEvents: deps.activityEventsRepo ?? createActivityEventsRepo(repoDeps),
+        listingSends: deps.listingSendsRepo ?? createListingSendsRepo(repoDeps),
+        audit: deps.auditRepo ?? createAuditRepo(repoDeps),
+        events,
+        log,
+      },
+    };
+    return ctx;
+  }
+
+  defineJobHandler(SEND_RECONCILE_JOB, async (raw) => {
+    const payload = parseSendReconcilePayload(raw);
+    await runCheck(context(), payload);
+  });
+}
+
+/** The owner kind and its ids, for a log line - never the recipient key (logged beside it, redacted). */
+function ownerLog(owner: SendAttemptOwner): Record<string, string> {
+  switch (owner.kind) {
+    case 'broadcast':
+      return { kind: owner.kind, broadcastId: owner.broadcastId };
+    case 'relay_leg':
+      return { kind: owner.kind, relayConversationId: owner.relayConversationId, sourceTsMsgId: owner.sourceTsMsgId };
+    case 'relay_rung':
+      return { kind: owner.kind, relayConversationId: owner.relayConversationId, retryTsMsgId: owner.retryTsMsgId };
+  }
+}
+
+async function runCheck(c: Ctx, payload: SendReconcilePayload): Promise<void> {
+  const r = await resolve(c, payload.owner);
+  if (r === undefined) {
+    // A record, if any, is left for the sweeper (spec Sec 1 residue).
+    c.log.info(
+      { event: 'send_reconcile', owner: payload.owner, checkNo: payload.checkNo },
+      'send.reconcile: owner recipient not found - the attempt is left for the sweeper',
+    );
+    return;
+  }
+  const base: LogBase = {
+    event: 'send_reconcile',
+    owner: ownerLog(r.owner),
+    recipientKey: safeRecipientKey(r.key),
+    checkNo: payload.checkNo,
+  };
+  const record = await c.attempts.get(r.owner);
+  if (record === undefined || record.state !== 'reconciling' || record.attemptedAt !== payload.attemptedAt) {
+    c.log.info(
+      { ...base, state: record?.state ?? 'absent', ...(record?.outcome !== undefined && { outcome: record.outcome }) },
+      'send.reconcile: superseded - the attempt is no longer this chain\'s',
+    );
+    // Build ruling A7: a close of THIS attempt whose afterClose threw is
+    // finished here - finalize is conditional and the emits idempotent.
+    if (record?.state === 'done' && record.attemptedAt === payload.attemptedAt) await afterClose(c, r);
+    return;
+  }
+  if (!(await c.attempts.recordCheck(r.owner, payload.attemptedAt, payload.checkNo + 1))) {
+    c.log.info(base, 'send.reconcile: check already recorded - a later check owns the chain');
+    return;
+  }
+  const verdict = record.sid !== undefined ? await adoptKnown(c, r, record.sid) : await lookup(c, r, record, payload.checkNo);
+  switch (verdict.kind) {
+    case 'found': {
+      const closed = await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'adopted', sid: verdict.sid });
+      c.log.info(
+        {
+          ...base,
+          verdict: 'found',
+          path: verdict.path,
+          sid: verdict.sid,
+          adoption: verdict.adoption,
+          deliveryStatus: verdict.status,
+          ...(!closed && { recordClosed: false }),
+        },
+        'send.reconcile: found - the message the provider holds is adopted',
+      );
+      await afterClose(c, r, verdict.status);
+      return;
+    }
+    case 'continue': {
+      if (verdict.reason === 'provider_error') {
+        c.log.warn({ ...base, err: verdict.err }, 'send.reconcile: the provider lookup failed at this check - the next check tries again');
+      }
+      const next = payload.checkNo + 1;
+      const enqueued = await enqueueOrClose(c, r, record, base, 'reconciling', () =>
+        enqueueSendReconcile({ ...payload, checkNo: next }, reconcileDelayMs(record.attemptedAt, next, Date.now())),
+      );
+      if (enqueued) {
+        c.log.info(
+          { ...base, verdict: 'continue', reason: verdict.reason, nextCheck: next },
+          'send.reconcile: nothing adoptable yet - the next check is scheduled',
+        );
+      }
+      return;
+    }
+    case 'never_sent':
+      await redrive(c, r, record, payload.continuation, base);
+      return;
+    case 'unresolved':
+      await closeUnresolved(c, r, record, verdict.cause, base, verdict.extra);
+      return;
+  }
+}
+
+/** Resolve the RAW recipient key from the payload's hash (spec D12). */
+async function resolve(c: Ctx, ref: SendAttemptOwnerRef): Promise<Resolved | undefined> {
+  switch (ref.kind) {
+    case 'broadcast': {
+      const broadcast = await c.broadcasts.getByIdConsistent(ref.broadcastId);
+      const key = Object.keys(broadcast?.recipients ?? {}).find((k) => hashRecipientKey(k) === ref.recipientKeyHash);
+      if (broadcast === undefined || key === undefined) return undefined;
+      return { owner: { kind: 'broadcast', broadcastId: ref.broadcastId, contactKey: key }, key, broadcast };
+    }
+    case 'relay_leg':
+    case 'relay_rung':
+      throw new Error(`sendReconcile: the ${ref.kind} owner is not handled yet`);
+  }
+}
+
+/** A broadcast recipient's contact, read once per check (consistently where the repo can). */
+async function contactOf(c: Ctx, r: Resolved): Promise<ContactItem | undefined> {
+  if (r.contact === undefined) r.contact = (await resolveContact(c.contacts, r.key)) ?? null;
+  return r.contact ?? undefined;
+}
+
+/** The number the recipient has NOW (spec D12): what the lookup lists by and the digest proves. */
+async function currentPhone(c: Ctx, r: Resolved): Promise<string | undefined> {
+  switch (r.owner.kind) {
+    case 'broadcast': {
+      const phone = (await contactOf(c, r))?.phone;
+      return typeof phone === 'string' && phone.length > 0 ? phone : undefined;
+    }
+    case 'relay_leg':
+    case 'relay_rung':
+      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The lookup (spec D13)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is `m` this attempt's message? The fingerprint must match (spec D13, lossy):
+ * the normalized body's hash AND the media count; a SHORT body (a media- or
+ * emoji-only text) matches on the media count, and only a short candidate -
+ * so a short attempt never adopts Twilio's STOP auto-reply (build deviation;
+ * stricter than the plan's rule, never looser).
+ */
+function matches(record: SendAttemptFacts, m: ProviderMessageSummary): boolean {
+  if (m.mediaCount !== record.mediaCount) return false;
+  const fp = bodyFingerprint(m.body);
+  return record.bodyShort ? fp.short : fp.hash === record.bodyHash;
+}
+
+/**
+ * Could an attempt with facts `a` have claimed the message an attempt with
+ * facts `b` sent? Exactly `matches` seen from the other side - so the D13
+ * same-fingerprint rule withholds never_sent from every sibling whose own
+ * lookup might hold our message.
+ */
+function sameFingerprint(a: SendAttemptFacts, b: SendAttemptFacts): boolean {
+  if (a.mediaCount !== b.mediaCount) return false;
+  return a.bodyShort || b.bodyShort ? a.bodyShort && b.bodyShort : a.bodyHash === b.bodyHash;
+}
+
+function holderOf(held: Held): string {
+  return held.kind === 'other' || held.kind === 'system' ? held.holder : 'unknown';
+}
+
+/**
+ * Who holds a provider SID, from strongly consistent reads (D11, D13): the
+ * `syssid#` system-send marker, a `relaysid#` pointer (this relay owner's
+ * exact source/retry row and member -> mine), or a `sid#` row (this
+ * broadcast recipient's by isBroadcastRowFor -> mine). `holder` is a log-safe
+ * description of the other owner (build finding T10-4: keys via safeRecipientKey).
+ */
+async function heldBy(c: Ctx, r: Resolved, sid: string): Promise<Held> {
+  const system = await c.messages.getSystemSidMarkerConsistent(sid);
+  if (system !== undefined) return { kind: 'system', holder: `syssid:${system.kind}` };
+  const pointer = await c.messages.getRelaySidPointerConsistent(sid);
+  if (pointer !== undefined) {
+    return { kind: 'other', holder: `relay#${pointer.conversationId}#${pointer.tsMsgId}#${safeRecipientKey(pointer.memberKey)}` };
+  }
+  const row = await c.messages.getByProviderSidConsistent(sid);
+  if (row === undefined) return { kind: 'free' };
+  if (r.owner.kind === 'broadcast') {
+    const contact = await contactOf(c, r);
+    const mine = isBroadcastRowFor(row, {
+      broadcastId: r.owner.broadcastId,
+      contactId: contact?.contactId,
+      slotTsMsgId: r.broadcast?.recipients?.[r.key]?.tsMsgId,
+    });
+    if (mine) return { kind: 'mine' };
+  }
+  return {
+    kind: 'other',
+    holder:
+      row.broadcast_id !== undefined
+        ? `broadcast#${row.broadcast_id}#${row.recipient_contact_id ?? '-'}`
+        : `message#${row.conversationId}#${row.tsMsgId}`,
+  };
+}
+
+/** Adopt `m` for this owner (spec D15): its own SID claim decides; `other` = someone else's message. */
+async function adopt(c: Ctx, r: Resolved, m: ProviderMessageSummary): Promise<Found | { kind: 'other' }> {
+  switch (r.owner.kind) {
+    case 'broadcast': {
+      const result = await adoptBroadcastRecipient(c.adopt, {
+        broadcastId: r.owner.broadcastId,
+        contactKey: r.key,
+        providerSid: m.providerSid,
+        providerTs: m.createdAt,
+        providerStatus: m.providerStatus,
+        ...(m.errorCode !== undefined && { errorCode: m.errorCode }),
+        body: m.body,
+        mediaCount: m.mediaCount,
+        ...(m.sentAt !== undefined && { sentAt: m.sentAt }),
+      });
+      if (result === 'other_owner') return { kind: 'other' };
+      return { kind: 'found', sid: m.providerSid, adoption: result, status: mapTwilioStatus(m.providerStatus) };
+    }
+    case 'relay_leg':
+    case 'relay_rung':
+      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+  }
+}
+
+/**
+ * The KNOWN-SID path (D13): the send is known to have happened, so there is
+ * no digest check and no list - fetch that message and adopt it, unless the
+ * SID already belongs to another owner (`sid_held_elsewhere`: it exists, it is
+ * never re-sent). A fetch that throws, or finds nothing, is a job failure - a
+ * genuine retry, never a verdict.
+ */
+async function adoptKnown(c: Ctx, r: Resolved, sid: string): Promise<Verdict> {
+  const held = await heldBy(c, r, sid);
+  if (held.kind === 'system' || held.kind === 'other') {
+    return { kind: 'unresolved', cause: 'sid_held_elsewhere', extra: { sid, heldBy: held.holder } };
+  }
+  const m = await c.adapter.getMessage(sid);
+  if (m === undefined) {
+    throw new Error(`send.reconcile: the provider has no message for the known SID ${sid} - a retry decides`);
+  }
+  const adopted = await adopt(c, r, m);
+  if (adopted.kind === 'found') return { ...adopted, path: 'known_sid' };
+  return { kind: 'unresolved', cause: 'sid_held_elsewhere', extra: { sid, heldBy: holderOf(await heldBy(c, r, sid)) } };
+}
+
+/**
+ * The LOOKUP path (D12, D13). List the provider's messages to the recipient's
+ * CURRENT number from the attempt's sender - proven to be the number the
+ * attempt went to by the digest - walking at most RECONCILE_MAX_PAGES pages,
+ * and keep those created from RECONCILE_WINDOW_LEAD_MS before the attempt.
+ * Oldest first: a SID another owner holds (a sibling record, a pointer, a
+ * row, the system marker) is skipped; one this owner holds is a repair; a
+ * matching free candidate is claimed, and the first claim that wins is
+ * `found`. A provider error is this check's result (continue; unresolved at
+ * the last check); only the job's own reads and writes throw.
+ */
+async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: number): Promise<Verdict> {
+  const last = checkNo >= RECONCILE_CHECK_DELAYS_MS.length - 1;
+  const sender = record.sender;
+  if (sender === undefined) return { kind: 'unresolved', cause: 'no_sender' };
+  const phone = await currentPhone(c, r);
+  if (phone === undefined || recipientDigest(sender, phone) !== record.recipientDigest) {
+    return { kind: 'unresolved', cause: 'digest_mismatch' };
+  }
+  const windowStartMs = Date.parse(record.attemptedAt) - RECONCILE_WINDOW_LEAD_MS;
+  // SIBLINGS: other attempts to the same number from the same sender in the
+  // window - compared by RECORD identity (attemptKey), never ownerKey: two
+  // contacts on one phone in one share are two records (R3 #5). Read once.
+  const self = attemptKey(r.owner);
+  const siblings = (await c.attempts.listByRecipient(sender, record.recipientDigest, new Date(windowStartMs).toISOString())).filter(
+    (s) => attemptKey(s.owner) !== self,
+  );
+  const siblingSids = new Set(siblings.flatMap((s) => (s.sid !== undefined ? [s.sid] : [])));
+
+  const bySid = new Map<string, ProviderMessageSummary>();
+  let pageToken: string | undefined;
+  let pages = 0;
+  do {
+    let page: ListMessagesPage;
+    try {
+      page = await c.adapter.listMessages({
+        to: phone,
+        from: sender,
+        pageSize: RECONCILE_LIST_PAGE_SIZE,
+        ...(pageToken !== undefined && { pageToken }),
+      });
+    } catch (err) {
+      return last
+        ? { kind: 'unresolved', cause: 'provider_unreachable', extra: { err } }
+        : { kind: 'continue', reason: 'provider_error', err };
+    }
+    pages += 1;
+    for (const m of page.messages) {
+      if (Date.parse(m.createdAt) >= windowStartMs && !bySid.has(m.providerSid)) bySid.set(m.providerSid, m);
+    }
+    pageToken = page.nextPageToken;
+    if (pageToken !== undefined && pages >= RECONCILE_MAX_PAGES) {
+      return { kind: 'unresolved', cause: 'page_bound', extra: { pages } };
+    }
+  } while (pageToken !== undefined);
+
+  const candidates = [...bySid.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  let unmatched = 0;
+  for (const m of candidates) {
+    if (siblingSids.has(m.providerSid)) continue;
+    const held = await heldBy(c, r, m.providerSid);
+    if (held.kind === 'system' || held.kind === 'other') continue;
+    if (held.kind === 'free' && !matches(record, m)) {
+      unmatched += 1;
+      continue;
+    }
+    const adopted = await adopt(c, r, m);
+    if (adopted.kind === 'found') return { ...adopted, path: 'lookup' };
+    if (held.kind === 'mine') {
+      // Ours by its pointer or row, yet the claim says otherwise: a race to
+      // another owner. The message exists - it is never re-sent.
+      return {
+        kind: 'unresolved',
+        cause: 'sid_held_elsewhere',
+        extra: { sid: m.providerSid, heldBy: holderOf(await heldBy(c, r, m.providerSid)) },
+      };
+    }
+    // A free match whose claim another attempt won: someone else's. Next.
+  }
+  if (!last) return { kind: 'continue', reason: 'nothing_adoptable' };
+  if (unmatched > 0) return { kind: 'unresolved', cause: 'unidentified_candidate', extra: { unmatched } };
+  // D13: never_sent is withheld while a sibling that could have claimed our
+  // message is still open or adopted one in the window - re-driving on that
+  // ambiguity is how one photo goes twice and another never.
+  if (siblings.some((s) => sameFingerprint(s, record) && (s.state !== 'done' || s.outcome === 'adopted'))) {
+    return { kind: 'unresolved', cause: 'same_fingerprint_sibling' };
+  }
+  return { kind: 'never_sent' };
+}
+
+// ---------------------------------------------------------------------------
+// The verdicts' writes (spec D16). The job's OWN closes are exempt from the
+// D8 gate: they close the attempt they own, the slot FIRST and the record
+// after it, so a redelivered close re-applies the (forward-only) slot write
+// before it finds the record done (D8).
+// ---------------------------------------------------------------------------
+
+/** Close the recipient's slot `failed` with `code` - only while it still holds no send. */
+async function closeSlot(c: Ctx, r: Resolved, code: string, bucket: 'failed' | 'unconfirmed'): Promise<void> {
+  switch (r.owner.kind) {
+    case 'broadcast': {
+      const closed = await c.broadcasts.closeRecipientIfQueued(r.owner.broadcastId, r.key, code, bucket);
+      if (closed.moved && closed.item) emitBroadcastProgress(c.events, r.owner.broadcastId, closed.item);
+      return;
+    }
+    case 'relay_leg':
+    case 'relay_rung':
+      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+  }
+}
+
+/**
+ * After every close or adoption: the owner's own last word. A broadcast
+ * FINALIZES (D16a - idempotent, it defers while any slot is queued).
+ */
+async function afterClose(c: Ctx, r: Resolved, _deliveryStatus?: DeliveryStatus): Promise<void> {
+  switch (r.owner.kind) {
+    case 'broadcast':
+      await finalize(c.broadcasts, c.events, r.owner.broadcastId, c.log, c.adopt.audit);
+      return;
+    case 'relay_leg':
+    case 'relay_rung':
+      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+  }
+}
+
+/** `unresolved` (D16): the slot failed / send_unconfirmed, then the record done, then ONE ERROR naming the cause. */
+async function closeUnresolved(
+  c: Ctx,
+  r: Resolved,
+  record: SendAttemptRecord,
+  cause: UnresolvedCause,
+  base: LogBase,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  await closeSlot(c, r, SEND_UNCONFIRMED_CODE, 'unconfirmed');
+  const closed = await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'unresolved', cause });
+  c.log.error(
+    { ...base, verdict: 'unresolved', cause, ...extra, ...(!closed && { recordClosed: false }) },
+    'send.reconcile: unresolved - the platform cannot tell whether this text went out; closed send_unconfirmed, never re-sent',
+  );
+  await afterClose(c, r, 'failed');
+}
+
+/**
+ * Every enqueue the job makes goes through here (D13a). A throw - the hop
+ * limit or the queue - closes the recipient on the spot: after a never_sent
+ * verdict (the record is `redriven`) it closes `enqueue_failed` - the record
+ * FIRST, fenced on `redriven`, and the slot only when that close won, so a
+ * pass that claimed the record meanwhile keeps its slot (build finding
+ * T10-14); otherwise it closes `unresolved` / enqueue_failed. Returns whether
+ * the enqueue went out.
+ */
+async function enqueueOrClose(
+  c: Ctx,
+  r: Resolved,
+  record: SendAttemptRecord,
+  base: LogBase,
+  state: 'reconciling' | 'redriven',
+  run: () => Promise<unknown>,
+): Promise<boolean> {
+  try {
+    await run();
+    return true;
+  } catch (err) {
+    if (state === 'reconciling') {
+      await closeUnresolved(c, r, record, ENQUEUE_FAILED_CODE, base, { err });
+      return false;
+    }
+    const closed = await c.attempts.closeRedriven(r.owner, { outcome: 'enqueue_failed', cause: ENQUEUE_FAILED_CODE });
+    if (!closed) {
+      c.log.warn(
+        { ...base, verdict: 'never_sent', err },
+        'send.reconcile: the re-drive enqueue failed after a pass took the record over - nothing closed',
+      );
+      return false;
+    }
+    await closeSlot(c, r, ENQUEUE_FAILED_CODE, 'failed');
+    c.log.error(
+      { ...base, verdict: 'never_sent', cause: ENQUEUE_FAILED_CODE, err },
+      'send.reconcile: the re-drive enqueue failed - recipient closed enqueue_failed (nothing was sent)',
+    );
+    await afterClose(c, r, 'failed');
+    return false;
+  }
+}
+
+/** The re-drive envelope of each owner: its own send job, for that one recipient, marked `redrive`. */
+async function enqueueRedrive(r: Resolved): Promise<void> {
+  switch (r.owner.kind) {
+    case 'broadcast': {
+      const redrive: BroadcastSendPayload = {
+        broadcastId: r.owner.broadcastId,
+        recipientKeys: [r.key],
+        // Advisory (the durable pass count is fanout_attempt); a re-drive pass claims no rung up front.
+        attempt: (r.broadcast?.fanout_attempt ?? 0) + 1,
+        redrive: true,
+      };
+      await enqueue(BROADCAST_SEND_JOB, redrive);
+      return;
+    }
+    case 'relay_leg':
+    case 'relay_rung':
+      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+  }
+}
+
+/**
+ * `never_sent` (D16): mark the record `redriven` (at most once per recipient:
+ * fenced on redriveCount 0) and THEN enqueue the owner's re-drive - a pass
+ * that claims the record like any send site (D8a). A record that was already
+ * re-driven once cannot be re-driven again: it closes unresolved
+ * second_unknown (D13a).
+ */
+async function redrive(
+  c: Ctx,
+  r: Resolved,
+  record: SendAttemptRecord,
+  _continuation: SendReconcilePayload['continuation'],
+  base: LogBase,
+): Promise<void> {
+  if (!(await c.attempts.markRedriven(r.owner, record.attemptedAt))) {
+    if (record.redriveCount >= 1) {
+      await closeUnresolved(c, r, record, 'second_unknown', base);
+      return;
+    }
+    c.log.info({ ...base, verdict: 'never_sent' }, 'send.reconcile: never_sent, but the attempt moved on before the re-drive was marked');
+    return;
+  }
+  c.log.warn(
+    { ...base, verdict: 'never_sent' },
+    'send.reconcile: never_sent - the provider holds nothing for this attempt; the recipient is re-driven once',
+  );
+  await enqueueOrClose(c, r, record, base, 'redriven', () => enqueueRedrive(r));
 }

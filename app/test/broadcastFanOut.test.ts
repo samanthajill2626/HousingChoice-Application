@@ -41,7 +41,11 @@ import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { DEV_SESSION_SECRET_DEFAULT } from '../src/lib/config.js';
 import { hashRecipientKey } from '../src/lib/sendFingerprint.js';
-import { SEND_RECONCILE_JOB, type SendReconcilePayload } from '../src/jobs/sendReconcile.js';
+import {
+  SEND_RECONCILE_JOB,
+  registerSendReconcileJobHandler,
+  type SendReconcilePayload,
+} from '../src/jobs/sendReconcile.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
@@ -2153,8 +2157,110 @@ describe('broadcast.send (M1.8a)', () => {
       expect(world.emitted.filter((e) => e.event === 'broadcast.updated')).toHaveLength(0);
     });
 
-    it.skip('pass-then-verdict and verdict-then-pass both finalize exactly once', () => {
-      // Drives Task 10's send.reconcile handler; un-skipped in Task 10.
+    // Drives the REAL send.reconcile handler (Task 10), so this test never
+    // calls the describe-local recordReconciles() stub: a second registration
+    // of SEND_RECONCILE_JOB would throw.
+    it('pass-then-verdict and verdict-then-pass both finalize exactly once', async () => {
+      const MAIN = '+15550009999';
+      seedUnit(world);
+      wireHandler(world, logger, undefined, { BUSINESS_PHONE_NUMBER: MAIN });
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger,
+      });
+      // The first recipient of each share: the provider RECORDS the message and
+      // then the socket drops (the accept-then-drop case) - an unknown outcome
+      // the reconcile finds and adopts. `duringNextSend` lets the verdict land
+      // while the pass is still sending the NEXT recipient.
+      const dropFor = new Set<string>();
+      let duringNextSend: (() => Promise<void>) | undefined;
+      const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+      world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+        if (dropFor.has(prepared.params.to)) {
+          world.providerMessages.push({
+            providerSid: `SMdrop-${prepared.params.to.slice(-4)}`,
+            providerStatus: 'delivered',
+            body: prepared.params.body ?? '',
+            mediaCount: 0,
+            createdAt: new Date().toISOString(),
+            to: prepared.params.to,
+            from: prepared.params.from ?? '',
+          });
+          throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        }
+        const hook = duringNextSend;
+        duringNextSend = undefined;
+        if (hook !== undefined) await hook();
+        return realSend(prepared);
+      };
+      /** Deliver the one scheduled reconcile check of a share now (its delay is not awaited). */
+      async function runVerdict(broadcastId: string): Promise<void> {
+        const index = outbound.delayed.findIndex(
+          (d) =>
+            d.envelope.jobName === SEND_RECONCILE_JOB &&
+            (d.envelope.payload as SendReconcilePayload).owner.kind === 'broadcast' &&
+            (d.envelope.payload as { owner: { broadcastId: string } }).owner.broadcastId === broadcastId,
+        );
+        expect(index).toBeGreaterThanOrEqual(0);
+        const [item] = outbound.delayed.splice(index, 1);
+        await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)) as unknown);
+      }
+      const terminalEmits = (broadcastId: string) =>
+        world.emitted.filter(
+          (e) =>
+            e.event === 'broadcast.updated' &&
+            (e.payload as { broadcastId: string }).broadcastId === broadcastId &&
+            (e.payload as { status: string }).status !== 'sending',
+        );
+      const auditRows = (broadcastId: string) =>
+        world.auditEvents.filter((e) => e.event_type === 'broadcast_sent' && e.payload?.['broadcastId'] === broadcastId);
+
+      // PASS then VERDICT: the pass ends with its dropped recipient still
+      // reconciling (a queued slot - finalize defers); the verdict adopts it
+      // and is the finalize that flips.
+      const a1 = seedTenant(world, { contactId: 'a-1', phone: '+15550100011' });
+      const a2 = seedTenant(world, { contactId: 'a-2', phone: '+15550100012' });
+      seedBroadcast(world, [a1, a2], { broadcastId: 'bcast-a' });
+      dropFor.add(a1.phone!);
+      await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-a' });
+      await outbound.settle();
+      expect(world.broadcasts.get('bcast-a')!.recipients['a-1']).toEqual({ status: 'queued' });
+      expect(world.broadcasts.get('bcast-a')!.status).toBe('sending');
+      await runVerdict('bcast-a');
+      expect(world.broadcasts.get('bcast-a')!.recipients['a-1']).toMatchObject({ status: 'delivered' });
+      expect(world.broadcasts.get('bcast-a')!.status).toBe('sent');
+      expect(auditRows('bcast-a')).toHaveLength(1);
+      expect(terminalEmits('bcast-a')).toHaveLength(1);
+
+      // VERDICT then PASS: the verdict lands while the pass is still sending
+      // the second recipient - its finalize defers on that queued slot - and
+      // the pass's own finalize is the one that flips.
+      const b1 = seedTenant(world, { contactId: 'b-1', phone: '+15550100021' });
+      const b2 = seedTenant(world, { contactId: 'b-2', phone: '+15550100022' });
+      seedBroadcast(world, [b1, b2], { broadcastId: 'bcast-b' });
+      dropFor.add(b1.phone!);
+      let statusWhenVerdictRan: string | undefined;
+      duringNextSend = async () => {
+        await runVerdict('bcast-b');
+        statusWhenVerdictRan = world.broadcasts.get('bcast-b')!.status;
+      };
+      await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-b' });
+      await outbound.settle();
+      expect(statusWhenVerdictRan).toBe('sending');
+      expect(world.broadcasts.get('bcast-b')!.recipients['b-1']).toMatchObject({ status: 'delivered' });
+      expect(world.broadcasts.get('bcast-b')!.recipients['b-2']).toMatchObject({ status: 'sent' });
+      expect(world.broadcasts.get('bcast-b')!.status).toBe('sent');
+      expect(auditRows('bcast-b')).toHaveLength(1);
+      expect(terminalEmits('bcast-b')).toHaveLength(1);
     });
   });
 });

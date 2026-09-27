@@ -29,6 +29,7 @@ describe('registerAllJobHandlers', () => {
         'relay.numberReady',
         'relay.retryLeg',
         'relay.warmNumber',
+        'send.reconcile',
         'voice.createTranscript',
         'voice.reconcileTranscript',
       ].sort(),

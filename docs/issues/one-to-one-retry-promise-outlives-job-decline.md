@@ -3,11 +3,18 @@ id: one-to-one-retry-promise-outlives-job-decline
 title: When the one-to-one 30003 retry job gives up, the bubble keeps its retry promise and hides Retry until the promise expires
 type: improvement
 severity: low
-status: open
+status: wontfix
 area: app/messaging
 created: 2026-09-26
+resolved: 2026-09-26
 refs: app/src/jobs/retrySend.ts, app/src/routes/webhooks/twilio.ts, app/src/lib/retrySendWindow.ts, dashboard/src/routes/contact/Timeline.tsx, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
 ---
+
+**ACCEPTED as-is (Cameron, 2026-09-26): "accepted."** Asked whether the stale
+promise after a during-backoff refusal - group (b) below, 170 s measured - should
+be withdrawn at once, he accepted the behavior. Group (a) was already accepted by
+the spec. Nothing below is scheduled; this record stays so the trade-off is
+findable if it is ever revisited.
 
 **Problem.** Since `feat/retry-send-window` (spec D7, D8, D10), a one-to-one
 30003 failure that will be retried carries `retry_due_at` - the retry's run

@@ -89,6 +89,12 @@ send - its `automated` flag and its recipient (D14).
 
 ## Open for Cameron (none blocks the merge)
 
+Answered 2026-09-26: item 1 ACCEPTED (issue closed wontfix); item 2 stays filed
+as an issue, no action now; item 3 explained - a late 30003 can trip the
+ErrorLogs alarms (5 errors in one 5-minute period, or 1 in each of 3
+consecutive periods): alert noise only, no user impact; no change made
+(switching that one log line to WARN is a small option if it proves noisy).
+
 1. When the retry job refuses at send time because something changed during
    the 1-4 minute backoff (a STOP, the kill switch, manual mode on an automated
    original, a deleted contact, lost consent), the bubble keeps "will retry"

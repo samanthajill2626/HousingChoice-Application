@@ -27,13 +27,18 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
   const state = useVoicemailGreeting();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const [playerBroken, setPlayerBroken] = useState(false);
+  // The player src that last fired `error`. The missing-file line shows while
+  // THAT src is still the mounted one, so it clears only when the src changes
+  // (a successful upload or replace carries a new ?v=), never merely because a
+  // file was chosen: a refused Replace leaves the same broken player, whose
+  // <audio> never re-fires error. Spec 4.3 Concurrency wants that state
+  // visible until a re-upload repairs it (fix wave R1, FW3).
+  const [brokenSrc, setBrokenSrc] = useState<string | null>(null);
 
   async function onFileChosen(e: React.ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = e.target.files?.[0];
     e.target.value = ''; // let the same file be chosen again
     if (!file) return;
-    setPlayerBroken(false);
     await state.upload(file);
   }
 
@@ -41,13 +46,14 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
     try {
       await state.remove();
       setConfirming(false);
-      setPlayerBroken(false);
     } catch {
       // the hook surfaced the message; keep the dialog open
     }
   }
 
   const g = state.greeting;
+  const audioSrc = g === undefined ? undefined : voicemailGreetingAudioUrl(g);
+  const playerBroken = audioSrc !== undefined && brokenSrc === audioSrc;
 
   return (
     // A plain div on purpose: an aria-labelledby here would give the wrapper the
@@ -101,9 +107,9 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
             className={styles.greetingPlayer}
             controls
             preload="metadata"
-            src={voicemailGreetingAudioUrl(g)}
+            src={audioSrc}
             aria-label="Voicemail greeting"
-            onError={() => setPlayerBroken(true)}
+            onError={() => setBrokenSrc(audioSrc ?? null)}
           />
           {playerBroken ? (
             <span role="status" className={styles.greetingStatus}>

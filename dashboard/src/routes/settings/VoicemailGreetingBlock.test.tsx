@@ -38,9 +38,13 @@ import {
   GREETING_EMPTY_MESSAGE,
   GREETING_FORBIDDEN_MESSAGE,
   GREETING_REJECT_MESSAGE,
+  GREETING_STORAGE_MESSAGE,
   GREETING_TOO_LARGE_MESSAGE,
+  GREETING_UPLOAD_FAILED_MESSAGE,
   greetingContentTypeFor,
 } from './useVoicemailGreeting.js';
+
+const MISSING_FILE = "The greeting file is missing or can't be played. Upload it again.";
 
 const BASE: OrgSettings = {
   missedCallAutoText: 'Sorry I missed you.',
@@ -198,6 +202,51 @@ describe('VoicemailGreetingBlock', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  // Fix wave R1, FW3 (spec 4.3 Concurrency: the record-without-object state is
+  // rendered visibly "so it is repaired by a re-upload rather than found by a
+  // caller"). A REFUSED Replace leaves the same broken player mounted, and its
+  // <audio> never re-fires error because its src did not change - so the line
+  // may clear only when the src changes (a successful upload or replace).
+  it('after the player errors, a CLIENT-refused Replace (audio/mp4) keeps the missing-file line', async () => {
+    getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
+    render(<VoicemailGreetingBlock />);
+    fireEvent.error(await screen.findByLabelText('Voicemail greeting'));
+    expect(await screen.findByText(MISSING_FILE)).toBeInTheDocument();
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3('memo.m4a', 'audio/mp4'));
+    expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_REJECT_MESSAGE);
+    expect(uploadVoicemailGreeting).not.toHaveBeenCalled();
+    expect(screen.getByText(MISSING_FILE)).toBeInTheDocument();
+  });
+
+  it('after the player errors, a SERVER-refused Replace (unsupported_media_type) keeps the missing-file line', async () => {
+    getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
+    uploadVoicemailGreeting.mockRejectedValue(new ApiError(400, 'unsupported_media_type', 'unsupported_media_type'));
+    render(<VoicemailGreetingBlock />);
+    fireEvent.error(await screen.findByLabelText('Voicemail greeting'));
+    expect(await screen.findByText(MISSING_FILE)).toBeInTheDocument();
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3());
+    expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_REJECT_MESSAGE);
+    expect(uploadVoicemailGreeting).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(MISSING_FILE)).toBeInTheDocument();
+  });
+
+  it('after the player errors, a SUCCESSFUL Replace (new uploadedAt, so a new src) clears the line; an error on the new src shows it again', async () => {
+    getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
+    uploadVoicemailGreeting.mockResolvedValue({ ...GREETING, fileName: 'new.mp3', uploadedAt: '2026-09-27T09:00:00.000Z' });
+    render(<VoicemailGreetingBlock />);
+    const audio = await screen.findByLabelText('Voicemail greeting');
+    const oldSrc = audio.getAttribute('src');
+    fireEvent.error(audio);
+    expect(await screen.findByText(MISSING_FILE)).toBeInTheDocument();
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3('new.mp3'));
+    expect(await screen.findByText('Greeting replaced.')).toBeInTheDocument();
+    const replaced = screen.getByLabelText('Voicemail greeting');
+    expect(replaced.getAttribute('src')).not.toBe(oldSrc);
+    expect(screen.queryByText(MISSING_FILE)).not.toBeInTheDocument();
+    fireEvent.error(replaced);
+    expect(await screen.findByText(MISSING_FILE)).toBeInTheDocument();
+  });
+
   it('Remove: dialog, Cancel makes no call; Remove calls the endpoint and returns to the empty state', async () => {
     getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
     removeVoicemailGreeting.mockResolvedValue(undefined);
@@ -220,6 +269,38 @@ describe('VoicemailGreetingBlock', () => {
     await screen.findByRole('button', { name: 'Upload greeting' });
     await user.upload(screen.getByLabelText('Greeting audio file'), mp3());
     expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_FORBIDDEN_MESSAGE);
+  });
+
+  // Fix wave R1, FW5 (plan Review Focus 1; spec 4.7 server error map). The M4A
+  // and 6 MB cases above are CLIENT pre-checks that never reach the endpoint;
+  // these are the SERVER's refusal codes, each rendered as exactly its spec
+  // message after exactly one call.
+  it.each([
+    ['unsupported_media_type', 400, GREETING_REJECT_MESSAGE],
+    ['file_too_large', 413, GREETING_TOO_LARGE_MESSAGE],
+    ['empty_file', 400, GREETING_EMPTY_MESSAGE],
+    ['media_storage_unavailable', 503, GREETING_STORAGE_MESSAGE],
+    ['forbidden', 403, GREETING_FORBIDDEN_MESSAGE],
+    ['http_500', 500, GREETING_UPLOAD_FAILED_MESSAGE], // any other code: the fallback
+  ])('a server %s (HTTP %i) upload refusal renders exactly its spec 4.7 message', async (code, status, message) => {
+    uploadVoicemailGreeting.mockRejectedValue(new ApiError(status, code, code));
+    render(<VoicemailGreetingBlock />);
+    await screen.findByRole('button', { name: 'Upload greeting' });
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3());
+    expect((await screen.findByRole('alert')).textContent).toBe(message);
+    expect(uploadVoicemailGreeting).toHaveBeenCalledTimes(1);
+    expect(uploadVoicemailGreeting).toHaveBeenCalledWith(expect.any(File), 'audio/mpeg');
+  });
+
+  it('the upload messages are the spec 4.7 copy verbatim', () => {
+    expect(GREETING_REJECT_MESSAGE).toBe(
+      'Upload an MP3 or WAV file. iPhone voice memos are M4A; export or convert the recording first.',
+    );
+    expect(GREETING_TOO_LARGE_MESSAGE).toBe('That file is over 5 MB. Trim or re-export it at a lower bitrate.');
+    expect(GREETING_EMPTY_MESSAGE).toBe('That file is empty.');
+    expect(GREETING_STORAGE_MESSAGE).toBe("Media storage isn't available right now. Try again in a minute.");
+    expect(GREETING_FORBIDDEN_MESSAGE).toBe('Only an admin can change the greeting.');
+    expect(GREETING_UPLOAD_FAILED_MESSAGE).toBe("Couldn't upload the greeting. Try again.");
   });
 
   it('a failed Remove keeps the dialog open and shows the error INSIDE it (exactly one alert)', async () => {

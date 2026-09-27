@@ -205,6 +205,7 @@ function PastTourRow({
   const property = propertyLabel(units, tour.unitId);
   const when = whenLabel(tour.scheduledAt);
   const who = `${tenant} at ${property} on ${when}`;
+  const state = pastState(tour);
   const notMarked = tour.status === 'scheduled';
   const needsOutcome = tour.status === 'toured' && tour.outcome === undefined;
 
@@ -227,11 +228,15 @@ function PastTourRow({
             />
           ) : null}
         </span>
+        {/* The aria-label REPLACES the link's content as its accessible name,
+            so the state chip must ride in it: the state is what this tab is
+            for, and without it a screen reader could not tell "No show" from
+            "Needs placement" (planner adversarial review, 2026-09-27). */}
         <Link
           to={`/tours/${tour.tourId}`}
           state={BACK_TO_PAST}
           className={styles.row}
-          aria-label={`Tour for ${who}`}
+          aria-label={`Tour for ${who}, ${state}`}
         >
           <span className={styles.main}>
             <span className={styles.tenant}>{tenant}</span>
@@ -239,7 +244,7 @@ function PastTourRow({
           </span>
           <span className={styles.meta}>
             {when.length > 0 ? <span className={styles.time}>{when}</span> : null}
-            <span className={styles.badge}>{pastState(tour)}</span>
+            <span className={styles.badge}>{state}</span>
           </span>
         </Link>
         <span className={styles.rowActions}>

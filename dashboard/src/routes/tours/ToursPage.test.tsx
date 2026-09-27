@@ -729,8 +729,11 @@ describe('ToursPage - Past view', () => {
     const items = within(region).getAllByRole('listitem');
     expect(items).toHaveLength(3);
     // Order is the hook's order (most recent first).
-    const rowLink = within(items[0]!).getByRole('link', { name: `Tour for ${P1_LABEL}` });
+    // The accessible name carries the state chip (a screen reader hears it).
+    const rowLink = within(items[0]!).getByRole('link', { name: `Tour for ${P1_LABEL}, Not marked` });
     expect(rowLink).toHaveAttribute('href', '/tours/p1');
+    expect(within(items[1]!).getByRole('link', { name: /, Needs outcome$/ })).toBeInTheDocument();
+    expect(within(items[2]!).getByRole('link', { name: /, No show$/ })).toBeInTheDocument();
     expect(within(items[0]!).getByText('Not marked')).toBeInTheDocument();
     expect(within(items[0]!).getByText(whenLabel(NOT_MARKED.scheduledAt!))).toBeInTheDocument();
     expect(within(items[1]!).getByText('Needs outcome')).toBeInTheDocument();
@@ -757,9 +760,9 @@ describe('ToursPage - Past view', () => {
     renderPage('/tours/past');
     const item = within(screen.getByRole('region', { name: 'Past tours' })).getAllByRole('listitem')[0]!;
     // Exact compares (no whitespace normalization on either side).
-    expect(within(item).getByRole('link', { name: `Tour for ${P1_LABEL}` })).toHaveAttribute(
+    expect(within(item).getByRole('link', { name: `Tour for ${P1_LABEL}, Not marked` })).toHaveAttribute(
       'aria-label',
-      `Tour for ${P1_LABEL}`,
+      `Tour for ${P1_LABEL}, Not marked`,
     );
     expect(within(item).getByRole('button', { name: `Mark toured: ${P1_LABEL}` })).toHaveAttribute(
       'aria-label',
@@ -1022,7 +1025,7 @@ describe('ToursPage - Past view', () => {
     // enabled during a batch), which unmounts the whole ToursPage, then come
     // back through the router the way the tour page's back arrow does. The
     // page and its Past view are NEW instances, with their own reload.
-    await user.click(screen.getByRole('link', { name: `Tour for ${P1_LABEL}` }));
+    await user.click(screen.getByRole('link', { name: `Tour for ${P1_LABEL}, Not marked` }));
     expect(screen.getByTestId('loc')).toHaveTextContent('/tours/p1|{"back":"/tours/past"}');
     expect(screen.queryByRole('region', { name: 'Past tours' })).not.toBeInTheDocument();
     const reloadSecondVisit = vi.fn();

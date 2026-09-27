@@ -36,7 +36,7 @@ const UNIT_B = 'unit-0002'; // 88 Sycamore St
 const TENANT_PHONE = '+15550100001'; // Tasha Nguyen (lean seed)
 const LANDLORD_PHONE = '+15550100002'; // Marcus Bell, landlord of both units (lean seed)
 /** A 960px window: with the expanded 240px sidebar and the content's 24px
- *  padding each side, the content pane is ~672px - inside the 561-800px band
+ *  padding each side, the content pane is ~672px - inside the 561-840px band
  *  where a Past card must stack (review R2-1). Above the 768px nav
  *  breakpoint, so the layout is the desktop one, only narrower. */
 const MID_960 = { width: 960, height: 800 } as const;

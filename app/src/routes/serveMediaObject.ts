@@ -91,5 +91,22 @@ export async function serveMediaObject(req: Request, res: Response, opts: ServeM
     log.error({ err, ...logContext }, opts.messages.errored);
     res.destroy(err);
   });
+  // A client that LEAVES (a closed tab, or a browser that stops reading once
+  // its preload="metadata" player has the header) closes `res` before it
+  // finishes. pipe() then merely unpipes, leaving the store body paused and
+  // open - in production an S3 GetObject response holding a pooled socket
+  // until S3 drops the idle connection, whose 'error' would log the ERROR
+  // above for a client that simply left. Destroying the body WITHOUT an error
+  // releases the socket and emits no 'error', so nothing is logged; a genuine
+  // upstream failure while the client is still connected still reaches the
+  // handler above (spec 4.10: ERROR lines feed the alarms). The `destroyed`
+  // check covers a client that left while the store was still answering: its
+  // 'close' has already fired. After a normal finish writableFinished is true
+  // and the body is left alone.
+  const releaseBody = (): void => {
+    if (!res.writableFinished) object.body.destroy();
+  };
+  res.once('close', releaseBody);
+  if (res.destroyed) releaseBody();
   object.body.pipe(res);
 }

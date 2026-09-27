@@ -149,7 +149,7 @@ describe('DeliveryBadge', () => {
       <DeliveryBadge status="failed" errorCode="transient_cap" />,
     );
     expect(screen.getByText('Failed')).toBeInTheDocument();
-    expect(screen.getByText(/Sending gave up after repeated carrier deferrals/)).toBeInTheDocument();
+    expect(screen.getByText(/Sending gave up after repeated temporary errors/)).toBeInTheDocument();
     expect(container.textContent ?? '').not.toContain('(error ');
     expect(container.textContent ?? '').not.toContain('transient_cap');
 

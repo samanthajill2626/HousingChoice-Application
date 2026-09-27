@@ -1770,6 +1770,11 @@ export interface RelayRecipientDelivery {
   requestedTransport?: MessageTransport;
   actualTransport?: MessageTransport;
   transportAggregationState?: TransportAggregationState;
+  /** OUR attempt clock (SOR D8a/D20a), stamped when a send site claims this
+   *  recipient before its provider call. Best-effort - a wholesale slot write
+   *  can erase it - and never a provider timestamp. A `queued` leg with no
+   *  `sentAt` ages from it (deliveryStatus.ts `stalenessClockMs`). */
+  attemptedAt?: string;
 }
 
 /** GET /api/events 'conversation.updated' payload. */

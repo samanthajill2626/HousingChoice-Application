@@ -150,7 +150,7 @@ describe('shareRecipientReason (share-skip-fix D7)', () => {
   it('failed rows: no_contact has its own line; carrier and fan-out codes keep deliveryReason; no code = Delivery failed', () => {
     expect(shareRecipientReason('failed', 'no_contact')).toBe('No contact or phone on file');
     expect(shareRecipientReason('failed', '30007')).toBe('Carrier filtered the message (error 30007)');
-    expect(shareRecipientReason('failed', 'transient_cap')).toBe('Sending gave up after repeated carrier deferrals');
+    expect(shareRecipientReason('failed', 'transient_cap')).toBe('Sending gave up after repeated temporary errors');
     expect(shareRecipientReason('failed', 'enqueue_failed')).toBe('Sending could not be scheduled');
     expect(shareRecipientReason('failed', undefined)).toBe('Delivery failed');
     // retry-send-window D8: a failed share row reads the PLAIN 30003. The slot

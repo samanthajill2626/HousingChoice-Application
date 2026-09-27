@@ -385,7 +385,7 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     const failedRow = rows()[1] as HTMLElement;
     expect(failedRow).toHaveTextContent('Lars Landlord');
     expect(
-      within(failedRow).getByText('Failed - Sending gave up after repeated carrier deferrals'),
+      within(failedRow).getByText('Failed - Sending gave up after repeated temporary errors'),
     ).toBeInTheDocument();
     expect(failedRow.textContent ?? '').not.toContain('(error ');
     expect(failedRow.textContent ?? '').not.toContain('transient_cap');
@@ -393,8 +393,8 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     // whether or not the list is revealed, so a screen-reader user gets the same
     // sentence a sighted one does.
     expect(screen.getByRole('img')).toHaveAccessibleName(
-      'delivered 1 of 2, 1 failed, Sending gave up after repeated carrier deferrals. ' +
-        'Keisha Kane: Delivered. Lars Landlord: Failed, Sending gave up after repeated carrier deferrals.',
+      'delivered 1 of 2, 1 failed, Sending gave up after repeated temporary errors. ' +
+        'Keisha Kane: Delivered. Lars Landlord: Failed, Sending gave up after repeated temporary errors.',
     );
   });
 
@@ -420,11 +420,54 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     ).toBeInTheDocument();
     expect(failedRow.textContent ?? '').not.toContain('(error ');
     expect(failedRow.textContent ?? '').not.toContain('enqueue_failed');
-    expect(screen.queryByText(/gave up after repeated carrier deferrals/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/gave up after repeated temporary errors/)).not.toBeInTheDocument();
     expect(screen.getByRole('img')).toHaveAccessibleName(
       'delivered 1 of 2, 1 failed, Sending could not be scheduled. ' +
         'Keisha Kane: Delivered. Lars Landlord: Failed, Sending could not be scheduled.',
     );
+  });
+
+  // SOR D20 at the three positions on the DIRECT shape: the reconcile closed a
+  // fan-out leg unresolved, so the SOURCE's own slot reads
+  // `{ status: 'failed', errorCode: 'send_unconfirmed' }`. By CODE ALONE the
+  // chip counts it under not confirmed with the reason, and the recital and the
+  // row say "Not confirmed" - never "Failed", and never the token dressed as a
+  // carrier error number. Staff must not be invited to resend a text that may
+  // have gone out.
+  it('reads an UNRESOLVED fan-out leg as Not confirmed at the chip, the recital and the row', () => {
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-unconfirmed',
+      tsMsgId: 'r-unconfirmed',
+      body: 'group note nobody could confirm',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: 'send_unconfirmed' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent(
+      "delivered 1/2 - 1 not confirmed - Couldn't confirm whether this text went out",
+    );
+    expect(rollup).toHaveAccessibleName(
+      "delivered 1 of 2, 1 not confirmed, Couldn't confirm whether this text went out. " +
+        "Keisha Kane: Delivered. Lars Landlord: Not confirmed, Couldn't confirm whether this text went out.",
+    );
+    reveal('group note nobody could confirm');
+    const row = rows()[1] as HTMLElement;
+    expect(row).toHaveTextContent('Lars Landlord');
+    expect(
+      within(row).getByText("Not confirmed - Couldn't confirm whether this text went out"),
+    ).toBeInTheDocument();
+    expect(row).toHaveAccessibleName(
+      "Lars Landlord - Not confirmed - Couldn't confirm whether this text went out",
+    );
+    for (const el of [rollup, row]) {
+      expect(el.textContent ?? '').not.toContain('(error ');
+      expect(el.textContent ?? '').not.toContain('send_unconfirmed');
+      expect(el.textContent ?? '').not.toMatch(/failed/i);
+    }
   });
 
   it('shows NO reason on a STILL-RETRYING row that carries a transient carrier code', () => {
@@ -1147,6 +1190,43 @@ describe('Timeline relay retry states - the chip, the recital and the row togeth
     expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
   });
 
+  // SOR D20 on the JOIN's shape: a rung the reconcile closed UNRESOLVED
+  // projects `send_unconfirmed` onto the ORIGINAL leg, whose status stays the
+  // original's `undelivered` (the terminal step). By code alone all three
+  // positions read "Not confirmed" - never "Undelivered", never "1 failed",
+  // never a carrier tail on the app's own token.
+  it('reads a rung closed send_unconfirmed as Not confirmed at all three positions', () => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'failed', errorCode: 'send_unconfirmed' },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent(
+      "delivered 1/2 - 1 not confirmed - Couldn't confirm whether this text went out",
+    );
+    expect(rollup).not.toHaveTextContent('failed');
+    expect(rollup).toHaveAccessibleName(
+      /Lars Landlord: Not confirmed, Couldn't confirm whether this text went out/,
+    );
+    expect(rollup).not.toHaveAccessibleName(/Undelivered/);
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(
+        "Not confirmed - Couldn't confirm whether this text went out",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\(error /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retrying/)).not.toBeInTheDocument();
+  });
+
   // THE IDENTITY CASE, and it is the one protecting every relay thread in the
   // product today: no retry row exists anywhere, so the projection is the
   // identity and the bubble renders byte for byte what it rendered before this
@@ -1168,5 +1248,53 @@ describe('Timeline relay retry states - the chip, the recital and the row togeth
       within(failedRow).getByText('Undelivered - Phone unreachable (error 30003)'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+});
+
+// SOR D20a at the three positions. A send site claims a relay recipient before
+// its provider call and stamps the slot with OUR attempt clock, `attemptedAt`,
+// so a leg stranded mid-send or mid-reconcile - `queued`, no provider `sentAt` -
+// reads "Queued - not confirmed" once that clock is past the budget, instead of
+// "Sending..." for ever. No reason: the stale half of J names nothing it cannot
+// know.
+describe('Timeline relay attempt clock (SOR D20a) - the chip, the recital and the row', () => {
+  /** The pinned clock (src/test/setup.ts) as an instant. */
+  const NOW_MS = Date.parse('2026-07-01T12:00:00Z');
+  const iso = (ms: number): string => new Date(ms).toISOString();
+
+  const stranded = (attemptedAtMs: number): TimelineItem => ({
+    ...RELAY_OUT,
+    id: 'r-stranded',
+    tsMsgId: 'r-stranded',
+    body: 'group note stranded mid-send',
+    delivery_status: 'queued',
+    delivery_recipients: {
+      c1: { status: 'delivered' },
+      c2: { status: 'queued', attemptedAt: iso(attemptedAtMs) },
+    },
+  });
+
+  it('reads a queued leg whose attempt clock went quiet as Queued - not confirmed', () => {
+    renderTimeline({ items: [stranded(NOW_MS - 30 * 60 * 1000)], relayRoster: RELAY_ROSTER });
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent('delivered 1/2 - 1 not confirmed');
+    expect(rollup).toHaveAccessibleName(
+      'delivered 1 of 2, 1 not confirmed. Keisha Kane: Delivered. Lars Landlord: Queued, not confirmed.',
+    );
+    reveal('group note stranded mid-send');
+    const row = rows()[1] as HTMLElement;
+    expect(within(row).getByText('Queued - not confirmed')).toBeInTheDocument();
+    expect(row).toHaveAccessibleName('Lars Landlord - Queued - not confirmed');
+  });
+
+  it('leaves a fresh attempt reading as an ordinary in-flight leg', () => {
+    renderTimeline({ items: [stranded(NOW_MS - 60_000)], relayRoster: RELAY_ROSTER });
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent('delivered 1/2');
+    expect(rollup).not.toHaveTextContent('not confirmed');
+    reveal('group note stranded mid-send');
+    const row = rows()[1] as HTMLElement;
+    expect(within(row).getByText(/^Sending/)).toBeInTheDocument();
+    expect(row).not.toHaveTextContent('not confirmed');
   });
 });

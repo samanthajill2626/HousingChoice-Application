@@ -326,6 +326,19 @@ const ARMING_CASES: TickerCase[] = [
         { delivery_status: 'queued' },
       ),
   },
+  {
+    title:
+      'S3 row 3b (SOR D20a) - a `queued` leg with NO sentAt but an attemptedAt (our attempt clock) ages from attemptedAt',
+    build: (t0) =>
+      outboundAt(
+        t0,
+        {
+          c1: { status: 'delivered' },
+          c2: { status: 'queued', attemptedAt: new Date(t0).toISOString() },
+        },
+        { delivery_status: 'queued' },
+      ),
+  },
 ];
 
 const SILENT_CASES: TickerCase[] = [

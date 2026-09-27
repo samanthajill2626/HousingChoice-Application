@@ -234,6 +234,34 @@ describe('projectRelayLegs - the four end states', () => {
     expect(legs).toMatchObject({ errorCode: '30003', retryState: 'terminal' });
   });
 
+  // SOR D20/D21: a rung the reconcile closed UNRESOLVED carries
+  // `send_unconfirmed`, and the terminal step projects it like any other close
+  // code - onto the ORIGINAL leg, whose status stays the original's. That kept
+  // status is exactly why every presenter keys on the code alone; the join
+  // itself needs no logic change.
+  it('projects a rung closed send_unconfirmed onto the original, keeping the original status', () => {
+    const undelivered: RelayRecipientDelivery = { ...ORIGINAL, status: 'undelivered' };
+    const legs = project(
+      [retryItem({ attempt: 1, leg: failedLeg('send_unconfirmed'), atMs: NOW - 60_000 })],
+      NOW,
+      undelivered,
+    );
+
+    expect(legs).toEqual({ ...undelivered, errorCode: 'send_unconfirmed', retryState: 'terminal' });
+  });
+
+  // SOR D20a: with no rungs the projection is the identity, so a claimed leg's
+  // attempt clock reaches the presenters that age it.
+  it('carries a leg attemptedAt through the identity projection', () => {
+    const stranded: RelayRecipientDelivery = {
+      status: 'queued',
+      attemptedAt: '2026-09-02T10:00:00.500Z',
+      transportAggregationState: 'attempted',
+    };
+
+    expect(project([], NOW, stranded)).toEqual(stranded);
+  });
+
   // The four GATE closes are untouched: each still replaces the carrier code,
   // so the leg reads its "Not retried - ..." copy (Cameron's gate answer).
   it.each(['retry_group_closed', 'retry_member_removed', 'retry_number_changed', 'retry_opted_out'])(

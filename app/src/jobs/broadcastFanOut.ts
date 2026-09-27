@@ -61,6 +61,7 @@ import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/eve
 import { guardWrite } from '../lib/guardWrite.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
+import { gateFor } from '../lib/sendAttemptGate.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import { buildUnitMergeContext, renderBody } from '../lib/mergeFields.js';
 import { bodyFingerprint, recipientDigest, safeRecipientKey } from '../lib/sendFingerprint.js';
@@ -68,7 +69,6 @@ import {
   ENQUEUE_FAILED_CODE,
   isProviderCode,
   OUTAGE_BRAKE_UNKNOWN_STREAK,
-  SEND_CLAIM_TTL_MS,
   SEND_RETRYABLE_CODE,
   SEND_UNCONFIRMED_CODE,
   SMS_SENDING_DISABLED_CODE,
@@ -103,7 +103,6 @@ import {
   createSendAttemptsRepo,
   type AttemptRef,
   type SendAttemptOwner,
-  type SendAttemptRecord,
   type SendAttemptsRepo,
 } from '../repos/sendAttemptsRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
@@ -232,37 +231,6 @@ export function emitBroadcastProgress(events: EventBus, broadcastId: string, ite
 
 /** The broadcast member of the send-attempt owner union. */
 type BroadcastOwner = Extract<SendAttemptOwner, { kind: 'broadcast' }>;
-
-/** What the D8 gate decided for one recipient (spec D8, revision 11). */
-type GateResult =
-  | { kind: 'proceed'; record?: SendAttemptRecord }
-  | { kind: 'skip' }
-  | { kind: 'defer' }
-  | { kind: 'taken_over'; record: SendAttemptRecord };
-
-/**
- * Spec D8 (revision 11): a pre-claim decline or a close by another writer
- * touches the slot ONLY when the recipient's attempt record cannot belong to a
- * live attempt. An ALLOW-list: an ABSENT record, done/retryable and redriven
- * PROCEED (a redriven record is claimable by ANY pass, so any pass's decline
- * may close it - the caller then runs closeRedriven); done with any other
- * outcome SKIPS (terminal, never carried forward); a STALE attempting record
- * (older than the claim TTL) is TAKEN OVER into reconcile and returned - the
- * CALLER hands off, exactly once: this gate never enqueues; a fresh attempting
- * or a reconciling record DEFERS. Tasks 8 and 9 copy this body. The repo is a
- * parameter (build finding T7-4) and the read is strongly consistent; a read
- * that throws is the caller's prepare-phase throw.
- */
-async function gateFor(attempts: SendAttemptsRepo, owner: SendAttemptOwner, nowMs: number): Promise<GateResult> {
-  const rec = await attempts.get(owner);
-  if (rec === undefined) return { kind: 'proceed' };
-  if (rec.state === 'done') return rec.outcome === 'retryable' ? { kind: 'proceed', record: rec } : { kind: 'skip' };
-  if (rec.state === 'redriven') return { kind: 'proceed', record: rec };
-  if (rec.state === 'attempting' && nowMs - Date.parse(rec.attemptedAt) > SEND_CLAIM_TTL_MS) {
-    return (await attempts.takeOver(owner, rec)) ? { kind: 'taken_over', record: rec } : { kind: 'defer' };
-  }
-  return { kind: 'defer' };
-}
 
 /** One pre-send fence: the slot it writes and the stats bucket it bumps (share-skip-fix D7). */
 interface Fence {

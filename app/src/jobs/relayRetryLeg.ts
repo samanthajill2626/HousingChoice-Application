@@ -64,8 +64,9 @@ import {
   retrySendDeadlineMs,
   withinRetrySendWindow,
 } from '../lib/retrySendWindow.js';
+import { gateFor } from '../lib/sendAttemptGate.js';
 import { safeRecipientKey } from '../lib/sendFingerprint.js';
-import { ENQUEUE_FAILED_CODE, SEND_CLAIM_TTL_MS, SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
+import { ENQUEUE_FAILED_CODE, SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -78,7 +79,6 @@ import {
 import {
   createSendAttemptsRepo,
   type SendAttemptOwner,
-  type SendAttemptRecord,
   type SendAttemptsRepo,
 } from '../repos/sendAttemptsRepo.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../services/relayAnnouncements.js';
@@ -369,38 +369,6 @@ function readRetryLineage(row: MessageItem, retryTsMsgId: string): RetryRowLinea
     legBody: legBody as string,
     windowStart: row.relay_retry_window_start,
   };
-}
-
-/** What the D8 gate decided for the rung (SOR spec D8, revision 11). */
-type GateResult =
-  | { kind: 'proceed'; record?: SendAttemptRecord }
-  | { kind: 'skip' }
-  | { kind: 'defer' }
-  | { kind: 'taken_over'; record: SendAttemptRecord };
-
-/**
- * Spec D8 (revision 11): a pre-claim decline or a close by another writer
- * touches the slot ONLY when the rung's attempt record cannot belong to a
- * live attempt. An ALLOW-list: an ABSENT record, done/retryable and redriven
- * PROCEED (a redriven record is claimable by ANY pass, so any pass's decline
- * may close it - the caller then runs closeRedriven); done with any other
- * outcome SKIPS (terminal); a STALE attempting record (older than the claim
- * TTL) is TAKEN OVER into reconcile and returned - the CALLER hands off,
- * exactly once: this gate never enqueues; a fresh attempting or a reconciling
- * record DEFERS. The fan-out twin's body (relayFanOut.ts), the repo a
- * parameter (build finding G6); the read is strongly consistent, and a read
- * that throws throws out of the job like the close it guards (build finding
- * T9-7, a recorded residue).
- */
-async function gateFor(attempts: SendAttemptsRepo, owner: SendAttemptOwner, nowMs: number): Promise<GateResult> {
-  const rec = await attempts.get(owner);
-  if (rec === undefined) return { kind: 'proceed' };
-  if (rec.state === 'done') return rec.outcome === 'retryable' ? { kind: 'proceed', record: rec } : { kind: 'skip' };
-  if (rec.state === 'redriven') return { kind: 'proceed', record: rec };
-  if (rec.state === 'attempting' && nowMs - Date.parse(rec.attemptedAt) > SEND_CLAIM_TTL_MS) {
-    return (await attempts.takeOver(owner, rec)) ? { kind: 'taken_over', record: rec } : { kind: 'defer' };
-  }
-  return { kind: 'defer' };
 }
 
 /**

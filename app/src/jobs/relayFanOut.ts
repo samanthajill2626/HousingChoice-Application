@@ -70,7 +70,6 @@ import {
   isProviderCode,
   OUTAGE_BRAKE_UNKNOWN_STREAK,
   REDRIVE_REFUSED_CODE,
-  SEND_CLAIM_TTL_MS,
   SEND_RETRYABLE_CODE,
   SEND_UNCONFIRMED_CODE,
   SMS_SENDING_DISABLED_CODE,
@@ -107,10 +106,10 @@ import {
   createSendAttemptsRepo,
   type AttemptRef,
   type SendAttemptOwner,
-  type SendAttemptRecord,
   type SendAttemptsRepo,
 } from '../repos/sendAttemptsRepo.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
+import { gateFor } from '../lib/sendAttemptGate.js';
 import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
 import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
 import { SendRefusedError } from '../services/sendMessage.js';
@@ -1638,37 +1637,6 @@ function memberCtx(
     tsMsgId: payload.sourceTsMsgId,
     memberKey: logSafeMemberKey(member),
   };
-}
-
-/** What the D8 gate decided for one member (spec D8, revision 11). */
-type GateResult =
-  | { kind: 'proceed'; record?: SendAttemptRecord }
-  | { kind: 'skip' }
-  | { kind: 'defer' }
-  | { kind: 'taken_over'; record: SendAttemptRecord };
-
-/**
- * Spec D8 (revision 11): a pre-claim decline or a close by another writer
- * touches the slot ONLY when the member's attempt record cannot belong to a
- * live attempt. An ALLOW-list: an ABSENT record, done/retryable and redriven
- * PROCEED (a redriven record is claimable by ANY pass, so any pass's decline
- * may close it - the caller then runs closeRedriven); done with any other
- * outcome SKIPS (terminal, never carried forward); a STALE attempting record
- * (older than the claim TTL) is TAKEN OVER into reconcile and returned - the
- * CALLER hands off, exactly once: this gate never enqueues; a fresh attempting
- * or a reconciling record DEFERS. The broadcast twin's body (Task 7), the repo
- * a parameter (build finding T7-4); the read is strongly consistent and a read
- * that throws is the caller's prepare-phase throw.
- */
-async function gateFor(attempts: SendAttemptsRepo, owner: SendAttemptOwner, nowMs: number): Promise<GateResult> {
-  const rec = await attempts.get(owner);
-  if (rec === undefined) return { kind: 'proceed' };
-  if (rec.state === 'done') return rec.outcome === 'retryable' ? { kind: 'proceed', record: rec } : { kind: 'skip' };
-  if (rec.state === 'redriven') return { kind: 'proceed', record: rec };
-  if (rec.state === 'attempting' && nowMs - Date.parse(rec.attemptedAt) > SEND_CLAIM_TTL_MS) {
-    return (await attempts.takeOver(owner, rec)) ? { kind: 'taken_over', record: rec } : { kind: 'defer' };
-  }
-  return { kind: 'defer' };
 }
 
 /**

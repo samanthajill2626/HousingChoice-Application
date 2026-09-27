@@ -1140,6 +1140,13 @@ async function runRelayFanOutExecution(
   if (payload.recipientKeys !== undefined) {
     const allowed = new Set(payload.recipientKeys);
     recipients = recipients.filter((member) => allowed.has(relayMemberKey(member)));
+    // Code review ADV-5: a RE-DRIVE pass closes each carried member no longer
+    // on the roster (the record first, then the slot); dropped silently, its
+    // record would stay redriven and its slot queued. A no-op on other passes.
+    const departed = payload.recipientKeys.filter((key) => !recipients.some((member) => relayMemberKey(member) === key));
+    if (departed.length > 0) {
+      await closeRedriveRefused(messages, attempts, payload, log, departed, 'member_removed');
+    }
   }
 
   let currentSource = source;

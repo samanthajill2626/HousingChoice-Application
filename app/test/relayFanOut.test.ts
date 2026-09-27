@@ -2545,6 +2545,67 @@ describe('relay.fanOut (M1.7)', () => {
       expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'contact_opted_out' });
       expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotWrite.mock.invocationCallOrder[0]!);
     });
+
+    // --- code review ADV-5 (FW2-5) ---
+
+    it('ADV-5 (zz-adv-2): a re-drive pass closes a carried member who left the roster after the reconcile saw them - redrive_refused / member_removed, the record FIRST, then the slot (FW2-5)', async () => {
+      const conv = seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+      // Bob's leg drops before the provider records it: an unknown the reconcile rules never_sent.
+      unknownOn(new Set([BOB]));
+      await run(source);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'reconciling' });
+      // The reconcile's roster pre-check still sees Bob; he leaves the group
+      // right after the record is marked redriven, before the re-drive pass runs.
+      const realMark = world.sendAttemptsRepo.markRedriven.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'markRedriven').mockImplementationOnce(async (owner, at) => {
+        const marked = await realMark(owner, at);
+        conv.participants = conv.participants!.filter((p) => p.contactId !== 'c-bob');
+        return marked;
+      });
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotClose = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      for (let check = 0; check < 3; check++) {
+        const [item] = outbound.delayed.splice(
+          outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB),
+          1,
+        );
+        await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)) as unknown);
+        await outbound.settle();
+      }
+      expect(sends).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'member_removed' });
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'failed', errorCode: 'redrive_refused' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotClose.mock.invocationCallOrder[0]!);
+      const refused = capture.atLevel(40).filter((l) => String(l['msg']).includes('re-drive refused'));
+      expect(refused).toHaveLength(1);
+      expect(refused[0]).toMatchObject({ cause: 'member_removed', carried: 1, closed: 1 });
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('ADV-5: an ORDINARY continuation that carries a member who left the roster closes nothing - only a re-drive pass does (FW2-5)', async () => {
+      const conv = seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      conv.participants = conv.participants!.filter((p) => p.contactId !== 'c-bob');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'redriven' });
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('re-drive refused'))).toHaveLength(0);
+    });
   });
 });
 

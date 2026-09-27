@@ -7,6 +7,8 @@ import { expectTodayReady } from '../../support/today.js';
 // and the Manage-numbers dialog. Targets the seeded tenant (Tasha Nguyen,
 // contact-tenant-0001). Mutations use the non-identifying `notes` field and are
 // reverted so other specs' name assertions stay valid.
+// Notes locators are scoped to the Edit dialog because the tenant file's Staff
+// notes card (item 22) also carries "notes" in an aria-label.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const TENANT = 'contact-tenant-0001';
 const LANDLORD = 'contact-landlord-0001';
@@ -55,8 +57,9 @@ test.describe('Contact detail — header actions + edit', () => {
 
     // Open the Details "Edit" affordance, set a note, save.
     await page.getByRole('button', { name: 'Edit contact details' }).click();
-    await expect(page.getByRole('dialog', { name: /Edit contact/i })).toBeVisible();
-    const notes = page.getByLabel('Notes');
+    const dialog = page.getByRole('dialog', { name: /Edit contact/i });
+    await expect(dialog).toBeVisible();
+    const notes = dialog.getByLabel('Notes');
     await notes.fill(marker);
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -70,7 +73,7 @@ test.describe('Contact detail — header actions + edit', () => {
 
     // Cleanup — clear the note so the seeded contact is pristine for other specs.
     await page.getByRole('button', { name: 'Edit contact details' }).click();
-    await page.getByLabel('Notes').fill('');
+    await page.getByRole('dialog', { name: /Edit contact/i }).getByLabel('Notes').fill('');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.getByText(marker)).toHaveCount(0);

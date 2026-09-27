@@ -373,11 +373,12 @@ p.vanished {
  * whose card is the full pane and whose stacking the page-level 560px rule
  * above was sized for. Side by side, a 561-800px pane (a 960px window beside
  * the expanded sidebar, a tablet) cut every tenant name to a few characters
- * (review R2-1); 800px, not 760px, because at 761-800px the name was still
- * cut. These are that rule's four stacking declarations, scoped to the Past
- * card; the lead and action slots stay beside it (only the 560px block below
- * wraps the row). */
-@container (max-width: 800px) {
+ * (review R2-1); 840px, not 760px, because measured side by side the name
+ * was still cut by 1-8px in 761-835px panes and whole only from 836px. These
+ * are that rule's four stacking declarations, scoped to the Past card; the
+ * lead and action slots stay beside it (only the 560px block below wraps the
+ * row). */
+@container (max-width: 840px) {
   .pastRow > .row {
     align-items: flex-start;
     flex-wrap: wrap;

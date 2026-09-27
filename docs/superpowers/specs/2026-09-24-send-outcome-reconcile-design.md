@@ -2,7 +2,7 @@
 
 Anchor issue: `throw-for-redelivery-defeated-by-job-marker` (high).
 Branch `feat/send-outcome-reconcile`, cut from `main@685f2ede`, 2026-09-24.
-Revision 8 (after design review rounds 1-4, the 2026-09-25 cross-branch
+Revision 9 (after design review rounds 1-4, the 2026-09-25 cross-branch
 sequencing with `feat/retry-send-window` and `feat/share-skip-fix`, the RSW
 planner's 2026-09-26 relay, kept verbatim at
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/handoffs/rsw-relay-2026-09-26.md`,
@@ -223,9 +223,12 @@ code:**
 | `unknown` | the request may have reached Twilio; a message may exist | HTTP 5xx regardless of code; timeout (ECONNABORTED, ETIMEDOUT); dropped socket (ECONNRESET, EPIPE); any error the rules above do not place |
 
 Status is consulted first (a 5xx carrying a Twilio code is still `unknown`),
-then the code, then the network code. 30007 stays `rejected` if it ever
-arrives at send time (it never has; it is a receipt code) and keeps its
-never-retry meaning.
+then the code, then the network code - with one precedence rule: a code the
+send sites ALREADY recognise classifies by code whatever the status says or
+omits, so the existing arms keep their behavior and their status-less test
+fixtures: 30007 is `rejected` (never retry), 30005/30006 are `rejected` (flag
+unreachable), and the legacy `429` / `30022` tokens are `retryable`. Every
+other code follows the status-first rule.
 
 **D2. `unknown` is the default.** An error the classifier cannot place is
 `unknown`, never `rejected`: a text that went out and is marked failed invites a
@@ -251,9 +254,18 @@ facts a reconcile needs, instead of the bare provider error:**
   the falsehood. This is a deliberate behavior change for every caller,
   including the staff send route, which now answers 201 where it answered 500.
 
-`SendRefusedError` and its subclasses are unchanged. Callers that catch nothing
-new behave exactly as today for the first three (the new classes still extend
-`Error`).
+`SendRefusedError` and its subclasses are unchanged and are NEVER wrapped:
+the pre-provider span throws a refusal at nearly every gate, and every caller
+and the parity test key on `instanceof SendRefusedError`. Only the
+non-refusal throws in that span (the conversation and contact reads, the
+breaker increment and its trip-branch writes, the transport classification)
+become `SendNotAttemptedError`. `ProviderSendFailedError` exposes the
+provider's code and status (the existing arms read them through
+`errorCodeOf`) and carries its cause's message. Callers that catch nothing
+new behave exactly as today for the first three (the new classes still
+extend `Error`). When the post-append inbox touch fails and is swallowed, the
+`conversation.updated` emit that depends on its result is skipped, not built
+from nothing.
 
 **D3a. Classification applies to the SEND phase only.** The classifier is
 applied to the provider call (relay) or to `sendMessage`'s typed errors
@@ -285,10 +297,13 @@ it earlier as a `SendRefusedError`, and that recipient stays `skipped` as
 today.
 
 **D6. `retryable`: defer the recipient to the existing continuation, continue.**
-The recipient is written `queued` with the code, joins the same
-`transientRemaining` set the 429/30022 arm uses, and rides the same ladder with
-the same cap (`MAX_BROADCAST_ATTEMPTS` / `MAX_FANOUT_ATTEMPTS`, unchanged) and
-the same backoff. A ladder that runs out closes `transient_cap` as today.
+The recipient is written `queued` with the provider code when there is one
+and with `send_retryable` when there is not (a connection that never opened,
+a `SendNotAttemptedError` - never the raw network string or HTTP status),
+joins the same `transientRemaining` set the 429/30022 arm uses, and rides the
+same ladder with the same cap (`MAX_BROADCAST_ATTEMPTS` /
+`MAX_FANOUT_ATTEMPTS`, unchanged) and the same backoff. A ladder that runs
+out closes `transient_cap` as today.
 
 **D7. `unknown`: hand the recipient to the reconcile job, continue.** The site
 transitions the attempt record to `reconciling` (D8a; the record already
@@ -306,9 +321,9 @@ differently.**
 
 | phase | what runs | on failure |
 |---|---|---|
-| PREPARE | reads and writes before the provider call: contact, conversation, roster suppression check, presign, the aggregation-state write, the claim itself (D8a) | nothing was sent: the recipient is deferred as `retryable` (D6), and the record - if it was claimed - is released to `done` / `retryable`; a refused claim is handled by D8a, not here. ONE exception (Sec 2a, RSW #5): on the relay retry rung, RSW's window deadline expiring during the bounded token acquire - the unit's existing `deadline_exceeded` outcome, returned before any `attempted` write - is a TERMINAL close through the job's `refuseGate` (`retry_window_closed`; the record, if claimed by then, `done` / `window_closed`), never a deferral |
-| SEND | the provider call, or `sendMessage` | classified (D1) |
-| RECORD | writes after a successful send that the receipts depend on: the SID pointer (relay), the message row (`sendMessage`'s append), then LAST the slot together with the stats bump in one conditional write, then the record's `done` / `sent` | the send HAPPENED and its SID is known: `sent_unrecorded` - one ERROR line carrying the SID and the owner, then the record goes to `reconciling` WITH the SID and a reconcile is enqueued (D13's known-SID path), whose adoption re-runs those writes idempotently; the loop continues. The token acquire, the milestone and listing-send rows and the SSE emits are best-effort and stay so |
+| PREPARE | reads and writes before the provider call: the contact and conversation reads, the fences (broadcast) and the roster suppression check (relay), the relay token acquire (which runs BEFORE the send on relay - it is post-send pacing on broadcast only), the claim (D8a), the presign, the aggregation-state write | nothing was sent. A PRE-CLAIM decline (a broadcast fence, a relay gate refusal or suppression, RSW's `deadline_exceeded`) writes its terminal slot as today and touches no record it does not own (D8). A POST-CLAIM failure defers the recipient as `retryable` (D6) and releases the record to `done` / `retryable`. ONE exception (Sec 2a, RSW #5): on the relay retry rung the window deadline is TERMINAL through the job's `refuseGate` (`retry_window_closed`), never a deferral - and because the claim sits after the acquire, that close never holds a claim |
+| SEND | the provider call, or `sendMessage` | classified (D1); a `SendRefusedError` after the claim is a `refused` outcome: the slot as today, the record `done` / `refused` with the refusal code as its cause |
+| RECORD | writes after a successful send that the receipts depend on, in today's order: the message row (`sendMessage`'s append, broadcast) or the slot then the `relaysid#` pointer (relay - the pointer stays SECOND, because on a legacy row a fast receipt that arrives once the pointer exists would be erased by the wholesale slot write that followed); on broadcast the slot together with its stats bump in ONE conditional write; then the record's `done` / `sent` | the send HAPPENED and its SID is known: `sent_unrecorded` - one ERROR line carrying the SID and the owner, then the record goes to `reconciling` WITH the SID and a reconcile is enqueued (D13's known-SID path), whose adoption re-runs those writes idempotently; the loop continues. The broadcast's post-send token acquire, the milestone and listing-send rows, the retry rung's inbox touch and the SSE emits are best-effort and stay so (the unwrapped ones get wrapped) |
 
 A failure-arm write (the D5/D6/D7 writes) that itself fails is logged at ERROR
 with the owner and the recipient and the loop continues; the record keeps
@@ -316,7 +331,20 @@ with the owner and the recipient and the loop continues; the record keeps
 sweeper's, and Sec 1 records it. Nothing in any phase throws out of the loop.
 The relay unit returns two new outcome kinds, `sent_unrecorded` and
 `handed_to_reconcile`, so its callers can count them and the retry rung can
-handle them explicitly.
+handle them explicitly - and the rung's outcome chain, which today ends in a
+catch-all "ended terminally" ERROR, becomes exhaustive so a future kind
+cannot fall through it. The unit does not enqueue: it has no owner context.
+Each caller enqueues the reconcile for a `handed_to_reconcile` /
+`sent_unrecorded` outcome with the context it holds (the fan-out loop its
+continuation context, the rung its row), and reports an enqueue failure as
+D7 says.
+
+**Claim placement, fixed here because two test pins depend on it:** the
+relay unit claims AFTER the bounded token acquire and BEFORE the presign, so
+`deadline_exceeded` never holds a claim and the RSW pin on the exact
+deadline-close slot shape stays green; the broadcast pass claims immediately
+before `sendMessage`, after its fences, so the fences remain the pre-claim
+writes they are today.
 
 **D8. Every close of a recipient by a writer OTHER than its own attempt
 proceeds only when no attempt has claimed it.** Before writing a slot terminal
@@ -329,16 +357,37 @@ recipient only if the record is ABSENT or `done` / `retryable`. Any other
 state is someone else's: `attempting` fresher than the provider timeout,
 `reconciling` and `redriven` are skipped; `attempting` OLDER than the
 provider timeout is taken over into reconcile exactly as a send site would
-take it over (D8a), so a recipient whose release write failed still reaches a
-verdict at the cap. RSW's window close in the relay retry job is such a close
-and follows this gate (Sec 2a). The close's slot write is itself conditional: the slot
-must still be `queued` and carry no SID, so a stale snapshot can never
-overwrite a send that landed. The reconcile job's OWN closes (`unresolved`,
-`enqueue_failed`, `redrive_refused`) are exempt from this gate - they close
-the attempt they own - and write the slot FIRST, then the record `done`; a
-redelivered close re-applies the slot write (forward-only, idempotent) before
-finding the record `done`. The D9 brake defers the recipients not yet
-attempted IN THIS PASS, whatever their records say.
+take it over (D8a) - which makes the cap-closes enqueuers too, with D7's
+enqueue-failure path and one hop of the pass's budget (D13a) - so a
+recipient whose release write failed still reaches a verdict at the cap.
+RSW's window close in the relay retry job is such a close and follows this
+gate (Sec 2a). The close's slot write is itself conditional, per slot type:
+a broadcast slot must still be `queued` (it has no SID field; the success
+path never leaves one `queued`); a relay slot must be ABSENT (a legacy
+source row starts with an empty map and today's close creates the slot) or
+`queued` with no `sid`. No existing write expresses that condition; it is a
+new conditional write in each repo. So a stale snapshot can never overwrite
+a send that landed.
+
+**A pass that carries the re-drive marker OWNS the `redriven` record for its
+recipient.** Its pre-claim declines - the broadcast fences, the relay
+suppression arm, the retry rung's gate refusals and window close - write
+their terminal slot as today AND move the record `redriven` -> `done` with
+the outcome `refused` and the decline's code as cause, instead of consulting
+this gate (which would skip its own record and strand the recipient). Every
+other pre-claim decline touches no record (the record is absent).
+
+The reconcile job's OWN closes (`unresolved`, `enqueue_failed`,
+`redrive_refused`) are exempt from this gate - they close the attempt they
+own - and write the slot FIRST, then the record `done`; a redelivered close
+re-applies the slot write (forward-only, idempotent) before finding the
+record `done`. The same own-attempt rule applies to a send site's post-claim
+closes (`rejected`, `refused`, a failed continuation enqueue): they are
+conditioned on the record's `attemptNo`/`attemptedAt`, never gated. The D9
+brake defers the recipients not yet attempted IN THIS PASS, whatever their
+records say. One close this branch cannot cover is the status webhook's
+`closeRetryLegEnqueueFailed` (fenced file); it is recorded beside gap 5 of
+`manual-retry-double-send-residual-windows`.
 
 **D8a. Every send site claims the recipient on its send-attempt RECORD before
 calling the provider.** The record is a per-owner-per-recipient item in the
@@ -355,9 +404,13 @@ reference and recipient key; `state` in `attempting` | `reconciling` |
 `redriven` | `done`; `attemptNo`; `attemptedAt`; `redriveCount`; `checkNo`;
 `sid` once known; `outcome` (`sent`, `rejected`, `retryable`, `adopted`,
 `never_sent`, `unresolved`, `enqueue_failed`, `redrive_refused`, and
-`window_closed` for RSW's terminal decline - Sec 2a) and its `cause` when
-`done`; the recipient number's keyed digest, the sender, the normalized body
-hash and the media count of THIS attempt.
+`refused` for a post-claim refusal or a re-drive pass's own pre-claim
+decline, with the refusal or gate code as `cause` - Sec 2a; RSW's window
+close never holds a claim, so no `window_closed` outcome is needed) and its
+`cause` when `done`; the recipient number's keyed digest, the sender, the
+normalized body hash and the media count of THIS attempt. The record lives
+in its OWN repo module over the messages table (a separate interface, so
+`MessagesRepo` and its three fully typed test fakes are not widened).
 
 The claim is one conditional write:
 
@@ -408,21 +461,26 @@ be read consistently (D11). Both families carry the 30-day cleanup TTL.
 
 **D9. Outage brake.** Three consecutive `unknown` outcomes in one pass end the
 pass early: every recipient not yet attempted is deferred to the continuation
-as if `retryable`, one WARN names the count, and the pass returns. Without it a
-Twilio outage costs the 30-second SDK timeout per recipient and marks every
-one of them unconfirmed. `retryable` outcomes do not count toward the brake:
-they are fast and already deferred one by one. `rejected` never brakes: a
-systemic 4xx (bad credentials) fails every recipient quickly, visibly and
-honestly, and retrying it could not help.
+as if `retryable`, one WARN names the count, and the pass returns. Any other
+outcome between two unknowns - sent, rejected, retryable, refused, a skip -
+resets the streak to zero. Without it a Twilio outage costs the 30-second
+SDK timeout per recipient and marks every one of them unconfirmed.
+`retryable` outcomes do not count toward the brake: they are fast and
+already deferred one by one. `rejected` never brakes: a systemic 4xx (bad
+credentials) fails every recipient quickly, visibly and honestly, and
+retrying it could not help. A brake on the LAST rung closes the untried
+remainder `transient_cap` in the same pass, as any transient remainder on
+the last rung does today (Sec 2, the ladder's timing).
 
 **D10. No new slot STATUS values.** Every state this branch introduces is an
 existing status (`queued`, `failed`, `sent`) plus a code. `deriveBroadcastStats`
 switches on status with no default arm and the dashboard's status maps fall
 through to "Sending...", so a new status would vanish from every chip silently.
 The codes this branch writes on slots: `send_unconfirmed` (closed
-unresolved), `enqueue_failed` (existing), `redrive_refused`,
-`sms_sending_disabled` (existing token), and the provider's own rejection
-codes. Pending states are record states, never slot codes.
+unresolved), `send_retryable` (a deferral with no provider code, transient),
+`enqueue_failed` (existing), `redrive_refused`, `sms_sending_disabled`
+(existing token), and the provider's own rejection codes. Pending states are
+record states, never slot codes.
 
 ## 5. Decisions: the reconcile job
 
@@ -580,10 +638,14 @@ it) and records:
 - the slot: a non-terminal provider status (accepted, queued, sending, sent)
   maps to the slot's `sent` (the broadcast success path writes `sent`; the
   relay paths keep `queued` for a provider `queued` and write `sent`
-  otherwise - adoption follows each owner's own mapping); a terminal one maps
-  through `mapTwilioStatus` to `delivered` or `failed` with its error code,
-  so a message that already delivered adopts as delivered and one that
-  already failed adopts as failed. `sentAt` (relay) and `carrierSentAt`
+  otherwise - adoption follows each owner's own mapping); a terminal one
+  maps PER OWNER the way that owner's receipt path maps it: `delivered` to
+  `delivered`; Twilio `undelivered` to a relay slot's `undelivered` (a
+  status the relay machine holds and the 30003 claim reads) and to a
+  broadcast slot's `failed` (which has no `undelivered`); `failed` to
+  `failed`; each with its error code - so a message that already delivered
+  adopts as delivered and one that already failed adopts as failed. `sentAt`
+  (relay) and `carrierSentAt`
   (broadcast) take the provider's `date_sent` when it has one; the relay
   slot's first-write-wins rule may keep an earlier value, which is accepted.
 - everything else the owner's success path writes, in this order: FIRST the
@@ -838,10 +900,12 @@ Test INTENTIONS; the plan specifies seams, fixtures and mechanics.
     record and sends.
 12. RSW carry-overs (Sec 2a): a window deadline during the relay rung's
     bounded acquire closes `retry_window_closed` with the record `done` /
-    `window_closed` and is never deferred; a re-driven rung is declined by
-    the job-time window check when the window has passed; RSW's window close
-    refuses a recipient with an open attempt; `retrySend` is byte-identical
-    to its RSW-merged state on this branch.
+    `refused` when it was the re-drive's own and is never deferred; a
+    re-driven rung is declined by the job-time window check when the window
+    has passed and its `redriven` record closes `done` / `refused`; RSW's
+    window close refuses a recipient with a FOREIGN open attempt;
+    `retrySend`'s FILE is unchanged on this branch (its behavior changes
+    only through D3's typed errors, which it rethrows as before).
 13. `send_throttled` fires on 20429 and not on ECONNREFUSED (D4).
 14. Dashboard: `send_unconfirmed` renders "Not confirmed" / danger / not a
     failure in every relay position including the retry join, and on the
@@ -901,9 +965,13 @@ recipient is attempted) still throws under the marker and strands the pass;
 a relay continuation that early-returns (group closed, source gone) leaves its
 queued slots non-terminal, shared with the transient ladder; a send-time 21610
 gets no suppression bookkeeping; the passive match of an unknown-SID status
-callback against a pending reconcile (fenced webhook). Filed only if still
-open at filing time - share-skip-fix's Branch A may land them first: the
-`no_contact` copy and the broadcast-30003-retry slot update.
+callback against a pending reconcile (fenced webhook); and, added to the
+per-pass-setup issue at build time, the relay retry rung's own pre-claim
+throws (the row read, the lineage check, the conversation read, a
+suppression read that rejects, the no-pool throw) and a re-drive
+continuation's early returns, which strand a `redriven` record. Filed only
+if still open at filing time - share-skip-fix's Branch A may land them
+first: the `no_contact` copy and the broadcast-30003-retry slot update.
 
 The anchor issue's claim that `retrySend` "does not rely on redelivery" is
 corrected in the issue file: it has the same shape; its adoption follows RSW.

@@ -15,10 +15,13 @@
 //                 link, a checkbox, and a bulk Mark toured (N) toolbar; each
 //                 mark re-reads the tour first. PastToursView is a Past-only
 //                 child, so its selection and batch results never survive a
-//                 tab switch. The batch's busy flag, in-flight guard and
-//                 reload pointer are PAGE-owned, so a tab round trip while a
-//                 batch runs still shows every mark control disabled, and the
-//                 batch's refresh reaches the Past view mounted when it ends.
+//                 tab switch. The batch's busy flag (also its in-flight guard)
+//                 and the mounted view's reload slot are MODULE state - one
+//                 batch per browser tab - so a tab switch or a route change
+//                 (to a tour page and back) while a batch runs still shows
+//                 every mark control disabled, and the batch's refresh
+//                 reaches the Past view mounted when it ends. A full page
+//                 reload ends the batch.
 //
 //   Closed (/tours/closed) — the "not live" tours: status closed (terminal)
 //                 AND canceled (revivable - Cameron 2026-07-15), newest first
@@ -36,7 +39,7 @@
 // a closed tour routinely outlives its contact/unit (tenant placed, property
 // removed from inventory), and a live-only map rendered raw uuids for those rows.
 // Staff-facing vocabulary: "property" for the unit (per GLOSSARY.md).
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   TOUR_STATUS_LABELS,
@@ -274,54 +277,87 @@ function PastTourRow({
   );
 }
 
+// ---------------------------------------------------------------------------
+// The Past batch store - one bulk "Mark toured" batch per browser tab
+// ---------------------------------------------------------------------------
+
+// The runner's busy flag (which is also its in-flight guard) and the slot for
+// the MOUNTED Past view's reload live at MODULE scope, not in a component. A
+// batch keeps running after the view that started it unmounts: on a tab
+// switch, and on a route change (a row link or Record outcome to
+// /tours/:tourId, then back) that unmounts the whole page. So the flag outlives
+// every page instance: each Past view mounted meanwhile renders every mark
+// control disabled, the runner refuses a second batch, and the refresh reaches
+// whichever Past view is mounted when the batch ends. One batch per browser
+// tab, across tab switches AND route changes; a full page reload ends it (the
+// module state starts fresh).
+let batchRunning = false;
+const batchListeners = new Set<() => void>();
+
+function subscribeBatch(cb: () => void): () => void {
+  batchListeners.add(cb);
+  return () => {
+    batchListeners.delete(cb);
+  };
+}
+
+function readBatch(): boolean {
+  return batchRunning;
+}
+
+/** Called only on the runner's event-handler path - never in render or in an
+ *  effect. */
+function setBatchRunning(next: boolean): void {
+  if (batchRunning === next) return;
+  batchRunning = next;
+  for (const cb of batchListeners) cb();
+}
+
+/** The mounted Past view's reload; each view registers its own while mounted. */
+let mountedPastReload: (() => void) | null = null;
+
+/** Test isolation only: end any batch a previous test left running. */
+export function resetBulkBatchStoreForTests(): void {
+  setBatchRunning(false);
+  mountedPastReload = null;
+}
+
+/** The page's name maps. The batch state is NOT a prop: the busy flag, the
+ *  in-flight guard and the mounted view's reload slot are the module store
+ *  above, so they hold for every Past view in this browser tab - across tab
+ *  switches AND route changes (one batch per browser tab; a full page reload
+ *  ends it). */
 interface PastToursViewProps {
   contacts: Map<string, Contact>;
   units: Map<string, UnitItem>;
-  /** The batch's busy flag, owned by the PAGE (which survives a tab switch),
-   *  so a Past view remounted mid-batch (Past -> Active -> Past) still renders
-   *  every mark control disabled. Set only inside the runner. */
-  bulkBusy: boolean;
-  setBulkBusy: (busy: boolean) => void;
-  /** The in-flight guard, owned by the PAGE so a batch still running after
-   *  Past -> Active -> Past cannot be joined by a second one. Read and written
-   *  only inside event handlers. */
-  bulkBusyRef: React.RefObject<boolean>;
-  /** The page-owned pointer to the MOUNTED Past view's reload: this view
-   *  registers its hook's reload on mount and clears it on unmount. The
-   *  runner refreshes through it, so the refresh reaches whichever Past view
-   *  is showing when the batch ends. */
-  pastReloadRef: React.RefObject<(() => void) | null>;
 }
 
 /** The Past tab's body (spec 4.2-4.5): the lazy data hook, the bulk runner
  *  and the view's own batch state (selection, results, snapshot). Mounted
  *  ONLY while the Past view shows. */
-function PastToursView({
-  contacts,
-  units,
-  bulkBusy,
-  setBulkBusy,
-  bulkBusyRef,
-  pastReloadRef,
-}: PastToursViewProps): React.JSX.Element {
+function PastToursView({ contacts, units }: PastToursViewProps): React.JSX.Element {
   // Enabled for this component's whole life: it exists only on the Past view.
   const { status: pastStatus, past: pastTours, reload: reloadPast, reloadFailed } = usePastTours(true);
+  // True while ANY batch in this browser tab runs, including one an earlier,
+  // since-unmounted view started (the module store above).
+  const bulkBusy = useSyncExternalStore(subscribeBatch, readBatch);
 
-  // Register this view's reload with the page while mounted. A ref write in an
-  // effect - no state is set here. `reloadPast` is identity-stable, so this
-  // runs once per mount.
+  // Register this view's reload as the mounted one while mounted: a module
+  // write in an effect - no state is set here. The cleanup clears the slot
+  // only while it still holds THIS view's reload. `reloadPast` is
+  // identity-stable, so this runs once per mount.
   useEffect(() => {
-    pastReloadRef.current = reloadPast;
+    mountedPastReload = reloadPast;
     return () => {
-      pastReloadRef.current = null;
+      if (mountedPastReload === reloadPast) mountedPastReload = null;
     };
-  }, [pastReloadRef, reloadPast]);
+  }, [reloadPast]);
 
   // Bulk "Mark toured" (spec 4.5): the raw selection and the per-row results
   // of the LAST batch (cleared when the next one starts). `snapshot` remembers
   // what each id looked like when the batch ran, so a row the reload drops can
   // still be named in the above-toolbar block. The busy flag that drives the
-  // disabled controls and the re-entry guard are the page's (see the props).
+  // disabled controls and the re-entry guard are the module store's (above).
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [results, setResults] = useState<ReadonlyMap<string, MarkResult>>(new Map());
   const [snapshot, setSnapshot] = useState<ReadonlyMap<string, Tour>>(new Map());
@@ -378,14 +414,14 @@ function PastToursView({
   // Sequential on purpose - each PATCH rotates that tour's reminder ladder and
   // writes audit/activity rows; serial keeps those ordered and the per-row
   // result deterministic. Sends ONLY { status: 'toured' } - never an outcome,
-  // never closed. Ignores a call while a batch is in flight.
+  // never closed. Ignores a call while a batch is in flight anywhere in this
+  // browser tab.
   const markToured = async (ids: string[]): Promise<void> => {
-    if (bulkBusyRef.current) return;
+    if (batchRunning) return;
     const listed = new Map(pastTours.map((t) => [t.tourId, t]));
     const eligible = ids.filter((id) => notMarkedIds.includes(id));
     if (eligible.length === 0) return;
-    bulkBusyRef.current = true;
-    setBulkBusy(true);
+    setBatchRunning(true);
     setResults(new Map());
     setSnapshot(listed);
     const next = new Map<string, MarkResult>();
@@ -414,16 +450,17 @@ function PastToursView({
       for (const [id, r] of next) if (r.ok) remaining.delete(id);
       return remaining;
     });
-    pastReloadRef.current?.();
-    bulkBusyRef.current = false;
-    setBulkBusy(false);
-    // The refresh goes through the page-owned pointer, so it reaches the Past
-    // view mounted NOW. After a Past -> Active -> Past round trip mid-batch
-    // that is the remounted view (this closure's own setters above landed on
-    // the unmounted instance, a no-op in React 19); with no Past view mounted
-    // the call is a no-op and the next mount fetches fresh. The PATCHes
-    // already sent stand, and the page-owned flag and ref kept every mark
-    // control disabled and a second batch from starting meanwhile.
+    mountedPastReload?.();
+    setBatchRunning(false);
+    // The refresh goes through the module's mounted-view slot, so it reaches
+    // the Past view mounted NOW. After a tab switch, or a route change to a
+    // tour page and back, mid-batch that is a remounted view (this closure's
+    // own setters above landed on the unmounted instance, a no-op in React
+    // 19); with no Past view mounted the call is a no-op and the next mount
+    // fetches fresh. The PATCHes already sent stand, and the module-owned flag
+    // kept every mark control disabled - in every Past view of this browser
+    // tab - and a second batch from starting meanwhile. A full page reload
+    // ends the batch (and this loop with it).
   };
 
   if (pastStatus === 'idle') return <Spinner center />;
@@ -572,13 +609,6 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
   const navigate = useNavigate();
   const closed = view === 'closed';
   const past = view === 'past';
-  // The Past bulk runner's busy flag, in-flight guard and reload pointer live
-  // HERE, on the page that survives a tab switch, and are handed to the Past
-  // child (spec 4.5). The child sets the flag only inside the runner and
-  // registers its reload in the pointer while mounted.
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const bulkBusyRef = useRef(false);
-  const pastReloadRef = useRef<(() => void) | null>(null);
   const { status: toursStatus, upcoming, needsBooking } = useTours();
   const { status: contactsStatus, contacts: contactsList } = useContacts('all');
   const { status: unitsStatus, units: unitsList } = useListings();
@@ -742,18 +772,10 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
       ) : null}
 
       {/* --- Past view (/tours/past) - spec 4.3-4.5. The child owns the view's
-          selection and results and unmounts on a tab switch; the busy flag,
-          the in-flight guard and the reload pointer are the page's. --- */}
-      {!loading && !error && past ? (
-        <PastToursView
-          contacts={contactsMap}
-          units={unitsMap}
-          bulkBusy={bulkBusy}
-          setBulkBusy={setBulkBusy}
-          bulkBusyRef={bulkBusyRef}
-          pastReloadRef={pastReloadRef}
-        />
-      ) : null}
+          selection and results and unmounts on a tab switch; the batch's
+          busy flag, in-flight guard and reload slot are module state (one
+          batch per browser tab, see the store above PastToursView). --- */}
+      {!loading && !error && past ? <PastToursView contacts={contactsMap} units={unitsMap} /> : null}
 
       {/* --- Closed view (/tours/closed) --- */}
       {!loading && !error && closed ? (

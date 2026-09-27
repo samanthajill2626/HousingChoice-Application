@@ -14,7 +14,7 @@
 //     (usePastTours is mocked; pastState stays real via importActual)
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Tour, Contact, UnitItem } from '../../api/index.js';
 import type { ClosedToursState, PastToursState, ToursPageState } from './useTours.js';
@@ -90,7 +90,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { ApiError } from '../../api/index.js';
-import { ToursPage } from './ToursPage.js';
+import { ToursPage, resetBulkBatchStoreForTests } from './ToursPage.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -227,14 +227,22 @@ const TOUR_REQUESTED_NEW: Tour = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Shows where a row link landed and what state it carried (unit-test only). */
+/** Stands in for the tour page (unit-test only): shows where a row link landed
+ *  and what state it carried, and offers the tour page's back arrow - a link
+ *  to state.back, named "Back to tours", as TourDetail honors it (spec 4.6). */
 function LocationProbe(): React.JSX.Element {
   const l = useLocation();
+  const back = (l.state as { back?: string } | null)?.back ?? '/tours';
   return (
-    <output data-testid="loc">
-      {l.pathname}
-      {l.search}|{JSON.stringify(l.state ?? null)}
-    </output>
+    <>
+      <output data-testid="loc">
+        {l.pathname}
+        {l.search}|{JSON.stringify(l.state ?? null)}
+      </output>
+      <Link to={back} aria-label="Back to tours">
+        Back
+      </Link>
+    </>
   );
 }
 
@@ -285,6 +293,10 @@ beforeEach(() => {
   usePastToursSpy.mockImplementation(pastHookAnswer);
   getTour.mockReset();
   patchTour.mockReset();
+  // The Past batch state is MODULE state (one batch per browser tab), so it
+  // outlives a test's render: a test that fails while holding a PATCH must
+  // not leave the next test's controls disabled.
+  resetBulkBatchStoreForTests();
 });
 
 afterEach(() => {
@@ -828,11 +840,11 @@ describe('ToursPage - Past view', () => {
     patchTour.mockResolvedValue({ ...NOT_MARKED, status: 'toured' });
     // The mocked hook is not reactive, so the "reload" swaps its rows
     // SYNCHRONOUSLY inside reloadPast(): the runner refreshes (reloadPast,
-    // through the page's pointer) and then clears the page's busy flag in the
-    // same async continuation, and React batches both into ONE render that
-    // reads the new rows. Here the reload drops BOTH ids: p4 is canceled now,
-    // and p1 (marked toured) is gone because its "toured" row was, say, given
-    // an outcome meanwhile.
+    // through the module's mounted-view slot) and then clears the module's
+    // busy flag in the same async continuation, and React batches both into
+    // ONE render that reads the new rows. Here the reload drops BOTH ids: p4
+    // is canceled now, and p1 (marked toured) is gone because its "toured"
+    // row was, say, given an outcome meanwhile.
     reloadPast.mockImplementation(() => {
       pastRows = { status: 'ready', past: [], reloadFailed: false };
     });
@@ -897,7 +909,7 @@ describe('ToursPage - Past view', () => {
     const region = await screen.findByRole('region', { name: 'Past tours' });
 
     // Fresh view state (nothing selected, no result lines), but the batch is
-    // still running: the busy flag is the page's, so no control is enabled
+    // still running: the busy flag is module state, so no control is enabled
     // and silently inert.
     expect(screen.getByRole('button', { name: 'Mark toured (0)' })).toBeDisabled();
     expect(screen.getByRole('button', { name: `Mark toured: ${P1_LABEL}` })).toBeDisabled();
@@ -906,8 +918,60 @@ describe('ToursPage - Past view', () => {
     expect(within(region).queryByRole('status')).not.toBeInTheDocument();
 
     release!();
-    // The batch's refresh reaches the view mounted NOW (through the page-owned
-    // pointer), never the unmounted first one, and the controls come back.
+    // The batch's refresh reaches the view mounted NOW (through the module's
+    // mounted-view slot), never the unmounted first one, and the controls
+    // come back.
+    await waitFor(() => expect(reloadSecondVisit).toHaveBeenCalledTimes(1));
+    expect(reloadPast).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Select all not marked' })).toBeEnabled(),
+    );
+    expect(screen.getByRole('button', { name: `Mark toured: ${P1_LABEL}` })).toBeEnabled();
+    expect(patchTour).toHaveBeenCalledTimes(1);
+  });
+
+  it('a ROUTE change MID-BATCH (to the tour page and back) shows every mark control still disabled, ignores a row click, and the batch refreshes the mounted view', async () => {
+    const user = userEvent.setup();
+    readyPast([NOT_MARKED, NOT_MARKED_2]);
+    getTour.mockResolvedValue(NOT_MARKED);
+    let release: (() => void) | undefined;
+    patchTour.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ...NOT_MARKED, status: 'toured' });
+        }),
+    );
+    renderPage('/tours/past');
+    await user.click(screen.getByRole('button', { name: `Mark toured: ${P1_LABEL}` }));
+    await waitFor(() => expect(patchTour).toHaveBeenCalledTimes(1));
+
+    // Leave for the tour page while that PATCH is held (a row link stays
+    // enabled during a batch), which unmounts the whole ToursPage, then come
+    // back through the router the way the tour page's back arrow does. The
+    // page and its Past view are NEW instances, with their own reload.
+    await user.click(screen.getByRole('link', { name: `Tour for ${P1_LABEL}` }));
+    expect(screen.getByTestId('loc')).toHaveTextContent('/tours/p1|{"back":"/tours/past"}');
+    expect(screen.queryByRole('region', { name: 'Past tours' })).not.toBeInTheDocument();
+    const reloadSecondVisit = vi.fn();
+    usePastToursSpy.mockImplementation((enabled: boolean) => ({ ...pastHookAnswer(enabled), reload: reloadSecondVisit }));
+    await user.click(screen.getByRole('link', { name: 'Back to tours' }));
+    const region = await screen.findByRole('region', { name: 'Past tours' });
+
+    // The batch still runs, so every mark control is disabled, and a click on
+    // the very row being marked starts nothing beside it.
+    expect(screen.getByRole('button', { name: 'Mark toured (0)' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Select all not marked' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: `Mark toured: ${P1_LABEL}` })).toBeDisabled();
+    expect(screen.getByRole('button', { name: `Mark toured: ${P4_LABEL}` })).toBeDisabled();
+    for (const box of within(region).getAllByRole('checkbox')) expect(box).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: `Mark toured: ${P1_LABEL}` }));
+    expect(patchTour).toHaveBeenCalledTimes(1);
+    expect(getTour).toHaveBeenCalledTimes(1);
+    expect(within(region).queryByRole('status')).not.toBeInTheDocument();
+
+    release!();
+    // The refresh reaches the view mounted NOW, never the unmounted first
+    // one, and the controls come back.
     await waitFor(() => expect(reloadSecondVisit).toHaveBeenCalledTimes(1));
     expect(reloadPast).not.toHaveBeenCalled();
     await waitFor(() =>

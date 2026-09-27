@@ -11,6 +11,7 @@ import {
   InProcessOutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
 import type { PreparedMessageSend } from '../src/adapters/messaging.js';
+import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messagingErrors.js';
 import {
   _resetForTests,
   configureJobsLogger,
@@ -1369,7 +1370,9 @@ describe('broadcast.send (M1.8a)', () => {
 
     it('4a three consecutive unknowns brake the pass; the untried remainder is deferred, not attempted (D9)', async () => {
       seedUnit(world);
-      seedBroadcast(world, tenants(6));
+      const item = seedBroadcast(world, tenants(7));
+      // A terminal key AFTER the brake is skipped, never carried (build finding T7-12).
+      item.recipients['t-7'] = { status: 'sent', conversationId: 'conv-x', tsMsgId: 'ts-x' };
       const capture = wire();
       unknownOn(new Set(['+15550100001', '+15550100002', '+15550100003']));
       await runFirstPass();
@@ -1597,6 +1600,19 @@ describe('broadcast.send (M1.8a)', () => {
       expect(outbound.delayed).toHaveLength(0);
     });
 
+    it('7e a FIRST pass does not carry a recipient a foreign fresh attempt owns (T7-11)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, new Date().toISOString());
+      await runFirstPass();
+      expect(sends).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+    });
+
     it('7d a continuation that meets a reconciling record skips it and does not carry it', async () => {
       seedUnit(world);
       seedBroadcast(world, tenants(1));
@@ -1758,6 +1774,45 @@ describe('broadcast.send (M1.8a)', () => {
       expect(world.flagWrites.filter((f) => f.flag === 'sms_unreachable').map((f) => f.contactId)).toEqual(['t-3']);
       expect(b.status).toBe('failed');
       expect(b.last_error).toBe('all recipients failed');
+    });
+
+    it('13c the adapter kill switch fails the recipient with its prose token (D5, D23)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw new AdapterSmsSendingDisabledError('SMS sending is disabled');
+      };
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'sms_sending_disabled' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'rejected', cause: 'sms_sending_disabled' });
+    });
+
+    it('14 anything else thrown at the send is an UNKNOWN outcome (D2): handed to reconcile, never failed', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const { logger: log } = capturingLogger();
+      registerBroadcastSendJobHandler({
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        config: testConfig({ BUSINESS_PHONE_NUMBER: MAIN }),
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        unitsRepo: world.unitsRepo,
+        sendMessageService: async () => {
+          throw new Error('an untyped failure');
+        },
+        auditRepo: world.auditRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        events: world.events,
+        logger: log,
+      });
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling' });
+      expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(1);
     });
 
     // --- the cap-close gate (D8) and the re-drive pass (D13a, D16) ---------
@@ -2060,9 +2115,13 @@ describe('broadcast.send (M1.8a)', () => {
       expect(b.last_error).toBeUndefined();
     });
 
-    it('one reached recipient keeps the share sent, whatever else failed; only skips is sent too', async () => {
+    it.each([
+      ['dispatched (sending)', { status: 'sent', conversationId: 'c', tsMsgId: 'x' }],
+      ['carrier-confirmed sent', { status: 'sent', conversationId: 'c', tsMsgId: 'x', carrierSentAt: '2026-09-27T00:00:00.000Z' }],
+      ['delivered', { status: 'delivered', conversationId: 'c', tsMsgId: 'x' }],
+    ] as const)('one %s recipient keeps the share sent, whatever else failed', async (_name, reached) => {
       terminalBroadcast({
-        a: { status: 'sent', conversationId: 'c', tsMsgId: 'x' },
+        a: { ...reached },
         b: { status: 'failed', errorCode: '30007' },
         c: { status: 'failed', errorCode: 'send_unconfirmed' },
       });

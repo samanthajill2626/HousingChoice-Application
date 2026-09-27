@@ -11,6 +11,9 @@ import type { MeUser } from '../../api/index.js';
 const getVoiceMe = vi.fn();
 const startCellVerify = vi.fn();
 const confirmCellVerify = vi.fn();
+// getSettings feeds the voicemail greeting block mounted at the bottom of the
+// section (voicemail-greeting spec 4.7); every test here loads it with no greeting.
+const getSettings = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -18,6 +21,7 @@ vi.mock('../../api/index.js', async () => {
     getVoiceMe: (...a: unknown[]) => getVoiceMe(...a),
     startCellVerify: (...a: unknown[]) => startCellVerify(...a),
     confirmCellVerify: (...a: unknown[]) => confirmCellVerify(...a),
+    getSettings: (...a: unknown[]) => getSettings(...a),
   };
 });
 
@@ -27,7 +31,22 @@ function me(overrides: Partial<MeUser> = {}): MeUser {
   return { userId: 'u1', email: 'va@example.com', name: 'VA', role: 'va', ...overrides };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  getSettings.mockResolvedValue({
+    settings: {
+      missedCallAutoText: 'x',
+      missedCallAutoTextEnabled: true,
+      quickReplies: [],
+      preRingPauseSeconds: 2,
+      quietHoursEnabled: true,
+      quietHoursStart: '21:00',
+      quietHoursEnd: '08:00',
+      timezone: 'America/New_York',
+    },
+    welcomeTextDefault: 'w',
+  });
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe('VoiceSection — cell verification', () => {
@@ -161,5 +180,19 @@ describe('VoiceSection — cell verification', () => {
     );
     // busy reset by the finally — the Send code control is back and enabled.
     expect(screen.getByRole('button', { name: 'Send code' })).toBeEnabled();
+  });
+});
+
+describe('VoiceSection - voicemail greeting block', () => {
+  // voicemail-greeting spec 4.7: the block is mounted OUTSIDE the useMe ternary,
+  // so a /users/me failure never hides the greeting, and the block adds no alert
+  // of its own (the cell-verification flow owns the section's alert semantics).
+  it('still renders the greeting block when /users/me fails, adding no alert', async () => {
+    getVoiceMe.mockRejectedValue(new ApiError(500, 'http_500', 'boom'));
+    render(<VoiceSection />);
+    expect(await screen.findByText("Couldn't load your voice settings.")).toBeInTheDocument();
+    expect(await screen.findByText('No greeting uploaded - callers hear the built-in prompt.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Voicemail greeting', level: 3 })).toBeInTheDocument();
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
   });
 });

@@ -54,6 +54,9 @@ export const OUTAGE_BRAKE_UNKNOWN_STREAK = 3;
 // behavior and their status-less test fixtures.
 const KNOWN_REJECTED_CODES = new Set(['30007', '30005', '30006']);
 const KNOWN_RETRYABLE_CODES = new Set(['429', '30022']);
+// Twilio's "Too Many Requests" (not processed, safe to retry): retryable
+// whatever the status - but ranked AFTER the 5xx rule, so a 5xx stays unknown.
+const RATE_LIMIT_CODE = '20429';
 // A connection that never opened: nothing reached the provider (D1).
 const NETWORK_RETRYABLE = new Set(['ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN']);
 
@@ -80,11 +83,13 @@ function statusOf(err: unknown): number | undefined {
 /**
  * Classify one provider send failure (spec D1). Pure, no I/O. Precedence: a
  * recognized code first (30007 / 30005 / 30006 rejected; 429 / 30022
- * retryable); then the HTTP status (5xx unknown, 429 retryable, other 4xx
- * rejected - with or without a code); then the network code (a connection
- * that never opened is retryable); everything else, timeouts and dropped
- * sockets included, is unknown (D2: a wrong `unknown` costs one reconcile, a
- * wrong `rejected` invites a manual resend).
+ * retryable); then an HTTP 5xx (unknown, whatever the code); then Twilio's
+ * rate-limit code 20429 (retryable, whatever the status says or omits - D1
+ * "HTTP 429 or code 20429"; code review C-5); then the rest of the status
+ * (429 retryable, other 4xx rejected - with or without a code); then the
+ * network code (a connection that never opened is retryable); everything
+ * else, timeouts and dropped sockets included, is unknown (D2: a wrong
+ * `unknown` costs one reconcile, a wrong `rejected` invites a manual resend).
  */
 export function classifySendFailure(err: unknown): SendFailureClassification {
   if (err instanceof SmsSendingDisabledError) return { kind: 'rejected', code: SMS_SENDING_DISABLED_CODE };
@@ -97,8 +102,9 @@ export function classifySendFailure(err: unknown): SendFailureClassification {
   });
   if (code !== undefined && KNOWN_REJECTED_CODES.has(code)) return withMeta('rejected');
   if (code !== undefined && KNOWN_RETRYABLE_CODES.has(code)) return withMeta('retryable');
+  if (status !== undefined && status >= 500) return withMeta('unknown');
+  if (code === RATE_LIMIT_CODE) return withMeta('retryable');
   if (status !== undefined) {
-    if (status >= 500) return withMeta('unknown');
     if (status === 429) return withMeta('retryable');
     if (status >= 400) return withMeta('rejected');
   }

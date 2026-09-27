@@ -34,6 +34,14 @@ describe('classifySendFailure (spec D1/D2)', () => {
     expect(classifySendFailure(restException(429))).toMatchObject({ kind: 'retryable', status: 429 });
   });
 
+  it('a code 20429 is retryable whatever the status says or omits - after the 5xx rule (D1; code review C-5, FW1-7)', () => {
+    expect(classifySendFailure({ code: 20429 })).toEqual({ kind: 'retryable', code: '20429' });
+    expect(classifySendFailure({ code: '20429' })).toEqual({ kind: 'retryable', code: '20429' });
+    expect(classifySendFailure(restException(400, 20429))).toEqual({ kind: 'retryable', code: '20429', status: 400 });
+    // HTTP 5xx is unknown regardless of code: the 5xx rule decides first.
+    expect(classifySendFailure(restException(503, 20429))).toEqual({ kind: 'unknown', code: '20429', status: 503 });
+  });
+
   it('a 4xx with no code (unparseable body) is still rejected - Review Focus 1', () => {
     expect(classifySendFailure(restException(400))).toEqual({ kind: 'rejected', status: 400 });
   });

@@ -1978,9 +1978,11 @@ describe('relay.retryLeg (30003 ladder)', () => {
         expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
       });
 
-      it('closes a redriven record with the close code as its cause, after the slot (spec D8)', async () => {
+      it('closes a redriven record with the close code as its cause - the record FIRST, then the slot (spec D8; code review C-4 / R-a)', async () => {
         const row = await arrange();
         await seedRedriven(rungOwner(row));
+        const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+        const slotWrite = vi.spyOn(world.messagesRepo, 'applyRecipientSendResult');
 
         await runHandler(payloadFor(row));
 
@@ -1990,8 +1992,29 @@ describe('relay.retryLeg (30003 ladder)', () => {
           outcome: code === 'enqueue_failed' ? 'enqueue_failed' : 'refused',
           cause: code,
         });
+        expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotWrite.mock.invocationCallOrder[0]!);
         expect(closeLines(code)).toHaveLength(1);
         expect(persistedEmits()).toHaveLength(1);
+      });
+
+      it('writes nothing when another pass re-claims the redriven record between the gate read and the close - INFO, no emit (code review C-4 / R-a, FW2-4)', async () => {
+        const row = await arrange();
+        await seedRedriven(rungOwner(row));
+        const realGet = world.sendAttemptsRepo.get.bind(world.sendAttemptsRepo);
+        vi.spyOn(world.sendAttemptsRepo, 'get').mockImplementationOnce(async (owner) => {
+          const seen = await realGet(owner);
+          await world.sendAttemptsRepo.claim(rungOwner(row), facts, new Date().toISOString());
+          return seen;
+        });
+
+        await runHandler(payloadFor(row));
+
+        expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+        expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({ state: 'attempting', attemptNo: 2 });
+        expect(infoLogs().filter((l) => l['gate'] === 'reclaimed' && l['closeCode'] === code)).toHaveLength(1);
+        expect(closeLines(code)).toHaveLength(0);
+        expect(persistedEmits()).toEqual([]);
+        expect(errorLogs()).toEqual([]);
       });
 
       it.each<[string, 'attempting' | 'reconciling']>([

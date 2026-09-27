@@ -401,7 +401,8 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      *
      * SOR D8: this is a close by a writer OTHER than the recipient's own
      * attempt, so each key passes the D8 gate first: an absent, done/retryable
-     * or redriven record is closed (a redriven one's record too - `code` keeps
+     * or redriven record is closed (a redriven one's record too, FIRST, and
+     * its slot only when that close won - code review C-4 / R-a; `code` keeps
      * the caller's reason, `transient_cap` or `enqueue_failed`); a stale
      * attempting record is taken over and handed to reconcile (so a recipient
      * whose release write failed still reaches a verdict at the cap); a live
@@ -431,16 +432,20 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
             log.info({ ...ctx, gate: gate.kind, closeCode: code }, 'broadcastFanOut: close left the recipient to its own attempt');
             continue;
           }
+          // Code review C-4 / R-a: a redriven record closes FIRST, and the slot
+          // only when that won - a pass that re-claimed it since keeps it.
+          if (
+            gate.record?.state === 'redriven' &&
+            !(await attempts.closeRedriven(owner, {
+              outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
+              cause: code,
+            }))
+          ) {
+            log.info({ ...ctx, closeCode: code }, 'broadcastFanOut: close not written - another pass re-claimed the re-driven recipient');
+            continue;
+          }
           const closed = await repo.closeRecipientIfQueued(payload.broadcastId, contactKey, code, 'failed');
           if (closed.moved && closed.item) emitBroadcastProgress(events, payload.broadcastId, closed.item);
-          if (gate.record?.state === 'redriven') {
-            await guardWrite(log, ctx, 'closeRedriven', () =>
-              attempts.closeRedriven(owner, {
-                outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
-                cause: code,
-              }),
-            );
-          }
         } catch (err) {
           log.error({ err, ...ctx, label: 'capClose' }, 'broadcastFanOut: closing one recipient failed; the rest still close');
         }
@@ -616,7 +621,8 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      * A fence's decline, behind the D8 gate: the fence writes its slot only
      * when no live attempt owns the recipient. A redriven record reached here
      * (on the re-drive pass or on any continuation that still carries the key)
-     * is closed done/refused with the fence's code.
+     * is closed done/refused with the fence's code - FIRST, the slot only when
+     * that close won (code review C-4 / R-a).
      */
     async function declineAtFence(owner: BroadcastOwner, fence: Fence): Promise<void> {
       const ctx = recipientCtx(owner.contactKey);
@@ -634,19 +640,20 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         await handOff(owner, gate.record.attemptedAt);
         return;
       }
-      // Code review C-3: a PREPARE write, not a failure arm - a throw reaches
-      // the unit's prepare catch, which defers the recipient and carries it.
+      // Code review C-3 and C-4 / R-a: PREPARE writes, not failure arms - a
+      // throw reaches the unit's prepare catch, which defers and carries. A
+      // redriven record closes FIRST; a pass that re-claimed it since keeps
+      // the recipient, so the fence writes nothing and does not carry it.
+      if (gate.record?.state === 'redriven' && !(await attempts.closeRedriven(owner, { outcome: 'refused', cause: fence.code }))) {
+        log.info({ ...ctx, fence: fence.code }, 'broadcastFanOut: fence not written - another pass re-claimed the re-driven recipient');
+        return;
+      }
       await recordRecipient(repo, payload.broadcastId, owner.contactKey, { status: fence.status, errorCode: fence.code });
       emitBroadcastProgress(
         events,
         payload.broadcastId,
         await repo.bumpStats(payload.broadcastId, { [fence.bucket]: 1, queued: -1 }),
       );
-      if (gate.record?.state === 'redriven') {
-        await guardWrite(log, ctx, 'closeRedriven', () =>
-          attempts.closeRedriven(owner, { outcome: 'refused', cause: fence.code }),
-        );
-      }
       if (fence.status === 'failed') failedCount += 1;
       else skippedCount += 1;
       if (fence.note?.level === 'warn') log.warn({ ...ctx }, fence.note.msg);

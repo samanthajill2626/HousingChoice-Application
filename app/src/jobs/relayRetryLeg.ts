@@ -655,10 +655,12 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
      * rung) is a close by a writer other than the rung's own attempt, so it
      * passes the D8 gate first:
      *   - PROCEED (no record, done/retryable, redriven): `write` as today; a
-     *     redriven record is then closed done with the close's code as cause
+     *     redriven record is closed done with the close's code as cause FIRST
      *     (spec D8: the decline would have applied to the re-drive equally) -
      *     `enqueue_failed` for the job's own enqueue failure, else `refused`
-     *     (the cap-close rule, build finding G7).
+     *     (the cap-close rule, build finding G7) - and `write` runs only when
+     *     that close won (code review C-4 / R-a): a pass that re-claimed the
+     *     rung since keeps it (INFO, no write).
      *   - DEFER (a live attempt, or a reconcile, owns the rung): WARN, no write.
      *   - SKIP (the attempt is terminal): INFO, no write.
      *   - TAKEN_OVER (a stale attempt, now reconciling): handed to reconcile
@@ -675,15 +677,27 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       const gate = await gateFor(attempts, rungOwner, Date.now());
       switch (gate.kind) {
         case 'proceed':
-          await write(code);
           if (gate.record?.state === 'redriven') {
-            await guardWrite(log, keyCtx, 'closeRedriven', () =>
-              attempts.closeRedriven(rungOwner, {
+            // Code review C-4 / R-a: the record FIRST - a pass that re-claimed
+            // the re-driven rung since keeps it, and its slot is not closed.
+            let closed = false;
+            const wrote = await guardWrite(log, keyCtx, 'closeRedriven', async () => {
+              closed = await attempts.closeRedriven(rungOwner, {
                 outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
                 cause: code,
-              }),
-            );
+              });
+            });
+            if (!closed) {
+              if (wrote) {
+                log.info(
+                  { ...keyCtx, ...extra, gate: 'reclaimed', closeCode: code },
+                  'relayRetryLeg: close not written - another pass re-claimed the re-driven retry leg',
+                );
+              }
+              return false;
+            }
           }
+          await write(code);
           return true;
         case 'defer':
           log.warn(

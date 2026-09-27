@@ -2473,6 +2473,78 @@ describe('relay.fanOut (M1.7)', () => {
       expect(line).toHaveLength(1);
       expect(String(line[0]!['msg'])).toContain('close failed');
     });
+
+    // --- code review C-4 / R-a (FW2-4): a close of a REDRIVEN record by
+    // another writer closes the record FIRST and writes its slot only when
+    // that won - a pass that re-claimed the record in between keeps the slot.
+
+    /** The R-a race: the gate reads the record redriven, then another pass claims it before the close lands. */
+    function reclaimAfterGateRead(owner: SendAttemptOwner): void {
+      const realGet = world.sendAttemptsRepo.get.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockImplementationOnce(async (o) => {
+        const seen = await realGet(o);
+        await world.sendAttemptsRepo.claim(owner, seedFacts, new Date().toISOString());
+        return seen;
+      });
+    }
+    const reclaimedLines = () => capture.atLevel(30).filter((l) => String(l['msg']).includes('re-claimed'));
+
+    it('C-4 / R-a: a cap-close of a redriven record another pass re-claims after the gate read writes no slot - the re-claimer keeps it (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      reclaimAfterGateRead(ownerOf(source, 'c-bob'));
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(reclaimedLines()).toHaveLength(1);
+      expect(reclaimedLines()[0]).toMatchObject({ recipientKey: 'c-bob', closeCode: 'transient_cap' });
+    });
+
+    it('C-4 / R-a: a cap-close of a redriven record closes the record BEFORE the slot (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotClose = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'transient_cap' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotClose.mock.invocationCallOrder[0]!);
+    });
+
+    it('C-4 / R-a: the suppression arm on a redriven record another pass re-claims after the gate read writes nothing and carries nothing (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      reclaimAfterGateRead(ownerOf(source, 'c-bob'));
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(world.conversations.get('conv-relay-1')!.relay_opted_out_members?.['c-bob']).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 2 });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(reclaimedLines()).toHaveLength(1);
+      expect(reclaimedLines()[0]).toMatchObject({ memberKey: 'c-bob' });
+    });
+
+    it('C-4 / R-a: the suppression arm closes a redriven record BEFORE its slot (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotWrite = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'contact_opted_out' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'contact_opted_out' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotWrite.mock.invocationCallOrder[0]!);
+    });
   });
 });
 

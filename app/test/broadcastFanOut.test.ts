@@ -2342,6 +2342,88 @@ describe('broadcast.send (M1.8a)', () => {
       expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
       expect(world.sent).toHaveLength(0);
     });
+
+    // --- code review C-4 / R-a (FW2-4): a close of a REDRIVEN record by
+    // another writer closes the record FIRST and writes its slot only when
+    // that won - a pass that re-claimed the record in between keeps the slot.
+
+    /** The R-a race: the gate reads the record redriven, then another pass claims it before the close lands. */
+    function reclaimAfterGateRead(k: string): void {
+      const realGet = world.sendAttemptsRepo.get.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockImplementationOnce(async (owner) => {
+        const seen = await realGet(owner);
+        await world.sendAttemptsRepo.claim(ownerOf(k), seedFacts, new Date().toISOString());
+        return seen;
+      });
+    }
+    const reclaimedLines = (capture: LogCapture) =>
+      capture.atLevel(30).filter((l) => String(l['msg']).includes('re-claimed'));
+
+    it('C-4 / R-a: a cap-close of a redriven record another pass re-claims after the gate read writes no slot - the re-claimer keeps it (FW2-4)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      // Close B: the ladder is spent when this first pass begins.
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      reclaimAfterGateRead('t-1');
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(sends).toHaveLength(0);
+      expect(reclaimedLines(capture)).toHaveLength(1);
+      expect(reclaimedLines(capture)[0]).toMatchObject({ recipientKey: 't-1', closeCode: 'transient_cap' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+    });
+
+    it('C-4 / R-a: a cap-close of a redriven record closes the record BEFORE the slot (FW2-4)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotClose = vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued');
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'transient_cap' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotClose.mock.invocationCallOrder[0]!);
+    });
+
+    it('C-4 / R-a: a fence on a redriven record another pass re-claims after the gate read writes nothing and carries nothing (FW2-4)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      const capture = wire();
+      await seedRedriven('t-1');
+      reclaimAfterGateRead('t-1');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(b.stats.skipped_opted_out).toBe(0);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 2 });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(reclaimedLines(capture)).toHaveLength(1);
+      expect(reclaimedLines(capture)[0]).toMatchObject({ recipientKey: 't-1', fence: 'opted_out' });
+    });
+
+    it('C-4 / R-a: a fence of a redriven record closes the record BEFORE its slot (FW2-4)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      await seedRedriven('t-1');
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotWrite = vi.spyOn(world.broadcastsRepo, 'setRecipient');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'opted_out' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotWrite.mock.invocationCallOrder[0]!);
+    });
   });
 
   describe('finalize (spec D16a)', () => {

@@ -1240,8 +1240,9 @@ async function runRelayFanOutExecution(
    *
    * SOR D8: this is a close by a writer OTHER than the member's own attempt,
    * so each member passes the D8 gate first: an absent, done/retryable or
-   * redriven record is closed (a redriven one's record too - `code` keeps
-   * the caller's reason, build finding G7); a stale attempting record is
+   * redriven record is closed (a redriven one's record too, FIRST, and its
+   * slot only when that close won - code review C-4 / R-a; `code` keeps the
+   * caller's reason, build finding G7); a stale attempting record is
    * taken over and handed to reconcile; a live or terminal one is left to
    * its owner. The slot close itself is conditional: it writes an ABSENT slot
    * (a legacy source starts with an empty map) or a `queued` one with no
@@ -1267,18 +1268,22 @@ async function runRelayFanOutExecution(
           log.info({ ...ctx, gate: gate.kind, closeCode: code }, 'relayFanOut: close left the member to its own attempt');
           continue;
         }
+        // Code review C-4 / R-a: a redriven record closes FIRST, and the slot
+        // only when that won - a pass that re-claimed it since keeps it.
+        if (
+          gate.record?.state === 'redriven' &&
+          !(await attempts.closeRedriven(owner, {
+            outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
+            cause: code,
+          }))
+        ) {
+          log.info({ ...ctx, closeCode: code }, 'relayFanOut: close not written - another pass re-claimed the re-driven member');
+          continue;
+        }
         await messages.closeRelayRecipientIfUnsent(payload.relayConversationId, payload.sourceTsMsgId, key, {
           status: 'failed',
           errorCode: code,
         });
-        if (gate.record?.state === 'redriven') {
-          await guardWrite(log, ctx, 'closeRedriven', () =>
-            attempts.closeRedriven(owner, {
-              outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
-              cause: code,
-            }),
-          );
-        }
       } catch (err) {
         log.error({ err, ...ctx, label: 'capClose' }, 'relayFanOut: closing one member failed; the rest still close');
       }
@@ -1856,7 +1861,17 @@ export async function sendOneRelayLeg(args: {
           attemptRef: { attemptNo: gate.record.attemptNo, attemptedAt: gate.record.attemptedAt },
         };
       }
-      const redriven = gate.record?.state === 'redriven';
+      // A redriven record belongs to whichever pass reaches it (spec D8): the
+      // decline would have applied to the re-drive equally, so it closes it -
+      // FIRST (code review C-4 / R-a): a pass that re-claimed it since keeps
+      // the member, and nothing is written. A throw is the pre-claim catch's.
+      if (
+        gate.record?.state === 'redriven' &&
+        !(await sendAttempts.closeRedriven(owner, { outcome: 'refused', cause: 'contact_opted_out' }))
+      ) {
+        log.info({ ...ctx }, 'relayFanOut: suppression not written - another pass re-claimed the re-driven member');
+        return { kind: 'skipped_terminal' };
+      }
       if (transport.kind === 'versioned') {
         await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
       }
@@ -1864,13 +1879,6 @@ export async function sendOneRelayLeg(args: {
         status: 'failed',
         errorCode: 'contact_opted_out',
       }, transport);
-      if (redriven) {
-        // A redriven record belongs to whichever pass reaches it (spec D8): the
-        // decline would have applied to the re-drive equally, so it closes it.
-        await guardWrite(log, ctx, 'closeRedriven', () =>
-          sendAttempts.closeRedriven(owner, { outcome: 'refused', cause: 'contact_opted_out' }),
-        );
-      }
       try {
         await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
           ...(member.contactId !== undefined &&

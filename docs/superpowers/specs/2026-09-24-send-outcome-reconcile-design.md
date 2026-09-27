@@ -2,7 +2,7 @@
 
 Anchor issue: `throw-for-redelivery-defeated-by-job-marker` (high).
 Branch `feat/send-outcome-reconcile`, cut from `main@685f2ede`, 2026-09-24.
-Revision 9 (after design review rounds 1-4, the 2026-09-25 cross-branch
+Revision 10 (after design review rounds 1-4, the 2026-09-25 cross-branch
 sequencing with `feat/retry-send-window` and `feat/share-skip-fix`, the RSW
 planner's 2026-09-26 relay, kept verbatim at
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/handoffs/rsw-relay-2026-09-26.md`,
@@ -349,8 +349,10 @@ writes they are today.
 **D8. Every close of a recipient by a writer OTHER than its own attempt
 proceeds only when no attempt has claimed it.** Before writing a slot terminal
 - `closeBroadcast` and `closeRelay` (the cap and enqueue-failed closes), the
-relay retry job's gate refusals and the relay opt-out arm (which write the
-slot before that job's own claim) - the writer reads the recipient's attempt
+broadcast pass's five fences, the relay retry job's gate refusals and the
+relay opt-out arm (all of which write the slot before that pass's own claim,
+and can meet a recipient another attempt owns because a deferred key is
+carried back through them) - the writer reads the recipient's attempt
 record with a strongly consistent PER-KEY read (a batch read that reports a
 key unprocessed must be re-read, never treated as absent) and closes the
 recipient only if the record is ABSENT or `done` / `retryable`. Any other
@@ -558,8 +560,14 @@ retry rung; not this branch.)
 **D13. The lookup, and its three verdicts.**
 
 - **Known SID (on the record):** fetch that message by SID (D17). The verdict
-  is `found`. A fetch that fails is a job failure (a genuine retry, D11),
-  never a verdict.
+  is `found` - unless that SID's pointer already resolves to ANOTHER owner or
+  recipient (a same-body sibling's reconcile adopted it first, or a record
+  from a race), in which case the verdict is `unresolved` with cause
+  `sid_held_elsewhere`: the message exists, it is not re-sent, and the ERROR
+  names both owners. A fetch that fails is a job failure (a genuine retry,
+  D11), never a verdict. To make that case rare, the lookup path also
+  excludes any candidate whose SID appears on a sibling attempt record for
+  the same recipient and sender (the index Query of D8a returns them).
 - **Otherwise** list the provider's messages to that recipient from that
   sender (D17) at the provider's maximum page size (1000 for the Messages
   list; the driver asserts the size it asked for is the size it got), walking

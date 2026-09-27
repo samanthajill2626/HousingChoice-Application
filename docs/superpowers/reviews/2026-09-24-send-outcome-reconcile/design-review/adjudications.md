@@ -194,3 +194,35 @@ ACCEPT.
 **Round 1 outcome:** 49 raw findings, 32 distinct; ACCEPT 32 (3 partly), REJECT
 0, DEFER 0. Decisions changed: none in the SPEC; the plan's task order and
 several mechanisms changed, so plan round 2 runs with one continued reviewer.
+
+## Plan round 2 (2026-09-26) - reviewer B continued, with A's round-1 report
+
+Plan revision 2 @16dd3dda. Report: `plan-r2-reviewer-b.md` (19 findings).
+Two findings are SPEC rulings (folded into spec revision 10); the rest are
+plan mechanics. Plan revision 3 carries every ACCEPT and is SELF-CONTAINED
+(finding 3): no task cites an earlier revision.
+
+| # | finding | ruling | change |
+|---|---|---|---|
+| 1 | Task 8's outer catch decides "did the send happen" by whether `result` was assigned; an `unknown` whose `handToReconcile` write throws is released as retryable and re-sent | ACCEPT (HIGH) | Both units track an explicit `phase` ('prepare' -> 'sending' set BEFORE the provider call -> 'record'); a throw at phase 'sending' or later is NEVER released as retryable: it is logged at ERROR, the record is left `attempting` (the stale-claim takeover or the sweeper resolves it), and the unit returns the terminal-for-the-pass kind `stranded` (slot untouched; counts as closed for the pass; not toward the brake). |
+| 2 | Task 7's catch arms do their own writes unprotected; a DB blip throws out of the loop; `outcome` is not hoisted | ACCEPT (HIGH) | Every failure-arm write goes through `guardWrite(label, fn)` which catches, logs ERROR with the owner and recipient, and never throws (D7a); `outcome` is hoisted above the try; the outer catch's last arm can therefore never rethrow. |
+| 3 | revision 2 cites "revision 1" content no longer in the file (18 places); the D3 tests and the repo-primitive tests are listed nowhere | ACCEPT (HIGH) | Revision 3 restores every test list and every code block in place; the word "revision" appears only in the header. |
+| 4 | Task 5 wires `sendAttemptsRepo` into the handlers' deps before the field exists | ACCEPT | Task 5 adds the optional field to the three deps interfaces (unused until Tasks 7-9) and lists the three job files. |
+| 5 | `heldBy` excludes only pointer-held SIDs; a same-body sibling can adopt first; the known-SID reconcile then gets `other` with no arm | ACCEPT - SPEC RULING (D13, revision 10) | A known SID whose pointer resolves to another owner is `unresolved` cause `sid_held_elsewhere` (never re-sent); the lookup also excludes candidates whose SID appears on a sibling record from the index Query. Task 10 gains both. |
+| 6 | `setRelayRecipientAttemptedAt` gives one names list for two statements | ACCEPT | Per-statement names/values. |
+| 7 | legacy relay adoption's `status IN (queued, sent)` overwrites a callback-advanced `sent` with `queued`; no create-if-absent | CONCEDE (contest of A14/B25 upheld) | The legacy adoption write uses the file's own `allowedPriorStatuses(patch.status)` plus same-status idempotence, and seeds an absent slot first (`if_not_exists`). |
+| 8 | the new D8 gates skip only on "foreign open"; D8 allows a close only when absent or done/retryable; a `done/sent` queued+sid leg or a stale attempting record gets overwritten | ACCEPT | Every pre-claim decline (broadcast fences, relay suppression arm, the rung's refuseGate and window close) proceeds only when the record is ABSENT, `done/retryable`, or the pass's OWN `redriven`; a stale `attempting` is taken over into reconcile; anything else defers/skips. |
+| 9 | the page-size guard warns when a page is larger than requested, which cannot happen; a provider cap returns SMALLER pages | CONCEDE (contest of B11/A20 upheld) | The driver reads the page payload's `page_size` and WARNs when it differs from the requested size. |
+| 10 | adding `sid`/`providerTs` to `world.sent` entries breaks an exact `toEqual` at twilioStatusWebhook.test.ts:1275 | ACCEPT | `world.sent` keeps its shape; a parallel `world.sentDetails` carries `{ params, sid, providerTs }`. |
+| 11 | a re-drive pass that defers before its claim and then hits the cap skips its own `redriven` record in the cap-close | ACCEPT | On a re-drive pass the cap-close treats the pass's own `redriven` record as closable (`closeRedriven(refused, transient_cap)`). |
+| 12 | broadcast fences are ungated though the deferral puts foreign-owned keys through them; D8's enumeration omits them | ACCEPT - SPEC RULING (D8, revision 10) | The fences join D8's list; Task 7 gates them exactly as the relay suppression arm. |
+| 13 | case 21's "no phone# in any payload" conflicts with the continuation payloads' raw `recipientKeys` and `senderKey`; Task 7 logs the raw owner | ACCEPT (narrowed) | The continuation payloads' shapes are pre-existing (`recipientKeys` carries `phone#` keys today) and out of scope; the assertion is scoped to the `send.reconcile` payload; every log line uses `safeRecipientKey`. |
+| 14 | three seam descriptions still wrong (log capture lines are parsed objects; `atLevel` takes a number; `createGroupOpen` returns no member data) | ACCEPT | Wording fixed; Task 12 tells the builder to read the helper for the member numbers it needs and to register ad-hoc parties itself. |
+| 15 | `reconcileDelayMs` must read the lane-overridable delays | ACCEPT | It calls `reconcileCheckDelaysMs()`. |
+| 16 | the B24 takeover slot-write deviation is stated nowhere | ACCEPT | Added to the plan's declared deviations. |
+| 17 | Task 15 omits `accepted-send-lost-when-append-fails` and `exactly-once-send-intent` | ACCEPT | Both get dated sections. |
+| 18 | two contacts sharing a phone in one broadcast can both adopt the same message | ACCEPT | "mine" for a broadcast = `broadcast_id` matches AND (the row's `recipient_contact_id` equals the owner's contact, or the owner's slot already carries that `tsMsgId`); otherwise `other`. |
+| 19 | the D9 streak is not reset by fence skips or refused-!fresh skips | ACCEPT | Any outcome other than an unknown hand-off resets the streak, skips included. |
+
+**Round 2 outcome:** 19 findings, ACCEPT 19 (2 as conceded contests, 2 as spec
+rulings). Plan mechanics changed -> plan round 3 with the same reviewer.

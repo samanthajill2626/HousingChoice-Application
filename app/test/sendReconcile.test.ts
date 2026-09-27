@@ -28,6 +28,13 @@ import {
   registerBroadcastSendJobHandler,
   type BroadcastSendPayload,
 } from '../src/jobs/broadcastFanOut.js';
+import { RELAY_FANOUT_JOB, type RelayFanOutPayload } from '../src/jobs/relayFanOut.js';
+import {
+  RELAY_RETRY_LEG_JOB,
+  _resetRelayRetryLegForTests,
+  registerRelayRetryLegJobHandler,
+  type RelayRetryLegPayload,
+} from '../src/jobs/relayRetryLeg.js';
 import {
   SEND_RECONCILE_JOB,
   reconcileCheckDelaysMs,
@@ -38,10 +45,13 @@ import {
 } from '../src/jobs/sendReconcile.js';
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
+import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
 import { bodyFingerprint, hashRecipientKey, recipientDigest } from '../src/lib/sendFingerprint.js';
 import { RECONCILE_CHECK_DELAYS_MS } from '../src/lib/sendOutcome.js';
 import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { ConversationItem, ConversationParticipant } from '../src/repos/conversationsRepo.js';
+import { buildTsMsgId, type MessageItem, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import type { SendAttemptFacts, SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
@@ -996,6 +1006,495 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(slotOf(key)).toMatchObject({ status: 'sent' });
       expect(JSON.stringify(capture.lines)).not.toContain('phone#+');
       expect(lines(30).some((l) => l['recipientKey'] === 'phone#redacted')).toBe(true);
+    });
+  });
+
+  describe('the relay owners', () => {
+    const CONV = 'conv-relay-1';
+    const POOL = '+15550109000';
+    const ALICE = '+15550100001';
+    const BOB = '+15550100002';
+    const CAROL = '+15550100003';
+    const DAVE = '+15550100004';
+    /** The COMPOSED leg copy a leg sends (the record's fingerprint is over this, never the raw body). */
+    const LEG_BODY = 'Alice: is the unit still available?';
+    /** The root (failed) leg a retry rung retries - the key the rung's root emit announces. */
+    const ROOT = '2026-09-27T10:00:00.000Z#SMrelay-root-1';
+    const CONT = { senderKey: 'c-alice' };
+    const MEMBERS: ConversationParticipant[] = [
+      { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+      { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      { contactId: 'c-carol', phone: CAROL, name: 'Carol' },
+    ];
+    let rowCounter = 0;
+
+    beforeEach(() => {
+      rowCounter = 0;
+    });
+
+    afterEach(() => {
+      _resetRelayRetryLegForTests();
+    });
+
+    function seedRelay(overrides: Partial<ConversationItem> = {}): ConversationItem {
+      // An hour-old inbox position, so an adoption's status-preserving touch visibly moves it.
+      const then = new Date(Date.now() - 3_600_000).toISOString();
+      const conv: ConversationItem = {
+        conversationId: CONV,
+        participant_phone: POOL,
+        pool_number: POOL,
+        status: 'open',
+        last_activity_at: then,
+        type: 'relay_group',
+        ai_mode: 'manual',
+        participants: MEMBERS.map((m) => ({ ...m })),
+        created_at: then,
+        ...overrides,
+      };
+      world.conversations.set(CONV, conv);
+      return conv;
+    }
+
+    /** An inbound relay SOURCE row (legacy unless `versioned`), its slots as given. */
+    function seedSource(opts: { slots?: Record<string, RelayRecipientDelivery>; direction?: 'inbound' | 'outbound' } = {}): MessageItem {
+      rowCounter += 1;
+      const providerTs = new Date(Date.now() - 1000 * rowCounter).toISOString();
+      const sid = `SMrelay-in-${rowCounter}`;
+      const item: MessageItem = {
+        conversationId: CONV,
+        tsMsgId: buildTsMsgId(providerTs, sid),
+        type: 'sms',
+        direction: opts.direction ?? 'inbound',
+        author: 'unknown',
+        body: 'is the unit still available?',
+        provider_sid: sid,
+        provider_ts: providerTs,
+        delivery_status: 'delivered',
+        created_at: providerTs,
+        relay_sender_key: 'c-alice',
+        delivery_recipients: structuredClone(opts.slots ?? { 'c-bob': { status: 'queued' } }),
+      };
+      world.messages.push(item);
+      return item;
+    }
+
+    /** A LEGACY 30003 retry row, as the status webhook's claim writes it, for Bob's leg of ROOT. */
+    function seedRetryRow(): MessageItem {
+      rowCounter += 1;
+      const providerTs = new Date().toISOString();
+      const providerSid = relayRetryProviderSid(relayRetryDigest(ROOT, BOB), rowCounter);
+      const row: MessageItem = {
+        conversationId: CONV,
+        tsMsgId: buildTsMsgId(providerTs, providerSid),
+        type: 'sms',
+        direction: 'inbound',
+        author: 'unknown',
+        body: 'is the unit still available?',
+        provider_sid: providerSid,
+        provider_ts: providerTs,
+        delivery_status: 'queued',
+        created_at: providerTs,
+        relay_sender_key: 'c-alice',
+        delivery_recipients: { 'c-bob': { status: 'queued' } },
+        relay_retry_of: ROOT,
+        relay_retry_member_key: 'c-bob',
+        relay_retry_attempt: 1,
+        relay_retry_dest_digest: relayRetryDigest(ROOT, BOB),
+        relay_retry_origin_direction: 'inbound',
+        relay_retry_leg_body: LEG_BODY,
+        relay_retry_window_start: new Date(Date.now() - 60_000).toISOString(),
+      };
+      world.messages.push(row);
+      return row;
+    }
+
+    const legOwner = (source: MessageItem, memberKey = 'c-bob'): SendAttemptOwner => ({
+      kind: 'relay_leg',
+      relayConversationId: CONV,
+      sourceTsMsgId: source.tsMsgId,
+      memberKey,
+    });
+    const rungOwner = (row: MessageItem): SendAttemptOwner => ({
+      kind: 'relay_rung',
+      relayConversationId: CONV,
+      retryTsMsgId: row.tsMsgId,
+      memberKey: 'c-bob',
+    });
+
+    /** A leg attempt's facts, exactly as sendOneRelayLeg computes them: from the pool number, over the leg copy. */
+    function legFacts(opts: { phone?: string; body?: string; mediaCount?: number } = {}): SendAttemptFacts {
+      const fp = bodyFingerprint(opts.body ?? LEG_BODY);
+      return {
+        recipientDigest: recipientDigest(POOL, opts.phone ?? BOB),
+        sender: POOL,
+        bodyHash: fp.hash,
+        bodyShort: fp.short,
+        mediaCount: opts.mediaCount ?? 0,
+      };
+    }
+
+    function legPayload(
+      owner: SendAttemptOwner,
+      at: string,
+      checkNo = 0,
+      continuation: SendReconcilePayload['continuation'] | null = CONT,
+    ): SendReconcilePayload {
+      return { owner: toOwnerRef(owner), attemptedAt: at, checkNo, ...(continuation !== null && { continuation }) };
+    }
+
+    const plantLeg = (providerSid: string, m: Partial<FakeProviderMessage> = {}) =>
+      plant({ providerSid, body: LEG_BODY, to: BOB, from: POOL, ...m });
+    const rowOf = (row: MessageItem) => world.messages.find((m) => m.tsMsgId === row.tsMsgId)!;
+    const slotAt = (row: MessageItem, key = 'c-bob') => rowOf(row).delivery_recipients?.[key];
+    const persisted = () => world.emitted.filter((e) => e.event === 'message.persisted').map((e) => e.payload);
+
+    it('3 an undelivered 30005 adopts on a relay leg as undelivered with its code - no unreachable flag - and the thread is told (A1)', async () => {
+      register();
+      seedRelay();
+      const source = seedSource();
+      const owner = legOwner(source);
+      const at = await reconciling(owner, legFacts());
+      const sentAt = new Date().toISOString();
+      plantLeg('SMleg-1', { providerStatus: 'undelivered', errorCode: '30005', sentAt });
+      await runCheck(legPayload(owner, at));
+      expect(slotAt(source)).toEqual({ status: 'undelivered', errorCode: '30005', sid: 'SMleg-1', sentAt });
+      // An MMS leg's 30005 says nothing of SMS reachability: the relay owner records the code only (D15).
+      expect(world.flagWrites).toEqual([]);
+      expect(world.relaySidPointers.get('SMleg-1')).toEqual({ conversationId: CONV, tsMsgId: source.tsMsgId, memberKey: 'c-bob' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMleg-1' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: source.tsMsgId, direction: 'inbound', deliveryStatus: 'undelivered' }]);
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('adopted terminal failure - webhook side effects skipped'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ errorCode: '30005', owner: { kind: 'relay_leg', relayConversationId: CONV } });
+    });
+
+    it('3b a delivered relay leg adopts forward with the provider clock and clears a stale transient code', async () => {
+      register();
+      seedRelay();
+      const source = seedSource({ slots: { 'c-bob': { status: 'queued', errorCode: 'send_retryable' } } });
+      const owner = legOwner(source);
+      const at = await reconciling(owner, legFacts());
+      const createdAt = new Date().toISOString();
+      plantLeg('SMleg-2', { providerStatus: 'delivered', createdAt });
+      await runCheck(legPayload(owner, at));
+      // No date_sent: the relay slot's sentAt takes the provider's creation time.
+      expect(slotAt(source)).toEqual({ status: 'delivered', sid: 'SMleg-2', sentAt: createdAt });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: source.tsMsgId, direction: 'inbound', deliveryStatus: 'delivered' }]);
+      expect(capture.atLevel(40).some((l) => String(l['msg']).includes('adopted terminal failure'))).toBe(false);
+    });
+
+    it('A1 every relay-leg close the job makes tells the thread, in the source row\'s direction; a close that moved nothing tells nobody', async () => {
+      register();
+      seedRelay();
+      // A TEAM source (outbound) whose member's number no longer matches: unresolved.
+      const team = seedSource({ direction: 'outbound' });
+      const ownerA = legOwner(team);
+      const atA = await reconciling(ownerA, legFacts({ phone: '+15550000000' }));
+      await runCheck(legPayload(ownerA, atA));
+      expect(slotAt(team)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: team.tsMsgId, direction: 'outbound', deliveryStatus: 'failed' }]);
+      // A slot that already holds a send is never closed, and nothing is announced.
+      const landed = seedSource({ slots: { 'c-bob': { status: 'queued', sid: 'SMlanded' } } });
+      const ownerB = legOwner(landed);
+      const atB = await reconciling(ownerB, legFacts({ phone: '+15550000000' }));
+      world.emitted.length = 0;
+      await runCheck(legPayload(ownerB, atB));
+      expect(slotAt(landed)).toEqual({ status: 'queued', sid: 'SMlanded' });
+      expect(persisted()).toEqual([]);
+      expect(await recordOf(ownerB)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'digest_mismatch' });
+    });
+
+    it('5 relay: a candidate whose relaysid pointer is THIS leg\'s is a repair (found); another source\'s pointer excludes its SID', async () => {
+      register();
+      seedRelay();
+      const other = seedSource({ slots: { 'c-bob': { status: 'sent', sid: 'SMother' } } });
+      // A late send landed its slot and pointer, but its record fence was lost (plan deviation 3).
+      const source = seedSource({ slots: { 'c-bob': { status: 'queued', sid: 'SMlate' } } });
+      const owner = legOwner(source);
+      const at = await reconciling(owner, legFacts());
+      world.relaySidPointers.set('SMother', { conversationId: CONV, tsMsgId: other.tsMsgId, memberKey: 'c-bob' });
+      world.relaySidPointers.set('SMlate', { conversationId: CONV, tsMsgId: source.tsMsgId, memberKey: 'c-bob' });
+      plantLeg('SMother', { createdAt: new Date(Date.parse(at) - 2000).toISOString() });
+      plantLeg('SMlate', { providerStatus: 'sent' });
+      await runCheck(legPayload(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMlate' });
+      expect(slotAt(source)).toMatchObject({ status: 'sent', sid: 'SMlate' });
+      expect(slotAt(other)).toEqual({ status: 'sent', sid: 'SMother' });
+      expect(world.relaySidPointers.get('SMother')).toMatchObject({ tsMsgId: other.tsMsgId });
+    });
+
+    it('7 two text attempts with one body and two orphans each adopt one; the pointer claim decides a race; neither re-drives', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const s1 = seedSource();
+      const s2 = seedSource();
+      const a = legOwner(s1);
+      const b = legOwner(s2);
+      const atA = await reconciling(a, legFacts());
+      const atB = await reconciling(b, legFacts());
+      const t0 = Date.now();
+      plantLeg('SMo-1', { createdAt: new Date(t0 - 2000).toISOString() });
+      plantLeg('SMo-2', { createdAt: new Date(t0 - 1000).toISOString() });
+      await runCheck(legPayload(a, atA));
+      expect(await recordOf(a)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMo-1' });
+      // b's reads race a's claim: it sees neither a's record nor a's pointer on o-1,
+      // so o-1 looks free and matching - and b's OWN claim says it is someone else's.
+      vi.spyOn(world.sendAttemptsRepo, 'listByRecipient').mockResolvedValueOnce([]);
+      vi.spyOn(world.messagesRepo, 'getRelaySidPointerConsistent').mockResolvedValueOnce(undefined);
+      await runCheck(legPayload(b, atB));
+      expect(await recordOf(b)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMo-2' });
+      expect(world.relaySidPointers.get('SMo-1')).toMatchObject({ tsMsgId: s1.tsMsgId });
+      expect(world.relaySidPointers.get('SMo-2')).toMatchObject({ tsMsgId: s2.tsMsgId });
+      expect(slotAt(s1)).toMatchObject({ sid: 'SMo-1' });
+      expect(slotAt(s2)).toMatchObject({ sid: 'SMo-2' });
+      expect(redrives).toHaveLength(0);
+    });
+
+    it('8 two MEDIA attempts with one fingerprint and ONE orphan: one adopts, the other is unresolved same_fingerprint_sibling - never a re-drive', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const photo = 'Alice sent a photo';
+      const s1 = seedSource();
+      const s2 = seedSource();
+      const a = legOwner(s1);
+      const b = legOwner(s2);
+      const atA = await reconciling(a, legFacts({ body: photo, mediaCount: 1 }));
+      const atB = await reconciling(b, legFacts({ body: photo, mediaCount: 1 }));
+      plantLeg('SMphoto-1', { body: photo, mediaCount: 1 });
+      await runCheck(legPayload(a, atA));
+      expect(await recordOf(a)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMphoto-1' });
+      await runChain(legPayload(b, atB));
+      expect(await recordOf(b)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(slotAt(s2)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(redrives).toHaveLength(0);
+    });
+
+    it('8b never_sent is withheld while a same-fingerprint sibling is still OPEN (reconciling)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const s1 = seedSource();
+      const s2 = seedSource();
+      await reconciling(legOwner(s1), legFacts());
+      const b = legOwner(s2);
+      const atB = await reconciling(b, legFacts());
+      await runChain(legPayload(b, atB));
+      expect(await recordOf(b)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(redrives).toHaveLength(0);
+    });
+
+    it('8c a sibling with a DIFFERENT fingerprint, or one that closed without adopting, does not withhold never_sent', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const s1 = seedSource();
+      const s2 = seedSource();
+      const s3 = seedSource();
+      await reconciling(legOwner(s1), legFacts({ body: 'Carol: a different message' }));
+      const closedOwner = legOwner(s2);
+      const atClosed = await reconciling(closedOwner, legFacts());
+      await world.sendAttemptsRepo.closeFromReconcile(closedOwner, atClosed, { outcome: 'unresolved', cause: 'digest_mismatch' });
+      const b = legOwner(s3);
+      const atB = await reconciling(b, legFacts());
+      await runChain(legPayload(b, atB));
+      expect(await recordOf(b)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(redrives).toHaveLength(1);
+    });
+
+    it('13 a relay member whose phone changed since the claim is unresolved digest_mismatch - never listed, never re-sent (Review Focus 2)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      const conv = seedRelay();
+      const source = seedSource();
+      const owner = legOwner(source);
+      const at = await reconciling(owner, legFacts());
+      conv.participants = MEMBERS.map((m) => (m.contactId === 'c-bob' ? { ...m, phone: '+15558675309' } : { ...m }));
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runChain(legPayload(owner, at));
+      expect(list).not.toHaveBeenCalled();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'digest_mismatch' });
+      expect(slotAt(source)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(redrives).toHaveLength(0);
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('15 relay never_sent: on a closed group redrive_refused (slot, record, the thread told, no enqueue); on an open one ONE relay.fanOut re-drive carries the continuation', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      const conv = seedRelay();
+      const closedSource = seedSource();
+      const ownerC = legOwner(closedSource);
+      const atC = await reconciling(ownerC, legFacts());
+      conv.status = 'closed';
+      await runChain(legPayload(ownerC, atC));
+      expect(await recordOf(ownerC)).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'group_not_open', redriveCount: 0 });
+      expect(slotAt(closedSource)).toEqual({ status: 'failed', errorCode: 'redrive_refused' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: closedSource.tsMsgId, direction: 'inbound', deliveryStatus: 'failed' }]);
+      expect(redrives).toHaveLength(0);
+      expect(lines(40).filter((l) => l['verdict'] === 'never_sent' && l['cause'] === 'group_not_open')).toHaveLength(1);
+
+      conv.status = 'open';
+      const open = seedSource();
+      open.fanout_attempt = 3;
+      const ownerO = legOwner(open);
+      const atO = await reconciling(ownerO, legFacts());
+      await runChain(legPayload(ownerO, atO, 0, { senderKey: 'team', senderNameOverride: 'HousingChoice' }));
+      expect(await recordOf(ownerO)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(redrives).toEqual([
+        {
+          relayConversationId: CONV,
+          sourceTsMsgId: open.tsMsgId,
+          senderKey: 'team',
+          senderNameOverride: 'HousingChoice',
+          recipientKeys: ['c-bob'],
+          attempt: 4,
+          redrive: true,
+        } satisfies RelayFanOutPayload,
+      ]);
+      expect(slotAt(open)).toEqual({ status: 'queued' });
+    });
+
+    it('15a a relay-leg never_sent with no continuation, or whose phone-only member left the roster, is redrive_refused with that cause', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const s1 = seedSource();
+      const o1 = legOwner(s1);
+      const at1 = await reconciling(o1, legFacts());
+      await runChain(legPayload(o1, at1, 0, null));
+      expect(await recordOf(o1)).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'no_continuation' });
+      expect(slotAt(s1)).toEqual({ status: 'failed', errorCode: 'redrive_refused' });
+      // A phone-only member, off the roster: its key's own number proves the digest; the re-drive has nobody to send to.
+      const daveKey = `phone#${DAVE}`;
+      const s2 = seedSource({ slots: { [daveKey]: { status: 'queued' } } });
+      const o2 = legOwner(s2, daveKey);
+      const at2 = await reconciling(o2, legFacts({ phone: DAVE }));
+      await runChain(legPayload(o2, at2));
+      expect(await recordOf(o2)).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'member_removed' });
+      expect(slotAt(s2, daveKey)).toEqual({ status: 'failed', errorCode: 'redrive_refused' });
+      expect(redrives).toHaveLength(0);
+    });
+
+    it('15b a relay rung\'s never_sent re-drives the SAME rung; through the real rung handler it claims from redriven (attempt 2) and sends ONCE; on a closed group redrive_refused', async () => {
+      register();
+      registerRelayRetryLegJobHandler({
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        adapter: world.adapter,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        mediaStore: world.mediaStore,
+        events: world.events,
+        logger,
+      });
+      const enqueued = vi.spyOn(outbound, 'enqueue');
+      const conv = seedRelay();
+      const row = seedRetryRow();
+      const owner = rungOwner(row);
+      const at = await reconciling(owner, legFacts());
+      await runChain({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 0 });
+      const redrive = enqueued.mock.calls.map((c) => c[0]).filter((e) => e.jobName === RELAY_RETRY_LEG_JOB);
+      expect(redrive.map((e) => e.payload)).toEqual([
+        { relayConversationId: CONV, retryTsMsgId: row.tsMsgId, redrive: true } satisfies RelayRetryLegPayload,
+      ]);
+      expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2, redriveCount: 1 });
+      expect(slotAt(row)).toMatchObject({ status: 'queued', sid: world.sentDetails[0]!.sid });
+
+      // A closed group: the re-drive is refused, and the root is announced.
+      const row2 = seedRetryRow();
+      const owner2 = rungOwner(row2);
+      const at2 = await reconciling(owner2, legFacts());
+      conv.status = 'closed';
+      world.emitted.length = 0;
+      await runChain({ owner: toOwnerRef(owner2), attemptedAt: at2, checkNo: 0 });
+      expect(await recordOf(owner2)).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'group_not_open' });
+      expect(slotAt(row2)).toEqual({ status: 'failed', errorCode: 'redrive_refused' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: ROOT, direction: 'inbound', deliveryStatus: 'failed' }]);
+      expect(world.sent).toHaveLength(1);
+    });
+
+    it('16 a relay-rung adoption touches the inbox the status-preserving way and announces the root with the adopted status; its closes announce the root failed (T10-2)', async () => {
+      register();
+      seedRelay({ status: 'closed' });
+      const row = seedRetryRow();
+      const owner = rungOwner(row);
+      // A send that landed but was not recorded: the known-SID path.
+      const at = await reconciling(owner, legFacts(), { sid: 'SMrung-1' });
+      const createdAt = new Date().toISOString();
+      plantLeg('SMrung-1', { providerStatus: 'delivered', createdAt, sentAt: createdAt });
+      await runCheck({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 0 });
+      expect(slotAt(row)).toEqual({ status: 'delivered', sid: 'SMrung-1', sentAt: createdAt });
+      // The status-preserving touch: the closed group stays closed, the inbox moves forward.
+      expect(world.conversations.get(CONV)).toMatchObject({ status: 'closed', last_activity_at: createdAt });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: ROOT, direction: 'inbound', deliveryStatus: 'delivered' }]);
+      // Never backwards: an older adoption leaves the inbox where it is.
+      const row2 = seedRetryRow();
+      const owner2 = rungOwner(row2);
+      const at2 = await reconciling(owner2, legFacts(), { sid: 'SMrung-2' });
+      plantLeg('SMrung-2', { providerStatus: 'sent', createdAt: new Date(Date.parse(createdAt) - 5000).toISOString() });
+      await runCheck({ owner: toOwnerRef(owner2), attemptedAt: at2, checkNo: 0 });
+      expect(world.conversations.get(CONV)!.last_activity_at).toBe(createdAt);
+
+      // A rung close (unresolved) announces the root failed.
+      const row3 = seedRetryRow();
+      const owner3 = rungOwner(row3);
+      const at3 = await reconciling(owner3, legFacts({ phone: '+15550000000' }));
+      world.emitted.length = 0;
+      await runCheck({ owner: toOwnerRef(owner3), attemptedAt: at3, checkNo: 0 });
+      expect(await recordOf(owner3)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'digest_mismatch' });
+      expect(slotAt(row3)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: ROOT, direction: 'inbound', deliveryStatus: 'failed' }]);
+    });
+
+    it('17 a relay re-drive enqueue that throws closes enqueue_failed: the record FIRST, then the slot, then the thread or the root is told', async () => {
+      register();
+      seedRelay();
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if (envelope.jobName === RELAY_FANOUT_JOB || envelope.jobName === RELAY_RETRY_LEG_JOB) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+      const closeRedriven = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const closeSlot = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      const source = seedSource();
+      const leg = legOwner(source);
+      const atLeg = await reconciling(leg, legFacts());
+      await runChain(legPayload(leg, atLeg));
+      expect(await recordOf(leg)).toMatchObject({ state: 'done', outcome: 'enqueue_failed', redriveCount: 1 });
+      expect(slotAt(source)).toEqual({ status: 'failed', errorCode: 'enqueue_failed' });
+      expect(closeRedriven.mock.invocationCallOrder[0]!).toBeLessThan(closeSlot.mock.invocationCallOrder[0]!);
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: source.tsMsgId, direction: 'inbound', deliveryStatus: 'failed' }]);
+
+      const row = seedRetryRow();
+      const rung = rungOwner(row);
+      const atRung = await reconciling(rung, legFacts());
+      world.emitted.length = 0;
+      await runChain({ owner: toOwnerRef(rung), attemptedAt: atRung, checkNo: 0 });
+      expect(await recordOf(rung)).toMatchObject({ state: 'done', outcome: 'enqueue_failed' });
+      expect(slotAt(row)).toEqual({ status: 'failed', errorCode: 'enqueue_failed' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: ROOT, direction: 'inbound', deliveryStatus: 'failed' }]);
+    });
+
+    it('21 a phone-only member: the reconcile payload carries only the hashed key, the job resolves it, and no reconcile envelope or log line carries the phone', async () => {
+      register();
+      const daveKey = `phone#${DAVE}`;
+      seedRelay({ participants: [...MEMBERS.map((m) => ({ ...m })), { contactId: '', phone: DAVE }] });
+      const source = seedSource({ slots: { [daveKey]: { status: 'queued' } } });
+      const owner = legOwner(source, daveKey);
+      const at = await reconciling(owner, legFacts({ phone: DAVE }));
+      await runCheck(legPayload(owner, at));
+      expect(JSON.stringify(scheduledChecks().map((d) => d.envelope))).not.toContain('phone#+');
+      plantLeg('SMdave-1', { to: DAVE });
+      await runNextCheck();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMdave-1' });
+      expect(world.relaySidPointers.get('SMdave-1')).toMatchObject({ memberKey: daveKey });
+      expect(slotAt(source, daveKey)).toMatchObject({ sid: 'SMdave-1' });
+      expect(JSON.stringify(capture.lines)).not.toContain('phone#+');
+      expect(lines(30).some((l) => l['recipientKey'] === 'phone#redacted' && l['verdict'] === 'found')).toBe(true);
     });
   });
 

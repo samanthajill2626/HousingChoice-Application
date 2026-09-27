@@ -60,15 +60,27 @@ import {
   RECONCILE_LIST_PAGE_SIZE,
   RECONCILE_MAX_PAGES,
   RECONCILE_WINDOW_LEAD_MS,
+  REDRIVE_REFUSED_CODE,
   SEND_UNCONFIRMED_CODE,
 } from '../lib/sendOutcome.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
-import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import {
+  createConversationsRepo,
+  type ConversationItem,
+  type ConversationParticipant,
+  type ConversationsRepo,
+} from '../repos/conversationsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
-import { createMessagesRepo, type DeliveryStatus, type MessagesRepo } from '../repos/messagesRepo.js';
+import {
+  createMessagesRepo,
+  relayMemberKey,
+  type DeliveryStatus,
+  type MessageItem,
+  type MessagesRepo,
+} from '../repos/messagesRepo.js';
 import {
   attemptKey,
   createSendAttemptsRepo,
@@ -88,6 +100,8 @@ import {
   type BroadcastSendPayload,
 } from './broadcastFanOut.js';
 import { defineJobHandler, enqueue } from './jobs.js';
+import { RELAY_FANOUT_JOB, type RelayFanOutPayload } from './relayFanOut.js';
+import { RELAY_RETRY_LEG_JOB, type RelayRetryLegPayload } from './relayRetryLeg.js';
 
 export const SEND_RECONCILE_JOB = 'send.reconcile';
 
@@ -246,6 +260,26 @@ interface Resolved {
   broadcast?: BroadcastItem;
   /** broadcast: the recipient's contact, read once per check (null = none). */
   contact?: ContactItem | null;
+  /** relay: the SOURCE row (a leg) or the RETRY row (a rung), read consistently (T10-7). */
+  row?: MessageItem;
+  /**
+   * relay: the group. The conversations repo has no consistent read, so the
+   * roster phone behind the digest check and the re-drive pre-check are
+   * eventually consistent (T10-7, accepted residue R3): the re-driven pass
+   * re-reads and re-filters, and a lagged roster can only err to unresolved.
+   */
+  conversation?: ConversationItem;
+}
+
+/** The relay row a relay owner's slot and relaysid pointer are addressed by. */
+function relayRowKey(owner: Exclude<SendAttemptOwner, { kind: 'broadcast' }>): string {
+  return owner.kind === 'relay_leg' ? owner.sourceTsMsgId : owner.retryTsMsgId;
+}
+
+/** The relay member behind the recipient key, on the group's CURRENT roster. */
+function rosterMember(r: Resolved): ConversationParticipant | undefined {
+  const roster = (r.conversation?.participants ?? []) as ConversationParticipant[];
+  return roster.find((member) => relayMemberKey(member) === r.key);
 }
 
 /** The causes an `unresolved` verdict names in its ONE ERROR (spec D16). */
@@ -417,8 +451,30 @@ async function resolve(c: Ctx, ref: SendAttemptOwnerRef): Promise<Resolved | und
       return { owner: { kind: 'broadcast', broadcastId: ref.broadcastId, contactKey: key }, key, broadcast };
     }
     case 'relay_leg':
-    case 'relay_rung':
-      throw new Error(`sendReconcile: the ${ref.kind} owner is not handled yet`);
+    case 'relay_rung': {
+      const rowTsMsgId = ref.kind === 'relay_leg' ? ref.sourceTsMsgId : ref.retryTsMsgId;
+      const row = await c.messages.getByTsMsgIdConsistent(ref.relayConversationId, rowTsMsgId);
+      const conversation = await c.conversations.getById(ref.relayConversationId);
+      // The rung's member is the one its row names; a leg's is a slot on its
+      // source, or - a legacy source seeds no slot before the claim - a roster member.
+      const keys = [
+        ...(ref.kind === 'relay_rung' && typeof row?.relay_retry_member_key === 'string' ? [row.relay_retry_member_key] : []),
+        ...Object.keys(row?.delivery_recipients ?? {}),
+        ...((conversation?.participants ?? []) as ConversationParticipant[]).map((member) => relayMemberKey(member)),
+      ];
+      const key = keys.find((k) => hashRecipientKey(k) === ref.recipientKeyHash);
+      if (key === undefined) return undefined;
+      const owner: SendAttemptOwner =
+        ref.kind === 'relay_leg'
+          ? { kind: 'relay_leg', relayConversationId: ref.relayConversationId, sourceTsMsgId: ref.sourceTsMsgId, memberKey: key }
+          : { kind: 'relay_rung', relayConversationId: ref.relayConversationId, retryTsMsgId: ref.retryTsMsgId, memberKey: key };
+      return {
+        owner,
+        key,
+        ...(row !== undefined && { row }),
+        ...(conversation !== undefined && { conversation }),
+      };
+    }
   }
 }
 
@@ -436,8 +492,13 @@ async function currentPhone(c: Ctx, r: Resolved): Promise<string | undefined> {
       return typeof phone === 'string' && phone.length > 0 ? phone : undefined;
     }
     case 'relay_leg':
-    case 'relay_rung':
-      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+    case 'relay_rung': {
+      // The roster member's number (what the leg sent to); a phone-only
+      // member's key IS its number. A contact member off the roster has none.
+      const phone = rosterMember(r)?.phone;
+      if (typeof phone === 'string' && phone.length > 0) return phone;
+      return r.key.startsWith('phone#') ? r.key.slice('phone#'.length) : undefined;
+    }
   }
 }
 
@@ -485,6 +546,15 @@ async function heldBy(c: Ctx, r: Resolved, sid: string): Promise<Held> {
   if (system !== undefined) return { kind: 'system', holder: `syssid:${system.kind}` };
   const pointer = await c.messages.getRelaySidPointerConsistent(sid);
   if (pointer !== undefined) {
+    const o = r.owner;
+    if (
+      o.kind !== 'broadcast' &&
+      pointer.conversationId === o.relayConversationId &&
+      pointer.tsMsgId === relayRowKey(o) &&
+      pointer.memberKey === r.key
+    ) {
+      return { kind: 'mine' };
+    }
     return { kind: 'other', holder: `relay#${pointer.conversationId}#${pointer.tsMsgId}#${safeRecipientKey(pointer.memberKey)}` };
   }
   const row = await c.messages.getByProviderSidConsistent(sid);
@@ -527,7 +597,100 @@ async function adopt(c: Ctx, r: Resolved, m: ProviderMessageSummary): Promise<Fo
     }
     case 'relay_leg':
     case 'relay_rung':
-      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+      return adoptRelay(c, r, r.owner, m);
+  }
+}
+
+/**
+ * A relay owner's adoption (D15), each write idempotent. FIRST the SID claim:
+ * the conditional `relaysid#` pointer put, which reports a lost claim (`other`
+ * - someone else's message). THEN the slot, forward-only and first-write-wins
+ * (the owner's own mapping: the provider's queued/accepted/sending stay
+ * `queued`, `sent` is sent, `undelivered` is the relay machine's
+ * `undelivered`; `sentAt` from the provider's date_sent, else its creation).
+ * THEN, only when the slot moved: a leg tells its thread (build ruling A1); a
+ * rung makes the status-preserving inbox touch its success path makes
+ * (never backwards - T10-12). An adopted terminal failure records the code
+ * only - an MMS leg's 30005 says nothing of SMS reachability - and WARNs: the
+ * webhook's side effects for it never ran. A row or slot that is gone is a
+ * job failure (a genuine retry).
+ */
+async function adoptRelay(
+  c: Ctx,
+  r: Resolved,
+  owner: Exclude<SendAttemptOwner, { kind: 'broadcast' }>,
+  m: ProviderMessageSummary,
+): Promise<Found | { kind: 'other' }> {
+  const conversationId = owner.relayConversationId;
+  const tsMsgId = relayRowKey(owner);
+  const claim = await c.messages.claimRelaySidPointer(m.providerSid, { conversationId, tsMsgId, memberKey: r.key });
+  if (claim === 'other') return { kind: 'other' };
+  const status = mapTwilioStatus(m.providerStatus);
+  const failed = status === 'failed' || status === 'undelivered';
+  const errorCode = failed ? m.errorCode : undefined;
+  const result = await c.messages.adoptRelayRecipientIfUnsent(conversationId, tsMsgId, r.key, {
+    status,
+    sid: m.providerSid,
+    sentAt: m.sentAt ?? m.createdAt,
+    ...(errorCode !== undefined && { errorCode }),
+  });
+  if (result === 'missing') {
+    throw new Error(`send.reconcile: the relay row or slot to adopt ${m.providerSid} onto is missing`);
+  }
+  if (result === 'adopted') {
+    if (owner.kind === 'relay_leg') announceLeg(c, r, owner, status);
+    else await touchInboxForward(c, r, m.createdAt);
+    if (failed) {
+      c.log.warn(
+        {
+          event: 'send_reconcile',
+          owner: ownerLog(owner),
+          recipientKey: safeRecipientKey(r.key),
+          sid: m.providerSid,
+          deliveryStatus: status,
+          errorCode,
+        },
+        'send.reconcile: adopted terminal failure - webhook side effects skipped',
+      );
+    }
+  }
+  return { kind: 'found', sid: m.providerSid, adoption: result, status };
+}
+
+/**
+ * Build ruling A1: every relay-LEG slot move the job makes tells the open
+ * thread, in the status webhook's shape (routes/webhooks/twilio.ts, the relay
+ * slot-move emit) and in the source row's direction - the relay thread
+ * refetches only on this event.
+ */
+function announceLeg(
+  c: Ctx,
+  r: Resolved,
+  owner: Extract<SendAttemptOwner, { kind: 'relay_leg' }>,
+  deliveryStatus: DeliveryStatus,
+): void {
+  c.events.emit('message.persisted', {
+    conversationId: owner.relayConversationId,
+    tsMsgId: owner.sourceTsMsgId,
+    direction: r.row?.direction ?? 'inbound',
+    deliveryStatus,
+  });
+}
+
+/**
+ * A rung's inbox touch (D15, the relay retry job's shape): status-preserving,
+ * no preview, and never backwards - a read-then-write guard (T10-12, accepted
+ * residue R1). Best-effort: the adoption already stands.
+ */
+async function touchInboxForward(c: Ctx, r: Resolved, at: string): Promise<void> {
+  if (r.conversation === undefined || (r.conversation.last_activity_at ?? '') >= at) return;
+  try {
+    await c.conversations.touchLastActivityPreservingStatus(r.conversation.conversationId, undefined, at);
+  } catch (err) {
+    c.log.error(
+      { err, event: 'send_reconcile', owner: ownerLog(r.owner), recipientKey: safeRecipientKey(r.key) },
+      'send.reconcile: the inbox touch after a rung adoption failed (best-effort) - the adoption stands',
+    );
   }
 }
 
@@ -658,23 +821,54 @@ async function closeSlot(c: Ctx, r: Resolved, code: string, bucket: 'failed' | '
       return;
     }
     case 'relay_leg':
-    case 'relay_rung':
-      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+    case 'relay_rung': {
+      // An ABSENT slot (a legacy source starts empty) or a queued one with no sid - never a send that landed.
+      const closed = await c.messages.closeRelayRecipientIfUnsent(r.owner.relayConversationId, relayRowKey(r.owner), r.key, {
+        status: 'failed',
+        errorCode: code,
+      });
+      // A1: a leg's slot move tells its thread; a rung's is announced at its root by afterClose.
+      if (closed === 'closed' && r.owner.kind === 'relay_leg') announceLeg(c, r, r.owner, 'failed');
+      return;
+    }
   }
 }
 
 /**
  * After every close or adoption: the owner's own last word. A broadcast
- * FINALIZES (D16a - idempotent, it defers while any slot is queued).
+ * FINALIZES (D16a - idempotent, it defers while any slot is queued). A relay
+ * RUNG announces its ROOT (build finding T10-2: the rung job's own
+ * announceRootClose is a closure, so it is rebuilt here from the retry row,
+ * read consistently) with the status the job just wrote - `failed` on a close,
+ * the adopted status on a found - or, when called with none (the superseded
+ * exit, ruling A7), the slot's current status. A relay LEG told its thread at
+ * the slot move itself (A1).
  */
-async function afterClose(c: Ctx, r: Resolved, _deliveryStatus?: DeliveryStatus): Promise<void> {
+async function afterClose(c: Ctx, r: Resolved, deliveryStatus?: DeliveryStatus): Promise<void> {
   switch (r.owner.kind) {
     case 'broadcast':
       await finalize(c.broadcasts, c.events, r.owner.broadcastId, c.log, c.adopt.audit);
       return;
     case 'relay_leg':
-    case 'relay_rung':
-      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+      return;
+    case 'relay_rung': {
+      const row = await c.messages.getByTsMsgIdConsistent(r.owner.relayConversationId, r.owner.retryTsMsgId);
+      const rootTsMsgId = row?.relay_retry_of;
+      if (row === undefined || typeof rootTsMsgId !== 'string' || rootTsMsgId.length === 0) {
+        c.log.warn(
+          { event: 'send_reconcile', owner: ownerLog(r.owner), recipientKey: safeRecipientKey(r.key) },
+          'send.reconcile: the retry row names no root - nothing to announce',
+        );
+        return;
+      }
+      c.events.emit('message.persisted', {
+        conversationId: r.owner.relayConversationId,
+        tsMsgId: rootTsMsgId,
+        direction: row.direction,
+        deliveryStatus: deliveryStatus ?? row.delivery_recipients?.[r.key]?.status ?? 'failed',
+      });
+      return;
+    }
   }
 }
 
@@ -739,8 +933,14 @@ async function enqueueOrClose(
   }
 }
 
-/** The re-drive envelope of each owner: its own send job, for that one recipient, marked `redrive`. */
-async function enqueueRedrive(r: Resolved): Promise<void> {
+/**
+ * The re-drive envelope of each owner: its own send job, for that one
+ * recipient, marked `redrive` (the continuation payloads carry raw keys - plan
+ * deviation 4). A rung is re-enqueued as ITSELF through plain `enqueue` -
+ * never enqueueRelayRetryLeg, which applies the 60/120/240 s ladder - so the
+ * rung job's own window check bounds the re-drive (RSW #1).
+ */
+async function enqueueRedrive(r: Resolved, continuation: SendReconcilePayload['continuation']): Promise<void> {
   switch (r.owner.kind) {
     case 'broadcast': {
       const redrive: BroadcastSendPayload = {
@@ -753,10 +953,67 @@ async function enqueueRedrive(r: Resolved): Promise<void> {
       await enqueue(BROADCAST_SEND_JOB, redrive);
       return;
     }
-    case 'relay_leg':
-    case 'relay_rung':
-      throw new Error(`sendReconcile: the ${r.owner.kind} owner is not handled yet`);
+    case 'relay_leg': {
+      if (continuation === undefined) throw new Error('sendReconcile: a relay-leg re-drive needs its continuation');
+      const redrive: RelayFanOutPayload = {
+        relayConversationId: r.owner.relayConversationId,
+        sourceTsMsgId: r.owner.sourceTsMsgId,
+        senderKey: continuation.senderKey,
+        ...(continuation.senderNameOverride !== undefined && { senderNameOverride: continuation.senderNameOverride }),
+        recipientKeys: [r.key],
+        attempt: (r.row?.fanout_attempt ?? 0) + 1,
+        redrive: true,
+      };
+      await enqueue(RELAY_FANOUT_JOB, redrive);
+      return;
+    }
+    case 'relay_rung': {
+      const redrive: RelayRetryLegPayload = {
+        relayConversationId: r.owner.relayConversationId,
+        retryTsMsgId: r.owner.retryTsMsgId,
+        redrive: true,
+      };
+      await enqueue(RELAY_RETRY_LEG_JOB, redrive);
+      return;
+    }
   }
+}
+
+/**
+ * D16: a relay re-drive is enqueued only while it could send - the group
+ * open, the member on its roster, the source (leg) or retry (rung) row
+ * present - and a leg only with the continuation it must repeat. Returns the
+ * refusal cause, or undefined. A broadcast re-drive pass runs its own fences.
+ */
+function redriveRefusal(r: Resolved, continuation: SendReconcilePayload['continuation']): string | undefined {
+  if (r.owner.kind === 'broadcast') return undefined;
+  if (r.owner.kind === 'relay_leg' && continuation === undefined) return 'no_continuation';
+  if (r.conversation?.status !== 'open') return 'group_not_open';
+  if (rosterMember(r) === undefined) return 'member_removed';
+  if (r.row === undefined) return r.owner.kind === 'relay_leg' ? 'source_not_found' : 'retry_row_not_found';
+  return undefined;
+}
+
+/**
+ * A relay never_sent whose re-drive could not send (D16): the slot failed /
+ * redrive_refused FIRST, then the record done / redrive_refused - the job's
+ * own close - then one WARN naming the cause (a closed group or a departed
+ * member is a human action, not a fault), then afterClose.
+ */
+async function closeRedriveRefused(
+  c: Ctx,
+  r: Resolved,
+  record: SendAttemptRecord,
+  cause: string,
+  base: LogBase,
+): Promise<void> {
+  await closeSlot(c, r, REDRIVE_REFUSED_CODE, 'failed');
+  const closed = await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'redrive_refused', cause });
+  c.log.warn(
+    { ...base, verdict: 'never_sent', cause, ...(!closed && { recordClosed: false }) },
+    'send.reconcile: never_sent, but the re-drive cannot send - recipient closed redrive_refused',
+  );
+  await afterClose(c, r, 'failed');
 }
 
 /**
@@ -764,15 +1021,21 @@ async function enqueueRedrive(r: Resolved): Promise<void> {
  * fenced on redriveCount 0) and THEN enqueue the owner's re-drive - a pass
  * that claims the record like any send site (D8a). A record that was already
  * re-driven once cannot be re-driven again: it closes unresolved
- * second_unknown (D13a).
+ * second_unknown (D13a). A relay re-drive that could not send is refused
+ * before the record is touched.
  */
 async function redrive(
   c: Ctx,
   r: Resolved,
   record: SendAttemptRecord,
-  _continuation: SendReconcilePayload['continuation'],
+  continuation: SendReconcilePayload['continuation'],
   base: LogBase,
 ): Promise<void> {
+  const refusal = redriveRefusal(r, continuation);
+  if (refusal !== undefined) {
+    await closeRedriveRefused(c, r, record, refusal, base);
+    return;
+  }
   if (!(await c.attempts.markRedriven(r.owner, record.attemptedAt))) {
     if (record.redriveCount >= 1) {
       await closeUnresolved(c, r, record, 'second_unknown', base);
@@ -785,5 +1048,5 @@ async function redrive(
     { ...base, verdict: 'never_sent' },
     'send.reconcile: never_sent - the provider holds nothing for this attempt; the recipient is re-driven once',
   );
-  await enqueueOrClose(c, r, record, base, 'redriven', () => enqueueRedrive(r));
+  await enqueueOrClose(c, r, record, base, 'redriven', () => enqueueRedrive(r, continuation));
 }

@@ -377,6 +377,8 @@ describe('route registry completeness', () => {
       '/join',
       '/broadcasts/new',
       '/quick-reply/:callId',
+      // A new list view, not yet a profiler surface (issue perf-pages-tours-past-surface).
+      '/tours/past',
       '/settings',
       '*',
     ]);

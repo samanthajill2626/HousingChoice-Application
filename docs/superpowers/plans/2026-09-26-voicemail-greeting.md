@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 24 / Express 5 / TypeScript (app), `@aws-sdk/lib-storage` via the existing `MediaStore` adapter, DynamoDB (settings item), twilio `VoiceResponse`, React 19 + CSS modules (dashboard), vitest + supertest + RTL, Playwright (e2e workspace only), fast-xml-parser (fake-twilio).
 
-**Spec:** `docs/superpowers/specs/2026-09-26-voicemail-greeting-design.md` (DRAFT 3, approved). The plan argues from the spec; read both. Section numbers below refer to it. Plan status: DRAFT 2 after plan review round 1 (two reviewers, every finding accepted; adjudications in `docs/superpowers/reviews/2026-09-26-voicemail-greeting/plan-r1-adjudications.md`).
+**Spec:** `docs/superpowers/specs/2026-09-26-voicemail-greeting-design.md` (DRAFT 3, approved). The plan argues from the spec; read both. Section numbers below refer to it. Plan status: DRAFT 3 - APPROVED for build after two plan review rounds (round 1 two reviewers, round 2 one continued reviewer; every finding accepted, no decision changed; adjudications in `docs/superpowers/reviews/2026-09-26-voicemail-greeting/plan-r1-adjudications.md` and `plan-r2-adjudications.md`).
 
 ## Global Constraints
 
@@ -40,7 +40,7 @@
 Create:
 - `app/src/lib/voicemailGreeting.ts` - constants, type normalization, header sniff, `GreetingUploadGate`, file-name sanitizer, `withTimeout`.
 - `app/src/routes/serveMediaObject.ts` - the range/416/404 streaming helper shared by recordings and the greeting audio route.
-- `app/test/voicemailGreeting.test.ts`, `app/test/voicemailGreetingRoutes.test.ts`.
+- `app/test/helpers/audioFixtures.ts` (shared WAV fixture), `app/test/voicemailGreeting.test.ts`, `app/test/voicemailGreetingRoutes.test.ts`, `app/test/mediaStore.head.test.ts`.
 - `dashboard/src/routes/settings/useVoicemailGreeting.ts`, `VoicemailGreetingBlock.tsx`, `VoicemailGreetingBlock.test.tsx`.
 - `e2e/tests/dashboard-next/voicemail-greeting.spec.ts`.
 - `docs/issues/voicemail-greeting-format-normalization.md`.
@@ -55,7 +55,7 @@ Modify:
 - `fake-twilio/src/engine/twimlInterpreter.ts`, `voiceTypes.ts`, `callEngine.ts`; `fake-twilio/test/twimlInterpreter.test.ts` (new or extended), `callEngineVoicemail.test.ts`.
 - `dashboard/src/api/types.ts`, `client.ts`, `endpoints.ts` (additive); `dashboard/src/api/mmsMedia.client.test.ts` sibling: new `voicemailGreeting.client.test.ts`.
 - `dashboard/src/routes/settings/VoiceSection.tsx`, `VoiceSection.test.tsx`, `VoiceSection.module.css`.
-- `e2e/performance/mutationCatalog.ts`, `mutationCatalog.test.ts` (108 -> 110), `routes.ts`, `routes.test.ts`.
+- `e2e/performance/mutationCatalog.ts`, `mutationCatalog.test.ts` (108 -> 110), `routes.ts`, `routes.test.ts`, `templates.ts`.
 
 ---
 
@@ -432,7 +432,9 @@ export function sanitizeGreetingFileName(raw: unknown, format: VoicemailGreeting
   if (typeof raw !== 'string') return fallback;
   const segments = raw.split(/[\\/]/);
   const last = segments[segments.length - 1] ?? '';
-  // eslint-disable-next-line no-control-regex
+  // (If eslint reports no-control-regex on this line under the repo config,
+  // add `// eslint-disable-next-line no-control-regex` above it; the round-2
+  // reviewer measured the directive as UNUSED here, so it is omitted.)
   const cleaned = last.replace(/[\u0000-\u001f\u007f]/g, '').trim();
   if (cleaned.length === 0) return fallback;
   return Array.from(cleaned).slice(0, VOICEMAIL_GREETING_FILE_NAME_MAX_CHARS).join('');
@@ -947,64 +949,90 @@ describe('PUT /api/settings/voicemail-greeting - gates', () => {
   });
 });
 
+/**
+ * Large-body requests go over a RAW keep-alive http.Agent against app.listen(0):
+ * supertest's keep-alive variant works but its server close waits out the
+ * draining connection (~6 s per refusal, measured); destroying our own agent
+ * before server.close() makes teardown immediate. `body` is either a Buffer
+ * (Content-Length set) or an array of Buffers written chunked (no length).
+ */
+async function rawPut(
+  app: Parameters<typeof request>[0],
+  opts: { body: Buffer | Buffer[]; contentType?: string; name?: string; cookie?: string },
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const server = (app as unknown as { listen: (port: number) => http.Server }).listen(0);
+  const agent = new http.Agent({ keepAlive: true });
+  try {
+    const port = (server.address() as AddressInfo).port;
+    return await new Promise((resolve, reject) => {
+      const chunked = Array.isArray(opts.body);
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'PUT',
+          path: PATH,
+          agent,
+          headers: {
+            'x-origin-verify': ORIGIN_SECRET,
+            cookie: opts.cookie ?? TEST_ADMIN_COOKIE,
+            ...(opts.contentType !== undefined && { 'content-type': opts.contentType }),
+            'x-greeting-file-name': encodeURIComponent(opts.name ?? 'greeting.mp3'),
+            ...(chunked
+              ? { 'transfer-encoding': 'chunked' }
+              : { 'content-length': String((opts.body as Buffer).length) }),
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () =>
+            resolve({ status: res.statusCode ?? 0, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> }),
+          );
+        },
+      );
+      req.on('error', reject);
+      if (chunked) {
+        const parts = opts.body as Buffer[];
+        for (const part of parts.slice(0, -1)) req.write(part);
+        req.end(parts[parts.length - 1]);
+      } else {
+        req.end(opts.body as Buffer);
+      }
+    });
+  } finally {
+    agent.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
 describe('PUT /api/settings/voicemail-greeting - the sniff and the cap (bodies big enough to expose a socket reset)', () => {
   it('a 3 MiB body of WAV bytes declared audio/mpeg is refused with the M4A message, the JSON reaches the client, no put, not logged as an abort', async () => {
     const { app, world, capture } = makeWebhookHarness();
-    const res = await upload(app, bigWav(3 * 1024 * 1024), 'audio/mpeg');
+    const res = await rawPut(app, { body: bigWav(3 * 1024 * 1024), contentType: 'audio/mpeg' });
     expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'unsupported_media_type', message: VOICEMAIL_GREETING_REJECT_MESSAGE });
+    expect(res.json).toEqual({ error: 'unsupported_media_type', message: VOICEMAIL_GREETING_REJECT_MESSAGE });
     expect(world.mediaPuts).toHaveLength(0);
     expect(capture.lines.some((l) => l['reason'] === 'client_aborted')).toBe(false);
   });
 
   it('413 file_too_large for a 6 MiB body with a Content-Length, and the JSON reaches the client', async () => {
     const { app, world } = makeWebhookHarness();
-    const res = await upload(app, bigMp3(6 * 1024 * 1024), 'audio/mpeg');
+    const res = await rawPut(app, { body: bigMp3(6 * 1024 * 1024), contentType: 'audio/mpeg' });
     expect(res.status).toBe(413);
-    expect(res.body.error).toBe('file_too_large');
-    expect(res.body.maxBytes).toBe(5 * 1024 * 1024);
+    expect(res.json['error']).toBe('file_too_large');
+    expect(res.json['maxBytes']).toBe(5 * 1024 * 1024);
     expect(world.mediaPuts).toHaveLength(0);
   });
 
   it('413 file_too_large for a CHUNKED 6 MiB body (no Content-Length), and the JSON reaches the client', async () => {
-    // superagent cannot stream a Readable, so drive a raw http.request with
-    // Transfer-Encoding: chunked (two writes) against a real listener.
+    // superagent cannot stream a Readable; rawPut writes the two halves chunked.
     const { app, world } = makeWebhookHarness();
-    const server = app.listen(0);
-    try {
-      const port = (server.address() as AddressInfo).port;
-      const body = bigMp3(6 * 1024 * 1024);
-      const result = await new Promise<{ status: number; json: { error?: string } }>((resolve, reject) => {
-        const req = http.request(
-          {
-            host: '127.0.0.1',
-            port,
-            method: 'PUT',
-            path: PATH,
-            headers: {
-              'x-origin-verify': ORIGIN_SECRET,
-              cookie: TEST_ADMIN_COOKIE,
-              'content-type': 'audio/mpeg',
-              'transfer-encoding': 'chunked',
-              connection: 'keep-alive',
-            },
-          },
-          (res) => {
-            const chunks: Buffer[] = [];
-            res.on('data', (c: Buffer) => chunks.push(c));
-            res.on('end', () => resolve({ status: res.statusCode ?? 0, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) as { error?: string } }));
-          },
-        );
-        req.on('error', reject);
-        req.write(body.subarray(0, 2 * 1024 * 1024));
-        req.end(body.subarray(2 * 1024 * 1024));
-      });
-      expect(result.status).toBe(413);
-      expect(result.json.error).toBe('file_too_large');
-      expect(world.mediaPuts).toHaveLength(0);
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    const body = bigMp3(6 * 1024 * 1024);
+    const res = await rawPut(app, { body: [body.subarray(0, 2 * 1024 * 1024), body.subarray(2 * 1024 * 1024)], contentType: 'audio/mpeg' });
+    expect(res.status).toBe(413);
+    expect(res.json['error']).toBe('file_too_large');
+    expect(world.mediaPuts).toHaveLength(0);
   });
 });
 
@@ -1064,9 +1092,9 @@ describe('PUT/DELETE /api/settings/voicemail-greeting - happy paths', () => {
     expect(second.body.voicemailGreeting.uploadedAt > first.body.voicemailGreeting.uploadedAt).toBe(true);
     expect(world.mediaObjects.get(KEY)?.body.equals(minimalWav())).toBe(true);
 
-    const refused = await upload(app, bigWav(3 * 1024 * 1024), 'audio/mpeg', 'three.mp3');
+    const refused = await rawPut(app, { body: bigWav(3 * 1024 * 1024), contentType: 'audio/mpeg', name: 'three.mp3' });
     expect(refused.status).toBe(400);
-    const tooBig = await upload(app, bigMp3(6 * 1024 * 1024), 'audio/mpeg', 'four.mp3');
+    const tooBig = await rawPut(app, { body: bigMp3(6 * 1024 * 1024), contentType: 'audio/mpeg', name: 'four.mp3' });
     expect(tooBig.status).toBe(413);
     expect(world.mediaPuts).toHaveLength(2);
     expect(world.mediaObjects.get(KEY)?.body.equals(minimalWav())).toBe(true);
@@ -1332,12 +1360,15 @@ Add the three routes BEFORE `return router;`:
   // A refusal must REACH the browser as JSON, which is why this uses req.pipe
   // (never stream.pipeline, which destroys req and its socket on a gate error)
   // and never Connection: close (proven on Node 24 to reset a client that is
-  // still uploading). The cost of draining a refused body is bounded by the
-  // Content-Length check below (at most 5 MiB reaches the gate for a
-  // known-length body); the one unbounded shape - a chunked body over the cap,
-  // which browsers never send for a Blob - is destroyed after the response
-  // flushes. See docs/issues/mms-upload-endpoint-hardening.md for the same
-  // trade-off on the retired MMS endpoint.
+  // still uploading). A refused body is DRAINED (req.resume) so the response
+  // can be read: bounded by the Content-Length check below for a known-length
+  // body (at most 5 MiB reaches the gate); a chunked body over the cap - which
+  // browsers never send for a Blob - drains until the client stops or Node's
+  // default 300 s requestTimeout ends it (never set requestTimeout: 0).
+  // Destroying the request after the response "finishes" was measured to
+  // reset the client before it reads the 413, so nothing here destroys req.
+  // See docs/issues/mms-upload-endpoint-hardening.md for the same trade-off
+  // on the retired MMS endpoint.
   router.put('/voicemail-greeting', requireRole('admin'), uploadLimiter, async (req: AuthedRequest, res) => {
     const actor = req.user?.userId;
     if (!mediaStore) {
@@ -1695,11 +1726,18 @@ Import `HarnessOptions` from `./helpers/twilioWebhookHarness.js` (export it ther
     it('(e2) the SETTINGS read never settles (no abort signal there) -> only withTimeout can end it: spoken prompt inside the budget, WARN names the budget', async () => {
       seedGreeting();
       const { app, capture } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
+      // FIRST delivery of the miss: onFounderBridgeMissed runs (its
+      // sendMissedCallPush reads the settings too, and /status awaits it before
+      // any TwiML - a hung read installed now would hang THERE, not in the
+      // greeting lookup). Let it settle normally.
+      await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
       // The router holds the repo OBJECT, so replacing the method on it after
       // the harness is built is what the router calls. Restore afterwards.
       const original = world.settingsRepo.getOrgSettings;
       world.settingsRepo.getOrgSettings = () => new Promise(() => {});
       try {
+        // A REDELIVERED summary skips onFounderBridgeMissed (the transitioned
+        // gate) and reaches only the greeting lookup - which withTimeout bounds.
         const t0 = Date.now();
         const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
         expect(Date.now() - t0).toBeLessThan(1000);
@@ -1709,7 +1747,10 @@ Import `HarnessOptions` from `./helpers/twilioWebhookHarness.js` (export it ther
         const warns = greetingWarns(capture);
         expect(warns).toHaveLength(1);
         expect(String((warns[0]?.['err'] as { message?: string } | undefined)?.message)).toContain('exceeded 50ms');
-        expect(world.mediaHeads).toHaveLength(0);
+        // Exactly ONE head: the first delivery's (which played). The hung
+        // redelivery never got past the settings read.
+        expect(world.mediaHeads).toHaveLength(1);
+        expect(capture.lines.filter((l) => l['msg'] === 'voicemail greeting offered')).toHaveLength(1);
       } finally {
         world.settingsRepo.getOrgSettings = original;
       }
@@ -2116,7 +2157,7 @@ Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 
 **Files:**
 - Modify (additive): `dashboard/src/api/types.ts` (~line 103-158), `dashboard/src/api/client.ts` (`RequestOptions` + `requestWithStatus`), `dashboard/src/api/endpoints.ts` (after `putSettings`, ~line 2037)
-- Modify: `e2e/performance/mutationCatalog.ts` (after the `putSettings` entry, ~line 125), `e2e/performance/mutationCatalog.test.ts` (~line 373: `108` -> `110`), `e2e/performance/routes.ts` (~line 300 `VOICE_GETS`), `e2e/performance/routes.test.ts` (~line 112)
+- Modify: `e2e/performance/mutationCatalog.ts` (after the `putSettings` entry, ~line 125), `e2e/performance/mutationCatalog.test.ts` (~line 373: `108` -> `110`), `e2e/performance/routes.ts` (~line 300 `VOICE_GETS`; the two `'/settings/voice'` citation strings ~699 and ~753), `e2e/performance/routes.test.ts` (~line 112), `e2e/performance/templates.ts` (`ENDPOINT_TEMPLATES`, after `'/api/settings'`)
 - Test: `dashboard/src/api/voicemailGreeting.client.test.ts` (create)
 
 **Interfaces:**
@@ -2412,6 +2453,7 @@ import {
   GREETING_FORBIDDEN_MESSAGE,
   GREETING_REJECT_MESSAGE,
   GREETING_TOO_LARGE_MESSAGE,
+  greetingContentTypeFor,
 } from './useVoicemailGreeting.js';
 
 const BASE: OrgSettings = {
@@ -2564,6 +2606,37 @@ describe('VoicemailGreetingBlock', () => {
     expect(dialog).toBeInTheDocument();
     expect(screen.getByText('sam-greeting.mp3')).toBeInTheDocument();
   });
+
+  it('a stale upload rejection is NOT shown inside the Remove dialog', async () => {
+    getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
+    render(<VoicemailGreetingBlock />);
+    await screen.findByRole('button', { name: 'Replace greeting' });
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3('memo.m4a', 'audio/mp4'));
+    expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_REJECT_MESSAGE);
+    await user.click(screen.getByRole('button', { name: 'Remove greeting' }));
+    const dialog = screen.getByRole('dialog', { name: 'Remove voicemail greeting?' });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('greetingContentTypeFor (browser MIME aliases, spec 4.7)', () => {
+  const file = (name: string, type: string) => new File([new Uint8Array(3)], name, { type });
+  it('canonicalizes the aliases browsers report', () => {
+    expect(greetingContentTypeFor(file('a.mp3', 'audio/mpeg'))).toBe('audio/mpeg');
+    expect(greetingContentTypeFor(file('a.mp3', 'audio/mp3'))).toBe('audio/mpeg');
+    expect(greetingContentTypeFor(file('a.wav', 'audio/wav'))).toBe('audio/wav');
+    expect(greetingContentTypeFor(file('a.wav', 'audio/x-wav'))).toBe('audio/wav');
+    expect(greetingContentTypeFor(file('a.wav', 'audio/wave'))).toBe('audio/wav');
+    expect(greetingContentTypeFor(file('a.wav', 'audio/vnd.wave'))).toBe('audio/wav');
+  });
+  it('infers from the extension only when the type is EMPTY, else rejects', () => {
+    expect(greetingContentTypeFor(file('memo.MP3', ''))).toBe('audio/mpeg');
+    expect(greetingContentTypeFor(file('memo.wav', ''))).toBe('audio/wav');
+    expect(greetingContentTypeFor(file('memo.m4a', ''))).toBeUndefined();
+    expect(greetingContentTypeFor(file('memo.mp3', 'audio/mp4'))).toBeUndefined();
+    expect(greetingContentTypeFor(file('memo.mp3', 'video/mp4'))).toBeUndefined();
+  });
 });
 ```
 
@@ -2635,6 +2708,9 @@ export interface VoicemailGreetingState {
   upload: (file: File) => Promise<void>;
   remove: () => Promise<void>;
   retry: () => void;
+  /** Drop a stale user-action error (the block calls it before opening the
+   *  Remove dialog so an earlier upload rejection is not shown inside it). */
+  clearError: () => void;
 }
 
 function messageFor(err: unknown, fallback: string): string {
@@ -2737,7 +2813,9 @@ export function useVoicemailGreeting(): VoicemailGreetingState {
     }
   }, []);
 
-  return { status, greeting, busy, error, notice, upload, remove, retry };
+  const clearError = useCallback(() => setError(null), []);
+
+  return { status, greeting, busy, error, notice, upload, remove, retry, clearError };
 }
 ```
 
@@ -2865,7 +2943,15 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
               <Button variant="secondary" size="sm" onClick={() => inputRef.current?.click()} disabled={state.busy}>
                 {state.busy ? 'Uploading...' : 'Replace greeting'}
               </Button>
-              <Button variant="danger" size="sm" onClick={() => setConfirming(true)} disabled={state.busy}>
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => {
+                  state.clearError(); // a stale upload rejection must not appear inside the dialog
+                  setConfirming(true);
+                }}
+                disabled={state.busy}
+              >
                 Remove greeting
               </Button>
             </div>
@@ -3294,8 +3380,8 @@ Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 1. The plain-text restatement of the mission and, under "Questions I would have stopped for", spec section 3 assumptions A-H verbatim with the reading taken for each.
 2. Infra-side facts (spec 4.10): prior greeting versions persist on the versioned media bucket (a lifecycle rule would be the infra change); whether CloudFront's 30 s `origin_read_timeout` can fire during a slow 5 MB upload is UNVERIFIED.
 3. The local-dev-only limitation (spec 4.3): through the Vite dev proxy a SERVER refusal of a body of roughly 3 MB or more resets before the JSON arrives; production is CloudFront -> origin and expected unaffected (UNVERIFIED).
-4. The unbounded-drain acceptance (spec 4.3): a non-browser client streaming more than 5 MiB chunked is drained; admin-only + 10/min.
-5. The dev verification script from spec section 7, including the optional unplayable-WAV check that settles `docs/issues/voicemail-greeting-format-normalization.md`.
+4. The chunked-drain acceptance (spec 4.3): a non-browser client streaming more than 5 MiB chunked is drained until it stops or Node's default 300 s `requestTimeout` ends it (never set `requestTimeout: 0`); admin-only + 10/min.
+5. The dev verification script from spec section 7: the greeting call, the removal call, the 3-4 MB renamed-M4A upload (must show the M4A message on the deployed path, which the local Vite proxy cannot demonstrate), and the optional unplayable-WAV check that settles `docs/issues/voicemail-greeting-format-normalization.md`.
 6. Every issue filed, the gate outputs quoted per the orchestrator's handback format, and `MERGE-READY @<hash>` / `UNMERGED (human gate)`.
 
 - [ ] **Step 4: The five gates (orchestrator phase; listed here so the plan is complete)**
@@ -3315,6 +3401,6 @@ Then ONE `git merge main` (if main advanced), re-run all five, and hand back wit
 ## Self-review (planner)
 
 - Spec coverage: 4.1 -> T1; 4.2 -> T2; 4.3/4.4/4.5 -> T4 (+T3 helper); 4.6 -> T5; 4.7 -> T7+T8; 4.8 -> T6; 4.9 writers/readers -> T2 (parsePatch pin, harness fake), T5 (webhook), T4 (audio), T8 (block), gate-2 rows -> T7 (catalog, routes contract), T8 (VoiceSection tests), T9 (viewport helpers); 4.10 -> T4/T5 log posture (tests pin no file name, no URL); section 5 unit/route/webhook/fake/dashboard/e2e -> T1-T9; section 6 issue -> T10; assumptions A-H are carried by T4 (admin gate, uploader fields), T8 (VA read-only, Remove-only confirmation), T5 (no log when unset).
-- Placeholder scan: the only `// ...` lines are in T5 (f)/(e) and T6 tests, each with an explicit instruction naming the exact existing helper/drive to copy; no TBD/TODO.
+- Placeholder scan: the only `// ...` lines are in T6's engine tests ("same drive" - copy the drive statements of the file's first voicemail case, named explicitly) and in the T5 `founderHarness` snippet ("the rest of the function is unchanged"); no TBD/TODO. T5's tests are complete code placed inside the describe that owns `world`.
 - Type consistency: `VoicemailGreeting` fields identical in T2 (app), T7 (dashboard mirror), T4/T5/T8/T9 fixtures; `head(key, { signal })` in T4 (adapter + fake) and T5 (caller); `withTimeout(promise, ms, label)` in T1 and T5; `greeting: 'play'|'say'|'none'` in T6 and T9; endpoint names `uploadVoicemailGreeting` / `removeVoicemailGreeting` / `voicemailGreetingAudioUrl` in T7 and T8; catalog symbol names match T7's exports.
 - Review Focus: each of the five lines names its owning task and test above.

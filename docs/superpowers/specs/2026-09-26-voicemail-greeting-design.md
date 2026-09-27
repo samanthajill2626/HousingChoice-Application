@@ -451,20 +451,23 @@ retired MMS endpoint.
      the response "finishes" was measured (plan review round 1, two
      reviewers, Node 24) to RESET the client before it reads the 413 - the
      bytes are handed to the OS, not read by the peer - while draining
-     delivers it every time. That drain is unbounded only for a non-browser
+     delivers it every time. That drain is "unbounded" only for a non-browser
      client that streams more than 5 MiB chunked (browsers never send a
-     Blob body chunked); accepted, bounded in practice by admin-only access
-     and the 10/min limiter, and named in the handback.
-     KNOWN LOCAL-DEV LIMITATION (not production): the Vite dev proxy forces
-     `Connection: close` on proxied requests, so in `npm run dev` and the
-     hermetic e2e lane a SERVER refusal of a body of roughly 3 MB or more
-     resets before the JSON arrives and the dashboard shows the generic
-     "Couldn't upload the greeting" line; refusals of small bodies (the
-     e2e's 200 KB case) and every client-side pre-check are unaffected.
-     Production is CloudFront -> origin over persistent connections and is
-     expected to deliver the JSON (UNVERIFIED; a dev-stack call cannot
-     settle it because dev also fronts with CloudFront - it is the Vite
-     proxy that is absent there).
+     Blob body chunked), and even then Node's default `requestTimeout`
+     (300 s; `app/src/index.ts` sets only the keep-alive and headers
+     timeouts) ends it - never set `requestTimeout: 0`. Accepted, bounded
+     in practice by admin-only access and the 10/min limiter, and named in
+     the handback.
+     KNOWN LOCAL-DEV LIMITATION (not deployed environments): the Vite dev
+     proxy forces `Connection: close` on proxied requests, so in `npm run
+     dev` and the hermetic e2e lane a SERVER refusal of a body of roughly
+     3 MB or more resets before the JSON arrives and the dashboard shows the
+     generic "Couldn't upload the greeting" line; refusals of small bodies
+     (the e2e's 200 KB case) and every client-side pre-check are
+     unaffected. Deployed dev and prod are CloudFront -> origin over
+     persistent connections with no Vite in the path, so the JSON is
+     expected to arrive there; the section 7 dev check settles it with a
+     3-4 MB renamed M4A upload.
    - `GreetingClientAbortedError`: WARN `{ actor, reason: 'client_aborted' }`,
      no response (the connection is gone), nothing stored.
    - Any other error -> 500 `{ error: 'upload_failed' }` with an ERROR log
@@ -1012,8 +1015,12 @@ Settings > Voice on the dev dashboard, call the dev business number, do not
 answer on the holder's cell, and confirm the caller hears the uploaded audio,
 then the beep. Remove it and repeat: the computer voice returns. The dev app
 log shows `voicemail greeting offered` on the first call and no
-greeting-related line on the second. Optional third check (settles the
-section 6 UNVERIFIED item): upload a WAV Twilio cannot decode (for example a
-32-bit float WAV), call, and note whether the caller hears silence then the
-beep, or Twilio's error; record the answer in
+greeting-related line on the second. Third check (settles the deployed-path
+half of 4.3's refusal promise, which the Vite proxy hides locally): rename a
+3-4 MB M4A voice memo to `.mp3` and upload it on the dev dashboard; the
+expected result is the M4A message inline, not the generic "Couldn't upload
+the greeting" line. Optional fourth check (settles the section 6 UNVERIFIED
+item): upload a WAV Twilio cannot decode (for example a 32-bit float WAV),
+call, and note whether the caller hears silence then the beep, or Twilio's
+error; record the answer in
 `docs/issues/voicemail-greeting-format-normalization.md`.

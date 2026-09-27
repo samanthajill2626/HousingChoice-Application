@@ -22,8 +22,11 @@ const CONTACT: Contact = {
   staff_notes_updated_at: '2026-09-26T15:00:00.000Z',
 };
 
-/** The file pane for one contact (a rerender with another contact re-renders
- *  the same tree, as ContactDetail does on a contact-to-contact navigation). */
+/** The file pane for one contact. A rerender with another contact swaps the
+ *  contact IN PLACE under a still-mounted TenantFile. ContactDetail never does
+ *  that today: on a contact-to-contact navigation it unmounts the pane, and
+ *  the card with it, rendering its spinner while useContact derives "loading"
+ *  for the new id. The card's key defends against a future caller that does. */
 function fileFor(contact: Contact): React.JSX.Element {
   return (
     <MemoryRouter>
@@ -73,7 +76,7 @@ describe('TenantFile - Staff notes card placement', () => {
     expect(screen.getByRole('heading', { name: /Preferences & notes/ })).toBeInTheDocument();
   });
 
-  it("an editor open on tenant A does not carry over to tenant B: B's file shows B's stored text, and A's draft is gone", async () => {
+  it("defensive key: if the contact is swapped IN PLACE (ContactDetail unmounts the pane on a switch today), an editor open on tenant A does not carry over to tenant B: B's file shows B's stored text, and A's draft is gone", async () => {
     const user = userEvent.setup();
     const tenantB: Contact = {
       ...CONTACT,
@@ -87,7 +90,8 @@ describe('TenantFile - Staff notes card placement', () => {
     await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
     await user.type(screen.getByLabelText('Staff notes'), ' - draft for A');
 
-    // The same file pane, now showing tenant B (re-rendered, not remounted).
+    // The same mounted file pane, its contact swapped in place to tenant B -
+    // the case the key defends (not what ContactDetail does today).
     rerender(fileFor(tenantB));
     expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue(/draft for A/)).not.toBeInTheDocument();

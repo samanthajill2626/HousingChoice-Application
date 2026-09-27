@@ -1,5 +1,6 @@
-/* Tours list page — two-section layout (Upcoming / Needs booking). Mirrors the
- * ContactsList / ListingsList module language (tokens.css, never hard-coded). */
+/* Tours list page - three views: Active (the Upcoming / Needs booking
+ * sections), Past and Closed. Mirrors the ContactsList / ListingsList module
+ * language (tokens.css, never hard-coded). */
 
 .page {
   /* Full-width: fills the AppFrame content area.
@@ -32,8 +33,9 @@
   color: var(--c-text-muted);
 }
 
-/* Active / Closed view tabs (links to /tours and /tours/closed) - mirrors the
- * properties list's Active/Deleted tabs (ListingsList.module.css). */
+/* Active / Past / Closed view tabs (links to /tours, /tours/past and
+ * /tours/closed) - mirrors the properties list's Active/Deleted tabs
+ * (ListingsList.module.css). */
 .tabs {
   display: flex;
   flex-wrap: wrap;
@@ -242,4 +244,120 @@
   margin: 0;
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
+}
+
+/* --- Past view (spec 4.3-4.5) ------------------------------------------- */
+
+/* A Past row is NOT one link: the checkbox and the actions sit BESIDE the link
+ * (interactive content cannot nest inside an <a>). The link keeps .row's
+ * card look and takes the room; the leading checkbox and trailing actions
+ * stay out of its flow. */
+.pastRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.pastRow > .row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.check {
+  flex: 0 0 auto;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0;
+  accent-color: var(--c-brand);
+}
+
+.rowActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.actionLink {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-brand);
+  white-space: nowrap;
+}
+
+.actionLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Per-row bulk result, under the row. */
+.rowResult {
+  margin: var(--sp-1) 0 0 var(--sp-4);
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.rowResultError {
+  color: var(--c-danger);
+}
+
+/* Failures for rows the reload dropped: one line per tour, above the toolbar. */
+.vanished {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+.vanishedOk {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.vanished p,
+.vanishedOk p {
+  margin: 0;
+}
+
+/* The refresh alert reuses .vanished; as a <p> it needs its own margin reset. */
+p.vanished {
+  margin: 0 0 var(--sp-3);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-3);
+}
+
+.selectAll {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* Tight pane: the actions wrap under the link, right-aligned; the checkbox
+ * stays leading on the first line. */
+@container (max-width: 560px) {
+  .pastRow {
+    flex-wrap: wrap;
+  }
+  .rowActions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
 }

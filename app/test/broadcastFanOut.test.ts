@@ -2424,6 +2424,46 @@ describe('broadcast.send (M1.8a)', () => {
       expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'opted_out' });
       expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotWrite.mock.invocationCallOrder[0]!);
     });
+
+    // --- code review ADV-6 (FW2-6) ---
+
+    it('ADV-6 (zz-adv-1): a record close that throws after the slot moved no longer loses the property rows - the milestone and the listing-send row are written before it, once (FW2-6)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+      vi.spyOn(world.sendAttemptsRepo, 'finishAttempt').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      // The record phase hands the SID to reconcile; its known-SID check adopts the message
+      // - and finds the slot already moved, so the adoption itself writes no property row.
+      const [check0] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB),
+        1,
+      );
+      await dispatchJob(JSON.parse(JSON.stringify(check0!.envelope)) as unknown);
+      await outbound.settle();
+      expect(world.sent).toHaveLength(1);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'adopted',
+        sid: world.sentDetails[0]!.sid,
+      });
+      expect(world.activityEvents.filter((e) => e.type === 'listing_sent' && e.contactId === 't-1')).toHaveLength(1);
+      expect(world.listingSends.filter((r) => r.contactId === 't-1' && r.unitId === 'unit-1')).toHaveLength(1);
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
   });
 
   describe('finalize (spec D16a)', () => {

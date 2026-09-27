@@ -35,11 +35,11 @@
 //     MAX_BROADCAST_ATTEMPTS); `unknown` hands it to the send.reconcile job
 //     (D7) - the slot stays `queued` and only the verdict writes it.
 //   - RECORD: the slot `sent` and its stats bump in ONE conditional write,
-//     BEFORE the A2P token (a fast delivery callback must find the slot), then
-//     the record done/sent. A failure here is `sent_unrecorded`: the text went
-//     out, so the recipient is handed to reconcile WITH its SID and never
-//     re-sent (D3a). The token acquire, the listing_sent milestone and the
-//     listing-send row are best-effort.
+//     BEFORE the A2P token (a fast delivery callback must find the slot);
+//     then the token acquire, the listing_sent milestone and the listing-send
+//     row, each best-effort; then the record done/sent (code review ADV-6).
+//     A failure here is `sent_unrecorded`: the text went out, so the
+//     recipient is handed to reconcile WITH its SID and never re-sent (D3a).
 //
 // A refused or skipped recipient spends NO token. Every failure-arm write goes
 // through guardWrite: a lost write is logged at ERROR and the attempt record
@@ -901,7 +901,10 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         // the provider's delivery status callback can fire within the ~1s
         // token gap, and the /status rollup matches THIS message to its slot
         // by conversationId+tsMsgId - the slot must exist first. The live
-        // 'sent' tick follows it. Then the record done/sent.
+        // 'sent' tick follows it, then the best-effort follow-ups - BEFORE the
+        // record's done/sent (code review ADV-6): a record write that throws
+        // is handed to reconcile, whose adoption finds the slot moved and
+        // writes no property row, so they would be lost. Then the record.
         phase = 'record';
         const recorded = await repo.recordRecipientOutcome(
           payload.broadcastId,
@@ -911,6 +914,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           ['queued'],
         );
         if (recorded.moved && recorded.item) emitBroadcastProgress(events, payload.broadcastId, recorded.item);
+        await afterSend(contact, contactKey);
         if (!(await attempts.finishAttempt(owner, ref, { outcome: 'sent', sid: outcome.providerSid }))) {
           // Plan deviation 3: the slot is not rolled back - the takeover's
           // reconcile finds the SID through the pointer and repairs.
@@ -920,7 +924,6 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           );
         }
         sentCount += 1;
-        await afterSend(contact, contactKey);
         return 'other';
       } catch (err) {
         if (phase === 'prepare') {

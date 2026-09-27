@@ -262,3 +262,36 @@ needs a crash and a number change together.
     (`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/self-qa.md`).
     Fix: word the INFO by its reason ("the next check is scheduled" alone, or
     one line per reason).
+
+## Addendum 2026-09-27 - planner post-build review
+
+Found by the planner's post-build review of `feat/send-outcome-reconcile`
+(2026-09-27), adversarial finding L-1
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/planner-review/adversarial.md`).
+Anchors at HEAD `91a66577` (the code is identical to the code-final commit
+`52220729`). Severity stays `low`.
+
+17. **The sibling read has no upper bound and costs one consistent GetItem
+    per index item.** The lookup reads its siblings once through
+    `listByRecipient` with only a LOWER bound, attemptedAt - 150 s
+    (`app/src/jobs/sendReconcile.ts:787-790`), and then discards everything
+    whose start lies outside +-150 s (`:791-795`). The repo's Query is
+    `conversationId = :p AND tsMsgId >= :since` with no upper key bound,
+    paged to the end, and makes a sequential consistent `get` for EVERY
+    index item before it dedupes (`app/src/repos/sendAttemptsRepo.ts:585-615`,
+    the `get` at `:602`). The reviewer's check with an injected fake
+    document client: 250 index items spread over three days after `since`
+    produced 3 Queries and 250 consistent GetItems, all but one outside the
+    sibling span. On time, a check reads about 390 s of index items. On a
+    LATE check (an SQS backlog, a DLQ redrive) it reads everything since
+    attemptedAt - 150 s - up to the 30-day TTL - for a busy recipient (a
+    relay member collects 2 index items per leg: the claim's and the
+    re-arm's, [send-attempt-rearm-residues](./send-attempt-rearm-residues.md)
+    item 6). That can outrun the 120 s visibility timeout and redeliver the
+    check while it is still running - the duplicate-chain shape of item 9.
+    **Fix:** bound the Query at `siblingToMs` as well
+    (`tsMsgId BETWEEN :since AND :until`), so the read is the span and no
+    more; optionally skip the `get` for an index item whose record identity
+    was already seen. Cost and a narrow duplicate-check window only: not a
+    double text, and the verdict is unchanged (the filter already discards
+    the extra rows).

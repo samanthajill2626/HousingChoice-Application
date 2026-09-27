@@ -6,6 +6,7 @@ severity: low
 status: open
 area: app/messaging
 created: 2026-09-27
+updated: 2026-09-27
 refs: app/src/lib/sendAttemptGate.ts:30, app/src/jobs/broadcastFanOut.ts:419, app/src/jobs/broadcastFanOut.ts:636, app/src/jobs/relayFanOut.ts:1259, app/src/jobs/relayFanOut.ts:1854, app/src/jobs/relayRetryLeg.ts:552, app/src/jobs/relayRetryLeg.ts:574, app/src/jobs/relayRetryLeg.ts:672, app/src/repos/sendAttemptsRepo.ts:422
 ---
 
@@ -88,3 +89,40 @@ machinery for a rare double-fault or race path).
 **Related.** [fanout-close-path-robustness-residues](./fanout-close-path-robustness-residues.md),
 [send-attempt-sweeper](./send-attempt-sweeper.md),
 [send-attempt-rearm-residues](./send-attempt-rearm-residues.md).
+
+## Addendum 2026-09-27 - planner post-build review: the cheap half, never ruled on
+
+Found by the planner's post-build review of `feat/send-outcome-reconcile`
+(2026-09-27), conformance finding P-3
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/planner-review/conformance.md`).
+Anchors at HEAD `91a66577`.
+
+The round 1 adjudication (R-b) ruled this issue residue while reasoning about
+the FULL fix - an atomic gate-plus-close transaction. It never ruled
+separately on the cheaper half: spec D8's per-slot-type CONDITIONAL close
+write (`docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md`,
+D8, design:370-376) on the writers that still write BLIND. The repos already
+expose it:
+
+- the broadcast fences (`declineAtFence`,
+  `app/src/jobs/broadcastFanOut.ts:660`, a blind `setRecipient`, then a
+  separate `bumpStats` at `:662-666`) could use `recordRecipientOutcome`
+  from `['queued']` with the fence's stats delta in the same write - the
+  shape `deferSlot` already uses (`broadcastFanOut.ts:541-543`);
+- the relay opt-out suppression arm (`app/src/jobs/relayFanOut.ts:1885-1888`,
+  `persistRelayRecipientResult`) could use `closeRelayRecipientIfUnsent`
+  (`app/src/repos/messagesRepo.ts:3949-4014`), as the cap-close does;
+- the rung's `refuseGate` / `closeTerminally` on a legacy relay row
+  (`app/src/jobs/relayRetryLeg.ts:552-583`), whose slot writer is wholesale,
+  likewise.
+
+That removes the "blind writer overwrites a send that already landed"
+sub-case - the fence's `skipped`/`opted_out` over a delivered text, which also
+drops the slot's `tsMsgId`, so later delivery receipts cannot roll up to it -
+without any transaction. It does not close the remaining window (a
+conditional close that lands between the claim and the claimant's own slot
+write), which still needs the transactional fix above.
+
+**Suggested fix (added).** Do the cheap half first, independently of the
+transaction: switch the three blind writers to their conditional twins.
+Mislabel-only either way; not a double text.

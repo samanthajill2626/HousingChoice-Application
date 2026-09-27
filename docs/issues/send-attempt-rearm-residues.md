@@ -6,6 +6,7 @@ severity: low
 status: open
 area: app/messaging
 created: 2026-09-27
+updated: 2026-09-27
 refs: app/src/repos/sendAttemptsRepo.ts:379, app/src/lib/dynamo.ts:61, app/src/jobs/broadcastFanOut.ts:917, app/src/jobs/relayFanOut.ts:2016, app/src/services/sendMessage.ts:549, app/src/services/sendMessage.ts:615, app/src/lib/sendOutcome.ts:41, app/src/adapters/messaging.ts:692, app/src/jobs/broadcastFanOut.ts:817, app/src/jobs/relayFanOut.ts:1983
 ---
 
@@ -181,3 +182,31 @@ residue; items 2, 6, 7 and 8 are the fix waves' own named residues
 double text by another road),
 [throw-for-redelivery-defeated-by-job-marker](./throw-for-redelivery-defeated-by-job-marker.md),
 [send-attempt-gate-then-close-window](./send-attempt-gate-then-close-window.md).
+
+## Addendum 2026-09-27 - planner post-build review
+
+Found by the planner's post-build review of `feat/send-outcome-reconcile`
+(2026-09-27), adversarial finding L-6
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/planner-review/adversarial.md`).
+Anchors at HEAD `91a66577`. Severity stays `low`.
+
+9. **Two consistent reads per attempt that could go (cost, extends item 6).**
+   - The claim re-reads the record after its own successful create
+     (`mustGet`, `app/src/repos/sendAttemptsRepo.ts:424`) to return it,
+     although it just wrote every field it would read back.
+   - The re-arm's consistent Get (`:383`) exists only to copy the attempt's
+     facts into the new recipient-index item (`indexItem(owner, record, ...)`,
+     `:406`); the caller already holds those facts - it passed them to the
+     claim moments earlier (broadcast `app/src/jobs/broadcastFanOut.ts:868-877`,
+     relay `app/src/jobs/relayFanOut.ts:1941-1951`). The TransactWrite's own
+     condition, not the Get, is what decides whether the re-arm applies
+     (`:386-409`); a Get that finds no record returns early (`:384`), which the
+     condition would also refuse.
+
+   Passing the facts into `rearm` and building the claimed record from the
+   write's inputs would remove both reads - two consistent reads on every
+   happy-path send. The review's cost line: a broadcast recipient's happy
+   path is about +4 DynamoDB round trips over main, a relay leg about +7
+   (adversarial review, "Cost per recipient"). Cost only: no behavior,
+   ordering or double-text change, and item 7's belt (the re-read after a
+   FAILED condition, `:411-419`) is a different read and stays.

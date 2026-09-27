@@ -2,7 +2,7 @@
 
 Anchor issue: `throw-for-redelivery-defeated-by-job-marker` (high).
 Branch `feat/send-outcome-reconcile`, cut from `main@685f2ede`, 2026-09-24.
-Revision 11 (after design review rounds 1-4, plan review rounds 1-3, the 2026-09-25 cross-branch
+Revision 12 (revision 11 plus the "Errata as built" section at the end, written at the planner's post-build review on 2026-09-27; after design review rounds 1-4, plan review rounds 1-3, the 2026-09-25 cross-branch
 sequencing with `feat/retry-send-window` and `feat/share-skip-fix`, the RSW
 planner's 2026-09-26 relay, kept verbatim at
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/handoffs/rsw-relay-2026-09-26.md`,
@@ -1037,3 +1037,88 @@ say).
   retry-counter mission found several close branches unreachable from where its
   plan wanted to call them; `finalize` from the reconcile handler is exactly
   that shape, which is why D16a rebuilds it.
+
+
+## 12. Errata as built (revision 12, 2026-09-27)
+
+The text above is the approved design. The build (code final at 52220729,
+handback 91a66577) departs from it in the places below, each one adjudicated
+in a committed record under
+`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/` (build/,
+code-review/, planner-review/). Stage 1b and share-skip Branch B build on the
+rules AS BUILT, which are these. Where an erratum tightens a guarantee the
+approved text stays for the reasoning; where it loosens one the residue is
+filed and named.
+
+1. **D8a - the claim is RE-ARMED immediately before the provider call** (code
+   review round 1 ADV-1, fix waves FW1-1 / FW2-1; Cameron's ruling: HIGH at
+   most, minimal site half). `SendAttemptsRepo.rearm` is one fenced
+   TransactWrite (a new `attemptedAt` on the record plus a new index item);
+   every send site calls it as the last step before the provider call - the
+   broadcast pass through `sendMessage`'s new `beforeProviderSend` hook, the
+   relay unit directly - and a lost re-arm (the attempt was taken over)
+   SENDS NOTHING and takes the takeover-lost path; a throw is the existing
+   prepare-phase deferral. The claim TTL is measured from the LAST re-arm.
+   Residue: a stall of about 90 s inside the re-arm's own DynamoDB calls plus
+   a concurrent taker can still send twice (`send-attempt-rearm-residues`).
+2. **D8 - the reconcile job's own closes write the RECORD first**, then the
+   slot only when that close won (round 1 ADV-2, FW1-4) - the reverse of the
+   approved "slot FIRST". Crash safety moved to the superseded exit: a
+   redelivered check that finds the record `done` for its own attempt
+   re-applies the slot close its outcome implies (idempotent). Sec 8 item 6's
+   "writes the slot before the record" reads accordingly.
+3. **D13 - the lookup window is TWO-SIDED**: `[attemptedAt - 60 s,
+   attemptedAt + RECONCILE_WINDOW_TRAIL_MS]` (the trail = the claim TTL plus
+   the lead), not "to now" (round 1 C-1, FW1-2). Siblings are every live
+   attempt to the same recipient from the same sender whose window overlaps
+   (`RECONCILE_SIBLING_SPAN_MS` either side), compared by RECORD identity
+   (`attemptKey`), never by owner alone. Residue: a provider request that
+   completes more than the trail after the re-arm creates a message outside
+   the window, which a later `never_sent` then duplicates
+   (`send-attempt-rearm-residues` item 2).
+4. **D13 - the match rule is STRICTER**: a candidate matches only when the
+   body hash AND the media count both match, for EVERY body; a short record
+   matches only a short candidate (build S3a deviation 1, S3b F-2, FW1-3).
+   `bodyShort` stays on the record but no longer decides a match. Direction:
+   only toward `unresolved`, never toward adoption or a re-send.
+5. **D13 - `never_sent` needs a COMPLETE walk** (round 2 R2C-1 / F-1, FW4-1;
+   round 3 NEW-1, FW5-1): the newest-first early stop runs only on the checks
+   BEFORE the last; the last check walks to the list's end or the page bound;
+   a walk cut at the bound or ended by a list error judges what it read and
+   never rules `never_sent` (page_bound / provider_error take precedence).
+6. **D8a - relay strands and the broadcast ladder**: the approved sentence
+   "the broadcast ladder clears the TTL" holds for a strand in PASS 1 only; a
+   broadcast recipient stranded in pass 2 or 3, or on any re-drive pass, and
+   every relay strand, stays `attempting` with a `queued` slot until the
+   sweeper (`send-attempt-sweeper`, D14 not built).
+7. **D7a - the deferral arms release the record** `done` / `retryable` even
+   when their slot write failed (planner conformance review P-2; broadcast
+   `deferClaimed`, relay `relayFanOut.ts` deferral arms). Nothing was sent
+   and the recipient is carried, so the next pass claims it straight away;
+   the approved "the record keeps `attempting`" applies to the TERMINAL
+   failure arms (which write the record only once their slot write resolved
+   - round 1 C-2 / R-e, FW2-2).
+8. **D7a / D8 - three pre-claim declines still write their slot blindly**
+   behind the gate: the broadcast fences (`setRecipient`), the relay opt-out
+   arm, and the rung's closes on legacy rows (round 1 C-4 / R-b, filed as the
+   gate-then-close residue; planner review P-3 notes the cheaper conditional
+   half was not ruled on separately). Damage: a mislabeled slot, never a
+   second send.
+9. **Sec 2 - broadcast slots carry NO `attemptedAt`** (correct per D8a's
+   own rule: the attempt clock lives on the record; the five slot-shape pins
+   in `broadcastFanOut.test.ts` hold). Relay slots carry it best-effort.
+10. **D16 - the relay retry rung's `never_sent` marks its record `redriven`
+    before its re-drive enqueue**, exactly as the leg does (plan round 3 #1)
+    - the approved text implied it; the plan's first revisions omitted it.
+11. **Sec 10 - hosted-dev checks are a PRECONDITION**, not an afterthought
+    (planner conformance review P-1, medium): before the reconcile is relied
+    on in production, run `send-reconcile-hosted-dev-checks` item 1 - does
+    Twilio's Messages list include a message still `queued` / `accepted`? If
+    it does not, a message stuck in Twilio's queue past the last check is
+    ruled `never_sent` and re-sent. Also check `num_media` on outbound MMS
+    and the MMS Converter setting (P-5): a mismatch means photo legs are
+    never adopted and always read "Not confirmed".
+12. **Codes** - `enqueue_failed` is written to a slot by the reconcile job's
+    enqueue-failure close (D10 listed it as a code this branch writes; it is
+    confirmed as built); no HTTP status ever reaches a slot (plan round 3
+    #13).

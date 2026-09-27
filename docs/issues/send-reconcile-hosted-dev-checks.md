@@ -1,12 +1,13 @@
 ---
 id: send-reconcile-hosted-dev-checks
-title: Checks owed at the first hosted-dev run of send.reconcile - whether unsent messages are listed, the list's order and paging, and the Messaging Service settings that rewrite bodies (a possible double text rides on the first)
+title: Checks owed at the first hosted-dev run of send.reconcile - whether unsent messages are listed, the list's order and paging, the Messaging Service settings that rewrite bodies, and the MMS media count (a possible double text rides on the first)
 type: bug
 severity: med
 status: open
 area: app/messaging
 created: 2026-09-27
-refs: docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, app/src/jobs/sendReconcile.ts:765, app/src/jobs/sendReconcile.ts:801, app/src/jobs/sendReconcile.ts:892, app/src/adapters/messaging.ts:1131, app/src/lib/sendOutcome.ts:48, app/src/lib/sendFingerprint.ts:10
+updated: 2026-09-27
+refs: docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, app/src/jobs/sendReconcile.ts:765, app/src/jobs/sendReconcile.ts:801, app/src/jobs/sendReconcile.ts:892, app/src/adapters/messaging.ts:1131, app/src/lib/sendOutcome.ts:48, app/src/lib/sendFingerprint.ts:10, app/src/jobs/sendReconcile.ts:552, app/src/adapters/messaging.ts:624, fake-twilio/src/routes/rest.ts:83
 ---
 
 **Problem.** The `send.reconcile` job (`feat/send-outcome-reconcile`)
@@ -88,3 +89,32 @@ the human's request.
 **Related.** [send-reconcile-job-residues](./send-reconcile-job-residues.md),
 [send-attempt-rearm-residues](./send-attempt-rearm-residues.md) (the other
 double-text windows), [send-attempt-sweeper](./send-attempt-sweeper.md).
+
+## Addendum 2026-09-27 - planner post-build review: the media half of the fingerprint
+
+Found by the planner's post-build review of `feat/send-outcome-reconcile`
+(2026-09-27), conformance finding P-5
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/planner-review/conformance.md`).
+Anchors at HEAD `91a66577`.
+
+5. **Does Twilio report an outbound MMS's media count as submitted, and is
+   the MMS Converter on?** Items 3 and 4 check the BODY half of the D13
+   fingerprint. The match also requires the provider's media count to equal
+   the attempt's (`matches`, `app/src/jobs/sendReconcile.ts:552-554`); the
+   driver reads it from the listed or fetched message's `num_media`
+   (`app/src/adapters/messaging.ts:624-631`). Two things could break that for
+   every outbound MMS: Twilio's listed/fetched `num_media` differing from the
+   number of media URLs submitted, and the Messaging Service's MMS Converter
+   (which can deliver media as a link in the body - changing both the body
+   and the media count). Either would leave every relay photo leg unmatched:
+   `unresolved`, "Not confirmed", never adopted - the safe direction, never
+   a re-send. No test can see it: the fake stores
+   `num_media = mediaUrls.length` (`fake-twilio/src/routes/rest.ts:83`).
+   **What the run should add:** send an MMS with a known number of media
+   URLs from the hosted-dev stack, list and fetch it, and compare `num_media`;
+   and read the MMS Converter setting on the dev and prod Messaging Services
+   alongside items 3 and 4 (the prod read is the human's to run or
+   authorize). Broadcasts carry no media today, so this is relay-only until
+   [broadcast-mms](./broadcast-mms.md) lands (see also
+   [send-attempt-facts-dead-and-duplicated](./send-attempt-facts-dead-and-duplicated.md),
+   item 2). Not a double text: an unmatched candidate withholds `never_sent`.

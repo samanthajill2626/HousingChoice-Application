@@ -369,3 +369,59 @@ of the section above):
   are the attempts whose start lies within 150 s of it, either side
   (`sendOutcome.ts:31-47`), whenever the check runs - so a sweeper that
   re-enqueues `send.reconcile` for an old record re-judges the same window.
+
+## Addendum 2026-09-27 - planner post-build review: sweep by broadcast and relay source, not only by record
+
+Found by the planner's post-build review of `feat/send-outcome-reconcile`
+(2026-09-27), adversarial finding H-1
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/planner-review/adversarial.md`),
+filed as its own high issue:
+[deploy-mid-share-strands-remaining-recipients](./deploy-mid-share-strands-remaining-recipients.md).
+Anchors at HEAD `91a66577`. Status and severity here are unchanged; the high
+lives in that issue.
+
+**The gap.** The suggested fix above finds "attempt records open past a
+bound". A deploy that lands during a share kills the pass mid-loop (the
+worker's 10 s drain, `app/src/worker.ts:543`); the SQS redelivery carries the
+same `jobId` and the run-once marker suppresses it
+(`app/src/jobs/broadcastFanOut.ts:351-363`, relay
+`app/src/jobs/relayFanOut.ts:829-841`). That leaves ONE recipient with an
+`attempting` record (the one mid-send) and every recipient after it `queued`
+with NO record at all - records are written only at the claim
+(`broadcastFanOut.ts:869-879`, relay `relayFanOut.ts:1941-1952`). A sweeper
+keyed on records finds the one and misses the rest, which is most of the
+share. Every deploy during a share produces this, so it is the most frequent
+strand this sweeper will meet.
+
+**What the sweeper must add.**
+
+- **A second input: owners, not only records.** `sending` broadcasts, and
+  relay source messages carrying `queued` legs, whose pass is no longer live
+  past a bound. For broadcasts the team-wide list can nominate candidates
+  (`listByStatus('sending')`, a byCreated GSI Query with a status filter,
+  `app/src/repos/broadcastsRepo.ts:692-695`) - under D11 only as a
+  NOMINATOR, each candidate then re-read with `getByIdConsistent`. Relay
+  source rows have no such list; finding them (a due row written with the
+  source, or similar) is a design question.
+- **Per `queued` slot, read the record consistently and act on it.** No
+  record: the recipient was never claimed and so never sent - re-drive it in
+  a continuation under a FRESH `jobId` (the claim makes a duplicate safe). A
+  stale `attempting` or orphaned `reconciling` record: the existing plan
+  above (takeover into `send.reconcile`). A terminal record: close the slot
+  from it (item 7's rule, read the slot before acting, applies in reverse).
+- **A liveness bound.** A large share is legitimately `sending` for minutes
+  (about 1 text per second, `app/src/lib/config.ts:302`, plus the 10 s and
+  20 s continuations), so "`sending` and old" is not enough. The sweeper
+  needs a progress clock - for example the last slot write or the pass
+  claim's time - and a bound past which no pass can still be running.
+- **Shares that pre-date the record.** A `queued` slot with no record means
+  "never sent" only for a pass that ran with the claim in place. A share
+  whose pass ran before `feat/send-outcome-reconcile` deployed has no
+  records at all, and a slot of it may have been sent. Bound the sweep to
+  shares created after that deploy, or close such slots `send_unconfirmed`
+  rather than re-driving them.
+
+A SIGTERM-aware fan-out loop (stop at a recipient boundary, re-enqueue the
+remainder under a fresh `jobId` before exit) would remove the common case at
+its source; the owner sweep is still needed for a SIGKILL or a crash. Both
+are recorded as directions in the H-1 issue, not designed.

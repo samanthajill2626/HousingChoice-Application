@@ -1,6 +1,6 @@
 ---
 id: send-outcome-dashboard-residues
-title: Three small dashboard residues of the send-outcome presentation work - a latent delivered and not-confirmed double count, a stale reason doc, one token with two sentences
+title: Four small dashboard residues of the send-outcome presentation work - a latent delivered and not-confirmed double count, a stale reason doc, one token with two sentences, redrive_refused prose wrong for most causes
 type: debt
 severity: low
 status: open
@@ -41,3 +41,26 @@ None is visible today.
 **Suggested fix.** Optional: exclude the code from the delivered count, or pin
 its unreachability in a test (1); correct the doc (2); decide whether one
 sentence should serve both positions - a product call (3).
+
+## Addendum 2026-09-27 - planner post-build review
+
+Found by the planner's post-build review of `feat/send-outcome-reconcile`
+(2026-09-27), adversarial finding L-3
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/planner-review/adversarial.md`).
+Anchors at HEAD `91a66577`. Severity stays `low`.
+
+4. **The `redrive_refused` prose is wrong for most of the causes that write
+   it.** The row reads "Wasn't resent: the group closed or the member left"
+   (`INTERNAL_CODE_REASONS`, `dashboard/src/routes/contact/deliveryStatus.ts:1056`).
+   Two of the causes that write the code fit: `group_not_open` and
+   `member_removed`. The rest do not: the relay fan-out's
+   `conversation_not_found`, `no_pool_number` and `source_not_found`
+   (`app/src/jobs/relayFanOut.ts:846`, `:866`, `:882`), `nothing_to_relay`
+   (`:1124`) and `source_vanished` (`:1494`); and the reconcile's own
+   pre-check refusals `no_continuation` and `retry_row_not_found`
+   (`app/src/jobs/sendReconcile.ts:1125`, `:1128`). The slot carries only the
+   code, not the cause, so the dashboard cannot choose per cause. **Fix:** a
+   generic sentence that is true for all of them - for example "Wasn't
+   resent" plus a neutral clause, a product-copy call - and update the mirror
+   test (`dashboard/src/routes/contact/sendOutcomeCodesMirror.test.ts`) if it
+   pins the prose. Wording only: no send, no status, no count changes.

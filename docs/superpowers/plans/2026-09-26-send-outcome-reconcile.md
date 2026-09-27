@@ -411,18 +411,18 @@ import { describe, expect, it } from 'vitest';
 import { bodyFingerprint, hashRecipientKey, normalizeBodyForMatch, recipientDigest } from '../src/lib/sendFingerprint.js';
 
 describe('normalizeBodyForMatch (spec D13, Smart Encoding)', () => {
-  const submitted = 'HC spike B ’quote’ dash—dash more… ignore';
+  const submitted = 'HC spike B \u2019quote\u2019 dash\u2014dash more\u2026 ignore';
   const stored = "HC spike B 'quote' dash-dash more... ignore";   // what the 2026-09-24 spike read back
   it('makes the submitted and the Smart-Encoded stored body equal', () => {
     expect(normalizeBodyForMatch(submitted)).toBe(normalizeBodyForMatch(stored));
     expect(bodyFingerprint(submitted).hash).toBe(bodyFingerprint(stored).hash);
   });
   it('keeps letters and digits only, NFKC first', () => {
-    expect(normalizeBodyForMatch('ＨＣ 42!')).toBe('HC42');
+    expect(normalizeBodyForMatch('\uff28\uff23 42!')).toBe('HC42');
     expect(normalizeBodyForMatch(undefined)).toBe('');
   });
   it('flags a body under three normalized characters as short', () => {
-    expect(bodyFingerprint('👍').short).toBe(true);
+    expect(bodyFingerprint('\u{1f44d}').short).toBe(true);
     expect(bodyFingerprint('ok').short).toBe(true);
     expect(bodyFingerprint('yes').short).toBe(false);
   });
@@ -1920,7 +1920,7 @@ it('lists messages by To and From newest first with Twilio paging', async () => 
   expect(typeof page1.body.messages[0].date_created).toBe('string');
 });
 it('stores the Smart-Encoded body the way Twilio does', async () => {
-  const submitted = 'HC ’q’ d—d m…';
+  const submitted = 'HC \u2019q\u2019 d\u2014d m\u2026';
   const created = await request(app).post('/2010-04-01/Accounts/ACtest/Messages.json').type('form').send({ To: '+16175550100', From: '+15550009999', Body: submitted });
   expect(created.body.body).toBe(submitted);                    // the create response echoes
   const fetched = await request(app).get(`/2010-04-01/Accounts/ACtest/Messages/${created.body.sid}.json`);

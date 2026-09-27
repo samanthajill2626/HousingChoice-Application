@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 24 / Express 5 / TypeScript (app), `@aws-sdk/lib-storage` via the existing `MediaStore` adapter, DynamoDB (settings item), twilio `VoiceResponse`, React 19 + CSS modules (dashboard), vitest + supertest + RTL, Playwright (e2e workspace only), fast-xml-parser (fake-twilio).
 
-**Spec:** `docs/superpowers/specs/2026-09-26-voicemail-greeting-design.md` (DRAFT 2). The plan argues from the spec; read both. Section numbers below refer to it.
+**Spec:** `docs/superpowers/specs/2026-09-26-voicemail-greeting-design.md` (DRAFT 3, approved). The plan argues from the spec; read both. Section numbers below refer to it. Plan status: DRAFT 2 after plan review round 1 (two reviewers, every finding accepted; adjudications in `docs/superpowers/reviews/2026-09-26-voicemail-greeting/plan-r1-adjudications.md`).
 
 ## Global Constraints
 
@@ -19,7 +19,8 @@
 - Never log: the file name, the presigned URL, audio bytes. ERROR level only for server faults (spec 4.10).
 - Admin-only mutation; every logged-in user may read/play (assumption A). Remove has a confirmation dialog; Replace does not (assumption E).
 - No new dependency, no infrastructure change, no message-catalog entry, no change to `<Record>` parameters or the thanks/goodbye (spec 3.5, 4.10).
-- ASCII only in every new/touched line of code, tests, specs and docs. Never `Get-Content | -replace | Set-Content`. Commit explicit paths after a gating `git status`; add the trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` (or the authoring model).
+- ASCII only in every new/touched line of code, tests, specs and docs. Never `Get-Content | -replace | Set-Content`. Commit explicit paths after a gating `git status`; end every commit message with a `Co-Authored-By:` trailer naming the model that AUTHORED the commit (the implementer child's own model, e.g. `Co-Authored-By: Claude Opus 4.1 <noreply@anthropic.com>`); the commit blocks below write `<AUTHORING MODEL>` where that name goes - never copy a placeholder literally.
+- The test harness (`app/test/helpers/twilioWebhookHarness.ts`, supertest) sends `Connection: close` unless told otherwise; every large-body upload test sets `Connection: keep-alive` (Task 4), or the client resets before the 4xx JSON arrives and the failure looks like a route bug. It is not.
 - Run fast checks per task from the worktree: `cd W:/tmp/voicemail-greeting/app && npx vitest run test/<file>` and `cd W:/tmp/voicemail-greeting && npm run typecheck`. The slow gates (`npm test`, `npm run smoke`, `npm run e2e`, gate 5 lint) belong to the orchestrator's gate phase.
 - Every e2e assertion uses accessibility-first selectors; NEVER `documentElement.scrollWidth` (a guard test fails the file); hermetic lane only.
 - Never edit: `app/src/adapters/messaging.ts`, `app/src/services/sendMessage.ts`, `app/src/jobs/broadcastFanOut.ts`, `app/src/jobs/relayFanOut.ts`, `app/src/jobs/relayRetryLeg.ts`, `app/src/jobs/retrySend.ts`, `app/src/repos/messagesRepo.ts`, `app/src/repos/broadcastsRepo.ts`, `dashboard/src/routes/contact/deliveryStatus.ts`, `dashboard/src/routes/contact/relayRetryJoin.ts`, `dashboard/src/routes/broadcasts/**`, broadcast seed fixtures. `dashboard/src/api/types.ts`, `client.ts`, `endpoints.ts`: additive edits only.
@@ -62,10 +63,39 @@ Modify:
 
 **Files:**
 - Create: `app/src/lib/voicemailGreeting.ts`
+- Create: `app/test/helpers/audioFixtures.ts` (a shared WAV fixture; a HELPER, not a test file, so importing it never re-runs a suite)
 - Test: `app/test/voicemailGreeting.test.ts`
 
 **Interfaces:**
-- Produces (used by Tasks 2, 4, 5, 8): every export below, byte-exact names.
+- Produces (used by Tasks 2, 4, 5, 8): every export below, byte-exact names; `minimalWav(silenceBytes?: number): Buffer` from the helper.
+
+- [ ] **Step 0: The shared WAV fixture**
+
+```ts
+// app/test/helpers/audioFixtures.ts
+// Audio fixtures shared by the voicemail-greeting suites. A HELPER module (no
+// describe/it): importing it from several test files must never re-run a suite.
+// minimalMp3() already lives in app/src/lib/seed/media.ts.
+
+/** A minimal PCM WAV: 44-byte RIFF/WAVE header + `silenceBytes` zero samples. */
+export function minimalWav(silenceBytes = 64): Buffer {
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'latin1');
+  header.writeUInt32LE(36 + silenceBytes, 4);
+  header.write('WAVE', 8, 'latin1');
+  header.write('fmt ', 12, 'latin1');
+  header.writeUInt32LE(16, 16); // fmt chunk size
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(8000, 24); // sample rate
+  header.writeUInt32LE(16000, 28); // byte rate
+  header.writeUInt16LE(2, 32); // block align
+  header.writeUInt16LE(16, 34); // bits per sample
+  header.write('data', 36, 'latin1');
+  header.writeUInt32LE(silenceBytes, 40);
+  return Buffer.concat([header, Buffer.alloc(silenceBytes, 0)]);
+}
+```
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -86,25 +116,7 @@ import {
   withTimeout,
 } from '../src/lib/voicemailGreeting.js';
 import { minimalMp3 } from '../src/lib/seed/media.js';
-
-/** A minimal PCM WAV: 44-byte RIFF/WAVE header + `silenceBytes` zero samples. */
-export function minimalWav(silenceBytes = 64): Buffer {
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0, 'latin1');
-  header.writeUInt32LE(36 + silenceBytes, 4);
-  header.write('WAVE', 8, 'latin1');
-  header.write('fmt ', 12, 'latin1');
-  header.writeUInt32LE(16, 16); // fmt chunk size
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(1, 22); // mono
-  header.writeUInt32LE(8000, 24); // sample rate
-  header.writeUInt32LE(16000, 28); // byte rate
-  header.writeUInt16LE(2, 32); // block align
-  header.writeUInt16LE(16, 34); // bits per sample
-  header.write('data', 36, 'latin1');
-  header.writeUInt32LE(silenceBytes, 40);
-  return Buffer.concat([header, Buffer.alloc(silenceBytes, 0)]);
-}
+import { minimalWav } from './helpers/audioFixtures.js';
 
 async function drain(gate: GreetingUploadGate, input: Buffer[]): Promise<Buffer> {
   const out: Buffer[] = [];
@@ -134,6 +146,7 @@ describe('normalizeGreetingContentType', () => {
 
 describe('sniffGreetingHeader', () => {
   const ADTS = Buffer.from([0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0xfc, 0, 0, 0, 0, 0]);
+  const ADTS_MPEG2 = Buffer.from([0xff, 0xf9, 0x50, 0x80, 0x00, 0x1f, 0xfc, 0, 0, 0, 0, 0]);
   const M4A = Buffer.from('\u0000\u0000\u0000\u0018ftypM4A ', 'latin1');
   const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
   it('accepts an ID3 tag and MPEG frame syncs with non-zero layer bits', () => {
@@ -144,8 +157,8 @@ describe('sniffGreetingHeader', () => {
   it('accepts RIFF/WAVE', () => {
     expect(sniffGreetingHeader(minimalWav().subarray(0, 12), 'wav')).toBe(true);
   });
-  it('rejects ADTS AAC (layer bits 00), M4A ftyp and PNG under both formats', () => {
-    for (const head of [ADTS, M4A, PNG]) {
+  it('rejects ADTS AAC (layer bits 00, both 0xFFF1 and 0xFFF9 syncs), M4A ftyp and PNG under both formats', () => {
+    for (const head of [ADTS, ADTS_MPEG2, M4A, PNG]) {
       expect(sniffGreetingHeader(head, 'mp3')).toBe(false);
       expect(sniffGreetingHeader(head, 'wav')).toBe(false);
     }
@@ -460,9 +473,9 @@ Expected: PASS (all cases). Then `cd W:/tmp/voicemail-greeting && npm run typech
 - [ ] **Step 5: Commit**
 
 ```bash
-cd W:/tmp/voicemail-greeting && git status && git add app/src/lib/voicemailGreeting.ts app/test/voicemailGreeting.test.ts && git commit -m "feat(voicemail-greeting): greeting library - type normalization, header sniff, upload gate, name sanitizer, lookup timeout
+cd W:/tmp/voicemail-greeting && git status && git add app/src/lib/voicemailGreeting.ts app/test/helpers/audioFixtures.ts app/test/voicemailGreeting.test.ts && git commit -m "feat(voicemail-greeting): greeting library - type normalization, header sniff, upload gate, name sanitizer, lookup timeout
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -692,7 +705,7 @@ Expected: PASS; typecheck exit 0 (the dashboard mirror is Task 7; the app compil
 ```bash
 cd W:/tmp/voicemail-greeting && git status && git add app/src/repos/settingsRepo.ts app/src/routes/settings.ts app/test/helpers/twilioWebhookHarness.ts app/test/settings.test.ts app/test/voicemailGreetingRoutes.test.ts && git commit -m "feat(voicemail-greeting): settings record - VoicemailGreeting map, fixed-key projection, null-REMOVE patch; PUT /api/settings ignores it
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -835,7 +848,7 @@ Expected: identical pass count to Step 1; typecheck exit 0; no NEW lint errors (
 ```bash
 cd W:/tmp/voicemail-greeting && git status && git add app/src/routes/serveMediaObject.ts app/src/routes/api.ts && git commit -m "refactor(media-serve): extract serveMediaObject from the call-recording route (behavior unchanged; greeting audio reuses it)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -859,15 +872,26 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 Append to `app/test/voicemailGreetingRoutes.test.ts` (add the imports at the top of the file):
 
 ```ts
-import { Readable } from 'node:stream';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { minimalMp3 } from '../src/lib/seed/media.js';
 import { VOICEMAIL_GREETING_REJECT_MESSAGE, VOICEMAIL_GREETING_S3_KEY } from '../src/lib/voicemailGreeting.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { TEST_ADMIN_USER, TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { minimalWav } from './helpers/audioFixtures.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
-import { minimalWav } from './voicemailGreeting.test.js';
 
 const KEY = VOICEMAIL_GREETING_S3_KEY;
 const PATH = '/api/settings/voicemail-greeting';
+
+// supertest/superagent send `Connection: close` by default. Node then closes
+// the socket the moment the response finishes; a client still uploading gets
+// RST before it reads the 4xx JSON (measured: ECONNRESET on every 3 MiB /
+// 6 MiB refusal, 400/413 JSON with keep-alive). Browsers keep connections
+// alive, so keep-alive is the realistic shape - and the ONLY way these tests
+// can observe the JSON the route really sends.
+function keepAlive(req: request.Test): request.Test {
+  return req.set('connection', 'keep-alive');
+}
 
 /** A valid MP3 padded with zero bytes to `total` (still sniffs as MP3). */
 function bigMp3(total: number): Buffer {
@@ -880,7 +904,7 @@ function bigWav(total: number): Buffer {
 }
 
 function admin(req: request.Test): request.Test {
-  return req.set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_ADMIN_COOKIE);
+  return keepAlive(req.set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_ADMIN_COOKIE));
 }
 
 async function upload(app: Parameters<typeof request>[0], body: Buffer, contentType: string, name = 'greeting.mp3', extra: (t: request.Test) => request.Test = (t) => t) {
@@ -943,15 +967,44 @@ describe('PUT /api/settings/voicemail-greeting - the sniff and the cap (bodies b
   });
 
   it('413 file_too_large for a CHUNKED 6 MiB body (no Content-Length), and the JSON reaches the client', async () => {
+    // superagent cannot stream a Readable, so drive a raw http.request with
+    // Transfer-Encoding: chunked (two writes) against a real listener.
     const { app, world } = makeWebhookHarness();
-    const body = bigMp3(6 * 1024 * 1024);
-    const res = await admin(request(app).put(PATH))
-      .set('content-type', 'audio/mpeg')
-      .set('transfer-encoding', 'chunked')
-      .send(Readable.from([body.subarray(0, 2 * 1024 * 1024), body.subarray(2 * 1024 * 1024)]) as never);
-    expect(res.status).toBe(413);
-    expect(res.body.error).toBe('file_too_large');
-    expect(world.mediaPuts).toHaveLength(0);
+    const server = app.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const body = bigMp3(6 * 1024 * 1024);
+      const result = await new Promise<{ status: number; json: { error?: string } }>((resolve, reject) => {
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port,
+            method: 'PUT',
+            path: PATH,
+            headers: {
+              'x-origin-verify': ORIGIN_SECRET,
+              cookie: TEST_ADMIN_COOKIE,
+              'content-type': 'audio/mpeg',
+              'transfer-encoding': 'chunked',
+              connection: 'keep-alive',
+            },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) as { error?: string } }));
+          },
+        );
+        req.on('error', reject);
+        req.write(body.subarray(0, 2 * 1024 * 1024));
+        req.end(body.subarray(2 * 1024 * 1024));
+      });
+      expect(result.status).toBe(413);
+      expect(result.json.error).toBe('file_too_large');
+      expect(world.mediaPuts).toHaveLength(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
@@ -965,15 +1018,15 @@ describe('PUT/DELETE /api/settings/voicemail-greeting - happy paths', () => {
       contentType: 'audio/mpeg',
       fileName: 'Sam greeting.mp3',
       sizeBytes: minimalMp3().length,
-      uploadedByUserId: 'user-0001',
-      uploadedByEmail: 'founder@example.com',
+      uploadedByUserId: TEST_ADMIN_USER.userId,
+      uploadedByEmail: TEST_ADMIN_USER.email,
     });
     expect(typeof res.body.voicemailGreeting.uploadedAt).toBe('string');
     expect(world.mediaPuts).toEqual([{ key: KEY, contentType: 'audio/mpeg', bytes: minimalMp3().length }]);
     expect(world.mediaObjects.get(KEY)?.body.equals(minimalMp3())).toBe(true);
     expect(world.settings.voicemailGreeting?.fileName).toBe('Sam greeting.mp3');
     const audit = world.auditEvents.find((e) => e.event_type === 'settings_updated');
-    expect(audit?.payload).toMatchObject({ fields: ['voicemailGreeting'], action: 'uploaded', actor: 'user-0001' });
+    expect(audit?.payload).toMatchObject({ fields: ['voicemailGreeting'], action: 'uploaded', actor: TEST_ADMIN_USER.userId });
     const settings = await admin(request(app).get('/api/settings'));
     expect(settings.body.settings.voicemailGreeting.fileName).toBe('Sam greeting.mp3');
   });
@@ -1110,7 +1163,7 @@ describe('GET /api/settings/voicemail-greeting/audio', () => {
 });
 ```
 
-Note for the chunked test: supertest's `.send(stream)` may not stream; if `Readable.from(...)` is rejected, use Node's `http.request` against `app.listen(0)` with `Transfer-Encoding: chunked`, writing the two halves with `req.write()` then `req.end()`, and read the JSON response. Either way the assertion is the same: 413 JSON arrives.
+Every supertest request that carries a body goes through `admin()` (keep-alive). If a large-body refusal test reports ECONNRESET, check the request's `Connection` header before anything else: the route is not the suspect, the client's `Connection: close` is.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1328,12 +1381,13 @@ Add the three routes BEFORE `return router;`:
     } catch (err) {
       if (err instanceof GreetingRejectedError) {
         req.unpipe(gate);
-        if (err.reason === 'too_large' && declaredLength === undefined) {
-          // Chunked over the cap: the only unbounded drain. Answer, then drop it.
-          res.once('finish', () => req.destroy());
-        } else {
-          req.resume(); // bounded: at most the declared length (<= 5 MiB) remains
-        }
+        // Drain what is left so the response can be READ by the client. For a
+        // known length this is bounded (step 3 refused anything over 5 MiB);
+        // for a chunked over-cap body it is not, and that is accepted: browsers
+        // never send a Blob chunked, and destroying the request after the
+        // response "finishes" was measured to RESET the client before it reads
+        // the 413 (spec 4.3).
+        req.resume();
         if (err.reason === 'invalid_format') {
           res.status(400).json({ error: 'unsupported_media_type', message: VOICEMAIL_GREETING_REJECT_MESSAGE });
         } else if (err.reason === 'too_large') {
@@ -1442,17 +1496,58 @@ In `app/src/routes/api.ts` (~line 724), pass the store:
     }),
 ```
 
+- [ ] **Step 5b: Pin that `S3MediaStore.head` forwards the abort signal**
+
+```ts
+// app/test/mediaStore.head.test.ts
+// The voicemail-greeting webhook bounds its HeadObject with an AbortSignal
+// (spec 4.6). This pins that the signal actually reaches client.send as
+// `abortSignal` - the only thing that releases a pooled socket when the
+// lookup budget expires. Same fake-client shape as mediaStore.getStreamRange.test.ts.
+import { describe, expect, it } from 'vitest';
+import { S3MediaStore } from '../src/adapters/mediaStore.js';
+
+describe('S3MediaStore.head', () => {
+  it('passes opts.signal to client.send as abortSignal, and nothing when omitted', async () => {
+    const seen: { input: Record<string, unknown>; options: unknown }[] = [];
+    const client = {
+      send: async (cmd: { input: Record<string, unknown> }, options?: unknown) => {
+        seen.push({ input: { ...cmd.input }, options });
+        return { ContentType: 'audio/mpeg', ContentLength: 427 };
+      },
+    } as unknown as ConstructorParameters<typeof S3MediaStore>[1];
+    const store = new S3MediaStore('bucket', client);
+    const signal = AbortSignal.timeout(10_000);
+    await expect(store.head('settings/voicemail-greeting', { signal })).resolves.toEqual({ contentType: 'audio/mpeg', size: 427 });
+    expect(seen[0]?.input).toEqual({ Bucket: 'bucket', Key: 'settings/voicemail-greeting' });
+    expect((seen[0]?.options as { abortSignal?: AbortSignal }).abortSignal).toBe(signal);
+    await store.head('settings/voicemail-greeting');
+    expect(seen[1]?.options).toBeUndefined();
+  });
+  it('an aborted send rejects (never reads as a 404)', async () => {
+    const client = {
+      send: async () => {
+        const err = new Error('Request aborted');
+        (err as { name?: string }).name = 'AbortError';
+        throw err;
+      },
+    } as unknown as ConstructorParameters<typeof S3MediaStore>[1];
+    await expect(new S3MediaStore('bucket', client).head('k', { signal: AbortSignal.abort() })).rejects.toThrow('Request aborted');
+  });
+});
+```
+
 - [ ] **Step 6: Run to verify they pass**
 
-Run: `cd W:/tmp/voicemail-greeting/app && npx vitest run test/voicemailGreetingRoutes.test.ts test/settings.test.ts test/mmsMediaRoutes.test.ts test/mediaStore.test.ts && cd .. && npm run typecheck && npx eslint app/src/routes/settings.ts app/src/adapters/mediaStore.ts app/test/voicemailGreetingRoutes.test.ts app/test/helpers/twilioWebhookHarness.ts`
-Expected: all PASS; typecheck 0; no new lint errors. If the 3 MiB sniff test or the chunked 413 test times out or reports ECONNRESET, the wiring regressed toward `pipeline`/`Connection: close` - re-read the route comment; do not shrink the bodies.
+Run: `cd W:/tmp/voicemail-greeting/app && npx vitest run test/voicemailGreetingRoutes.test.ts test/mediaStore.head.test.ts test/settings.test.ts test/mmsMediaRoutes.test.ts test/mediaStore.test.ts && cd .. && npm run typecheck && npx eslint app/src/routes/settings.ts app/src/adapters/mediaStore.ts app/test/voicemailGreetingRoutes.test.ts app/test/mediaStore.head.test.ts app/test/helpers/twilioWebhookHarness.ts`
+Expected: all PASS; typecheck 0; no new lint errors. If a large-body refusal test reports ECONNRESET: first confirm the request went through `admin()` / carries `Connection: keep-alive` (supertest's default `Connection: close` is the usual cause and has nothing to do with the route); only then look at the route - `stream.pipeline`, `Connection: close` on the response, or a `req.destroy()` after the response would each reset the client. Do not shrink the bodies.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd W:/tmp/voicemail-greeting && git status && git add app/src/adapters/mediaStore.ts app/src/routes/settings.ts app/src/routes/api.ts app/test/helpers/twilioWebhookHarness.ts app/test/voicemailGreetingRoutes.test.ts && git commit -m "feat(voicemail-greeting): upload/remove/audio routes under /api/settings (streamed sniff-and-cap gate, fixed key, best-effort audit); MediaStore.head abort signal; harness head/presign seams
+cd W:/tmp/voicemail-greeting && git status && git add app/src/adapters/mediaStore.ts app/src/routes/settings.ts app/src/routes/api.ts app/test/helpers/twilioWebhookHarness.ts app/test/voicemailGreetingRoutes.test.ts app/test/mediaStore.head.test.ts && git commit -m "feat(voicemail-greeting): upload/remove/audio routes under /api/settings (streamed sniff-and-cap gate, fixed key, best-effort audit); MediaStore.head abort signal; harness head/presign seams
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -1462,7 +1557,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Files:**
 - Modify: `app/src/routes/webhooks/voice.ts` (imports; `TwilioVoiceWebhookDeps`; a local helper inside `createTwilioVoiceRouter`; the `/status` miss branch at `reply.say(resolveMessage('voice.voicemail_prompt'))` ~line 1875)
 - Modify: `app/test/helpers/twilioWebhookHarness.ts` (`HarnessOptions.voicemailGreetingLookupBudgetMs` threaded into the `webhooks` deps next to `statusUnknownSidRetryDelayMs`)
-- Test: `app/test/founderTriage.test.ts` (new `describe` block appended)
+- Test: `app/test/founderTriage.test.ts` (`founderHarness` widened to take harness options; `seedRingingBridgeWith` added beside `seedRingingBridge`; a nested `describe` added INSIDE the MISSED describe that owns `world`)
 
 **Interfaces:**
 - Consumes: Task 1 (`withTimeout`, `VOICEMAIL_GREETING_LOOKUP_BUDGET_MS`, `VOICEMAIL_GREETING_PLAY_TTL_SECONDS`), Task 2 (`world.settings.voicemailGreeting`), Task 4 harness seams (`mediaHeads`, `mediaPresigns`, `failMediaHeads`, `hangMediaHeads`, `head(key, { signal })`).
@@ -1470,132 +1565,198 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing webhook tests**
 
-Append to `app/test/founderTriage.test.ts` (inside the file's existing structure; reuse its `seedRingingBridge`, `world`, `signedTwilioPost`, `resolveMessage`; the block below assumes the file's `beforeEach` creates `world` and the harness the way the surrounding `describe`s do - copy the pattern of the "missed INBOUND founder-bridge <Dial action> OFFERS VOICEMAIL" test that already exists in the file):
+In `app/test/founderTriage.test.ts` the harness helpers are NOT module-level: `founderHarness(world)` (~line 102) builds a fresh `makeWebhookHarness({ world })` and assigns the holder; `seedRingingBridge()` (~line 598) lives INSIDE `describe('founder call-triage - MISSED -> push + auto-text (M1.9b)')` (~lines 553-1136), which owns `world` and the job-wiring `beforeEach`. So:
+
+(1) Widen `founderHarness` to accept harness options and forward them (every existing caller passes none):
 
 ```ts
-describe('voicemail greeting on the missed founder-bridge <Dial action> (voicemail-greeting spec 4.6)', () => {
-  const GREETING = {
-    s3Key: 'settings/voicemail-greeting',
-    contentType: 'audio/mpeg' as const,
-    fileName: 'sam.mp3',
-    sizeBytes: 427,
-    uploadedAt: '2026-09-26T12:00:00.000Z',
-    uploadedByUserId: 'user-0001',
-    uploadedByEmail: 'founder@example.com',
-  };
-  const MISS = { CallSid: 'CAbiz0001', DialCallStatus: 'no-answer', ApiVersion: '2010-04-01' };
-
-  async function seedGreeting(w: FakeWorld, withObject = true) {
-    w.settings.voicemailGreeting = { ...GREETING };
-    if (withObject) w.mediaObjects.set(GREETING.s3Key, { body: Buffer.from('greeting-bytes'), contentType: 'audio/mpeg' });
-  }
-
-  it('(a) greeting set + object present -> <Play presigned> BEFORE <Record>, no spoken prompt, Record unchanged, offered INFO', async () => {
-    const app = await seedRingingBridge();
-    await seedGreeting(world);
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
-    expect(res.status).toBe(200);
-    const play = res.text.indexOf('<Play>');
-    const record = res.text.indexOf('<Record');
-    expect(play).toBeGreaterThan(-1);
-    expect(record).toBeGreaterThan(play);
-    expect(res.text).toMatch(/<Play>https:\/\/fake-s3\.local\/settings\/voicemail-greeting\?X-Amz-Signature=fakesig\d+&amp;X-Amz-Expires=600<\/Play>/);
-    expect(res.text).not.toContain(resolveMessage('voice.voicemail_prompt'));
-    expect(res.text).toContain('maxLength="120"');
-    expect(res.text).toContain(resolveMessage('voice.voicemail_thanks'));
-    expect(world.mediaHeads).toEqual([{ key: GREETING.s3Key, signal: true }]);
-    expect(world.mediaPresigns).toEqual([{ key: GREETING.s3Key, ttlSeconds: 600 }]);
-    expect(harness.capture.lines.some((l) => l['msg'] === 'voicemail greeting offered')).toBe(true);
-    expect(JSON.stringify(harness.capture.lines)).not.toContain('X-Amz-Signature');
-  });
-
-  it('(b) no greeting -> the spoken prompt exactly as today and NO greeting log line', async () => {
-    const app = await seedRingingBridge();
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
-    expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
-    expect(res.text).not.toContain('<Play>');
-    expect(harness.capture.lines.some((l) => String(l['msg']).includes('voicemail greeting'))).toBe(false);
-    expect(world.mediaHeads).toHaveLength(0);
-  });
-
-  it('(c) greeting set but the object is missing -> spoken prompt + ONE WARN without a URL', async () => {
-    const app = await seedRingingBridge();
-    await seedGreeting(world, false);
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
-    expect(res.status).toBe(200);
-    expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
-    expect(res.text).not.toContain('<Play>');
-    const warns = harness.capture.atLevel(40).filter((l) => String(l['msg']).includes('voicemail greeting'));
-    expect(warns).toHaveLength(1);
-    expect(warns[0]?.['msg']).toBe('voicemail greeting object missing - using the spoken prompt');
-    expect(JSON.stringify(warns)).not.toContain('http');
-  });
-
-  it('(d) head throws -> spoken prompt + WARN, still 200', async () => {
-    const app = await seedRingingBridge();
-    await seedGreeting(world);
-    world.failMediaHeads.add(GREETING.s3Key);
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
-    expect(res.status).toBe(200);
-    expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
-    expect(res.text).not.toContain('<Play>');
-    expect(harness.capture.atLevel(40).some((l) => l['msg'] === 'voicemail greeting lookup failed or timed out - using the spoken prompt')).toBe(true);
-  });
-
-  it('(f) greeting set, no media store -> spoken prompt + WARN', async () => {
-    // Build a harness WITHOUT the store for this one case.
-    const w = createFakeWorld();
-    const h = makeWebhookHarness({ world: w, withoutMediaStore: true });
-    // ... seed the ringing bridge on `h.app` exactly as seedRingingBridge does for the default harness ...
-    w.settings.voicemailGreeting = { ...GREETING };
-    const res = await signedTwilioPost(h.app, '/webhooks/twilio/voice/status', MISS);
-    expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
-    expect(h.capture.atLevel(40).some((l) => l['msg'] === 'voicemail greeting set but no media store configured - using the spoken prompt')).toBe(true);
-  });
-
-  it('(g) a MASKED relay miss with a greeting set keeps the goodbye - no <Play>, no head', async () => {
-    // Reuse the file's existing masked-miss setup (seedRelayGroup + the masked /voice + /status posts).
-    // Assert: res.text contains resolveMessage('voice.missed_call_goodbye'), not '<Play>', and world.mediaHeads is empty.
-  });
-});
-
-describe('voicemail greeting lookup budget (spec 4.6 - the webhook never waits on a hung store)', () => {
-  it('(e) head never settles -> spoken prompt inside the budget, exactly one WARN, no offered line even after the head is released', async () => {
-    const w = createFakeWorld();
-    const h = makeWebhookHarness({ world: w, voicemailGreetingLookupBudgetMs: 50 });
-    // ... seed the ringing bridge on `h.app` as seedRingingBridge does ...
-    w.settings.voicemailGreeting = {
-      s3Key: 'settings/voicemail-greeting', contentType: 'audio/mpeg', fileName: 'sam.mp3', sizeBytes: 1,
-      uploadedAt: '2026-09-26T12:00:00.000Z', uploadedByUserId: 'user-0001', uploadedByEmail: 'founder@example.com',
-    };
-    w.mediaObjects.set('settings/voicemail-greeting', { body: Buffer.from('x'), contentType: 'audio/mpeg' });
-    w.hangMediaHeads.add('settings/voicemail-greeting');
-    const t0 = Date.now();
-    const res = await signedTwilioPost(h.app, '/webhooks/twilio/voice/status', { CallSid: 'CAbiz0001', DialCallStatus: 'no-answer', ApiVersion: '2010-04-01' });
-    const elapsed = Date.now() - t0;
-    expect(res.status).toBe(200);
-    expect(elapsed).toBeLessThan(1000);
-    expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
-    expect(res.text).not.toContain('<Play>');
-    const greetingWarns = () => h.capture.atLevel(40).filter((l) => String(l['msg']).includes('voicemail greeting'));
-    expect(greetingWarns()).toHaveLength(1);
-    expect(String(greetingWarns()[0]?.['msg'])).toContain('timed out');
-    // The abort signal fired at the budget, the fake rejected the hung head;
-    // give the abandoned lookup a tick to settle: nothing more may be logged.
-    await new Promise((r) => setTimeout(r, 120));
-    expect(greetingWarns()).toHaveLength(1);
-    expect(h.capture.lines.some((l) => l['msg'] === 'voicemail greeting offered')).toBe(false);
-    expect(w.mediaHeads[0]?.signal).toBe(true);
-  });
-});
+function founderHarness(world: FakeWorld, opts: Omit<HarnessOptions, 'world'> = {}) {
+  const harness = makeWebhookHarness({ world, ...opts });
+  // ... the rest of the function is unchanged (admin cell + assignInboundVoiceLine) ...
+}
 ```
 
-The two `// ...` comments are NOT placeholders for the builder to guess: they mean "call the same helper this file already uses to seed a ringing bridge, but against the harness built in this test". Read `seedRingingBridge` at the top of `founderTriage.test.ts`; if it closes over a module-level `harness`, extract a `seedRingingBridgeOn(h)` variant that takes the harness (a two-line refactor) and have `seedRingingBridge` call it.
+Import `HarnessOptions` from `./helpers/twilioWebhookHarness.js` (export it there if it is not exported yet - it is declared `export interface HarnessOptions`).
+
+(2) INSIDE that describe, next to `seedRingingBridge`, add a variant that returns the harness too, and make `seedRingingBridge` delegate to it so the existing callers are untouched:
+
+```ts
+  /** seedRingingBridge, but built with harness options and returning the
+   *  capture too (the voicemail-greeting cases assert on log lines). */
+  async function seedRingingBridgeWith(
+    opts: Omit<HarnessOptions, 'world'>,
+    caller: Record<string, unknown> = { type: 'unknown' },
+  ) {
+    world.contacts.push({ contactId: 'c-caller', phone: CALLER, ...caller } as (typeof world.contacts)[number]);
+    const harness = founderHarness(world, opts);
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice', bizVoiceParams());
+    world.pushSends.length = 0;
+    return harness;
+  }
+
+  async function seedRingingBridge(caller: Record<string, unknown> = { type: 'unknown' }) {
+    return (await seedRingingBridgeWith({}, caller)).app;
+  }
+```
+
+(3) INSIDE the same describe (before its closing `});`, after the last existing `it`), add:
+
+```ts
+  describe('voicemail greeting on the missed founder-bridge <Dial action> (voicemail-greeting spec 4.6)', () => {
+    const GREETING = {
+      s3Key: 'settings/voicemail-greeting',
+      contentType: 'audio/mpeg' as const,
+      fileName: 'sam.mp3',
+      sizeBytes: 427,
+      uploadedAt: '2026-09-26T12:00:00.000Z',
+      uploadedByUserId: 'user-0001',
+      uploadedByEmail: 'founder@example.com',
+    };
+    const MISS = { CallSid: 'CAbiz0001', DialCallStatus: 'no-answer', ApiVersion: '2010-04-01' };
+    const greetingWarns = (capture: LogCapture) =>
+      capture.atLevel(40).filter((l) => String(l['msg']).includes('voicemail greeting'));
+
+    function seedGreeting(withObject = true) {
+      world.settings.voicemailGreeting = { ...GREETING };
+      if (withObject) {
+        world.mediaObjects.set(GREETING.s3Key, { body: Buffer.from('greeting-bytes'), contentType: 'audio/mpeg' });
+      }
+    }
+
+    it('(a) greeting set + object present -> <Play presigned> BEFORE <Record>, no spoken prompt, Record unchanged, offered INFO', async () => {
+      seedGreeting();
+      const { app, capture } = await seedRingingBridgeWith({});
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+      expect(res.status).toBe(200);
+      const play = res.text.indexOf('<Play>');
+      const record = res.text.indexOf('<Record');
+      expect(play).toBeGreaterThan(-1);
+      expect(record).toBeGreaterThan(play);
+      expect(res.text).toMatch(/<Play>https:\/\/fake-s3\.local\/settings\/voicemail-greeting\?X-Amz-Signature=fakesig\d+&amp;X-Amz-Expires=600<\/Play>/);
+      expect(res.text).not.toContain(resolveMessage('voice.voicemail_prompt'));
+      expect(res.text).toContain('maxLength="120"');
+      expect(res.text).toContain(resolveMessage('voice.voicemail_thanks'));
+      expect(world.mediaHeads).toEqual([{ key: GREETING.s3Key, signal: true }]);
+      expect(world.mediaPresigns).toEqual([{ key: GREETING.s3Key, ttlSeconds: 600 }]);
+      expect(capture.lines.some((l) => l['msg'] === 'voicemail greeting offered')).toBe(true);
+      expect(JSON.stringify(capture.lines)).not.toContain('X-Amz-Signature');
+    });
+
+    it('(b) no greeting -> the spoken prompt exactly as today and NO greeting log line', async () => {
+      const { app, capture } = await seedRingingBridgeWith({});
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+      expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+      expect(res.text).not.toContain('<Play>');
+      expect(capture.lines.some((l) => String(l['msg']).includes('voicemail greeting'))).toBe(false);
+      expect(world.mediaHeads).toHaveLength(0);
+    });
+
+    it('(c) greeting set but the object is missing -> spoken prompt + ONE WARN without a URL', async () => {
+      seedGreeting(false);
+      const { app, capture } = await seedRingingBridgeWith({});
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+      expect(res.text).not.toContain('<Play>');
+      const warns = greetingWarns(capture);
+      expect(warns).toHaveLength(1);
+      expect(warns[0]?.['msg']).toBe('voicemail greeting object missing - using the spoken prompt');
+      expect(JSON.stringify(warns)).not.toContain('http');
+    });
+
+    it('(d) head throws -> spoken prompt + WARN, still 200', async () => {
+      seedGreeting();
+      world.failMediaHeads.add(GREETING.s3Key);
+      const { app, capture } = await seedRingingBridgeWith({});
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+      expect(res.text).not.toContain('<Play>');
+      expect(greetingWarns(capture).some((l) => l['msg'] === 'voicemail greeting lookup failed or timed out - using the spoken prompt')).toBe(true);
+    });
+
+    it('(e) head never settles -> the abort signal ends it inside the budget: spoken prompt, one WARN, no offered line even after a tick', async () => {
+      seedGreeting();
+      world.hangMediaHeads.add(GREETING.s3Key);
+      const { app, capture } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
+      const t0 = Date.now();
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+      expect(res.text).not.toContain('<Play>');
+      expect(greetingWarns(capture)).toHaveLength(1);
+      expect(world.mediaHeads[0]?.signal).toBe(true);
+      await new Promise((r) => setTimeout(r, 120));
+      expect(greetingWarns(capture)).toHaveLength(1);
+      expect(capture.lines.some((l) => l['msg'] === 'voicemail greeting offered')).toBe(false);
+    });
+
+    it('(e2) the SETTINGS read never settles (no abort signal there) -> only withTimeout can end it: spoken prompt inside the budget, WARN names the budget', async () => {
+      seedGreeting();
+      const { app, capture } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
+      // The router holds the repo OBJECT, so replacing the method on it after
+      // the harness is built is what the router calls. Restore afterwards.
+      const original = world.settingsRepo.getOrgSettings;
+      world.settingsRepo.getOrgSettings = () => new Promise(() => {});
+      try {
+        const t0 = Date.now();
+        const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+        expect(Date.now() - t0).toBeLessThan(1000);
+        expect(res.status).toBe(200);
+        expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+        expect(res.text).not.toContain('<Play>');
+        const warns = greetingWarns(capture);
+        expect(warns).toHaveLength(1);
+        expect(String((warns[0]?.['err'] as { message?: string } | undefined)?.message)).toContain('exceeded 50ms');
+        expect(world.mediaHeads).toHaveLength(0);
+      } finally {
+        world.settingsRepo.getOrgSettings = original;
+      }
+    });
+
+    it('(f) greeting set, no media store -> spoken prompt + WARN', async () => {
+      seedGreeting(false);
+      const { app, capture } = await seedRingingBridgeWith({ withoutMediaStore: true });
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+      expect(greetingWarns(capture).some((l) => l['msg'] === 'voicemail greeting set but no media store configured - using the spoken prompt')).toBe(true);
+    });
+
+    it('(g) a MASKED relay miss with a greeting set keeps the goodbye - no <Play>, no head', async () => {
+      seedGreeting();
+      seedRelayGroup(world);
+      const { app } = makeWebhookHarness({ world });
+      await signedTwilioPost(app, '/webhooks/twilio/voice', {
+        CallSid: 'CAmasked1',
+        From: ALICE,
+        To: POOL,
+        CallStatus: 'ringing',
+        Direction: 'inbound',
+        ApiVersion: '2010-04-01',
+      });
+      expect(world.messages.find((m) => m.provider_sid === 'CAmasked1')!.masked).toBe(true);
+      const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+        CallSid: 'CAmasked1',
+        DialCallStatus: 'no-answer',
+        ApiVersion: '2010-04-01',
+      });
+      expect(res.status).toBe(200);
+      expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
+      expect(res.text).not.toContain('<Play>');
+      expect(res.text).not.toContain('<Record');
+      expect(world.mediaHeads).toHaveLength(0);
+    });
+  });
+```
+
+Add `import type { LogCapture } from './helpers/logCapture.js';` to the file's imports (the file already imports `createLogCapture` from there). Test (e) proves the ABORT-SIGNAL path (the fake head rejects when the signal fires, exactly as the S3 client does); test (e2) proves the `withTimeout` bound on its own, because the settings read has no signal - deleting `withTimeout` from the webhook turns (e2) red. Pino serializes `err` as an object with `message`, which (e2) reads.
 
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `cd W:/tmp/voicemail-greeting/app && npx vitest run test/founderTriage.test.ts -t "voicemail greeting"`
-Expected: (a), (c), (d), (e), (f) FAIL (no `<Play>`, no log lines, `voicemailGreetingLookupBudgetMs` unknown); (b) and (g) pass already (today's behavior) and stay as guards.
+Expected: (a), (c), (d), (e), (e2), (f) FAIL (no `<Play>`, no greeting log lines, `voicemailGreetingLookupBudgetMs` unknown to the harness); (b) and (g) pass already (today's behavior) and stay as guards - (g) is the masked-call privacy guard and must keep passing after Step 3.
 
 - [ ] **Step 3: Implement the webhook side**
 
@@ -1724,7 +1885,7 @@ Expected: PASS, including every pre-existing case in those files (the no-greetin
 ```bash
 cd W:/tmp/voicemail-greeting && git status && git add app/src/routes/webhooks/voice.ts app/test/helpers/twilioWebhookHarness.ts app/test/founderTriage.test.ts && git commit -m "feat(voicemail-greeting): missed founder-bridge voicemail plays the uploaded greeting (<Play> presigned, 2.5s budget, spoken-prompt fallback)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -1742,7 +1903,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
-`fake-twilio/test/twimlInterpreter.test.ts` (append, or create with these imports):
+`fake-twilio/test/twimlInterpreter.test.ts`: if the file does NOT exist, create it with the two imports below; if it DOES exist, it already imports `vitest` and `interpretTwiml` - add ONLY the `const`s and the `describe` (a second import of the same binding is a SyntaxError):
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -1926,8 +2087,13 @@ In `leaveVoicemail`, as the first statements:
     call.voicemailGreeting = plan.greeting;
     if (plan.playUrl !== undefined) {
       // Best effort and never fatal: the observation is for the e2e, the call
-      // proceeds whatever the fetch returned.
-      call.voicemailGreetingFetchStatus = await this.fetchStatus(plan.playUrl);
+      // proceeds whatever the fetch returned - including an injected
+      // fetchStatus that THROWS (the default never does; a stub might).
+      try {
+        call.voicemailGreetingFetchStatus = await this.fetchStatus(plan.playUrl);
+      } catch {
+        call.voicemailGreetingFetchStatus = 0;
+      }
     }
 ```
 
@@ -1941,7 +2107,7 @@ Expected: the whole fake-twilio suite PASS (the existing voicemail cases use Say
 ```bash
 cd W:/tmp/voicemail-greeting && git status && git add fake-twilio/src/engine/twimlInterpreter.ts fake-twilio/src/engine/voiceTypes.ts fake-twilio/src/engine/callEngine.ts fake-twilio/test/twimlInterpreter.test.ts fake-twilio/test/callEngineVoicemail.test.ts && git commit -m "feat(fake-twilio): record the verb before <Record> (play/say/none) and the <Play> URL fetch status on the call
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -2013,6 +2179,12 @@ describe('voicemail greeting client', () => {
   });
   it('voicemailGreetingAudioUrl carries the upload instant as a cache-buster', () => {
     expect(voicemailGreetingAudioUrl(GREETING)).toBe('/api/settings/voicemail-greeting/audio?v=2026-09-26T12%3A00%3A00.000Z');
+  });
+  it('request() refuses body + rawBody together (programmer error) before any fetch', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const { request } = await import('./client.js');
+    await expect(request('/api/x', { method: 'PUT', body: { a: 1 }, rawBody: new Blob(['x']) })).rejects.toThrow('mutually exclusive');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 ```
@@ -2150,14 +2322,29 @@ Add `VoicemailGreeting` to the `./types.js` import list at the top of `endpoints
 `e2e/performance/routes.ts` ~line 300:
 
 ```ts
-const VOICE_GETS = Object.freeze([required('/api/users/me'), required('/api/settings')]);
+// Voice tab (voicemail greeting): the org settings are required; the
+// player's preload="metadata" audio GET happens only when a greeting is set.
+const VOICE_GETS = Object.freeze([
+  required('/api/users/me'),
+  required('/api/settings'),
+  conditional('/api/settings/voicemail-greeting/audio', ['v']),
+]);
 ```
 
-`e2e/performance/routes.test.ts` ~line 112:
+`e2e/performance/routes.test.ts` ~line 112 (mirror the exact string form the file uses for the other `conditional(...)` entries - read one first, e.g. grep `#conditional` in that file):
 
 ```ts
-  '/settings/voice': ['/api/users/me?#required', '/api/settings?#required'],
+  '/settings/voice': ['/api/users/me?#required', '/api/settings?#required', '/api/settings/voicemail-greeting/audio?v#conditional'],
 ```
+
+`e2e/performance/templates.ts` `ENDPOINT_TEMPLATES` (after `'/api/settings',`):
+
+```ts
+  '/api/settings/voicemail-greeting',
+  '/api/settings/voicemail-greeting/audio',
+```
+
+(one template covers PUT and DELETE; the audio GET is its own path.) In `e2e/performance/routes.ts`, both `'/settings/voice'` source-citation strings (~lines 699 and 753) gain `; dashboard/src/routes/settings/useVoicemailGreeting.ts:1-40` so the citation names where the new required GET comes from (the citation test checks format only, so the exact line span is documentation, not a gate).
 
 - [ ] **Step 5: Run to verify**
 
@@ -2167,9 +2354,9 @@ Expected: PASS everywhere (the catalog test now discovers exactly 110 non-delega
 - [ ] **Step 6: Commit**
 
 ```bash
-cd W:/tmp/voicemail-greeting && git status && git add dashboard/src/api/types.ts dashboard/src/api/client.ts dashboard/src/api/endpoints.ts dashboard/src/api/index.ts dashboard/src/api/voicemailGreeting.client.test.ts e2e/performance/mutationCatalog.ts e2e/performance/mutationCatalog.test.ts e2e/performance/routes.ts e2e/performance/routes.test.ts && git commit -m "feat(voicemail-greeting): dashboard API (raw-body upload, remove, audio URL) + mutation catalog and Voice-tab GET contract
+cd W:/tmp/voicemail-greeting && git status && git add dashboard/src/api/types.ts dashboard/src/api/client.ts dashboard/src/api/endpoints.ts dashboard/src/api/index.ts dashboard/src/api/voicemailGreeting.client.test.ts e2e/performance/mutationCatalog.ts e2e/performance/mutationCatalog.test.ts e2e/performance/routes.ts e2e/performance/routes.test.ts e2e/performance/templates.ts && git commit -m "feat(voicemail-greeting): dashboard API (raw-body upload, remove, audio URL) + mutation catalog and Voice-tab GET contract
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 (Drop `dashboard/src/api/index.ts` from the `git add` if it needed no edit.)
@@ -2248,6 +2435,10 @@ const GREETING: VoicemailGreeting = {
 };
 const wrap = (settings: OrgSettings): SettingsResponse => ({ settings, welcomeTextDefault: 'Welcome' });
 const mp3 = (name = 'g.mp3', type = 'audio/mpeg', size = 3) => new File([new Uint8Array(size)], name, { type });
+// applyAccept: false - user-event 14 otherwise DROPS a file whose type is not in
+// the input's `accept` list (no change event, no alert), which would make the
+// M4A-reject test time out for a reason unrelated to the code under test.
+const user = userEvent.setup({ applyAccept: false });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -2279,14 +2470,14 @@ describe('VoicemailGreetingBlock', () => {
     expect(await screen.findByText("Couldn't load the voicemail greeting.")).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     getSettings.mockResolvedValue(wrap(BASE));
-    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('No greeting uploaded - callers hear the built-in prompt.')).toBeInTheDocument();
   });
 
   it('an audio/mp4 file shows the reject message WITHOUT calling the endpoint', async () => {
     render(<VoicemailGreetingBlock />);
     await screen.findByRole('button', { name: 'Upload greeting' });
-    await userEvent.upload(screen.getByLabelText('Greeting audio file'), mp3('memo.m4a', 'audio/mp4'));
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3('memo.m4a', 'audio/mp4'));
     expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_REJECT_MESSAGE);
     expect(uploadVoicemailGreeting).not.toHaveBeenCalled();
   });
@@ -2295,7 +2486,7 @@ describe('VoicemailGreetingBlock', () => {
     uploadVoicemailGreeting.mockResolvedValue(GREETING);
     render(<VoicemailGreetingBlock />);
     await screen.findByRole('button', { name: 'Upload greeting' });
-    await userEvent.upload(screen.getByLabelText('Greeting audio file'), mp3('sam-greeting.mp3', ''));
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3('sam-greeting.mp3', ''));
     await waitFor(() => expect(uploadVoicemailGreeting).toHaveBeenCalledWith(expect.any(File), 'audio/mpeg'));
   });
 
@@ -2303,9 +2494,9 @@ describe('VoicemailGreetingBlock', () => {
     render(<VoicemailGreetingBlock />);
     await screen.findByRole('button', { name: 'Upload greeting' });
     const big = new File([new Uint8Array(6 * 1024 * 1024)], 'big.mp3', { type: 'audio/mpeg' });
-    await userEvent.upload(screen.getByLabelText('Greeting audio file'), big);
+    await user.upload(screen.getByLabelText('Greeting audio file'), big);
     expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_TOO_LARGE_MESSAGE);
-    await userEvent.upload(screen.getByLabelText('Greeting audio file'), mp3('empty.mp3', 'audio/mpeg', 0));
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3('empty.mp3', 'audio/mpeg', 0));
     expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_EMPTY_MESSAGE);
     expect(uploadVoicemailGreeting).not.toHaveBeenCalled();
   });
@@ -2314,7 +2505,7 @@ describe('VoicemailGreetingBlock', () => {
     uploadVoicemailGreeting.mockResolvedValue(GREETING);
     render(<VoicemailGreetingBlock />);
     await screen.findByRole('button', { name: 'Upload greeting' });
-    await userEvent.upload(screen.getByLabelText('Greeting audio file'), mp3());
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3());
     expect(await screen.findByText('Greeting uploaded.')).toBeInTheDocument();
     expect(screen.getByText('sam-greeting.mp3')).toBeInTheDocument();
     expect(screen.getByText(/Uploaded .* by founder@example.com/)).toBeInTheDocument();
@@ -2339,13 +2530,13 @@ describe('VoicemailGreetingBlock', () => {
     getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
     removeVoicemailGreeting.mockResolvedValue(undefined);
     render(<VoicemailGreetingBlock />);
-    await userEvent.click(await screen.findByRole('button', { name: 'Remove greeting' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove greeting' }));
     const dialog = screen.getByRole('dialog', { name: 'Remove voicemail greeting?' });
-    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(removeVoicemailGreeting).not.toHaveBeenCalled();
     expect(dialog).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Remove greeting' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await user.click(screen.getByRole('button', { name: 'Remove greeting' }));
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
     expect(await screen.findByText('Greeting removed.')).toBeInTheDocument();
     expect(screen.getByText('No greeting uploaded - callers hear the built-in prompt.')).toBeInTheDocument();
     expect(removeVoicemailGreeting).toHaveBeenCalledTimes(1);
@@ -2355,8 +2546,23 @@ describe('VoicemailGreetingBlock', () => {
     uploadVoicemailGreeting.mockRejectedValue(new ApiError(403, 'forbidden', 'forbidden'));
     render(<VoicemailGreetingBlock />);
     await screen.findByRole('button', { name: 'Upload greeting' });
-    await userEvent.upload(screen.getByLabelText('Greeting audio file'), mp3());
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3());
     expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_FORBIDDEN_MESSAGE);
+  });
+
+  it('a failed Remove keeps the dialog open and shows the error INSIDE it (exactly one alert)', async () => {
+    getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
+    removeVoicemailGreeting.mockRejectedValue(new ApiError(500, 'http_500', 'boom'));
+    render(<VoicemailGreetingBlock />);
+    await user.click(await screen.findByRole('button', { name: 'Remove greeting' }));
+    const dialog = screen.getByRole('dialog', { name: 'Remove voicemail greeting?' });
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+    const alerts = await screen.findAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(dialog).toContainElement(alerts[0]!);
+    expect(alerts[0]).toHaveTextContent("Couldn't remove the greeting. Try again.");
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByText('sam-greeting.mp3')).toBeInTheDocument();
   });
 });
 ```
@@ -2592,7 +2798,11 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
   const g = state.greeting;
 
   return (
-    <div className={styles.greetingBlock} aria-labelledby={headingId}>
+    // A plain div on purpose: an aria-labelledby here would give the wrapper the
+    // SAME accessible name as the <audio aria-label="Voicemail greeting"> below,
+    // and both RTL's getByLabelText and Playwright's getByLabel would then match
+    // two elements.
+    <div className={styles.greetingBlock}>
       <h3 id={headingId} className={styles.greetingHeading}>
         Voicemail greeting
       </h3>
@@ -2668,7 +2878,7 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
           {state.notice}
         </p>
       ) : null}
-      {state.error !== null ? (
+      {state.error !== null && !confirming ? (
         <p role="alert" className={styles.error}>
           {state.error}
         </p>
@@ -2704,6 +2914,14 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
             Callers will hear the built-in spoken prompt instead. You can upload a new greeting any
             time.
           </p>
+          {/* A failed Remove reports INSIDE the dialog (the ConfirmRemoveDialog
+              shape): the block-level alert below sits behind the fixed modal
+              backdrop and outside the aria-modal scope, where nobody sees it. */}
+          {state.error !== null ? (
+            <p role="alert" className={styles.error}>
+              {state.error}
+            </p>
+          ) : null}
         </Modal>
       ) : null}
     </div>
@@ -2806,7 +3024,7 @@ Expected: PASS (every pre-existing settings suite included); typecheck 0; no new
 ```bash
 cd W:/tmp/voicemail-greeting && git status && git add dashboard/src/routes/settings/useVoicemailGreeting.ts dashboard/src/routes/settings/VoicemailGreetingBlock.tsx dashboard/src/routes/settings/VoicemailGreetingBlock.test.tsx dashboard/src/routes/settings/VoiceSection.tsx dashboard/src/routes/settings/VoiceSection.test.tsx dashboard/src/routes/settings/VoiceSection.module.css && git commit -m "feat(voicemail-greeting): Settings > Voice greeting block - upload/replace/remove with confirmation, in-page player, VA read-only
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -2835,9 +3053,10 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 //      the next missed call's verb before <Record> is <Say>;
 //   4. phone width: no sideways scroll of the routed <main>, the dialog fits;
 //   5. the reject path in the real UI; 6. a VA sees no controls and no alert.
-// Selectors are accessibility-first (e2e/support/selectors.md). NEVER
-// documentElement.scrollWidth here - support/viewport.guard.test.ts fails the
-// file; the viewport helpers below measure the boxes that can overflow.
+// Selectors are accessibility-first (e2e/support/selectors.md). Overflow is
+// measured ONLY through the viewport helpers below: the guard-banned
+// document-width expression (see support/viewport.guard.test.ts) must never
+// appear in this file, comments included.
 import { test, expect, type Page } from '@playwright/test';
 import { listCalls, placeCall } from '../../fixtures/fakeVoice.js';
 import { reseed } from '../../fixtures/reseed.js';
@@ -2955,10 +3174,19 @@ test('the reject path in the real UI: an M4A shows the given message and nothing
   await page.getByLabel('Greeting audio file').setInputFiles({ name: 'memo.m4a', mimeType: 'audio/mp4', buffer: Buffer.from('\u0000\u0000\u0000\u0018ftypM4A ', 'latin1') });
   await expect(page.getByRole('alert')).toHaveText('Upload an MP3 or WAV file. iPhone voice memos are M4A; export or convert the recording first.');
   await expect(page.getByText('No greeting uploaded - callers hear the built-in prompt.')).toBeVisible();
-  // A renamed M4A the browser calls audio/mpeg is refused by the SERVER's sniff
-  // with the same message (the JSON must reach the browser).
+  // A renamed M4A the browser calls audio/mpeg passes the client pre-check and
+  // is refused by the SERVER's sniff with the same message. The alert text is
+  // identical to the client-side one above, so the proof is the PUT's 400
+  // response, awaited explicitly, and the alert re-appearing after it (the
+  // hook clears the previous error when a new file is chosen). 200 KB stays
+  // under the Vite dev proxy's `Connection: close` window (spec 4.3).
+  const refusal = page.waitForResponse((r) => r.url().includes('/api/settings/voicemail-greeting') && r.request().method() === 'PUT');
   await page.getByLabel('Greeting audio file').setInputFiles({ name: 'memo.mp3', mimeType: 'audio/mpeg', buffer: Buffer.concat([Buffer.from('\u0000\u0000\u0000\u0018ftypM4A ', 'latin1'), Buffer.alloc(200_000, 0)]) });
+  const res = await refusal;
+  expect(res.status()).toBe(400);
+  expect((await res.json()).error).toBe('unsupported_media_type');
   await expect(page.getByRole('alert')).toHaveText('Upload an MP3 or WAV file. iPhone voice memos are M4A; export or convert the recording first.');
+  await expect(page.getByText('No greeting uploaded - callers hear the built-in prompt.')).toBeVisible();
 });
 
 test('phone width: the block and the Remove dialog fit without sideways scroll', async ({ page }) => {
@@ -2994,14 +3222,14 @@ test('a VA sees the greeting block read-only: no controls, no alert at load', as
 
 - [ ] **Step 2: Run it against a live session lane**
 
-From the worktree: `cd W:/tmp/voicemail-greeting && npm run e2e:session` (background, per the orchestrator's WAITING rule), then `cd W:/tmp/voicemail-greeting/e2e && npx playwright test tests/dashboard-next/voicemail-greeting.spec.ts` (the config reuses the live session lane). Expected: 4 passed. If `placeCall` completes but `voicemailGreeting` stays undefined, the fake-twilio build in the lane predates Task 6 - `npm run e2e:restart`. Also re-run the neighbors this feature touches: `npx playwright test tests/dashboard-next/voice-outbound.spec.ts tests/dashboard-next/voice-transcription.spec.ts tests/dashboard-next/settings.spec.ts tests/dashboard-next/call-inbox-unread.spec.ts`. Stop the session (`npm run e2e:stop`) before the full gate.
+From the worktree: `cd W:/tmp/voicemail-greeting && npm run e2e:session` (background, per the orchestrator's WAITING rule), then the SANCTIONED single-spec entry point (AGENTS.md: Playwright only through the e2e workspace; `e2e/README.md` documents this form): `cd W:/tmp/voicemail-greeting && npm run e2e -- tests/dashboard-next/voicemail-greeting.spec.ts` (the config reuses the live session lane). Expected: 4 passed. If `placeCall` completes but `voicemailGreeting` stays undefined, the fake-twilio build in the lane predates Task 6 - `npm run e2e:restart`. Also re-run the neighbors this feature touches the same way: `npm run e2e -- tests/dashboard-next/voice-outbound.spec.ts tests/dashboard-next/voice-transcription.spec.ts tests/dashboard-next/settings.spec.ts tests/dashboard-next/call-inbox-unread.spec.ts`. Stop the session (`npm run e2e:stop`) before the full gate.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 cd W:/tmp/voicemail-greeting && git status && git add e2e/tests/dashboard-next/voicemail-greeting.spec.ts && git commit -m "test(e2e): voicemail greeting - upload/serve, <Play> before <Record> via fake-twilio, remove restores <Say>, phone width, reject path, VA read-only
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -3058,10 +3286,19 @@ Then `cd W:/tmp/voicemail-greeting && npm run issues` (do not commit `docs/issue
 ```bash
 cd W:/tmp/voicemail-greeting && git status && git add docs/issues/voicemail-greeting-format-normalization.md && git commit -m "docs(issues): voicemail-greeting-format-normalization - no transcoding; Twilio unplayable-<Play> behavior to verify on dev
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING MODEL> <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 3: The five gates (orchestrator phase; listed here so the plan is complete)**
+- [ ] **Step 3: The handback carries these (write them into `.superpowers/sdd/handback.md` AND the tracked `docs/superpowers/reviews/2026-09-26-voicemail-greeting/handback.md`)**
+
+1. The plain-text restatement of the mission and, under "Questions I would have stopped for", spec section 3 assumptions A-H verbatim with the reading taken for each.
+2. Infra-side facts (spec 4.10): prior greeting versions persist on the versioned media bucket (a lifecycle rule would be the infra change); whether CloudFront's 30 s `origin_read_timeout` can fire during a slow 5 MB upload is UNVERIFIED.
+3. The local-dev-only limitation (spec 4.3): through the Vite dev proxy a SERVER refusal of a body of roughly 3 MB or more resets before the JSON arrives; production is CloudFront -> origin and expected unaffected (UNVERIFIED).
+4. The unbounded-drain acceptance (spec 4.3): a non-browser client streaming more than 5 MiB chunked is drained; admin-only + 10/min.
+5. The dev verification script from spec section 7, including the optional unplayable-WAV check that settles `docs/issues/voicemail-greeting-format-normalization.md`.
+6. Every issue filed, the gate outputs quoted per the orchestrator's handback format, and `MERGE-READY @<hash>` / `UNMERGED (human gate)`.
+
+- [ ] **Step 4: The five gates (orchestrator phase; listed here so the plan is complete)**
 
 From `W:/tmp/voicemail-greeting`, bare, real exit codes, output redirected to files under `.superpowers/` and grepped AFTER:
 

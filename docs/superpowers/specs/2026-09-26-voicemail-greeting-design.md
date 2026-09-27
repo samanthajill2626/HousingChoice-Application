@@ -446,10 +446,25 @@ retired MMS endpoint.
      with the same message; `'too_large'` -> 413 `file_too_large`; `'empty'`
      -> 400 `empty_file`. Before answering, `req.unpipe(gate)` and
      `req.resume()` to drain the remainder (at most 5 MiB for a known
-     length, per step 3). The ONE unbounded shape - a CHUNKED body (no
-     Content-Length) that tripped `too_large` - answers 413 and then
-     destroys the request once the response has flushed (`res.once('finish',
-     () => req.destroy())`); browsers never send a Blob body chunked.
+     length, per step 3). The same drain applies to a CHUNKED body (no
+     Content-Length) that tripped `too_large`: destroying the request after
+     the response "finishes" was measured (plan review round 1, two
+     reviewers, Node 24) to RESET the client before it reads the 413 - the
+     bytes are handed to the OS, not read by the peer - while draining
+     delivers it every time. That drain is unbounded only for a non-browser
+     client that streams more than 5 MiB chunked (browsers never send a
+     Blob body chunked); accepted, bounded in practice by admin-only access
+     and the 10/min limiter, and named in the handback.
+     KNOWN LOCAL-DEV LIMITATION (not production): the Vite dev proxy forces
+     `Connection: close` on proxied requests, so in `npm run dev` and the
+     hermetic e2e lane a SERVER refusal of a body of roughly 3 MB or more
+     resets before the JSON arrives and the dashboard shows the generic
+     "Couldn't upload the greeting" line; refusals of small bodies (the
+     e2e's 200 KB case) and every client-side pre-check are unaffected.
+     Production is CloudFront -> origin over persistent connections and is
+     expected to deliver the JSON (UNVERIFIED; a dev-stack call cannot
+     settle it because dev also fronts with CloudFront - it is the Vite
+     proxy that is absent there).
    - `GreetingClientAbortedError`: WARN `{ actor, reason: 'client_aborted' }`,
      no response (the connection is gone), nothing stored.
    - Any other error -> 500 `{ error: 'upload_failed' }` with an ERROR log
@@ -671,10 +686,13 @@ if (!played) reply.say(resolveMessage('voice.voicemail_prompt'));
   greeting, upload(file), remove(), error, busy, retry, notice }`.
   Client-side pre-checks in `upload` BEFORE the request, with the SAME message
   as the server: derive the content type as `file.type` when it is in the
-  allowlist, else from the extension when `file.type` is EMPTY (`.mp3` ->
-  `audio/mpeg`, `.wav` -> `audio/wav`), else reject -> the reject message
-  inline (so an empty browser-reported type on a real MP3 still reaches the
-  server, which decides by the header bytes); `file.size > 5 MB` -> "That
+  allowlist, mapping the browser aliases `audio/mp3` -> `audio/mpeg` and
+  `audio/wave` / `audio/vnd.wave` -> `audio/wav` (browsers disagree on the
+  WAV/MP3 type string; the server still sniffs the bytes, so an alias can
+  never admit a bad file), else from the extension when `file.type` is
+  EMPTY (`.mp3` -> `audio/mpeg`, `.wav` -> `audio/wav`), else reject -> the
+  reject message inline (so an empty browser-reported type on a real MP3
+  still reaches the server, which decides by the header bytes); `file.size > 5 MB` -> "That
   file is over 5 MB. Trim or re-export it at a lower bitrate." `size === 0`
   -> "That file is empty." Server errors map: `unsupported_media_type` -> the
   reject message; `file_too_large` -> the 5 MB line; `empty_file` -> "That
@@ -721,8 +739,10 @@ if (!played) reply.say(resolveMessage('voice.voicemail_prompt'));
     body "Callers will hear the built-in spoken prompt instead. You can upload
     a new greeting any time." and footer Cancel / Remove (danger, "Removing..."
     while busy; the dialog cannot be dismissed while busy - the
-    ConfirmRemoveDialog shape). Success closes the dialog and shows
-    `role="status"` "Greeting removed."
+    ConfirmRemoveDialog shape, INCLUDING its error placement: a failed
+    Remove renders the message as a `role="alert"` INSIDE the dialog body,
+    never behind the modal backdrop, and the dialog stays open). Success
+    closes the dialog and shows `role="status"` "Greeting removed."
   - USER-ACTION errors (upload/remove failures) render in a `<p role="alert">`
     under the controls (only ever present after an action inside the block).
   - VA (non-admin): everything above minus the buttons; the helper text gains
@@ -799,7 +819,7 @@ Static/test surfaces that must stay green (gate 2):
 | `dashboard/src/routes/settings/VoiceSection.test.tsx` | mock `getSettings` (resolves with no greeting) so the block loads quietly; no new alert at load |
 | `e2e/tests/dashboard-next/voice-outbound.spec.ts` (~690, zero alerts on the Voice tab) | must keep passing (the block never renders an alert at load) |
 | `e2e/performance/mutationCatalog.ts` + `.test.ts` | two entries, count 108 -> 110 |
-| `e2e/performance/routes.ts` + `routes.test.ts` | `VOICE_GETS` gains `/api/settings` |
+| `e2e/performance/routes.ts` + `routes.test.ts` + `templates.ts` | `VOICE_GETS` gains `required('/api/settings')` and `conditional('/api/settings/voicemail-greeting/audio', ['v'])` (the player's `preload="metadata"` GET, present only when a greeting is set); `ENDPOINT_TEMPLATES` gains the three greeting endpoints; the Voice tab's source citations name `useVoicemailGreeting.ts` |
 | `e2e/support/viewport.guard.test.ts` | the new spec uses the viewport helpers, never `documentElement.scrollWidth` |
 | `app/test/voiceRecording.test.ts` | unchanged assertions guard the `serveMediaObject` extraction |
 | `app/test/helpers/twilioWebhookHarness.ts` | settings fake learns the field; media fake gains `mediaHeads` / `mediaPresigns` recorders, `failMediaHeads` / `hangMediaHeads` seams (a hung head rejects when its `signal` aborts), and accepts the new `head(key, { signal })` shape; harness option `voicemailGreetingLookupBudgetMs` |

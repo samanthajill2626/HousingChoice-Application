@@ -303,7 +303,7 @@ type Found = { kind: 'found'; sid: string; adoption: 'adopted' | 'skipped'; stat
 
 type Verdict =
   | (Found & { path: 'known_sid' | 'lookup' })
-  | { kind: 'continue'; reason: 'provider_error' | 'nothing_adoptable'; err?: unknown }
+  | { kind: 'continue'; reason: 'provider_error' | 'nothing_adoptable' | 'page_bound'; err?: unknown }
   | { kind: 'never_sent' }
   | { kind: 'unresolved'; cause: UnresolvedCause; extra?: Record<string, unknown> };
 
@@ -359,6 +359,18 @@ export function registerSendReconcileJobHandler(deps: SendReconcileJobDeps = {})
   });
 }
 
+/** A payload's owner reference for a log line: the kind and its ids - never its recipient hash (FW1-10). */
+function ownerRefLog(ref: SendAttemptOwnerRef): Record<string, string> {
+  switch (ref.kind) {
+    case 'broadcast':
+      return { kind: ref.kind, broadcastId: ref.broadcastId };
+    case 'relay_leg':
+      return { kind: ref.kind, relayConversationId: ref.relayConversationId, sourceTsMsgId: ref.sourceTsMsgId };
+    case 'relay_rung':
+      return { kind: ref.kind, relayConversationId: ref.relayConversationId, retryTsMsgId: ref.retryTsMsgId };
+  }
+}
+
 /** The owner kind and its ids, for a log line - never the recipient key (logged beside it, redacted). */
 function ownerLog(owner: SendAttemptOwner): Record<string, string> {
   switch (owner.kind) {
@@ -374,9 +386,11 @@ function ownerLog(owner: SendAttemptOwner): Record<string, string> {
 async function runCheck(c: Ctx, payload: SendReconcilePayload): Promise<void> {
   const r = await resolve(c, payload.owner);
   if (r === undefined) {
-    // A record, if any, is left for the sweeper (spec Sec 1 residue).
+    // A record, if any, is left for the sweeper (spec Sec 1 residue). The line
+    // names the owner kind and its ids, never the recipient hash: an unkeyed
+    // hash of a phone is effectively the phone (code review ADV-9, FW1-10).
     c.log.info(
-      { event: 'send_reconcile', owner: payload.owner, checkNo: payload.checkNo },
+      { event: 'send_reconcile', owner: ownerRefLog(payload.owner), checkNo: payload.checkNo },
       'send.reconcile: owner recipient not found - the attempt is left for the sweeper',
     );
     return;
@@ -502,6 +516,10 @@ async function contactOf(c: Ctx, r: Resolved): Promise<ContactItem | undefined> 
 async function currentPhone(c: Ctx, r: Resolved): Promise<string | undefined> {
   switch (r.owner.kind) {
     case 'broadcast': {
+      // A phone-keyed recipient's number IS its key - no contact read, so no
+      // byPhone GSI read decides it (D11; code review C-8, fix FW1-9), as the
+      // relay branch does for a phone-only member.
+      if (r.key.startsWith('phone#')) return r.key.slice('phone#'.length);
       const phone = (await contactOf(c, r))?.phone;
       return typeof phone === 'string' && phone.length > 0 ? phone : undefined;
     }
@@ -778,6 +796,17 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
   const bySid = new Map<string, ProviderMessageSummary>();
   let pageToken: string | undefined;
   let pages = 0;
+  // THE EARLY STOP (code review ADV-4, fix FW1-6). The list is newest-first,
+  // but that order is UNVERIFIED against real Twilio (spec Sec 10), so the
+  // walk trusts only the order the provider actually returned: while every
+  // page so far is non-increasing in createdAt - inside itself, and not newer
+  // than the previous page's last message - a page whose oldest message is
+  // older than the window's start proves no later page can hold a candidate.
+  // Without it, a recipient with more than RECONCILE_MAX_PAGES pages of OLD
+  // history closed page_bound on the first check with the orphan on page 1.
+  // An unordered list walks on exactly as before.
+  let newestFirst = true;
+  let previousLastMs: number | undefined;
   do {
     let page: ListMessagesPage;
     try {
@@ -793,13 +822,21 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
         : { kind: 'continue', reason: 'provider_error', err };
     }
     pages += 1;
-    for (const m of page.messages) {
-      const createdMs = Date.parse(m.createdAt);
+    const times = page.messages.map((m) => Date.parse(m.createdAt));
+    for (const [i, m] of page.messages.entries()) {
+      const createdMs = times[i]!;
       if (createdMs >= windowStartMs && createdMs <= windowEndMs && !bySid.has(m.providerSid)) bySid.set(m.providerSid, m);
     }
+    newestFirst &&= times.every((t, i) => t <= (i === 0 ? (previousLastMs ?? t) : times[i - 1]!));
+    const oldestMs = times.length > 0 ? times[times.length - 1] : undefined;
+    if (oldestMs !== undefined) previousLastMs = oldestMs;
+    if (newestFirst && oldestMs !== undefined && oldestMs < windowStartMs) break;
     pageToken = page.nextPageToken;
+    // A walk cut at the bound with a page pending decides nothing until the
+    // LAST check (the provider may answer a shorter list later); there it is
+    // the page_bound residue - unresolved, never never_sent.
     if (pageToken !== undefined && pages >= RECONCILE_MAX_PAGES) {
-      return { kind: 'unresolved', cause: 'page_bound', extra: { pages } };
+      return last ? { kind: 'unresolved', cause: 'page_bound', extra: { pages } } : { kind: 'continue', reason: 'page_bound' };
     }
   } while (pageToken !== undefined);
 

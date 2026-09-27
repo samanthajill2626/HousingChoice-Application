@@ -29,9 +29,16 @@ export function bodyFingerprint(body: string | undefined): BodyFingerprint {
 }
 
 /**
- * The recipient number's keyed digest (D12): keyed on the sender, independent
- * of the owner, so a reconcile can prove the number it would look up is the
- * number the attempt was sent to without the record ever holding a phone.
+ * The recipient number's digest (D12): salted with the sender number, not
+ * keyed with a secret, and independent of the owner - so a reconcile can
+ * prove the number it would look up is the number the attempt was sent to by
+ * comparing digests. Neither the record's KEYS nor this digest carry the
+ * phone in the clear; the record's `owner` map, and the recipient-index
+ * item's, DO keep the raw recipient key (a `phone#<E164>` key for a
+ * contact-less recipient), which is how a reconcile addresses the slot. An
+ * unkeyed sha256 over a phone is brute-forceable, so treat this digest and
+ * hashRecipientKey's output as sensitive (code review ADV-9; keying them
+ * needs a secret, filed as a residue).
  */
 export function recipientDigest(sender: string | undefined, destinationE164: string): string {
   return createHash('sha256').update(`${sender ?? ''}|${destinationE164}`).digest('hex').slice(0, 32);

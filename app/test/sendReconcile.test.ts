@@ -10,6 +10,7 @@
 // an immediate enqueue, drained by `outbound.settle()` (build finding T10-8).
 // Every attemptedAt a test observes a delayed enqueue from is FRESH (T9-1).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ListMessagesPage, ProviderMessageSummary } from '../src/adapters/messaging.js';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -697,7 +698,8 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(list.mock.calls.every((c) => c[0].pageSize === 1000 && c[0].to === t.phone && c[0].from === MAIN)).toBe(true);
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMdeep-1' });
 
-      // The bound: page 5 still has a next page.
+      // The bound: page 5 still has a next page, and every page is inside the window (no early stop).
+      // FW1-6: a cut walk CONTINUES at checks 0 and 1; only the last check closes it page_bound.
       const u = seedTenant();
       seedBroadcast([u.contactId], { broadcastId: 'bcast-2' });
       world.listPageSize = 1;
@@ -706,8 +708,115 @@ describe('send.reconcile (spec D11-D16)', () => {
       list.mockClear();
       await runCheck(payloadOf(bOwner(u.contactId, 'bcast-2'), atU));
       expect(list).toHaveBeenCalledTimes(5);
+      expect(await recordOf(bOwner(u.contactId, 'bcast-2'))).toMatchObject({ state: 'reconciling', checkNo: 1 });
+      expect(slotOf(u.contactId, 'bcast-2')).toEqual({ status: 'queued' });
+      expect(lines(30).filter((l) => l['verdict'] === 'continue' && l['reason'] === 'page_bound')).toHaveLength(1);
+      while (scheduledChecks().length > 0) await runNextCheck();
+      expect(list).toHaveBeenCalledTimes(15);
       expect(await recordOf(bOwner(u.contactId, 'bcast-2'))).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'page_bound' });
       expect(slotOf(u.contactId, 'bcast-2')).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+    });
+
+    it('ADV-4 (zz-adv-4): heavy OLD history does not bury an orphan on page 1 - the walk stops at the window\'s edge and adopts at check 0 (FW1-6)', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      world.listPageSize = 2;
+      const at = await reconciling(bOwner(t.contactId), factsFor(t.phone!));
+      const base = Date.parse(at);
+      // Twelve recorded sends from an hour ago and more (newest-first behind the orphan).
+      for (let i = 1; i <= 12; i += 1) {
+        plant({ providerSid: `SMold-${i}`, createdAt: new Date(base - 3_600_000 - 1000 * i).toISOString(), body: `old share ${i}` });
+      }
+      plant({ providerSid: 'SMorphan-1', createdAt: new Date(base + 1_000).toISOString() });
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(bOwner(t.contactId), at));
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-1', checkNo: 1 });
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent' });
+    });
+
+    it('equal creation instants (the provider\'s one-second resolution) are still newest-first: a page of ties behind the window ends the walk (FW1-6)', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      world.listPageSize = 2;
+      const at = await reconciling(bOwner(t.contactId), factsFor(t.phone!));
+      const base = Date.parse(at);
+      const inWindow = new Date(base + 1_000).toISOString();
+      const oldTie = new Date(base - 3_600_000).toISOString();
+      plant({ providerSid: 'SMorphan-t', createdAt: inWindow });
+      plant({ providerSid: 'SMtie-new', createdAt: inWindow, body: 'other share' });
+      plant({ providerSid: 'SMtie-old1', createdAt: oldTie, body: 'old share 1' });
+      plant({ providerSid: 'SMtie-old2', createdAt: oldTie, body: 'old share 2' });
+      for (let i = 3; i <= 8; i += 1) {
+        plant({ providerSid: `SMtie-old${i}`, createdAt: new Date(base - 3_600_000 - 1000 * i).toISOString(), body: `old share ${i}` });
+      }
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(bOwner(t.contactId), at));
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-t' });
+    });
+
+    it('the early stop wins over the bound: a fifth page that reaches behind the window ends the walk without page_bound, even with a next page pending (FW1-6)', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      world.listPageSize = 1;
+      const at = await reconciling(bOwner(t.contactId), factsFor(t.phone!));
+      const base = Date.parse(at);
+      for (let i = 1; i <= 3; i += 1) {
+        plant({ providerSid: `SMnew-${i}`, createdAt: new Date(base + 10_000 * i).toISOString(), body: `other share ${i}` });
+      }
+      plant({ providerSid: 'SMorphan-5', createdAt: new Date(base + 1_000).toISOString() });
+      for (let i = 1; i <= 3; i += 1) {
+        plant({ providerSid: `SMold-${i}`, createdAt: new Date(base - 3_600_000 - 1000 * i).toISOString(), body: `old share ${i}` });
+      }
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(bOwner(t.contactId), at));
+      expect(list).toHaveBeenCalledTimes(5);
+      expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-5' });
+    });
+
+    it('a list whose order is NOT monotonic walks on as today - within a page, and across pages - so an orphan behind it is still found (FW1-6)', async () => {
+      register();
+      const old = -3_600_000;
+      /** One recipient whose provider list is `pages` (scripted), and its check 0. */
+      async function walk(broadcastId: string, build: (msg: (sid: string, offsetMs: number, body?: string) => ProviderMessageSummary) => ListMessagesPage[]) {
+        const t = seedTenant();
+        seedBroadcast([t.contactId], { broadcastId });
+        const at = await reconciling(bOwner(t.contactId, broadcastId), factsFor(t.phone!));
+        const base = Date.parse(at);
+        const pages = build((providerSid, offsetMs, body = 'other share') => ({
+          providerSid,
+          providerStatus: 'sent',
+          body,
+          mediaCount: 0,
+          createdAt: new Date(base + offsetMs).toISOString(),
+        }));
+        const calls: (string | undefined)[] = [];
+        world.adapter.listMessages = async (args) => {
+          calls.push(args.pageToken);
+          return pages[Number(args.pageToken ?? 0)]!;
+        };
+        await runCheck(payloadOf(bOwner(t.contactId, broadcastId), at));
+        return { calls, record: await recordOf(bOwner(t.contactId, broadcastId)) };
+      }
+      // Within a page: page 1 rises, then falls behind the window - its last message is old, but the page is not newest-first.
+      const within = await walk('bcast-1', (msg) => [
+        { messages: [msg('SMa-new1', 20_000), msg('SMa-new2', 40_000), msg('SMa-old', old)], nextPageToken: '1' },
+        { messages: [msg('SMorphan-a', 1_000, BODY)] },
+      ]);
+      expect(within.calls).toEqual([undefined, '1']);
+      expect(within.record).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-a' });
+      // Across pages: page 2 is newest-first inside itself and reaches behind the window, but opens NEWER than page 1 ended.
+      const across = await walk('bcast-2', (msg) => [
+        { messages: [msg('SMb-new1', 20_000)], nextPageToken: '1' },
+        { messages: [msg('SMb-new2', 30_000), msg('SMb-old', old)], nextPageToken: '2' },
+        { messages: [msg('SMorphan-b', 1_000, BODY)] },
+      ]);
+      expect(across.calls).toEqual([undefined, '1', '2']);
+      expect(across.record).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-b' });
     });
 
     it('11 an empty window through all three checks is never_sent: ONE re-drive of that recipient; a second delivery of the verdict enqueues nothing', async () => {
@@ -1045,6 +1154,39 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(slotOf(key)).toMatchObject({ status: 'sent' });
       expect(JSON.stringify(capture.lines)).not.toContain('phone#+');
       expect(lines(30).some((l) => l['recipientKey'] === 'phone#redacted')).toBe(true);
+    });
+
+    it('C-8: a phone#-keyed recipient is looked up by its key\'s OWN number - no byPhone GSI read decides it (FW1-9)', async () => {
+      register();
+      const key = `phone#${T_PHONE}`;
+      seedBroadcast([key]);
+      // No contact resolves the number through the GSI (none holds it, or the index lags): the key IS the number texted.
+      const at = await reconciling(bOwner(key), factsFor(T_PHONE));
+      const byPhone = vi.spyOn(world.contactsRepo, 'findByPhone');
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(bOwner(key), at));
+      expect(byPhone).not.toHaveBeenCalled();
+      expect(list).toHaveBeenCalledWith(expect.objectContaining({ to: T_PHONE, from: MAIN }));
+      expect(await recordOf(bOwner(key))).toMatchObject({ state: 'reconciling', checkNo: 1 });
+    });
+
+    it('ADV-9: the "owner recipient not found" INFO names the owner kind and its ids - never the recipient hash (FW1-10)', async () => {
+      register();
+      const key = `phone#${T_PHONE}`;
+      seedBroadcast([key]);
+      const at = await reconciling(bOwner(key), factsFor(T_PHONE));
+      // The share no longer carries the recipient: the job cannot resolve it from the hash.
+      delete world.broadcasts.get('bcast-1')!.recipients[key];
+      await runCheck(payloadOf(bOwner(key), at));
+      const leg: SendAttemptOwner = { kind: 'relay_leg', relayConversationId: 'conv-gone', sourceTsMsgId: 'ts-gone', memberKey: key };
+      await runCheck(payloadOf(leg, at));
+      const info = capture.atLevel(30).filter((l) => String(l['msg']).includes('owner recipient not found'));
+      expect(info.map((l) => l['owner'])).toEqual([
+        { kind: 'broadcast', broadcastId: 'bcast-1' },
+        { kind: 'relay_leg', relayConversationId: 'conv-gone', sourceTsMsgId: 'ts-gone' },
+      ]);
+      expect(JSON.stringify(info)).not.toContain('phonehash#');
+      expect(JSON.stringify(info)).not.toContain(hashRecipientKey(key));
     });
 
     // ---- S3b: decisions the mutant pass found unpinned (broadcast owner) ----

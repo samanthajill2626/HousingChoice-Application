@@ -2003,6 +2003,13 @@ export interface Contact {
   lastName?: string;
   voucherSize?: number;
   notes?: string;
+  /** Staff notes (item 22): the hand-written box on the tenant file, kept apart
+   *  from `notes` (which the AI appends dated lines to). Never machine-written
+   *  or machine-read. MIRRORS ContactItem.staff_notes. */
+  staff_notes?: string;
+  /** ISO 8601 - server-stamped on every staff_notes write (a clear included).
+   *  Renders as "Last edited <date>" while the box holds text. */
+  staff_notes_updated_at?: string;
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
   /** Voice Phase 1 (spec §8): staff-set company do-not-call. INDEPENDENT of
@@ -2096,6 +2103,9 @@ export interface ContactPatch {
   voucherSize?: number;
   status?: string;
   notes?: string;
+  /** Staff notes (item 22). PATCH-allowlisted app-side; '' clears. The server
+   *  stamps staff_notes_updated_at itself - never send one. */
+  staff_notes?: string;
   company?: string;
   housingAuthority?: string;
   /** The tenant's helper organization (see Contact.agency). PATCH-allowlisted

@@ -110,3 +110,54 @@ CF11 [NOTE] Assumption G's spec text understates the ~2x peak - ACCEPT
 Then re-run the affected suites + typecheck + lint on the touched files; the
 full gates already ran on de4df265 and the fix wave touches comments, one
 dashboard message path and tests only.
+
+## Adversarial re-review (r2, on 1f7e99b4; `planner-review-adversarial-r2.md`)
+
+R2-1 [SHOULD] The AD1 message claimed "callers hear the new greeting", false
+for a FIRST upload (no record -> the webhook stops at "absent" -> built-in
+prompt) - ACCEPT (the planner shipped a claim its own adjudication had
+avoided). Message now claims neither case: "The file was uploaded, but its
+details couldn't be saved. Upload it again."; the route comment and the
+constant's JSDoc state both cases truthfully.
+
+R2-2 [NOTE] The re-fetch is unfenced (a Remove/Replace during it is
+overwritten by the stale response) - ACCEPT: `upload` and `remove` abort the
+in-flight load before acting (the hook's existing AbortController).
+
+R2-3 [NOTE] The block test did not prove the re-fetch RENDERS - ACCEPT: the
+second GET now answers a different record and the test asserts it renders.
+
+R2-4 [NOTE] `serveMediaObject` serves the store's Content-Type verbatim -
+accepted as-is: both writers canonicalize to fixed audio types (the
+recording mirror `audio/mpeg`; the greeting route the normalized type), so no
+attacker-controlled type reaches it; noted in the verdict for any future
+caller.
+
+R2-5 [NOTE] Records disagree (adjudicated wording vs shipped; verdict file
+pending; the reviewer's own r1 NOTE count) - ACCEPT: wording fixed above;
+the verdict is `planner-review-verdict.md` (this commit's successor); count
+erratum noted.
+
+R2-6 [NOTE] The perf ledger citation re-staled - ACCEPT (re-pointed to the
+hook's current `load` span; `routes.test.ts` green).
+
+R2-7 [NOTE] AD4 input for Cameron: the caller's own message is capped at
+120 s while a greeting can run ~327 s at the 5 MB cap; decision 5 froze the
+recording length, not the greeting's - carried to the verdict.
+
+R2-8 [NOTE] AD6 restated correctly: the no-greeting default returns before
+any WARN branch, so an alarm could never flood on it; the real choice is
+alarm-or-not on a BROKEN greeting (a metric filter on the two WARN messages
+would keep decision 3's WARN literal) - carried to the verdict.
+
+R2-9 [NOTE] AD7: showing the uploader's EMAIL to VAs is assumption B's
+addition, not decision 4's ask, and is the first VA-visible staff email in
+the app - carried to the verdict as a one-line choice for Cameron (date
+only vs date + email).
+
+R2-10 [NOTE] The r1 fixes are real (targeted suites green in the reviewer's
+own run); the (e) comment's AbortError claim held 20/20 but is unasserted -
+left as is.
+
+Outcome: R2-1, R2-2, R2-3, R2-6 fixed in the same planner fix wave (second
+commit); no decision changed; the review is closed.

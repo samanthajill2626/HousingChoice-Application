@@ -413,14 +413,15 @@ export function createSettingsRouter(deps: SettingsRouterDeps): Router {
     try {
       await settings.putOrgSettings({ voicemailGreeting: record });
     } catch (err) {
-      // The object under the fixed key already holds the NEW bytes; the record
-      // is absent (a first upload) or STALE (a replace: it still describes the
-      // previous file's name, type, size and uploadedAt). The webhook offers
-      // the fixed key, so callers hear the new file either way - never a broken
-      // call. What is wrong is the description: the dashboard shows the old
-      // name/date and its player URL (`?v=<old uploadedAt>`) now serves the new
-      // bytes. The distinct error code lets the dashboard say so and re-fetch;
-      // the next successful upload rewrites both (spec 4.3, planner review AD1).
+      // The object under the fixed key already holds the NEW bytes. Two cases,
+      // neither a broken call: on a REPLACE the record still describes the
+      // previous upload (name, type, size, uploadedAt) while the webhook offers
+      // the fixed key, so callers hear the new file under a stale description
+      // and the dashboard's player URL (`?v=<old uploadedAt>`) serves the new
+      // bytes; on a FIRST upload no record exists, the webhook stops at
+      // "absent", and callers keep the built-in prompt. The distinct error code
+      // lets the dashboard re-fetch and show what the server holds; the next
+      // successful upload rewrites both (spec 4.3, planner review AD1).
       log.error({ err, actor, s3Key: VOICEMAIL_GREETING_S3_KEY }, 'voicemail greeting stored but the settings record write failed');
       res.status(500).json({ error: 'greeting_record_failed' });
       return;

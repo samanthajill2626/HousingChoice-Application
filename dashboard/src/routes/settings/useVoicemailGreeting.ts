@@ -21,12 +21,13 @@ export const GREETING_TOO_LARGE_MESSAGE = 'That file is over 5 MB. Trim or re-ex
 export const GREETING_EMPTY_MESSAGE = 'That file is empty.';
 export const GREETING_STORAGE_MESSAGE = "Media storage isn't available right now. Try again in a minute.";
 export const GREETING_FORBIDDEN_MESSAGE = 'Only an admin can change the greeting.';
-/** The server stored the file but could not write its record (spec 4.3): the
- *  greeting callers hear IS the new file; the details shown may be stale until
- *  the next successful upload. The block re-fetches so it shows what the
- *  server holds. */
+/** The server stored the file but could not write its record (spec 4.3). What
+ *  callers hear depends on the case - a REPLACE plays the new file under the
+ *  old record; a FIRST upload leaves no record, so callers keep the built-in
+ *  prompt - so the message claims neither. The block re-fetches so it shows
+ *  what the server holds, and the next successful upload repairs both. */
 export const GREETING_RECORD_FAILED_MESSAGE =
-  "The file was stored, but its details couldn't be saved. Callers hear the new greeting; upload it again to fix the name and date.";
+  "The file was uploaded, but its details couldn't be saved. Upload it again.";
 export const GREETING_UPLOAD_FAILED_MESSAGE = "Couldn't upload the greeting. Try again.";
 export const GREETING_REMOVE_FAILED_MESSAGE = "Couldn't remove the greeting. Try again.";
 
@@ -141,6 +142,9 @@ export function useVoicemailGreeting(): VoicemailGreetingState {
       return;
     }
     const replacing = greeting !== undefined;
+    // A re-fetch still in flight (from an earlier greeting_record_failed) must
+    // not land AFTER this action and overwrite its result with stale state.
+    abortRef.current?.abort();
     setBusy(true);
     try {
       const next = await uploadVoicemailGreeting(file, contentType);
@@ -160,6 +164,8 @@ export function useVoicemailGreeting(): VoicemailGreetingState {
   const remove = useCallback(async () => {
     setError(null);
     setNotice(null);
+    // Same fence as upload: an in-flight re-fetch must not overwrite the remove.
+    abortRef.current?.abort();
     setBusy(true);
     try {
       await removeVoicemailGreeting();

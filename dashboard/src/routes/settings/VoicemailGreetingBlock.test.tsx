@@ -276,16 +276,22 @@ describe('VoicemailGreetingBlock', () => {
   // write its record. The message must say the file is live and the block must
   // re-fetch so it shows what the server holds (here: the OLD greeting), never
   // the optimistic local state.
-  it('greeting_record_failed: says the file is live, and re-fetches the server record', async () => {
-    getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
+  it('greeting_record_failed: shows the message and RENDERS the re-fetched server record', async () => {
+    // The second GET answers with a DIFFERENT record than the first, so the
+    // assertion can only pass if the re-fetch's result is rendered - not if the
+    // block merely kept its pre-upload state.
+    getSettings
+      .mockResolvedValueOnce(wrap({ ...BASE, voicemailGreeting: GREETING }))
+      .mockResolvedValueOnce(wrap({ ...BASE, voicemailGreeting: { ...GREETING, fileName: 'server-truth.mp3', uploadedAt: '2026-09-27T09:00:00.000Z' } }));
     uploadVoicemailGreeting.mockRejectedValue(new ApiError(500, 'greeting_record_failed', 'greeting_record_failed'));
     render(<VoicemailGreetingBlock />);
     await screen.findByRole('button', { name: 'Replace greeting' });
     expect(getSettings).toHaveBeenCalledTimes(1);
     await user.upload(screen.getByLabelText('Greeting audio file'), mp3('new-file.mp3'));
     expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_RECORD_FAILED_MESSAGE);
-    await waitFor(() => expect(getSettings).toHaveBeenCalledTimes(2));
-    expect(screen.getByText('sam-greeting.mp3')).toBeInTheDocument();
+    expect(await screen.findByText('server-truth.mp3')).toBeInTheDocument();
+    expect(getSettings).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('sam-greeting.mp3')).not.toBeInTheDocument();
     expect(screen.queryByText('new-file.mp3')).not.toBeInTheDocument();
   });
 

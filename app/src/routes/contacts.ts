@@ -4,7 +4,7 @@
 //   GET   /api/contacts?type=&status=&phone=&limit=&cursor=  → { contacts, nextCursor }   (M1.5)
 //   POST  /api/contacts  { type, firstName, lastName, phone, … }  → 201 { contact } | 409  (M1.5)
 //   GET   /api/contacts/:contactId   → { contact }                                          (M1.4)
-//   PATCH /api/contacts/:contactId   { type?, firstName?, lastName?, voucherSize?, status?, notes? }
+//   PATCH /api/contacts/:contactId   { type?, firstName?, lastName?, voucherSize?, status?, notes?, staff_notes? }
 //                                    → { contact }                                          (M1.4)
 //
 // THE M1.5 SEAM the honest-identity deviation left (README 2026-06-12):
@@ -570,6 +570,16 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     if (typeof v !== 'string') return { error: 'notes must be a string' };
     patch['notes'] = v;
     changedFields.push('notes');
+  }
+  // Staff notes (item 22): the hand-written box on the tenant file. Same
+  // string-only validation as `notes`; '' clears. NOT a provenance field and
+  // never machine-written - the route stamps staff_notes_updated_at itself,
+  // and a client-supplied staff_notes_updated_at is ignored like any unknown key.
+  if ('staff_notes' in b) {
+    const v = b['staff_notes'];
+    if (typeof v !== 'string') return { error: 'staff_notes must be a string' };
+    patch['staff_notes'] = v;
+    changedFields.push('staff_notes');
   }
   // Landlord park reason (edit form). Free text captured when a landlord lead is
   // moved to `parked`. Normally written by the /tenant-status route on the parked
@@ -1503,6 +1513,13 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     if (parsed.consentCaptured === true) {
       parsed.patch['consent_captured_by'] = req.user?.userId;
       parsed.changedFields.push('consent_captured_by');
+    }
+
+    // Staff notes (item 22): stamp the last-edited instant server-side on
+    // every write, a clear included. The parser never copies a client value
+    // for this key, so this is the only writer.
+    if ('staff_notes' in parsed.patch) {
+      parsed.patch['staff_notes_updated_at'] = new Date().toISOString();
     }
 
     // Capture the PRIOR stored voucher date BEFORE the write so the voucher

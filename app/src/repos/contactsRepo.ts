@@ -132,6 +132,21 @@ export interface ContactItem {
    * on non-parked contacts. Tenants never set it.
    */
   park_reason?: string;
+  /**
+   * Staff notes (Sam's item 22, 2026-09-26): free text staff write BY HAND on
+   * the tenant file - a second box kept apart from `notes`, which the AI
+   * appends its dated "[Auto - <date>]" lines to. NOTHING machine-writes or
+   * machine-reads THIS field: not the import, not the seeds, not the public
+   * sign-up, not the transition service, not extraction (toProfile names its
+   * fields and omits it). PATCH only; `''` clears. Not a provenance field.
+   */
+  staff_notes?: string;
+  /**
+   * ISO 8601 - when `staff_notes` was last written (a clear included).
+   * Stamped by the PATCH route on every staff_notes write; never
+   * client-settable (the parser does not copy it).
+   */
+  staff_notes_updated_at?: string;
   /** E.164 (byPhone GSI) — the PRIMARY number (back-compat scalar). */
   phone?: string;
   /**

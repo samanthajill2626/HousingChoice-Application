@@ -49,6 +49,16 @@ The web UI talks to a small control API on the same port; the useful bits:
   the cross-check's `Source === 'SMS'` filter.
 - `GET  /control/conversations/dispatch-errors` - the Conversations engine's own
   rejected-webhook ring buffer.
+- `POST /control/fail-next-send` `{ partyNumber, mode, code?, count? }` - the next
+  `count` (default 1) Messages creates TO that party fail: `reject` answers a
+  Twilio 400 (`code`, default 21211) and records nothing; `drop_before_create`
+  destroys the socket and records nothing; `accept_then_drop` records the
+  message (its status callbacks still fire), then destroys the socket. The first
+  two leave a `delivery-outcome` arming for that number unconsumed.
+- `POST /control/fail-list` `{ partyNumber, count? }` - the next `count` (default
+  1) Messages list calls whose `To` is that party, and fetches of a message sent
+  to it, answer a Twilio 500 (20500). A send-outcome reconcile check stops at its
+  first failed call, so `count: 3` fails a whole reconcile window.
 - `POST /control/reset` - clear threads, relay groups **and** carrier-group rails
   (personas persist).
 

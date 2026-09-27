@@ -1328,7 +1328,7 @@ describe('broadcast.send (M1.8a)', () => {
     it('3 a prepare-phase throw defers the recipient as send_retryable with no record', async () => {
       seedUnit(world);
       seedBroadcast(world, tenants(2));
-      wire();
+      const capture = wire();
       vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
       await runFirstPass();
       const b = world.broadcasts.get('bcast-1')!;
@@ -1337,6 +1337,10 @@ describe('broadcast.send (M1.8a)', () => {
       expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toBeUndefined();
       expect(continuationKeys()).toEqual(['t-1']);
       expect(world.sent.map((s) => s.to)).toEqual(['+15550100002']);
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('prepare failed'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ recipientKey: 't-1', err: { message: 'dynamo blip' } });
+      expect(capture.atLevel(50)).toHaveLength(0);
     });
 
     it('3b a deferral write that itself throws is logged and the next recipient is still attempted (D7a)', async () => {
@@ -2109,10 +2113,13 @@ describe('broadcast.send (M1.8a)', () => {
         b: { status: 'delivered', conversationId: 'c', tsMsgId: 'y' },
       });
       world.broadcasts.get('bcast-1')!.stats.failed = 99;
+      const consistent = vi.spyOn(world.broadcastsRepo, 'getByIdConsistent');
       await run();
       const b = world.broadcasts.get('bcast-1')!;
       expect(b.status).toBe('sent');
       expect(b.last_error).toBeUndefined();
+      // D16a: the decision rests on a strongly consistent read.
+      expect(consistent).toHaveBeenCalledWith('bcast-1');
     });
 
     it.each([

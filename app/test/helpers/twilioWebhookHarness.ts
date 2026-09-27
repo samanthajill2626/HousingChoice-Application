@@ -18,6 +18,7 @@ import {
   type CarrierMessageSender,
   type InitiateCallParams,
   type MessagingAdapter,
+  type ProviderMessageSummary,
   type SendMessageParams,
   type SendMessageResult,
 } from '../../src/adapters/messaging.js';
@@ -210,6 +211,13 @@ export const TENANT_PHONE = '+15550100001';
 // SID-conditional append dedupe, forward-only status machine, byPhone lookup.
 // ---------------------------------------------------------------------------
 
+/**
+ * A provider-side message a test plants in `world.providerMessages` (SOR Task
+ * 4). It carries its parties because the fake listMessages filters by them,
+ * like the provider does.
+ */
+export type FakeProviderMessage = ProviderMessageSummary & { to: string; from: string };
+
 export interface FakeWorld {
   conversations: Map<string, ConversationItem>;
   messages: MessageItem[];
@@ -263,6 +271,25 @@ export interface FakeWorld {
    */
   failNextSetUnread: number;
   sent: SendMessageParams[];
+  /**
+   * Every send's params WITH the SID and provider timestamp the fake adapter
+   * minted, in order, from BOTH send methods (SOR Task 4). `sent` keeps its
+   * exact shape (twilioStatusWebhook.test.ts pins it); the fake listMessages /
+   * getMessage answer from here as status 'queued', created at providerTs.
+   */
+  sentDetails: { params: SendMessageParams; sid: string; providerTs: string }[];
+  /**
+   * Provider-side messages a test plants for listMessages / getMessage (SOR
+   * Task 4): an orphan the app never recorded, a STOP auto-reply, or a sent
+   * message's later provider state - a planted entry REPLACES the sent message
+   * with the same SID.
+   */
+  providerMessages: FakeProviderMessage[];
+  /**
+   * The page size the fake listMessages serves, whatever the caller asks
+   * (default 1000; set 2 to force paging). Its pageToken is an integer offset.
+   */
+  listPageSize: number;
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
@@ -443,6 +470,12 @@ export function createFakeWorld(): FakeWorld {
   // get/set so a test's `world.failNextSetUnread = 2` reaches this closure.
   let failNextSetUnread = 0;
   const sent: SendMessageParams[] = [];
+  // The provider's view for the fake listMessages / getMessage (SOR Task 4).
+  // listPageSize is exposed through get/set on the returned world, like
+  // failNextSetUnread (a number does not share a reference).
+  const sentDetails: FakeWorld['sentDetails'] = [];
+  const providerMessages: FakeProviderMessage[] = [];
+  let listPageSize = 1000;
   const initiatedCalls: InitiateCallParams[] = [];
   // Voice Intelligence (voice-transcription) fake seams: recorded create inputs,
   // an inspectable transcript store, and a settable inline-create error. The
@@ -3763,6 +3796,32 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // The provider's view of the fake world (SOR Task 4, spec D17): every send
+  // (status 'queued', created at its providerTs) overlaid by what a test
+  // planted - a planted entry REPLACES the send with the same SID. In send /
+  // plant order; a send without `from` never matches a list by sender.
+  type ProviderViewEntry = ProviderMessageSummary & { to: string; from?: string };
+  const providerView = (): ProviderViewEntry[] => {
+    const bySid = new Map<string, ProviderViewEntry>();
+    for (const detail of sentDetails) {
+      bySid.set(detail.sid, {
+        providerSid: detail.sid,
+        providerStatus: 'queued',
+        body: detail.params.body ?? '',
+        mediaCount: detail.params.mediaUrls?.length ?? 0,
+        createdAt: detail.providerTs,
+        to: detail.params.to,
+        ...(detail.params.from !== undefined && { from: detail.params.from }),
+      });
+    }
+    for (const planted of providerMessages) bySid.set(planted.providerSid, planted);
+    return [...bySid.values()];
+  };
+  const withoutParties = (entry: ProviderViewEntry): ProviderMessageSummary => {
+    const { to: _to, from: _from, ...summary } = entry;
+    return summary;
+  };
+
   const adapter: MessagingAdapter & CarrierMessageSender = {
     classifyMessageTransport(facts) {
       return Object.freeze({
@@ -3774,21 +3833,50 @@ export function createFakeWorld(): FakeWorld {
     },
     async sendPreparedMessage(prepared): Promise<SendMessageResult> {
       sent.push(prepared.params);
+      const sid = `SMfake-out-${++sidCounter}`;
+      const providerTs = new Date().toISOString();
+      sentDetails.push({ params: prepared.params, sid, providerTs });
       return {
-        providerSid: `SMfake-out-${++sidCounter}`,
+        providerSid: sid,
         status: 'queued',
-        providerTs: new Date().toISOString(),
+        providerTs,
         actualTransport: prepared.requestedTransport,
       };
     },
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
+      const sid = `SMfake-out-${++sidCounter}`;
+      const providerTs = new Date().toISOString();
+      sentDetails.push({ params, sid, providerTs });
       return {
-        providerSid: `SMfake-out-${++sidCounter}`,
+        providerSid: sid,
         status: 'queued',
-        providerTs: new Date().toISOString(),
+        providerTs,
         actualTransport: (params.mediaUrls?.length ?? 0) > 0 ? 'mms' : 'sms',
       };
+    },
+    async listMessages(args) {
+      // By recipient and sender, newest first (ties: the later send or plant
+      // first), paged at world.listPageSize whatever the caller asks.
+      const ordered = providerView()
+        .map((entry, index) => ({ entry, index, at: Date.parse(entry.createdAt) }))
+        .filter(({ entry }) => entry.to === args.to && entry.from === args.from)
+        .sort((a, b) => b.at - a.at || b.index - a.index)
+        .map(({ entry }) => withoutParties(entry));
+      const start = args.pageToken === undefined ? 0 : Number(args.pageToken);
+      if (!Number.isInteger(start) || start < 0) {
+        throw new Error(`fake listMessages: pageToken must be an integer offset, got ${args.pageToken}`);
+      }
+      const size = Math.max(1, Math.floor(listPageSize));
+      const next = start + size;
+      return {
+        messages: ordered.slice(start, next),
+        ...(next < ordered.length && { nextPageToken: String(next) }),
+      };
+    },
+    async getMessage(providerSid) {
+      const entry = providerView().find((candidate) => candidate.providerSid === providerSid);
+      return entry === undefined ? undefined : withoutParties(entry);
     },
     async getMediaStream(mediaUrl) {
       // The failure shape Twilio really returns for media it has not served
@@ -4061,6 +4149,16 @@ export function createFakeWorld(): FakeWorld {
       failNextSetUnread = n;
     },
     sent,
+    sentDetails,
+    providerMessages,
+    // get/set bridges a test's `world.listPageSize = N` to the local `let`
+    // the fake listMessages reads.
+    get listPageSize(): number {
+      return listPageSize;
+    },
+    set listPageSize(n: number) {
+      listPageSize = n;
+    },
     initiatedCalls,
     mediaPuts,
     presignPosts,

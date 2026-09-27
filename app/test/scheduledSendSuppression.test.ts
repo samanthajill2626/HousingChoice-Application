@@ -400,6 +400,8 @@ function makeSendFakes(
     listViSentences: async () => {
       throw new Error('not used');
     },
+    listMessages: async () => ({ messages: [] }),
+    getMessage: async () => undefined,
   };
 
   const service = createSendMessageService({

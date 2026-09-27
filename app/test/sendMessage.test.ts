@@ -371,6 +371,8 @@ function makeFakes(
     listViSentences: async () => {
       throw new Error('not used');
     },
+    listMessages: async () => ({ messages: [] }),
+    getMessage: async () => undefined,
   };
 
   const events = createEventBus();

@@ -270,6 +270,12 @@ function makeFakeAdapter(
     async listViSentences() {
       throw new Error('not used');
     },
+    async listMessages() {
+      return { messages: [] };
+    },
+    async getMessage() {
+      return undefined;
+    },
   };
   return adapter;
 }

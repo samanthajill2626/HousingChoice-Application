@@ -23,7 +23,7 @@
 // created once per file and never reset.
 import { randomUUID } from 'node:crypto';
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -301,6 +301,9 @@ const MSG_CASES: MsgCase[] = [
       adopt('src', 'c-8', { status: 'failed', sid: 'SMnew', sentAt: T1, errorCode: '30007' }, 'adopted'),
       setSlot('src', 'c-7', { status: 'queued', sid: 'SMold', sentAt: T0 }),
       adopt('src', 'c-7', { status: 'sent', sid: 'SMnew', sentAt: T1 }, 'adopted'),
+      // The seed persists even when the move is then refused (queued_pending
+      // accepts no prior but itself).
+      adopt('src', 'c-pending', { status: 'queued_pending', sid: 'SMp', sentAt: T0 }, 'skipped'),
       adopt('nope', 'c-9', { status: 'sent', sid: 'SM9', sentAt: T1 }, 'missing'),
     ],
   },
@@ -728,6 +731,31 @@ function expectScripted(realAnswer: unknown, expectation: unknown, where: string
     expect(realAnswer, `${where}: the script's expectation`).toBe(expectation);
   }
 }
+
+// Fake-only (no DynamoDB): the consistent twins delegate THROUGH THE OBJECT
+// PROPERTY (build finding T8-3), so a test that spies the eventual read -
+// relayFanOut.test.ts's source-read order pin - keeps observing a caller that
+// moved to the consistent one. The parity cases above cannot see this.
+describe('the harness consistent twins delegate through the object property', () => {
+  it('a spy on each eventual read observes its consistent twin, with the same arguments', async () => {
+    const world = createFakeWorld();
+    const list = vi.spyOn(world.messagesRepo, 'listByConversation');
+    await world.messagesRepo.listByConversationConsistent('conv-x', { limit: 5 });
+    expect(list).toHaveBeenCalledWith('conv-x', { limit: 5 });
+    const bySid = vi.spyOn(world.messagesRepo, 'getByProviderSid');
+    await world.messagesRepo.getByProviderSidConsistent('SMx');
+    expect(bySid).toHaveBeenCalledWith('SMx');
+    const ptr = vi.spyOn(world.messagesRepo, 'getRelaySidPointer');
+    await world.messagesRepo.getRelaySidPointerConsistent('SMy');
+    expect(ptr).toHaveBeenCalledWith('SMy');
+    const marker = vi.spyOn(world.messagesRepo, 'getSystemSidMarker');
+    await world.messagesRepo.getSystemSidMarkerConsistent('SMz');
+    expect(marker).toHaveBeenCalledWith('SMz');
+    const byId = vi.spyOn(world.broadcastsRepo, 'getById');
+    await world.broadcastsRepo.getByIdConsistent('b-x');
+    expect(byId).toHaveBeenCalledWith('b-x');
+  });
+});
 
 describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror the real repos on the SOR additions (DynamoDB Local)', () => {
   beforeAll(async () => {

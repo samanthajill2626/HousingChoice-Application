@@ -1027,5 +1027,52 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
       expect(await relayMessages.listByConversationConsistent(src.conversationId)).toEqual([row]);
       expect(await relayMessages.listByConversationConsistent(src.conversationId, { before: src.tsMsgId })).toEqual([]);
     });
+
+    it('every read a consistent twin makes carries ConsistentRead; the eventual reads never do (D11)', async () => {
+      // DynamoDB Local answers every read consistently, so only the request
+      // itself can show which read a method asked for.
+      const sent: Array<Record<string, unknown>> = [];
+      const recordingDoc = {
+        send: (command: { input: Record<string, unknown> }) => {
+          sent.push(command.input);
+          return doc.send(command as never);
+        },
+      } as unknown as typeof doc;
+      const m = createMessagesRepo({ doc: recordingDoc, env: testEnv, logger });
+      const b = createBroadcastsRepo({ doc: recordingDoc, env: testEnv, logger });
+      const reads = async (fn: () => Promise<unknown>): Promise<unknown[]> => {
+        sent.length = 0;
+        await fn();
+        return sent.map((input) => input['ConsistentRead']);
+      };
+      const src = await legacySource();
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      const sid = row!.provider_sid;
+      await relayMessages.claimRelaySidPointer(sid, { ...src, memberKey: 'c-1' });
+      await relayMessages.putSystemSidMarker(sid, 'cell_verification');
+      const created = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'Hi [TenantName]',
+      });
+      expect(await reads(() => m.getByProviderSidConsistent(sid))).toEqual([true, true]);
+      expect(await reads(() => m.getByProviderSid(sid))).toEqual([undefined, undefined]);
+      expect(await reads(() => m.listByConversationConsistent(src.conversationId))).toEqual([true]);
+      expect(await reads(() => m.listByConversation(src.conversationId))).toEqual([undefined]);
+      expect(await reads(() => m.getRelaySidPointerConsistent(sid))).toEqual([true]);
+      expect(await reads(() => m.getRelaySidPointer(sid))).toEqual([undefined]);
+      expect(await reads(() => m.getSystemSidMarkerConsistent(sid))).toEqual([true]);
+      expect(await reads(() => m.getSystemSidMarker(sid))).toEqual([undefined]);
+      expect(await reads(() => b.getByIdConsistent(created.broadcastId))).toEqual([true]);
+      expect(await reads(() => b.getById(created.broadcastId))).toEqual([undefined]);
+      // A lost claim, a refused close and a lost finalize each decide from a
+      // CONSISTENT read-back.
+      expect(await reads(() => m.claimRelaySidPointer(sid, { ...src, memberKey: 'c-1' }))).toEqual([undefined, true]);
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-2', { status: 'sent', sid: 'SM2' });
+      expect(
+        await reads(() => m.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-2', { status: 'failed', errorCode: 'x' })),
+      ).toEqual([undefined, undefined, true]);
+      expect(await reads(() => b.finalizeStatus(created.broadcastId, 'sent'))).toEqual([undefined, true]);
+    });
   });
 });

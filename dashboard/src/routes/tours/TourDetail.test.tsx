@@ -12,7 +12,7 @@
 // barrel, import after mocking, assert accessibility-first.
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import type { Contact, ConversationSummary, RosterView, Tour, UnitItem } from '../../api/index.js';
@@ -1811,5 +1811,88 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     ).toBeInTheDocument();
     // The landlord IS on the roster already, so they are never suggested.
     expect(screen.queryByText(/Also on this property: Lon Landlord/)).not.toBeInTheDocument();
+  });
+});
+
+describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () => {
+  /** Shows the current search string (unit-test only). */
+  function SearchProbe(): React.JSX.Element {
+    const l = useLocation();
+    return <output data-testid="search">{l.search}</output>;
+  }
+
+  function renderAt(path: string, state?: unknown) {
+    return render(
+      <MemoryRouter initialEntries={[{ pathname: '/tours/tour-abc', search: path, state }]}>
+        <Routes>
+          <Route
+            path="/tours/:tourId"
+            element={
+              <>
+                <TourDetail />
+                <SearchProbe />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it('opens the Record-outcome dialog on a toured tour with no outcome, and strips the param', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('?outcome=1');
+    await waitLoaded();
+    expect(await screen.findByRole('dialog', { name: 'Record outcome' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(''));
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Record outcome' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Record outcome' })).toBeInTheDocument();
+  });
+
+  it('strips the param WITHOUT losing state.back (the Record-outcome path from Past)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('?outcome=1', { back: '/tours/past' });
+    await waitLoaded();
+    expect(await screen.findByRole('dialog', { name: 'Record outcome' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(''));
+    expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours/past');
+  });
+
+  it('opens nothing on a scheduled tour (and still strips the param)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderAt('?outcome=1');
+    await waitLoaded();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(''));
+  });
+
+  it('opens nothing on a toured tour that already has an outcome', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }));
+    renderAt('?outcome=1');
+    await waitLoaded();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('opens nothing without the param', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('');
+    await waitLoaded();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('the back arrow honors state.back for a tours route and ignores anything else', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('', { back: '/tours/past' });
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours/past');
+  });
+
+  it('the back arrow falls back to /tours without state or with a foreign path', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('', { back: '/contacts/evil' });
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours');
   });
 });

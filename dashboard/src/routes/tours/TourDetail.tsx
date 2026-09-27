@@ -17,13 +17,15 @@
 // retry path when the chained conversion fails). "Mark toured" likewise opens
 // the Record-outcome modal itself on success (Cameron 2026-08-06) - the CTA
 // ladder still HAS a "Record outcome" rung, but only as the way back in after a
-// dismiss (or for a tour marked toured elsewhere). A REQUESTED tour reaches the
-// same gate through the kebab's "Mark already toured": the visit happened
-// without us booking it, and scheduling it just to record the outcome would arm
-// - and send - a reminder ladder for a visit already in the past. Audience:
-// staff see "property" for the unit (GLOSSARY).
+// dismiss (or for a tour marked toured elsewhere). The Past tab's "Record
+// outcome" deep-links here with ?outcome=1, which opens the same modal once and
+// strips itself; its rows also pass state.back so the back arrow returns to
+// Past. A REQUESTED tour reaches the same gate through the kebab's "Mark already
+// toured": the visit happened without us booking it, and scheduling it just to
+// record the outcome would arm - and send - a reminder ladder for a visit
+// already in the past. Audience: staff see "property" for the unit (GLOSSARY).
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ApiError,
   createPlacementFromTour,
@@ -95,6 +97,17 @@ const RESCHEDULABLE_UI: ReadonlySet<TourStatus> = new Set<TourStatus>([
 
 /** Cancel shows for the pre-tour (non-dead) statuses. */
 const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>(['requested', 'scheduled']);
+
+/** The tours-list routes a back pointer may name (spec 4.6). Anything else
+ *  falls back to /tours - router state is client-supplied. */
+const BACK_TARGETS: ReadonlySet<string> = new Set(['/tours', '/tours/past', '/tours/closed']);
+
+/** Where the back arrow goes: the tab that opened this page when its link
+ *  said so (the Past tab's rows), else the Active list. */
+function backHref(state: unknown): string {
+  const back = typeof state === 'object' && state !== null ? (state as { back?: unknown }).back : undefined;
+  return typeof back === 'string' && BACK_TARGETS.has(back) ? back : '/tours';
+}
 
 export function TourDetail(): React.JSX.Element {
   const { tourId = '' } = useParams<{ tourId: string }>();
@@ -234,9 +247,31 @@ function TourDetailLoaded({
   // whole-inbox-row fan-out).
   const narrowShell = useTwoPaneNarrow();
   const commsVisible = !narrowShell || pane === 'conversation';
+  // The back arrow returns to the tab that opened this page (spec 4.6).
+  const location = useLocation();
+  const backTo = backHref(location.state);
+  // Deep link from the Tours page's Past tab (spec 4.6): /tours/:id?outcome=1
+  // opens the Record-outcome dialog ONCE, on a toured tour with no outcome.
+  // The dialog is opened in the STATE INITIALIZER (this component mounts after
+  // the tour loads and remounts per tourId, so the URL and the tour are both
+  // known here) - never from an effect. The effect below only STRIPS the
+  // param (replace, not push) so a reload or the Back button never reopens
+  // it, and it CARRIES THE LOCATION STATE FORWARD: a navigation without
+  // `state` resets it to null (react-router createLocation), which would drop
+  // the back pointer on exactly this path. It runs only while the param is
+  // present, so the plain row-link path never touches its state. The Past
+  // tab's "Record outcome" is the only producer.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const wantsOutcome = searchParams.get('outcome') === '1';
   const [modal, setModal] = useState<
     'book' | 'reschedule' | 'outcome' | 'cancel' | 'already-toured' | null
-  >(null);
+  >(() => (wantsOutcome && tour.status === 'toured' && tour.outcome === undefined ? 'outcome' : null));
+  useEffect(() => {
+    if (!wantsOutcome) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('outcome');
+    setSearchParams(next, { replace: true, state: location.state });
+  }, [wantsOutcome, searchParams, setSearchParams, location.state]);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   // "Send no-show check-in" seed handed to TourConversation (nonce bumps per click).
@@ -592,7 +627,7 @@ function TourDetailLoaded({
   return (
     <div className={shell.page}>
       <header className={shell.header}>
-        <Link to="/tours" className={styles.backBtn} aria-label="Back to tours">
+        <Link to={backTo} className={styles.backBtn} aria-label="Back to tours">
           {'\u2190'}
         </Link>
         <div className={shell.identity}>

@@ -1,7 +1,8 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
-// status) - Preferences & notes - Properties sent (C4) - Tours - Placements - Group
-// texts - Media (C5). Placements + Tours + Properties-sent + Relay groups are REAL
+// status) - Staff notes (tenants only) - Preferences & notes - Properties sent
+// (C4) - Tours - Placements - Group texts - Media (C5). Placements + Tours +
+// Properties-sent + Relay groups are REAL
 // (/api/placements, /api/tours?tenantId=, /api/contacts/:id/listings-sent,
 // /api/contacts/:id/relay-groups); Preferences are manual-now (pending until the
 // gleaning slice). Each list row links to its detail route.
@@ -40,6 +41,7 @@ import { SUGGESTION_TARGET_LABEL, aiSourceOf, suggestionFor } from './suggestion
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
+import { StaffNotesCard } from './StaffNotesCard.js';
 import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
@@ -85,6 +87,9 @@ export interface TenantFileProps {
   mediaPaging?: MediaGalleryPaging | undefined;
   /** Open the edit dialog (Details "Edit" + Preferences "+ Add"). */
   onEdit?: () => void;
+  /** Apply a contact the Staff notes card saved (the file pane's setContact).
+   *  Absent -> that card is read-only. */
+  onContactUpdated?: (updated: Contact) => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
   /** Open the "New placement" dialog pre-filled+locked to this tenant (Placements
@@ -128,6 +133,7 @@ export function TenantFile({
   suggestionBusy,
   suggestionError,
   onEdit,
+  onContactUpdated,
   onManagePhones,
   onStartPlacement,
   onScheduleTour,
@@ -243,6 +249,18 @@ export function TenantFile({
         {...(suggestionBusy !== undefined && { suggestionBusy })}
         {...(suggestionError !== undefined && { suggestionError })}
       />
+
+      {/* Staff notes (item 22): the hand-written box, kept apart from the
+          AI-appended "Preferences & notes" below. TENANTS ONLY - this file
+          also serves team_member contacts, who do not get it. */}
+      {contact.type === 'tenant' ? (
+        <StaffNotesCard
+          contactId={contact.contactId}
+          value={contact.staff_notes}
+          updatedAt={contact.staff_notes_updated_at}
+          onContactUpdated={onContactUpdated}
+        />
+      ) : null}
 
       <Card
         title="Preferences & notes"

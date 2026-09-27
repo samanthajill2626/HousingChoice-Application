@@ -1077,6 +1077,7 @@ export function ContactDetail(): React.JSX.Element {
                 suggestionBusy={suggestionBusy}
                 suggestionError={suggestionError}
                 onEdit={() => setEditing(true)}
+                onContactUpdated={setContact}
                 onManagePhones={() => setManagingPhones(true)}
                 onStartPlacement={() => setStartingPlacement(true)}
                 onScheduleTour={() => setSchedulingTour(true)}

@@ -33,3 +33,10 @@ the missing piece is a way to say "done with this one".
 3. A dedicated "followed up" flag that hides the row without changing status.
 
 Option 1 fits the existing status model with no new state. Ask Sam.
+
+**Asked Sam 2026-09-27 (Cameron's ruling: "we need to ask Sam").** Added under
+item 18 ("Tours: past and upcoming") in the HousingChoice Improvements Tracker,
+"Questions and decisions": "No-shows on the new Past tab stay on the list for
+90 days, because there is no way to mark one as done. Should a no-show get a
+way off the list, such as Cancel tour (moves it to Closed)?" Open until Sam
+answers; option 1 above is the recommendation.

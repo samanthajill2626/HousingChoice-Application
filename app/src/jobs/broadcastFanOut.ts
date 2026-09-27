@@ -160,6 +160,15 @@ export interface BroadcastSendPayload {
   recipientKeys?: string[];
   /** 1-based continuation attempt (absent = first run, treated as 1). */
   attempt?: number;
+  /**
+   * SOR D13a/D16: a RE-DRIVE pass - the reconcile ruled one recipient
+   * never_sent and re-drove it. Such a pass claims no ladder rung up front
+   * (only after its loop, and only for a transient remainder), so a spent
+   * ladder cannot close the recipient before it is tried. A transient
+   * continuation never carries it: the gate and the claim treat a `redriven`
+   * record the same on every pass.
+   */
+  redrive?: true;
 }
 
 export function parseBroadcastSendPayload(payload: unknown): BroadcastSendPayload {
@@ -180,6 +189,7 @@ export function parseBroadcastSendPayload(payload: unknown): BroadcastSendPayloa
     broadcastId: p.broadcastId,
     attempt,
     ...(recipientKeys !== undefined && { recipientKeys }),
+    ...(p.redrive === true && { redrive: true as const }),
   };
 }
 
@@ -375,7 +385,13 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       );
     }
 
-    const broadcast = await broadcasts.getById(payload.broadcastId);
+    // A continuation or a re-drive decides from a strongly consistent snapshot
+    // (SOR D11, D16): the pass before it, or the reconcile, wrote the slots it
+    // reads. The first pass keeps the cheap read.
+    const broadcast =
+      payload.recipientKeys !== undefined
+        ? await broadcasts.getByIdConsistent(payload.broadcastId)
+        : await broadcasts.getById(payload.broadcastId);
     if (!broadcast) {
       log.warn({ broadcastId: payload.broadcastId }, 'broadcastFanOut: broadcast not found — nothing to send');
       return;
@@ -405,6 +421,17 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      * refused (close C, D9) - but all three must leave the SAME terminal shape:
      * no recipient left `queued`, the persisted counters reconciled, the row no
      * longer `sending`, and one operator ERROR line naming the reason (D10).
+     *
+     * SOR D8: this is a close by a writer OTHER than the recipient's own
+     * attempt, so each key passes the D8 gate first: an absent, done/retryable
+     * or redriven record is closed (a redriven one's record too - `code` keeps
+     * the caller's reason, `transient_cap` or `enqueue_failed`); a stale
+     * attempting record is taken over and handed to reconcile (so a recipient
+     * whose release write failed still reaches a verdict at the cap); a live
+     * or terminal one is left to its owner, and finalize then defers while its
+     * slot is still queued. The slot close itself is conditional on `queued`.
+     * Each key is its own try/catch: one failure never skips the rest, the
+     * operator line, or finalize (build finding T7-9).
      */
     async function closeBroadcast(
       recipientKeys: string[],
@@ -415,12 +442,31 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         // Both call sites pass an already-non-terminal set; re-checked against
         // the pass snapshot so a future caller cannot double-count a slot.
         if (isTerminal(snapshot.recipients?.[contactKey]?.status)) continue;
-        await recordRecipient(repo, payload.broadcastId, contactKey, { status: 'failed', errorCode: code });
-        emitBroadcastProgress(
-          events,
-          payload.broadcastId,
-          await repo.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
-        );
+        const owner: BroadcastOwner = { kind: 'broadcast', broadcastId: payload.broadcastId, contactKey };
+        const ctx = recipientCtx(contactKey);
+        try {
+          const gate = await gateFor(attempts, owner, Date.now());
+          if (gate.kind === 'taken_over') {
+            await handOff(owner, gate.record.attemptedAt);
+            continue;
+          }
+          if (gate.kind !== 'proceed') {
+            log.info({ ...ctx, gate: gate.kind, closeCode: code }, 'broadcastFanOut: close left the recipient to its own attempt');
+            continue;
+          }
+          const closed = await repo.closeRecipientIfQueued(payload.broadcastId, contactKey, code, 'failed');
+          if (closed.moved && closed.item) emitBroadcastProgress(events, payload.broadcastId, closed.item);
+          if (gate.record?.state === 'redriven') {
+            await guardWrite(log, ctx, 'closeRedriven', () =>
+              attempts.closeRedriven(owner, {
+                outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
+                cause: code,
+              }),
+            );
+          }
+        } catch (err) {
+          log.error({ err, ...ctx, label: 'capClose' }, 'broadcastFanOut: closing one recipient failed; the rest still close');
+        }
       }
       // D10: the ONE operator line carries the DURABLE pass number, never the
       // envelope's. On the LADDER closes (A and B) that is the number the close
@@ -467,8 +513,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     // could never be reached. Claimed here, BELOW the duplicate-delivery guard
     // and only when this pass will actually attempt a send: a job that sends
     // nothing must not spend a rung, and a redelivery must not either.
+    // SOR D13a: a RE-DRIVE pass claims nothing up front - only after its loop,
+    // and only if it has a transient remainder - so a spent ladder cannot
+    // close the re-driven recipient before it is tried.
     const pending = keys.filter((k) => !isTerminal(broadcast.recipients?.[k]?.status));
-    if (pending.length > 0) {
+    if (pending.length > 0 && payload.redrive !== true) {
       claim = await repo.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
       if (claim.outcome === 'missing') {
         log.warn(
@@ -1036,12 +1085,28 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     // final rung is the one that marks the still-deferred recipients failed
     // (no silent black hole, and no fourth pass exists to do it later).
     if (transientRemaining.length > 0) {
-      if (claim?.outcome !== 'claimed') {
-        // Unreachable by construction: a key reaches transientRemaining only
-        // from inside the send loop, which only runs for a non-terminal slot -
-        // so `pending` was non-empty and the claim either succeeded or returned
-        // above. Narrowed rather than asserted, and closed rather than ignored,
-        // so D8 holds even if the impossible ever happens.
+      if (claim === undefined) {
+        // Reached only by a RE-DRIVE pass (every other pass with a
+        // non-terminal key claimed above): it claims its rung now, because it
+        // has a remainder to defer, and takes the same branches the up-front
+        // claim takes - never a close for want of a claim.
+        claim = await repo.claimFanoutPass(payload.broadcastId, MAX_BROADCAST_ATTEMPTS);
+        if (claim.outcome === 'missing') {
+          log.warn(
+            { broadcastId: payload.broadcastId },
+            'broadcastFanOut: broadcast vanished before the pass claim - nothing to defer',
+          );
+          return;
+        }
+        if (claim.outcome === 'capped') {
+          await closeBroadcast(transientRemaining, TRANSIENT_CAP_CODE);
+          return;
+        }
+      }
+      if (claim.outcome !== 'claimed') {
+        // Unreachable by construction: the up-front claim returned above on
+        // `missing` and `capped`. Narrowed rather than asserted, and closed
+        // rather than ignored, so D8 holds even if the impossible ever happens.
         await closeBroadcast(transientRemaining, TRANSIENT_CAP_CODE);
         return;
       }

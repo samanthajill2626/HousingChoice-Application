@@ -24,6 +24,7 @@ import {
   BROADCAST_SEND_JOB,
   broadcastBackoffMs,
   finalize,
+  parseBroadcastSendPayload,
   registerBroadcastSendJobHandler,
 } from '../src/jobs/broadcastFanOut.js';
 import { loadConfig } from '../src/lib/config.js';
@@ -1757,6 +1758,249 @@ describe('broadcast.send (M1.8a)', () => {
       expect(world.flagWrites.filter((f) => f.flag === 'sms_unreachable').map((f) => f.contactId)).toEqual(['t-3']);
       expect(b.status).toBe('failed');
       expect(b.last_error).toBe('all recipients failed');
+    });
+
+    // --- the cap-close gate (D8) and the re-drive pass (D13a, D16) ---------
+    /** A record the reconcile ruled never_sent and re-drove: redriven, redriveCount 1. */
+    async function seedRedriven(k: string): Promise<void> {
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(ownerOf(k), seedFacts, at);
+      await world.sendAttemptsRepo.handToReconcile(ownerOf(k), { attemptNo: 1, attemptedAt: at });
+      await world.sendAttemptsRepo.markRedriven(ownerOf(k), at);
+    }
+    function refuseDelayedEnqueues(): void {
+      // DELAY-SELECTIVE: the entry enqueue (delay 0) must still pass.
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+    }
+
+    it('8 a cap-close closes only records that are absent or done/retryable, skips a terminal one, defers a live one and takes over a stale attempting one (D8)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(6));
+      const capture = wire();
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      // Close B: the ladder is already spent when this first pass begins.
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      const now = new Date().toISOString();
+      const stale = agoIso(31_000);
+      // t-1: no record.
+      await world.sendAttemptsRepo.claim(ownerOf('t-2'), seedFacts, now); // fresh attempting
+      await world.sendAttemptsRepo.claim(ownerOf('t-3'), seedFacts, stale); // stale attempting
+      await world.sendAttemptsRepo.claim(ownerOf('t-4'), seedFacts, now); // reconciling
+      await world.sendAttemptsRepo.handToReconcile(ownerOf('t-4'), { attemptNo: 1, attemptedAt: now });
+      await world.sendAttemptsRepo.claim(ownerOf('t-5'), seedFacts, now); // done/sent
+      await world.sendAttemptsRepo.finishAttempt(ownerOf('t-5'), { attemptNo: 1, attemptedAt: now }, { outcome: 'sent', sid: 'SM5' });
+      await world.sendAttemptsRepo.claim(ownerOf('t-6'), seedFacts, now); // done/retryable
+      await world.sendAttemptsRepo.finishAttempt(ownerOf('t-6'), { attemptNo: 1, attemptedAt: now }, { outcome: 'retryable', cause: '429' });
+
+      await runFirstPass();
+
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      for (const k of ['t-2', 't-3', 't-4', 't-5']) expect(b.recipients[k], k).toEqual({ status: 'queued' });
+      expect(b.recipients['t-6']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(b.stats).toMatchObject({ failed: 2, queued: 4 });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-3'))).toMatchObject({ state: 'reconciling', attemptedAt: stale });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-2'))).toMatchObject({ state: 'attempting' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-6'))).toMatchObject({ state: 'done', outcome: 'retryable' });
+      expect(reconciles).toEqual([
+        { owner: { kind: 'broadcast', broadcastId: 'bcast-1', recipientKeyHash: 't-3' }, attemptedAt: stale, checkNo: 0 },
+      ]);
+      expect(sends).toHaveLength(0);
+      expect(closeLines(capture)).toHaveLength(1);
+      // finalize ran and deferred: four recipients are still owned elsewhere.
+      expect(b.status).toBe('sending');
+    });
+
+    it('8b a cap-close takeover whose fence is lost leaves the recipient alone', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, agoIso(31_000));
+      vi.spyOn(world.sendAttemptsRepo, 'takeOver').mockResolvedValueOnce(false);
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(reconciles).toHaveLength(0);
+    });
+
+    it('8c a cap-close whose gate read throws for one recipient logs it and still closes the rest and finalizes (T7-9)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(2));
+      const capture = wire();
+      unknownOn(new Set());
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(b.recipients['t-2']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      const capClose = capture.atLevel(50).filter((l) => l['label'] === 'capClose');
+      expect(capClose).toHaveLength(1);
+      expect(capClose[0]).toMatchObject({ broadcastId: 'bcast-1', recipientKey: 't-1' });
+      expect(closeLines(capture)).toHaveLength(1);
+      expect(capture.atLevel(30).some((l) => String(l['msg']).includes('finalize deferred'))).toBe(true);
+    });
+
+    it('9a a re-drive pass claims no ladder rung up front and its fence closes the redriven record done/refused', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'opted_out' });
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(b.fanout_attempt).toBe(3);
+      expect(b.status).toBe('sent');
+    });
+
+    it('9b a re-drive attempt that comes back unknown closes unresolved with no second reconcile (D13a)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      await seedRedriven('t-1');
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(sends).toHaveLength(1);
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(b.stats.unconfirmed).toBe(1);
+      expect(b.stats.queued).toBe(0);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'unresolved',
+        cause: 'second_unknown',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(b.status).toBe('failed');
+      expect(b.last_error).toBe("Couldn't confirm any text went out");
+      expect(capture.atLevel(50).filter((l) => l['cause'] === 'second_unknown')).toHaveLength(1);
+    });
+
+    it('9c a re-drive pass that defers before its claim and hits the cap closes its OWN redriven record (R2 #11)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'transient_cap' });
+      // The rung is claimed only AFTER the loop, because the pass has a remainder - and it is capped.
+      expect(claimPass).toHaveBeenCalledTimes(1);
+      expect(sends).toHaveLength(0);
+      expect(b.status).toBe('failed');
+    });
+
+    it('9d a redriven record reached by an ORDINARY continuation (no marker) whose fence trips closes done/refused (R3 #17)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      await seedRedriven('t-1');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'opted_out' });
+    });
+
+    it('9e a re-drive pass whose continuation enqueue is refused closes its redriven record enqueue_failed (G7)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      refuseDelayedEnqueues();
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'enqueue_failed' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'enqueue_failed', cause: 'enqueue_failed' });
+      expect(b.status).toBe('failed');
+    });
+
+    it('9f a re-drive pass with a retryable remainder claims its rung AFTER the loop; the continuation carries no marker', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      const refused = vi.fn(async (): Promise<never> => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      });
+      world.adapter.sendPreparedMessage = refused;
+      await seedRedriven('t-1');
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(refused).toHaveBeenCalledTimes(1);
+      expect(claimPass).toHaveBeenCalledTimes(1);
+      // AFTER the loop: the rung is claimed only once the pass knows it has a remainder.
+      expect(claimPass.mock.invocationCallOrder[0]!).toBeGreaterThan(refused.mock.invocationCallOrder[0]!);
+      expect(delayedOf(BROADCAST_SEND_JOB).map((d) => d.envelope.payload)).toEqual([
+        { broadcastId: 'bcast-1', attempt: 2, recipientKeys: ['t-1'] },
+      ]);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'retryable', redriveCount: 1 });
+    });
+
+    it('9g a re-drive pass whose recipient sends claims no rung and finalizes', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(sends).toHaveLength(1);
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'sent', sid: 'SM-+15550100001' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
+
+    it('the payload parser carries redrive: true and nothing else', () => {
+      expect(parseBroadcastSendPayload({ broadcastId: 'b', redrive: true })).toEqual({ broadcastId: 'b', attempt: 1, redrive: true });
+      expect(parseBroadcastSendPayload({ broadcastId: 'b', redrive: 'yes' })).toEqual({ broadcastId: 'b', attempt: 1 });
+      expect(parseBroadcastSendPayload({ broadcastId: 'b', recipientKeys: ['k'], attempt: 2 })).toEqual({
+        broadcastId: 'b',
+        attempt: 2,
+        recipientKeys: ['k'],
+      });
+    });
+
+    it('a continuation reads its snapshot strongly consistently; a first pass does not (D11, D16)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      const consistent = vi.spyOn(world.broadcastsRepo, 'getByIdConsistent');
+      // First pass: a prepare throw defers t-1 (a continuation is pending, so no finalize reads either).
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      await runFirstPass();
+      expect(consistent).not.toHaveBeenCalled();
+      // A continuation: a foreign fresh attempt defers t-1 again - the one consistent read is the snapshot.
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, new Date().toISOString());
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(consistent).toHaveBeenCalledTimes(1);
+      expect(consistent).toHaveBeenCalledWith('bcast-1');
     });
   });
 

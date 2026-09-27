@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 3** (after plan review rounds 1 and 2; adjudications in `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/design-review/adjudications.md`, sections "Plan round 1" and "Plan round 2"). This document is self-contained: every test and every code block a task needs is IN that task.
+**Revision 4** (after plan review rounds 1-3; adjudications in `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/design-review/adjudications.md`, sections "Plan round 1", "Plan round 2" and "Plan round 3"). This document is self-contained: every test and every code block a task needs is IN that task.
 
 **Goal:** Replace the throw-for-redelivery in both fan-outs and the relay retry rung with a classified send outcome, a per-recipient send-attempt record claimed before every provider call, and a `send.reconcile` job that resolves an ambiguous send by looking the message up at the provider - so every attempted recipient reaches a terminal state and nobody is ever texted twice.
 
@@ -10,13 +10,13 @@
 
 **Tech Stack:** TypeScript (Node 24, ESM), Express, DynamoDB (`@aws-sdk/lib-dynamodb`, DynamoDB Local for integration tests), twilio-node 6.0.2, Vitest, React 19 dashboard, Playwright e2e harness with the in-repo fake-twilio.
 
-**Spec:** `docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md` (revision 10). The plan argues from the spec; executors read both. Decision numbers (D1, D8a, ...) are the spec's.
+**Spec:** `docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md` (revision 11). The plan argues from the spec; executors read both. Decision numbers (D1, D8a, ...) are the spec's.
 
 **Declared deviations from the spec's wording (all deliberate, restated in the handback):**
 1. D17's `createdAfter` is not a port argument; the job filters by `createdAt` after listing.
 2. The dashboard's code constants live in `deliveryStatus.ts` and are pinned to the app's by a mirror test (the dashboard never imports app values at runtime).
-3. A slot write made by a send site after its claim keeps the slot's existing guards (forward-only / allowed priors); it is NOT additionally fenced on the attempt record - the record fence decides, and a lost record fence makes the site skip the slot write.
-4. The continuation payloads (`broadcast.send` `recipientKeys`, `relay.fanOut` `recipientKeys` and `senderKey`) keep their pre-existing shapes, which carry `phone#` keys today; only the NEW `send.reconcile` payload is phone-free.
+3. A slot write made by a send site after its claim keeps the slot's existing guards (forward-only / allowed priors) and is NOT additionally fenced on the attempt record. The slot is written BEFORE the fenced `finishAttempt`; a lost fence (a `false` after the slot write - the record was taken over during a long send) is logged at WARN and the slot is NOT rolled back: the takeover's reconcile finds the SID through the pointer and repairs/adopts.
+4. The continuation payloads (`broadcast.send` `recipientKeys`, `relay.fanOut` `recipientKeys` and `senderKey`) keep their pre-existing shapes, which carry `phone#` keys today. The NEW `send.reconcile` payload's OWNER field is phone-free (hashed recipient key); its optional `continuation.senderKey` is the fan-out's own sender key, carried verbatim because the re-drive envelope must repeat it, and is a `phone#` key for a contact-less sender. Test 21 is scoped to the owner field.
 
 **Branch / worktree:** `feat/send-outcome-reconcile` at `W:\tmp\send-outcome-reconcile`, HEAD merged with `main` @bd752bd0 at a9f411f3 (RSW and share-skip-fix Branch A included). This branch's ONE main sync is already done; Task 17 reports later drift, it does not re-merge.
 
@@ -39,7 +39,10 @@
 - Reconcile: check k (0, 1, 2) runs at `attemptedAt + reconcileCheckDelaysMs()[k]` (defaults +5 s, +30 s, +240 s - offsets from the ATTEMPT); enqueue delay `max(0, thatTime - now)`; lane-overridable only when `JOBS_QUEUE_URL` is unset; window opens 60 s before the attempt; list page size 1000, at most 5 pages; one re-drive per recipient; worst-case chain depth 8 of 10 hops (D13, D13a).
 - Body matching uses the lossy normalization (Unicode NFKC, letters and digits only); a normalized body shorter than 3 characters matches on media count instead (D13).
 - The `send.reconcile` payload carries the HASHED recipient key, never a phone; every log line uses `safeRecipientKey` / `logSafeMemberKey` (D12, D18).
-- D8 gate, uniformly: a pre-claim decline or a close by another writer proceeds only when the recipient's attempt record is ABSENT, `done/retryable`, or the pass's OWN `redriven`; a stale `attempting` (older than the TTL) is taken over into reconcile; anything else defers the recipient (continuation-carried) or skips it.
+- D8 gate, uniformly through the module-local `gateFor(owner, nowMs)` (Task 7 defines it; Tasks 8 and 9 copy it): a pre-claim decline or a close by another writer PROCEEDS only when the recipient's attempt record is ABSENT, `done/retryable`, or `redriven` (any pass - a `redriven` record is claimable by any pass, so any pass's decline may close it through `closeRedriven`); a `done` record with any other outcome SKIPS (terminal, never carried forward); a stale `attempting` (older than the TTL) is TAKEN OVER and the record RETURNED so the CALLER hands off exactly once (the gate never enqueues); a fresh `attempting` or `reconciling` DEFERS (continuation-carried). A gate read that throws is a prepare-phase throw (deferred, no record).
+- A recipient whose `handToReconcile` write is lost is STRANDED: deferred with no slot write, the record left `attempting`, and it COUNTS toward the outage streak (it is an unknown provider outcome whose bookkeeping failed). On broadcast the continuation's claim takes the stale record over (the 10 s + 20 s ladder clears the 30 s TTL); on relay the ladder (5 s + 10 s) does NOT clear it, so a stranded relay member or rung is deferred at the cap and left for the sweeper (spec D8a revision 11; Task 15 files it).
+- A rejection with NO provider code (a 4xx whose body did not parse) writes NO slot code: the slot is `failed` with no `errorCode` (the badge reads `Delivery failed`); the record's `cause` keeps `String(status)`. An HTTP status is never a slot code (D10, D23). The kill switch's `sms_sending_disabled` IS a slot code (it has prose).
+- A pre-claim deferral write on a broadcast slot goes through `recordRecipientOutcome` with an EMPTY stats delta and `['queued']` priors - never a blind `setRecipient` (it could revert a fence's `skipped` or a foreign attempt's `sent`).
 - Dashboard copy (D20-D23, exact): `send_unconfirmed` -> label `Not confirmed`, tone `danger`, `isFailure: false`, reason `Couldn't confirm whether this text went out`; `redrive_refused` -> `Wasn't resent: the group closed or the member left`; `sms_sending_disabled` -> `SMS sending is switched off, so nothing was sent`; `transient_cap` -> `Sending gave up after repeated temporary errors`; chip label `Not confirmed`; `last_error` `Couldn't confirm any text went out`; a 21211 renders `Delivery failed (error 21211)`.
 - The `unconfirmed` stats bucket is OPTIONAL in both `BroadcastStats` types, read as `?? 0`, its own chip in the audience sum, never in `skippedTotal` (D22).
 - E2E never uses the lean seed's switched-off tenant `contact-tenant-0002` / `conv-0002` as a recipient of anything automated (Sec 2a).
@@ -153,8 +156,17 @@ export interface SendAttemptsRepo {
   get(owner): Promise<SendAttemptRecord | undefined>;
   listByRecipient(sender: string, recipientDigest: string, sinceIso: string): Promise<SendAttemptRecord[]>;
 }
-export function ownerKey(owner: SendAttemptOwner): string;
+export function ownerKey(owner: SendAttemptOwner): string;                       // the owner WITHOUT the recipient
+export function attemptKey(owner: SendAttemptOwner): string;                     // `${ownerKey(owner)}|${hashRecipientKey(recipientKey)}` - the RECORD's identity; sibling filters compare THIS
 export function createSendAttemptsRepo(deps?: RepoDeps): SendAttemptsRepo;
+
+// module-local in broadcastFanOut.ts (T7), relayFanOut.ts (T8), relayRetryLeg.ts (T9) - same body, over `sendAttempts`
+type GateResult =
+  | { kind: 'proceed'; record?: SendAttemptRecord }     // absent, done/retryable, or redriven (the caller closes a redriven record with closeRedriven)
+  | { kind: 'skip' }                                     // done with a terminal outcome
+  | { kind: 'defer' }                                    // fresh attempting, reconciling, or a lost takeover
+  | { kind: 'taken_over'; record: SendAttemptRecord };   // a stale attempting record now reconciling - the CALLER hands off
+async function gateFor(owner: SendAttemptOwner, nowMs: number): Promise<GateResult>;
 // T5 also adds `sendAttemptsRepo?: SendAttemptsRepo` to BroadcastSendJobDeps, RelayFanOutJobDeps, RelayRetryLegJobDeps and RegisterJobHandlersDeps (unused until T7-T9).
 
 // app/src/jobs/relayFanOut.ts  (T8)
@@ -165,7 +177,7 @@ export interface RelayLegSendOutcome {
   reason?: 'unknown' | 'takeover';         // on handed_to_reconcile
   deferredByClaim?: true;                  // on transient: a FOREIGN attempt owns the recipient; no slot written
 }
-// sendOneRelayLeg args gain: sendAttempts?: SendAttemptsRepo; owner?: SendAttemptOwner; redrive?: boolean  (optional in T8; required in T9)
+// sendOneRelayLeg args gain: sendAttempts?: SendAttemptsRepo; owner?: SendAttemptOwner  (optional in T8; required in T9). No `redrive` arg: the gate and the claim treat a `redriven` record the same on every pass.
 
 // app/src/jobs/sendReconcile.ts  (T7 stub; T10 handler)
 export const SEND_RECONCILE_JOB = 'send.reconcile';
@@ -177,7 +189,7 @@ export interface SendReconcilePayload { owner: SendAttemptOwnerRef; attemptedAt:
 export function toOwnerRef(owner: SendAttemptOwner): SendAttemptOwnerRef;
 export function reconcileCheckDelaysMs(): readonly number[];                                   // lane-overridable
 export function reconcileDelayMs(attemptedAt: string, checkNo: number, nowMs: number): number;   // max(0, attemptedAt + reconcileCheckDelaysMs()[checkNo] - nowMs)
-export async function enqueueSendReconcile(payload: SendReconcilePayload, delayMs: number): Promise<void>;
+export async function enqueueSendReconcile(payload: SendReconcilePayload, delayMs: number): Promise<void>;   // enqueue(SEND_RECONCILE_JOB, payload, { runAt: new Date(Date.now() + delayMs) }) - EnqueueOptions is { runAt } only (jobs.ts:91-93)
 ```
 
 Re-drive marker on the three continuation payloads: `redrive?: true`, carried by each parser; a transient re-enqueue STRIPS it.
@@ -655,10 +667,19 @@ Run: `cd app; npx vitest run test/guardWrite.test.ts` -> PASS (2 tests).
 // file's own document client and table name.
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { hashRecipientKey } from '../src/lib/sendFingerprint.js';
-import { createSendAttemptsRepo, ownerKey, type SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
+import { createSendAttemptsRepo, ownerKey, type SendAttemptFacts, type SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 
-const owner: SendAttemptOwner = { kind: 'broadcast', broadcastId: 'b-1', contactKey: 'phone#+16175550100' };
-const facts = { recipientDigest: 'd'.repeat(32), sender: '+15550009999', bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 };
+// ONE owner and ONE index partition PER CASE: the table is created once per
+// file and never reset between cases, so a shared owner would carry state
+// from case to case (a done/sent record refuses every later claim).
+let seq = 0;
+let owner: SendAttemptOwner;
+let facts: SendAttemptFacts;
+beforeEach(() => {
+  seq += 1;
+  owner = { kind: 'broadcast', broadcastId: `b-${seq}`, contactKey: 'phone#+16175550100' };
+  facts = { recipientDigest: `d${seq}`.padEnd(32, 'd'), sender: '+15550009999', bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 };
+});
 const T0 = '2026-09-26T12:00:00.000Z';
 const T1 = '2026-09-26T12:00:05.000Z';
 
@@ -722,7 +743,7 @@ describe.skipIf(!reachable)('sendAttemptsRepo (spec D8a/D11)', () => {
   });
   it('closeRedriven accepts refused, redrive_refused, enqueue_failed and unresolved, once', async () => {
     for (const outcome of ['refused', 'redrive_refused', 'enqueue_failed', 'unresolved'] as const) {
-      const o: SendAttemptOwner = { kind: 'broadcast', broadcastId: `b-${outcome}`, contactKey: 'c-1' };
+      const o: SendAttemptOwner = { kind: 'broadcast', broadcastId: `b-${seq}-${outcome}`, contactKey: 'c-1' };
       await repo.claim(o, facts, T0);
       await repo.handToReconcile(o, { attemptNo: 1, attemptedAt: T0 });
       await repo.markRedriven(o, T0);
@@ -814,6 +835,8 @@ export function ownerKey(owner: SendAttemptOwner): string {
   }
 }
 function recipientKeyOf(owner: SendAttemptOwner): string { return owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey; }
+/** The RECORD's identity (owner AND recipient). Sibling comparisons use this, never ownerKey alone: two contacts on one phone in one broadcast are two records. */
+export function attemptKey(owner: SendAttemptOwner): string { return `${ownerKey(owner)}|${hashRecipientKey(recipientKeyOf(owner))}`; }
 function recordKey(owner: SendAttemptOwner): { conversationId: string; tsMsgId: string } {
   return { conversationId: `${SEND_ATTEMPT_PARTITION_PREFIX}${ownerKey(owner)}`, tsMsgId: hashRecipientKey(recipientKeyOf(owner)) };
 }
@@ -1029,13 +1052,13 @@ git commit -m "feat(repos): the per-recipient send-attempt record and its recipi
   - `getByProviderSidConsistent(sid)`, `getRelaySidPointerConsistent(providerSid)`, `getSystemSidMarkerConsistent(providerSid)`, `listByConversationConsistent(conversationId, opts?)` - consistent twins of the existing reads.
   - `claimRelaySidPointer(providerSid, ref: { conversationId; tsMsgId; memberKey }): Promise<'created' | 'mine' | 'other'>` - the existing conditional put (`:3784-3806`); on CCF a `getRelaySidPointerConsistent` compares all three ref fields -> `'mine'` / `'other'`. `putRelaySidPointer` stays (its other caller `relayAnnouncements.ts:354` is Stage 2).
   - `closeRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, delivery: { status: 'failed'; errorCode: string }): Promise<'closed' | 'skipped_sent' | 'missing'>` - two statements, each with its OWN names/values: (1) `SET #dr.#mk.#st = :failed, #dr.#mk.#ec = :ec`, condition `attribute_exists(tsMsgId) AND attribute_exists(#dr.#mk) AND #dr.#mk.#st = :queued AND attribute_not_exists(#dr.#mk.#sid)`, names `{ '#dr': 'delivery_recipients', '#mk': memberKey, '#st': 'status', '#ec': 'errorCode', '#sid': 'sid' }`, values `{ ':failed': 'failed', ':ec': errorCode, ':queued': 'queued' }` (keeps `requestedTransport`, `attemptedAt`, every sibling field); on CCF (2) `SET #dr.#mk = :fresh`, condition `attribute_exists(tsMsgId) AND attribute_not_exists(#dr.#mk)`, names `{ '#dr': 'delivery_recipients', '#mk': memberKey }`, values `{ ':fresh': { status: 'failed', errorCode } }`; on a second CCF a consistent read decides `'missing'` (no row) vs `'skipped_sent'`. Legacy and versioned rows alike.
-  - `adoptRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, patch: { status: DeliveryStatus; sid: string; sentAt: string; errorCode?: string }): Promise<'adopted' | 'skipped' | 'missing'>` - on a VERSIONED row delegate to `applyRecipientSendResult` (`updated` -> `adopted`; `idempotent`/`stale`/`conflict` -> `skipped`; else `missing`). On a LEGACY row, FORWARD-ONLY (D15: a raced receipt is never regressed): (a) seed an absent slot: `SET #dr.#mk = if_not_exists(#dr.#mk, :seed)`, condition `attribute_exists(tsMsgId)`, names `{ '#dr': 'delivery_recipients', '#mk': memberKey }`, values `{ ':seed': { status: 'queued' } }` - CCF -> `'missing'`; (b) `SET #dr.#mk.#st = :st, #dr.#mk.#sid = if_not_exists(#dr.#mk.#sid, :sid), #dr.#mk.#sa = if_not_exists(#dr.#mk.#sa, :sa)[, #dr.#mk.#ec = :ec]`, condition `attribute_exists(#dr.#mk) AND #dr.#mk.#st IN (:p0, :p1, ...)` where the priors are `allowedPriorStatuses(patch.status)` - the file's own forward-only table at `:133-141` (use its real helper name) - PLUS `patch.status` itself (same-status idempotence); names `{ '#dr', '#mk', '#st': 'status', '#sid': 'sid', '#sa': 'sentAt'[, '#ec': 'errorCode'] }`, values `{ ':st', ':sid', ':sa'[, ':ec'], ':p0'.. }`; CCF -> `'skipped'`. Never `markRecipient`'s wholesale SET.
+  - `adoptRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, patch: { status: DeliveryStatus; sid: string; sentAt: string; errorCode?: string }): Promise<'adopted' | 'skipped' | 'missing'>` - delegate FIRST to `applyRecipientSendResult` (`updated` -> `adopted`; `idempotent`/`stale`/`conflict` -> `skipped`; `missing` -> `missing`; `legacy_noop` (`messagesRepo.ts:3481`) -> the LEGACY branch below - that result IS the discriminator, no extra read). On a LEGACY row, FORWARD-ONLY (D15: a raced receipt is never regressed): (a) seed an absent slot: `SET #dr.#mk = if_not_exists(#dr.#mk, :seed)`, condition `attribute_exists(tsMsgId)`, names `{ '#dr': 'delivery_recipients', '#mk': memberKey }`, values `{ ':seed': { status: 'queued' } }` - CCF -> `'missing'`; (b) `SET #dr.#mk.#st = :st, #dr.#mk.#sid = if_not_exists(#dr.#mk.#sid, :sid), #dr.#mk.#sa = if_not_exists(#dr.#mk.#sa, :sa)[, #dr.#mk.#ec = :ec]`, condition `attribute_exists(#dr.#mk) AND #dr.#mk.#st IN (:p0, :p1, ...)` where the priors are `allowedPriorStatuses(patch.status)` - the file's own forward-only table at `:133-141` (use its real helper name) - PLUS `patch.status` itself (same-status idempotence); names `{ '#dr', '#mk', '#st': 'status', '#sid': 'sid', '#sa': 'sentAt'[, '#ec': 'errorCode'] }`, values `{ ':st', ':sid', ':sa'[, ':ec'], ':p0'.. }`; CCF -> `'skipped'`. Never `markRecipient`'s wholesale SET.
   - `setRelayRecipientAttemptedAt(conversationId, tsMsgId, memberKey, attemptedAt): Promise<void>` - two statements, each with its OWN names/values: (1) `SET #dr.#mk = if_not_exists(#dr.#mk, :seed)`, condition `attribute_exists(tsMsgId)`, names `{ '#dr': 'delivery_recipients', '#mk': memberKey }`, values `{ ':seed': { status: 'queued' } }`; (2) `SET #dr.#mk.#at = :at`, condition `attribute_exists(#dr.#mk)`, names `{ '#dr': 'delivery_recipients', '#mk': memberKey, '#at': 'attemptedAt' }`, values `{ ':at': attemptedAt }`; a CCF on either is WARNed and swallowed (best-effort); anything else throws.
   - `AppendResult` gains `conversationId: string` (fresh: the input's; dedupe: `ptr.ref_conversationId`).
   - `RelayRecipientDelivery.attemptedAt?: string` with the doc line "OUR attempt clock (D8a), best-effort; a wholesale write may drop it; never a provider timestamp."
 - Produces (broadcastsRepo):
   - `getByIdConsistent(broadcastId)`.
-  - `recordRecipientOutcome(broadcastId, contactKey, recipient: BroadcastRecipient, statsDelta: Partial<BroadcastStats>, allowedPriorStatuses: ReadonlyArray<BroadcastRecipient['status']>): Promise<{ moved: boolean; item?: BroadcastItem }>` - ONE UpdateCommand `SET recipients.#ck = :rec, #updatedAt = :now ADD stats.#a0 :v0[, stats.#a1 :v1 ...]` with condition `attribute_exists(broadcastId) AND recipients.#ck.#status IN (:ps0[, :ps1 ...])`, names `{ '#ck': contactKey, '#updatedAt': 'updated_at', '#status': 'status', '#a0': <bucket> ... }` ONLY for buckets present with a non-zero delta, values likewise, `ReturnValues: 'ALL_NEW'`; CCF -> `{ moved: false }`.
+  - `recordRecipientOutcome(broadcastId, contactKey, recipient: BroadcastRecipient, statsDelta: Partial<BroadcastStats>, allowedPriorStatuses: ReadonlyArray<BroadcastRecipient['status']>): Promise<{ moved: boolean; item?: BroadcastItem }>` - ONE UpdateCommand `SET recipients.#ck = :rec, #updatedAt = :now ADD stats.#a0 :v0[, stats.#a1 :v1 ...]` with condition `attribute_exists(broadcastId) AND recipients.#ck.#status IN (:ps0[, :ps1 ...])`, names `{ '#ck': contactKey, '#updatedAt': 'updated_at', '#status': 'status', '#a0': <bucket> ... }` ONLY for buckets present with a non-zero delta, values likewise (an EMPTY delta omits the `ADD` clause entirely - the slot-only write the pre-claim deferral uses), `ReturnValues: 'ALL_NEW'`; CCF -> `{ moved: false }`.
   - `closeRecipientIfQueued(broadcastId, contactKey, errorCode, statsBucket: 'failed' | 'unconfirmed')` = `recordRecipientOutcome(..., { status: 'failed', errorCode }, { [statsBucket]: 1, queued: -1 }, ['queued'])`.
   - `finalizeStatus(broadcastId, status: 'sent' | 'failed', lastError?): Promise<{ won: boolean; item: BroadcastItem }>` - `flipStatus`'s expression with condition `attribute_exists(broadcastId) AND #s = :sending` (values `{ ':status', ':now', ':sending': 'sending'[, ':err'] }`), `ReturnValues: 'ALL_NEW'`; on CCF a consistent read -> `{ won: false, item }` (throw if missing).
   - `deriveBroadcastStats` routes `failed` + `send_unconfirmed` to `unconfirmed`; `zeroStats` includes `unconfirmed: 0`.
@@ -1125,6 +1148,13 @@ it('recordRecipientOutcome with a single-bucket delta lists only that bucket', a
   const r = await broadcasts.recordRecipientOutcome('b-1', 'c-1', { status: 'skipped', errorCode: 'opted_out' }, { skipped_opted_out: 1 }, ['queued']);
   expect(r.moved).toBe(true);   // an unused alias would be a ValidationException here
 });
+it('recordRecipientOutcome with an EMPTY delta writes the slot only, under the priors', async () => {
+  const r = await broadcasts.recordRecipientOutcome('b-1', 'c-1', { status: 'queued', errorCode: 'send_retryable' }, {}, ['queued']);
+  expect(r.moved).toBe(true);
+  expect(r.item!.recipients['c-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+  expect(r.item!.stats.queued).toBe(1);   // untouched
+  expect(await broadcasts.recordRecipientOutcome('b-1', 'c-1', { status: 'queued', errorCode: 'send_retryable' }, {}, ['sent'])).toEqual({ moved: false });
+});
 it('closeRecipientIfQueued bumps the unconfirmed bucket, creating it on a legacy stats map', async () => {
   const r = await broadcasts.closeRecipientIfQueued('b-legacy', 'c-1', 'send_unconfirmed', 'unconfirmed');
   expect(r.item!.stats.unconfirmed).toBe(1);
@@ -1171,11 +1201,11 @@ git commit -m "feat(repos): conditional recipient closes and forward-only adopti
 
 **Files:**
 - Modify: `app/src/services/sendMessage.ts` (errors block after `:191`; steps at `:332`, `:361`, `:431-439`, `:465-475`, `:479-519`, `:523-539`)
-- Test: `app/test/sendMessage.test.ts` (extend `makeFakes` overrides at `:57-66`; add cases; the file's log capture is `f.capture` and its ERROR level constant is `const ERROR = 50` at `:39`)
+- Test: `app/test/sendMessage.test.ts` (extend `makeFakes` overrides at `:57-66`; add cases; the file's log capture is `f.capture` and its ERROR level constant is `const ERROR = 50` at `:39`; the fixture conversation's `participant_phone` is `+15550100001` at `:68`; `Fakes` (`:41-55`) has NO `env` - read what BUSINESS_PHONE_NUMBER the fixture config carries and what SID the fake adapter returns, and use those)
 
 **Interfaces:**
 - Consumes: `classifySendFailure`, `SendFailureClassification` (Task 1); `bodyFingerprint`, `recipientDigest` (Task 2); `SendAttemptFacts` (Task 5 - `import type { SendAttemptFacts } from '../repos/sendAttemptsRepo.js'`; a type import keeps this module a runtime leaf).
-- Produces: `SendNotAttemptedError`, `ProviderSendFailedError` (with own `code` and `status` mirroring the cause's), `SendAcceptedNotRecordedError`; the post-append swallow. Behavior change for EVERY caller: a non-refusal throw is now one of these three classes and a post-append failure no longer throws (the staff send route answers 201 where it answered 500). `retrySend.ts` is unchanged and rethrows these as before; the broadcast arms keep matching because `errorCodeOf(err)` (`app/src/lib/errors.ts:68-98`) reads `code`/`status` off the wrapper's own properties.
+- Produces: `SendNotAttemptedError`, `ProviderSendFailedError` (with own `code` and `status` mirroring the cause's), `SendAcceptedNotRecordedError`; the post-append swallow. Behavior change for EVERY caller: a non-refusal throw is now one of these three classes and a post-append failure no longer throws (the staff send route answers 201 where it answered 500). `retrySend.ts` is unchanged and rethrows these as before; the broadcast arms keep matching because `errorCodeOf(err)` (`app/src/jobs/broadcastFanOut.ts:176-185`) reads `code`/`status` off the wrapper's own properties.
 
 - [ ] **Step 1: Extend the fixture seams**
 
@@ -1185,7 +1215,8 @@ In `makeFakes` overrides (`:57-66`) add `getByIdError?: unknown; findByPhoneErro
 
 ```ts
 describe('typed send errors (spec D3)', () => {
-  // `base`, the live-contact fixture, `f.env`, `f.sent`, `f.appended`, `f.emitted` are the file's real names - read makeFakes first.
+  // `base`, the live-contact fixture, `f.sent`, `f.appended`, `f.emitted`, the configured BUSINESS_PHONE_NUMBER
+  // and the fake adapter's SID are the file's real names/values - read makeFakes first.
   const base = { conversationId: 'conv-1', body: 'Hey there' };
   it('a DB failure before the provider call is SendNotAttemptedError and sends nothing', async () => {
     const f = makeFakes({ findByPhoneError: new Error('dynamo down') });
@@ -1208,7 +1239,7 @@ describe('typed send errors (spec D3)', () => {
     expect((typed as { code?: unknown }).code).toBe(20500);   // what errorCodeOf reads
     expect(typed.facts.bodyHash).toBe(bodyFingerprint('Hey there').hash);
     expect(typed.facts.mediaCount).toBe(0);
-    expect(typed.facts.recipientDigest).toBe(recipientDigest(f.env.BUSINESS_PHONE_NUMBER, '+15550001111'));
+    expect(typed.facts.recipientDigest).toBe(recipientDigest(<the configured BUSINESS_PHONE_NUMBER>, '+15550100001'));
     expect(Date.parse(typed.attemptedAt)).not.toBeNaN();
     expect(f.appended).toHaveLength(0);
   });
@@ -1216,7 +1247,7 @@ describe('typed send errors (spec D3)', () => {
     const f = makeFakes({ appendError: new Error('TransactionInProgressException') });
     const err = await f.service(base).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SendAcceptedNotRecordedError);
-    expect((err as SendAcceptedNotRecordedError).providerSid).toBe(f.sent[0]!.sid);
+    expect((err as SendAcceptedNotRecordedError).providerSid).toBe(<the SID the fake adapter returns>);
   });
   it('a failure after the row is written does NOT throw: ERROR logged, conversation.updated skipped', async () => {
     const f = makeFakes({ touchError: new Error('touch down') });
@@ -1344,9 +1375,9 @@ git commit -m "feat(send): typed non-refusal errors from sendMessage that keep t
 ### Task 7: The broadcast fan-out (D5-D9, D7a, D8, D8a, D13a, D16a)
 
 **Files:**
-- Modify: `app/src/jobs/broadcastFanOut.ts` (parser :124-143; handler :218-688; `closeBroadcast` :287-324; loop :373-622; continuation :642-683; `finalize` :723-771; the header comment :1-33 and the `TODO(throw-for-redelivery-defeated-by-job-marker)` block :609-620 are rewritten)
+- Modify: `app/src/jobs/broadcastFanOut.ts` (parser :124-143; handler :218-688; `closeBroadcast` :287-324; loop :373-622; continuation :642-683; `finalize` :723-771; the header comment :1-33 and the `TODO(throw-for-redelivery-defeated-by-job-marker)` block :609-620 are rewritten; the file's `enqueue` named import at `:88`)
 - Create: `app/src/jobs/sendReconcile.ts` (STUB: `SEND_RECONCILE_JOB`, `SendReconcilePayload`, `SendAttemptOwnerRef`, `toOwnerRef`, `enqueueSendReconcile`, `reconcileCheckDelaysMs`, `reconcileDelayMs` - Task 10 adds the handler)
-- Test: `app/test/broadcastFanOut.test.ts` (fixtures `seedTenant`, `seedBroadcast`, `wireHandler`, `outbound`, `capture` = `createLogCapture()` whose `.lines` / `.atLevel(50)` are parsed objects; the queue-refusal seam at `:735-740`; provider errors injected on `world.adapter.sendPreparedMessage`; enqueues read from `outbound.delayed`)
+- Test: `app/test/broadcastFanOut.test.ts` (fixtures `seedTenant`, `seedBroadcast`, `wireHandler`, `outbound`, `capture` = `createLogCapture()` whose `.lines` / `.atLevel(50)` are parsed objects; the queue-refusal seam at `:735-740`; provider errors injected by REPLACING `world.adapter.sendPreparedMessage` - the override's own call count is the only honest send count (`:172-176`); enqueues read from `outbound.delayed`; the `outbound.delayed.shift()` idiom at `:660-665` drains ONE named envelope)
 
 **Interfaces:**
 - Consumes: Tasks 1-6; the stub.
@@ -1355,6 +1386,7 @@ git commit -m "feat(send): typed non-refusal errors from sendMessage that keep t
 **The stub (`sendReconcile.ts`):**
 
 ```ts
+import { enqueue } from './jobs.js';   // the named import broadcastFanOut.ts:88 uses; EnqueueOptions is { runAt?: Date } ONLY (jobs.ts:91-93)
 export const SEND_RECONCILE_JOB = 'send.reconcile';
 export type SendAttemptOwnerRef =
   | { kind: 'broadcast'; broadcastId: string; recipientKeyHash: string }
@@ -1380,49 +1412,55 @@ export function reconcileDelayMs(attemptedAt: string, checkNo: number, nowMs: nu
   return Math.max(0, Date.parse(attemptedAt) + reconcileCheckDelaysMs()[checkNo]! - nowMs);
 }
 export async function enqueueSendReconcile(payload: SendReconcilePayload, delayMs: number): Promise<void> {
-  await jobs.enqueue(SEND_RECONCILE_JOB, payload, { delaySeconds: Math.ceil(delayMs / 1000) });
+  await enqueue(SEND_RECONCILE_JOB, payload, { runAt: new Date(Date.now() + delayMs) });
 }
 ```
 
-(`jobs.enqueue` is the existing `app/src/jobs/jobs.ts` entry; read how `broadcastFanOut.ts` enqueues its continuation and use the same call and options shape.)
-
-**The D8 gate helper (module-local in `broadcastFanOut.ts`; the relay files get their own copy in Task 8):**
+**The D8 gate helper (module-local in `broadcastFanOut.ts`; Tasks 8 and 9 copy the SAME body into their files). It never enqueues; the caller hands off:**
 
 ```ts
-type GateResult = 'proceed' | 'defer' | 'handed';
-/** Spec D8: a pre-claim decline or a close by another writer touches the slot ONLY when the record cannot belong to a live attempt. */
-async function gateFor(owner: SendAttemptOwner, redrive: boolean, nowMs: number): Promise<GateResult> {
+type GateResult =
+  | { kind: 'proceed'; record?: SendAttemptRecord }
+  | { kind: 'skip' }
+  | { kind: 'defer' }
+  | { kind: 'taken_over'; record: SendAttemptRecord };
+/** Spec D8 (revision 11): a pre-claim decline or a close by another writer touches the slot ONLY when the record cannot belong to a live attempt. */
+async function gateFor(owner: SendAttemptOwner, nowMs: number): Promise<GateResult> {
   const rec = await sendAttempts.get(owner);
-  if (rec === undefined) return 'proceed';
-  if (rec.state === 'done' && rec.outcome === 'retryable') return 'proceed';
-  if (rec.state === 'redriven' && redrive) return 'proceed';                       // a re-drive pass OWNS its redriven record
+  if (rec === undefined) return { kind: 'proceed' };
+  if (rec.state === 'done') return rec.outcome === 'retryable' ? { kind: 'proceed', record: rec } : { kind: 'skip' };   // terminal: never carried forward
+  if (rec.state === 'redriven') return { kind: 'proceed', record: rec };                                                // any pass may close a redriven record (closeRedriven)
   if (rec.state === 'attempting' && nowMs - Date.parse(rec.attemptedAt) > SEND_CLAIM_TTL_MS) {
-    if (await sendAttempts.takeOver(owner, rec)) { await handOff(owner, rec.attemptedAt); return 'handed'; }
-    return 'defer';
+    return (await sendAttempts.takeOver(owner, rec)) ? { kind: 'taken_over', record: rec } : { kind: 'defer' };
   }
-  return 'defer';
+  return { kind: 'defer' };   // fresh attempting, reconciling
 }
 ```
 
-A gate read that THROWS is caught by the recipient unit's outer catch at phase `'prepare'` (deferred, no record).
+A gate read that THROWS is caught by the recipient unit's outer catch at phase `'prepare'` (deferred, no record). On `proceed` with `record?.state === 'redriven'` the caller ALSO runs `guardWrite(log, ctx, 'closeRedriven', () => sendAttempts.closeRedriven(owner, { outcome: 'refused', cause: <the decline's code> }))`.
 
-**The recipient unit (ONE outer try/catch; the phase decides the catch; every failure-arm write through `guardWrite`):**
+**The recipient unit (ONE outer try/catch; the phase decides the catch; every failure-arm write through `guardWrite`; the brake is a FLAG read at the top of the loop, never a bare `break` from inside the switch):**
 
 ```
+let braked = false;
 for (const contactKey of keys) {
+  if (braked) { transientRemaining.push(contactKey); continue; }            // BRAKE: every key not yet attempted is deferred
   const owner: SendAttemptOwner = { kind: 'broadcast', broadcastId, contactKey };
   const ctx = { broadcastId, recipientKey: safeRecipientKey(contactKey) };
   let phase: 'prepare' | 'sending' | 'record' = 'prepare';
   let ref: AttemptRef | undefined;
   let outcome: SendMessageOutcome | undefined;     // hoisted: the catch reads it
   let secondUnknownWouldClose = false;
+  const deferSlot = () => recordRecipientOutcome(broadcastId, contactKey, { status: 'queued', errorCode: SEND_RETRYABLE_CODE }, {}, ['queued']);   // never a blind setRecipient
+  const brakeIfDue = () => { streak += 1; if (streak >= OUTAGE_BRAKE_UNKNOWN_STREAK) braked = true; };
   try {
     slot terminal? -> continue
     PREPARE: resolveContact
-    FENCES (each of the five, in today's order): before the fence's write, gate = await gateFor(owner, redrive, now)
-        'defer'  -> if (payload.recipientKeys) transientRemaining.push(contactKey); streak = 0; continue   (no slot write)
-        'handed' -> streak = 0; continue                                                                  (NOT toward the brake)
-        'proceed'-> the fence's write UNCHANGED; on a redrive pass guardWrite(log, ctx, 'closeRedriven', () => sendAttempts.closeRedriven(owner, { outcome: 'refused', cause: <fence code> })); streak = 0; continue
+    FENCES (each of the five, in today's order): before the fence's write, g = await gateFor(owner, now)
+        skip       -> streak = 0; continue                                                                  (terminal record; no slot write, not carried)
+        defer      -> if (payload.recipientKeys) transientRemaining.push(contactKey); streak = 0; continue   (no slot write)
+        taken_over -> await handOff(owner, g.record.attemptedAt); streak = 0; continue                       (NOT toward the brake)
+        proceed    -> the fence's write UNCHANGED (through guardWrite); if (g.record?.state === 'redriven') guardWrite(closeRedriven(owner, { outcome: 'refused', cause: <fence code> })); streak = 0; continue
     createOrGetByParticipantPhone; renderBody
     facts = { recipientDigest: recipientDigest(config.businessPhoneNumber, contact.phone), ...(config.businessPhoneNumber && { sender: config.businessPhoneNumber }), bodyHash, bodyShort (from bodyFingerprint(body)), mediaCount: 0 }
     CLAIM: c = await sendAttempts.claim(owner, facts, nowIso)
@@ -1435,71 +1473,75 @@ for (const contactKey of keys) {
     phase = 'record'
     RECORD: r = await recordRecipientOutcome(broadcastId, contactKey, { conversationId, tsMsgId, status: 'sent' }, { sent: 1, queued: -1 }, ['queued'])
             if (r.moved) emitBroadcastProgress(r.item)
-            await sendAttempts.finishAttempt(owner, ref, { outcome: 'sent', sid: outcome.providerSid })
+            if (!(await sendAttempts.finishAttempt(owner, ref, { outcome: 'sent', sid: outcome.providerSid }))) log.warn({ ...ctx }, 'attempt fence lost after the slot write; the takeover reconcile repairs')   (deviation 3)
             best-effort, each in its own try/catch (WARN): tokenBucket.acquire(1); milestone; listing-send
             sentCount += 1; streak = 0
   } catch (err) {
     if (phase === 'prepare' && ref === undefined) {                                   // nothing sent, no record
-      await guardWrite(log, ctx, 'deferSlot', () => setRecipient(broadcastId, contactKey, { status: 'queued', errorCode: SEND_RETRYABLE_CODE }));
-      transientRemaining.push(contactKey); log.warn({ err, ...ctx }, 'prepare failed - deferred'); streak = 0; continue
+      await guardWrite(log, ctx, 'deferSlot', deferSlot); transientRemaining.push(contactKey); log.warn({ err, ...ctx }, 'prepare failed - deferred'); streak = 0; continue
     }
     if (phase === 'prepare') {                                                        // claimed, threw before the send (defensive: the claim is the last prepare step)
       await guardWrite(log, ctx, 'finishAttempt', () => sendAttempts.finishAttempt(owner, ref!, { outcome: 'retryable', cause: SEND_RETRYABLE_CODE }));
-      await guardWrite(log, ctx, 'deferSlot', () => setRecipient(...queued + SEND_RETRYABLE_CODE)); transientRemaining.push(contactKey); streak = 0; continue
+      await guardWrite(log, ctx, 'deferSlot', deferSlot); transientRemaining.push(contactKey); streak = 0; continue
     }
     if (phase === 'record') {                                                         // the send HAPPENED; a record write threw
       log.error({ err, ...ctx, providerSid: outcome!.providerSid }, 'sent_unrecorded: recipient sent but not recorded');
       if (await guardWrite(log, ctx, 'handToReconcile', () => sendAttempts.handToReconcile(owner, ref!, outcome!.providerSid))) await handOff(owner, ref!.attemptedAt);
-      else transientRemaining.push(contactKey);                                       // stranded: record stays attempting; the continuation's claim takes it over once stale
-      continue                                                                        // NOT toward the brake
+      else transientRemaining.push(contactKey);                                       // stranded after a KNOWN send: deferred, record attempting
+      streak = 0; continue                                                            // the provider answered: resets the streak
     }
     // phase === 'sending': the provider call threw (sendMessage throws only typed errors and refusals)
     if (err instanceof SendRefusedError) { slot skipped + bump UNCHANGED (through guardWrite); await guardWrite(..., 'finishAttempt', () => finishAttempt(owner, ref!, { outcome: 'refused', cause: err.code })); streak = 0; continue }
-    if (err instanceof SendNotAttemptedError) { guardWrite(deferSlot queued + SEND_RETRYABLE_CODE); transientRemaining.push; guardWrite(finishAttempt(retryable, SEND_RETRYABLE_CODE)); streak = 0; continue }
-    if (err instanceof SendAcceptedNotRecordedError) { ERROR 'sent_unrecorded'; if (await guardWrite(..., () => handToReconcile(owner, ref!, err.providerSid))) await handOff(owner, ref!.attemptedAt); else transientRemaining.push(contactKey); continue }
+    if (err instanceof SendNotAttemptedError) { guardWrite(deferSlot); transientRemaining.push; guardWrite(finishAttempt(retryable, SEND_RETRYABLE_CODE)); streak = 0; continue }
+    if (err instanceof SendAcceptedNotRecordedError) { ERROR 'sent_unrecorded'; if (await guardWrite(..., () => handToReconcile(owner, ref!, err.providerSid))) await handOff(owner, ref!.attemptedAt); else transientRemaining.push(contactKey); streak = 0; continue }
     const classification = err instanceof ProviderSendFailedError ? err.classification : { kind: 'unknown' as const };   // anything else at 'sending' is unknown (D2); the reconcile decides
     switch (classification.kind) {
       case 'rejected': {
-        const code = classification.code;   // '30007' / '30005' / '30006' take today's arms (writes unchanged, through guardWrite); the kill switch's SMS_SENDING_DISABLED_CODE goes to the slot as-is
-        else guardWrite(recordRecipientOutcome(failed + (code ?? String(classification.status)), { failed: 1, queued: -1 }, ['queued']));
+        const code = classification.code;
+        const slotCode = isProviderCode(code) || code === SMS_SENDING_DISABLED_CODE ? code : undefined;   // an HTTP status NEVER reaches a slot (D10/D23)
+        '30007' / '30005' / '30006' take today's arms (writes unchanged, through guardWrite)
+        else guardWrite(recordRecipientOutcome(broadcastId, contactKey, { status: 'failed', ...(slotCode && { errorCode: slotCode }) }, { failed: 1, queued: -1 }, ['queued']));
         guardWrite(finishAttempt(owner, ref!, { outcome: 'rejected', cause: code ?? String(classification.status) })); streak = 0; continue
       }
       case 'retryable': {
         const slotCode = isProviderCode(classification.code) ? classification.code! : SEND_RETRYABLE_CODE;   // a network string NEVER reaches a slot (D6)
-        guardWrite(deferSlot queued + slotCode); transientRemaining.push(contactKey); guardWrite(finishAttempt(retryable, slotCode)); streak = 0; continue
+        guardWrite(recordRecipientOutcome(... { status: 'queued', errorCode: slotCode }, {}, ['queued'])); transientRemaining.push(contactKey); guardWrite(finishAttempt(retryable, slotCode)); streak = 0; continue
       }
       case 'unknown': {
         if (secondUnknownWouldClose) { guardWrite(closeRecipientIfQueued(broadcastId, contactKey, SEND_UNCONFIRMED_CODE, 'unconfirmed')); guardWrite(finishAttempt(owner, ref!, { outcome: 'unresolved', cause: 'second_unknown' })); log.error(...); continue }   // D13a
-        if (await guardWrite(log, ctx, 'handToReconcile', () => sendAttempts.handToReconcile(owner, ref!))) { await handOff(owner, ref!.attemptedAt); streak += 1; if (streak >= OUTAGE_BRAKE_UNKNOWN_STREAK) BRAKE }
-        else transientRemaining.push(contactKey);   // stranded; not toward the brake
-        continue
+        if (await guardWrite(log, ctx, 'handToReconcile', () => sendAttempts.handToReconcile(owner, ref!))) await handOff(owner, ref!.attemptedAt);
+        else transientRemaining.push(contactKey);                                     // stranded: deferred, record attempting
+        brakeIfDue(); continue                                                         // handed AND stranded both count (an unknown provider outcome either way)
       }
     }
   }
 }
-BRAKE: every key not yet attempted in this pass -> transientRemaining; log.warn({ event: 'outage_brake', deferred: n, broadcastId }); break
+if (braked) log.warn({ event: 'outage_brake', deferred: transientRemaining.length, broadcastId }, 'outage brake: consecutive unknown send outcomes; the remainder is deferred');
 ```
 
 `handOff(owner, attemptedAt)`: `try { await enqueueSendReconcile({ owner: toOwnerRef(owner), attemptedAt, checkNo: 0 }, reconcileDelayMs(attemptedAt, 0, Date.now())) } catch (err) { await guardWrite(log, ctx, 'closeUnconfirmed', () => closeRecipientIfQueued(broadcastId, contactKey, SEND_UNCONFIRMED_CODE, 'unconfirmed')); await guardWrite(log, ctx, 'closeFromReconcile', () => sendAttempts.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE })); log.error({ err, ...ctx }, 'reconcile enqueue failed - recipient closed unresolved') }`. `handOff` never throws.
 
-Nothing in the catch can throw: every write is guarded and `handOff` is total. A `stranded` recipient (a lost `handToReconcile`) is DEFERRED with no slot write; the continuation's claim finds the record `attempting` (fresh -> deferred again; stale -> takeover -> reconcile); at the cap the cap-close gate takes a stale one over and skips a fresh one (the Sec 1 sweeper residue).
+Nothing in the catch can throw: every write is guarded and `handOff` is total. A stranded recipient is DEFERRED with no slot write; on broadcast the continuation's claim finds the record `attempting` (fresh -> deferred again; stale after 30 s -> takeover -> reconcile - the 10 s + 20 s ladder clears the TTL); at the cap the cap-close gate takes a stale one over and defers a fresh one (the Sec 1 sweeper residue).
 
 **Pass-level changes:**
 - Snapshot read `:259` -> `getByIdConsistent` when `payload.recipientKeys !== undefined` (a continuation or a re-drive); the first pass keeps `getById`.
 - Up-front claim `:349-364`: skipped when `payload.redrive === true`; after the loop, a re-drive pass with a non-empty `transientRemaining` claims then (`claimFanoutPass`) and takes the existing cap/enqueue branches; with an empty remainder it goes straight to `finalize`.
 - The "unreachable by construction" guard `:643-651` becomes reachable only on a re-drive pass and must NOT close: `if (claim === undefined) { claim = await repo.claimFanoutPass(...); handle missing/capped as the up-front branch does }`.
-- `closeBroadcast` (D8, the cap-close): for each key, `gate = await gateFor(owner, redrive, now)`: `'proceed'` -> `closeRecipientIfQueued(broadcastId, key, TRANSIENT_CAP_CODE, 'failed')`, emit progress if moved, and on a redrive pass `guardWrite(closeRedriven(owner, { outcome: 'refused', cause: TRANSIENT_CAP_CODE }))` (R2 #11: the pass's own `redriven` record is closed, never stranded); `'handed'` -> nothing more; `'defer'` -> skip with INFO. Then the existing ERROR line and `finalize`.
+- `closeBroadcast` (D8, the cap-close): for each key, `g = await gateFor(owner, now)`: `proceed` -> `closeRecipientIfQueued(broadcastId, key, TRANSIENT_CAP_CODE, 'failed')`, emit progress if moved, and if `g.record?.state === 'redriven'` `guardWrite(closeRedriven(owner, { outcome: 'refused', cause: TRANSIENT_CAP_CODE }))` (a redriven record is closed by whichever pass reaches the cap - R2 #11, R3 #17); `taken_over` -> `await handOff(owner, g.record.attemptedAt)`; `skip` / `defer` -> skip with INFO. Then the existing ERROR line and `finalize`.
 - `finalize` (D16a): `fresh = await getByIdConsistent(broadcastId)`; if any slot status is `queued` -> INFO `finalize deferred - recipients still open`, return; `s = deriveBroadcastStats(fresh)`; `reachedAny = s.sent + s.sending + s.delivered > 0`; `failedAny = s.failed + (s.unconfirmed ?? 0) > 0`; `status = !reachedAny && failedAny ? 'failed' : 'sent'`; `lastError = status === 'failed' ? (s.failed === 0 ? "Couldn't confirm any text went out" : 'all recipients failed') : undefined`; `{ won, item } = await finalizeStatus(broadcastId, status, lastError)`; only when `won`: the `broadcast_sent` unit audit row, the terminal emit, the INFO line (gains `unconfirmed`).
-- The continuation payload (`:661-673`) is unchanged in shape (it carries raw `recipientKeys` today, incl. `phone#` keys - deviation 4); a transient continuation never carries `redrive`.
-- `adoptBroadcastRecipient` (D15, exported): resolves the contact and the conversation (the reads the pass makes); appends the row (`automated: broadcast.created_via !== 'dashboard'`; `recipientContactId` only when `contactHoldsPhone`); on `deduped`, read the row (`getByProviderSidConsistent`): `row.broadcast_id !== broadcastId` -> `'other_owner'`; `row.broadcast_id === broadcastId` AND `row.recipient_contact_id !== undefined` AND `row.recipient_contact_id !== <this contact>` AND the owner's slot does not already carry that `tsMsgId` -> `'other_owner'` (R2 #18: two contacts on one phone in one share); otherwise mine. Then the slot via `recordRecipientOutcome` (status per D15's table; `carrierSentAt = sentAt` when present; `conversationId` + `tsMsgId`; `['queued']` prior) -> `moved: false` -> `'skipped'`; when moved: the stats bump (same write), the audit row (its `automated` from the same rule), the preserving inbox touch (`touchLastActivityPreservingStatus(conversationId, undefined, providerTs)` only when the conversation's `last_activity_at < providerTs`), the emits, and - only for an adopted `sent`/`delivered` - the milestone and the listing-send row; the 30005/30006 unreachable flag on an adopted failure with those codes.
+- The continuation payload (`:661-673`) is unchanged in shape (it carries raw `recipientKeys` today - deviation 4); a transient continuation never carries `redrive` (the gate and the claim do not need it: a `redriven` record is closable/claimable by any pass).
+- `adoptBroadcastRecipient` (D15, exported): resolves the contact and the conversation (the reads the pass makes); appends the row (`automated: broadcast.created_via !== 'dashboard'`; `recipientContactId` only when `contactHoldsPhone`); on `deduped`, read the row (`getByProviderSidConsistent`): `row.broadcast_id !== broadcastId` -> `'other_owner'`; `row.broadcast_id === broadcastId` AND `row.recipient_contact_id !== undefined` AND `row.recipient_contact_id !== <this contact>` AND the owner's slot does not already carry that `tsMsgId` -> `'other_owner'` (two contacts on one phone in one share); otherwise mine. Then the slot via `recordRecipientOutcome` (status per D15's table; `carrierSentAt = sentAt` when present; `conversationId` + `tsMsgId`; `['queued']` prior) -> `moved: false` -> `'skipped'`; when moved: the stats bump (same write), the audit row (its `automated` from the same rule), the preserving inbox touch (`touchLastActivityPreservingStatus(conversationId, undefined, providerTs)` only when the conversation's `last_activity_at < providerTs`), the emits, and - only for an adopted `sent`/`delivered` - the milestone and the listing-send row; the 30005/30006 unreachable flag on an adopted failure with those codes.
 - Lazy deps: `sendAttempts ??= deps.sendAttemptsRepo ?? createSendAttemptsRepo({ logger: deps.logger })`. Header comment rewritten (three phases, the claim, the hand-off, the brake); the TODO block deleted; every touched log line ASCII.
 
-- [ ] **Step 1: Failing tests** (`wireHandler` passes `sendAttemptsRepo: world.sendAttemptsRepo`; reconcile-related cases build their config with `BUSINESS_PHONE_NUMBER: '+15550009999'` so the record has a sender - read how the file builds `config`):
+- [ ] **Step 1: Failing tests** (`wireHandler` passes `sendAttemptsRepo: world.sendAttemptsRepo`; reconcile-related cases build their config with `BUSINESS_PHONE_NUMBER: '+15550009999'` so the record has a sender - read how the file builds `config`). At Task 7 NO `send.reconcile` handler exists, so a test that lets `outbound` deliver such an envelope gets `MalformedJobEnvelopeError` (`jobs.ts:257-261`): every test that produces one drains ONLY the `broadcast.send` envelopes it needs (the `:660-665` shift idiom) and asserts the reconcile envelope by inspection. The enqueue delay is asserted the way the harness exposes `runAt` (read `outbound.delayed`'s entry shape - the broadcast continuation tests already assert a delay).
 
 ```ts
 describe('unknown send errors (spec D7, D7a, D8a, D9, D13a) - the first test must fail on main', () => {
+  // The override REPLACES the adapter and records nothing: its own call count is the only honest send count.
+  const sends: string[] = [];
   function unknownOn(phones: Set<string>) {
     world.adapter.sendPreparedMessage = async (prepared) => {
+      sends.push(prepared.params.to);
       if (phones.has(prepared.params.to)) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
       return { providerSid: `SM-${prepared.params.to}`, status: 'sent', providerTs: new Date().toISOString() };
     };
@@ -1516,7 +1558,7 @@ describe('unknown send errors (spec D7, D7a, D8a, D9, D13a) - the first test mus
     expect(await world.sendAttemptsRepo.get(ownerOf('t-3'))).toMatchObject({ state: 'reconciling', attemptNo: 1, checkNo: 0 });
     const reconcile = outbound.delayed.find((d) => d.envelope.jobName === SEND_RECONCILE_JOB);
     expect(reconcile?.envelope.payload).toMatchObject({ owner: { kind: 'broadcast', broadcastId: 'bcast-1', recipientKeyHash: hashRecipientKey('t-3') }, checkNo: 0 });
-    expect(reconcile?.delaySeconds).toBe(5);
+    <assert the envelope runs about 5 s after the attempt, in the harness's own delay field>;
     expect(b.status).toBe('sending');
   });
   it('2 a claimed recipient whose sendMessage refuses closes done/refused, slot skipped, no reconcile - Review Focus 3', async () => {
@@ -1527,26 +1569,23 @@ describe('unknown send errors (spec D7, D7a, D8a, D9, D13a) - the first test mus
     expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'manual_mode' });
     expect(outbound.delayed.some((d) => d.envelope.jobName === SEND_RECONCILE_JOB)).toBe(false);
   });
-  it('3 a prepare-phase throw defers the recipient as send_retryable with no record', async () => {
-    <make world.conversationsRepo.createOrGetByParticipantPhone throw once>;
-    /* expect slot { status: 'queued', errorCode: 'send_retryable' }, the continuation lists t-1, no record, no throw, the next recipient still attempted */
-  });
-  it('3b a deferral write that itself throws is logged and the next recipient is still attempted (D7a)', async () => {
-    <createOrGetByParticipantPhone throws once for t-1 AND world.broadcastsRepo.setRecipient throws once>;
-    /* expect one ERROR with label 'deferSlot', t-2 sent, no throw out of the job */
-  });
+  it('3 a prepare-phase throw defers the recipient as send_retryable with no record', /* createOrGetByParticipantPhone throws once for t-1: slot { status: 'queued', errorCode: 'send_retryable' }, the continuation lists t-1, no record, no throw, t-2 still attempted */);
+  it('3b a deferral write that itself throws is logged and the next recipient is still attempted (D7a)', /* createOrGetByParticipantPhone throws once for t-1 AND world.broadcastsRepo.recordRecipientOutcome throws once (the deferral): one ERROR with label 'deferSlot', t-2 sent, no throw out of the job */);
+  it('3c the deferral never reverts a skipped slot', /* t-1 opted out: its fence wrote `skipped`; make the fence's stats bump throw so the unit falls into the prepare catch; the slot stays `skipped` (the ['queued'] prior refuses) */);
   it('4a three consecutive unknowns brake the pass; the untried remainder is deferred, not attempted (D9)', async () => {
     const tenants = [1, 2, 3, 4, 5, 6].map((i) => seedTenant(world, { contactId: `t-${i}`, phone: `+1555010000${i}` })); seedBroadcast(world, tenants);
     unknownOn(new Set(['+15550100001', '+15550100002', '+15550100003']));
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' }); await outbound.settle();
     const b = world.broadcasts.get('bcast-1')!;
     expect(['t-4', 't-5', 't-6'].map((k) => b.recipients[k]!.status)).toEqual(['queued', 'queued', 'queued']);
+    expect(sends).toHaveLength(3);
     expect(outbound.delayed.find((d) => d.envelope.jobName === BROADCAST_SEND_JOB)?.envelope.payload).toMatchObject({ recipientKeys: ['t-4', 't-5', 't-6'], attempt: 2 });
     expect(capture.atLevel(40).some((l) => l['event'] === 'outage_brake')).toBe(true);
   });
-  it('4b a sent between two unknowns resets the streak', /* unknown, sent, unknown, sent, unknown -> no brake, all five attempted */);
+  it('4b a sent between two unknowns resets the streak', /* unknown, sent, unknown, sent, unknown -> no brake, sends.length 5 */);
   it('4c a fence skip between two unknowns resets the streak (D9: a skip resets)', /* unknown, opted-out, unknown, opted-out, unknown -> no brake */);
   it('4d three rejected do not brake; three retryable do not brake', /* 30007 x3 then sent x2; ECONNREFUSED x3 then sent x2 */);
+  it('4e a stranded unknown counts toward the brake', /* unknownOn(t-1..t-3) AND handToReconcile throws every time: braked after t-3, t-4.. deferred */);
   it('5a a record-phase failure after a successful send hands the SID to reconcile and never re-sends (D7a)', async () => {
     const t = seedTenant(world, { contactId: 't-1', phone: '+15550100001' }); seedBroadcast(world, [t]);
     const real = world.broadcastsRepo.recordRecipientOutcome.bind(world.broadcastsRepo);
@@ -1560,18 +1599,20 @@ describe('unknown send errors (spec D7, D7a, D8a, D9, D13a) - the first test mus
   it('5b a SendAcceptedNotRecordedError from sendMessage does the same', /* world.messagesRepo.append throws once; expect reconciling + sid, one provider call */);
   it('5c an unknown whose handToReconcile write throws strands the recipient: NO second provider call, record still attempting, deferred (R2 #1)', async () => {
     <unknownOn(t-1); world.sendAttemptsRepo.handToReconcile throws once>;
-    /* run the first pass and the continuation it enqueues (advance the fake clock past SEND_CLAIM_TTL_MS before the continuation runs); expect world.sent has ZERO messages to t-1 across both passes, an ERROR with label 'handToReconcile', and after the continuation the record is 'reconciling' via takeover with the ORIGINAL attemptedAt */
+    /* run the first pass; drain ONLY the broadcast.send continuation (the shift idiom) after advancing the fake clock past SEND_CLAIM_TTL_MS; expect sends.filter(to t-1).length === 1 across both passes, an ERROR with label 'handToReconcile', and after the continuation the record is 'reconciling' via takeover with the ORIGINAL attemptedAt and ONE send.reconcile envelope */
   });
   it('6 a reconcile enqueue that throws closes the recipient unresolved on the spot', /* the queue-refusal seam; expect slot failed/send_unconfirmed, stats.unconfirmed 1, record done/unresolved cause enqueue_failed, broadcast finalized 'failed' with last_error "Couldn't confirm any text went out" */);
-  it('7a two passes for the same recipient produce ONE provider call (D8a)', /* claim once via world.sendAttemptsRepo.claim(owner, facts, now) then run the pass: deferred, no send */);
-  it('7b a stale attempting record is taken over into reconcile by the next pass', /* claim with attemptedAt 31 s ago; run a continuation for that key; expect reconciling with the OLD attemptedAt, one reconcile envelope, NOT toward the brake */);
-  it('8 a cap-close closes only records that are absent or done/retryable and takes over a stale attempting one (D8)', /* fanout_attempt at the cap; keys: none / fresh attempting / stale attempting / reconciling -> closed transient_cap / skipped / reconciling + envelope / skipped */);
+  it('7a two passes for the same recipient produce ONE provider call (D8a)', /* claim once via world.sendAttemptsRepo.claim(owner, facts, now) then run the pass: deferred, sends has no t-1 */);
+  it('7b a stale attempting record is taken over into reconcile by the next pass', /* claim with attemptedAt 31 s ago; run a continuation for that key (drain only broadcast.send); expect reconciling with the OLD attemptedAt, one reconcile envelope, NOT toward the brake */);
+  it('8 a cap-close closes only records that are absent or done/retryable, skips a terminal one, and takes over a stale attempting one (D8)', /* fanout_attempt at the cap; keys: none / fresh attempting / stale attempting / reconciling / done-sent -> closed transient_cap / skipped / reconciling + envelope / skipped / skipped */);
   it('9a a re-drive pass claims no ladder rung up front and its fence closes the redriven record done/refused', /* record redriven for t-1, fanout_attempt at cap, contact opted out; run { broadcastId, recipientKeys: ['t-1'], attempt: 4, redrive: true }; expect slot skipped opted_out, record done/refused cause opted_out, claimFanoutPass NOT called */);
   it('9b a re-drive attempt that comes back unknown closes unresolved with no second reconcile (D13a)', /* record redriveCount 1 + redriven; unknown; expect slot failed/send_unconfirmed, stats.unconfirmed 1, record done/unresolved cause second_unknown, no send.reconcile envelope */);
   it('9c a re-drive pass that defers before its claim and hits the cap closes its OWN redriven record (R2 #11)', /* record redriven; createOrGetByParticipantPhone throws once; fanout_attempt at the cap -> the cap-close writes transient_cap AND the record closes done/refused cause transient_cap */);
+  it('9d a redriven record reached by an ORDINARY continuation (no marker) whose fence trips closes done/refused (R3 #17)', /* record redriven for t-1, contact opted out; run { broadcastId, recipientKeys: ['t-1'], attempt: 2 } WITHOUT redrive; expect slot skipped, record done/refused cause opted_out */);
   it('10 a retryable with a network code writes send_retryable, never the network string', /* ECONNREFUSED -> slot { status: 'queued', errorCode: 'send_retryable' } */);
   it('11 a foreign fresh attempt on a fenced recipient defers the fence instead of writing skipped (D8, R2 #12)', /* claim t-1 with another attempt now; opt t-1 out; run a continuation for t-1: slot untouched (queued), key carried forward */);
   it('12 every log line for a phone-keyed recipient names it redacted', /* a phone#-keyed recipient through the unknown arm; assert no capture line's JSON contains 'phone#+' */);
+  it('13 a 4xx with no code writes failed with NO errorCode; the record cause keeps the status (R3 #13)', /* Object.assign(new Error('bad'), { status: 400 }) -> slot { status: 'failed' } with no errorCode key, record done/rejected cause '400' */);
 });
 describe('finalize (spec D16a)', () => {
   it('N callers produce one flip, one audit row, one terminal emit', ...);
@@ -1599,50 +1640,56 @@ git commit -m "feat(broadcast): classified send outcomes, a claim before every s
 
 **Files:**
 - Modify: `app/src/jobs/relayFanOut.ts` (parser :152-186; `RelayLegSendOutcome` :1234-1245; `sendOneRelayLeg` :1270-1514; `runRelayFanOutExecution` :1002-1203 incl. `closeRelay` :1081-1110; `RelayFanOutExecutionDeps` :960-970; header)
-- Test: `app/test/relayFanOut.test.ts` (fixtures `seedRelay`, `seedSource` legacy, `seedTeamSource` versioned; error injection via `world.adapter.sendMessage` for a legacy source and `sendPreparedMessage` for a versioned one - `.superpowers/sdd/plan-send-sites-reference.md` Sec 8.2; the token-bucket describe at `:2325-2370`; the close-B pin at `:999-1037`)
+- Test: `app/test/relayFanOut.test.ts` (fixtures `seedRelay`, `seedSource` legacy, `seedTeamSource` versioned; error injection via `world.adapter.sendMessage` for a legacy source and `sendPreparedMessage` for a versioned one - `.superpowers/sdd/plan-send-sites-reference.md` Sec 8.2; the token-bucket describe at `:2325-2370`; the close-B pin at `:999-1037`; count provider calls through the override, as Task 7 does; drain only the envelopes a test needs - no `send.reconcile` handler exists until Task 10)
 
 **Interfaces:**
 - Consumes: Tasks 1, 2, 5, 6; the Task 7 stub.
-- Produces: the shared block's `RelayLegSendOutcome` (new kinds `rejected`, `sent_unrecorded`, `handed_to_reconcile`, `stranded`; `attemptRef`, `reason`, `deferredByClaim`) and the OPTIONAL unit args `sendAttempts?`, `owner?`, `redrive?` - "absent = the pre-claim legacy path: no claim, no record; an unknown error returns `handed_to_reconcile` with NO attemptRef" (the rung passes none until Task 9, which makes them required); `RelayFanOutPayload.redrive?: true`; `RelayFanOutExecutionDeps.sendAttempts` and `consistent: boolean`; the module-local `gateFor` (same body as Task 7's, over the relay owner) and `handOff`.
+- Produces: the shared block's `RelayLegSendOutcome` (new kinds `rejected`, `sent_unrecorded`, `handed_to_reconcile`, `stranded`; `attemptRef`, `reason`, `deferredByClaim`) and the OPTIONAL unit args `sendAttempts?`, `owner?` - "absent = the pre-claim legacy path: no claim, no record; an unknown error returns `handed_to_reconcile` with NO attemptRef" (the rung passes none until Task 9, which makes them required); `RelayFanOutPayload.redrive?: true`; `RelayFanOutExecutionDeps.sendAttempts` and `consistent: boolean`; the module-local `gateFor` (Task 7's body, over the relay owner) and `handOff` (loop scope - it holds `payload.senderKey`).
 
-**The unit (the claim AFTER the bounded acquire and BEFORE the presign; the phase decides the catch; every failure-arm write through `guardWrite`):**
+**The unit (ONE outer try/catch around EVERYTHING after the terminal skip - the suppression read, the gate, the token acquire and the claim are prepare steps (spec D7a table) and a throw in any of them DEFERS the member; the claim sits AFTER the bounded acquire and BEFORE the presign; the phase decides the catch; every failure-arm write through `guardWrite`; the unit never enqueues - it returns kinds and the loop hands off):**
 
 ```
 terminal skip (unchanged)
-suppression arm (when sendAttempts && owner): gate = await gateFor(owner, redrive, now)
-    'defer'  -> return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true }   (no slot write)
-    'handed' -> return { kind: 'handed_to_reconcile', reason: 'takeover', attemptRef: { attemptNo: rec.attemptNo, attemptedAt: rec.attemptedAt } }
-    'proceed'-> the arm's writes UNCHANGED; when redrive: guardWrite(closeRedriven(owner, { outcome: 'refused', cause: 'contact_opted_out' })); return suppressed
-acquire (unchanged; deadline_exceeded returns BEFORE any claim - RSW #5)
-facts = { recipientDigest: recipientDigest(poolNumber, member.phone), sender: poolNumber, bodyHash, bodyShort (bodyFingerprint(legBody)), mediaCount: hasMedia && mediaStore ? sourceMedia.length : 0 }
-CLAIM (when sendAttempts && owner): c = await sendAttempts.claim(owner, facts, nowIso)
-    refused fresh  -> return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true }
-    refused !fresh -> return { kind: 'skipped_terminal' }
-    takeover       -> if (!(await sendAttempts.takeOver(owner, c.record))) return { kind: 'skipped_terminal' }; return { kind: 'handed_to_reconcile', reason: 'takeover', attemptRef: { attemptNo: c.record.attemptNo, attemptedAt: c.record.attemptedAt } }
-    claimed        -> ref = {...}; secondUnknownWouldClose = c.record.redriveCount >= 1
-best-effort: try { await setRelayRecipientAttemptedAt(conversationId, tsMsgId, memberKey, ref.attemptedAt) } catch (err) { WARN }
-let phase: 'prepare' | 'sending' | 'record' = 'prepare'; let result: SendMessageResult | undefined;
+let phase: 'prepare' | 'sending' | 'record' = 'prepare'; let ref: AttemptRef | undefined; let result: SendMessageResult | undefined; let secondUnknownWouldClose = false
 try {
+  suppression arm (when sendAttempts && owner): g = await gateFor(owner, now)
+      skip       -> return { kind: 'skipped_terminal' }                                                  (terminal record; not carried)
+      defer      -> return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true }   (no slot write)
+      taken_over -> return { kind: 'handed_to_reconcile', reason: 'takeover', attemptRef: { attemptNo: g.record.attemptNo, attemptedAt: g.record.attemptedAt } }
+      proceed    -> the arm's writes UNCHANGED; if (g.record?.state === 'redriven') guardWrite(closeRedriven(owner, { outcome: 'refused', cause: 'contact_opted_out' })); return suppressed
+  acquire (unchanged; deadline_exceeded RETURNS before any claim - RSW #5)
+  facts = { recipientDigest: recipientDigest(poolNumber, member.phone), sender: poolNumber, bodyHash, bodyShort (bodyFingerprint(legBody)), mediaCount: hasMedia && mediaStore ? sourceMedia.length : 0 }
+  CLAIM (when sendAttempts && owner): c = await sendAttempts.claim(owner, facts, nowIso)
+      refused fresh  -> return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true }
+      refused !fresh -> return { kind: 'skipped_terminal' }
+      takeover       -> if (!(await sendAttempts.takeOver(owner, c.record))) return { kind: 'skipped_terminal' }; return { kind: 'handed_to_reconcile', reason: 'takeover', attemptRef: { attemptNo: c.record.attemptNo, attemptedAt: c.record.attemptedAt } }
+      claimed        -> ref = {...}; secondUnknownWouldClose = c.record.redriveCount >= 1
+  best-effort: try { await setRelayRecipientAttemptedAt(conversationId, tsMsgId, memberKey, ref.attemptedAt) } catch (err) { WARN }
   presign; params; prepare; aggregation 'attempted'
   phase = 'sending'
   result = await <the provider call as today>
   phase = 'record'
-  persistRelayRecipientResult (unchanged, FIRST); claimRelaySidPointer (SECOND: 'other' -> ERROR, then continue as recorded - the reconcile's known-SID path rules sid_held_elsewhere if it ever matters); finishAttempt(owner, ref, { outcome: 'sent', sid })
+  persistRelayRecipientResult (unchanged, FIRST); claimRelaySidPointer (SECOND: 'other' -> ERROR, then continue as recorded - the reconcile's known-SID path rules sid_held_elsewhere if it ever matters)
+  if (!(await finishAttempt(owner, ref, { outcome: 'sent', sid }))) WARN 'attempt fence lost after the slot write; the takeover reconcile repairs'   (deviation 3)
   return sent
 } catch (err) {
-  if (phase === 'prepare') {                     // a pre-send throw after the claim (presign, prepare)
+  if (phase === 'prepare' && ref === undefined) {   // a pre-claim throw: suppression read, gate, acquire, claim - nothing sent, no record
+    guardWrite(persist queued + SEND_RETRYABLE_CODE); return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE }
+  }
+  if (phase === 'prepare') {                        // a pre-send throw after the claim (presign, prepare)
     guardWrite(finishAttempt(owner, ref, { outcome: 'retryable', cause: SEND_RETRYABLE_CODE })); guardWrite(persist queued + SEND_RETRYABLE_CODE); return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE }
   }
-  if (phase === 'record') {                      // the send HAPPENED; a record write threw
+  if (phase === 'record') {                         // the send HAPPENED; a record write threw
     ERROR 'sent_unrecorded' { providerSid }
-    return (await guardWrite(handToReconcile(owner, ref, result!.providerSid))) ? { kind: 'sent_unrecorded', providerSid: result!.providerSid, attemptRef: ref } : { kind: 'stranded' }
+    return (await guardWrite(handToReconcile(owner, ref, result!.providerSid))) ? { kind: 'sent_unrecorded', providerSid: result!.providerSid, attemptRef: ref } : { kind: 'stranded', afterSend: true }
   }
   // phase === 'sending'
   if (err instanceof SendRefusedError) { guardWrite(the unchanged slot write); guardWrite(finishAttempt(refused, err.code)); return refused }
   const classification = classifySendFailure(err)
   switch (classification.kind) {
     rejected:  '30007' -> the unchanged filtered arm; guardWrite(finishAttempt(rejected, '30007')); return filtered
-               else code = classification.code ?? String(classification.status)  (SMS_SENDING_DISABLED_CODE for the kill switch); guardWrite(persist failed + code); guardWrite(finishAttempt(rejected, code)); return { kind: 'rejected', errorCode: code }
+               else code = classification.code; slotCode = isProviderCode(code) || code === SMS_SENDING_DISABLED_CODE ? code : undefined   (an HTTP status NEVER reaches a slot)
+               guardWrite(persist failed + slotCode (no errorCode when undefined)); guardWrite(finishAttempt(rejected, code ?? String(classification.status))); return { kind: 'rejected', errorCode: slotCode }
     retryable: code = isProviderCode(classification.code) ? classification.code : SEND_RETRYABLE_CODE; guardWrite(persist queued + code); guardWrite(finishAttempt(retryable, code)); return { kind: 'transient', errorCode: code }
     unknown:   if (secondUnknownWouldClose) { guardWrite(closeRelayRecipientIfUnsent(..., { status: 'failed', errorCode: SEND_UNCONFIRMED_CODE })); guardWrite(finishAttempt(unresolved, 'second_unknown')); ERROR; return { kind: 'rejected', errorCode: SEND_UNCONFIRMED_CODE } }   // D13a: terminal, the caller counts it closed
                return (await guardWrite(handToReconcile(owner, ref))) ? { kind: 'handed_to_reconcile', reason: 'unknown', attemptRef: ref } : { kind: 'stranded' }
@@ -1650,15 +1697,15 @@ try {
 }
 ```
 
-A throw at phase `'sending'` or later is NEVER released as retryable (R2 #1): a lost hand-off returns `stranded` with the record left `attempting`. Without `sendAttempts`/`owner` (the legacy path until Task 9) the unit skips the claim, the `attemptedAt` write and every record write, and an unknown returns `{ kind: 'handed_to_reconcile', reason: 'unknown' }` with no `attemptRef`.
+`RelayLegSendOutcome` gains `afterSend?: true` on `stranded` (a lost hand-off after a KNOWN send; the loop resets the streak for it). A throw at phase `'sending'` or later is NEVER released as retryable (R2 #1): a lost hand-off returns `stranded` with the record left `attempting`. Without `sendAttempts`/`owner` (the legacy path until Task 9) the unit skips the gate, the claim, the `attemptedAt` write and every record write, and an unknown returns `{ kind: 'handed_to_reconcile', reason: 'unknown' }` with no `attemptRef`.
 
 **The fan-out loop:**
-- `handed_to_reconcile` / `sent_unrecorded` -> `handOff(owner, attemptRef.attemptedAt)`: enqueue `{ owner: toOwnerRef(owner), attemptedAt, checkNo: 0, continuation: { senderKey, senderNameOverride? } }` at `reconcileDelayMs(attemptedAt, 0, now)`; on throw `guardWrite(closeRelayRecipientIfUnsent(... SEND_UNCONFIRMED_CODE))` + `guardWrite(closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }))` + ERROR. Counts as closed for the pass.
-- The D9 streak counts ONLY `handed_to_reconcile` with `reason: 'unknown'`; EVERY other kind (sent, skipped_terminal, suppressed, refused, filtered, rejected, transient, deadline_exceeded, sent_unrecorded, takeover, stranded) resets it to zero (R2 #19).
-- `transient` with `deferredByClaim` and `stranded` both join `transientRemaining` with NO slot write; the transient continuation carries them (a stranded member's stale record is taken over by the continuation's claim).
+- `handed_to_reconcile` / `sent_unrecorded` -> `handOff(owner, attemptRef.attemptedAt)` ONCE, here in the loop (the unit never enqueues): enqueue `{ owner: toOwnerRef(owner), attemptedAt, checkNo: 0, continuation: { senderKey: payload.senderKey, senderNameOverride? } }` at `reconcileDelayMs(attemptedAt, 0, now)`; on throw `guardWrite(closeRelayRecipientIfUnsent(... SEND_UNCONFIRMED_CODE))` + `guardWrite(closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }))` + ERROR. Counts as closed for the pass. A `handed_to_reconcile` with NO `attemptRef` (the legacy path) is logged at ERROR and counted closed (Task 9 removes the path).
+- The D9 streak: `handed_to_reconcile` with `reason: 'unknown'` and `stranded` WITHOUT `afterSend` INCREMENT it (an unknown provider outcome either way); EVERY other kind resets it to zero. Braking is a flag read at the top of the loop: the remaining members are deferred with no slot write, then WARN `{ event: 'outage_brake' }`.
+- `transient` with `deferredByClaim` and `stranded` both join `transientRemaining` with NO slot write; the transient continuation carries them. On relay the 5 s + 10 s ladder does NOT clear the 30 s TTL, so a stranded member is deferred again at the cap and left for the sweeper (spec D8a revision 11).
 - A `rejected` with `SEND_UNCONFIRMED_CODE` counts as closed.
-- The loop's own outer try/catch per member turns any other throw into ERROR + continue (never out of the job).
-- `closeRelay` (D8, the cap-close): per member `gate = await gateFor(owner, redrive, now)`: `'proceed'` -> `closeRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, { status: 'failed', errorCode: TRANSIENT_CAP_CODE })` and on a redrive pass `guardWrite(closeRedriven(owner, { outcome: 'refused', cause: TRANSIENT_CAP_CODE }))` (R2 #11); `'handed'` -> nothing more; `'defer'` -> skip with INFO.
+- The loop's own outer try/catch per member turns any other throw into ERROR + `transientRemaining.push(memberKey)` (deferred, never dropped, never out of the job).
+- `closeRelay` (D8, the cap-close): per member `g = await gateFor(owner, now)`: `proceed` -> `closeRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, { status: 'failed', errorCode: TRANSIENT_CAP_CODE })` and if `g.record?.state === 'redriven'` `guardWrite(closeRedriven(owner, { outcome: 'refused', cause: TRANSIENT_CAP_CODE }))`; `taken_over` -> `await handOff(owner, g.record.attemptedAt)` (with the continuation); `skip` / `defer` -> skip with INFO.
 - The up-front pass claim is skipped on `redrive`; the post-loop claim runs only with a remainder; the `claim?.outcome !== 'claimed'` guard claims instead of closing; consistent snapshot reads when `payload.recipientKeys !== undefined`; a re-drive pass's early returns close each carried member's record `redrive_refused` (`closeRedriven`) and its slot `REDRIVE_REFUSED_CODE` (`closeRelayRecipientIfUnsent`); the transient continuation payload never carries `redrive`.
 - Every log line names the member through the file's `logSafeMemberKey`.
 
@@ -1666,17 +1713,20 @@ A throw at phase `'sending'` or later is NEVER released as retryable (R2 #1): a 
   1. `an unknown on member 2 of 4 leaves 3 and 4 sent, 2 handed to reconcile, no throw` on a LEGACY and on a VERSIONED source (two `it`s) - member 2's slot untouched except `attemptedAt` (absent on a legacy row -> `{ status: 'queued', attemptedAt }` from the seed); record `reconciling`; a `send.reconcile` envelope with `owner.kind 'relay_leg'`, `owner.recipientKeyHash === hashRecipientKey(memberKey)`, `continuation.senderKey` the sender's key; **must fail on main**.
   2. `a queued+sid success refuses a second claim: the same payload dispatched twice makes one provider call`.
   3. the token-bucket describe (`:2325-2370`) still asserts `[[1],[1]]` (the claim sits AFTER the acquire).
-  4. `closeRelay on a legacy row with an empty map still creates failed slots for absent records` (close-B pin `:999-1037` green) `and skips a member whose record is reconciling, and takes over a stale attempting one`.
+  4. `closeRelay on a legacy row with an empty map still creates failed slots for absent records` (close-B pin `:999-1037` green) `and skips a member whose record is reconciling, skips a done/sent one, and takes over a stale attempting one (ONE reconcile envelope, carrying the continuation)`.
   5. `the adapter kill switch writes sms_sending_disabled and the record done/rejected`.
   6. `a record-phase failure (claimRelaySidPointer throws once) returns sent_unrecorded: record reconciling with the sid, one reconcile envelope, one provider call`.
-  7. `an unknown whose handToReconcile throws returns stranded: NO second provider call, record still attempting, member carried in the transient continuation, ERROR logged` (R2 #1).
+  7. `an unknown whose handToReconcile throws returns stranded: NO second provider call, record still attempting, member carried in the transient continuation, ERROR logged, counted toward the brake` (R2 #1, R3 #16).
   8. `brake after three unknowns; a sent resets; a suppressed (opted-out) member resets; three retryable do not brake`.
   9. `a re-drive pass (redrive: true, one member, record redriven, fanout_attempt at cap) sends without claiming a rung; with the member opted out it closes the record done/refused`.
   10. `a re-drive attempt that comes back unknown closes unresolved` (D13a).
-  11. `a foreign open attempt on the suppression arm defers the member instead of writing a terminal slot; a done/sent record (queued+sid slot) is NOT overwritten by a duplicate pass's suppression write` (D8 allow-list, R2 #8).
+  11. `a foreign open attempt on the suppression arm defers the member instead of writing a terminal slot; a done/sent record (queued+sid slot) makes the arm return skipped_terminal and is NOT carried forward` (D8 allow-list, R2 #8, R3 #10).
   12. `mediaCount on the record equals the source media count when a store exists and 0 without one`.
   13. `a pre-send throw after the claim (presign fails) releases the record done/retryable and defers`.
   14. `a re-drive pass that defers before its claim and hits the cap closes its own redriven record transient_cap` (R2 #11).
+  15. `a pre-claim throw (isMemberSuppressed throws once) defers the member: carried on the continuation and SENT there` (R3 #4).
+  16. `a redriven record reached by an ordinary continuation (no marker) whose member is opted out closes done/refused` (R3 #17).
+  17. `a 4xx with no code writes failed with no errorCode` (R3 #13).
 
 - [ ] **Step 2: Implement**; rewrite the unit docblock (`:1234-1268`) and the module header to the three-phase model; delete `throw err` at `:1492`; every touched log line ASCII.
 - [ ] **Step 3: Run, typecheck, commit**
@@ -1698,7 +1748,7 @@ git commit -m "feat(relay): the leg claims before the send, tracks its phase, cl
 
 **Interfaces:**
 - Consumes: Task 8's unit and kinds; Tasks 5, 6; the stub.
-- Produces: `RelayRetryLegPayload.redrive?: true`; `RelayRetryLegJobDeps.sendAttemptsRepo?` is read; the rung's `rungOwner = { kind: 'relay_rung', relayConversationId, retryTsMsgId, memberKey }`.
+- Produces: `RelayRetryLegPayload.redrive?: true`; `RelayRetryLegJobDeps.sendAttemptsRepo?` is read; the rung's `rungOwner = { kind: 'relay_rung', relayConversationId, retryTsMsgId, memberKey }`; the rung's own module-local `gateFor` (Task 7's body) and `handOff` (no `continuation`).
 
 - [ ] **Step 1: Failing tests**
 
@@ -1732,8 +1782,8 @@ it('a re-driven rung declined by the window gate closes the record done/refused 
 it('a re-driven rung whose deadline expires during the acquire closes retry_window_closed and the record done/refused (RSW #5)', /* the file's drained-bucket helper; redrive: true; the RSW pins (no attempted write, no claimFanoutPass) AND record done/refused */);
 it('a foreign fresh attempt on the rung skips the send (transient deferredByClaim) and re-enqueues the same rung once', /* claim rungOwner with another attempt now; expect no provider call, one same-rung re-enqueue through the transient sub-ladder, no slot write */);
 it('a foreign open attempt makes refuseGate and the window close skip their writes with a WARN (RSW #6 through D8)', /* record reconciling; window closed; expect no slot write, one WARN, no emit */);
-it('a done/sent record makes the window close skip its write (D8 allow-list)', /* record done/sent with a queued+sid slot; window closed; expect the slot unchanged */);
-it('a stale attempting record at the window close is taken over into reconcile', /* record attempting 31 s old; window closed; expect record reconciling, one reconcile envelope, no slot write */);
+it('a done/sent record makes the window close skip its write (D8 allow-list)', /* record done/sent with a queued+sid slot; window closed; expect the slot unchanged, INFO */);
+it('a stale attempting record at the window close is taken over into reconcile', /* record attempting 31 s old; window closed; expect record reconciling, ONE reconcile envelope (owner relay_rung, no continuation), no slot write */);
 it('a transient re-enqueue of a re-driven rung does not carry redrive', /* legSend.override -> transient; payload redrive: true; expect the re-enqueued payload has no redrive */);
 ```
 
@@ -1741,10 +1791,10 @@ The RSW pins (`:557-566`, `:1214-1256`) stay byte-identical: the claim sits afte
 
 - [ ] **Step 2: Implement**
   - The parser carries `redrive`.
-  - Build `rungOwner`; pass `sendAttempts`, `owner: rungOwner`, `redrive: payload.redrive === true` to `sendOneRelayLeg`; `sendAttempts ??= deps.sendAttemptsRepo ?? createSendAttemptsRepo(...)`.
-  - `refuseGate` and the window close (`:532-558`, `:586-606`, `:674-692`): `gate = await gateFor(rungOwner, payload.redrive === true, now)` (the rung's own module-local copy of Task 7's helper); `'proceed'` -> the write as today, and on a re-drive pass `guardWrite(closeRedriven(rungOwner, { outcome: 'refused', cause: <code> }))`; `'defer'` -> skip the write with a WARN and return; `'handed'` -> WARN and return. (RSW's claim-time declines never reach here: the webhook appends them closed and never enqueues.)
-  - The outcome chain becomes `switch (outcome.kind)` with arms for `sent` (the touch wrapped in try/catch, ERROR on failure), `sent_unrecorded` (ERROR; `handOff`; NO touch), `handed_to_reconcile` (`handOff`), `stranded` (ERROR; nothing else), `transient` (the unchanged sub-ladder; a `deferredByClaim` transient skips the slot write and takes the same re-enqueue; the re-enqueue payload never carries `redrive`), `deadline_exceeded` (unchanged, plus `closeRedriven` on a re-drive pass), `skipped_terminal` (unchanged), `rejected` / `refused` / `suppressed` / `filtered` (the ERROR + `announceRootClose`), and `default: { const never: never = outcome.kind; throw new Error(String(never)); }`.
-  - `handOff` as Task 8's with `owner: toOwnerRef(rungOwner)` and no `continuation`; its enqueue-failure path closes the slot `SEND_UNCONFIRMED_CODE` and the record `unresolved`/`enqueue_failed`, ERROR, `announceRootClose()`.
+  - Build `rungOwner`; pass `sendAttempts`, `owner: rungOwner` to `sendOneRelayLeg`; `sendAttempts ??= deps.sendAttemptsRepo ?? createSendAttemptsRepo(...)`.
+  - `refuseGate` and the window close (`:532-558`, `:586-606`, `:674-692`): `g = await gateFor(rungOwner, now)`; `proceed` -> the write as today, and if `g.record?.state === 'redriven'` `guardWrite(closeRedriven(rungOwner, { outcome: 'refused', cause: <code> }))`; `defer` -> skip the write with a WARN and return; `skip` -> INFO and return; `taken_over` -> `await handOff(rungOwner, g.record.attemptedAt)`, WARN, return. (RSW's claim-time declines never reach here: the webhook appends them closed and never enqueues.)
+  - The outcome chain becomes `switch (outcome.kind)` with arms for `sent` (the touch wrapped in try/catch, ERROR on failure), `sent_unrecorded` (ERROR; `handOff`; NO touch), `handed_to_reconcile` (`handOff`), `stranded` (ERROR; nothing else), `transient` (the unchanged sub-ladder; a `deferredByClaim` transient skips the slot write and takes the same re-enqueue; the re-enqueue payload never carries `redrive`), `deadline_exceeded` (unchanged, plus `closeRedriven` when the record is `redriven`), `skipped_terminal` (unchanged), `rejected` / `refused` / `suppressed` / `filtered` (the ERROR + `announceRootClose`), and `default: { const never: never = outcome.kind; throw new Error(String(never)); }`.
+  - `handOff(rungOwner, attemptedAt)` as Task 8's with `owner: toOwnerRef(rungOwner)` and no `continuation`; its enqueue-failure path closes the slot `SEND_UNCONFIRMED_CODE` and the record `unresolved`/`enqueue_failed`, ERROR, `announceRootClose()`.
   - In `relayFanOut.ts` make the two args required and delete the legacy branch.
 
 - [ ] **Step 3: Run, typecheck, commit**
@@ -1770,7 +1820,7 @@ git commit -m "feat(relay-retry): the rung owns its re-driven record, gates its 
 - Modify: `app/test/broadcastFanOut.test.ts` (un-skip the pass/verdict ordering test from Task 7)
 
 **Interfaces:**
-- Consumes: Tasks 1-9; `jobs.enqueue`; `mapTwilioStatus`; `finalize` and `adoptBroadcastRecipient` (Task 7); `adoptRelayRecipientIfUnsent`, `claimRelaySidPointer`, `closeRelayRecipientIfUnsent`, the consistent reads (Task 6); `touchLastActivityPreservingStatus`; `isMemberSuppressed`; `listByRecipient` (Task 5).
+- Consumes: Tasks 1-9; `enqueue` (`{ runAt }` only); `attemptKey`, `ownerKey` (Task 5); `mapTwilioStatus`; `finalize` and `adoptBroadcastRecipient` (Task 7); `adoptRelayRecipientIfUnsent`, `claimRelaySidPointer`, `closeRelayRecipientIfUnsent`, the consistent reads (Task 6); `touchLastActivityPreservingStatus`; `isMemberSuppressed`; `listByRecipient` (Task 5).
 - Produces: `registerSendReconcileJobHandler(deps: SendReconcileJobDeps)`, `SendReconcileJobDeps { adapter?, messagesRepo?, broadcastsRepo?, contactsRepo?, conversationsRepo?, sendAttemptsRepo?, activityEventsRepo?, listingSendsRepo?, auditRepo?, events?, logger?, config? }`. The handler is registered through `defineJobHandler` WITHOUT the run-once marker (D11): every write below is idempotent, so a throw is a real retry.
 
 **Owner resolution.** The payload's `SendAttemptOwnerRef` carries `recipientKeyHash`. The handler resolves the raw key: broadcast - `getByIdConsistent(broadcastId)` and the key `k` in `recipients` with `hashRecipientKey(k) === recipientKeyHash`; relay - the source/retry row (consistent) and the key in `delivery_recipients`, else the roster member whose `hashRecipientKey(relayMemberKey(m))` matches (a legacy row may have no slot yet). No match -> INFO `owner recipient not found` and return (the record, if any, is left for the sweeper - a Sec 1 residue).
@@ -1800,7 +1850,8 @@ currentPhone = currentRecipientPhone(owner)   // broadcast: resolveContact(conta
 if (!currentPhone || recipientDigest(sender, currentPhone) !== record.recipientDigest) -> unresolved 'digest_mismatch'
 windowStartMs = Date.parse(record.attemptedAt) - RECONCILE_WINDOW_LEAD_MS
 siblings = await sendAttempts.listByRecipient(sender, record.recipientDigest, new Date(windowStartMs).toISOString())   // consistent; read ONCE per check
-siblingSids = new Set(siblings.filter((s) => ownerKey(s.owner) !== ownerKey(owner) && s.sid !== undefined).map((s) => s.sid))
+isSibling = (s) => attemptKey(s.owner) !== attemptKey(owner)      // RECORD identity (owner + recipient): two contacts on one phone in one broadcast ARE siblings (R3 #5)
+siblingSids = new Set(siblings.filter((s) => isSibling(s) && s.sid !== undefined).map((s) => s.sid))
 candidates = []; pages = 0; token = undefined; providerError = undefined
 do { try { page = await adapter.listMessages({ to: currentPhone, from: sender, pageSize: RECONCILE_LIST_PAGE_SIZE, pageToken: token }) } catch (err) { providerError = err; break }
      pages += 1; candidates.push(...page.messages.filter((m) => Date.parse(m.createdAt) >= windowStartMs))
@@ -1810,22 +1861,22 @@ if (providerError) return isLast(checkNo) ? unresolved 'provider_unreachable' : 
 unmatched = []
 for m of candidates sorted by createdAt ascending:
    if (siblingSids.has(m.providerSid)) continue                    // a sibling ATTEMPT holds it on its record (R2 #5)
-   held = await heldBy(owner, m.providerSid)                       // consistent: 'system' | 'other' | 'mine' | 'free' (below)
-   if (held === 'system' || held === 'other') continue
-   if (held === 'mine') return await adopt(owner, record, m)      // repair: the row exists, the slot may not
+   held = await heldBy(owner, m.providerSid)                       // consistent: { kind: 'system' } | { kind: 'other', holder } | { kind: 'mine' } | { kind: 'free' } (below)
+   if (held.kind === 'system' || held.kind === 'other') continue
+   if (held.kind === 'mine') { r = await adopt(owner, record, m); return r.kind === 'other' ? unresolved 'sid_held_elsewhere' (holder from a fresh heldBy) : r }   // repair: the row exists, the slot may not; a race to `other` is never re-sent
    if (!matches(record, m)) { unmatched.push(m); continue }
    r = await adopt(owner, record, m)                               // the adoption's OWN claim decides (below)
    if (r.kind === 'found') return r; else continue
 if (!isLast(checkNo)) return continue
 if (unmatched.length > 0) return unresolved 'unidentified_candidate'
-if (siblings.some((s) => ownerKey(s.owner) !== ownerKey(owner) && s.bodyHash === record.bodyHash && s.mediaCount === record.mediaCount && (s.state !== 'done' || s.outcome === 'adopted'))) return unresolved 'same_fingerprint_sibling'
+if (siblings.some((s) => isSibling(s) && s.bodyHash === record.bodyHash && s.mediaCount === record.mediaCount && (s.state !== 'done' || s.outcome === 'adopted'))) return unresolved 'same_fingerprint_sibling'
 return never_sent
 matches(record, m) = record.bodyShort ? m.mediaCount === record.mediaCount : bodyFingerprint(m.body).hash === record.bodyHash
 ```
 
-`heldBy(owner, sid)`: `getSystemSidMarkerConsistent(sid)` -> `'system'`; `getRelaySidPointerConsistent(sid)` -> for a relay owner all three ref fields equal -> `'mine'`, else `'other'`; `getByProviderSidConsistent(sid)` -> for a broadcast owner: `row.broadcast_id === broadcastId` AND (`row.recipient_contact_id === undefined` OR `row.recipient_contact_id === <the owner's contact id>` OR the owner's slot `tsMsgId === row.tsMsgId`) -> `'mine'`, else `'other'` (R2 #18); for a relay owner a `sid#` row that is not ours -> `'other'`; nothing -> `'free'`.
+`heldBy(owner, sid)` returns `{ kind: 'system' } | { kind: 'other'; holder: string } | { kind: 'mine' } | { kind: 'free' }` where `holder` is a log-safe description of the other owner (`broadcast#<id>` / `relay#<conversationId>#<tsMsgId>#<logSafeMemberKey>` / `syssid:<kind>`): `getSystemSidMarkerConsistent(sid)` -> `system`; `getRelaySidPointerConsistent(sid)` -> for a relay owner all three ref fields equal -> `mine`, else `other`; `getByProviderSidConsistent(sid)` -> for a broadcast owner: `row.broadcast_id === broadcastId` AND (`row.recipient_contact_id === undefined` OR `row.recipient_contact_id === <the owner's contact id>` OR the owner's slot `tsMsgId === row.tsMsgId`) -> `mine`, else `other` (R2 #18); for a relay owner a `sid#` row that is not ours -> `other`; nothing -> `free`.
 
-`adoptKnown(owner, record)`: `held = await heldBy(owner, record.sid)`; `'other'` or `'system'` -> `unresolved 'sid_held_elsewhere'` (spec D13, revision 10: never re-sent); `m = await adapter.getMessage(record.sid)`; `!m` -> `throw new Error('known SID not found at the provider')` (a genuine retry); `return adopt(owner, record, m)`; an `adopt` that answers `other` here -> `unresolved 'sid_held_elsewhere'`.
+`adoptKnown(owner, record)`: `held = await heldBy(owner, record.sid)`; `other` or `system` -> `unresolved 'sid_held_elsewhere'` with `heldBy: held.holder` on the ERROR (spec D13 revision 10: the line names BOTH owners; never re-sent); `m = await adapter.getMessage(record.sid)`; `!m` -> `throw new Error('known SID not found at the provider')` (a genuine retry); `r = await adopt(owner, record, m)`; `r.kind === 'other'` -> `unresolved 'sid_held_elsewhere'` (re-read `heldBy` for the holder); else `r`.
 
 `adopt(owner, record, m)` per owner (D15), each idempotent as a whole:
 - **broadcast**: `r = await adoptBroadcastRecipient(deps, { broadcastId, contactKey, providerSid: m.providerSid, providerTs: m.createdAt, providerStatus: m.providerStatus, errorCode: m.errorCode, body: m.body, mediaCount: m.mediaCount, sentAt: m.sentAt })`; `'other_owner'` -> `{ kind: 'other' }`; `'adopted' | 'skipped'` -> `{ kind: 'found', sid }`.
@@ -1833,7 +1884,11 @@ matches(record, m) = record.bodyShort ? m.mediaCount === record.mediaCount : bod
 
 `statusFor`: provider `accepted|queued|sending|sent` -> broadcast `sent`, relay `queued` for `accepted|queued|sending` else `sent`; `delivered|read` -> `delivered`; `undelivered` -> broadcast `failed` + code, relay `undelivered` + code; `failed|canceled` -> `failed` + code. `carrierSentAt` (broadcast) / `sentAt` (relay) from `m.sentAt` whenever present.
 
-`redrive(owner, record, continuation)` (D16): broadcast -> `markRedriven` (false -> if `record.redriveCount >= 1` then `closeUnresolved('second_unknown')` else return) -> `enqueueOrClose(() => enqueue(BROADCAST_SEND_JOB, { broadcastId, recipientKeys: [contactKey], attempt: (b.fanout_attempt ?? 0) + 1, redrive: true }))`; relay_leg -> pre-check (conversation open, member on roster, source present) else `closeRelayRecipientIfUnsent(... REDRIVE_REFUSED_CODE)` + `closeFromReconcile(owner, attemptedAt, { outcome: 'redrive_refused', cause })` + `afterClose`; `markRedriven` as above; `enqueueOrClose(() => enqueue(RELAY_FANOUT_JOB, { relayConversationId, sourceTsMsgId, senderKey: continuation.senderKey, senderNameOverride?, recipientKeys: [memberKey], attempt: (source.fanout_attempt ?? 0) + 1, redrive: true }))` (no `continuation` -> `redrive_refused` cause `no_continuation`); relay_rung -> the pre-check, then `enqueueOrClose(() => enqueue(RELAY_RETRY_LEG_JOB, { relayConversationId, retryTsMsgId, redrive: true }))`. (The continuation payloads carry raw keys - deviation 4.)
+`redrive(owner, record, continuation)` (D16) - EVERY owner runs `markRedriven` before its enqueue (a re-driven pass meets a `redriven` record, never a `reconciling` one - R3 #1):
+- broadcast -> `markRedriven(owner, attemptedAt)` (false -> if `record.redriveCount >= 1` then `closeUnresolved('second_unknown')` else return) -> `enqueueOrClose(() => enqueue(BROADCAST_SEND_JOB, { broadcastId, recipientKeys: [contactKey], attempt: (b.fanout_attempt ?? 0) + 1, redrive: true }))`;
+- relay_leg -> pre-check (conversation open, member on roster, source present) else `closeRelayRecipientIfUnsent(... REDRIVE_REFUSED_CODE)` + `closeFromReconcile(owner, attemptedAt, { outcome: 'redrive_refused', cause })` + `afterClose`; `markRedriven` as above; `enqueueOrClose(() => enqueue(RELAY_FANOUT_JOB, { relayConversationId, sourceTsMsgId, senderKey: continuation.senderKey, senderNameOverride?, recipientKeys: [memberKey], attempt: (source.fanout_attempt ?? 0) + 1, redrive: true }))` (no `continuation` -> `redrive_refused` cause `no_continuation`);
+- relay_rung -> the same pre-check (conversation open, member on roster, the retry row present) else the same `redrive_refused` close; `markRedriven` as above; `enqueueOrClose(() => enqueue(RELAY_RETRY_LEG_JOB, { relayConversationId, retryTsMsgId, redrive: true }))`.
+(The continuation payloads carry raw keys - deviation 4.)
 
 `closeUnresolved(owner, record, cause)`: broadcast `closeRecipientIfQueued(id, key, SEND_UNCONFIRMED_CODE, 'unconfirmed')`; relay `closeRelayRecipientIfUnsent(..., { status: 'failed', errorCode: SEND_UNCONFIRMED_CODE })`; then `closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause })` (or `closeRedriven` when the record is `redriven`); ONE ERROR `{ event: 'send_reconcile', verdict: 'unresolved', cause, owner: <kind + ids>, recipientKey: safeRecipientKey(key) }`; `afterClose`.
 
@@ -1847,7 +1902,7 @@ Logging (D16/D18): `found` INFO, `never_sent` WARN, `unresolved` ERROR; never a 
   5. a candidate held by ANOTHER owner (a `sid#` pointer to a row with a different `broadcast_id`) is excluded; held by THIS owner -> `found` repair.
   5b. a `syssid#` candidate is excluded.
   5c. a candidate whose SID sits on a SIBLING RECORD (a sibling attempt `reconciling` with that `sid`, no pointer yet) is excluded (R2 #5).
-  5d. a known SID whose pointer resolves to another owner -> `unresolved` `sid_held_elsewhere`, no send, no re-drive (spec D13 rev 10).
+  5d. a known SID whose pointer resolves to another owner -> `unresolved` `sid_held_elsewhere`, no send, no re-drive, and the ERROR line names both owners (`heldBy`) (spec D13 rev 10).
   5e. two contacts sharing one phone in ONE broadcast, one orphan: the first adopts, the second's candidate reads `other` (the row's `recipient_contact_id`) and it ends `unresolved` `same_fingerprint_sibling` at the last check (R2 #18).
   6. the spike's Smart-Encoded body matches its submitted body; a media-only message matches on media count.
   7. two text attempts, two orphans -> each adopts one (relay: `claimRelaySidPointer` decides), neither re-drives.
@@ -1860,7 +1915,9 @@ Logging (D16/D18): `found` INFO, `never_sent` WARN, `unresolved` ERROR; never a 
   13b. a candidate created 59 s BEFORE the attempt is considered - Review Focus 4.
   14. a payload for an older `attemptedAt` writes nothing; a redelivered check (same payload twice) records once and converges.
   14b. `unresolved` delivered twice writes once.
-  15. relay `never_sent` on a closed group -> `redrive_refused` slot + record, no enqueue; on an open group -> a `relay.fanOut` envelope with `redrive: true` and the continuation's `senderKey`.
+  15. relay `never_sent` on a closed group -> `redrive_refused` slot + record, no enqueue; on an open group -> the record `redriven` and a `relay.fanOut` envelope with `redrive: true` and the continuation's `senderKey`.
+  15b. relay_rung `never_sent` on an open group -> the record `redriven` and a `relay.retryLeg` envelope `{ relayConversationId, retryTsMsgId, redrive: true }`; deliver it through Task 9's handler: the re-driven rung CLAIMS (from `redriven`, attemptNo 2) and sends once; on a closed group -> `redrive_refused` (R3 #1).
+  15c. `heldBy` for a broadcast owner: a row with the same `broadcast_id` but another `recipient_contact_id` is `other` with a `holder`; the same row with the owner's contact id is `mine`.
   16. relay_rung adoption touches the inbox the preserving way and every close emits the root close.
   17. an enqueue throw after `never_sent` closes `enqueue_failed` (record via `closeRedriven`, slot `enqueue_failed`, finalize runs); after any other verdict `unresolved` `enqueue_failed`.
   18. `reconcileCheckDelaysMs` honors `E2E_SEND_RECONCILE_DELAYS_MS` only when `JOBS_QUEUE_URL` is unset; `reconcileDelayMs` reads it.
@@ -2134,7 +2191,7 @@ git commit -m "test(e2e): prove adoption, re-drive, rejection and an unresolved 
 - `docs/issues/fanout-pass-setup-throw-strands-pass.md` - the relay retry rung's pre-claim throws (the row read, the lineage check, the conversation read, a suppression read that rejects, the no-pool throw); cite.
 - `docs/issues/relay-continuation-early-return-strands-slots.md` - a RE-DRIVE continuation's early returns now close the carried member's record `redrive_refused` and its slot (Task 8); the ordinary transient continuation's early returns still strand, as filed.
 - `docs/issues/manual-retry-double-send-residual-windows.md` - a dated note beside gap 5: the status webhook's `closeRetryLegEnqueueFailed` is a close by another writer the D8 gate cannot cover (fenced file).
-- `docs/issues/send-attempt-sweeper.md` - the record's exact key shapes, states, clocks and the index family as BUILT, plus the two residues the sweeper resolves: a fresh `attempting` record at the cap-close, and an orphan record whose owner recipient cannot be resolved.
+- `docs/issues/send-attempt-sweeper.md` - the record's exact key shapes, states, clocks and the index family as BUILT, plus the three residues the sweeper resolves: a fresh `attempting` record at the cap-close; a STRANDED relay member or rung (a lost `handToReconcile`) - the relay ladder (5 s + 10 s) and the rung's sub-ladder never outlast the 30 s TTL, so no continuation takes it over (spec D8a revision 11); and an orphan record whose owner recipient cannot be resolved.
 - `docs/issues/throw-for-redelivery-defeated-by-job-marker.md` - built on this branch for both fan-outs and the relay retry rung; the `TODO(throw-for-redelivery-defeated-by-job-marker)` markers are gone from the tree; `status` stays `open` (the human sets it resolved at merge).
 - `docs/issues/retry-send-lost-under-job-marker.md` - a dated note: Stage 1 landed the core it will adopt; nothing else.
 - `docs/issues/accepted-send-lost-when-append-fails.md` - piece 1 built: `SendAcceptedNotRecordedError` carries the SID and the fan-outs hand it to reconcile, which adopts it; the non-adopting callers (Stage 2 sites) still lose it; cite.
@@ -2156,7 +2213,7 @@ git commit -m "docs(issues): record the residues this branch leaves and the reco
   - relay `accept_then_drop`: after the reveal click, the affected member's row reads `Delivered` within the lane's delays; the fake's thread shows ONE outbound to that member; the worker log has one `send_reconcile` INFO `found`.
   - broadcast `drop_before_create`: `Delivered` reaches the audience; `Not confirmed` 0; the pill `Sent`; ONE outbound in the fake.
   - broadcast `drop_before_create` + `fail-list` x3: the row reads `Not confirmed - Couldn't confirm whether this text went out`, the `Not confirmed` chip 1, no `open conversation to retry` hint, the pill `Failed` with the prose alert when it was the only recipient; exactly one ERROR line in the worker log.
-  - a relay leg left `queued` with `attemptedAt` and no `sentAt`: seed it through the hermetic message-fixture seam (`routes/dev.ts` message fixture; `plan-send-sites-findings.md` D3 "Dev seams") with an `attemptedAt` 16 minutes before the dashboard's pinned clock; the row reads `Queued - not confirmed` immediately.
+  - a relay leg left `queued` with `attemptedAt` and no `sentAt`: seed it through the hermetic message-fixture seam (`routes/dev.ts` message fixture; `plan-send-sites-findings.md` D3 "Dev seams") with a WALL-CLOCK `attemptedAt` 16 minutes in the past (the lane pins no clock; the dashboard's staleness budget is wall-clock); the row reads `Queued - not confirmed` immediately.
 - [ ] **Step 3:** `npm run e2e:stop`. Commit the record.
 
 ```bash
@@ -2183,26 +2240,26 @@ Report every real exit code and count. If `npm test` is red on DynamoDB Local su
 
 ---
 
-## Self-review (planner, against spec revision 10) - coverage by NAMED test
+## Self-review (planner, against spec revision 11) - coverage by NAMED test
 
 | spec | task(s) | proof |
 |---|---|---|
 | D1, D2 | T1 | `classifySendFailure` describe (10 tests incl. Review Focus 1, code 0) |
 | D3, D3a | T3; T7/T8 (the arms) | `typed send errors` describe (6); T7 tests 2, 5a, 5b; T8 case 6 |
 | D4 | T1 | "fires send_throttled on a real 20429 and not on ECONNREFUSED" |
-| D5, D6 | T7 tests 4d, 10; T8 case 5 + the retryable arm | |
-| D7, D7a | T7 tests 1, 3, 3b, 5a, 5b, 5c; T8 cases 1, 6, 7, 13; T9 handed / sent_unrecorded / stranded arms; T5 `guardWrite` | |
-| D8 | T7 tests 8, 9c, 11; T8 cases 4, 11, 14; T9 refuseGate / window-close gates (foreign open, done/sent, stale takeover) | |
-| D8a | T5 integration (11); T7 tests 7a, 7b; T8 case 2; T6 `setRelayRecipientAttemptedAt` | |
-| D9 | T7 tests 4a-4d; T8 case 8 | |
-| D10 | T1 constants; T13 mirror | |
+| D5, D6 | T7 tests 4d, 10, 13; T8 cases 5, 17 + the retryable arm | |
+| D7, D7a | T7 tests 1, 3, 3b, 3c, 5a, 5b, 5c; T8 cases 1, 6, 7, 13, 15; T9 handed / sent_unrecorded / stranded arms; T5 `guardWrite` | |
+| D8 | T7 tests 8, 9c, 9d, 11; T8 cases 4, 11, 14, 16; T9 refuseGate / window-close gates (foreign open, done/sent, stale takeover) | |
+| D8a | T5 integration (11, one owner per case); T7 tests 7a, 7b; T8 case 2; T6 `setRelayRecipientAttemptedAt` | |
+| D9 | T7 tests 4a-4e; T8 cases 7, 8 | |
+| D10 | T1 constants; T13 mirror; T7 test 13 (no HTTP status on a slot) | |
 | D11 | T5 transitions; T10 cases 14, 14b; T10 integration | |
 | D12 | T2 digest/hash/safe; T7 test 12; T10 cases 13, 21 | |
-| D13 | T10 cases 5, 5b, 5c, 5d, 5e, 6, 7, 8, 9, 10, 12, 13b | |
+| D13 | T10 cases 5, 5b, 5c, 5d, 5e, 6, 7, 8, 9, 10, 12, 13b, 15c | |
 | D13a | T7 tests 9a, 9b; T8 cases 9, 10; T10 cases 4, 18, 20 | |
-| D14 | recorded, not built (Sec 1 residue; T15 files the shapes) | |
-| D15 | T10 cases 1, 2, 3, 16; T10 integration; T6 `adoptRelayRecipientIfUnsent` (legacy forward-only + versioned) | |
-| D16 | T10 cases 11, 15, 17, 19 | |
+| D14 | recorded, not built (Sec 1 residue; T15 files the shapes and the relay strand) | |
+| D15 | T10 cases 1, 2, 3, 16; T10 integration; T6 `adoptRelayRecipientIfUnsent` (legacy forward-only + versioned + the legacy_noop discriminator) | |
+| D16 | T10 cases 11, 15, 15b, 17, 19 | |
 | D16a | T6 `finalizeStatus`; T7 finalize tests (N callers; Review Focus 5; stale counter; ordering un-skipped in T10) | |
 | D17 | T4 driver tests (+ the page-size WARN on a SMALLER provider page); deviation 1 | |
 | D18 | T10 case 21; T7 test 12; log assertions in T10 cases 12, 16 | |

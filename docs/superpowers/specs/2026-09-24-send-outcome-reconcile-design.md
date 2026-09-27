@@ -2,7 +2,7 @@
 
 Anchor issue: `throw-for-redelivery-defeated-by-job-marker` (high).
 Branch `feat/send-outcome-reconcile`, cut from `main@685f2ede`, 2026-09-24.
-Revision 10 (after design review rounds 1-4, the 2026-09-25 cross-branch
+Revision 11 (after design review rounds 1-4, plan review rounds 1-3, the 2026-09-25 cross-branch
 sequencing with `feat/retry-send-window` and `feat/share-skip-fix`, the RSW
 planner's 2026-09-26 relay, kept verbatim at
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/handoffs/rsw-relay-2026-09-26.md`,
@@ -355,9 +355,13 @@ and can meet a recipient another attempt owns because a deferred key is
 carried back through them) - the writer reads the recipient's attempt
 record with a strongly consistent PER-KEY read (a batch read that reports a
 key unprocessed must be re-read, never treated as absent) and closes the
-recipient only if the record is ABSENT or `done` / `retryable`. Any other
-state is someone else's: `attempting` fresher than the provider timeout,
-`reconciling` and `redriven` are skipped; `attempting` OLDER than the
+recipient only if the record is ABSENT, `done` / `retryable`, or `redriven`
+(a `redriven` record is claimable by ANY pass under D8a, so any pass's
+decline may close it `done` / `refused` - the decline would have applied to
+the re-drive pass equally). A `done` record with any other outcome is
+SKIPPED: terminal, never carried forward. `attempting` fresher than the
+provider timeout and `reconciling` are someone else's: DEFERRED (carried on
+the continuation) or skipped; `attempting` OLDER than the
 provider timeout is taken over into reconcile exactly as a send site would
 take it over (D8a) - which makes the cap-closes enqueuers too, with D7's
 enqueue-failure path and one hop of the pass's budget (D13a) - so a
@@ -371,13 +375,18 @@ source row starts with an empty map and today's close creates the slot) or
 new conditional write in each repo. So a stale snapshot can never overwrite
 a send that landed.
 
-**A pass that carries the re-drive marker OWNS the `redriven` record for its
-recipient.** Its pre-claim declines - the broadcast fences, the relay
-suppression arm, the retry rung's gate refusals and window close - write
-their terminal slot as today AND move the record `redriven` -> `done` with
-the outcome `refused` and the decline's code as cause, instead of consulting
-this gate (which would skip its own record and strand the recipient). Every
-other pre-claim decline touches no record (the record is absent).
+**A `redriven` record belongs to whichever pass reaches it.** A pre-claim
+decline - a broadcast fence, the relay suppression arm, the retry rung's
+gate refusals and window close - that finds the record `redriven`, on the
+re-drive pass itself OR on an ordinary continuation that still carries the
+key (a transient continuation drops the re-drive marker, so the marker
+cannot be the test - revision 11), writes its terminal slot as today AND
+moves the record `redriven` -> `done` with the outcome `refused` and the
+decline's code as cause. The gate itself never enqueues: on a stale
+`attempting` record it performs the takeover and RETURNS the record, and the
+caller hands off exactly once - so a relay unit's takeover is handed off by
+the fan-out loop, which holds the sender key the re-drive continuation
+needs. Every other pre-claim decline touches no record (the record is absent).
 
 The reconcile job's OWN closes (`unresolved`, `enqueue_failed`,
 `redrive_refused`) are exempt from this gate - they close the attempt they
@@ -430,9 +439,15 @@ The claim is one conditional write:
   call, and either way the outcome is unknown. A takeover of a call that
   then completes is harmless: the late outcome write fails the
   `attemptedAt` condition, and the reconcile's lookup finds the message and
-  repairs the slot. The TTL is deliberately no longer than the ladders it
-  must fit inside (about 35 seconds on broadcast, 15 on relay), so a stuck
-  attempt is taken over at the cap rather than skipped past it;
+  repairs the slot. The TTL equals the provider request timeout (30 s) and
+  is NOT tuned to the ladders (revision 11 corrects revision 10's claim
+  that it fit inside both): the broadcast ladder (10 s + 20 s) clears it,
+  so a stuck broadcast attempt is taken over at the cap; the relay ladder
+  (5 s + 10 s) and the rung's transient sub-ladder do NOT, so a relay
+  attempt stuck in pass 1 or 2 is still fresh at the cap, is deferred there,
+  and stays `attempting` with a `queued` slot until the sweeper (D14,
+  `send-attempt-sweeper`). No double send follows from this; the gap is
+  only that no verdict is reached until then;
 - is refused from `attempting` fresher than the TTL, from `reconciling`, and
   from `done` with any outcome but `retryable`. A refused claim on a
   recipient a continuation carries is DEFERRED again (the recipient stays in

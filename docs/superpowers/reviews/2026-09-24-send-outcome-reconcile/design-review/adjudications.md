@@ -226,3 +226,49 @@ plan mechanics. Plan revision 3 carries every ACCEPT and is SELF-CONTAINED
 
 **Round 2 outcome:** 19 findings, ACCEPT 19 (2 as conceded contests, 2 as spec
 rulings). Plan mechanics changed -> plan round 3 with the same reviewer.
+
+## Plan round 3 (2026-09-26) - reviewer B continued (re-review charge)
+
+Plan revision 3 @b25d7807 against spec revision 10. Report:
+`plan-r3-reviewer-b.md` (20 findings: 0 blocking, 1 high, 5 medium, 14 low;
+one a SPEC finding). Plan revision 4 carries every ACCEPT; the spec moves to
+revision 11 (D8 gate list and the `redriven` ownership sentence; D8a's TTL
+sentence). Every claim about existing code was re-checked by the reviewer at
+b25d7807 with file:line; I verified the load-bearing ones (jobs.ts:91-93
+`EnqueueOptions = { runAt }`; relayFanOut.ts:99-101 backoff 5 s / 10 s;
+messagesRepo.ts:3481 `legacy_noop`; broadcastsRepo.ts:680-707 blind
+`setRecipient`; sendMessage.test.ts:41-55, :68).
+
+| # | finding | ruling | change |
+|---|---|---|---|
+| 1 | Task 10's relay_rung `never_sent` never calls `markRedriven`; the re-driven rung meets `reconciling` and strands; an enqueue failure mis-closes `unresolved` | ACCEPT (HIGH) | Every owner runs `markRedriven` (with the `redriveCount >= 1` -> `second_unknown` branch) before its re-drive enqueue; the rung gets the same pre-check as the leg; case 15b delivers the re-driven rung through Task 9's handler and asserts a claim from `redriven` and ONE send. An omission carried since revision 1, restored to what D16 already decided. |
+| 2 | Task 5's eleven integration cases share one owner, one index partition and one table with no per-test reset; from case 5 on they fail against a correct repo | ACCEPT | `beforeEach` gives each case its own `broadcastId` and its own `recipientDigest`; case 9's per-outcome owners carry the case sequence. |
+| 3 | the relay unit's `gateFor` hands off inside the gate AND the unit returns `handed_to_reconcile` for the loop to hand off again; `rec` is out of scope; the unit has no `senderKey` | ACCEPT | `gateFor` is redesigned for ALL THREE files: it never enqueues; it returns `{ proceed, record? } | { skip } | { defer } | { taken_over, record }`, and the CALLER hands off exactly once - the relay loop (which holds `payload.senderKey`) for the unit's takeover, `closeRelay` for the cap-close, the rung for its own. The spec's D8 paragraph now says so. |
+| 4 | a relay pre-claim throw (suppression read, gate, token acquire, claim) leaves the unit and the loop drops the member for good | ACCEPT | The relay unit's outer try now wraps EVERYTHING after the terminal skip; `phase === 'prepare' && ref === undefined` defers with the transient slot write, exactly as broadcast; the loop's own catch defers rather than drops; case 15 (`isMemberSuppressed` throws once -> carried and SENT on the continuation). |
+| 5 | both sibling filters compare `ownerKey` (no recipient), so same-broadcast siblings are invisible and case 5e contradicts the code; the record-held-SID swap stays open | ACCEPT (contest of R2 #18 as applied UPHELD) | New `attemptKey(owner)` = ownerKey + hashed recipient key, exported from the repo; both filters compare it. Case 5e's verdict (`unresolved` `same_fingerprint_sibling`) now follows from the code. |
+| 6 | the claim TTL (30 s) is LONGER than the relay ladder (5 s + 10 s); D8a claims the opposite; a stranded relay member is never taken over by a continuation | ACCEPT - SPEC RULING (D8a, revision 11) | D8a now states the truth: the TTL equals the provider timeout and is not tuned to the ladders; broadcast's 10 s + 20 s clears it, relay's does not; a relay strand is deferred at the cap and left for the sweeper (D14). The plan's Global Constraints and Task 15's sweeper section say the same. No double send follows; the residue is "no verdict until the sweeper". |
+| 7 | the stub passes `{ delaySeconds }`, which `EnqueueOptions` does not have (`{ runAt }` only, jobs.ts:91-93): TS2353 and the delay ignored | ACCEPT | `enqueue(SEND_RECONCILE_JOB, payload, { runAt: new Date(Date.now() + delayMs) })` with the `enqueue` named import broadcastFanOut.ts:88 uses; the tests assert the delay in whatever field the harness exposes for `runAt`. |
+| 8 | `BRAKE`'s bare `break` inside a switch inside a catch leaves the switch, not the loop | ACCEPT | The brake is a `braked` flag read at the top of each iteration (which is also how "every key not yet attempted is deferred" is implemented); the WARN follows the loop. Both loops. |
+| 9 | the pre-claim deferral `setRecipient` is blind and can revert a fence's `skipped` or a foreign attempt's `sent` | ACCEPT | The deferral is `recordRecipientOutcome(..., { status: 'queued', errorCode: send_retryable }, {}, ['queued'])`; Task 6's write supports an EMPTY delta (no `ADD` clause) with its own test; Task 7 test 3c pins that a `skipped` slot is never reverted. |
+| 10 | `gateFor` has no "skip" result, so a terminal `done` record is carried to the cap | ACCEPT | `skip` for `done` with any outcome but `retryable`; broadcast continues without deferring; the relay unit returns `skipped_terminal`; Task 8 case 11 widened. |
+| 11 | deviation 4 is inaccurate: the reconcile payload's `continuation.senderKey` is a raw member key | ACCEPT (contest of R2 #13 UPHELD) | Deviation 4 now declares it (carried verbatim because the re-drive envelope must repeat it); case 21 is scoped to the OWNER field. Hashing and re-resolving the sender was rejected as surface the branch does not need. |
+| 12 | deviation 3 describes a skip the plan does not do: every arm writes the slot BEFORE the fenced `finishAttempt` | ACCEPT (contest of R2 #16 UPHELD) | Deviation 3 reworded to what is built: the slot keeps its own guards, a lost fence after the slot write is WARNed and not rolled back, and the takeover's reconcile repairs through the pointer. |
+| 13 | the rejected arms write an HTTP status (e.g. `'400'`) as the slot code - a fake carrier number D10/D23 exclude | ACCEPT | A code-less rejection writes NO slot `errorCode` (badge `Delivery failed`); the record's `cause` keeps `String(status)`; `sms_sending_disabled` stays a slot code (it has prose). Global Constraint added; Task 7 test 13, Task 8 case 17; Review Focus 1 now has a slot-level pin too. |
+| 14 | Task 3's sketch uses `f.env` and `f.sent[0].sid`, which do not exist, digests the wrong phone (`+15550100001`), and cites `errorCodeOf` at the wrong file | ACCEPT | Sketch fixed: the configured BUSINESS_PHONE_NUMBER and the fake adapter's SID are named as "read makeFakes"; the phone corrected; `errorCodeOf` cited at broadcastFanOut.ts:176-185. |
+| 15 | test 5c's "zero sends" is vacuous (the override records nothing); tests 5c/7b/8 would drain a `send.reconcile` envelope with no handler and die on `MalformedJobEnvelopeError` | ACCEPT | The override counts its own calls (`sends[]`); every test that produces a reconcile envelope drains ONLY the `broadcast.send` envelopes it needs (the file's shift idiom) and asserts the reconcile envelope by inspection; the same instruction in Task 8. |
+| 16 | the D9 streak treats `stranded` inconsistently; a joint outage (provider + DynamoDB) never brakes | ACCEPT (reverses my R2 #1 note) | A stranded UNKNOWN counts toward the streak in both loops; a lost hand-off after a KNOWN send (`sent_unrecorded`'s stranded variant, `stranded.afterSend`) resets it - the provider answered. Task 7 test 4e; Task 8 case 7. |
+| 17 | a re-drive deferral whose continuation drops the marker strands the `redriven` record if a fence then trips | ACCEPT - SPEC PRECISION (D8, revision 11) | A `redriven` record is closable by ANY pass's decline (it is claimable by any pass already, and the decline would apply to the re-drive pass equally). The gate no longer takes a `redrive` flag; the unit drops its `redrive` arg. Task 7 test 9d; Task 8 case 16. |
+| 18 | `adoptRelayRecipientIfUnsent` does not say how it tells legacy from versioned; delegating first maps `legacy_noop` to `missing` and the job DLQs | ACCEPT | Delegate first; `legacy_noop` IS the discriminator and routes to the legacy branch. |
+| 19 | the `sid_held_elsewhere` ERROR names only the current owner; the lookup's `mine` path returns `adopt()`'s `other` unfiltered | ACCEPT | `heldBy` returns `{ kind, holder }`; the ERROR carries `heldBy`; the `mine` path maps `other` to `unresolved` `sid_held_elsewhere` as `adoptKnown` does; case 15c. |
+| 20 | "the dashboard's pinned clock" does not exist at lane level | ACCEPT | Task 16 seeds a wall-clock `attemptedAt` 16 minutes old. |
+
+**Round 3 outcome:** 20 findings, ACCEPT 20 (3 as upheld contests of round-2
+rulings, 2 as spec edits). **Decision test:** no accepted finding added or
+removed a surface or moved what gets built - #1 restores a D16 decision the
+plan had dropped; #3/#10/#17 restructure the gate helper and align D8's
+`redriven` wording with the claim rule D8a already had; #6 corrects a false
+sentence about a mechanism (nothing built changes; the sweeper residue was
+already filed); #16 flips one line of streak bookkeeping. This is a round of
+precision and omission fixes: TERMINAL under the stop rule. Plan review
+closed at round 3 (cap 4 not reached). The orchestrator's own review and the
+planner's independent review on handback remain downstream.

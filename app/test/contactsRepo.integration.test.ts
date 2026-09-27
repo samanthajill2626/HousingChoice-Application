@@ -497,6 +497,23 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     );
     expect(second.staff_notes).toBe('second');
 
+    // A no-op update (nothing to write) with a guard still honors it: the
+    // guard is checked on a consistent read, so it refuses exactly when a
+    // guarded write would.
+    await expect(
+      contacts.update(
+        created.contactId,
+        {},
+        { expect: { attr: 'staff_notes_updated_at', value: '2026-09-27T09:00:00.000Z' } },
+      ),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    const noop = await contacts.update(
+      created.contactId,
+      {},
+      { expect: { attr: 'staff_notes_updated_at', value: '2026-09-27T10:10:00.000Z' } },
+    );
+    expect(noop.staff_notes).toBe('second');
+
     // An unknown contact is still refused the same way (the route re-reads to
     // tell "gone" from "stale").
     await expect(

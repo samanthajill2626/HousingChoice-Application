@@ -90,3 +90,12 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* "(The notes were cleared.)" - a statement ABOUT the note, not note text, so
+ * it must not look like the note itself. */
+.conflictEmpty {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-style: italic;
+  color: var(--c-text-muted);
+}

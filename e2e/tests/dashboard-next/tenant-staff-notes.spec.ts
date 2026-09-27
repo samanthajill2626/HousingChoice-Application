@@ -127,14 +127,17 @@ test.describe('Tenant file - Staff notes card', () => {
     await theirs.getByRole('button', { name: 'Add staff notes', exact: true }).click();
     await theirs.getByLabel('Staff notes', { exact: true }).fill('E2E theirs - saved first');
 
-    // The colleague saves first; it lands.
+    // The colleague saves first, and it LANDS before mine is sent: the editor
+    // closes only on a successful save (the typed text alone is not proof - a
+    // controlled textarea carries it as text content too).
     await theirs.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(theirs.getByLabel('Staff notes', { exact: true })).toHaveCount(0);
     await expect(theirs.getByText('E2E theirs - saved first')).toBeVisible();
 
     // My save is refused with their note shown and my draft kept.
     await mine.getByRole('button', { name: 'Save', exact: true }).click();
     const conflict = mine.getByRole('alert');
-    await expect(conflict).toContainText('Someone else saved these notes while you were editing.');
+    await expect(conflict).toContainText('These notes were changed since this page loaded.');
     await expect(conflict).toContainText('E2E theirs - saved first');
     await expect(mine.getByLabel('Staff notes', { exact: true })).toHaveValue(
       'E2E mine - typed on the stale page',

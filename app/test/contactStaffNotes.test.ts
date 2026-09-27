@@ -195,7 +195,7 @@ describe('PATCH /api/contacts/:id - the Staff notes stale-save guard (spec 3.9)'
     expect(res.body.contact.staff_notes).toBe('');
   });
 
-  it('400s an expectation that is neither a string nor null', async () => {
+  it('400s an expectation that is neither a non-empty string nor null', async () => {
     const { app, world } = makeWebhookHarness();
     seedTenant(world);
 
@@ -204,7 +204,15 @@ describe('PATCH /api/contacts/:id - the Staff notes stale-save guard (spec 3.9)'
       staff_notes_expected_updated_at: 5,
     });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('staff_notes_expected_updated_at must be a string or null');
+    expect(res.body.error).toBe('staff_notes_expected_updated_at must be a non-empty string or null');
+    expect('staff_notes' in stored(world)).toBe(false);
+
+    // '' can never match a real stamp, so it is refused too (not a 409 loop).
+    const empty = await auth(request(app).patch('/api/contacts/c-sn-1')).send({
+      staff_notes: 'x',
+      staff_notes_expected_updated_at: '',
+    });
+    expect(empty.status).toBe(400);
     expect('staff_notes' in stored(world)).toBe(false);
   });
 

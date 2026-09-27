@@ -1,5 +1,6 @@
 // StaffNotesCard - the tenant file's hand-written notes box (spec 3.6).
 // Mocks updateContact from the api barrel; asserts accessibility-first.
+import { useState } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -235,7 +236,7 @@ describe('StaffNotesCard - edit mode', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Someone else saved these notes while you were editing.');
+    expect(alert).toHaveTextContent('These notes were changed since this page loaded.');
     expect(alert).toHaveTextContent('Prefers texts after 5pm');
     // Still editing, the draft intact, their contact handed up to the file pane.
     expect(screen.getByLabelText('Staff notes')).toHaveValue('Mine wins');
@@ -262,21 +263,46 @@ describe('StaffNotesCard - edit mode', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('after a 409, Cancel keeps THEIR note (no request) and clears the conflict panel', async () => {
+  it('after a 409, Cancel keeps THEIR note (no request): read mode shows theirs, the panel is gone', async () => {
     const user = userEvent.setup();
     const theirs: Contact = { ...CONTACT, staff_notes: 'Theirs', staff_notes_updated_at: '2026-09-27T09:30:00.000Z' };
     updateContact.mockRejectedValueOnce(
       new ApiError(409, 'staff_notes_stale', 'staff_notes_stale', { error: 'staff_notes_stale', contact: theirs }),
     );
-    render(<StaffNotesCard contactId="c1" value="Mine" updatedAt={undefined} onContactUpdated={() => {}} />);
+    // A stateful parent, as ContactDetail's setContact is: the handed-up
+    // contact becomes the card's props.
+    function Parent(): React.JSX.Element {
+      const [c, setC] = useState<Contact>({ ...CONTACT, staff_notes: 'Mine', staff_notes_updated_at: undefined });
+      return (
+        <StaffNotesCard contactId="c1" value={c.staff_notes} updatedAt={c.staff_notes_updated_at} onContactUpdated={setC} />
+      );
+    }
+    render(<Parent />);
     await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
     await user.type(screen.getByLabelText('Staff notes'), ' more');
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    await screen.findByRole('alert');
+    const alert = await screen.findByRole('alert');
+    // The panel describes the box while it is up.
+    expect(screen.getByLabelText('Staff notes')).toHaveAttribute('aria-describedby', alert.id);
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(updateContact).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
+    expect(screen.getByText('Theirs')).toBeInTheDocument();
+    expect(screen.queryByText('Mine more')).not.toBeInTheDocument();
+  });
+
+  it('a stale 409 WITHOUT a contact body falls back to the plain failure alert', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValueOnce(
+      new ApiError(409, 'staff_notes_stale', 'staff_notes_stale', { error: 'staff_notes_stale' }),
+    );
+    render(<StaffNotesCard contactId="c1" value="Mine" updatedAt={undefined} onContactUpdated={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    await user.type(screen.getByLabelText('Staff notes'), ' more');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save staff notes. Try again.');
+    expect(screen.getByLabelText('Staff notes')).not.toHaveAttribute('aria-describedby');
   });
 
   it('a 409 when the colleague CLEARED the box says so', async () => {
@@ -289,7 +315,7 @@ describe('StaffNotesCard - edit mode', () => {
     await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
     await user.type(screen.getByLabelText('Staff notes'), ' more');
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('They cleared the notes.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('(The notes were cleared.)');
   });
 
   it('a 409 that is NOT staff_notes_stale (or carries no contact) is the plain failure alert', async () => {

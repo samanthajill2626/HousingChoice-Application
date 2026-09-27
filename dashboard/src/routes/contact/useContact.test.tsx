@@ -68,7 +68,14 @@ describe('useContact - setContact is bound to its contact', () => {
     await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
     await user.type(screen.getByLabelText('Staff notes'), ' - updated');
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('A', { staff_notes: 'note A - updated' }));
+    // The card also sends the stamp its editor opened with (the stale-save
+    // guard, spec 3.9); A has never been saved, so it is null.
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('A', {
+        staff_notes: 'note A - updated',
+        staff_notes_expected_updated_at: null,
+      }),
+    );
 
     // ...then the page moves to B (same component, new id) and B loads.
     rerender(<Page contactId="B" />);

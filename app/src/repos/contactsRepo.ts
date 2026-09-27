@@ -1340,12 +1340,24 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       }
       if (sets.length === 0 && removes.length === 0) {
         // Nothing to change — read the current item back (still 404s if gone).
-        const existing = await this.getById(contactId);
+        // An `expect` guard still applies: checked on a consistent read, so a
+        // no-op guarded update refuses exactly when a guarded write would.
+        const existing = await this.getById(contactId, { consistentRead: opts?.expect !== undefined });
         if (!existing) {
           throw new ConditionalCheckFailedException({
             message: `contact ${contactId} not found`,
             $metadata: {},
           });
+        }
+        if (opts?.expect !== undefined) {
+          const current = existing[opts.expect.attr];
+          const matches = opts.expect.value === null ? current === undefined : current === opts.expect.value;
+          if (!matches) {
+            throw new ConditionalCheckFailedException({
+              message: `contact ${contactId}: expected ${opts.expect.attr} did not match`,
+              $metadata: {},
+            });
+          }
         }
         return existing;
       }

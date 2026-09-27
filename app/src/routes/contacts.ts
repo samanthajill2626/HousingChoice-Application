@@ -594,8 +594,9 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
   let staffNotesExpected: string | null | undefined;
   if ('staff_notes_expected_updated_at' in b) {
     const v = b['staff_notes_expected_updated_at'];
-    if (v !== null && typeof v !== 'string') {
-      return { error: 'staff_notes_expected_updated_at must be a string or null' };
+    // '' can never equal a real stamp, so it would 409 every time: refuse it.
+    if (v !== null && (typeof v !== 'string' || v.length === 0)) {
+      return { error: 'staff_notes_expected_updated_at must be a non-empty string or null' };
     }
     staffNotesExpected = v;
   }

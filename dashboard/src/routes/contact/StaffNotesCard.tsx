@@ -75,6 +75,7 @@ export function StaffNotesCard({
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const textareaId = useId();
+  const conflictId = useId();
 
   // Focus the box on entry to edit mode (the click that opened it was on the
   // heading affordance, which is gone once the form renders).
@@ -163,15 +164,18 @@ export function StaffNotesCard({
               accessible text, so getByLabel('Staff notes', { exact: true })
               would miss a prefilled box. */}
           {conflict !== null ? (
-            <div role="alert" className={styles.conflict}>
+            // Worded for every way a stale save happens (a colleague, the
+            // same person in another tab, a page left open): it names what
+            // changed, not who. Linked to the box via aria-describedby.
+            <div id={conflictId} role="alert" className={styles.conflict}>
               <p className={styles.conflictLead}>
-                Someone else saved these notes while you were editing. Their version is below; your
-                text is still in the box. Save again to replace theirs, or Cancel to keep theirs.
+                These notes were changed since this page loaded. The current version is below, and
+                your text is still in the box. Save again to replace it, or Cancel to keep it.
               </p>
               {conflict.trim().length > 0 ? (
                 <p className={styles.conflictText}>{conflict}</p>
               ) : (
-                <p className={styles.conflictText}>They cleared the notes.</p>
+                <p className={styles.conflictEmpty}>(The notes were cleared.)</p>
               )}
             </div>
           ) : null}
@@ -187,6 +191,7 @@ export function StaffNotesCard({
               onChange={(e) => setDraft(e.target.value)}
               rows={4}
               readOnly={saving}
+              {...(conflict !== null && { 'aria-describedby': conflictId })}
             />
           </div>
           {error !== null ? (

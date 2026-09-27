@@ -27,7 +27,7 @@ import {
   pastState,
   pastToursDateRange,
   selectPastTours,
-  selectUndatedTours,
+  selectOffRangeTours,
   useClosedTours,
   usePastTours,
   useTours,
@@ -314,7 +314,7 @@ describe('pastState', () => {
   });
 });
 
-describe('selectUndatedTours (spec 4.2a)', () => {
+describe('selectOffRangeTours (spec 4.2a)', () => {
   /** A fixed "now": 2026-09-26 15:30 local. */
   const NOW = new Date(2026, 8, 26, 15, 30, 0, 0);
   const at = (y: number, m: number, d: number, h: number): string =>
@@ -331,14 +331,34 @@ describe('selectUndatedTours (spec 4.2a)', () => {
     { ...base, tourId: 'u-outcome', status: 'toured', outcome: 'not_a_fit', moveForward: false, updatedAt: at(2026, 9, 24, 9) },
     // Move-forward never converted: kept (Needs placement).
     { ...base, tourId: 'u-np', status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true, updatedAt: at(2026, 9, 22, 9) },
-    // Dated: the range read owns it, so this read must not add it twice.
+    // Dated inside the window: the range read owns it, so this read must not add it twice.
     { ...base, tourId: 'dated', status: 'toured', scheduledAt: at(2026, 9, 24, 10), updatedAt: at(2026, 9, 24, 12) },
+    // Dated TODAY, later than now: still inside the window (it runs through
+    // the end of today), so still the range read's.
+    { ...base, tourId: 'dated-today', status: 'toured', scheduledAt: at(2026, 9, 26, 18), updatedAt: at(2026, 9, 26, 9) },
     // Not toured.
     { ...base, tourId: 'closed', status: 'closed', updatedAt: at(2026, 9, 25, 9) },
   ] as Tour[];
 
   it('keeps undated toured tours still needing a decision, inside the 90 days, most recently touched first', () => {
-    expect(selectUndatedTours(ROWS, NOW).map((t) => t.tourId)).toEqual(['u-new', 'u-np', 'u-old', 'u-created-only']);
+    expect(selectOffRangeTours(ROWS, NOW).map((t) => t.tourId)).toEqual(['u-new', 'u-np', 'u-old', 'u-created-only']);
+  });
+
+  it('also keeps a toured tour dated AFTER today (marked toured early) that still needs a decision, ordered by its last touch', () => {
+    const input = [
+      ...ROWS,
+      // Tomorrow, marked toured today with no outcome: the range read cannot see it until tomorrow.
+      { ...base, tourId: 'f-early', status: 'toured', scheduledAt: at(2026, 9, 27, 10), updatedAt: at(2026, 9, 26, 11) },
+      // A mistyped year: far future, touched last week.
+      { ...base, tourId: 'f-year', status: 'toured', scheduledAt: at(2027, 9, 21, 10), updatedAt: at(2026, 9, 21, 9) },
+      // Future-dated but decided: dropped.
+      { ...base, tourId: 'f-decided', status: 'toured', outcome: 'not_a_fit', moveForward: false, scheduledAt: at(2026, 9, 28, 10), updatedAt: at(2026, 9, 26, 12) },
+      // Future-dated and still scheduled: Active's Upcoming shows it, never Past.
+      { ...base, tourId: 'f-scheduled', status: 'scheduled', scheduledAt: at(2026, 9, 28, 10), updatedAt: at(2026, 9, 26, 12) },
+    ] as Tour[];
+    expect(selectOffRangeTours(input, NOW).map((t) => t.tourId)).toEqual([
+      'f-early', 'u-new', 'u-np', 'f-year', 'u-old', 'u-created-only',
+    ]);
   });
 
   it('breaks a tie by tourId and never mutates its input', () => {
@@ -347,7 +367,7 @@ describe('selectUndatedTours (spec 4.2a)', () => {
       { ...base, tourId: 'b', status: 'toured', updatedAt: same },
       { ...base, tourId: 'a', status: 'toured', updatedAt: same },
     ] as Tour[];
-    expect(selectUndatedTours(input, NOW).map((t) => t.tourId)).toEqual(['a', 'b']);
+    expect(selectOffRangeTours(input, NOW).map((t) => t.tourId)).toEqual(['a', 'b']);
     expect(input.map((t) => t.tourId)).toEqual(['b', 'a']);
   });
 });

@@ -383,7 +383,8 @@ the newer note, unrecoverably. Cameron asked for the cheap guard.
 - Heading: "Past tours". Intro line: "Last 90 days: tours that were never
   marked toured, toured tours still waiting on an outcome or a placement, and
   no-shows." A toured tour recorded with no date is listed LAST, as
-  "Undated" (section 4.2a, amendment 2026-09-27).
+  "Undated", and a tour marked toured before its day is listed there too,
+  with its date (section 4.2a, amendments 2026-09-27).
 - The "+ New tour" button stays Active-only.
 
 ### 4.2 Data
@@ -451,7 +452,8 @@ them, labeled "Undated", at the bottom.
   `getTours({ status: 'toured' })` (`listByStatus`, which paginates). Both reads
   succeed or the load fails as one (first load -> error; reload ->
   `reloadFailed`, rows kept), and `reload()` refetches both.
-- Selection (`selectUndatedTours(touredRows, now)`, pure): keep a row with
+- Selection (`selectOffRangeTours(touredRows, now)`, pure; named
+  `selectUndatedTours` until the second amendment below): keep a row with
   status `toured`, NO `scheduledAt`, and either no `outcome` or the
   Needs-placement shape (4.2 step 3's rule, same exception); keep it only if
   its `updatedAt ?? createdAt` is on or after the Past window's `from` (the
@@ -471,10 +473,20 @@ them, labeled "Undated", at the bottom.
 - Cost: the status read returns every toured tour ever; at this org's volume a
   toured tour normally leaves that status within days (the outcome closes it),
   so the set stays small. Noted, not engineered around.
-- Tests: `selectUndatedTours` (kept / dropped / window / order / the two
+- Tests: `selectOffRangeTours` (kept / dropped / window / order / the two
   exceptions), the hook's two reads and the merged order, a page row with
   "Undated" and its label, and Playwright: a requested tour marked toured with
   no date appears LAST as "Undated" with "Record outcome".
+- SECOND AMENDMENT (2026-09-27, planner, from the guard review round 2,
+  finding 1; same reason as Cameron's ruling - a tour staff cannot find): a
+  tour marked toured BEFORE its day (Mark toured has no time gate; "Mark
+  toured anyway" accepts a future time) is dated after the window's `to`, so
+  the range read skips it until that day and it was on no tab. The same
+  selection now also keeps a `toured` row whose `scheduledAt` is AFTER `to`
+  (string order, as the range read's BETWEEN, so the two reads stay disjoint
+  and together cover every dated toured tour up to 90 days old), under the
+  same decision and touch-window rules and the same order. Its row shows its
+  date as any dated row does. Pinned in the selector test.
 
 ### 4.3 The row
 

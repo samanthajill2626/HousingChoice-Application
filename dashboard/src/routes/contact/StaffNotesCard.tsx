@@ -71,6 +71,8 @@ export function StaffNotesCard({
   const [baselineStamp, setBaselineStamp] = useState<string | null>(updatedAt ?? null);
   // A colleague's newer note, shown after a stale refusal (null = no conflict).
   const [conflict, setConflict] = useState<string | null>(null);
+  // Counts stale refusals; the focus effect below keys on it.
+  const [refusals, setRefusals] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -82,6 +84,17 @@ export function StaffNotesCard({
   useEffect(() => {
     if (editing) textareaRef.current?.focus();
   }, [editing]);
+
+  // After a stale refusal, put focus in the box: the draft is there, and its
+  // aria-describedby now names the conflict panel. Save is disabled while the
+  // request runs, and a focused control that becomes disabled can drop focus
+  // to the page body. An effect, not a focus() in the handler, so the
+  // description is attached before focus lands; keyed on a counter so a
+  // second refusal with the same note refocuses too. The box is readOnly (not
+  // disabled) while saving, so it can always take focus.
+  useEffect(() => {
+    if (refusals > 0) textareaRef.current?.focus();
+  }, [refusals]);
 
   const startEdit = (): void => {
     setDraft(stored);
@@ -127,6 +140,7 @@ export function StaffNotesCard({
         setBaseline(theirText);
         setBaselineStamp(typeof theirs.staff_notes_updated_at === 'string' ? theirs.staff_notes_updated_at : null);
         setConflict(theirText);
+        setRefusals((n) => n + 1);
       }
     } finally {
       setSaving(false);

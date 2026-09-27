@@ -215,21 +215,30 @@ function isUndated(t: Tour): boolean {
   return typeof t.scheduledAt !== 'string' || t.scheduledAt.length === 0;
 }
 
-/** Undated toured tours (spec 4.2a). A requested tour marked "already toured"
- *  with the date left blank has NO scheduledAt, so the range read can never
- *  return it; the Past view reads status=toured as well and lists these LAST,
- *  labeled "Undated". Pure; never mutates its input.
- *  1. keep status toured with no scheduledAt (a dated one is the range read's);
+/** Toured tours the range read cannot reach (spec 4.2a), listed LAST. The
+ *  Past view reads status=toured as well, for two kinds of row:
+ *  - UNDATED: a requested tour marked "already toured" with the date left
+ *    blank has no scheduledAt, so it is not in the byScheduledAt index at all
+ *    (the row reads "Undated");
+ *  - FUTURE-DATED: a tour marked toured before its day (Mark toured has no
+ *    time gate; "Mark toured anyway" accepts a future time) is dated after the
+ *    window's end, so the range read skips it until that day (the row shows
+ *    its date).
+ *  Pure; never mutates its input.
+ *  1. keep status toured that is undated or dated AFTER the window's end - the
+ *     same string order as the range read's BETWEEN, so the two reads are
+ *     disjoint and together cover every dated toured tour up to 90 days old;
  *  2. keep only rows still needing a decision - no outcome, or a move-forward
  *     whose placement was never created (the same rule as 4.2 step 3);
  *  3. keep only rows last touched (updatedAt, else createdAt) inside the same
- *     90-day window - with no tour date, the last touch is the only clock;
+ *     90-day window - the tour date cannot place these rows, so the last touch
+ *     is the clock;
  *  4. most recently touched first, ties by tourId. */
-export function selectUndatedTours(tours: Tour[], now: Date = new Date()): Tour[] {
-  const { from } = pastToursDateRange(now);
+export function selectOffRangeTours(tours: Tour[], now: Date = new Date()): Tour[] {
+  const { from, to } = pastToursDateRange(now);
   const touched = (t: Tour): string => t.updatedAt ?? t.createdAt ?? '';
   return tours
-    .filter((t) => t.status === 'toured' && isUndated(t))
+    .filter((t) => t.status === 'toured' && (isUndated(t) || (t.scheduledAt as string) > to))
     .filter((t) => t.outcome === undefined || needsPlacement(t))
     .filter((t) => touched(t) >= from)
     .sort((a, b) => {
@@ -257,8 +266,9 @@ export interface PastToursState {
    *  synchronously in the effect is what react-hooks/set-state-in-effect
    *  forbids, and idle already means "nothing shown yet". */
   status: 'idle' | 'ready' | 'error';
-  /** The selected Past rows: dated rows most recent first, then undated rows
-   *  (spec 4.2a) most recently touched first. */
+  /** The selected Past rows: the range read's rows most recent first, then
+   *  the off-range toured rows (undated or dated after today, spec 4.2a) most
+   *  recently touched first. */
   past: Tour[];
   /** Refetch (after a bulk action). Keeps the current rows until the new page lands. */
   reload: () => void;
@@ -268,8 +278,8 @@ export interface PastToursState {
 }
 
 /** LAZY fetch for the Past view - the range read plus the status=toured read
- *  (for undated toured tours, spec 4.2a), in parallel, client-selected. The
- *  two succeed or fail as one load. */
+ *  (for toured tours the range cannot reach, spec 4.2a), in parallel,
+ *  client-selected. The two succeed or fail as one load. */
 export function usePastTours(enabled: boolean): PastToursState {
   const [state, setState] = useState<{
     status: PastToursState['status'];
@@ -298,9 +308,10 @@ export function usePastTours(enabled: boolean): PastToursState {
           getTours({ status: 'toured' }, signal),
         ]);
         if (signal.aborted) return;
-        // Dated rows first (the range read), undated after (spec 4.2a). The
-        // two sets are disjoint: a range row always carries a scheduledAt.
-        const past = [...selectPastTours(rows, now), ...selectUndatedTours(toured, now)];
+        // Range rows first, off-range toured rows after (spec 4.2a). The two
+        // sets are disjoint: a range row carries a scheduledAt inside
+        // [from, to]; an off-range row has none, or one after `to`.
+        const past = [...selectPastTours(rows, now), ...selectOffRangeTours(toured, now)];
         setState({ status: 'ready', past, reloadFailed: false });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;

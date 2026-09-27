@@ -2063,6 +2063,25 @@ export function createFakeWorld(): FakeWorld {
       return contact;
     },
     async update(contactId, patch, opts) {
+      // The real repo refuses a bad index-key field BEFORE any network call -
+      // so before its not-found and `expect` conditions can be evaluated - and
+      // refuses the whole patch. Validate every field first, in the same
+      // order, so the fake neither reorders those errors nor half-applies.
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) continue;
+        // Mirror the real repo's GSI-key guard (F6). A fake that happily stores
+        // '' on an index key attribute is how the edit form's housingAuthority
+        // clear passed every unit test and 500'd in a live request.
+        if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new EmptyIndexKeyError(key);
+        }
+        // Mirror the other half too. A fake that lets `status: null` through
+        // would keep the contact in this array and so keep it "visible", which
+        // is precisely the illusion the real byTypeStatus GSI does not offer.
+        if (value === null && REQUIRED_INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new RequiredIndexKeyRemovalError(key, contactId);
+        }
+      }
       const contact = contacts.find((c) => c.contactId === contactId);
       if (!contact) {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
@@ -2079,18 +2098,6 @@ export function createFakeWorld(): FakeWorld {
       const changesKind = patch.type !== undefined || patch.role !== undefined;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
-        // Mirror the real repo's GSI-key guard (F6). A fake that happily stores
-        // '' on an index key attribute is how the edit form's housingAuthority
-        // clear passed every unit test and 500'd in a live request.
-        if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
-          throw new EmptyIndexKeyError(key);
-        }
-        // Mirror the other half too. A fake that lets `status: null` through
-        // would keep the contact in this array and so keep it "visible", which
-        // is precisely the illusion the real byTypeStatus GSI does not offer.
-        if (value === null && REQUIRED_INDEX_KEY_ATTRIBUTES.has(key)) {
-          throw new RequiredIndexKeyRemovalError(key, contactId);
-        }
         if (value === null) delete contact[key]; // null → REMOVE the attribute
         else contact[key] = value;
       }

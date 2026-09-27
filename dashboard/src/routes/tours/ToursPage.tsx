@@ -189,8 +189,12 @@ interface PastTourRowProps {
 /** A Past row (spec 4.3): the link carries identity + meta and the back
  *  pointer; the checkbox and the actions sit BESIDE it (interactive content
  *  cannot nest inside an <a>), each in a fixed slot every row renders.
- *  Every accessible name ends with the row's date-time so two tours for one
- *  tenant at one property stay distinct. */
+ *  A dated row's accessible names end with its date-time, so two dated tours
+ *  for one tenant at one property stay distinct. Undated rows (spec 4.2a) have
+ *  no such fact: two undated tours for one pair, both undecided, read the same
+ *  (each still links to its own tour). Rare - it needs two tours for one pair
+ *  both marked "already toured" with no date - and Cameron's copy ruling is
+ *  "Undated", so no second fact is added. */
 function PastTourRow({
   tour,
   contacts,

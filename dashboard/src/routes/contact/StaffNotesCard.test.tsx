@@ -263,6 +263,38 @@ describe('StaffNotesCard - edit mode', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('a stale 409 moves focus into the box (described by the panel), and a second 409 moves it back again', async () => {
+    const user = userEvent.setup();
+    const theirs: Contact = { ...CONTACT, staff_notes: 'Theirs', staff_notes_updated_at: '2026-09-27T09:30:00.000Z' };
+    const stale = (): ApiError =>
+      new ApiError(409, 'staff_notes_stale', 'staff_notes_stale', { error: 'staff_notes_stale', contact: theirs });
+    updateContact.mockRejectedValueOnce(stale()).mockRejectedValueOnce(stale());
+    render(
+      <StaffNotesCard
+        contactId="c1"
+        value={CONTACT.staff_notes}
+        updatedAt={CONTACT.staff_notes_updated_at}
+        onContactUpdated={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    const box = screen.getByLabelText('Staff notes');
+    await user.clear(box);
+    await user.type(box, 'Mine');
+    const save = screen.getByRole('button', { name: 'Save' });
+    await user.click(save);
+    const alert = await screen.findByRole('alert');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('Staff notes')));
+    expect(screen.getByLabelText('Staff notes')).toHaveAttribute('aria-describedby', alert.id);
+
+    // The same refusal again (a colleague saved the same note twice, or a
+    // retry): focus leaves the box for Save, then comes back.
+    await user.click(save);
+    await waitFor(() => expect(updateContact).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('Staff notes')));
+    expect(screen.getByLabelText('Staff notes')).toHaveValue('Mine');
+  });
+
   it('after a 409, Cancel keeps THEIR note (no request): read mode shows theirs, the panel is gone', async () => {
     const user = userEvent.setup();
     const theirs: Contact = { ...CONTACT, staff_notes: 'Theirs', staff_notes_updated_at: '2026-09-27T09:30:00.000Z' };

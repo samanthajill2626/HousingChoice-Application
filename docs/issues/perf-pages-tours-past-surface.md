@@ -40,3 +40,14 @@ to `EXPECTED_KEYS` / `EXPECTED_WARM`, bump the 31 pins to 32, refresh the
 update the README count, remove the `excluded` entry, and re-run the profiler
 self-QA (`npm run perf:pages -- hermetic --self-qa=full`, human-owned per
 `e2e/README.md`).
+
+**Update 2026-09-27 (guard review round 2).** The GET contract above is out of
+date: since spec 4.2a the Past view also reads `GET /api/tours?status=toured`
+(toured tours the range cannot reach: undated, or dated after today). The page
+always issues the Active window's two reads (`?from&to` and
+`?status=requested`) and the contact and unit walks every Tours list carries
+(`TOUR_LIST_ACTIVE_GETS` in `e2e/performance/routes.ts`), then Past's range
+read and its status read. In the contract's path + query-key model the two
+`?from&to` reads share one shape and the two `?status` reads share another,
+so a registered row must count occurrences rather than list keys. The KNOWN
+GAP note in `routes.ts` says the same.

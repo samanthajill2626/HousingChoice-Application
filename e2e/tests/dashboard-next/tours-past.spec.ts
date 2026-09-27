@@ -239,11 +239,14 @@ test.describe('Tours page - Past tab', () => {
 
   // Spec 4.2a: a requested tour marked "already toured" with the date left
   // blank has NO scheduledAt, so the range read never returns it. The Past tab
-  // lists it LAST as "Undated" so it can still be found and closed out. Runs
-  // after the test above in this file (workers: 1), so the earlier dated rows
-  // are present too - which is what proves "last".
+  // lists it LAST as "Undated" so it can still be found and closed out. The
+  // test creates its own dated past row to prove "last", so it passes alone
+  // and after a reseed (a fresh worker re-runs beforeAll after a failure).
   test('an undated "already toured" tour is listed LAST as Undated, with Record outcome', async ({ page }) => {
     await devLogin(page);
+
+    // A dated past row of this test's own (still scheduled = "Not marked").
+    const datedId = await createTour(page, UNIT_A, pastAt(4, 10));
 
     // A requested (timeless) tour, marked toured WITHOUT a date - the same
     // PATCH the "Mark already toured" dialog sends with the date left blank.
@@ -262,11 +265,12 @@ test.describe('Tours page - Past tab', () => {
     const region = page.getByRole('region', { name: 'Past tours' });
     const undatedLink = region.locator(`a[href="/tours/${undatedId}"]`);
     await expect(undatedLink).toBeVisible();
+    await expect(region.locator(`a[href="/tours/${datedId}"]`)).toBeVisible();
     const items = region.getByRole('listitem');
     const last = items.last();
+    // Last, and below this test's own dated row.
     await expect(last.locator(`a[href="/tours/${undatedId}"]`)).toBeVisible();
-    // More than one row, so "last" means below the dated ones.
-    expect(await items.count()).toBeGreaterThan(1);
+    await expect(last.locator(`a[href="/tours/${datedId}"]`)).toHaveCount(0);
     await expect(last.getByText('Undated', { exact: true })).toBeVisible();
     await expect(last.getByText('Needs outcome', { exact: true })).toBeVisible();
     await expect(last.getByRole('link', { name: /^Tour for .*, undated, Needs outcome$/ })).toBeVisible();

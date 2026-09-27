@@ -599,8 +599,12 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   // route pin in routes.test.ts lists it with the same issue), not forgotten.
   // Registering it needs: a source (from /tours via the Past tab link), a
   // terminal (the "Past tours" region settled), and its GETs - the Active
-  // window's two reads the page always issues, plus the Past range read and
-  // the status=toured read (docs/issues/perf-pages-tours-past-surface.md).
+  // window's two reads the page always issues, the contact and unit walks
+  // every Tours list carries (as TOUR_LIST_ACTIVE_GETS), plus the Past range
+  // read and the status=toured read. In this contract's path + query-key
+  // model the two ?from&to reads share one shape and the two ?status reads
+  // share another, so the contract must count them, not just list the keys
+  // (docs/issues/perf-pages-tours-past-surface.md).
   row({ surfaceId: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: 'inbox-all', label: 'Inbox: All', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox' }), behaviorFamily: 'inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), destinationSelected: inboxDestinationSelected('All'), terminal: inboxTerminal('No conversations yet'), gets: inboxGets('inbox_page_all'), surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: 'inbox-unread', label: 'Inbox: Unread', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unread' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unread', inboxGets('inbox_page_unread')), destinationSelected: inboxDestinationSelected('Unread'), terminal: inboxTerminal("You're all caught up"), gets: inboxGets('inbox_page_unread'), surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -697,8 +701,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/listings': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
     '/listings/deleted': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
-    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:639-643' },
-    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:639-643' },
+    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:643-647' },
+    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:643-647' },
     '/placements': { base: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225' },
     'inbox-all': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
     'inbox-unread': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
@@ -727,7 +731,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
       reason: 'The sibling route changes the unmatched-email filter while the same EmailTriage tree keeps the contacts hook mounted, so only the filtered unmatched-email request is passive navigation work.',
     }),
     '/tours/closed': Object.freeze({
-      source: 'dashboard/src/routes/tours/ToursPage.tsx:639-656; dashboard/src/routes/tours/useTours.ts:122-151',
+      source: 'dashboard/src/routes/tours/ToursPage.tsx:643-660; dashboard/src/routes/tours/useTours.ts:122-151',
       reason: 'The sibling route enables useClosedTours while the active-tour and cross-reference hooks remain mounted, so only the status-filtered closed-tour request is passive navigation work.',
     }),
   } as const),
@@ -751,8 +755,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/listings': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
     '/listings/deleted': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
-    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:716-814',
-    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:716-814',
+    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:720-818',
+    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:720-818',
     '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
     'inbox-all': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
     'inbox-unread': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',

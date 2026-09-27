@@ -11,6 +11,7 @@ import { useMe } from '../../app/useMe.js';
 import { Button, Spinner } from '../../ui/index.js';
 import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
 import { useCellVerify } from './useCellVerify.js';
+import { VoicemailGreetingBlock } from './VoicemailGreetingBlock.js';
 import styles from './VoiceSection.module.css';
 
 /** Friendly verified-at date. */
@@ -207,6 +208,10 @@ export function VoiceSection(): React.JSX.Element {
           )}
         </>
       )}
+
+      {/* The org's voicemail greeting (voicemail-greeting spec 4.7). OUTSIDE the
+          useMe ternary above, so a /users/me failure never hides it. */}
+      <VoicemailGreetingBlock />
     </section>
   );
 }

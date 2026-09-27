@@ -74,6 +74,7 @@ import type {
 } from '../../src/repos/suggestionResolutionRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
+  toVoicemailGreeting,
   type OrgSettings,
   type SettingsRepo,
 } from '../../src/repos/settingsRepo.js';
@@ -272,6 +273,14 @@ export interface FakeWorld {
   deletedMediaKeys: string[];
   /** Keys for which mediaStore.deleteObject should REJECT (exercises D1's best-effort WARN path). */
   failMediaDeletes: Set<string>;
+  /** Every mediaStore.head call, in order (voicemail greeting: the webhook's existence check). */
+  mediaHeads: { key: string; signal: boolean }[];
+  /** Every mediaStore.presign call, in order (voicemail greeting: the <Play> URL). */
+  mediaPresigns: { key: string; ttlSeconds: number }[];
+  /** Keys for which mediaStore.head should REJECT (the webhook's failed-check fallback). */
+  failMediaHeads: Set<string>;
+  /** Keys for which mediaStore.head NEVER settles until its abort signal fires (the webhook's budget). */
+  hangMediaHeads: Set<string>;
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /**
@@ -455,6 +464,12 @@ export function createFakeWorld(): FakeWorld {
   const presignPosts: FakeWorld['presignPosts'] = [];
   const deletedMediaKeys: FakeWorld['deletedMediaKeys'] = [];
   const failMediaDeletes = new Set<string>();
+  // Voicemail-greeting webhook seams: the head/presign calls it made, plus
+  // keys whose head rejects or hangs until the caller's abort signal fires.
+  const mediaHeads: FakeWorld['mediaHeads'] = [];
+  const mediaPresigns: FakeWorld['mediaPresigns'] = [];
+  const failMediaHeads = new Set<string>();
+  const hangMediaHeads = new Set<string>();
   const failMediaUrls = new Set<string>();
   const failMediaUrlsFor = new Map<string, number>();
   const failRecordingUrls = new Set<string>();
@@ -2295,9 +2310,22 @@ export function createFakeWorld(): FakeWorld {
   const groupTimestamps = new Map<string, string>();
   /** The abandoned-journal sweep's Scan cursor (log-hygiene spec 9.2). */
   let journalSweepCursor: string | undefined;
+  /**
+   * The READ projection, mirroring the real repo's toOrgSettings for the one
+   * field it validates as a whole (voicemail-greeting spec 4.2): a stored
+   * voicemailGreeting map is projected ONLY when well-formed and naming the
+   * fixed key (toVoicemailGreeting), so a test that plants a foreign key on
+   * `world.settings` sees "no greeting" exactly as production would. Every
+   * other field is returned as stored.
+   */
+  const readSettings = (): OrgSettings => {
+    const { voicemailGreeting: stored, ...rest } = settings;
+    const voicemailGreeting = toVoicemailGreeting(stored);
+    return { ...rest, ...(voicemailGreeting !== undefined && { voicemailGreeting }) };
+  };
   const settingsRepo: SettingsRepo = {
     async getOrgSettings() {
-      return { ...settings };
+      return readSettings();
     },
     async putOrgSettings(patch) {
       if (patch.missedCallAutoText !== undefined) settings.missedCallAutoText = patch.missedCallAutoText;
@@ -2319,7 +2347,15 @@ export function createFakeWorld(): FakeWorld {
       } else if (patch.welcomeText !== undefined) {
         settings.welcomeText = patch.welcomeText;
       }
-      return { ...settings };
+      if ('voicemailGreeting' in patch) {
+        if (patch.voicemailGreeting === null) {
+          delete settings.voicemailGreeting;
+        } else if (patch.voicemailGreeting !== undefined) {
+          settings.voicemailGreeting = patch.voicemailGreeting;
+        }
+      }
+      // The real repo answers with toOrgSettings(ALL_NEW): the same projection.
+      return readSettings();
     },
     async claimGroupIdentityFingerprint() {
       // The fingerprint is a DEPLOYED-stack boot guard; no webhook path touches
@@ -3947,9 +3983,25 @@ export function createFakeWorld(): FakeWorld {
       // X-Amz-Signature-style query so send-path tests can assert a presigned
       // (bearer-token) URL reached the adapter.
       presignCounter += 1;
+      mediaPresigns.push({ key, ttlSeconds });
       return `https://fake-s3.local/${key}?X-Amz-Signature=fakesig${presignCounter}&X-Amz-Expires=${ttlSeconds}`;
     },
-    async head(key) {
+    async head(key, opts) {
+      mediaHeads.push({ key, signal: opts?.signal !== undefined });
+      if (hangMediaHeads.has(key)) {
+        // Models a stuck S3 connection: settles ONLY when the caller's abort
+        // signal fires (the SDK rejects with an AbortError), never on its own.
+        return new Promise((_resolve, reject) => {
+          const signal = opts?.signal;
+          if (signal === undefined) return; // truly never
+          const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          if (signal.aborted) abort();
+          else signal.addEventListener('abort', abort, { once: true });
+        });
+      }
+      if (failMediaHeads.has(key)) {
+        throw new Error(`fake mediaStore: forced head failure for ${key}`);
+      }
       const obj = mediaObjects.get(key);
       if (!obj) return undefined;
       return {
@@ -4075,6 +4127,10 @@ export function createFakeWorld(): FakeWorld {
     presignPosts,
     deletedMediaKeys,
     failMediaDeletes,
+    mediaHeads,
+    mediaPresigns,
+    failMediaHeads,
+    hangMediaHeads,
     failMediaUrls,
     failMediaUrlsFor,
     failRecordingUrls,
@@ -4168,6 +4224,8 @@ export interface HarnessOptions {
   withoutMediaStore?: boolean;
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
   statusUnknownSidRetryDelayMs?: number;
+  /** Voicemail-greeting lookup budget for the voice webhook (tests shrink the 2500ms default). */
+  voicemailGreetingLookupBudgetMs?: number;
   /** Native group texting (S5): replace the Conversations receipts pipeline. */
   groupReceipts?: GroupReceiptsService;
   /** Native group texting (S5): replace the group send service on /api. */
@@ -4516,6 +4574,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       }),
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
+      }),
+      ...(opts.voicemailGreetingLookupBudgetMs !== undefined && {
+        voicemailGreetingLookupBudgetMs: opts.voicemailGreetingLookupBudgetMs,
       }),
       // relay-number-buying T3: the Event Streams sink router (POST
       // /webhooks/twilio/events) promotes a warming pool number on registration.

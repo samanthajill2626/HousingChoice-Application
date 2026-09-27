@@ -9,7 +9,7 @@
 // <Record> from the app (goodbye say/hangup), so the engine records nothing - the
 // standing masked never-record invariant is preserved.
 import { describe, expect, it } from 'vitest';
-import { CallEngine } from '../src/engine/callEngine.js';
+import { CallEngine, type CallEngineDeps } from '../src/engine/callEngine.js';
 import { EventHub } from '../src/engine/eventHub.js';
 import { ManualClock } from '../src/engine/clock.js';
 import { NumberRegistry } from '../src/engine/numberRegistry.js';
@@ -64,7 +64,7 @@ function makeStubDispatcher(inboundBody: string, statusNoAnswerBody: string) {
   return { dispatcher, calls };
 }
 
-function makeEngine(inboundBody: string, statusNoAnswerBody: string) {
+function makeEngine(inboundBody: string, statusNoAnswerBody: string, extra: Partial<CallEngineDeps> = {}) {
   const clock = new ManualClock('2026-06-15T00:00:00.000Z');
   const { dispatcher, calls } = makeStubDispatcher(inboundBody, statusNoAnswerBody);
   const registry = new NumberRegistry();
@@ -72,7 +72,7 @@ function makeEngine(inboundBody: string, statusNoAnswerBody: string) {
   const hub = new EventHub();
   const events: EngineEvent[] = [];
   hub.subscribe((e) => events.push(e));
-  const engine = new CallEngine({ clock, dispatcher, hub, registry, recordingServeBase: RECORDING_BASE });
+  const engine = new CallEngine({ clock, dispatcher, hub, registry, recordingServeBase: RECORDING_BASE, ...extra });
   return { engine, clock, calls, events };
 }
 
@@ -140,5 +140,53 @@ describe('CallEngine missed-branch voicemail (Task 13)', () => {
     const call = engine.getCalls()[0]!;
     expect(call.recordingSid).toBeUndefined();
     expect(call.status).toBe('no-answer');
+  });
+});
+
+const PLAY_VOICEMAIL_TWIML = VOICEMAIL_TWIML.replace(
+  '<Say>Sorry we missed your call. Please leave a message after the tone.</Say>',
+  '<Play>http://minio.local/hc-local-media/settings/voicemail-greeting?X-Amz-Signature=abc&amp;X-Amz-Expires=600</Play>',
+);
+
+describe('CallEngine voicemail greeting observation (voicemail-greeting spec 4.8)', () => {
+  it('records the verb before <Record> and the play-URL fetch status', async () => {
+    const fetched: string[] = [];
+    const { engine, clock } = makeEngine(FOUNDER_DIAL, PLAY_VOICEMAIL_TWIML, {
+      fetchStatus: async (url) => { fetched.push(url); return 200; },
+    });
+    await engine.placeCall({
+      from: '+15550100001',
+      to: '+15551230000', // not a pool number -> founder
+      scenario: { digit: null, transcript: 'Please call me back. Thanks so much.' },
+    });
+    clock.flush();
+    await engine.settle();
+    const call = engine.getCalls()[0]!;
+    expect(call.voicemailGreeting).toBe('play');
+    expect(call.voicemailGreetingFetchStatus).toBe(200);
+    expect(fetched).toEqual(['http://minio.local/hc-local-media/settings/voicemail-greeting?X-Amz-Signature=abc&X-Amz-Expires=600']);
+    expect(call.status).toBe('completed');
+  });
+  it('a Say greeting records say and fetches nothing; a throwing fetch records 0 and the call still completes', async () => {
+    const { engine, clock } = makeEngine(FOUNDER_DIAL, VOICEMAIL_TWIML, { fetchStatus: async () => { throw new Error('no network'); } });
+    await engine.placeCall({
+      from: '+15550100001',
+      to: '+15551230000', // not a pool number -> founder
+      scenario: { digit: null, transcript: 'Please call me back. Thanks so much.' },
+    });
+    clock.flush();
+    await engine.settle();
+    expect(engine.getCalls()[0]!.voicemailGreeting).toBe('say');
+    expect(engine.getCalls()[0]!.voicemailGreetingFetchStatus).toBeUndefined();
+    const { engine: e2, clock: clock2 } = makeEngine(FOUNDER_DIAL, PLAY_VOICEMAIL_TWIML, { fetchStatus: async () => { throw new Error('no network'); } });
+    await e2.placeCall({
+      from: '+15550100001',
+      to: '+15551230000', // not a pool number -> founder
+      scenario: { digit: null, transcript: 'Please call me back. Thanks so much.' },
+    });
+    clock2.flush();
+    await e2.settle();
+    expect(e2.getCalls()[0]!.voicemailGreetingFetchStatus).toBe(0);
+    expect(e2.getCalls()[0]!.status).toBe('completed');
   });
 });

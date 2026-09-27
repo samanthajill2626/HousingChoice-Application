@@ -21,6 +21,10 @@ import { logger as defaultLogger } from '../lib/logger.js';
 import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
 import { FOUNDER_MISSED_CALL_AUTOTEXT } from '../lib/smsCompliance.js';
 import {
+  VOICEMAIL_GREETING_S3_KEY,
+  type VoicemailGreetingContentType,
+} from '../lib/voicemailGreeting.js';
+import {
   GroupFingerprintCorruptError,
   type GroupFingerprintClaim,
 } from '../services/groupIdentityFingerprint.js';
@@ -105,6 +109,49 @@ export type GroupPeriodRecordId =
 export const JOURNAL_SWEEP_SCAN_CURSOR_ID = 'journal_sweep_scan_cursor';
 
 /**
+ * The recorded voicemail greeting (voicemail-greeting spec 4.2): metadata for
+ * the ONE object under VOICEMAIL_GREETING_S3_KEY. Written only by the two
+ * greeting routes (routes/settings.ts); the generic PUT /api/settings ignores
+ * it. `s3Key` is stored for forward compatibility but the projection accepts
+ * ONLY the fixed key, so a hand-edited record can never point the webhook or
+ * the audio route at a call recording or an MMS object.
+ */
+export interface VoicemailGreeting {
+  s3Key: string;
+  contentType: VoicemailGreetingContentType;
+  /** Sanitized display name (lib/voicemailGreeting.ts). Never logged. */
+  fileName: string;
+  sizeBytes: number;
+  /** ISO instant. */
+  uploadedAt: string;
+  uploadedByUserId: string;
+  uploadedByEmail: string;
+}
+
+/** Project a stored map onto VoicemailGreeting, or undefined when any field is off. */
+export function toVoicemailGreeting(raw: unknown): VoicemailGreeting | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const contentType = r['contentType'];
+  if (r['s3Key'] !== VOICEMAIL_GREETING_S3_KEY) return undefined;
+  if (contentType !== 'audio/mpeg' && contentType !== 'audio/wav') return undefined;
+  if (typeof r['fileName'] !== 'string') return undefined;
+  if (typeof r['sizeBytes'] !== 'number' || !Number.isFinite(r['sizeBytes']) || r['sizeBytes'] < 0) return undefined;
+  if (typeof r['uploadedAt'] !== 'string') return undefined;
+  if (typeof r['uploadedByUserId'] !== 'string') return undefined;
+  if (typeof r['uploadedByEmail'] !== 'string') return undefined;
+  return {
+    s3Key: VOICEMAIL_GREETING_S3_KEY,
+    contentType,
+    fileName: r['fileName'],
+    sizeBytes: r['sizeBytes'],
+    uploadedAt: r['uploadedAt'],
+    uploadedByUserId: r['uploadedByUserId'],
+    uploadedByEmail: r['uploadedByEmail'],
+  };
+}
+
+/**
  * The founder-editable settings (CO2). Defaults are CO2's copy, applied by
  * getOrgSettings() when no item exists yet (a fresh stack reads sane values
  * without an admin first having to PUT them).
@@ -145,6 +192,11 @@ export interface OrgSettings {
    * absent by default and is projected only when actually stored.
    */
   welcomeText?: string;
+  /**
+   * OPTIONAL - the recorded voicemail greeting (spec 4.2). Absent until an
+   * admin uploads one; projected only when the stored map is well-formed.
+   */
+  voicemailGreeting?: VoicemailGreeting;
 }
 
 /** CO2's copy — the defaults a fresh stack reads before any admin edit. */
@@ -176,12 +228,12 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   timezone: 'America/New_York',
 };
 
-/** A settings patch. `welcomeText` may be `null` — an explicit CLEAR that issues a
- *  DynamoDB REMOVE so the attribute is deleted (getOrgSettings then projects no
- *  welcomeText and public.ts falls back to WELCOME_TEXT_TEMPLATE). Every other
- *  field keeps its OrgSettings type. */
-export type OrgSettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
+/** A settings patch. `welcomeText` and `voicemailGreeting` may be `null` - an
+ *  explicit CLEAR that issues a DynamoDB REMOVE. Every other field keeps its
+ *  OrgSettings type. */
+export type OrgSettingsPatch = Partial<Omit<OrgSettings, 'welcomeText' | 'voicemailGreeting'>> & {
   welcomeText?: string | null;
+  voicemailGreeting?: VoicemailGreeting | null;
 };
 
 export interface SettingsRepo {
@@ -191,7 +243,7 @@ export interface SettingsRepo {
    * Merge a partial patch onto the stored settings and return the result.
    * Field-level merge (a patch omitting a field leaves it untouched);
    * quickReplies is replaced wholesale when present (it's a list, not a map).
-   * A `null`-valued field (today only welcomeText) is REMOVEd (cleared).
+   * A `null`-valued field (welcomeText, voicemailGreeting) is REMOVEd (cleared).
    */
   putOrgSettings(patch: OrgSettingsPatch): Promise<OrgSettings>;
   /**
@@ -247,6 +299,7 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
 
   /** Project a stored item (or nothing) onto the typed shape, defaults filling gaps. */
   function toOrgSettings(item: Record<string, unknown> | undefined): OrgSettings {
+    const voicemailGreeting = toVoicemailGreeting(item?.['voicemailGreeting']);
     return {
       missedCallAutoText:
         typeof item?.['missedCallAutoText'] === 'string'
@@ -293,6 +346,10 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
       ...(typeof item?.['welcomeText'] === 'string' && {
         welcomeText: item['welcomeText'] as string,
       }),
+      // voicemailGreeting is OPTIONAL too (no default): projected ONLY when the
+      // stored map is well-formed and names the fixed key (toVoicemailGreeting);
+      // anything else reads as "no greeting", never as a partial record.
+      ...(voicemailGreeting !== undefined && { voicemailGreeting }),
     };
   }
 
@@ -309,7 +366,7 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
       // fields present in the patch — a merge, not a replace (an omitted field is
       // left as stored). An UpdateCommand (not a Put) so a partial patch never
       // blanks the other fields, and the item is created on first write (upsert
-      // semantics, no condition). A `null` value (today only welcomeText) REMOVEs
+      // semantics, no condition). A `null` value (welcomeText, voicemailGreeting) REMOVEs
       // the attribute so getOrgSettings no longer projects it (revert to default).
       const sets: string[] = [];
       const removes: string[] = [];

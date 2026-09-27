@@ -41,6 +41,11 @@ interface RequestOptions {
   /** Query params; undefined/null values are dropped. */
   query?: Record<string, string | number | null | undefined>;
   signal?: AbortSignal;
+  /** A RAW body (a File/Blob) sent as-is; the caller sets Content-Type via
+   *  `headers`. Mutually exclusive with `body`. */
+  rawBody?: Blob;
+  /** Extra request headers (a raw upload's Content-Type and its name header). */
+  headers?: Record<string, string>;
 }
 
 function buildUrl(path: string, query?: RequestOptions['query']): string {
@@ -95,13 +100,17 @@ export async function requestWithStatus<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<ApiResponse<T>> {
-  const { method = 'GET', body, query, signal } = options;
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const { method = 'GET', body, rawBody, query, signal } = options;
+  if (body !== undefined && rawBody !== undefined) {
+    throw new Error('request: body and rawBody are mutually exclusive');
+  }
+  const headers: Record<string, string> = { Accept: 'application/json', ...(options.headers ?? {}) };
   let payload: string | undefined;
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
+  const outgoing: BodyInit | undefined = payload ?? rawBody;
 
   let res: Response;
   try {
@@ -109,7 +118,7 @@ export async function requestWithStatus<T>(
       method,
       headers,
       credentials: 'same-origin',
-      ...(payload !== undefined && { body: payload }),
+      ...(outgoing !== undefined && { body: outgoing }),
       ...(signal !== undefined && { signal }),
     });
   } catch (err) {

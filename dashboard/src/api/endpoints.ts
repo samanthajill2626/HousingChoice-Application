@@ -15,6 +15,7 @@ import type {
   PreviewResponse,
   SettingsPatch,
   SettingsResponse,
+  VoicemailGreeting,
   UserRole,
   PlacementItem,
   PlacementsPage,
@@ -2034,6 +2035,35 @@ export function putSettings(patch: SettingsPatch): Promise<SettingsResponse> {
     method: 'PUT',
     body: patch,
   });
+}
+
+// --- Settings > Voice: the recorded voicemail greeting (/api/settings/voicemail-greeting)
+// Admin-only writes; every logged-in user may read/play. The upload is the RAW
+// file as the body (no multipart), its display name URI-encoded in a header so
+// it never rides the URL (trace attributes) - spec 2026-09-26 section 4.3.
+
+/** PUT /api/settings/voicemail-greeting - upload or replace. `contentType` is
+ *  the canonical audio type the caller resolved (audio/mpeg | audio/wav |
+ *  audio/x-wav). Throws ApiError: 400 unsupported_media_type (with `message`
+ *  in the body) / empty_file, 413 file_too_large, 503 media_storage_unavailable,
+ *  403 forbidden, 429 rate_limited. */
+export function uploadVoicemailGreeting(file: File, contentType: string): Promise<VoicemailGreeting> {
+  return request<{ voicemailGreeting: VoicemailGreeting }>('/api/settings/voicemail-greeting', {
+    method: 'PUT',
+    rawBody: file,
+    headers: { 'Content-Type': contentType, 'X-Greeting-File-Name': encodeURIComponent(file.name) },
+  }).then((r) => r.voicemailGreeting);
+}
+
+/** DELETE /api/settings/voicemail-greeting - 204; idempotent. */
+export function removeVoicemailGreeting(): Promise<void> {
+  return request<void>('/api/settings/voicemail-greeting', { method: 'DELETE' });
+}
+
+/** The authed audio URL for the in-page player. `?v=` is the upload instant so
+ *  a Replace is never served from the browser cache. */
+export function voicemailGreetingAudioUrl(greeting: VoicemailGreeting): string {
+  return `/api/settings/voicemail-greeting/audio?v=${encodeURIComponent(greeting.uploadedAt)}`;
 }
 
 // --- Settings ▸ Notifications (/api/push) -----------------------------------

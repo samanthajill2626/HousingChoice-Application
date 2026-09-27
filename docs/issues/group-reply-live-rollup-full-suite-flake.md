@@ -10,6 +10,27 @@ resolved: 2026-08-24
 refs: e2e/tests/dashboard-next/group-text-reply-all.spec.ts:121, dashboard/src/routes/conversation/GroupTextView.tsx, dashboard/src/api/EventStreamProvider.tsx
 ---
 
+**Sighting (2026-09-27 afternoon, `feat/voicemail-greeting` gate runs) -
+the reopen signature, now DETERMINISTIC IN ISOLATION.** A full `npm run e2e`
+at 12:15-12:53 EDT (284 passed, 5 failed, 38.6m) failed
+`group-text-reply-all.spec.ts:45` and `group-text-per-recipient-delivery.spec.ts:63`
+on exactly this signature (the per-member rollup never finalized LIVE; 60 s
+poll). Run ALONE they failed again (2 of 2), and run alone at MAIN @65015b2c
+(before the branch's last commit, which touches only voicemail-greeting log
+levels and copy) they failed the same way (13:00, 1 passed / 2 failed). So it
+is not load and not that branch. The same machine passed the full suite at
+09:16 that morning (289 passed on c720e0a3, identical group-text code). The
+app log during the failing runs carries "the Conversations rail refused a
+post because it is closed or gone" / "group text rail dropped" / "deleted a
+dead Conversations rail". The other three full-run failures that day
+(`group-text-stop.spec.ts:48`, `matching-entry-points.spec.ts:270`,
+`relay-30003-retry.spec.ts:135`) passed alone. Unverified lead: something
+time-of-day or wall-clock dependent (compare
+`group-crosscheck-wiring-test-wall-clock-dependent`) or fake-twilio
+Conversations state; run the suggested trace below before touching any
+timeout. Logs: `W:/tmp/voicemail-greeting/.superpowers/planner-gates/`
+(`final-e2e.log`, `final-e2e-rerun5.log`, `base-e2e-grouptext.log`).
+
 **Resolution (2026-08-24): single sighting from the one sick gate run.** The
 2026-08-21 27.1-minute run that produced this also produced two
 machine-exhaustion issues since resolved as environmental

@@ -14,8 +14,6 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import {
   createMediaStore,
-  RangeNotSatisfiableError,
-  type MediaObject,
   type MediaStore,
 } from '../adapters/mediaStore.js';
 import type { Semaphore } from '../lib/semaphore.js';
@@ -144,6 +142,7 @@ import { createUnmatchedEmailRouter } from './unmatchedEmail.js';
 import { type UnmatchedEmailRepo } from '../repos/unmatchedEmailRepo.js';
 import { createMmsMediaRouter } from './mmsMedia.js';
 import { createEmailMediaRouter } from './emailMedia.js';
+import { serveMediaObject } from './serveMediaObject.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -718,7 +717,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(mediaStore !== undefined && { mediaStore }),
     }),
   );
-  // Founder settings (GET requireAuth, PUT requireRole admin).
+  // Founder settings (GET requireAuth, PUT requireRole admin), plus the
+  // voicemail greeting routes (upload/remove admin-only, audio any user) over
+  // the SAME media store (unset: upload answers 503, audio 404).
   router.use(
     '/settings',
     createSettingsRouter({
@@ -726,6 +727,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
       auditRepo: audit,
+      ...(mediaStore !== undefined && { mediaStore }),
     }),
   );
   // Self cell verification + self view (Voice Phase 1, spec §7) — mounted at
@@ -2289,72 +2291,31 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.status(404).json({ error: 'recording_not_found' });
       return;
     }
-    // A SINGLE well-formed byte range only ("bytes=0-1023", "bytes=1024-",
-    // "bytes=-500"). A multi-range value, another unit, or a malformed one is
-    // IGNORED and answered with the full 200 - RFC 7233 explicitly lets a
-    // server ignore a Range it does not wish to satisfy, and the browser then
-    // falls back to a normal read rather than erroring.
-    const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range.trim() : undefined;
-    const range =
-      rangeHeader !== undefined && /^bytes=(\d+-\d*|-\d+)$/.test(rangeHeader) ? rangeHeader : undefined;
-    let object: MediaObject | undefined;
-    try {
-      object =
-        range !== undefined
-          ? await mediaStore.getStream(key, { range })
-          : await mediaStore.getStream(key);
-    } catch (err) {
-      if (err instanceof RangeNotSatisfiableError) {
-        // 416 must carry the object size so the client can re-ask correctly.
-        // HeadObject is best-effort and only on this malformed-client path -
-        // a 416 without Content-Range still beats a 500.
-        const meta = await mediaStore.head(key).catch(() => undefined);
-        res.setHeader('Accept-Ranges', 'bytes');
-        if (meta?.size !== undefined) res.setHeader('Content-Range', `bytes */${meta.size}`);
-        res.status(416).json({ error: 'range_not_satisfiable' });
-        return;
-      }
-      throw err;
-    }
-    if (!object) {
-      // The key is recorded on the call but the object is gone (lifecycle/
-      // deletion) — 404 rather than a hanging stream.
-      log.warn({ callSid: callId }, 'recording key present but object not found in the media store');
-      res.status(404).json({ error: 'recording_not_found' });
-      return;
-    }
-    res.setHeader('Content-Type', object.contentType ?? 'audio/mpeg');
-    // Accept-Ranges on EVERY successful response (the plain 200 included) is
-    // what tells the browser the recording is SEEKABLE. Without it the native
-    // scrubber renders but refuses to move - the whole bug this route had.
-    res.setHeader('Accept-Ranges', 'bytes');
-    // SAME declared posture as the MMS media route below (Cameron, 2026-09-02):
-    // immutable per CallSid, `private` so only this session's browser holds it
-    // and no shared proxy/CDN ever does. Declared rather than left to browser
-    // heuristics - an authenticated PII response should never have an UNSTATED
-    // caching policy, and a scrubbed-through recording is re-requested by range
-    // constantly, so a cacheable window is what makes playback usable at all.
-    // The accepted residual (a one-hour local-machine reuse window) and the
-    // reasoning behind accepting it are recorded in
-    // docs/issues/authenticated-mms-media-browser-cache.md - the two routes are
-    // deliberately kept in lockstep, so change them together or not at all.
-    res.setHeader('Cache-Control', 'private, max-age=3600');
-    if (object.contentLength !== undefined) {
-      res.setHeader('Content-Length', String(object.contentLength));
-    }
-    // DEFENSIVE DEGRADE: a range was forwarded but the store answered without
-    // a ContentRange - serve the full 200 rather than a malformed 206.
-    if (range !== undefined && object.contentRange !== undefined) {
-      res.setHeader('Content-Range', object.contentRange);
-      res.status(206);
-    }
-    // nosniff is already set app-wide; the recording is audio, never executable.
-    log.info({ callSid: callId }, 'streaming founder-bridge recording to the dashboard');
-    object.body.on('error', (err) => {
-      log.error({ err, callSid: callId }, 'recording stream errored mid-flight');
-      res.destroy(err);
+    await serveMediaObject(req, res, {
+      mediaStore,
+      key,
+      // nosniff is already set app-wide; the recording is audio, never executable.
+      defaultContentType: 'audio/mpeg',
+      // SAME declared posture as the MMS media route below (Cameron, 2026-09-02):
+      // immutable per CallSid, `private` so only this session's browser holds it
+      // and no shared proxy/CDN ever does. Declared rather than left to browser
+      // heuristics - an authenticated PII response should never have an UNSTATED
+      // caching policy, and a scrubbed-through recording is re-requested by range
+      // constantly, so a cacheable window is what makes playback usable at all.
+      // The accepted residual (a one-hour local-machine reuse window) and the
+      // reasoning behind accepting it are recorded in
+      // docs/issues/authenticated-mms-media-browser-cache.md - the two routes are
+      // deliberately kept in lockstep, so change them together or not at all.
+      cacheControl: 'private, max-age=3600',
+      notFoundError: 'recording_not_found',
+      log,
+      logContext: { callSid: callId },
+      messages: {
+        missing: 'recording key present but object not found in the media store',
+        streaming: 'streaming founder-bridge recording to the dashboard',
+        errored: 'recording stream errored mid-flight',
+      },
     });
-    object.body.pipe(res);
   });
 
   // GET /api/messages/:providerSid/media/:idx — stream a mirrored inbound MMS

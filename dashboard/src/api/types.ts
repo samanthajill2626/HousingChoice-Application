@@ -106,6 +106,19 @@ export interface PoolNumberRow {
 // is OPTIONAL (absent until the operator sets it — the backend falls back to its
 // WELCOME_TEXT_TEMPLATE constant).
 
+/** MIRRORS app/src/repos/settingsRepo.ts `VoicemailGreeting`. */
+export interface VoicemailGreeting {
+  s3Key: string;
+  contentType: 'audio/mpeg' | 'audio/wav';
+  /** Sanitized display name of the uploaded file. */
+  fileName: string;
+  sizeBytes: number;
+  /** ISO instant; also the audio URL's cache-buster. */
+  uploadedAt: string;
+  uploadedByUserId: string;
+  uploadedByEmail: string;
+}
+
 /** GET /api/settings → { settings }, PUT /api/settings { patch } → { settings }. */
 export interface OrgSettings {
   /** The zero-tap missed-call auto-text body (1..320 chars). */
@@ -131,13 +144,18 @@ export interface OrgSettings {
   /** OPTIONAL housing-fair welcome SMS body; {firstName} is interpolated.
    *  Absent → the backend falls back to WELCOME_TEXT_TEMPLATE. */
   welcomeText?: string;
+  /** OPTIONAL - the recorded voicemail greeting (voicemail-greeting spec 4.2).
+   *  Absent until an admin uploads one. Written ONLY by the greeting routes;
+   *  the generic PUT ignores it (see SettingsPatch). */
+  voicemailGreeting?: VoicemailGreeting;
 }
 
 /** The PUT /api/settings patch: only the changed fields. `welcomeText` accepts
  *  an explicit `null` to CLEAR a previously-set value (revert to the built-in
  *  default) — the backend deletes the stored attribute. Every other field keeps
- *  its OrgSettings type. */
-export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
+ *  its OrgSettings type. `voicemailGreeting` is Omitted: the server ignores it
+ *  on PUT - use uploadVoicemailGreeting / removeVoicemailGreeting. */
+export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText' | 'voicemailGreeting'>> & {
   welcomeText?: string | null;
 };
 

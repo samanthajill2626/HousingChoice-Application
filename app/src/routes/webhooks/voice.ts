@@ -37,6 +37,12 @@ import { Router } from 'express';
 import twilio from 'twilio';
 import { createMediaStore, type MediaStore } from '../../adapters/mediaStore.js';
 import {
+  VOICEMAIL_GREETING_LOOKUP_BUDGET_MS,
+  VOICEMAIL_GREETING_PLAY_TTL_SECONDS,
+  VOICEMAIL_GREETING_S3_KEY,
+  withTimeout,
+} from '../../lib/voicemailGreeting.js';
+import {
   createMessagingAdapter,
   MediaFetchRefusedError,
   type MessagingAdapter,
@@ -338,6 +344,11 @@ export interface TwilioVoiceWebhookDeps {
    * schedules a run on a fresh transcript save. Injectable in tests; the real
    * repo by default. */
   extractionRepo?: ExtractionRepo;
+  /**
+   * Voicemail-greeting lookup budget in ms (spec 4.6). Tests shrink it to prove
+   * the bound; production always uses VOICEMAIL_GREETING_LOOKUP_BUDGET_MS.
+   */
+  voicemailGreetingLookupBudgetMs?: number;
 }
 
 export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Router {
@@ -368,6 +379,94 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   });
   const ourNumberKind = createOurNumberKind({ config, conversations });
   const baseUrl = config.publicBaseUrl ?? '';
+  const greetingLookupBudgetMs = deps.voicemailGreetingLookupBudgetMs ?? VOICEMAIL_GREETING_LOOKUP_BUDGET_MS;
+
+  // Voicemail greeting (spec 4.6). The LOOKUP returns a result and touches
+  // nothing - no TwiML, no log line - so a lookup that resolves AFTER the
+  // budget has nothing to append and nothing to log. Only the caller, and
+  // only when the race resolved in time, emits <Play> and writes the one
+  // INFO, WARN or ERROR. PII: callSid + the fixed s3Key only; the presigned
+  // URL is a bearer token and is never logged.
+  //
+  // LEVELS (Cameron, 2026-09-27, amending decision 3's WARN): a greeting that
+  // IS set but cannot be offered logs ERROR, so it reaches the error alarms -
+  // callers are silently getting the computer voice while Settings shows a
+  // greeting. A failure BEFORE we know whether one is set (the settings read
+  // itself failing or timing out) stays WARN: the default no-greeting org
+  // would otherwise page on every DynamoDB blip. No log line when none is set.
+  type GreetingLookup =
+    | { kind: 'play'; url: string; s3Key: string }
+    | { kind: 'absent' }
+    | { kind: 'no_store'; s3Key: string }
+    | { kind: 'missing'; s3Key: string };
+
+  /** How far the lookup got, read ONLY by the caller's catch (a thrown error
+   *  or the budget expiring) to pick the level. The one side effect the lookup
+   *  has, and it is on this local object, never on the TwiML or the logger. */
+  interface GreetingLookupProgress {
+    greetingSet: boolean;
+  }
+
+  async function lookupVoicemailGreeting(
+    signal: AbortSignal,
+    progress: GreetingLookupProgress,
+  ): Promise<GreetingLookup> {
+    const org = await settings.getOrgSettings();
+    if (org.voicemailGreeting === undefined) return { kind: 'absent' };
+    progress.greetingSet = true;
+    // The FIXED key, never the record's s3Key: the projection already accepts
+    // only that key, and heading/presigning the constant (defense in depth)
+    // means no projection change or second writer of the map can point <Play>
+    // at a call recording or an MMS object.
+    const s3Key = VOICEMAIL_GREETING_S3_KEY;
+    if (!mediaStore) return { kind: 'no_store', s3Key };
+    const head = await mediaStore.head(s3Key, { signal });
+    if (head === undefined) return { kind: 'missing', s3Key };
+    const url = await mediaStore.presign(s3Key, VOICEMAIL_GREETING_PLAY_TTL_SECONDS);
+    return { kind: 'play', url, s3Key };
+  }
+
+  /**
+   * Append <Play greeting> to `reply` when a greeting is set AND its object
+   * exists, inside the budget; returns whether it did. Every other outcome
+   * (none set, store unconfigured, object missing, thrown error, timeout)
+   * returns false so the caller speaks today's prompt - the webhook can never
+   * fail because of the greeting (decision 3). No log line when no greeting is
+   * set (the normal state of every org); ERROR when one is set but cannot be
+   * offered; WARN when the settings read itself failed (see LEVELS above).
+   */
+  async function offerVoicemailGreeting(reply: InstanceType<typeof VoiceResponse>, callSid: string): Promise<boolean> {
+    let result: GreetingLookup;
+    const progress: GreetingLookupProgress = { greetingSet: false };
+    try {
+      result = await withTimeout(
+        lookupVoicemailGreeting(AbortSignal.timeout(greetingLookupBudgetMs), progress),
+        greetingLookupBudgetMs,
+        'voicemail greeting lookup',
+      );
+    } catch (err) {
+      const fields = { err, callSid, budgetMs: greetingLookupBudgetMs };
+      const message = 'voicemail greeting lookup failed or timed out - using the spoken prompt';
+      if (progress.greetingSet) log.error(fields, message);
+      else log.warn(fields, message);
+      return false;
+    }
+    switch (result.kind) {
+      case 'absent':
+        return false;
+      case 'no_store':
+        log.error({ callSid, s3Key: result.s3Key }, 'voicemail greeting set but no media store configured - using the spoken prompt');
+        return false;
+      case 'missing':
+        log.error({ callSid, s3Key: result.s3Key }, 'voicemail greeting object missing - using the spoken prompt');
+        return false;
+      case 'play':
+        reply.play(result.url);
+        log.info({ callSid, s3Key: result.s3Key }, 'voicemail greeting offered');
+        return true;
+    }
+  }
+
   // Founder-bridge caller ID: ALWAYS a number we own (the business number),
   // NEVER the real caller's From (the M1.9b guardrail).
   const businessCallerId = config.businessPhoneNumber;
@@ -1862,6 +1961,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     //    the EXISTING recordingStatusCallback (/voice/recording), where it is
     //    classified as a voicemail; then thanks + hangup on the Record action. The
     //    miss-time missed push + auto-text already fired above (before any message).
+    //  - INBOUND founder-bridge miss: when an admin has uploaded a voicemail
+    //    greeting, <Play> it (presigned, time-bounded) instead of the spoken
+    //    prompt (voicemail-greeting spec 4.6).
     //  - masked relay OR outbound miss -> today's brief goodbye + hangup (spec
     //    decision 3: voicemail is BUSINESS LINE ONLY; masked calls never record).
     // On an answered/completed bridge (or a per-leg statusCallback, whose response
@@ -1872,7 +1974,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // the guard matches the onFounderBridgeMissed side-effect guard exactly.
     const reply = new VoiceResponse();
     if (isMissed && entry?.type === 'call' && entry.masked !== true && entry.direction !== 'outbound') {
-      reply.say(resolveMessage('voice.voicemail_prompt'));
+      // Recorded greeting first (spec 4.6); today's spoken prompt when there is
+      // none or it cannot be offered in time. Everything after this line -
+      // <Record>, the thanks, the hangup - is untouched (decision 5).
+      const played = await offerVoicemailGreeting(reply, entryCallSid);
+      if (!played) reply.say(resolveMessage('voice.voicemail_prompt'));
       reply.record({
         maxLength: VOICEMAIL_MAX_LENGTH_SECONDS,
         // SILENCE timeout, NOT a length cap - `maxLength` is the cap. Twilio's

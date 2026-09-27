@@ -364,13 +364,15 @@ describe('dashboard mutation inventory', () => {
   it('matches the complete checked-in catalog in both directions without line fingerprints', () => {
     const discoveredFingerprints = catalogedRaw.map(fingerprint).sort();
     const checkedInFingerprints = DASHBOARD_MUTATION_CATALOG.map((entry) => entry.fingerprint).sort();
-    // 108 = the 102 pre-manual-trigger mutations + runExtraction
+    // 110 = the 102 pre-manual-trigger mutations + runExtraction
     // (manual-extraction-trigger 4.6's POST /api/contacts/:contactId/extraction-run)
     // + the three Mark-unread toggle routes (call-inbox-unread: markInboxUnread x2,
     // markConversationUnread)
     // + previewRelayGroup and createRelayGroup (contact-create-relay-group's
     // POST /api/relay-groups/preview and POST /api/relay-groups).
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(108);
+    // + uploadVoicemailGreeting and removeVoicemailGreeting (voicemail-greeting:
+    // PUT/DELETE /api/settings/voicemail-greeting).
+    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(110);
     expect(new Set(discoveredFingerprints).size).toBe(discoveredFingerprints.length);
     expect(new Set(checkedInFingerprints).size).toBe(checkedInFingerprints.length);
     expect(checkedInFingerprints).toEqual(discoveredFingerprints);

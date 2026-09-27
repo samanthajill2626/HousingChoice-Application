@@ -139,3 +139,102 @@
   color: var(--c-danger);
   font-size: var(--fs-xs);
 }
+
+/* --- Voicemail greeting block (voicemail-greeting spec 4.7) --------------- */
+
+.greetingBlock {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.greetingHeading {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.greetingHelp {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.greetingRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.greetingStatus {
+  font-size: var(--fs-sm);
+}
+
+.greetingNotice {
+  margin: 0;
+  color: var(--c-success);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.greetingCurrent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.greetingMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.greetingName {
+  font-weight: var(--fw-medium);
+  overflow-wrap: anywhere;
+}
+
+.greetingDate {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.greetingPlayer {
+  width: 100%;
+  max-width: 480px;
+}
+
+/* Replace / Remove. Its own class rather than .actions, which does not wrap:
+ * the buttons must wrap at phone width (spec 4.7). */
+.greetingActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+/* Visually hidden but still in the accessibility tree and drivable by
+ * setInputFiles / userEvent.upload - never `hidden` or display: none. */
+.greetingInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.greetingDialogText {
+  margin: 0;
+}

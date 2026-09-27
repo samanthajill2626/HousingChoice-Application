@@ -109,7 +109,7 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
   '/settings/team': ['/api/users?#required'],
   '/settings/templates': ['/api/settings?#required'],
   '/settings/notifications': [],
-  '/settings/voice': ['/api/users/me?#required'],
+  '/settings/voice': ['/api/users/me?#required', '/api/settings?#required', '/api/settings/voicemail-greeting/audio?v#conditional'],
   '/settings/system': [
     '/api/settings?#required', '/api/system/flags?#required', '/api/system/alarms?#required',
     '/api/system/errors?since#required',

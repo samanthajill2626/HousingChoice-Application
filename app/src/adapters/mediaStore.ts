@@ -116,8 +116,14 @@ export interface MediaStore {
    * an uploaded attachment exists, and re-check its size + Content-Type before
    * presigning). Returns undefined when the key does not exist (404), mirroring
    * getStream's absent-object contract.
+   *
+   * `opts.signal` (optional, additive) aborts the underlying request: the
+   * voicemail-greeting webhook hands it `AbortSignal.timeout(budget)` so an
+   * abandoned HEAD releases its pooled socket instead of holding it until the
+   * OS gives up. An aborted call REJECTS (it never reads as an absent object).
+   * Callers that omit it get byte-identical behavior.
    */
-  head(key: string): Promise<MediaHead | undefined>;
+  head(key: string, opts?: { signal?: AbortSignal }): Promise<MediaHead | undefined>;
   /**
    * Mint a presigned POST grant so the BROWSER uploads one file DIRECTLY to the
    * media bucket (unit-photos direct-upload revision) - the bytes never touch
@@ -241,10 +247,13 @@ export class S3MediaStore implements MediaStore {
     });
   }
 
-  async head(key: string): Promise<MediaHead | undefined> {
+  async head(key: string, opts?: { signal?: AbortSignal }): Promise<MediaHead | undefined> {
     try {
       const out = await this.client.send(
         new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+        // No signal -> `undefined` options, exactly what the old one-argument
+        // call sent. An aborted request's error is not a 404: it re-throws below.
+        opts?.signal !== undefined ? { abortSignal: opts.signal } : undefined,
       );
       return {
         ...(out.ContentType !== undefined && { contentType: out.ContentType }),

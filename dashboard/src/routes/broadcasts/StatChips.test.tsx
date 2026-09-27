@@ -8,6 +8,8 @@ import type { BroadcastStats } from '../../api/index.js';
 import { StatChips } from './StatChips.js';
 import { DeliveryBadge } from './DeliveryBadge.js';
 import { BroadcastStatusPill } from './BroadcastStatusPill.js';
+import styles from './StatChips.module.css';
+import badgeStyles from './DeliveryBadge.module.css';
 
 function stats(over: Partial<BroadcastStats> = {}): BroadcastStats {
   return {
@@ -72,7 +74,7 @@ describe('StatChips', () => {
     expect(chipValue(list, 'Skipped')).toContain('0');
   });
 
-  it('orders chips Recipients, Delivered, Sent, Sending, Queued, Failed, Skipped', () => {
+  it('orders chips Recipients, Delivered, Sent, Sending, Queued, Failed, Not confirmed, Skipped', () => {
     render(<StatChips stats={stats()} />);
     const list = screen.getByLabelText('Delivery stats');
     const labels = within(list)
@@ -82,7 +84,48 @@ describe('StatChips', () => {
     // "Queued" = still on our box (paced fan-out / deferred retry);
     // "Sending" = with the carrier (dispatched, awaiting its sent callback);
     // "Sent" = carrier-confirmed only.
-    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Sending', 'Queued', 'Failed', 'Skipped']);
+    // "Not confirmed" (SOR D22) sits right after "Failed": the recipients the
+    // platform could not confirm, which are neither failed nor skipped.
+    expect(labels).toEqual([
+      'Recipients',
+      'Delivered',
+      'Sent',
+      'Sending',
+      'Queued',
+      'Failed',
+      'Not confirmed',
+      'Skipped',
+    ]);
+  });
+
+  // SOR D22: the unresolved recipients get their OWN chip in the audience sum -
+  // danger, so it draws the eye, but only above zero (the Failed rule) - and
+  // never fold into Skipped, which also drives the "Not sent" pill.
+  it('renders a Not confirmed chip after Failed, danger only above zero, and keeps the audience sum', () => {
+    render(
+      <StatChips
+        stats={stats({ audience: 4, delivered: 2, sent: 0, queued: 0, failed: 1, unconfirmed: 1 })}
+      />,
+    );
+    const list = screen.getByLabelText('Delivery stats');
+    expect(chipValue(list, 'Not confirmed')).toContain('1');
+    expect(within(list).getByText('Not confirmed').closest('div')).toHaveClass(styles.danger!);
+    expect(chipValue(list, 'Skipped')).toContain('0');
+    // The row visibly balances: every bucket chip sums to Recipients.
+    const values = within(list)
+      .getAllByRole('definition')
+      .map((dd) => Number(dd.textContent));
+    const [recipients, ...buckets] = values;
+    expect(recipients).toBe(4);
+    expect(buckets.reduce((sum, v) => sum + v, 0)).toBe(4);
+  });
+
+  it('a legacy stats object without the bucket renders 0 with no danger class', () => {
+    // stats() carries no `unconfirmed`: persisted rows predate the field.
+    render(<StatChips stats={stats()} />);
+    const list = screen.getByLabelText('Delivery stats');
+    expect(chipValue(list, 'Not confirmed')).toBe('Not confirmed0');
+    expect(within(list).getByText('Not confirmed').closest('div')).not.toHaveClass(styles.danger!);
   });
 
   it('renders the Sending chip from stats.sending, defaulting 0 for legacy rows without it', () => {
@@ -157,6 +200,19 @@ describe('DeliveryBadge', () => {
     expect(screen.getByText(/Sending could not be scheduled/)).toBeInTheDocument();
     expect(container.textContent ?? '').not.toContain('(error ');
     expect(container.textContent ?? '').not.toContain('enqueue_failed');
+  });
+
+  // SOR D22: a recipient the platform could not confirm reads "Not confirmed"
+  // with the D20 reason, danger-toned - never "Failed", never an error number.
+  it('renders an unconfirmed recipient as Not confirmed with its reason, never Failed', () => {
+    const { container } = render(<DeliveryBadge status="failed" errorCode="send_unconfirmed" />);
+    const badge = screen.getByText('Not confirmed');
+    expect(badge).toHaveClass(badgeStyles.danger!);
+    expect(badge).toHaveAttribute('title', "Couldn't confirm whether this text went out");
+    expect(screen.getByText(/Couldn't confirm whether this text went out/)).toBeInTheDocument();
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument();
+    expect(container.textContent ?? '').not.toContain('(error ');
+    expect(container.textContent ?? '').not.toContain('send_unconfirmed');
   });
 
   it('share-skip-fix D7: a skipped row appends its reason, and a code-less legacy skip the disjunction', () => {

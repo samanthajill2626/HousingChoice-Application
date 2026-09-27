@@ -23,6 +23,7 @@ import {
   toRecipientViews,
 } from './broadcastFormat.js';
 import { useBroadcastResults } from './useBroadcastResults.js';
+import { SEND_UNCONFIRMED_CODE } from '../contact/deliveryStatus.js';
 import styles from './BroadcastResults.module.css';
 
 /** A recipient row's identity block: the tenant NAME (primary) + formatted phone
@@ -46,6 +47,13 @@ function recipientIdentity(row: BroadcastRecipientView): { primary: string; seco
  *  the contact page hosts the in-thread Retry). A phone-only row renders link-less. */
 function RecipientRow({ row }: { row: BroadcastRecipientView }): React.JSX.Element {
   const failed = row.status === 'failed';
+  // SOR D22: a recipient the platform could not confirm keeps the failed
+  // styling (a danger-toned row) and the failures-first sort, but gets NO
+  // "open conversation to retry": the text may have gone out, and a resend is
+  // the double text send-outcome-reconcile exists to prevent. The row itself
+  // stays a link to the contact.
+  const showRetryHint =
+    failed && row.errorCode !== SEND_UNCONFIRMED_CODE && row.contactId !== undefined;
   const { primary, secondary } = recipientIdentity(row);
   const inner = (
     <>
@@ -60,7 +68,7 @@ function RecipientRow({ row }: { row: BroadcastRecipientView }): React.JSX.Eleme
         {...(row.carrierSentAt !== undefined && { carrierSentAt: row.carrierSentAt })}
         {...(row.errorCode !== undefined && { errorCode: row.errorCode })}
       />
-      {failed && row.contactId !== undefined ? (
+      {showRetryHint ? (
         // NOT aria-hidden: the hint contributes to the link's accessible name so
         // a role+name lookup for "open conversation to retry" resolves the link.
         <span className={styles.retryHint}>↗ open conversation to retry</span>

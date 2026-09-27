@@ -26,12 +26,13 @@ export interface DeliveryBadgeProps {
    *  refusal / fence code on a skip. Rendered as a title + appended text through
    *  shareRecipientReason. Absent on a failed row -> "Delivery failed"; absent on
    *  a skipped row (recorded before 2026-09-25) -> "Opted out or number
-   *  unreachable". Queued / sent / delivered rows show no reason. */
+   *  unreachable". Queued / sent / delivered rows show no reason. It also picks
+   *  the LABEL for `send_unconfirmed`: "Not confirmed" (SOR D22). */
   errorCode?: string;
 }
 
 export function DeliveryBadge({ status, carrierSentAt, errorCode }: DeliveryBadgeProps): React.JSX.Element {
-  const pres = presentRecipientStatus(status, carrierSentAt);
+  const pres = presentRecipientStatus(status, carrierSentAt, errorCode);
   // share-skip-fix D7: every skipped and failed row carries its reason.
   const reason = shareRecipientReason(status, errorCode);
   return (

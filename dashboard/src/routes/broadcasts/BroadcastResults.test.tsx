@@ -29,6 +29,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { BroadcastResults } from './BroadcastResults.js';
+import styles from './BroadcastResults.module.css';
 
 function results(over: Partial<BroadcastResultsType> = {}): BroadcastResultsType {
   return {
@@ -149,6 +150,53 @@ describe('BroadcastResults — render', () => {
     const retryLink = within(list).getByRole('link', { name: /open conversation to retry/i });
     // The row links to the contact's comms (the in-thread Retry lives there).
     expect(retryLink).toHaveAttribute('href', '/contacts/c1');
+  });
+
+  // SOR D22. A recipient the platform could not confirm reads "Not confirmed"
+  // with its reason, keeps the failed styling and the failures-first sort (a
+  // danger-toned row sorted first is right), stays a link to the contact - and
+  // offers NO "open conversation to retry": the text may have gone out, and a
+  // resend is the double text this branch exists to prevent.
+  it('an unconfirmed row reads Not confirmed with its reason, keeps the failed styling and sort, and offers no retry hint', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({
+        stats: {
+          audience: 2,
+          sent: 0,
+          delivered: 1,
+          failed: 0,
+          unconfirmed: 1,
+          skipped_opted_out: 0,
+          skipped_no_consent: 0,
+          queued: 0,
+        },
+        recipients: {
+          // Delivered FIRST in the map, so only the sort can put Ana on top.
+          c2: { status: 'delivered', firstName: 'Bo' },
+          c1: { status: 'failed', errorCode: 'send_unconfirmed', firstName: 'Ana' },
+        },
+      }),
+    );
+    renderResults();
+    // Scoped to the Recipients list: the stats chip carries the same label.
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    const [first] = within(list).getAllByRole('listitem');
+    expect(first).toHaveTextContent('Ana');
+    expect(within(first as HTMLElement).getByText('Not confirmed')).toBeInTheDocument();
+    expect(
+      within(first as HTMLElement).getByText(/Couldn't confirm whether this text went out/),
+    ).toBeInTheDocument();
+    expect(first).toHaveClass(styles.recipientFailed!);
+    expect(within(first as HTMLElement).queryByText('Failed')).not.toBeInTheDocument();
+    // Still a link to the contact, but not a retry affordance.
+    expect(within(list).getByRole('link', { name: /Ana/ })).toHaveAttribute('href', '/contacts/c1');
+    expect(within(list).queryByRole('link', { name: /open conversation to retry/i })).toBeNull();
+    expect(list.textContent ?? '').not.toContain('open conversation to retry');
+    // The chip counts it apart from Failed.
+    const chips = screen.getByLabelText('Delivery stats');
+    expect(
+      within(within(chips).getByText('Not confirmed').closest('div') as HTMLElement).getByText('1'),
+    ).toBeInTheDocument();
   });
 });
 

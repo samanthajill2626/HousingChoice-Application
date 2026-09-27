@@ -1,6 +1,6 @@
 # Staff notes on the tenant file and a Past tab on the Tours page - design specification
 
-Status: DRAFT 2 - after spec review round 1 (adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/spec-r1-adjudications.md`); written for an OVERNIGHT UNATTENDED mission (Cameron 2026-09-26): every product decision below was given in the mission text or is recorded in section 9 as a decision the planner took alone
+Status: DRAFT 3 - after spec review rounds 1 and 2 (adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/spec-r1-adjudications.md` and `spec-r2-adjudications.md`); written for an OVERNIGHT UNATTENDED mission (Cameron 2026-09-26): every product decision below was given in the mission text or is recorded in section 9 as a decision the planner took alone
 Date: 2026-09-26
 Branch: `feat/staff-notes-past-tours`
 Worktree: `W:\tmp\staff-notes-past-tours`
@@ -24,17 +24,18 @@ unchanged.
 
 **Part 2 (items 18 and 20, list half only).** The Tours page gets a third tab,
 Past, between Active and Closed, at `/tours/past`. It lists, from the last 90
-days up to right now, the tours that still need a human decision: tours whose
-time has passed and were never marked toured ("Not marked"), toured tours with
-no outcome recorded ("Needs outcome"), and no-shows ("No show"). Most recent
-first. A tour still scheduled for LATER today, or earlier today and not yet
-marked, stays on Active's Today group until midnight and is not repeated here.
-A row's "Mark toured" marks that tour toured; a row's "Record outcome" opens
-the tour page's existing outcome dialog; the row itself links to the tour page,
-and the tour page's back arrow returns to Past. Staff can tick several "Not
-marked" rows and mark them toured in one go, one PATCH per tour, each tour
-re-read just before its PATCH so a tour a colleague has since canceled or
-marked no-show is skipped and says so. Nothing closes on its own, no status
+days through the end of today, the tours that still need a human decision:
+tours whose time has passed and were never marked toured ("Not marked"),
+toured tours with no outcome recorded ("Needs outcome"), toured tours whose
+move-forward decision never became a placement ("Needs placement"), and
+no-shows ("No show"). Most recent first. A tour still scheduled for today,
+marked or not, stays on Active's Today group until midnight and is not
+repeated here. A row's "Mark toured" marks that tour toured; a row's "Record
+outcome" opens the tour page's existing outcome dialog; the row itself links
+to the tour page, and the tour page's back arrow returns to Past. Staff can
+tick several "Not marked" rows and mark them toured in one go, one PATCH per
+tour, each tour re-read just before its PATCH so a tour a colleague has since
+canceled, marked no-show or rescheduled is skipped and says so. Nothing closes on its own, no status
 changes except through these actions, and nothing here sends a text or
 reminder. The calendar view (item 18's other half) is not part of this.
 
@@ -221,10 +222,13 @@ creates a contact without it.
 ### 3.4 The AI neither reads nor writes it
 
 By construction, not by a new guard: `toProfile` names its fields and
-`staff_notes` is not added; `applyExtraction` writes `notes` only. The prompt is
-untouched. A test asserts `toProfile` of a contact carrying `staff_notes`
-returns a profile without that key, and that an extraction apply that appends a
-note line writes a patch without `staff_notes`.
+`staff_notes` is not added; `applyExtraction` writes two kinds of patch, one
+direct-write patch whose keys come from the extraction schema
+(`apply.ts:455-460`) and the `notes` append (`apply.ts:704`), and neither can
+name `staff_notes`. The prompt is untouched. A test asserts `toProfile` of a
+contact carrying `staff_notes` returns a profile without that key, and that an
+extraction apply that both direct-writes a field and appends a note line makes
+NO `contacts.update` call carrying `staff_notes` or `staff_notes_updated_at`.
 
 One issue is filed: `extraction-prompt-read-staff-notes` (improvement, low) -
 have the extraction prompt read staff notes as context, so the model can
@@ -303,17 +307,21 @@ Copy is staff-facing only (no catalog). Source stays ASCII.
 
 ### 3.8 Glossary
 
-`documentation/GLOSSARY.md` gains an entry under the contact vocabulary:
+`documentation/GLOSSARY.md` gains an entry under "Feature & label notes",
+directly above the Unit `notes` entry:
 
 - **Staff notes** (contact `staff_notes`, 2026-09-26) - the tenant file's
   hand-written box, kept apart from contact `notes`. Contact `notes` is the
   "Preferences & notes" card, which the AI appends dated `[Auto - <date>]`
   lines to and reads as its profile; `staff_notes` is human-only - never
   machine-written or machine-read. Human label: "Staff notes" (staff only;
-  no tenant-facing surface).
+  no tenant-facing surface). The companion `staff_notes_updated_at` is
+  server-stamped on every write and renders as "Last edited <date>" while the
+  box holds text.
 
-and the Unit `notes` line's parenthetical becomes "(the counterpart of contact
-`notes`, the Preferences & notes field - not of the contact's Staff notes)".
+and the Unit `notes` line becomes "free-form INTERNAL notes on a property (the
+counterpart of contact `notes`, the Preferences & notes field - not of the
+contact's Staff notes)".
 
 ## 4. Part 2 - the Past tab
 
@@ -325,7 +333,9 @@ and the Unit `notes` line's parenthetical becomes "(the counterpart of contact
   (`/tours`), Past (`/tours/past`), Closed (`/tours/closed`), in that order; the
   current tab carries `aria-current="page"` as today.
 - Heading: "Past tours". Intro line: "Last 90 days: tours that were never
-  marked toured, toured tours still waiting on an outcome, and no-shows."
+  marked toured, toured tours still waiting on an outcome or a placement, and
+  no-shows." (A toured tour with no date at all is not listed - section 9,
+  Q10; the intro does not say so.)
 - The "+ New tour" button stays Active-only.
 
 ### 4.2 Data
@@ -337,9 +347,13 @@ current rows on screen until the new page lands (no spinner flash under the
 per-row results); only the first load shows the spinner.
 
 - Window (`pastToursDateRange(now)`): `from` = the start of the local calendar
-  day 90 days before today, built with calendar arithmetic
-  (`new Date(y, m, d - 90, 0, 0, 0, 0)`, DST-safe); `to` = `now`. Both ends are
-  sent as UTC ISO strings.
+  day 90 days before today; `to` = the end of today local (the start of
+  tomorrow minus 1 ms). Both built with calendar arithmetic
+  (`new Date(y, m, d - 90, 0, 0, 0, 0)` and `new Date(y, m, d + 1, 0, 0, 0, 0)`,
+  DST-safe) and sent as UTC ISO strings. Ending at the end of today rather than
+  at `now` lists a tour marked toured or no-show BEFORE its scheduled time
+  today; a tour marked toured on a FUTURE date stays invisible until that date
+  (section 9, Q9).
 - One request: `getTours({ from, to })`.
 - Selection (`selectPastTours(tours, now)`, a pure exported function), in this
   order:
@@ -349,10 +363,12 @@ per-row results); only the first load shows the spinner.
   2. drop a `scheduled` row whose `scheduledAt` is at or after the start of
      today local - Active's Today group shows it all day, and it is not "past"
      until the day ends (section 9, Q9);
-  3. drop a `toured` row that carries an `outcome` - its decision is recorded;
-     a stuck move_forward conversion is retried from the tour page's "Start
-     placement", and a not_a_fit left un-closed is the open issue
-     `tour-outcome-close-not-backend-enforced` (section 9, Q3);
+  3. drop a `toured` row that carries an `outcome` UNLESS it is `convertible
+     === true` with no `convertedPlacementId` (a move-forward decision whose
+     placement was never created - a failed conversion, which this tab's own
+     Record-outcome path can produce). A recorded not_a_fit left un-closed is
+     the open issue `tour-outcome-close-not-backend-enforced` and stays
+     excluded (section 9, Q3);
   4. sort by `scheduledAt` descending (most recent first), ties by `tourId`
      ascending for a stable order.
 - Statuses are filtered on the CLIENT. Why: the range endpoint already returns
@@ -376,11 +392,12 @@ Each Past row shows, in this order: the scheduled date and time ("Sep 24,
 | tour | state chip |
 |---|---|
 | status `scheduled` | "Not marked" |
-| status `toured` (no outcome, by 4.2 step 3) | "Needs outcome" |
+| status `toured`, no `outcome` | "Needs outcome" |
+| status `toured`, `convertible` and no `convertedPlacementId` (4.2 step 3) | "Needs placement" |
 | status `no_show` | "No show" |
 
 `pastState(tour)` is a pure exported function returning the chip text; for any
-other status it returns the status label (`TOUR_STATUS_LABELS`) so a
+other combination it returns the status label (`TOUR_STATUS_LABELS`) so a
 mis-selected row is never blank.
 
 Row structure - the whole row is NOT one link any more, because buttons and a
@@ -408,15 +425,20 @@ unit maps the other tabs use. The tour-type badge is not shown on Past rows
 ### 4.4 Row actions
 
 - "Not marked" (scheduled): a button "Mark toured" (aria-label "Mark toured:
-  <tenant> at <property> on <date-time>", so it never collides with the bulk
-  button or a sibling row). It runs the same runner as the bulk action with one
-  id (4.5). Unlike the tour page's own "Mark toured" (which opens the outcome
-  dialog on success, Cameron 2026-08-06), the list action stops at "Needs
-  outcome": a list cannot open a page's dialog, and the row's "Record outcome"
-  link is the way in.
+  <tenant> at <property> on <date-time>"). Its name is distinct from the bulk
+  button's "Mark toured (N)" and from every sibling row under EXACT or
+  anchored matching only - Playwright's default substring match on "Mark
+  toured" finds all of them, so every test locates the bulk button with an
+  anchored name (`/^Mark toured \(\d+\)$/` or `exact: true`). It runs the same
+  runner as the bulk action with one id (4.5). Unlike the tour page's own "Mark
+  toured" (which opens the outcome dialog on success, Cameron 2026-08-06), the
+  list action stops at "Needs outcome": a list cannot open a page's dialog,
+  and the row's "Record outcome" link is the way in.
 - "Needs outcome" (toured, no outcome): a link "Record outcome" (aria-label
   "Record outcome: <tenant> at <property> on <date-time>") to
   `/tours/<id>?outcome=1`, with router state `{ back: '/tours/past' }`.
+- "Needs placement": no row action; the row link opens the tour page, whose
+  primary CTA is "Start placement" for exactly this state.
 - "No show": no row action. The tour page holds reschedule and the check-in
   text; giving a no-show a way OFF this list is a product call (section 9,
   Q11; issue `past-tab-no-show-rows-need-an-exit`).
@@ -443,22 +465,27 @@ ignores a call while one is in flight.
 
 The runner (`markToured(ids)`):
 
-1. Set busy; clear previous results.
+1. Set busy; clear previous results; SNAPSHOT the listed rows (tenant,
+   property and date-time label per id) so a row the reload drops can still
+   be named afterwards.
 2. For each id IN LIST ORDER, ONE AT A TIME:
    a. re-read the tour (`getTour(id)`) - the list is a snapshot, and the
-      server accepts canceled -> toured and no_show -> toured, so a tour a
-      colleague has since canceled or marked no-show must not be flipped and
-      given a false "Tour took place" milestone;
+      server accepts canceled -> toured, no_show -> toured and a reschedule
+      that keeps `scheduled`, so a tour a colleague has since canceled, marked
+      no-show or rebooked must not be flipped, given a false "Tour took place"
+      milestone and stripped of its freshly armed reminders;
    b. if the re-read fails, record `{ ok: false, message: 'Could not check the
       tour' }` and continue;
-   c. if the CURRENT status is not `scheduled`, record `{ ok: false, message:
+   c. if the CURRENT status is not `scheduled`, OR the current `scheduledAt`
+      differs from the one the list showed, record `{ ok: false, message:
       'Changed since the list loaded' }` and continue;
    d. `patchTour(id, { status: 'toured' })`; record `{ ok: true }` or
-      `{ ok: false, message: 'Could not mark toured' }`.
+      `{ ok: false, message: 'The update failed' }`.
    Sequential, not `Promise.allSettled`: each PATCH rotates that tour's
    reminder ladder and writes audit and activity rows, and a serial run keeps
    those writes ordered and the per-row result deterministic. A failure does
-   not stop the batch.
+   not stop the batch. The re-read is an eventually consistent GET, so the
+   race window is one round trip plus DynamoDB's replication lag, not zero.
 3. Clear the raw selection for the ids that succeeded; keep it for the ones
    that failed (the derived selection then drops any that are no longer
    listed).
@@ -469,23 +496,34 @@ change or a navigation away: "Marked toured" (`role="status"`, muted) or
 "Could not mark toured: <message>" (`role="alert"`) - `<message>` being one of
 the three fixed strings above, never a raw server code. After the reload a
 succeeded row reads "Needs outcome" and offers "Record outcome"; a failed row
-that is still listed is unchanged and still "Not marked". A failed id that is
-NO LONGER listed after the reload (its tour left the Past set) is reported in
-an `role="alert"` block ABOVE the toolbar, one line per tour: "<tenant> at
-<property> on <date-time>: <message>", so no failure is ever silent.
+that is still listed is unchanged and still "Not marked". Every result whose
+id is NO LONGER listed after the reload (its tour left the Past set) is
+reported in a block ABOVE the toolbar, one line per tour from the snapshot:
+"<tenant> at <property> on <date-time>: Marked toured" (`role="status"`) or
+"<tenant> at <property> on <date-time>: <message>" (`role="alert"`), so no
+result is ever silent.
 
 The batch sends only `status: 'toured'`. It never sends an outcome, never
 closes a tour, and never PATCHes a tour whose CURRENT status (re-read
-immediately before the PATCH) is not `scheduled`.
+immediately before the PATCH) is not `scheduled` or whose scheduled time
+changed since the list loaded.
 
 ### 4.6 The tour page: the `?outcome=1` deep link and the back arrow
 
-`TourDetail` reads the query string once the tour has loaded:
+`TourDetail` reads the query string once the tour has loaded. ONLY when
+`outcome=1` is present:
 
-- `?outcome=1` and the tour is `toured` with no `outcome` -> `setModal('outcome')`.
-- Otherwise -> nothing opens.
-- In both cases the param is removed with a `replace` navigation so a reload or
-  the back button does not reopen the dialog.
+- the tour is `toured` with no `outcome` -> `setModal('outcome')`; otherwise
+  nothing opens;
+- either way the param is removed with a `replace` navigation that CARRIES
+  THE CURRENT LOCATION STATE FORWARD (`setSearchParams(next, { replace: true,
+  state: location.state })`): a navigation without `state` resets it to null
+  (react-router 7.18.0, `createLocation`), which would drop the back pointer
+  on exactly the Record-outcome path. A reload or the back button then never
+  reopens the dialog.
+
+Without the param nothing runs, so the plain row-link path keeps its state
+untouched.
 
 The back arrow (`aria-label "Back to tours"`) links to `location.state.back`
 when it is exactly `/tours`, `/tours/past` or `/tours/closed`, else `/tours`.
@@ -500,8 +538,9 @@ The dialog, its confirm handler and everything after it are the existing code.
 - No tour changes status except through a human clicking "Mark toured" (row or
   bulk) or the existing tour-page flows. The Past tab performs no write on load,
   on select, on view change or on navigation.
-- The batch never PATCHes a tour whose current status is not `scheduled`
-  (4.5 step 2c). The stale-list race is closed to one round trip; a
+- The batch never PATCHes a tour whose current status is not `scheduled` or
+  whose scheduled time changed since the list loaded (4.5 step 2c). The
+  stale-list race is closed to one eventually consistent round trip; a
   server-side precondition is not added.
 - No send: `status: 'toured'` is a terminal ladder transition (retires pending
   rungs, sends nothing), and the tab calls no messaging route. The e2e proves
@@ -535,34 +574,42 @@ Unit, app (`app/test/contactStaffNotes.test.ts`, in-memory harness like
 - POST `/api/contacts` with `staff_notes` in the body -> created contact has no
   `staff_notes`.
 - `toProfile({ ..., staff_notes: 'x' })` has no `staff_notes` key.
-- An extraction apply that appends a note line writes a `notes`-only patch.
+- An extraction apply that direct-writes one field AND appends a note line
+  makes no `contacts.update` call whose patch carries `staff_notes` or
+  `staff_notes_updated_at` (asserted across ALL update calls, not one).
 
 Unit, dashboard:
 
 - `useTours.test.ts`: `pastToursDateRange` (from = start of the local day 90
-  calendar days ago, asserted with the same calendar construction; to = the
-  `now` passed in); `selectPastTours` drops canceled/closed, drops a scheduled
-  row dated today, drops a toured row with an outcome, keeps a toured row from
-  earlier today, sorts most recent first with a tourId tiebreak, never mutates
-  its input; `pastState` for the three cases plus the fallback; `usePastTours`
-  idle until enabled, fetches with the window, `reload()` refetches while
-  keeping the rows.
+  calendar days ago, to = end of today local, both asserted with the same
+  calendar construction; a November case proves no DST drift);
+  `selectPastTours` drops canceled/closed, drops a scheduled row dated today,
+  drops a toured row with a not_a_fit outcome, KEEPS a toured row that is
+  convertible with no placement, keeps a toured row from later today, sorts
+  most recent first with a tourId tiebreak, never mutates its input;
+  `pastState` for the four cases plus the fallback; `usePastTours` idle until
+  enabled, fetches with the window, `reload()` refetches while keeping the
+  rows.
 - `ToursPage.test.tsx`: the three tabs with Past current on `/tours/past`; the
   Past rows (date-time, tenant, property, chip; date-time in every label) and
   their actions (Mark toured button on Not marked; Record outcome link to
-  `/tours/<id>?outcome=1` with `state.back` on Needs outcome; none on No show);
-  select-all + bulk button count; the batch re-reads each tour, calls
-  `patchTour` once per still-scheduled id, sequentially (the second call does
-  not start until the first resolves), skips a tour whose re-read is no longer
-  scheduled with "Changed since the list loaded", renders per-row success and
-  failure lines and the above-toolbar block for a failed id the reload dropped,
-  disables every mark control while running, then reloads; switching the view
-  resets selection and results; the existing Active and Closed tests still
-  pass under the `view` prop.
+  `/tours/<id>?outcome=1` with `state.back` on Needs outcome; none on Needs
+  placement or No show); select-all + bulk button count; the batch re-reads
+  each tour, calls `patchTour` once per id that is still scheduled AT THE SAME
+  TIME, sequentially (the second call does not start until the first
+  resolves), skips with "Changed since the list loaded" a tour whose re-read is
+  no longer scheduled AND one whose re-read is scheduled at a different time,
+  renders per-row success and failure lines and the above-toolbar block for a
+  result whose row the reload dropped, disables every mark control while
+  running, then reloads; switching the view resets selection and results; the
+  bulk button is located by an anchored name; the existing Active and Closed
+  tests still pass under the `view` prop.
 - `TourDetail.test.tsx`: `?outcome=1` on a toured-no-outcome tour opens the
-  Record outcome dialog and strips the param; on a scheduled tour and on a
-  toured tour with an outcome it opens nothing; the back arrow honors
-  `state.back = '/tours/past'` and ignores any other value.
+  Record outcome dialog and strips the param WHILE KEEPING `state.back` (the
+  test mounts with both and asserts the back arrow still points at
+  `/tours/past` after the strip); on a scheduled tour and on a toured tour with
+  an outcome it opens nothing; without the param the state is untouched; the
+  back arrow honors `state.back = '/tours/past'` and ignores any other value.
 - `StaffNotesCard.test.tsx`: empty and filled read modes, the "Last edited"
   line only with text, Edit -> textarea prefilled and focused -> Save calls
   `updateContact` with `{ staff_notes }` and hands the returned contact up;
@@ -575,8 +622,10 @@ Unit, dashboard:
 Playwright (hermetic lane only):
 
 - `e2e/tests/dashboard-next/contact-detail.spec.ts`: lines 59 and 73 become
-  `dialog.getByLabel('Notes')` where `dialog` is the Edit dialog locator the
-  test already holds (a scoping fix; no assertion changes).
+  `dialog.getByLabel('Notes')` where `dialog` is an Edit-dialog locator the
+  test INTRODUCES at both sites (`page.getByRole('dialog', { name: /Edit
+  contact/i })`; today line 58 asserts it inline and lines 72-73 hold no
+  reference). A scoping fix; no assertion changes.
 - `e2e/tests/dashboard-next/tenant-staff-notes.spec.ts`: reseed in
   `beforeAll`; on the seeded tenant (contact-tenant-0001), "+ Add" -> type into
   `getByLabel('Staff notes', { exact: true })` -> Save -> the text shows with a
@@ -591,11 +640,12 @@ Playwright (hermetic lane only):
   `no_show` via the API; `/tours/past` lists exactly those three with "Not
   marked", "Needs outcome", "No show", most recent first; none of them is in
   Active; capture the fake's thread-store outbound count; tick the "Not marked"
-  row, "Mark toured (1)" -> the row reads "Needs outcome" with "Record
-  outcome"; the outbound count is unchanged and the tour reads toured with no
-  outcome on the wire; the link lands on the tour page with the "Record
-  outcome" dialog open and no `?outcome` in the URL; Cancel; the back arrow
-  returns to `/tours/past`; at 360px no horizontal overflow.
+  row, the bulk button (located by the anchored name `/^Mark toured \(1\)$/`)
+  -> the row reads "Needs outcome" with "Record outcome"; the outbound count
+  is unchanged and the tour reads toured with no outcome on the wire; the link
+  lands on the tour page with the "Record outcome" dialog open and no
+  `?outcome` in the URL; Cancel; the back arrow returns to `/tours/past` (the
+  state survived the strip); at 360px no horizontal overflow.
 
 Gates: the five in AGENTS.md, bare, from the worktree.
 
@@ -657,18 +707,21 @@ the broadcast seed fixtures. `dashboard/src/api/types.ts`, `client.ts`,
   bigger save fails with the card's generic alert), then DynamoDB's 400 KB item.
 - Q2 The edit dialog (`ContactEditForm`) does not get a staff-notes field. The
   mission says inline edit; two editors for one field invite drift.
-- Q3 A `toured` tour WITH an outcome is NOT listed in Past (DRAFT 1 listed it
-  with its outcome label). Its decision is recorded, so it does not "need a
-  decision"; the tour page's "Start placement" is the retry for a stuck
-  move_forward conversion, and a not_a_fit left un-closed by an API caller is
-  the open issue `tour-outcome-close-not-backend-enforced`. Listing it would
-  have put a row with no action anywhere into the demo world on day one.
+- Q3 A `toured` tour WITH an outcome is listed only when the outcome was
+  move_forward and no placement exists (`convertible`, no
+  `convertedPlacementId`): "Needs placement", no row action, the tour page's
+  "Start placement" is the retry. DRAFT 1 listed every outcome; DRAFT 2 listed
+  none (which hid a failed conversion this tab's own Record-outcome path can
+  cause); DRAFT 3 lists the one case with a next step. A not_a_fit left
+  un-closed by an API caller is the open issue
+  `tour-outcome-close-not-backend-enforced` and stays excluded - listing it
+  would put a row with no action anywhere into the demo world on day one.
 - Q4 A no-show row has no row action (the mission named only "Mark toured" and
   "Record outcome"). See also Q11.
 - Q5 The bulk runner is sequential, not parallel (4.5).
 - Q6 Past rows drop the tour-type badge (4.3).
-- Q7 The Past window ends at `now`, not at the start of today (4.2), and a
-  scheduled row dated today is dropped (Q9).
+- Q7 The Past window ends at the end of today, not at the start of today
+  (4.2), and a scheduled row dated today is dropped (Q9).
 - Q8 The e2e creates past-dated tours through the API rather than adding tours
   to the lean seed: the lean world is byte-stable and tour-free, every existing
   tours spec creates its own tours the same way, and a past-dated create sends
@@ -677,15 +730,19 @@ the broadcast seed fixtures. `dashboard/src/api/types.ts`, `client.ts`,
 - Q9 "Today" rule. The mission said "tours whose scheduled time is before the
   start of today". Taken literally, a tour marked toured (with the outcome
   dialog dismissed) or marked no-show earlier TODAY is on no list until
-  midnight - the commonest "needs outcome" moment. Past therefore runs to
-  `now` and lists today's toured and no-show rows, while a still-scheduled
-  tour dated today stays on Active only (its Today group already shows it, and
-  it is not past until the day ends). A tour scheduled for 9:00 today and never
-  marked reaches Past at midnight.
+  midnight - the commonest "needs outcome" moment. Past therefore runs through
+  the END of today and lists every toured and no-show row dated today (marked
+  before or after its time), while a still-scheduled tour dated today stays on
+  Active only (its Today group already shows it, and it is not past until the
+  day ends). A tour scheduled for 9:00 today and never marked reaches Past at
+  midnight. A tour marked toured or no-show on a FUTURE date is on no list
+  until that date arrives (pre-existing; not changed here).
 - Q10 `toured` tours with NO scheduled time ("already toured", date left blank)
-  never appear in Past, because the mission defines Past by scheduled time and
-  the range query cannot see them. Listing them needs a second read by status
-  and a rule for placing undated rows. Filed `past-tab-timeless-toured-tours`.
+  never appear in Past: the range query cannot see them, and listing them
+  needs a second read by status plus a rule for placing undated rows in a list
+  ordered by date - a product call, deferred on cost, not because the mission
+  text forbids it (Q9 already reads that text as intent, not letter). The
+  intro copy does not carve them out. Filed `past-tab-timeless-toured-tours`.
 - Q11 No-show rows have no way off the Past list until they age out at 90 days
   (the tour page offers only reschedule and the check-in text). Filed
   `past-tab-no-show-rows-need-an-exit`.
@@ -696,7 +753,11 @@ the broadcast seed fixtures. `dashboard/src/api/types.ts`, `client.ts`,
   state carried by the Past tab's links. Without this, working through Past
   dropped staff on Active after every tour.
 - Q14 The stale-list race in bulk "Mark toured" is closed on the CLIENT by a
-  re-read before each PATCH, not by a server-side expected-status precondition.
-  A precondition would be the stronger guarantee but touches the tours route
-  and its contract for every caller; the re-read narrows the window to one
-  round trip and keeps the change inside the dashboard.
+  re-read before each PATCH (status still `scheduled` AND the scheduled time
+  unchanged since the list loaded), not by a server-side expected-status
+  precondition. A precondition would be the stronger guarantee but touches the
+  tours route and its contract for every caller; the re-read narrows the
+  window to one eventually consistent round trip and keeps the change inside
+  the dashboard. Residual: a tour marked no-show and then revived at the SAME
+  time between the load and the click passes the guard; it is scheduled at
+  that time, so marking it toured is what the operator meant.

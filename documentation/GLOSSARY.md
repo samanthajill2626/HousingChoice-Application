@@ -146,9 +146,9 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   seeds, the public sign-up, the transition service, or extraction). Human
   label: "Staff notes" (staff only; no tenant-facing surface). Companion
   `staff_notes_updated_at` is server-stamped on every write and renders as
-  "Last edited <date>".
+  "Last edited <date>" while the box holds text.
 
-- **Unit `notes`** - free-form INTERNAL staff notes on a property (the
+- **Unit `notes`** - free-form INTERNAL notes on a property (the
   counterpart of contact `notes`, the Preferences & notes field - not of the
   contact's Staff notes): amenity/quirk facts that are neither utilities nor
   accessibility, e.g. "In-unit washer/dryer", "No dishwasher". Never on the

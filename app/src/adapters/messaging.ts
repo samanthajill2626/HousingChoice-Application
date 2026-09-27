@@ -681,11 +681,13 @@ export function mapTwilioStatus(status: string): DeliveryStatus {
 }
 
 /**
- * The Twilio REST request timeout, PINNED to the send-claim TTL (spec D8a): a
- * claim older than the TTL can then only belong to a call that died or is
- * still inside its bounded request. One request per SDK call - never set the
- * SDK's `autoRetry`, which re-issues a create on a 429 and would let one
- * provider call outlive the claim.
+ * The Twilio REST request timeout, PINNED to the send-claim TTL (spec D8a).
+ * The TTL is measured from the attempt's LAST re-arm, which every send site
+ * performs immediately before this call (sendAttemptsRepo.rearm; code review
+ * ADV-1), so an attempt older than the TTL belongs to a call that died or is
+ * overrunning. One request per SDK call - never set the SDK's `autoRetry`,
+ * which re-issues a create on a 429 and would let one provider call outlive
+ * the claim.
  */
 export const TWILIO_REQUEST_TIMEOUT_MS = SEND_CLAIM_TTL_MS;
 

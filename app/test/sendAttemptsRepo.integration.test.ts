@@ -12,11 +12,12 @@
 // The first describe needs no DynamoDB: it drives the claim's cancellation
 // attribution (build finding T5-4) through a stub document client.
 import { randomUUID } from 'node:crypto';
-import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -179,6 +180,65 @@ describe('sendAttemptsRepo claim - cancellation attribution (build finding T5-4;
   it('a written claim whose read-back finds NO record throws as well', async () => {
     const { repo } = stubRepo(() => undefined, undefined);
     await expect(repo.claim(owner, facts, T1)).rejects.toThrow(/found no record/);
+  });
+
+  // FW1-1 (ADV-1): the re-arm is the claim's transaction shape, so it takes
+  // the claim's attribution - only index 0's condition is "taken over".
+  const R = '2026-09-26T12:00:20.000Z';
+  const ref = { attemptNo: 1, attemptedAt: T0 };
+
+  function rearmStub(onTransact: () => void, reads: Array<Record<string, unknown> | undefined>) {
+    const calls = { transacts: 0, gets: 0 };
+    const doc = {
+      async send(cmd: unknown) {
+        if (cmd instanceof TransactWriteCommand) {
+          calls.transacts += 1;
+          onTransact();
+          return {};
+        }
+        if (cmd instanceof GetCommand) {
+          const item = reads[calls.gets];
+          calls.gets += 1;
+          return item === undefined ? {} : { Item: item };
+        }
+        throw new Error('stub document client: unexpected command');
+      },
+    };
+    return { repo: createSendAttemptsRepo({ doc: doc as unknown as DynamoDBDocumentClient, env: { TABLE_PREFIX: 'hc-stub-' } }), calls };
+  }
+
+  it('rearm: a TransactionConflict or a condition failure on the INDEX item is rethrown, never read as a takeover (FW1-1)', async () => {
+    for (const codes of [['TransactionConflict', 'None'], ['None', 'ConditionalCheckFailed']]) {
+      const cancel = cancelled(codes);
+      const { repo, calls } = rearmStub(() => {
+        throw cancel;
+      }, [storedRecord]);
+      await expect(repo.rearm(owner, ref, R)).rejects.toBe(cancel);
+      expect(calls).toEqual({ transacts: 1, gets: 1 });
+    }
+  });
+
+  it('rearm: the record\'s own condition failure is a takeover (undefined) - unless the consistent re-read shows THIS re-arm, which committed on an earlier SDK attempt (FW1-1, ADV-3)', async () => {
+    const lost = rearmStub(() => {
+      throw cancelled(['ConditionalCheckFailed', 'None']);
+    }, [storedRecord, { ...storedRecord, attempt_state: 'reconciling' }]);
+    expect(await lost.repo.rearm(owner, ref, R)).toBeUndefined();
+    expect(lost.calls).toEqual({ transacts: 1, gets: 2 });
+    const replayed = rearmStub(() => {
+      throw cancelled(['ConditionalCheckFailed', 'None']);
+    }, [storedRecord, { ...storedRecord, attempted_at: R }]);
+    expect(await replayed.repo.rearm(owner, ref, R)).toStrictEqual({ attemptNo: 1, attemptedAt: R });
+    // Another attempt number at the re-armed instant is not this re-arm.
+    const other = rearmStub(() => {
+      throw cancelled(['ConditionalCheckFailed', 'None']);
+    }, [storedRecord, { ...storedRecord, attempted_at: R, attempt_no: 2 }]);
+    expect(await other.repo.rearm(owner, ref, R)).toBeUndefined();
+  });
+
+  it('rearm of an absent record writes nothing and is refused (FW1-1)', async () => {
+    const { repo, calls } = rearmStub(() => undefined, [undefined]);
+    expect(await repo.rearm(owner, ref, R)).toBeUndefined();
+    expect(calls).toEqual({ transacts: 0, gets: 1 });
   });
 });
 
@@ -520,4 +580,170 @@ describe.skipIf(!reachable)('sendAttemptsRepo on DynamoDB Local (spec D8a/D11)',
     expect(rows[count - 1]!.attemptedAt).toBe(T0);
     expect(new Set(rows.map((r) => attemptKey(r.owner))).size).toBe(count);
   }, 60_000);
+
+  // ---- FW1-1 (ADV-1): the re-arm immediately before the provider call ----
+
+  it('rearm re-arms THIS attempt in ONE transaction: attempted_at and expires_at move to now and a NEW index item is written for now; the returned ref fences every later write (FW1-1)', async () => {
+    await repo.claim(owner, facts, T0);
+    const R = plus(T0, 20_000);
+    expect(await repo.rearm(owner, { attemptNo: 1, attemptedAt: T0 }, R)).toStrictEqual({ attemptNo: 1, attemptedAt: R });
+    expect(await repo.get(owner)).toStrictEqual({ owner, state: 'attempting', attemptNo: 1, attemptedAt: R, redriveCount: 0, checkNo: 0, ...facts });
+    expect(await rawRecord(owner)).toMatchObject({ attempted_at: R, expires_at: Math.floor((Date.parse(R) + SEND_ATTEMPT_CLEANUP_MS) / 1000) });
+    const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${SENDER}#${facts.recipientDigest}`;
+    const suffix = `#${ownerKey(owner)}#${hashRecipientKey(PHONE_KEY)}`;
+    const items = await rawIndex(partition);
+    expect(items.map((i) => i['tsMsgId'])).toEqual([`${T0}${suffix}`, `${R}${suffix}`]);
+    // The claim's index-item shape, for the re-armed instant.
+    expect(items[1]).toStrictEqual({
+      conversationId: partition,
+      tsMsgId: `${R}${suffix}`,
+      owner,
+      attempted_at: R,
+      body_hash: facts.bodyHash,
+      body_short: false,
+      media_count: 0,
+      expires_at: Math.floor((Date.parse(R) + SEND_ATTEMPT_CLEANUP_MS) / 1000),
+    });
+    expect(await repo.finishAttempt(owner, { attemptNo: 1, attemptedAt: T0 }, { outcome: 'sent', sid: 'SM1' })).toBe(false);
+    expect(await repo.finishAttempt(owner, { attemptNo: 1, attemptedAt: R }, { outcome: 'sent', sid: 'SM1' })).toBe(true);
+  });
+
+  it('rearm refuses a ref that is not the live attempt - another attemptedAt, another attemptNo, a record no longer attempting - and writes nothing (FW1-1)', async () => {
+    const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${SENDER}#${facts.recipientDigest}`;
+    await repo.claim(owner, facts, T0);
+    expect(await repo.rearm(owner, { attemptNo: 1, attemptedAt: T1 }, plus(T0, 9_000))).toBeUndefined();
+    expect(await repo.rearm(owner, { attemptNo: 2, attemptedAt: T0 }, plus(T0, 9_000))).toBeUndefined();
+    expect(await rawIndex(partition)).toHaveLength(1);
+    expect(await repo.get(owner)).toMatchObject({ state: 'attempting', attemptNo: 1, attemptedAt: T0 });
+    // A re-arm moves the attempt; the ref it replaced is stale from then on.
+    expect(await repo.rearm(owner, { attemptNo: 1, attemptedAt: T0 }, plus(T0, 10_000))).toStrictEqual({ attemptNo: 1, attemptedAt: plus(T0, 10_000) });
+    expect(await repo.rearm(owner, { attemptNo: 1, attemptedAt: T0 }, plus(T0, 11_000))).toBeUndefined();
+    expect(await repo.handToReconcile(owner, { attemptNo: 1, attemptedAt: plus(T0, 10_000) })).toBe(true);
+    expect(await repo.rearm(owner, { attemptNo: 1, attemptedAt: plus(T0, 10_000) }, plus(T0, 12_000))).toBeUndefined();
+    expect(await rawIndex(partition)).toHaveLength(2);
+    expect(await repo.get(owner)).toMatchObject({ state: 'reconciling', attemptedAt: plus(T0, 10_000) });
+    // A done record is no attempt to re-arm.
+    const done: SendAttemptOwner = { kind: 'broadcast', broadcastId: `b-${seq}-done`, contactKey: 'c-1' };
+    await repo.claim(done, facts, T0);
+    await repo.finishAttempt(done, { attemptNo: 1, attemptedAt: T0 }, { outcome: 'sent', sid: 'SM1' });
+    expect(await repo.rearm(done, { attemptNo: 1, attemptedAt: T0 }, T1)).toBeUndefined();
+    expect(await repo.get(done)).toMatchObject({ state: 'done', attemptedAt: T0 });
+    expect(await repo.rearm({ kind: 'broadcast', broadcastId: `b-${seq}-absent`, contactKey: 'c-1' }, { attemptNo: 1, attemptedAt: T0 }, T1)).toBeUndefined();
+  });
+
+  it('rearm after a takeover is refused: the stalled pass learns it lost the attempt and must not send (FW1-1, the zz-adv-6 interleaving at the repo)', async () => {
+    await repo.claim(owner, facts, T0);
+    const late = await repo.claim(owner, facts, plus(T0, SEND_CLAIM_TTL_MS + 1));
+    if (late.outcome !== 'takeover') throw new Error('expected a takeover');
+    expect(await repo.takeOver(owner, late.record)).toBe(true);
+    expect(await repo.rearm(owner, { attemptNo: 1, attemptedAt: T0 }, plus(T0, 240_000))).toBeUndefined();
+    expect(await repo.get(owner)).toMatchObject({ state: 'reconciling', attemptNo: 1, attemptedAt: T0 });
+    expect(await rawIndex(`${SEND_ATTEMPT_INDEX_PREFIX}${SENDER}#${facts.recipientDigest}`)).toHaveLength(1);
+  });
+
+  it('the claim TTL is measured from the attempt\'s LAST re-arm, and listByRecipient finds the attempt by its re-armed time (FW1-1)', async () => {
+    await repo.claim(owner, facts, T0);
+    const R = plus(T0, 20_000);
+    await repo.rearm(owner, { attemptNo: 1, attemptedAt: T0 }, R);
+    expect(await repo.claim(owner, facts, plus(T0, SEND_CLAIM_TTL_MS + 1))).toMatchObject({ outcome: 'refused', fresh: true, record: { attemptedAt: R } });
+    expect(await repo.claim(owner, facts, plus(R, SEND_CLAIM_TTL_MS))).toMatchObject({ outcome: 'refused', fresh: true });
+    expect(await repo.claim(owner, facts, plus(R, SEND_CLAIM_TTL_MS + 1))).toMatchObject({ outcome: 'takeover', record: { attemptNo: 1, attemptedAt: R } });
+    // A bound between the claim and the re-arm sees the attempt through its re-armed item only; one row per record.
+    expect(await repo.listByRecipient(SENDER, facts.recipientDigest, plus(T0, 10_000))).toStrictEqual([await repo.get(owner)]);
+    expect(await repo.listByRecipient(SENDER, facts.recipientDigest, T0)).toHaveLength(1);
+    expect(await repo.listByRecipient(SENDER, facts.recipientDigest, plus(R, 1))).toHaveLength(0);
+  });
+
+  // ---- FW1-5 (ADV-3): every fenced transition is safe against the SDK's own replay ----
+
+  /**
+   * zz-adv-5's method: a document client whose next UpdateCommand COMMITS and
+   * then fails with the condition error the SDK's replay of it would meet (the
+   * first response was lost; the retry finds its own write).
+   */
+  function replaying(): { doc: DynamoDBDocumentClient; replayNextUpdate: () => void; replays: () => number } {
+    let armed = 0;
+    let replays = 0;
+    const send = doc.send.bind(doc) as unknown as (cmd: unknown) => Promise<unknown>;
+    const client = {
+      async send(cmd: unknown) {
+        const out = await send(cmd);
+        if (armed > 0 && cmd instanceof UpdateCommand) {
+          armed -= 1;
+          replays += 1;
+          throw new ConditionalCheckFailedException({ message: 'The conditional request failed', $metadata: {} });
+        }
+        return out;
+      },
+    };
+    return { doc: client as unknown as DynamoDBDocumentClient, replayNextUpdate: () => void (armed += 1), replays: () => replays };
+  }
+
+  it('a transition whose write committed on an earlier SDK attempt reports success when the replay fails its own condition - every fenced transition (FW1-5, ADV-3)', async () => {
+    const r = replaying();
+    const retried = createSendAttemptsRepo({ doc: r.doc, env: testEnv });
+    const o = (name: string): SendAttemptOwner => ({ kind: 'broadcast', broadcastId: `b-${seq}-${name}`, contactKey: 'c-1' });
+    const ref = { attemptNo: 1, attemptedAt: T0 };
+
+    await repo.claim(o('finish'), facts, T0);
+    r.replayNextUpdate();
+    expect(await retried.finishAttempt(o('finish'), ref, { outcome: 'sent', sid: 'SM1' })).toBe(true);
+    expect(await repo.get(o('finish'))).toMatchObject({ state: 'done', outcome: 'sent', sid: 'SM1' });
+
+    await repo.claim(o('hand'), facts, T0);
+    r.replayNextUpdate();
+    expect(await retried.handToReconcile(o('hand'), ref)).toBe(true);
+    expect(await repo.get(o('hand'))).toMatchObject({ state: 'reconciling' });
+
+    await repo.claim(o('take'), facts, T0);
+    const stale = await repo.claim(o('take'), facts, plus(T0, SEND_CLAIM_TTL_MS + 1));
+    r.replayNextUpdate();
+    expect(await retried.takeOver(o('take'), stale.record)).toBe(true);
+    expect(await repo.get(o('take'))).toMatchObject({ state: 'reconciling' });
+
+    await repo.claim(o('check'), facts, T0);
+    await repo.handToReconcile(o('check'), ref);
+    r.replayNextUpdate();
+    expect(await retried.recordCheck(o('check'), T0, 1)).toBe(true);
+    expect(await repo.get(o('check'))).toMatchObject({ checkNo: 1 });
+
+    await repo.claim(o('redrive'), facts, T0);
+    await repo.handToReconcile(o('redrive'), ref);
+    r.replayNextUpdate();
+    expect(await retried.markRedriven(o('redrive'), T0)).toBe(true);
+    expect(await repo.get(o('redrive'))).toMatchObject({ state: 'redriven', redriveCount: 1 });
+
+    await repo.claim(o('close'), facts, T0);
+    await repo.handToReconcile(o('close'), ref);
+    r.replayNextUpdate();
+    expect(await retried.closeFromReconcile(o('close'), T0, { outcome: 'unresolved', cause: 'provider_unreachable' })).toBe(true);
+    expect(await repo.get(o('close'))).toMatchObject({ state: 'done', outcome: 'unresolved' });
+
+    await repo.claim(o('closeRedriven'), facts, T0);
+    await repo.handToReconcile(o('closeRedriven'), ref);
+    await repo.markRedriven(o('closeRedriven'), T0);
+    r.replayNextUpdate();
+    expect(await retried.closeRedriven(o('closeRedriven'), { outcome: 'refused', cause: 'x' })).toBe(true);
+    expect(await repo.get(o('closeRedriven'))).toMatchObject({ state: 'done', outcome: 'refused' });
+
+    expect(r.replays()).toBe(7);
+    // A genuinely lost fence is still lost: the stored token is the other writer's, never this call's.
+    expect(await retried.finishAttempt(o('finish'), ref, { outcome: 'sent', sid: 'SM1' })).toBe(false);
+    expect(await retried.handToReconcile(o('hand'), ref)).toBe(false);
+    expect(await retried.closeRedriven(o('closeRedriven'), { outcome: 'refused' })).toBe(false);
+  });
+
+  it('every fenced transition writes a FRESH op token (last_op); a refused one writes nothing (FW1-5)', async () => {
+    await repo.claim(owner, facts, T0);
+    expect(await rawRecord(owner)).not.toHaveProperty('last_op');
+    await repo.handToReconcile(owner, { attemptNo: 1, attemptedAt: T0 });
+    const first = (await rawRecord(owner))!['last_op'];
+    expect(typeof first).toBe('string');
+    await repo.recordCheck(owner, T0, 1);
+    const second = (await rawRecord(owner))!['last_op'];
+    expect(typeof second).toBe('string');
+    expect(second).not.toBe(first);
+    expect(await repo.markRedriven(owner, T1)).toBe(false);
+    expect((await rawRecord(owner))!['last_op']).toBe(second);
+  });
 });

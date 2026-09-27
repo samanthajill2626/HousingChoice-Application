@@ -21,7 +21,7 @@
 // Owners and recipient digests are unique per case: the table is created
 // once per file and never reset.
 import { randomUUID } from 'node:crypto';
-import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -76,6 +76,8 @@ interface Ctx {
   facts: SendAttemptFacts;
   /** The most recent claim result, per implementation (takeOver reads it). */
   last?: ClaimResult;
+  /** The attempt the site holds: the last claim's, replaced by each successful re-arm (FW1-1). */
+  ref?: AttemptRef;
 }
 
 /** Which implementation a step is running against (a seed step writes each one's store directly). */
@@ -98,6 +100,7 @@ interface Case {
 // ---- step builders -------------------------------------------------------
 
 function lastRef(ctx: Ctx): AttemptRef {
+  if (ctx.ref !== undefined) return ctx.ref;
   if (ctx.last === undefined) throw new Error('script error: no claim yet');
   return { attemptNo: ctx.last.record.attemptNo, attemptedAt: ctx.last.record.attemptedAt };
 }
@@ -108,9 +111,21 @@ const claim = (nowIso: string, expectation?: unknown, opts: { o?: number; facts?
     const facts = opts.facts ? opts.facts(ctx.facts) : ctx.facts;
     const result = await repo.claim(ctx.owners[opts.o ?? 0]!, facts, nowIso);
     ctx.last = result;
+    ctx.ref = { attemptNo: result.record.attemptNo, attemptedAt: result.record.attemptedAt };
     return result;
   },
   ...(expectation !== undefined && { expect: expectation }),
+});
+
+/** FW1-1: re-arm the held attempt (or an explicit ref) at `nowIso`; a successful re-arm replaces the held ref. */
+const rearm = (ref: AttemptRef | 'last', nowIso: string, expectation: AttemptRef | 'refused', o = 0): Step => ({
+  label: `rearm ${ref === 'last' ? 'last' : `${ref.attemptNo}@${ref.attemptedAt}`} at ${nowIso}`,
+  run: async (repo, ctx) => {
+    const result = await repo.rearm(ctx.owners[o]!, ref === 'last' ? lastRef(ctx) : ref, nowIso);
+    if (result !== undefined) ctx.ref = result;
+    return result ?? 'refused';
+  },
+  expect: expectation,
 });
 
 const finish = (
@@ -435,6 +450,53 @@ const CASES: Case[] = [
     owners: (id) => [broadcastOwner(id)],
     steps: [claim(T0), scribble(), hand('last', true), scribble(), redrive(T0, true), scribble()],
   },
+  {
+    name: 're-arm of the own attempt; a stale ref; the index item for the re-armed time; a takeover measured from the re-arm; a re-arm after the takeover refused (FW1-1)',
+    owners: (id) => [broadcastOwner(id)],
+    steps: [
+      claim(T0),
+      rearm({ attemptNo: 1, attemptedAt: at(5_000) }, at(9_000), 'refused'),
+      rearm({ attemptNo: 2, attemptedAt: T0 }, at(9_000), 'refused'),
+      rearm('last', at(20_000), { attemptNo: 1, attemptedAt: at(20_000) }),
+      rearm({ attemptNo: 1, attemptedAt: T0 }, at(21_000), 'refused'),
+      claim(at(SEND_CLAIM_TTL_MS + 1), { outcome: 'refused', fresh: true, record: { attemptedAt: at(20_000) } }),
+      claim(at(20_000 + SEND_CLAIM_TTL_MS), { outcome: 'refused', fresh: true }),
+      claim(at(20_000 + SEND_CLAIM_TTL_MS + 1), { outcome: 'takeover', record: { attemptNo: 1, attemptedAt: at(20_000) } }),
+      takeOver(true),
+      rearm({ attemptNo: 1, attemptedAt: at(20_000) }, at(240_000), 'refused'),
+      finish({ attemptNo: 1, attemptedAt: at(20_000) }, { outcome: 'sent', sid: 'SM1' }, false),
+      closeRec(at(20_000), { outcome: 'adopted', sid: 'SM9' }, true),
+    ],
+  },
+  {
+    name: 're-arm without a sender; a re-arm at the claim\'s own instant rewrites its index item in place; no re-arm once handed off (FW1-1)',
+    owners: (id) => [broadcastOwner(id, 'c-5')],
+    steps: [
+      claim(T0, undefined, { facts: noSender }),
+      rearm('last', T0, { attemptNo: 1, attemptedAt: T0 }),
+      rearm('last', at(3_000), { attemptNo: 1, attemptedAt: at(3_000) }),
+      hand('last', true),
+      rearm('last', at(4_000), 'refused'),
+      check(at(3_000), 0, true),
+    ],
+  },
+  {
+    name: 're-arm of a re-claimed attempt and of a re-drive; an absent or a done record refuses (FW1-1)',
+    owners: (id) => [broadcastOwner(id)],
+    steps: [
+      rearm({ attemptNo: 1, attemptedAt: T0 }, at(1_000), 'refused'),
+      claim(T0),
+      finish('last', { outcome: 'retryable', cause: '20429' }, true),
+      claim(at(10_000), { outcome: 'claimed', record: { attemptNo: 2 } }),
+      rearm('last', at(12_000), { attemptNo: 2, attemptedAt: at(12_000) }),
+      hand('last', true),
+      redrive(at(12_000), true),
+      claim(at(40_000), { outcome: 'claimed', record: { attemptNo: 3, redriveCount: 1 } }),
+      rearm('last', at(41_000), { attemptNo: 3, attemptedAt: at(41_000) }),
+      finish('last', { outcome: 'sent', sid: 'SM3' }, true),
+      rearm('last', at(42_000), 'refused'),
+    ],
+  },
 ];
 
 // ---- the harness ---------------------------------------------------------
@@ -467,14 +529,46 @@ function fakeIndex(world: FakeWorld, partition: string): FakeWorld['sendAttemptI
     .sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
 }
 
+/** The real record's op token (FW1-5): `last_op`, which no read method returns. */
+async function realOp(owner: SendAttemptOwner): Promise<unknown> {
+  const recipientKey = owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+  const { Item } = await doc.send(
+    new GetCommand({
+      TableName: table,
+      Key: { conversationId: `${SEND_ATTEMPT_PARTITION_PREFIX}${ownerKey(owner)}`, tsMsgId: hashRecipientKey(recipientKey) },
+      ConsistentRead: true,
+    }),
+  );
+  return Item?.['last_op'];
+}
+
+/** Each implementation's op token per owner, as of the previous step. */
+interface OpMemory {
+  real: unknown[];
+  fake: unknown[];
+}
+
 /** Both implementations' observable state must agree after every step. */
-async function stateAgrees(world: FakeWorld, owners: SendAttemptOwner[], facts: SendAttemptFacts, where: string): Promise<void> {
+async function stateAgrees(
+  world: FakeWorld,
+  owners: SendAttemptOwner[],
+  facts: SendAttemptFacts,
+  where: string,
+  ops: OpMemory,
+): Promise<void> {
   const fake = world.sendAttemptsRepo;
   for (const [i, owner] of owners.entries()) {
     const realRecord = await real.get(owner);
     expect(await fake.get(owner), `${where}: get(o${i})`).toStrictEqual(realRecord);
     // The world map is keyed by attemptKey(owner) and holds exactly what get() returns.
     expect(world.sendAttempts.get(attemptKey(owner)), `${where}: world.sendAttempts[o${i}]`).toStrictEqual(realRecord);
+    // FW1-5: the tokens are random, so the fake is held to WHEN a token is written - by the same steps as the real one.
+    const realNow = await realOp(owner);
+    const fakeNow = world.sendAttemptOps.get(attemptKey(owner));
+    expect(fakeNow === undefined, `${where}: op token present (o${i})`).toBe(realNow === undefined);
+    expect(fakeNow !== ops.fake[i], `${where}: a fresh op token written this step (o${i})`).toBe(realNow !== ops.real[i]);
+    ops.real[i] = realNow;
+    ops.fake[i] = fakeNow;
   }
   for (const sender of [SENDER, '-']) {
     for (const since of [EARLY, at(1)]) {
@@ -513,7 +607,8 @@ describe.skipIf(!reachable)('the harness send-attempt fake mirrors the real repo
       const world = createFakeWorld();
       const realCtx: Ctx = { owners, facts };
       const fakeCtx: Ctx = { owners, facts };
-      await stateAgrees(world, owners, facts, `${c.name} / before any step`);
+      const ops: OpMemory = { real: [], fake: [] };
+      await stateAgrees(world, owners, facts, `${c.name} / before any step`, ops);
       for (const [stepNo, step] of c.steps.entries()) {
         const where = `${c.name} / step ${stepNo} ${step.label}`;
         const realAnswer = await step.run(real, realCtx, { kind: 'real' });
@@ -526,7 +621,7 @@ describe.skipIf(!reachable)('the harness send-attempt fake mirrors the real repo
             expect(realAnswer, `${where}: the script's expectation`).toBe(step.expect);
           }
         }
-        await stateAgrees(world, owners, facts, where);
+        await stateAgrees(world, owners, facts, where, ops);
       }
     }, 60_000);
   }

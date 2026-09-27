@@ -198,6 +198,7 @@ import {
   ownerKey,
   SEND_ATTEMPT_INDEX_PREFIX,
   type ClaimResult,
+  type SendAttemptFacts,
   type SendAttemptOwner,
   type SendAttemptRecord,
   type SendAttemptsRepo,
@@ -312,12 +313,19 @@ export interface FakeWorld {
    */
   sendAttempts: Map<string, SendAttemptRecord>;
   /**
-   * The recipient-index items the fake claim writes, one per claim (a claim at
-   * the same instant for the same owner replaces its item, as the real Put
-   * does): partition `sendattemptix#<sender or ->#<recipientDigest>`, sort key
-   * `<attemptedAt>#<ownerKey>#<hashed recipient key>`.
+   * The recipient-index items the fake claim and re-arm write, one per claim
+   * or re-arm (one at the same instant for the same owner replaces its item,
+   * as the real Put does): partition `sendattemptix#<sender or ->#<recipientDigest>`,
+   * sort key `<attemptedAt>#<ownerKey>#<hashed recipient key>`.
    */
   sendAttemptIndex: Array<{ partition: string; sortKey: string; owner: SendAttemptOwner }>;
+  /**
+   * The op token each record's last fenced transition wrote (code review
+   * ADV-3; the real item's `last_op`), keyed like `sendAttempts`. The fake
+   * never retries, so nothing reads it back; the parity test holds the fake
+   * to WHEN the real repo writes one.
+   */
+  sendAttemptOps: Map<string, string>;
   /**
    * In-memory twin of app/src/repos/sendAttemptsRepo.ts: the same conditions,
    * the same TTL, false exactly where the real one is false - held to it by
@@ -4325,11 +4333,27 @@ export function createFakeWorld(): FakeWorld {
   // null, which its read drops).
   const sendAttempts = new Map<string, SendAttemptRecord>();
   const sendAttemptIndex: FakeWorld['sendAttemptIndex'] = [];
+  const sendAttemptOps = new Map<string, string>();
   const attemptSnapshot = (record: SendAttemptRecord): SendAttemptRecord => structuredClone(record);
   const attemptRecipientKey = (owner: SendAttemptOwner): string =>
     owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
   /** DynamoDB orders a string range key by its UTF-8 bytes. */
   const utf8Order = (a: string, b: string): number => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+  /** The index Put of a claim or a re-arm: a same-key item is replaced, as the real Put does. */
+  const putAttemptIndex = (owner: SendAttemptOwner, facts: SendAttemptFacts, atIso: string): void => {
+    const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${facts.sender ?? '-'}#${facts.recipientDigest}`;
+    const sortKey = `${atIso}#${ownerKey(owner)}#${hashRecipientKey(attemptRecipientKey(owner))}`;
+    const entry = { partition, sortKey, owner: structuredClone(owner) };
+    const sameKey = sendAttemptIndex.findIndex((e) => e.partition === partition && e.sortKey === sortKey);
+    if (sameKey >= 0) sendAttemptIndex[sameKey] = entry;
+    else sendAttemptIndex.push(entry);
+  };
+  /** A fenced transition that won: the record, and a fresh op token (`#op = :op` - FW1-5). */
+  const writeAttempt = (key: string, record: SendAttemptRecord): true => {
+    sendAttempts.set(key, record);
+    sendAttemptOps.set(key, randomUUID());
+    return true;
+  };
   const sendAttemptsRepo: SendAttemptsRepo = {
     async claim(owner, facts, nowIso): Promise<ClaimResult> {
       const key = attemptKey(owner);
@@ -4351,12 +4375,7 @@ export function createFakeWorld(): FakeWorld {
           mediaCount: facts.mediaCount,
         };
         sendAttempts.set(key, record);
-        const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${facts.sender ?? '-'}#${facts.recipientDigest}`;
-        const sortKey = `${nowIso}#${ownerKey(owner)}#${hashRecipientKey(attemptRecipientKey(owner))}`;
-        const entry = { partition, sortKey, owner: structuredClone(owner) };
-        const sameKey = sendAttemptIndex.findIndex((e) => e.partition === partition && e.sortKey === sortKey);
-        if (sameKey >= 0) sendAttemptIndex[sameKey] = entry;
-        else sendAttemptIndex.push(entry);
+        putAttemptIndex(owner, facts, nowIso);
         return { outcome: 'claimed', record: attemptSnapshot(record) };
       };
       // 'attribute_not_exists(tsMsgId)'
@@ -4374,6 +4393,23 @@ export function createFakeWorld(): FakeWorld {
       // reconciling, or done with a terminal outcome
       return { outcome: 'refused', record: attemptSnapshot(current), fresh: false };
     },
+    // FW1-1: 'SET #at = :now, #exp = :exp' on '#st = :attempting AND #no = :no AND #at = :at',
+    // plus the index Put for :now under the record's own facts - one step, like the transaction.
+    async rearm(owner, ref, nowIso) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== ref.attemptNo ||
+        current.attemptedAt !== ref.attemptedAt
+      ) {
+        return undefined;
+      }
+      sendAttempts.set(key, { ...current, attemptedAt: nowIso });
+      putAttemptIndex(owner, current, nowIso);
+      return { attemptNo: current.attemptNo, attemptedAt: nowIso };
+    },
     async finishAttempt(owner, ref, result) {
       const key = attemptKey(owner);
       const current = sendAttempts.get(key);
@@ -4386,14 +4422,13 @@ export function createFakeWorld(): FakeWorld {
       ) {
         return false;
       }
-      sendAttempts.set(key, {
+      return writeAttempt(key, {
         ...current,
         state: 'done',
         outcome: result.outcome,
         ...(result.sid !== undefined && { sid: result.sid }),
         ...(result.cause !== undefined && { cause: result.cause }),
       });
-      return true;
     },
     async handToReconcile(owner, ref, sid) {
       const key = attemptKey(owner);
@@ -4407,8 +4442,7 @@ export function createFakeWorld(): FakeWorld {
       ) {
         return false;
       }
-      sendAttempts.set(key, { ...current, state: 'reconciling', checkNo: 0, ...(sid !== undefined && { sid }) });
-      return true;
+      return writeAttempt(key, { ...current, state: 'reconciling', checkNo: 0, ...(sid !== undefined && { sid }) });
     },
     async takeOver(owner, record) {
       const key = attemptKey(owner);
@@ -4422,8 +4456,7 @@ export function createFakeWorld(): FakeWorld {
       ) {
         return false;
       }
-      sendAttempts.set(key, { ...current, state: 'reconciling', checkNo: 0 });
-      return true;
+      return writeAttempt(key, { ...current, state: 'reconciling', checkNo: 0 });
     },
     async recordCheck(owner, attemptedAt, checkNo) {
       const key = attemptKey(owner);
@@ -4437,8 +4470,7 @@ export function createFakeWorld(): FakeWorld {
       ) {
         return false;
       }
-      sendAttempts.set(key, { ...current, checkNo });
-      return true;
+      return writeAttempt(key, { ...current, checkNo });
     },
     async markRedriven(owner, attemptedAt) {
       const key = attemptKey(owner);
@@ -4452,8 +4484,7 @@ export function createFakeWorld(): FakeWorld {
       ) {
         return false;
       }
-      sendAttempts.set(key, { ...current, state: 'redriven', redriveCount: 1 });
-      return true;
+      return writeAttempt(key, { ...current, state: 'redriven', redriveCount: 1 });
     },
     async closeFromReconcile(owner, attemptedAt, result) {
       const key = attemptKey(owner);
@@ -4462,27 +4493,25 @@ export function createFakeWorld(): FakeWorld {
       if (current === undefined || current.state !== 'reconciling' || current.attemptedAt !== attemptedAt) {
         return false;
       }
-      sendAttempts.set(key, {
+      return writeAttempt(key, {
         ...current,
         state: 'done',
         outcome: result.outcome,
         ...(result.sid !== undefined && { sid: result.sid }),
         ...(result.cause !== undefined && { cause: result.cause }),
       });
-      return true;
     },
     async closeRedriven(owner, result) {
       const key = attemptKey(owner);
       const current = sendAttempts.get(key);
       // '#st = :redriven'
       if (current === undefined || current.state !== 'redriven') return false;
-      sendAttempts.set(key, {
+      return writeAttempt(key, {
         ...current,
         state: 'done',
         outcome: result.outcome,
         ...(result.cause !== undefined && { cause: result.cause }),
       });
-      return true;
     },
     async get(owner) {
       const current = sendAttempts.get(attemptKey(owner));
@@ -4546,6 +4575,7 @@ export function createFakeWorld(): FakeWorld {
     },
     sendAttempts,
     sendAttemptIndex,
+    sendAttemptOps,
     sendAttemptsRepo,
     initiatedCalls,
     mediaPuts,

@@ -16,9 +16,22 @@
 // Every read here is strongly consistent and on the base table (D11): no GSI
 // is involved anywhere in the coordination path.
 //
+// RETRY SAFETY (code review ADV-3, fix FW1-5). The SDK retries a request whose
+// response was lost, and an UpdateItem carries no idempotency token of its
+// own: a fenced write that COMMITTED on the first try fails its own condition
+// on the replay, which would read as "another writer won". So every fenced
+// transition also writes a fresh random op token (`last_op`) and, on a
+// condition failure, re-reads the record consistently: its own token there
+// means the write committed on an earlier attempt, and the transition reports
+// success. A token, not a state comparison: a takeover and a hand-off leave
+// the same state behind. The two TRANSACTIONS (the claim and the re-arm) need
+// no token - the SDK fills the request's ClientRequestToken, and DynamoDB
+// answers a replay of a committed transaction with success.
+//
 // The in-memory twin is the harness fake (`world.sendAttemptsRepo` in
 // app/test/helpers/twilioWebhookHarness.ts); the two are held to the same
 // answers by app/test/twilioWebhookHarnessSendAttempts.integration.test.ts.
+import { randomUUID } from 'node:crypto';
 import { TransactionCanceledException, ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
@@ -76,10 +89,16 @@ export interface AttemptRef {
 /**
  * What a claim found (D8a):
  * - `claimed`: this caller owns a NEW attempt (the record is `attempting`
- *   with this claim's attemptNo / attemptedAt); it may call the provider.
+ *   with this claim's attemptNo / attemptedAt); it may call the provider -
+ *   after it RE-ARMS the attempt (`rearm`) as the last step before the call.
  * - `takeover`: the record is `attempting` and OLDER than the claim TTL; the
  *   returned record is that stale attempt, untouched - the caller runs
- *   `takeOver` with it and hands off to a reconcile. Never a send.
+ *   `takeOver` with it and hands off to a reconcile. Never a send. The age is
+ *   measured from the attempt's LAST re-arm (its `attemptedAt`), which every
+ *   send site performs immediately before the provider call - so an attempt
+ *   older than the TTL is a call that died or overran, never one still
+ *   preparing (code review ADV-1: a claim followed by an unbounded database
+ *   write could look stale before the provider was ever called).
  * - `refused`, `fresh: true`: a live attempt owns the recipient (a fresh
  *   `attempting`, or a concurrent claim won the conditional write) - defer.
  * - `refused`, `fresh: false`: `reconciling` (the reconcile owns it) or `done`
@@ -92,6 +111,20 @@ export type ClaimResult =
 
 export interface SendAttemptsRepo {
   claim(owner: SendAttemptOwner, facts: SendAttemptFacts, nowIso: string): Promise<ClaimResult>;
+  /**
+   * Re-arm THIS attempt immediately before the provider call (code review
+   * ADV-1, fix FW1-1): ONE transaction moves the record's `attemptedAt` (and
+   * its cleanup horizon) to `nowIso` - only while it is still `attempting`
+   * with `ref`'s attemptNo AND attemptedAt - and writes a NEW recipient-index
+   * item for `nowIso`, so the lookup finds the attempt by the time its call
+   * started. Returns the re-armed ref (`{ attemptNo, attemptedAt: nowIso }`),
+   * which every later fenced write of the attempt must use; `undefined` when
+   * the record's condition failed - the attempt was taken over (or is no
+   * longer this ref's), so the caller must NOT call the provider. Anything
+   * else (a TransactionConflict, a throttle, the index item's condition)
+   * throws.
+   */
+  rearm(owner: SendAttemptOwner, ref: AttemptRef, nowIso: string): Promise<AttemptRef | undefined>;
   finishAttempt(
     owner: SendAttemptOwner,
     ref: AttemptRef,
@@ -155,6 +188,29 @@ function expiresAt(nowMs: number): number {
   return Math.floor((nowMs + SEND_ATTEMPT_CLEANUP_MS) / 1000);
 }
 
+/**
+ * The recipient-index item (D8a) for an attempt that starts at `atIso`:
+ * written by the claim and by every re-arm, never updated - a reader resolves
+ * the record for the live state.
+ */
+function indexItem(owner: SendAttemptOwner, facts: SendAttemptFacts, atIso: string): Record<string, unknown> {
+  return {
+    conversationId: indexPartition(facts.sender, facts.recipientDigest),
+    tsMsgId: `${atIso}#${ownerKey(owner)}#${recordKey(owner).tsMsgId}`,
+    owner,
+    attempted_at: atIso,
+    body_hash: facts.bodyHash,
+    body_short: facts.bodyShort,
+    media_count: facts.mediaCount,
+    expires_at: expiresAt(Date.parse(atIso)),
+  };
+}
+
+/** Index 0 of the claim's and the re-arm's transaction is the RECORD: only its condition failing is the record's answer. */
+function recordConditionFailed(err: unknown): boolean {
+  return err instanceof TransactionCanceledException && err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed';
+}
+
 function toRecord(item: Record<string, unknown>): SendAttemptRecord {
   return {
     owner: item['owner'] as SendAttemptOwner,
@@ -177,6 +233,17 @@ function toRecord(item: Record<string, unknown>): SendAttemptRecord {
 
 interface Expr {
   update: string;
+  condition: string;
+  names: Record<string, string>;
+  values: Record<string, unknown>;
+}
+
+/**
+ * A fenced transition: its SET list, condition and exactly the aliases and
+ * values those use. `transition` adds the op token (`#op = :op`) to all three.
+ */
+interface TransitionExpr {
+  set: string;
   condition: string;
   names: Record<string, string>;
   values: Record<string, unknown>;
@@ -291,23 +358,8 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
                 ExpressionAttributeValues: expr.values,
               },
             },
-            {
-              // The recipient index item (D8a): written with the claim, never
-              // updated - a reader resolves the record for the live state.
-              Put: {
-                TableName: table,
-                Item: {
-                  conversationId: indexPartition(facts.sender, facts.recipientDigest),
-                  tsMsgId: `${nowIso}#${ownerKey(owner)}#${key.tsMsgId}`,
-                  owner,
-                  attempted_at: nowIso,
-                  body_hash: facts.bodyHash,
-                  body_short: facts.bodyShort,
-                  media_count: facts.mediaCount,
-                  expires_at: expiresAt(Date.parse(nowIso)),
-                },
-              },
-            },
+            // The recipient index item (D8a), in the same transaction.
+            { Put: { TableName: table, Item: indexItem(owner, facts, nowIso) } },
           ],
         }),
       );
@@ -319,10 +371,51 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
       // state this claim expected". Anything else - a TransactionConflict with
       // a concurrent claim, a throttle, a validation error - says nothing
       // about the record and is rethrown (a prepare-phase throw for the site).
-      if (err instanceof TransactionCanceledException && err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed') {
-        return false;
-      }
+      if (recordConditionFailed(err)) return false;
       throw err;
+    }
+  }
+
+  async function rearm(owner: SendAttemptOwner, ref: AttemptRef, nowIso: string): Promise<AttemptRef | undefined> {
+    // The index item carries the attempt's facts, which live on the record:
+    // read them here, and let the conditional write decide - a record that is
+    // no longer this attempt fails it, and the Put is cancelled with it.
+    const record = await get(owner);
+    if (record === undefined) return undefined;
+    const rearmed: AttemptRef = { attemptNo: ref.attemptNo, attemptedAt: nowIso };
+    try {
+      await doc.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: {
+                TableName: table,
+                Key: recordKey(owner),
+                UpdateExpression: 'SET #at = :now, #exp = :exp',
+                ConditionExpression: '#st = :attempting AND #no = :no AND #at = :at',
+                ExpressionAttributeNames: { '#at': 'attempted_at', '#exp': 'expires_at', '#st': 'attempt_state', '#no': 'attempt_no' },
+                ExpressionAttributeValues: {
+                  ':now': nowIso,
+                  ':exp': expiresAt(Date.parse(nowIso)),
+                  ':attempting': 'attempting',
+                  ':no': ref.attemptNo,
+                  ':at': ref.attemptedAt,
+                },
+              },
+            },
+            { Put: { TableName: table, Item: indexItem(owner, record, nowIso) } },
+          ],
+        }),
+      );
+      return rearmed;
+    } catch (err) {
+      if (!recordConditionFailed(err)) throw err;
+      // Taken over - or THIS re-arm committed on an earlier SDK attempt whose
+      // response was lost (the request's ClientRequestToken normally answers
+      // such a replay with success; this re-read is the belt to that brace).
+      // Only this call sets attemptedAt to nowIso on this attemptNo.
+      const after = await get(owner);
+      return after?.state === 'attempting' && after.attemptNo === ref.attemptNo && after.attemptedAt === nowIso ? rearmed : undefined;
     }
   }
 
@@ -345,38 +438,57 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
       return { outcome: 'refused', record: await mustGet(owner, 'a concurrent claim won'), fresh: true };
     }
     if (record.state === 'attempting') {
+      // Aged from the attempt's LAST re-arm (its attemptedAt), taken just before its provider call.
       const ageMs = Date.parse(nowIso) - Date.parse(record.attemptedAt);
       return ageMs > SEND_CLAIM_TTL_MS ? { outcome: 'takeover', record } : { outcome: 'refused', record, fresh: true };
     }
     return { outcome: 'refused', record, fresh: false };   // reconciling, or done with a terminal outcome
   }
 
-  async function transition(owner: SendAttemptOwner, expr: Expr): Promise<boolean> {
+  /**
+   * One fenced transition. true = written (on this request or, per the op
+   * token, on an earlier SDK attempt of it); false = its condition failed and
+   * the record does not carry this call's token; anything else throws.
+   */
+  async function transition(owner: SendAttemptOwner, expr: TransitionExpr): Promise<boolean> {
+    const key = recordKey(owner);
+    const op = randomUUID();
     try {
       await doc.send(
         new UpdateCommand({
           TableName: table,
-          Key: recordKey(owner),
-          UpdateExpression: expr.update,
+          Key: key,
+          UpdateExpression: `SET ${expr.set}, #op = :op`,
           ConditionExpression: expr.condition,
-          ExpressionAttributeNames: expr.names,
-          ExpressionAttributeValues: expr.values,
+          ExpressionAttributeNames: { ...expr.names, '#op': 'last_op' },
+          ExpressionAttributeValues: { ...expr.values, ':op': op },
         }),
       );
       return true;
     } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) return false;
-      throw err;
+      if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      // ADV-3: the replay of a write that committed fails its own condition.
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: key,
+          ConsistentRead: true,
+          ProjectionExpression: '#op',
+          ExpressionAttributeNames: { '#op': 'last_op' },
+        }),
+      );
+      return Item?.['last_op'] === op;
     }
   }
 
   return {
     claim,
+    rearm,
     get,
     // The site's own outcome: only the attempt that claimed may close it.
     finishAttempt: (owner, ref, result) =>
       transition(owner, {
-        update: `SET #st = :done, #oc = :oc${result.sid !== undefined ? ', #sid = :sid' : ''}${result.cause !== undefined ? ', #ca = :ca' : ''}`,
+        set: `#st = :done, #oc = :oc${result.sid !== undefined ? ', #sid = :sid' : ''}${result.cause !== undefined ? ', #ca = :ca' : ''}`,
         condition: '#st = :attempting AND #no = :no AND #at = :at',
         names: {
           '#st': 'attempt_state',
@@ -399,7 +511,7 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
     // An unknown outcome (or a known SID the site could not record): the attempt goes to the reconcile.
     handToReconcile: (owner, ref, sid) =>
       transition(owner, {
-        update: `SET #st = :reconciling, #ck = :zero${sid !== undefined ? ', #sid = :sid' : ''}`,
+        set: `#st = :reconciling, #ck = :zero${sid !== undefined ? ', #sid = :sid' : ''}`,
         condition: '#st = :attempting AND #no = :no AND #at = :at',
         names: {
           '#st': 'attempt_state',
@@ -417,10 +529,11 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
           ...(sid !== undefined && { ':sid': sid }),
         },
       }),
-    // A stale attempt (older than the claim TTL - the caller decided) goes to the reconcile, keeping its attemptedAt.
+    // A stale attempt (older than the claim TTL - the caller decided) goes to the reconcile, keeping its
+    // attemptedAt (its last re-arm), so the reconcile's window sits on the provider call.
     takeOver: (owner, record) =>
       transition(owner, {
-        update: 'SET #st = :reconciling, #ck = :zero',
+        set: '#st = :reconciling, #ck = :zero',
         condition: '#st = :attempting AND #no = :no AND #at = :at',
         names: { '#st': 'attempt_state', '#ck': 'check_no', '#no': 'attempt_no', '#at': 'attempted_at' },
         values: { ':reconciling': 'reconciling', ':zero': 0, ':attempting': 'attempting', ':no': record.attemptNo, ':at': record.attemptedAt },
@@ -428,7 +541,7 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
     // Check n is allowed from n-1 or n (tolerant of its own duplicate), never a skip or a step back.
     recordCheck: (owner, attemptedAt, checkNo) =>
       transition(owner, {
-        update: 'SET #ck = :ck',
+        set: '#ck = :ck',
         condition: '#st = :reconciling AND #at = :at AND (#ck = :prev OR #ck = :ck)',
         names: { '#st': 'attempt_state', '#ck': 'check_no', '#at': 'attempted_at' },
         values: { ':ck': checkNo, ':prev': checkNo - 1, ':reconciling': 'reconciling', ':at': attemptedAt },
@@ -436,14 +549,14 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
     // A never_sent verdict: at most ONE re-drive per recipient (redriveCount 0 -> 1; a claim never touches it).
     markRedriven: (owner, attemptedAt) =>
       transition(owner, {
-        update: 'SET #st = :redriven, #rc = :one',
+        set: '#st = :redriven, #rc = :one',
         condition: '#st = :reconciling AND #at = :at AND #rc = :zero',
         names: { '#st': 'attempt_state', '#rc': 'redrive_count', '#at': 'attempted_at' },
         values: { ':redriven': 'redriven', ':one': 1, ':zero': 0, ':reconciling': 'reconciling', ':at': attemptedAt },
       }),
     closeFromReconcile: (owner, attemptedAt, result) =>
       transition(owner, {
-        update: `SET #st = :done, #oc = :oc${result.sid !== undefined ? ', #sid = :sid' : ''}${result.cause !== undefined ? ', #ca = :ca' : ''}`,
+        set: `#st = :done, #oc = :oc${result.sid !== undefined ? ', #sid = :sid' : ''}${result.cause !== undefined ? ', #ca = :ca' : ''}`,
         condition: '#st = :reconciling AND #at = :at',
         names: {
           '#st': 'attempt_state',
@@ -464,7 +577,7 @@ export function createSendAttemptsRepo(deps: RepoDeps = {}): SendAttemptsRepo {
     // A redriven record belongs to whichever pass reaches it: any pass may close it.
     closeRedriven: (owner, result) =>
       transition(owner, {
-        update: `SET #st = :done, #oc = :oc${result.cause !== undefined ? ', #ca = :ca' : ''}`,
+        set: `#st = :done, #oc = :oc${result.cause !== undefined ? ', #ca = :ca' : ''}`,
         condition: '#st = :redriven',
         names: { '#st': 'attempt_state', '#oc': 'outcome', ...(result.cause !== undefined && { '#ca': 'cause' }) },
         values: { ':done': 'done', ':oc': result.outcome, ':redriven': 'redriven', ...(result.cause !== undefined && { ':ca': result.cause }) },

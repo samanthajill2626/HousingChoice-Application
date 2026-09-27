@@ -19,8 +19,12 @@ export const TRANSIENT_CAP_CODE = 'transient_cap';
 export const ENQUEUE_FAILED_CODE = 'enqueue_failed';
 /**
  * The send-attempt claim TTL (spec D8a). It EQUALS the provider request
- * timeout: adapters/messaging.ts pins TWILIO_REQUEST_TIMEOUT_MS to this value,
- * so a claim older than this can only belong to a dead or overrunning call.
+ * timeout (adapters/messaging.ts pins TWILIO_REQUEST_TIMEOUT_MS to this value)
+ * and is measured from the attempt's LAST re-arm, which every send site
+ * performs immediately before the provider call (sendAttemptsRepo.rearm; code
+ * review ADV-1). So an attempt older than this belongs to a call that died or
+ * is overrunning - never to one still preparing, which a claim followed by
+ * unbounded database work would otherwise look like.
  */
 export const SEND_CLAIM_TTL_MS = 30_000;
 export const RECONCILE_CHECK_DELAYS_MS: readonly number[] = [5_000, 30_000, 240_000];

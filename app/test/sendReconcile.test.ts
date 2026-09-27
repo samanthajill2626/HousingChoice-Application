@@ -699,7 +699,8 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMdeep-1' });
 
       // The bound: page 5 still has a next page, and every page is inside the window (no early stop).
-      // FW1-6: a cut walk CONTINUES at checks 0 and 1; only the last check closes it page_bound.
+      // FW1-6: a cut walk CONTINUES at checks 0 and 1; only the last check closes it page_bound. (FW4-1: it judges
+      // what it read first - nothing here is ours; the adopting twins are the FW4-1 tests below.)
       const u = seedTenant();
       seedBroadcast([u.contactId], { broadcastId: 'bcast-2' });
       world.listPageSize = 1;
@@ -792,6 +793,25 @@ describe('send.reconcile (spec D11-D16)', () => {
       await runCheck(payloadOf(bOwner(t.contactId), at));
       expect(list).toHaveBeenCalledTimes(5);
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-5' });
+
+      // Restated for FW4-1: a cut walk now judges what it read too, so the adoption above no longer tells the
+      // stop from the bound - the continue reason does. The same shape with nothing of ours: check 0 reads five
+      // pages and continues nothing_adoptable (the stop ended the walk), never page_bound.
+      const u = seedTenant();
+      seedBroadcast([u.contactId], { broadcastId: 'bcast-2' });
+      const atU = await reconciling(bOwner(u.contactId, 'bcast-2'), factsFor(u.phone!));
+      const baseU = Date.parse(atU);
+      for (let i = 1; i <= 4; i += 1) {
+        plant({ providerSid: `SMnewU-${i}`, to: u.phone!, createdAt: new Date(baseU + 10_000 * i).toISOString(), body: `other share ${i}` });
+      }
+      for (let i = 1; i <= 3; i += 1) {
+        plant({ providerSid: `SMoldU-${i}`, to: u.phone!, createdAt: new Date(baseU - 3_600_000 - 1000 * i).toISOString(), body: `old share ${i}` });
+      }
+      list.mockClear();
+      await runCheck(payloadOf(bOwner(u.contactId, 'bcast-2'), atU));
+      expect(list).toHaveBeenCalledTimes(5);
+      expect(await recordOf(bOwner(u.contactId, 'bcast-2'))).toMatchObject({ state: 'reconciling', checkNo: 1 });
+      expect(lines(30).filter((l) => l['verdict'] === 'continue').map((l) => l['reason'])).toEqual(['nothing_adoptable']);
     });
 
     it('a list whose order is NOT monotonic walks on as today - within a page, and across pages - so an orphan behind it is still found (FW1-6)', async () => {
@@ -833,6 +853,175 @@ describe('send.reconcile (spec D11-D16)', () => {
       ]);
       expect(across.calls).toEqual([undefined, '1', '2']);
       expect(across.record).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-b' });
+    });
+
+    // --- code review round 2, R2C-1 / F-1 (FW4-1): the early stop proves
+    // nothing about a page it has not read. A list that passes the order check
+    // while sorted on ANOTHER key (Twilio documents DateSent; a still-queued
+    // message has none and may sort last) can hold our orphan on a later page.
+    // So the stop only defers (checks 0-1); the LAST check walks on to the
+    // list's end or the bound, and never_sent needs that COMPLETE walk.
+
+    /** Script the provider's list as `pages` (the page token is the page index); returns the tokens asked for. */
+    function scriptList(pages: ListMessagesPage[]): (string | undefined)[] {
+      const calls: (string | undefined)[] = [];
+      world.adapter.listMessages = async (args) => {
+        calls.push(args.pageToken);
+        return pages[Number(args.pageToken ?? 0)]!;
+      };
+      return calls;
+    }
+
+    /** A provider message created `offsetMs` from `base` (another share's text unless `body` says otherwise). */
+    const listed = (base: number, providerSid: string, offsetMs: number, body = 'other share'): ProviderMessageSummary => ({
+      providerSid,
+      providerStatus: 'sent',
+      body,
+      mediaCount: 0,
+      createdAt: new Date(base + offsetMs).toISOString(),
+    });
+
+    it('R2C-1 / F-1: page 1 newest-first and wholly older than the window, our orphan on page 2 - checks 0-1 stop early and continue; the LAST check walks on, reads page 2 and adopts: found, no re-drive (FW4-1)', async () => {
+      register();
+      const redrives = recordJobs(BROADCAST_SEND_JOB);
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      const base = Date.parse(at);
+      // Page 1 passes the order check; the orphan, still queued at the provider (no date_sent), sorts onto page 2.
+      const calls = scriptList([
+        { messages: [listed(base, 'SMold-1', -3_600_000), listed(base, 'SMold-2', -3_601_000)], nextPageToken: '1' },
+        { messages: [{ ...listed(base, 'SMorphan-q', 1_000, BODY), providerStatus: 'queued' }] },
+      ]);
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      // Checks 0 and 1 read page 1 alone: the stop defers, nothing is decided.
+      expect(calls).toEqual([undefined, undefined]);
+      expect(await recordOf(owner)).toMatchObject({ state: 'reconciling', checkNo: 2 });
+      expect(lines(30).filter((l) => l['verdict'] === 'continue' && l['reason'] === 'nothing_adoptable')).toHaveLength(2);
+      const last = await runNextCheck();
+      expect(last.checkNo).toBe(2);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-q' });
+      expect(redrives).toHaveLength(0);
+      expect(calls).toEqual([undefined, undefined, undefined, '1']);
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent' });
+      expect(lines(40).filter((l) => l['verdict'] === 'never_sent')).toHaveLength(0);
+    });
+
+    it('FW4-1: the orphan BEYOND the page bound at the last check - the walk goes on to the bound and closes unresolved page_bound: never never_sent, never a re-drive', async () => {
+      register();
+      const redrives = recordJobs(BROADCAST_SEND_JOB);
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      const base = Date.parse(at);
+      // Five pages, each newest-first and wholly older than the window, each with a next page; the orphan is on page 6.
+      const pages: ListMessagesPage[] = [];
+      for (let p = 0; p < 5; p += 1) {
+        pages.push({ messages: [listed(base, `SMold-${p}`, -3_600_000 - 1_000 * p)], nextPageToken: String(p + 1) });
+      }
+      pages.push({ messages: [listed(base, 'SMorphan-far', 1_000, BODY)] });
+      const calls = scriptList(pages);
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      expect(calls).toEqual([undefined, undefined]);
+      await runNextCheck();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'page_bound' });
+      expect(redrives).toHaveLength(0);
+      expect(calls).toEqual([undefined, undefined, undefined, '1', '2', '3', '4']);
+      expect(slotOf(t.contactId)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      const errors = lines(50);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ verdict: 'unresolved', cause: 'page_bound', pages: 5, checkNo: 2 });
+    });
+
+    it('FW4-1: a CUT walk (a list longer than the bound) judges what it read - an orphan on page 1 is adopted at check 0, not deferred to a page_bound close', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      world.listPageSize = 1;
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      const base = Date.parse(at);
+      // Seven pages, every message inside the window (no early stop): the orphan is the newest, on page 1.
+      for (let i = 1; i <= 6; i += 1) {
+        plant({ providerSid: `SMin-${i}`, createdAt: new Date(base + 1_000 * i).toISOString(), body: `other share ${i}` });
+      }
+      plant({ providerSid: 'SMorphan-cut', createdAt: new Date(base + 10_000).toISOString() });
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-cut', checkNo: 1 });
+      expect(list).toHaveBeenCalledTimes(5);
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent' });
+      expect(scheduledChecks()).toHaveLength(0);
+    });
+
+    it('FW4-1: a cut walk at the LAST check still judges what it read - an orphan the list shows only by then (on page 1 of a list longer than the bound) is adopted, not closed page_bound', async () => {
+      register();
+      const redrives = recordJobs(BROADCAST_SEND_JOB);
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      world.listPageSize = 1;
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      const base = Date.parse(at);
+      for (let i = 1; i <= 6; i += 1) {
+        plant({ providerSid: `SMin-${i}`, createdAt: new Date(base + 1_000 * i).toISOString(), body: `other share ${i}` });
+      }
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      // Checks 0 and 1: cut at the bound with nothing adoptable - they continue page_bound.
+      expect(await recordOf(owner)).toMatchObject({ state: 'reconciling', checkNo: 2 });
+      expect(lines(30).filter((l) => l['verdict'] === 'continue' && l['reason'] === 'page_bound')).toHaveLength(2);
+      // The provider lists the orphan by the last check (list lag): the newest, on page 1.
+      plant({ providerSid: 'SMorphan-late', createdAt: new Date(base + 10_000).toISOString() });
+      await runNextCheck();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-late', checkNo: 3 });
+      expect(redrives).toHaveLength(0);
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent' });
+      expect(lines(50)).toHaveLength(0);
+    });
+
+    it('FW4-1: a COMPLETE walk at the last check reads past the early stop to the list\'s end: nothing in the window is never_sent (ONE re-drive); an unmatched candidate it reaches there is unidentified_candidate', async () => {
+      register();
+      const redrives = recordJobs(BROADCAST_SEND_JOB);
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      const base = Date.parse(at);
+      // Three pages, newest-first, every message an hour and more before the window; no next page after page 3.
+      const calls = scriptList([
+        { messages: [listed(base, 'SMold-1', -3_600_000)], nextPageToken: '1' },
+        { messages: [listed(base, 'SMold-2', -3_700_000)], nextPageToken: '2' },
+        { messages: [listed(base, 'SMold-3', -3_800_000)] },
+      ]);
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      await runNextCheck();
+      expect(calls).toEqual([undefined, undefined, undefined, '1', '2']);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(redrives).toEqual([{ broadcastId: 'bcast-1', recipientKeys: [t.contactId], attempt: 1, redrive: true } satisfies BroadcastSendPayload]);
+
+      // The same walk with a STOP auto-reply in the window sorted onto page 3: the complete walk sees it - unresolved, never re-driven.
+      const u = seedTenant();
+      seedBroadcast([u.contactId], { broadcastId: 'bcast-2' });
+      const ownerU = bOwner(u.contactId, 'bcast-2');
+      const atU = await reconciling(ownerU, factsFor(u.phone!));
+      const baseU = Date.parse(atU);
+      const callsU = scriptList([
+        { messages: [listed(baseU, 'SMoldU-1', -3_600_000)], nextPageToken: '1' },
+        { messages: [listed(baseU, 'SMoldU-2', -3_700_000)], nextPageToken: '2' },
+        { messages: [listed(baseU, 'SMstopU', 2_000, 'You have successfully been unsubscribed.')] },
+      ]);
+      await runCheck(payloadOf(ownerU, atU));
+      await runNextCheck();
+      await runNextCheck();
+      expect(await recordOf(ownerU)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'unidentified_candidate' });
+      expect(redrives).toHaveLength(1);
+      expect(callsU).toEqual([undefined, undefined, undefined, '1', '2']);
     });
 
     it('11 an empty window through all three checks is never_sent: ONE re-drive of that recipient; a second delivery of the verdict enqueues nothing', async () => {
@@ -1649,6 +1838,27 @@ describe('send.reconcile (spec D11-D16)', () => {
       await runCheck(payloadOf(bOwner(t.contactId), at));
       expect(list).toHaveBeenCalledTimes(5);
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMfive-orphan' });
+
+      // Restated for FW4-1: a cut walk now judges what it read, so adopting page 5's orphan no longer proves the
+      // walk was COMPLETE - the last check's verdict does (never_sent needs the list's end). Exactly five pages,
+      // all behind the window: checks 0-1 stop at page 1; the last check walks all five, reaches the end, and
+      // rules never_sent - never page_bound.
+      const redrives = recordJobs(BROADCAST_SEND_JOB);
+      const u = seedTenant();
+      seedBroadcast([u.contactId], { broadcastId: 'bcast-2' });
+      const ownerU = bOwner(u.contactId, 'bcast-2');
+      const atU = await reconciling(ownerU, factsFor(u.phone!));
+      for (let i = 1; i <= 5; i += 1) {
+        plant({ providerSid: `SMfiveU-${i}`, to: u.phone!, createdAt: new Date(Date.parse(atU) - 3_600_000 - 1000 * i).toISOString(), body: `old share ${i}` });
+      }
+      list.mockClear();
+      await runCheck(payloadOf(ownerU, atU));
+      await runNextCheck();
+      expect(list).toHaveBeenCalledTimes(2);
+      await runNextCheck();
+      expect(list).toHaveBeenCalledTimes(7);
+      expect(await recordOf(ownerU)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(redrives).toEqual([{ broadcastId: 'bcast-2', recipientKeys: [u.contactId], attempt: 1, redrive: true } satisfies BroadcastSendPayload]);
     });
 
     it('12b an unresolved close of a recipient that is not the last ticks the results page with the unconfirmed bucket (D22)', async () => {

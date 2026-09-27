@@ -796,17 +796,28 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
   const bySid = new Map<string, ProviderMessageSummary>();
   let pageToken: string | undefined;
   let pages = 0;
-  // THE EARLY STOP (code review ADV-4, fix FW1-6). The list is newest-first,
-  // but that order is UNVERIFIED against real Twilio (spec Sec 10), so the
-  // walk trusts only the order the provider actually returned: while every
-  // page so far is non-increasing in createdAt - inside itself, and not newer
-  // than the previous page's last message - a page whose oldest message is
-  // older than the window's start proves no later page can hold a candidate.
-  // Without it, a recipient with more than RECONCILE_MAX_PAGES pages of OLD
-  // history closed page_bound on the first check with the orphan on page 1.
-  // An unordered list walks on exactly as before.
+  // THE EARLY STOP (code review ADV-4, fix FW1-6; narrowed by round 2's
+  // R2C-1 / F-1, fix FW4-1). The list is newest-first, but that order is
+  // UNVERIFIED against real Twilio (spec Sec 10). The stop fires once a page's
+  // oldest message is older than the window's start while every page READ so
+  // far is non-increasing in createdAt - inside itself, and not newer than
+  // the previous page's last message. What that MAY prove: the pages read are
+  // in createdAt order and have walked behind the window, so IF the unread
+  // pages keep that order none of them holds a candidate. What it may NOT
+  // prove: that they do - a list sorted on ANOTHER key passes the check and
+  // still holds a newer message on a later page (Twilio documents DateSent; a
+  // still-queued orphan has none and may sort last). So the stop only DEFERS:
+  // it runs on the checks BEFORE the last, where a miss is followed by
+  // another check, and saves their cost (one page, not RECONCILE_MAX_PAGES,
+  // for a recipient with heavy OLD history). The LAST check never stops
+  // early: it walks on to the list's end or the page bound, and never_sent
+  // needs that COMPLETE walk. An unordered list never stops early.
   let newestFirst = true;
   let previousLastMs: number | undefined;
+  // A walk CUT at the bound (a page still pending after RECONCILE_MAX_PAGES
+  // pages) still judges what it read, at every check: an adoptable candidate
+  // is real whatever the unread pages hold. It never rules never_sent.
+  let cut = false;
   do {
     let page: ListMessagesPage;
     try {
@@ -830,13 +841,11 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
     newestFirst &&= times.every((t, i) => t <= (i === 0 ? (previousLastMs ?? t) : times[i - 1]!));
     const oldestMs = times.length > 0 ? times[times.length - 1] : undefined;
     if (oldestMs !== undefined) previousLastMs = oldestMs;
-    if (newestFirst && oldestMs !== undefined && oldestMs < windowStartMs) break;
+    if (!last && newestFirst && oldestMs !== undefined && oldestMs < windowStartMs) break;
     pageToken = page.nextPageToken;
-    // A walk cut at the bound with a page pending decides nothing until the
-    // LAST check (the provider may answer a shorter list later); there it is
-    // the page_bound residue - unresolved, never never_sent.
     if (pageToken !== undefined && pages >= RECONCILE_MAX_PAGES) {
-      return last ? { kind: 'unresolved', cause: 'page_bound', extra: { pages } } : { kind: 'continue', reason: 'page_bound' };
+      cut = true;
+      break;
     }
   } while (pageToken !== undefined);
 
@@ -863,7 +872,12 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
     }
     // A free match whose claim another attempt won: someone else's. Next.
   }
-  if (!last) return { kind: 'continue', reason: 'nothing_adoptable' };
+  // Nothing adopted. Before the last check a miss only defers (the provider
+  // may list more, or a shorter list, later) - a cut walk names the bound.
+  // At the last check a cut walk is the page_bound residue - unresolved,
+  // never never_sent; only a COMPLETE walk goes on to the causes below.
+  if (!last) return cut ? { kind: 'continue', reason: 'page_bound' } : { kind: 'continue', reason: 'nothing_adoptable' };
+  if (cut) return { kind: 'unresolved', cause: 'page_bound', extra: { pages } };
   if (unmatched > 0) return { kind: 'unresolved', cause: 'unidentified_candidate', extra: { unmatched } };
   // D13: never_sent is withheld while a sibling that could have claimed our
   // message is still open or adopted one in the window - re-driving on that

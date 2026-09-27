@@ -3,7 +3,8 @@ id: throw-for-redelivery-defeated-by-job-marker
 title: Both fan-outs throw to force an SQS redelivery that the job-execution marker then suppresses
 type: bug
 severity: high
-status: open
+status: resolved
+resolved: 2026-09-27
 area: jobs
 created: 2026-09-01
 updated: 2026-09-27
@@ -234,3 +235,5 @@ section 6). Each is filed:
 The stale-claim takeover is now measured from the attempt's last RE-ARM,
 taken immediately before the provider call (code review ADV-1; FW1-1 and
 FW2-1), not from the claim. Nothing here changes this issue's status.
+
+**RESOLVED 2026-09-27** - `feat/send-outcome-reconcile` merged into main at 79b9479e (code final at 52220729). Both fan-outs and the relay retry rung now classify every send failure (rejected / retryable / unknown), claim a per-recipient send-attempt record before each provider call (re-armed immediately before the call), hand an unknown outcome to the `send.reconcile` job, which looks the message up at the provider and adopts, re-drives once, or closes it `send_unconfirmed` (dashboard: "Not confirmed"); nothing throws under the run-once marker any more and the `TODO(throw-for-redelivery-defeated-by-job-marker)` markers are gone. Records: `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/` (handback, planner-verdict); spec revision 12 section 12 lists the as-built errata. Residues are their own issues (see `send-attempt-sweeper`, `send-attempt-rearm-residues`, `send-reconcile-job-residues`, `unconfirmed-share-invites-resend`, `deploy-mid-share-strands-remaining-recipients`). Stage 1b (`retry-send-lost-under-job-marker`) is the next worktree.

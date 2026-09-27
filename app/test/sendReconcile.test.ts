@@ -984,7 +984,7 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(lines(50)).toHaveLength(0);
     });
 
-    it('FW4-1: a COMPLETE walk at the last check reads past the early stop to the list\'s end: nothing in the window is never_sent (ONE re-drive); an unmatched candidate it reaches there is unidentified_candidate', async () => {
+    it('FW4-1: a COMPLETE walk at the last check reads past the early stop to the list\'s end: nothing in the window is never_sent (ONE re-drive); an unmatched candidate it reaches there is unidentified_candidate, ahead of an open same-fingerprint sibling', async () => {
       register();
       const redrives = recordJobs(BROADCAST_SEND_JOB);
       const t = seedTenant();
@@ -1016,6 +1016,9 @@ describe('send.reconcile (spec D11-D16)', () => {
         { messages: [listed(baseU, 'SMoldU-2', -3_700_000)], nextPageToken: '2' },
         { messages: [listed(baseU, 'SMstopU', 2_000, 'You have successfully been unsubscribed.')] },
       ]);
+      // Rule (d): the causes keep their order - beside an OPEN same-fingerprint sibling (another share's
+      // attempt to this number, mid-send) the unmatched candidate still decides.
+      expect((await world.sendAttemptsRepo.claim(bOwner(u.contactId, 'bcast-3'), factsFor(u.phone!), new Date().toISOString())).outcome).toBe('claimed');
       await runCheck(payloadOf(ownerU, atU));
       await runNextCheck();
       await runNextCheck();

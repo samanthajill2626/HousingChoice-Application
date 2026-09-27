@@ -2310,6 +2310,13 @@ export function createFakeWorld(): FakeWorld {
       } else if (patch.welcomeText !== undefined) {
         settings.welcomeText = patch.welcomeText;
       }
+      if ('voicemailGreeting' in patch) {
+        if (patch.voicemailGreeting === null) {
+          delete settings.voicemailGreeting;
+        } else if (patch.voicemailGreeting !== undefined) {
+          settings.voicemailGreeting = patch.voicemailGreeting;
+        }
+      }
       return { ...settings };
     },
     async claimGroupIdentityFingerprint() {

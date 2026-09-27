@@ -53,10 +53,10 @@ const MAX_PRE_RING_PAUSE_SECONDS = 10;
  * (only the supplied, valid fields) or an error message. An empty patch is
  * valid (a no-op PUT returns the current settings).
  */
-/** The validated patch. `welcomeText` may be `null` — an explicit CLEAR that the
- *  repo turns into a DynamoDB REMOVE (revert to the WELCOME_TEXT_TEMPLATE
- *  default); every other field keeps its OrgSettings type. */
-type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & { welcomeText?: string | null };
+/** The validated patch. `welcomeText` may be `null` (an explicit CLEAR the repo
+ *  turns into a DynamoDB REMOVE). `voicemailGreeting` is Omitted on purpose:
+ *  parsePatch never produces it - only the greeting routes below write it. */
+type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText' | 'voicemailGreeting'>> & { welcomeText?: string | null };
 
 function parsePatch(body: unknown): { patch: SettingsPatch } | { error: string } {
   if (typeof body !== 'object' || body === null) {

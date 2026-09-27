@@ -758,3 +758,55 @@ describe('settingsRepo - the journal-sweep Scan cursor', () => {
     expect(await repo.getJournalSweepCursor()).toBeUndefined();
   });
 });
+
+describe('settingsRepo - voicemailGreeting projection (voicemail-greeting spec 4.2)', () => {
+  const GOOD = {
+    s3Key: 'settings/voicemail-greeting',
+    contentType: 'audio/mpeg',
+    fileName: 'sam.mp3',
+    sizeBytes: 427,
+    uploadedAt: '2026-09-26T12:00:00.000Z',
+    uploadedByUserId: 'user-0001',
+    uploadedByEmail: 'founder@example.com',
+  };
+
+  it('projects a well-formed map', async () => {
+    const repo = createSettingsRepo({ doc: fakeDocReturning({ settingId: 'org', voicemailGreeting: GOOD }) });
+    const s = await repo.getOrgSettings();
+    expect(s.voicemailGreeting).toEqual(GOOD);
+  });
+
+  it('is absent by default and absent for a malformed map', async () => {
+    expect((await createSettingsRepo({ doc: fakeDocReturning({ settingId: 'org' }) }).getOrgSettings()).voicemailGreeting).toBeUndefined();
+    for (const bad of [
+      { ...GOOD, s3Key: 'recordings/CA1/RE1' }, // a foreign key can never be played
+      { ...GOOD, contentType: 'audio/mp4' },
+      { ...GOOD, contentType: undefined }, // spec 5 names a MISSING contentType
+      { ...GOOD, fileName: 42 },
+      { ...GOOD, sizeBytes: '427' },
+      { ...GOOD, sizeBytes: -1 }, // spec 4.2: finite NON-NEGATIVE
+      { ...GOOD, uploadedAt: undefined },
+      { ...GOOD, uploadedByUserId: undefined },
+      { ...GOOD, uploadedByEmail: null },
+      'not-a-map',
+      null, // a DynamoDB NULL attribute must read as absent, not throw
+    ]) {
+      const repo = createSettingsRepo({ doc: fakeDocReturning({ settingId: 'org', voicemailGreeting: bad }) });
+      expect((await repo.getOrgSettings()).voicemailGreeting, JSON.stringify(bad)).toBeUndefined();
+    }
+  });
+
+  it('putOrgSettings({ voicemailGreeting: null }) issues a REMOVE', async () => {
+    const sent: unknown[] = [];
+    const doc = {
+      send: async (cmd: unknown) => {
+        sent.push(cmd);
+        return { Attributes: { settingId: 'org' } };
+      },
+    } as unknown as DynamoDBDocumentClient;
+    await createSettingsRepo({ doc }).putOrgSettings({ voicemailGreeting: null });
+    const update = sent[0] as UpdateCommand;
+    expect(update.input.UpdateExpression).toBe('REMOVE #k0');
+    expect(update.input.ExpressionAttributeNames).toEqual({ '#k0': 'voicemailGreeting' });
+  });
+});

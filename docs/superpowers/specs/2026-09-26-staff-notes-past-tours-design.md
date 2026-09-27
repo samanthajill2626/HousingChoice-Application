@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-27).** This document describes how
+> this work was *designed/planned at the time of writing*. The work shipped to the main line and
+> its feature branch + worktree were deleted during cleanup. **This file is NOT current
+> documentation and the live code may have drifted from it - do not treat it as authoritative
+> guidance on how the system should be built or behaves today.** For current truth read the code
+> and the project's living docs. Kept only as a point-in-time record of intent.
+
 # Staff notes on the tenant file and a Past tab on the Tours page - design specification
 
 Status: DRAFT 4 + AMENDMENTS 3.9 (stale-save guard) and 4.2a (undated toured tours), 2026-09-27, Cameron - APPROVED FOR BUILD by the planner after spec review rounds 1-3 (round 3 changed no decision; adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/spec-r1-adjudications.md`, `spec-r2-adjudications.md`, `spec-r3-adjudications.md`); written for an OVERNIGHT UNATTENDED mission (Cameron 2026-09-26): every product decision below was given in the mission text or is recorded in section 9 as a decision the planner took alone

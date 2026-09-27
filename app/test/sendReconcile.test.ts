@@ -1027,6 +1027,139 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(callsU).toEqual([undefined, undefined, undefined, '1', '2']);
     });
 
+    // --- code review round 3, NEW-1 (FW5-1): a failed list call ends the walk
+    // but no longer discards what was read - FW4-1's "judge what was read",
+    // applied to a list error as well as to the bound. An adoptable candidate
+    // already read is adopted; when nothing is, the error is the check's
+    // verdict (continue provider_error; unresolved provider_unreachable at the
+    // last check) ahead of every other cause, so a walk that met a list error
+    // never rules never_sent. A page-1 failure reads nothing and keeps
+    // today's verdicts: test 12 pins them at every check.
+
+    /** Script the provider's list call by call: a page answers, an Error throws. Returns the tokens asked for. */
+    function scriptCalls(answers: (ListMessagesPage | Error)[]): (string | undefined)[] {
+      const calls: (string | undefined)[] = [];
+      world.adapter.listMessages = async (args) => {
+        calls.push(args.pageToken);
+        const answer = answers[calls.length - 1];
+        if (answer === undefined) throw new Error(`scriptCalls: no answer scripted for list call ${calls.length}`);
+        if (answer instanceof Error) throw answer;
+        return answer;
+      };
+      return calls;
+    }
+
+    const unavailable = (): Error => Object.assign(new Error('Service Unavailable'), { status: 503 });
+
+    it('FW5-1 (NEW-1): the list fails at checks 0-1; at the LAST check page 1 holds our orphan with a next page and the page-2 call throws - the orphan already read is adopted, never closed provider_unreachable', async () => {
+      register();
+      const redrives = recordJobs(BROADCAST_SEND_JOB);
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      const base = Date.parse(at);
+      // One provider incident: page 1 fails at checks 0 and 1; by the last check it answers, and page 2 fails.
+      const calls = scriptCalls([
+        unavailable(),
+        unavailable(),
+        { messages: [listed(base, 'SMorphan', 1_000, BODY), listed(base, 'SMold-1', -3_600_000)], nextPageToken: '1' },
+        unavailable(),
+      ]);
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      expect(await recordOf(owner)).toMatchObject({ state: 'reconciling', checkNo: 2 });
+      expect(lines(40).filter((l) => l['err'] !== undefined)).toHaveLength(2);
+      await runNextCheck();
+      expect(calls).toEqual([undefined, undefined, undefined, '1']);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan' });
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent' });
+      expect(redrives).toHaveLength(0);
+      expect(lines(50)).toHaveLength(0);
+    });
+
+    it('FW5-1: a page-2 error at the LAST check with nothing adoptable is unresolved provider_unreachable carrying that error - never never_sent or page_bound, and ahead of an unmatched candidate and of an open same-fingerprint sibling', async () => {
+      register();
+      const redrives = recordJobs(BROADCAST_SEND_JOB);
+      /** A recipient whose page 1 (newest-first, reaching behind the window: checks 0-1 stop there) has a next page that throws; its three checks. */
+      async function pageTwoFails(broadcastId: string, page1: (base: number) => ProviderMessageSummary[], sibling = false) {
+        const t = seedTenant();
+        seedBroadcast([t.contactId], { broadcastId });
+        const owner = bOwner(t.contactId, broadcastId);
+        const at = await reconciling(owner, factsFor(t.phone!));
+        if (sibling) {
+          // Another share's attempt to this number with the same fingerprint, still mid-send.
+          expect((await world.sendAttemptsRepo.claim(bOwner(t.contactId, `${broadcastId}-sib`), factsFor(t.phone!), new Date().toISOString())).outcome).toBe('claimed');
+        }
+        const page: ListMessagesPage = { messages: page1(Date.parse(at)), nextPageToken: '1' };
+        const calls = scriptCalls([page, page, page, new Error(`page 2 down ${broadcastId}`)]);
+        await runCheck(payloadOf(owner, at));
+        await runNextCheck();
+        await runNextCheck();
+        const mine = (level: number) => lines(level).filter((l) => (l['owner'] as { broadcastId?: string } | undefined)?.broadcastId === broadcastId);
+        return { calls, record: await recordOf(owner), slot: slotOf(t.contactId, broadcastId), errors: mine(50), warns: mine(40) };
+      }
+      const behind = (base: number) => [listed(base, 'SMold-1', -3_600_000), listed(base, 'SMold-2', -3_601_000)];
+      const walks = [
+        // Nothing in the window: judged as if complete, this walk would be never_sent.
+        ['bcast-1', await pageTwoFails('bcast-1', behind)],
+        // An unmatched candidate (a STOP auto-reply) in the window on page 1.
+        ['bcast-2', await pageTwoFails('bcast-2', (base) => [listed(base, 'SMstop', 2_000, 'You have successfully been unsubscribed.'), ...behind(base)])],
+        // An open same-fingerprint sibling.
+        ['bcast-3', await pageTwoFails('bcast-3', behind, true)],
+      ] as const;
+      for (const [broadcastId, walk] of walks) {
+        expect(walk.calls).toEqual([undefined, undefined, undefined, '1']);
+        expect(walk.record).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'provider_unreachable' });
+        expect(walk.slot).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+        expect(walk.errors).toHaveLength(1);
+        expect(walk.errors[0]).toMatchObject({ verdict: 'unresolved', cause: 'provider_unreachable', checkNo: 2, err: { message: `page 2 down ${broadcastId}` } });
+        expect(walk.warns.filter((l) => l['verdict'] === 'never_sent')).toHaveLength(0);
+      }
+      expect(redrives).toHaveLength(0);
+      expect(lines(30).filter((l) => l['reason'] === 'page_bound')).toHaveLength(0);
+    });
+
+    it('FW5-1: a page-2 error at CHECK 0 with our orphan on page 1 - the orphan already read is adopted at check 0; with nothing adoptable the check continues provider_error carrying that error', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      const base = Date.parse(at);
+      // Page 1 lies wholly inside the window (no early stop), so the walk asks for page 2 - which throws.
+      const calls = scriptCalls([
+        { messages: [listed(base, 'SMnew-1', 20_000), listed(base, 'SMorphan', 1_000, BODY)], nextPageToken: '1' },
+        unavailable(),
+      ]);
+      await runCheck(payloadOf(owner, at));
+      expect(calls).toEqual([undefined, '1']);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan', checkNo: 1 });
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent' });
+      expect(scheduledChecks()).toHaveLength(0);
+      expect(lines(40).filter((l) => l['err'] !== undefined)).toHaveLength(0);
+
+      // The same walk with nothing of ours on page 1: the error is the check's result - continue provider_error,
+      // its WARN carrying the error, never nothing_adoptable; the next check lists again.
+      const u = seedTenant();
+      seedBroadcast([u.contactId], { broadcastId: 'bcast-2' });
+      const ownerU = bOwner(u.contactId, 'bcast-2');
+      const atU = await reconciling(ownerU, factsFor(u.phone!));
+      const baseU = Date.parse(atU);
+      const callsU = scriptCalls([
+        { messages: [listed(baseU, 'SMnewU-1', 20_000), listed(baseU, 'SMnewU-2', 1_000)], nextPageToken: '1' },
+        new Error('page 2 down'),
+      ]);
+      await runCheck(payloadOf(ownerU, atU));
+      expect(callsU).toEqual([undefined, '1']);
+      expect(await recordOf(ownerU)).toMatchObject({ state: 'reconciling', checkNo: 1 });
+      expect(scheduledChecks()).toHaveLength(1);
+      const warned = lines(40).filter((l) => l['err'] !== undefined);
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toMatchObject({ checkNo: 0, err: { message: 'page 2 down' } });
+      expect(lines(30).filter((l) => l['verdict'] === 'continue').map((l) => l['reason'])).toEqual(['provider_error']);
+    });
+
     it('11 an empty window through all three checks is never_sent: ONE re-drive of that recipient; a second delivery of the verdict enqueues nothing', async () => {
       register();
       const redrives = recordJobs(BROADCAST_SEND_JOB);

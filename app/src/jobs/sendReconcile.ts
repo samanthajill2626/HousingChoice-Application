@@ -757,8 +757,10 @@ async function adoptKnown(c: Ctx, r: Resolved, sid: string): Promise<Verdict> {
  * Oldest first: a SID another owner holds (a sibling record, a pointer, a
  * row, the system marker) is skipped; one this owner holds is a repair; a
  * matching free candidate is claimed, and the first claim that wins is
- * `found`. A provider error is this check's result (continue; unresolved at
- * the last check); only the job's own reads and writes throw.
+ * `found`. A provider error ends the walk; what it read is still judged, and
+ * a judging that returns no verdict of its own yields the error as this
+ * check's result (continue; unresolved at the last check) - never
+ * never_sent. Only the job's own reads and writes throw.
  */
 async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: number): Promise<Verdict> {
   const last = checkNo >= RECONCILE_CHECK_DELAYS_MS.length - 1;
@@ -810,14 +812,21 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
   // it runs on the checks BEFORE the last, where a miss is followed by
   // another check, and saves their cost (one page, not RECONCILE_MAX_PAGES,
   // for a recipient with heavy OLD history). The LAST check never stops
-  // early: it walks on to the list's end or the page bound, and never_sent
-  // needs that COMPLETE walk. An unordered list never stops early.
+  // early: it walks on to the list's end or the page bound (unless a list
+  // call fails first), and never_sent needs that COMPLETE walk. An
+  // unordered list never stops early.
   let newestFirst = true;
   let previousLastMs: number | undefined;
   // A walk CUT at the bound (a page still pending after RECONCILE_MAX_PAGES
   // pages) still judges what it read, at every check: an adoptable candidate
   // is real whatever the unread pages hold. It never rules never_sent.
   let cut = false;
+  // A walk ENDED by a failed list call - at any page, at any check - still
+  // judges what it read, as a cut walk does (code review round 3, NEW-1; fix
+  // FW5-1): a page the walk adds can only ADD evidence, never discard what
+  // it read. A judging that returns no verdict of its own gives way to the
+  // error (below). A failure on page 1 reads nothing: the error alone.
+  let listFailure: { err: unknown } | undefined;
   do {
     let page: ListMessagesPage;
     try {
@@ -828,9 +837,8 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
         ...(pageToken !== undefined && { pageToken }),
       });
     } catch (err) {
-      return last
-        ? { kind: 'unresolved', cause: 'provider_unreachable', extra: { err } }
-        : { kind: 'continue', reason: 'provider_error', err };
+      listFailure = { err };
+      break;
     }
     pages += 1;
     const times = page.messages.map((m) => Date.parse(m.createdAt));
@@ -872,10 +880,20 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
     }
     // A free match whose claim another attempt won: someone else's. Next.
   }
-  // Nothing adopted. Before the last check a miss only defers (the provider
-  // may list more, or a shorter list, later) - a cut walk names the bound.
-  // At the last check a cut walk is the page_bound residue - unresolved,
-  // never never_sent; only a COMPLETE walk goes on to the causes below.
+  // Nothing adopted. A walk a list error ended returns that error, ahead of
+  // every cause below (the error is why the walk is incomplete): before the
+  // last check it continues provider_error and the next check lists again;
+  // at the last check it is unresolved provider_unreachable - never
+  // never_sent. Otherwise, before the last check a miss only defers (the
+  // provider may list more, or a shorter list, later) - a cut walk names the
+  // bound. At the last check a cut walk is the page_bound residue -
+  // unresolved, never never_sent; only a COMPLETE walk goes on to the causes
+  // below.
+  if (listFailure !== undefined) {
+    return last
+      ? { kind: 'unresolved', cause: 'provider_unreachable', extra: { err: listFailure.err } }
+      : { kind: 'continue', reason: 'provider_error', err: listFailure.err };
+  }
   if (!last) return cut ? { kind: 'continue', reason: 'page_bound' } : { kind: 'continue', reason: 'nothing_adoptable' };
   if (cut) return { kind: 'unresolved', cause: 'page_bound', extra: { pages } };
   if (unmatched > 0) return { kind: 'unresolved', cause: 'unidentified_candidate', extra: { unmatched } };

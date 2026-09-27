@@ -333,6 +333,27 @@ the byte-exact quotes.
   from the slice reports.
 - Gates: `npm run issues` (read the warnings), ASCII check on every touched file.
 
+## 2a. Dispatch amendments (recorded as the build ran)
+
+- 2026-09-27 01:25: S1b split into S1b (Task 5) and S1c (Task 6), and S1c
+  also carries a fake-vs-real parity test for the Task 6 decision methods
+  (`app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts`): both
+  tasks are large, and every Task 7-10 unit test stands on the harness fakes.
+- 2026-09-27 03:10: `adoptBroadcastRecipient` (plan Task 7's export) moves
+  from S2a to S3 (Task 10), its only consumer, so S2a stays inside one
+  child's working set. S2a = Task 3 + Task 7 without that function.
+- Carried into S3 from S1c: a LEGACY `adoptRelayRecipientIfUnsent` that
+  adopts a success status with no `errorCode` keeps a stale transient code on
+  the slot (the versioned path clears it); S3 adds `REMOVE #dr.#mk.#ec` to the
+  legacy statement in that case (both real and fake, with a parity case).
+- Carried into S2b from S1c: the harness `getByTsMsgIdConsistent` does not
+  delegate through `getByTsMsgId`; if Task 8 switches `readVersionedSource`
+  to the consistent read, re-check any spy on `getByTsMsgId`.
+- Recorded for the handback (hosted-dev verification, spec Sec 10): if a
+  Messaging Service appends opt-out text to a first message (Twilio Advanced
+  Opt-Out), the stored body no longer matches the record's fingerprint and
+  the reconcile ends `unresolved` (the safe direction; never a re-send).
+
 ## 3. Residues carried to the handback (not fixed on this branch)
 
 R1 (A10) the read-then-write inbox touch; R2 (A10) the relay receipt window

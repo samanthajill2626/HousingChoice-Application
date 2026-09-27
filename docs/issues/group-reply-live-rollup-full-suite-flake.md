@@ -72,3 +72,33 @@ rollups, clean alone. The suggested trace (receipt callback ->
 failing instance; a `E2E_CHILD_LOG_DIR` run is NOT the tool for it (a
 timing symptom), a trace on first retry is.
 
+**Recurrence (2026-09-27, `feat/staff-notes-past-tours` final gate run) -
+same signature, and this time the app-side log of the failing instance is
+in hand.** A bare `timeout 2700 npm run e2e` on `03768233` (25.9 minutes;
+the same code paths had run 287/287 in 22.9 minutes at 08:20Z that morning)
+failed `group-text-per-recipient-delivery.spec.ts:63` alone ("the per-recipient
+rollup never settled at 2/3 LIVE (no reload)") after its 60-second poll;
+286 passed. The isolated re-run of the file passed in 27.1 s (the test 5.7 s).
+The branch touches no messaging, SSE or group-text code (contacts PATCH,
+tours dashboard, two tours/contact e2e specs). Machine conditions: another
+mission's full e2e was live on lane 15 for the whole run (its lease was
+written at 10:59Z, 16-17 of its node processes alive after). The suggested
+trace was not run, but the launcher's captured app log for the failing test's
+window (`ok 71` to `x 72`) shows the receipt chain's own verdict - three
+lines, verbatim apart from the JSON wrapper:
+
+- `{"conversationId":"16d1845c-...","tsMsgId":"2026-09-27T10:43:14.831Z#IMfake31302060","status":"delivered","msg":"group recipient delivery status transition lost a race (regressed)"}` - TWICE, 22 ms apart (10:43:15.681Z and .703Z), two different requestIds;
+- `{"providerSid":"IMfake31302060","status":"sent","currentStatus":"queued","msg":"delivery status transition skipped (would regress)"}` at 10:43:15.882Z;
+- plus exactly three `group recipient delivery updated` and one `delivery status updated` lines in the window.
+
+So on the failing instance the two `delivered` receipts for the same
+provider SID both lost the per-recipient transition race (each saw a status
+it would regress) and were dropped, and the later `sent` receipt was skipped
+as a regression of `queued` - the rollup therefore never reached two
+delivered out of three, and no SSE push could have shown 2/3 because the
+stored state never got there. That points the trace at the per-recipient
+transition's compare-and-set (who held `delivered` first, and why a second
+`delivered` counts as a regression) rather than at the event stream. Under
+load the fake's receipts arrive closer together, which is consistent with
+every sighting being a slow full run.
+

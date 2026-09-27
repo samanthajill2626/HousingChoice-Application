@@ -385,17 +385,35 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   // nothing - no TwiML, no log line - so a lookup that resolves AFTER the
   // budget has nothing to append and nothing to log. Only the caller, and
   // only when the race resolved in time, emits <Play> and writes the one
-  // INFO or WARN. PII: callSid + the fixed s3Key only; the presigned URL is a
-  // bearer token and is never logged.
+  // INFO, WARN or ERROR. PII: callSid + the fixed s3Key only; the presigned
+  // URL is a bearer token and is never logged.
+  //
+  // LEVELS (Cameron, 2026-09-27, amending decision 3's WARN): a greeting that
+  // IS set but cannot be offered logs ERROR, so it reaches the error alarms -
+  // callers are silently getting the computer voice while Settings shows a
+  // greeting. A failure BEFORE we know whether one is set (the settings read
+  // itself failing or timing out) stays WARN: the default no-greeting org
+  // would otherwise page on every DynamoDB blip. No log line when none is set.
   type GreetingLookup =
     | { kind: 'play'; url: string; s3Key: string }
     | { kind: 'absent' }
     | { kind: 'no_store'; s3Key: string }
     | { kind: 'missing'; s3Key: string };
 
-  async function lookupVoicemailGreeting(signal: AbortSignal): Promise<GreetingLookup> {
+  /** How far the lookup got, read ONLY by the caller's catch (a thrown error
+   *  or the budget expiring) to pick the level. The one side effect the lookup
+   *  has, and it is on this local object, never on the TwiML or the logger. */
+  interface GreetingLookupProgress {
+    greetingSet: boolean;
+  }
+
+  async function lookupVoicemailGreeting(
+    signal: AbortSignal,
+    progress: GreetingLookupProgress,
+  ): Promise<GreetingLookup> {
     const org = await settings.getOrgSettings();
     if (org.voicemailGreeting === undefined) return { kind: 'absent' };
+    progress.greetingSet = true;
     // The FIXED key, never the record's s3Key: the projection already accepts
     // only that key, and heading/presigning the constant (defense in depth)
     // means no projection change or second writer of the map can point <Play>
@@ -414,31 +432,33 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
    * (none set, store unconfigured, object missing, thrown error, timeout)
    * returns false so the caller speaks today's prompt - the webhook can never
    * fail because of the greeting (decision 3). No log line when no greeting is
-   * set (the normal state of every org); WARN for the rest.
+   * set (the normal state of every org); ERROR when one is set but cannot be
+   * offered; WARN when the settings read itself failed (see LEVELS above).
    */
   async function offerVoicemailGreeting(reply: InstanceType<typeof VoiceResponse>, callSid: string): Promise<boolean> {
     let result: GreetingLookup;
+    const progress: GreetingLookupProgress = { greetingSet: false };
     try {
       result = await withTimeout(
-        lookupVoicemailGreeting(AbortSignal.timeout(greetingLookupBudgetMs)),
+        lookupVoicemailGreeting(AbortSignal.timeout(greetingLookupBudgetMs), progress),
         greetingLookupBudgetMs,
         'voicemail greeting lookup',
       );
     } catch (err) {
-      log.warn(
-        { err, callSid, budgetMs: greetingLookupBudgetMs },
-        'voicemail greeting lookup failed or timed out - using the spoken prompt',
-      );
+      const fields = { err, callSid, budgetMs: greetingLookupBudgetMs };
+      const message = 'voicemail greeting lookup failed or timed out - using the spoken prompt';
+      if (progress.greetingSet) log.error(fields, message);
+      else log.warn(fields, message);
       return false;
     }
     switch (result.kind) {
       case 'absent':
         return false;
       case 'no_store':
-        log.warn({ callSid, s3Key: result.s3Key }, 'voicemail greeting set but no media store configured - using the spoken prompt');
+        log.error({ callSid, s3Key: result.s3Key }, 'voicemail greeting set but no media store configured - using the spoken prompt');
         return false;
       case 'missing':
-        log.warn({ callSid, s3Key: result.s3Key }, 'voicemail greeting object missing - using the spoken prompt');
+        log.error({ callSid, s3Key: result.s3Key }, 'voicemail greeting object missing - using the spoken prompt');
         return false;
       case 'play':
         reply.play(result.url);

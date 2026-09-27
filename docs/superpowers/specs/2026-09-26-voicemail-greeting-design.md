@@ -11,7 +11,22 @@ was terminal. Adjudications: `docs/superpowers/reviews/
 2026-09-26-voicemail-greeting/spec-r1-adjudications.md` and
 `spec-r2-adjudications.md`.
 Date: 2026-09-26
-Revised: 2026-09-26 (DRAFT 3)
+Revised: 2026-09-26 (DRAFT 3); amended 2026-09-27 (Cameron's rulings below)
+
+AMENDMENTS (Cameron, 2026-09-27, after reading the verdict's open questions;
+these supersede the text they name):
+- Greeting length stays UNCAPPED (an accepted exception). The section 4.7
+  helper text gains a hint: "Keep it short - under 30 seconds works best,
+  since callers hear all of it before they can leave a message."
+- Decision 3's WARN and assumption F are amended: a greeting that IS set but
+  cannot be offered (object missing, store unconfigured, lookup failed or
+  timed out after the greeting was known to be set) logs ERROR, so it
+  reaches the error alarms. A failure before the lookup knows whether a
+  greeting is set (the settings read itself failing or timing out) stays
+  WARN. No log line when no greeting is set, as before. Sections 1, 4.6,
+  4.10 and 5 (webhook tests (c)-(f)) read WARN in their original text; the
+  build follows this amendment.
+- The uploader's email shown to every logged-in user (assumption B) stays.
 Branch: `feat/voicemail-greeting`
 Worktree: `W:\tmp\voicemail-greeting`
 Base: `main` at `0dafe3c12291f60a69cccaf5a8a65bcb8d252452`

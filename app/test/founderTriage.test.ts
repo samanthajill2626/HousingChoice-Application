@@ -1160,6 +1160,11 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     const MISS = { CallSid: 'CAbiz0001', DialCallStatus: 'no-answer', ApiVersion: '2010-04-01' };
     const greetingWarns = (capture: LogCapture) =>
       capture.atLevel(40).filter((l) => String(l['msg']).includes('voicemail greeting'));
+    // Cameron, 2026-09-27: a greeting that IS set but cannot be offered logs
+    // ERROR (it must reach the error alarms); only a failure before we know
+    // whether one is set (the settings read) stays WARN.
+    const greetingErrors = (capture: LogCapture) =>
+      capture.atLevel(50).filter((l) => String(l['msg']).includes('voicemail greeting'));
 
     function seedGreeting(withObject = true) {
       world.settings.voicemailGreeting = { ...GREETING };
@@ -1196,20 +1201,21 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
       expect(world.mediaHeads).toHaveLength(0);
     });
 
-    it('(c) greeting set but the object is missing -> spoken prompt + ONE WARN without a URL', async () => {
+    it('(c) greeting set but the object is missing -> spoken prompt + ONE ERROR without a URL', async () => {
       seedGreeting(false);
       const { app, capture } = await seedRingingBridgeWith({});
       const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
       expect(res.status).toBe(200);
       expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
       expect(res.text).not.toContain('<Play>');
-      const warns = greetingWarns(capture);
+      const warns = greetingErrors(capture);
+      expect(greetingWarns(capture)).toHaveLength(0);
       expect(warns).toHaveLength(1);
       expect(warns[0]?.['msg']).toBe('voicemail greeting object missing - using the spoken prompt');
       expect(JSON.stringify(warns)).not.toContain('http');
     });
 
-    it('(d) head throws -> spoken prompt + WARN, still 200', async () => {
+    it('(d) head throws -> spoken prompt + ERROR, still 200', async () => {
       seedGreeting();
       world.failMediaHeads.add(GREETING.s3Key);
       const { app, capture } = await seedRingingBridgeWith({});
@@ -1217,10 +1223,10 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
       expect(res.status).toBe(200);
       expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
       expect(res.text).not.toContain('<Play>');
-      expect(greetingWarns(capture).some((l) => l['msg'] === 'voicemail greeting lookup failed or timed out - using the spoken prompt')).toBe(true);
+      expect(greetingErrors(capture).some((l) => l['msg'] === 'voicemail greeting lookup failed or timed out - using the spoken prompt')).toBe(true);
     });
 
-    it('(e) head never settles -> the abort signal ends it inside the budget: spoken prompt, one WARN, no offered line even after a tick', async () => {
+    it('(e) head never settles -> the abort signal ends it inside the budget: spoken prompt, one ERROR, no offered line even after a tick', async () => {
       seedGreeting();
       world.hangMediaHeads.add(GREETING.s3Key);
       const { app, capture } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
@@ -1230,17 +1236,17 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
       expect(res.status).toBe(200);
       expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
       expect(res.text).not.toContain('<Play>');
-      expect(greetingWarns(capture)).toHaveLength(1);
-      // The abort signal ended the hung head: the WARN is the lookup-failure
+      expect(greetingErrors(capture)).toHaveLength(1);
+      // The abort signal ended the hung head: the ERROR is the lookup-failure
       // line (its `err` is the AbortError), never the object-missing line.
-      expect(greetingWarns(capture)[0]?.['msg']).toBe('voicemail greeting lookup failed or timed out - using the spoken prompt');
+      expect(greetingErrors(capture)[0]?.['msg']).toBe('voicemail greeting lookup failed or timed out - using the spoken prompt');
       expect(world.mediaHeads[0]?.signal).toBe(true);
       await new Promise((r) => setTimeout(r, 120));
-      expect(greetingWarns(capture)).toHaveLength(1);
+      expect(greetingErrors(capture)).toHaveLength(1);
       expect(capture.lines.some((l) => l['msg'] === 'voicemail greeting offered')).toBe(false);
     });
 
-    it('(e2) the SETTINGS read never settles (no abort signal there) -> only withTimeout can end it: spoken prompt inside the budget, WARN names the budget', async () => {
+    it('(e2) the SETTINGS read never settles (no abort signal there) -> only withTimeout can end it: spoken prompt inside the budget, WARN (not ERROR: whether a greeting is set is still unknown) names the budget', async () => {
       seedGreeting();
       const { app, capture } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
       // FIRST delivery of the miss: onFounderBridgeMissed runs (its
@@ -1263,6 +1269,7 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
         expect(res.text).not.toContain('<Play>');
         const warns = greetingWarns(capture);
         expect(warns).toHaveLength(1);
+        expect(greetingErrors(capture)).toHaveLength(0);
         expect(String((warns[0]?.['err'] as { message?: string } | undefined)?.message)).toContain('exceeded 50ms');
         // Exactly ONE head: the first delivery's (which played). The hung
         // redelivery never got past the settings read.
@@ -1280,7 +1287,7 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     // the late SUCCESS the result-returning lookup exists for. The router holds
     // the store OBJECT (the harness passes world.mediaStore), so replacing the
     // method on it is what the router calls - the (e2) mechanism.
-    it('(e3) a head that IGNORES its signal and RESOLVES after the budget -> spoken prompt, ONE WARN, and the late success appends and logs nothing', async () => {
+    it('(e3) a head that IGNORES its signal and RESOLVES after the budget -> spoken prompt, ONE ERROR, and the late success appends and logs nothing', async () => {
       seedGreeting();
       const { app, capture } = await seedRingingBridgeWith({ voicemailGreetingLookupBudgetMs: 50 });
       const original = world.mediaStore.head;
@@ -1298,13 +1305,13 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
         expect(res.status).toBe(200);
         expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
         expect(res.text).not.toContain('<Play>');
-        expect(greetingWarns(capture)).toHaveLength(1);
+        expect(greetingErrors(capture)).toHaveLength(1);
         await new Promise((r) => setTimeout(r, 300));
         // Not vacuous: the abandoned lookup DID succeed late - it went on to
         // presign - and its result was discarded.
         expect(lateHeadResolved).toBe(true);
         expect(world.mediaPresigns).toHaveLength(1);
-        expect(greetingWarns(capture)).toHaveLength(1);
+        expect(greetingErrors(capture)).toHaveLength(1);
         expect(capture.lines.some((l) => l['msg'] === 'voicemail greeting offered')).toBe(false);
       } finally {
         world.mediaStore.head = original;
@@ -1338,13 +1345,13 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
       }
     });
 
-    it('(f) greeting set, no media store -> spoken prompt + WARN', async () => {
+    it('(f) greeting set, no media store -> spoken prompt + ERROR', async () => {
       seedGreeting(false);
       const { app, capture } = await seedRingingBridgeWith({ withoutMediaStore: true });
       const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', MISS);
       expect(res.status).toBe(200);
       expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
-      expect(greetingWarns(capture).some((l) => l['msg'] === 'voicemail greeting set but no media store configured - using the spoken prompt')).toBe(true);
+      expect(greetingErrors(capture).some((l) => l['msg'] === 'voicemail greeting set but no media store configured - using the spoken prompt')).toBe(true);
     });
 
     it('(g) a MASKED relay miss with a greeting set keeps the goodbye - no <Play>, no head', async () => {

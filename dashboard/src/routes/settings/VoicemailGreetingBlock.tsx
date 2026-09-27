@@ -64,8 +64,9 @@ export function VoicemailGreetingBlock(): React.JSX.Element {
       <h3 className={styles.greetingHeading}>Voicemail greeting</h3>
       <p className={styles.greetingHelp}>
         When a call to the business line isn&apos;t answered, callers hear this greeting before the
-        beep. Upload an MP3 or WAV file up to 5 MB. iPhone voice memos are M4A; export or convert the
-        recording first. Without a greeting, callers hear the built-in spoken prompt.
+        beep. Keep it short - under 30 seconds works best, since callers hear all of it before they
+        can leave a message. Upload an MP3 or WAV file up to 5 MB. iPhone voice memos are M4A; export
+        or convert the recording first. Without a greeting, callers hear the built-in spoken prompt.
         {isAdmin ? null : ' An admin can upload or change it.'}
       </p>
 

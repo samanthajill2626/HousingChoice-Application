@@ -84,11 +84,13 @@ describe('VoicemailGreetingBlock', () => {
     render(<VoicemailGreetingBlock />);
     expect(await screen.findByText('No greeting uploaded - callers hear the built-in prompt.')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Voicemail greeting', level: 3 })).toBeInTheDocument();
-    // Spec 4.7 copy, verbatim (the JSX spans three source lines).
+    // Spec 4.7 copy, verbatim (the JSX spans several source lines), plus the
+    // length hint Cameron asked for on 2026-09-27 (the greeting is uncapped).
     expect(screen.getByText(/^When a call to the business line/).textContent).toBe(
       "When a call to the business line isn't answered, callers hear this greeting before the beep. " +
-        'Upload an MP3 or WAV file up to 5 MB. iPhone voice memos are M4A; export or convert the ' +
-        'recording first. Without a greeting, callers hear the built-in spoken prompt.',
+        'Keep it short - under 30 seconds works best, since callers hear all of it before they can ' +
+        'leave a message. Upload an MP3 or WAV file up to 5 MB. iPhone voice memos are M4A; export ' +
+        'or convert the recording first. Without a greeting, callers hear the built-in spoken prompt.',
     );
     expect(screen.getByRole('button', { name: 'Upload greeting' })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();

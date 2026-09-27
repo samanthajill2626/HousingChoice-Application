@@ -574,17 +574,22 @@ describe.skipIf(!reachable)('sendAttemptsRepo on DynamoDB Local (spec D8a/D11)',
   });
 
   it('listByRecipient pages past the Query limit, newest first, one row per record', async () => {
+    // This case's OWN facts and ids, bound once: on a loaded DynamoDB Local an
+    // overrun keeps claiming after vitest has moved on, and through the shared
+    // `facts` it would write into the NEXT case's index partition.
+    const own = facts;
+    const id = seq;
     const count = 101;
-    const owners: SendAttemptOwner[] = Array.from({ length: count }, (_, i) => ({ kind: 'broadcast', broadcastId: `b-${seq}-p${i}`, contactKey: `c-${i}` }));
+    const owners: SendAttemptOwner[] = Array.from({ length: count }, (_, i) => ({ kind: 'broadcast', broadcastId: `b-${id}-p${i}`, contactKey: `c-${i}` }));
     for (let i = 0; i < count; i += 10) {
-      await Promise.all(owners.slice(i, i + 10).map((o, j) => repo.claim(o, facts, plus(T0, (i + j) * 1000))));
+      await Promise.all(owners.slice(i, i + 10).map((o, j) => repo.claim(o, own, plus(T0, (i + j) * 1000))));
     }
-    const rows = await repo.listByRecipient(SENDER, facts.recipientDigest, T0);
+    const rows = await repo.listByRecipient(SENDER, own.recipientDigest, T0);
     expect(rows).toHaveLength(count);
     expect(rows[0]!.attemptedAt).toBe(plus(T0, (count - 1) * 1000));
     expect(rows[count - 1]!.attemptedAt).toBe(T0);
     expect(new Set(rows.map((r) => attemptKey(r.owner))).size).toBe(count);
-  }, 60_000);
+  }, 120_000);
 
   // ---- FW1-1 (ADV-1): the re-arm immediately before the provider call ----
 

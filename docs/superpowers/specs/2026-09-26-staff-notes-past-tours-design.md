@@ -472,9 +472,10 @@ A toolbar above the list, Past view only:
 
 Selection is DERIVED: the raw set of ticked ids intersected with the ids of
 the "Not marked" rows currently listed, so a row that left that state (marked
-elsewhere, then reloaded) leaves the selection and the count. Selection and
-results reset when the view changes (the three tabs share one component
-instance) and when the page unmounts.
+elsewhere, then reloaded) leaves the selection and the count. The Past view's
+body is a Past-only child component that mounts when the tab shows and
+unmounts when it does not (the three tabs still share one page instance, as
+today), so selection and results start fresh every time Past shows.
 
 While a batch runs, EVERY mark control is disabled: the bulk button, every row
 "Mark toured" button, every checkbox and the select-all box; the runner also

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v5 - after plan review R1 (two reviewers, 29 findings adjudicated in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/plan-r1-adjudications.md`); aligned to spec DRAFT 4; written for the overnight unattended mission of 2026-09-26
+Status: v6 - after plan reviews R1 and R2 (adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/plan-r1-adjudications.md` and `plan-r2-adjudications.md`); aligned to spec DRAFT 4; written for the overnight unattended mission of 2026-09-26
 
 Already on the branch before the build starts (no task needed): the GLOSSARY
 entry (spec 3.8) and all six `docs/issues/` files (spec 8) are committed.
@@ -1517,12 +1517,14 @@ In `dashboard/src/routes/tours/useTours.ts`:
 2. Extend the header comment with a third bullet:
    ```
    // Plus usePastTours(enabled) - the Past tab's fetch (spec 4.2): ONE range
-   // query over [start of the local day 90 days ago, now], selected on the
-   // client (the range GSI matches on scheduledAt alone, same as Upcoming):
-   // scheduled / toured / no_show only, minus a still-scheduled tour dated
-   // today (Active's Today group has it) and minus a toured tour whose outcome
-   // is recorded. Most recent first. `reload()` refetches after a bulk action
-   // while keeping the current rows on screen.
+   // query over [start of the local day 90 days ago, end of today], selected
+   // on the client (the range GSI matches on scheduledAt alone, same as
+   // Upcoming): scheduled / toured / no_show only, minus a still-scheduled
+   // tour dated today (Active's Today group has it) and minus a toured tour
+   // whose outcome is recorded - unless that outcome is a move-forward whose
+   // placement was never created (Needs placement). Most recent first.
+   // `reload()` refetches after a bulk action while keeping the current rows
+   // on screen; a failed reload keeps them too and sets reloadFailed.
    ```
 3. Append at the end of the file:
 
@@ -1742,24 +1744,27 @@ In `dashboard/src/routes/tours/ToursPage.test.tsx`:
      render(
        <MemoryRouter initialEntries={[initialPath]}>
          <Routes>
-           <Route path="/tours" element={<ToursPage key="active" />} />
-           <Route path="/tours/past" element={<ToursPage key="past" view="past" />} />
-           <Route path="/tours/closed" element={<ToursPage key="closed" view="closed" />} />
+           <Route path="/tours" element={<ToursPage />} />
+           <Route path="/tours/past" element={<ToursPage view="past" />} />
+           <Route path="/tours/closed" element={<ToursPage view="closed" />} />
            <Route path="/tours/:tourId" element={<LocationProbe />} />
          </Routes>
        </MemoryRouter>,
      );
    }
    ```
-   (The keys mirror App.tsx: the per-view remount is what resets the batch
-   state, so the test wiring must have them too.)
+   Also add `waitFor` to the file's `@testing-library/react` import (the
+   base import at line 12 has only `render, screen, within`; the new tests
+   below use `waitFor` and `findBy*`).
 4. In `beforeEach`, add `pastRows = { status: 'ready', past: [], reloadFailed: false }; reloadPast.mockClear(); usePastToursSpy.mockClear(); getTour.mockReset(); patchTour.mockReset();`.
 5. In the existing 'Active view: renders the view tabs ...' test, add:
    ```tsx
        const pastTab = within(tabs).getByRole('link', { name: 'Past' });
        expect(pastTab).not.toHaveAttribute('aria-current');
        expect(pastTab).toHaveAttribute('href', '/tours/past');
-       expect(usePastToursSpy.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
+       // The Past data hook lives in a Past-only child, so it is never even
+       // called on the Active view.
+       expect(usePastToursSpy).not.toHaveBeenCalled();
    ```
 6. Append a new describe block. Use the file's real `CONTACTS` / `UNITS`
    fixtures for the names below (replace "Alice Smith" and "12 Peach St,
@@ -1927,17 +1932,18 @@ describe('ToursPage - Past view', () => {
     await user.click(screen.getByRole('button', { name: 'Mark toured (2)' }));
     await waitFor(() => expect(reloadPast).toHaveBeenCalledTimes(1));
 
+    // The list is empty now; both results survive above it, named from the
+    // snapshot. findBy* waits for the batched render to commit.
     const region = await screen.findByRole('region', { name: 'Past tours' });
-    // The list is empty now; both results survive above it, named from the snapshot.
-    expect(within(region).getByText('No past tours need attention in the last 90 days.')).toBeInTheDocument();
-    expect(within(region).getByRole('alert')).toHaveTextContent(`${P4_LABEL}: Changed since the list loaded`);
-    expect(within(region).getByRole('status')).toHaveTextContent(`${P1_LABEL}: Marked toured`);
+    expect(await within(region).findByText('No past tours need attention in the last 90 days.')).toBeInTheDocument();
+    expect(await within(region).findByRole('alert')).toHaveTextContent(`${P4_LABEL}: Changed since the list loaded`);
+    expect(await within(region).findByRole('status')).toHaveTextContent(`${P1_LABEL}: Marked toured`);
     // No per-row line is left dangling.
     expect(screen.queryByText('Could not mark toured: Changed since the list loaded')).not.toBeInTheDocument();
     expect(screen.queryByText('Marked toured', { exact: true })).not.toBeInTheDocument();
   });
 
-  it('switching tabs remounts the page: selection and results are gone when Past shows again', async () => {
+  it('switching tabs unmounts the Past view: selection and results are gone when Past shows again', async () => {
     const user = userEvent.setup();
     readyPast([NOT_MARKED, NOT_MARKED_2]);
     getTour.mockResolvedValue({ ...NOT_MARKED_2, status: 'canceled' });
@@ -1945,12 +1951,14 @@ describe('ToursPage - Past view', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Select all not marked' }));
     await user.click(screen.getByRole('button', { name: 'Mark toured (2)' }));
     await waitFor(() => expect(reloadPast).toHaveBeenCalledTimes(1));
-    expect(screen.getAllByRole('alert').length).toBeGreaterThan(0);
+    expect((await screen.findAllByRole('alert')).length).toBeGreaterThan(0);
     await user.click(screen.getByRole('link', { name: 'Active' }));
+    expect(screen.queryByRole('region', { name: 'Past tours' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('link', { name: 'Past' }));
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    const region = await screen.findByRole('region', { name: 'Past tours' });
+    expect(within(region).queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Mark toured (0)' })).toBeDisabled();
-    for (const box of within(screen.getByRole('region', { name: 'Past tours' })).getAllByRole('checkbox')) {
+    for (const box of within(region).getAllByRole('checkbox')) {
       expect(box).not.toBeChecked();
     }
   });
@@ -2331,27 +2339,26 @@ function PastTourRow({
 }
 ```
 
-4. In `ToursPage`, replace the signature and the derived flags:
+4. Add the Past VIEW component after `PastTourRow`. It is a Past-only child:
+   it mounts only while the Past tab shows and UNMOUNTS on a tab switch, so
+   its selection, batch results and snapshot start fresh every time Past
+   shows - with no reset effect (the lint preset forbids setState in an
+   effect) and no route keys (a keyed remount of the whole page would refetch
+   the contact and unit lookups behind a spinner on every Active/Closed tab
+   click, which the existing tabs never did). The page keeps owning the
+   cross-reference maps and the tabs.
 
 ```tsx
-export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Element {
-  const navigate = useNavigate();
-  const closed = view === 'closed';
-  const past = view === 'past';
-```
+interface PastToursViewProps {
+  contacts: Map<string, Contact>;
+  units: Map<string, UnitItem>;
+}
 
-   Keep every existing line that reads `closed`; after
-   `const { status: closedStatus, closed: closedTours } = useClosedTours(closed);`
-   add:
-
-```tsx
-  // Past tours are fetched only when the Past view is showing (spec 4.2).
-  const {
-    status: pastStatus,
-    past: pastTours,
-    reload: reloadPast,
-    reloadFailed: pastReloadFailed,
-  } = usePastTours(past);
+/** The Past tab's body (spec 4.2-4.5): the lazy data hook, the bulk runner
+ *  and every piece of batch state. Mounted ONLY while the Past view shows. */
+function PastToursView({ contacts, units }: PastToursViewProps): React.JSX.Element {
+  // Enabled for this component's whole life: it exists only on the Past view.
+  const { status: pastStatus, past: pastTours, reload: reloadPast, reloadFailed } = usePastTours(true);
 
   // Bulk "Mark toured" (spec 4.5): the raw selection, the running flag, and the
   // per-row results of the LAST batch (cleared when the next one starts).
@@ -2364,9 +2371,6 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
   const bulkBusyRef = useRef(false);
   const [results, setResults] = useState<ReadonlyMap<string, MarkResult>>(new Map());
   const [snapshot, setSnapshot] = useState<ReadonlyMap<string, Tour>>(new Map());
-  // No per-view reset effect here: App.tsx keys each tours route's element by
-  // view, so a tab switch REMOUNTS this component and every piece of batch
-  // state starts fresh (a setState-in-effect reset would trip the lint preset).
 
   // Only "Not marked" rows can be selected; a row that left that state (marked
   // elsewhere, then reloaded) drops out of the effective selection.
@@ -2459,28 +2463,130 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
     reloadPast();
     bulkBusyRef.current = false;
     setBulkBusy(false);
-    // If the user switched tabs mid-batch the component remounted and these
+    // If the user switched tabs mid-batch this view unmounted and these
     // setters landed on the unmounted instance (a no-op in React 19); the
-    // PATCHes already sent stand, and the fresh Past view lists the truth.
+    // PATCHes already sent stand, and the next Past view lists the truth.
   };
+
+  if (pastStatus === 'idle') return <Spinner center />;
+  if (pastStatus === 'error') {
+    return (
+      <p className={styles.error} role="alert">
+        We couldn&apos;t load tours. Please try again.
+      </p>
+    );
+  }
+
+  return (
+    <section className={styles.section} aria-label="Past tours">
+      {reloadFailed ? (
+        <p role="alert" className={styles.vanished}>
+          Could not refresh the list. Reload the page to see the latest.
+        </p>
+      ) : null}
+      {vanished.ok.length > 0 ? (
+        <div role="status" className={styles.vanishedOk}>
+          {vanished.ok.map((v) => (
+            <p key={v.id}>
+              {tenantName(contacts, v.tour.tenantId)} at {propertyLabel(units, v.tour.unitId)} on{' '}
+              {whenLabel(v.tour.scheduledAt)}: Marked toured
+            </p>
+          ))}
+        </div>
+      ) : null}
+      {vanished.failed.length > 0 ? (
+        <div role="alert" className={styles.vanished}>
+          {vanished.failed.map((f) => (
+            <p key={f.id}>
+              {tenantName(contacts, f.tour.tenantId)} at {propertyLabel(units, f.tour.unitId)} on{' '}
+              {whenLabel(f.tour.scheduledAt)}: {f.message}
+            </p>
+          ))}
+        </div>
+      ) : null}
+      {pastTours.length === 0 ? (
+        <div className={styles.empty}>
+          <p className={styles.emptyText}>No past tours need attention in the last 90 days.</p>
+        </div>
+      ) : (
+        <>
+          <div className={styles.toolbar}>
+            <label className={styles.selectAll}>
+              <input
+                type="checkbox"
+                className={styles.check}
+                checked={allSelected}
+                ref={(el) => {
+                  if (el) el.indeterminate = someSelected;
+                }}
+                disabled={bulkBusy || notMarkedIds.length === 0}
+                onChange={toggleAll}
+              />
+              Select all not marked
+            </label>
+            <Button
+              size="sm"
+              variant="primary"
+              type="button"
+              disabled={selected.size === 0 || bulkBusy}
+              onClick={() => void markToured([...selected])}
+            >
+              Mark toured ({selected.size})
+            </Button>
+          </div>
+          <ul className={styles.rows} aria-label="Past tours list">
+            {pastTours.map((t) => (
+              <PastTourRow
+                key={t.tourId}
+                tour={t}
+                contacts={contacts}
+                units={units}
+                selected={selected.has(t.tourId)}
+                onToggle={() => toggleOne(t.tourId)}
+                onMarkToured={() => void markToured([t.tourId])}
+                busy={bulkBusy}
+                result={results.get(t.tourId)}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
 ```
 
-   Update `loading` / `error`:
+   `[...selected]` iterates in the insertion order of `notMarkedIds`, which
+   is the list order - that is what makes "in list order" true.
+
+5. In `ToursPage`, replace the signature and the derived flags:
+
+```tsx
+export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Element {
+  const navigate = useNavigate();
+  const closed = view === 'closed';
+  const past = view === 'past';
+```
+
+   Keep every existing line that reads `closed`. The page does NOT call
+   `usePastTours` (the child does). Update `loading` / `error` so the Past
+   view waits only for the cross-reference maps (the child owns its own
+   spinner and error):
 
 ```tsx
   const loading = closed
     ? closedStatus === 'loading' || closedStatus === 'idle' || crossRefLoading
     : past
-      ? pastStatus === 'idle' || crossRefLoading
+      ? crossRefLoading
       : toursStatus === 'loading' || crossRefLoading;
   const error = closed
     ? closedStatus === 'error' || crossRefError
     : past
-      ? pastStatus === 'error' || crossRefError
+      ? crossRefError
       : toursStatus === 'error' || crossRefError;
 ```
 
-5. In the JSX: the title becomes `{PAGE_TITLE[view]}`; the "+ New tour" button
+6. In the JSX: the title becomes `{PAGE_TITLE[view]}`; the "+ New tour" button
    condition becomes `{view === 'active' ? (...) : null}`; the intro becomes
    `{PAGE_INTRO[view]}`; the tabs map becomes
 
@@ -2500,104 +2606,24 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
    The Active block's condition becomes `{!loading && !error && view === 'active' ? (` and the Closed block's stays `closed`. Insert the Past block between them:
 
 ```tsx
-      {/* --- Past view (/tours/past) - spec 4.3-4.5 --- */}
-      {!loading && !error && past ? (
-        <section className={styles.section} aria-label="Past tours">
-          {pastReloadFailed ? (
-            <p role="alert" className={styles.vanished}>
-              Could not refresh the list. Reload the page to see the latest.
-            </p>
-          ) : null}
-          {vanished.ok.length > 0 ? (
-            <div role="status" className={styles.vanishedOk}>
-              {vanished.ok.map((v) => (
-                <p key={v.id}>
-                  {tenantName(contactsMap, v.tour.tenantId)} at {propertyLabel(unitsMap, v.tour.unitId)} on{' '}
-                  {whenLabel(v.tour.scheduledAt)}: Marked toured
-                </p>
-              ))}
-            </div>
-          ) : null}
-          {vanished.failed.length > 0 ? (
-            <div role="alert" className={styles.vanished}>
-              {vanished.failed.map((f) => (
-                <p key={f.id}>
-                  {tenantName(contactsMap, f.tour.tenantId)} at {propertyLabel(unitsMap, f.tour.unitId)} on{' '}
-                  {whenLabel(f.tour.scheduledAt)}: {f.message}
-                </p>
-              ))}
-            </div>
-          ) : null}
-          {pastTours.length === 0 ? (
-            <div className={styles.empty}>
-              <p className={styles.emptyText}>No past tours need attention in the last 90 days.</p>
-            </div>
-          ) : (
-            <>
-              <div className={styles.toolbar}>
-                <label className={styles.selectAll}>
-                  <input
-                    type="checkbox"
-                    className={styles.check}
-                    checked={allSelected}
-                    ref={(el) => {
-                      if (el) el.indeterminate = someSelected;
-                    }}
-                    disabled={bulkBusy || notMarkedIds.length === 0}
-                    onChange={toggleAll}
-                  />
-                  Select all not marked
-                </label>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  type="button"
-                  disabled={selected.size === 0 || bulkBusy}
-                  onClick={() => void markToured([...selected])}
-                >
-                  Mark toured ({selected.size})
-                </Button>
-              </div>
-              <ul className={styles.rows} aria-label="Past tours list">
-                {pastTours.map((t) => (
-                  <PastTourRow
-                    key={t.tourId}
-                    tour={t}
-                    contacts={contactsMap}
-                    units={unitsMap}
-                    selected={selected.has(t.tourId)}
-                    onToggle={() => toggleOne(t.tourId)}
-                    onMarkToured={() => void markToured([t.tourId])}
-                    busy={bulkBusy}
-                    result={results.get(t.tourId)}
-                  />
-                ))}
-              </ul>
-            </>
-          )}
-        </section>
-      ) : null}
+      {/* --- Past view (/tours/past) - spec 4.3-4.5. The child owns every
+          piece of batch state and unmounts on a tab switch. --- */}
+      {!loading && !error && past ? <PastToursView contacts={contactsMap} units={unitsMap} /> : null}
 ```
 
-   `[...selected]` iterates in the insertion order of `notMarkedIds`, which
-   is the list order - that is what makes "in list order" true.
+7. Update the header comment: the views list gains
+   `Past (/tours/past) - the last 90 days' tours (through the end of today) that still need a decision (spec 4): rows carry a plain-words state, a Mark toured button / Record outcome link, a checkbox, and a bulk Mark toured (N) toolbar; each mark re-reads the tour first. PastToursView is a Past-only child, so its selection and batch results never survive a tab switch.`
 
-6. Update the header comment: the views list gains
-   `Past (/tours/past) - the last 90 days' tours (through the end of today) that still need a decision (spec 4): rows carry a plain-words state, a Mark toured button / Record outcome link, a checkbox, and a bulk Mark toured (N) toolbar; each mark re-reads the tour first. The three tabs are keyed per view in App.tsx, so the page REMOUNTS on a tab switch and its batch state never leaks across views.`
-
-7. `dashboard/src/App.tsx` lines 237-240 become:
+8. `dashboard/src/App.tsx` lines 237-240 become (no keys - the page instance
+   is shared across tabs exactly as today; only the Past child unmounts):
 
 ```tsx
             {/* Tours list page at /tours (+ the Past view at /tours/past and the
                 Closed view at /tours/closed). The static paths rank above the
-                dynamic tours/:tourId segment below. Each element is KEYED by
-                its view: the three routes render the same component at the
-                same tree position, and without a key React would keep one
-                instance across a tab switch, carrying the Past tab's selection
-                and bulk results into the other tabs. */}
-            <Route path="tours" element={<ToursPage key="active" />} />
-            <Route path="tours/past" element={<ToursPage key="past" view="past" />} />
-            <Route path="tours/closed" element={<ToursPage key="closed" view="closed" />} />
+                dynamic tours/:tourId segment below. */}
+            <Route path="tours" element={<ToursPage />} />
+            <Route path="tours/past" element={<ToursPage view="past" />} />
+            <Route path="tours/closed" element={<ToursPage view="closed" />} />
 ```
 
 - [ ] **Step 5: Run, expect green**
@@ -3056,16 +3082,35 @@ Quote every exit code. `npm test` needs DynamoDB Local (`npm run db:start`
 from the worktree if it is not up). The e2e cap is 2700s (45 min): the
 suite's idle baseline is ~18 min and it runs at ~2x on a shared box
 (`e2e/playwright.config.ts:105-109`), and another mission's e2e runs on this
-machine tonight. If `timeout` fires (exit 124), the stack is ORPHANED: run
-`cd /w/tmp/staff-notes-past-tours && npm run e2e:stop`, confirm no listener
-survives on this lane's ports (`e2e/support/lane.mjs` prints them), read the
-partial report for the failing FILE, isolate it
-(`npm run e2e -w @housingchoice/e2e -- --grep "<title>"`), and only then
-re-run the suite. Never kill a process that is not this worktree's. For gate
-5, attribute any error by BASELINE COMPARISON (read the reported line at
-`main` for the same file): only errors absent at the base are yours - and
-expect `react-hooks/set-state-in-effect` to be reported at `useTours.ts`'s
-pre-existing `useClosedTours` line (baseline), never at a new line.
+machine tonight.
+
+If `timeout` fires (exit 124), the stack is ORPHANED. Recipe, in this order:
+
+1. Read this worktree's lane BEFORE stopping anything:
+   `cat /w/tmp/staff-notes-past-tours/e2e/.artifacts/lane.json` (e2e:stop
+   deletes it). Do NOT run `node e2e/support/lane.mjs` to "print the ports":
+   it RESERVES a fresh lane lease for 240 s, so a live orphan makes it skip to
+   another lane and the next isolate run lands somewhere else.
+2. `cd /w/tmp/staff-notes-past-tours && npm run e2e:stop`.
+3. Prove no listener survives on the ports from step 1 (PowerShell:
+   `Get-NetTCPConnection -LocalPort <port> -State Listen -ErrorAction SilentlyContinue`
+   for each; kill ONLY a PID whose command line names this worktree).
+4. If the partial report names a failing FILE, isolate it
+   (`npm run e2e -w @housingchoice/e2e -- --grep "<title>"`) and diagnose; if
+   it timed out with NO failure yet (a slow box), re-run the suite once with
+   `timeout 3600`, and say so in the handback.
+
+Never kill a process that is not this worktree's.
+
+For gate 5, attribute any error by BASELINE COMPARISON, by RULE and CONTEXT
+rather than line number (edits shift lines): run the same command on the
+same files at the merge base in a scratch checkout, or read the file at
+`main`. Pre-existing errors in the touched files as of main @0dafe3c1:
+`useTours.ts` - `react-hooks/set-state-in-effect` in `useClosedTours`
+(line 116 at base); `TourDetail.tsx` - `react-hooks/purity` (line 269 at
+base, shifts down after Task 8's insertion); `TenantFile.tsx` - an unused
+`FieldSource` import (line 14). Anything else in those files, and anything
+at all in a NEW file, is yours.
 
 - [ ] **Step 3: Records**
 

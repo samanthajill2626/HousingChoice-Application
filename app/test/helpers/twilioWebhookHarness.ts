@@ -272,6 +272,14 @@ export interface FakeWorld {
   deletedMediaKeys: string[];
   /** Keys for which mediaStore.deleteObject should REJECT (exercises D1's best-effort WARN path). */
   failMediaDeletes: Set<string>;
+  /** Every mediaStore.head call, in order (voicemail greeting: the webhook's existence check). */
+  mediaHeads: { key: string; signal: boolean }[];
+  /** Every mediaStore.presign call, in order (voicemail greeting: the <Play> URL). */
+  mediaPresigns: { key: string; ttlSeconds: number }[];
+  /** Keys for which mediaStore.head should REJECT (the webhook's failed-check fallback). */
+  failMediaHeads: Set<string>;
+  /** Keys for which mediaStore.head NEVER settles until its abort signal fires (the webhook's budget). */
+  hangMediaHeads: Set<string>;
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /**
@@ -455,6 +463,12 @@ export function createFakeWorld(): FakeWorld {
   const presignPosts: FakeWorld['presignPosts'] = [];
   const deletedMediaKeys: FakeWorld['deletedMediaKeys'] = [];
   const failMediaDeletes = new Set<string>();
+  // Voicemail-greeting webhook seams: the head/presign calls it made, plus
+  // keys whose head rejects or hangs until the caller's abort signal fires.
+  const mediaHeads: FakeWorld['mediaHeads'] = [];
+  const mediaPresigns: FakeWorld['mediaPresigns'] = [];
+  const failMediaHeads = new Set<string>();
+  const hangMediaHeads = new Set<string>();
   const failMediaUrls = new Set<string>();
   const failMediaUrlsFor = new Map<string, number>();
   const failRecordingUrls = new Set<string>();
@@ -3945,9 +3959,25 @@ export function createFakeWorld(): FakeWorld {
       // X-Amz-Signature-style query so send-path tests can assert a presigned
       // (bearer-token) URL reached the adapter.
       presignCounter += 1;
+      mediaPresigns.push({ key, ttlSeconds });
       return `https://fake-s3.local/${key}?X-Amz-Signature=fakesig${presignCounter}&X-Amz-Expires=${ttlSeconds}`;
     },
-    async head(key) {
+    async head(key, opts) {
+      mediaHeads.push({ key, signal: opts?.signal !== undefined });
+      if (hangMediaHeads.has(key)) {
+        // Models a stuck S3 connection: settles ONLY when the caller's abort
+        // signal fires (the SDK rejects with an AbortError), never on its own.
+        return new Promise((_resolve, reject) => {
+          const signal = opts?.signal;
+          if (signal === undefined) return; // truly never
+          const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          if (signal.aborted) abort();
+          else signal.addEventListener('abort', abort, { once: true });
+        });
+      }
+      if (failMediaHeads.has(key)) {
+        throw new Error(`fake mediaStore: forced head failure for ${key}`);
+      }
       const obj = mediaObjects.get(key);
       if (!obj) return undefined;
       return {
@@ -4073,6 +4103,10 @@ export function createFakeWorld(): FakeWorld {
     presignPosts,
     deletedMediaKeys,
     failMediaDeletes,
+    mediaHeads,
+    mediaPresigns,
+    failMediaHeads,
+    hangMediaHeads,
     failMediaUrls,
     failMediaUrlsFor,
     failRecordingUrls,

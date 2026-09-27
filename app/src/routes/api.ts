@@ -717,7 +717,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(mediaStore !== undefined && { mediaStore }),
     }),
   );
-  // Founder settings (GET requireAuth, PUT requireRole admin).
+  // Founder settings (GET requireAuth, PUT requireRole admin), plus the
+  // voicemail greeting routes (upload/remove admin-only, audio any user) over
+  // the SAME media store (unset: upload answers 503, audio 404).
   router.use(
     '/settings',
     createSettingsRouter({
@@ -725,6 +727,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
       auditRepo: audit,
+      ...(mediaStore !== undefined && { mediaStore }),
     }),
   );
   // Self cell verification + self view (Voice Phase 1, spec §7) — mounted at

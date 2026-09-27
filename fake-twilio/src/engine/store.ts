@@ -28,6 +28,18 @@ export class ConversationStore {
     return this.threads.get(partyNumber) ?? { partyNumber, messages: [] };
   }
 
+  /** The message with this SID, in any thread. */
+  messageBySid(sid: string): ThreadMessage | undefined {
+    return this.bySid.get(sid);
+  }
+
+  /** Every message, OLDEST first by APPEND order across all threads (SIDs are
+   *  unique, so the SID index keeps append order). Never a createdAt sort: a
+   *  clock can stand still between two appends. */
+  messagesInStoreOrder(): ThreadMessage[] {
+    return [...this.bySid.values()];
+  }
+
   listThreads(): Thread[] {
     return [...this.threads.values()];
   }

@@ -6,8 +6,8 @@ import { GroupStore } from './groups.js';
 import { buildInboundSmsParams, buildStatusParams, type WebhookParams } from './signer.js';
 import { plannedTransitions, stepDelayMs } from './delivery.js';
 import type {
-  AddAdHocInput, DeliveryProfile, DeliveryState, GroupSnapshot, Persona, SendAsPartyInput,
-  SetDeliveryOutcomeInput, Thread, ThreadMessage,
+  AddAdHocInput, DeliveryProfile, DeliveryState, FailListInput, FailNextSendInput, FailNextSendMode,
+  GroupSnapshot, Persona, SendAsPartyInput, SetDeliveryOutcomeInput, Thread, ThreadMessage,
 } from './types.js';
 import type { EventHub } from './eventHub.js';
 import type { EngineEvent, EngineListener } from './engineEvents.js';
@@ -64,6 +64,45 @@ function isHttpUrl(s: string): boolean {
   }
 }
 
+/**
+ * The `from` a Messages list/fetch resource reports for a stored message: null
+ * for a REST create that carried no From (the Messaging Service picks the
+ * sender; the create response says null too), else the stored sender. The
+ * list's From filter compares THIS value, so an unpinned send never matches it.
+ */
+export function messageResourceFrom(m: ThreadMessage): string | null {
+  return m.fromOmitted === true ? null : m.from;
+}
+
+/** A send-outcome seam arming (spec D19), as the engine keeps it. */
+interface FailNextSendArming {
+  mode: FailNextSendMode;
+  code?: number;
+  /** Creates this arming still covers (>= 1). */
+  remaining: number;
+}
+
+function isPositiveInteger(v: unknown): v is number {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+}
+
+/** The E.164 party a seam arming names; a TypeError (the route's 400) otherwise. */
+function armedParty(input: unknown, seam: string): string {
+  const partyNumber = (input as { partyNumber?: unknown } | null | undefined)?.partyNumber;
+  if (typeof partyNumber !== 'string' || !isE164(partyNumber)) {
+    throw new TypeError(`${seam}: partyNumber must be an E.164 number`);
+  }
+  return partyNumber;
+}
+
+/** A seam arming's `count` (default 1); a TypeError unless a positive integer. */
+function armedCount(input: unknown, seam: string): number {
+  const count = (input as { count?: unknown } | null | undefined)?.count;
+  if (count === undefined) return 1;
+  if (!isPositiveInteger(count)) throw new TypeError(`${seam}: count must be a positive integer`);
+  return count;
+}
+
 export interface FakeTwilioEngineDeps {
   clock: Clock;
   dispatcher: Dispatcher;
@@ -97,6 +136,10 @@ export class FakeTwilioEngine {
    *  legs still land in the recipient persona's 1:1 thread exactly as before. */
   private readonly groups = new GroupStore();
   private readonly nextProfile = new Map<string, DeliveryProfile>();
+  /** fail-next-send armings (spec D19), keyed by party number like nextProfile. */
+  private readonly failNextSend = new Map<string, FailNextSendArming>();
+  /** fail-list armings (spec D19): party number -> calls still to fail (>= 1). */
+  private readonly failList = new Map<string, number>();
   private sidSeq: number;
   /** Cancel fns for every still-pending scheduled status callback (FIX 1). */
   private readonly pendingCancels = new Set<() => void>();
@@ -170,6 +213,83 @@ export class FakeTwilioEngine {
     }
     this.nextProfile.set(input.partyNumber, input.profile);
   }
+
+  /**
+   * Arm the next `count` (default 1) Messages creates TO a party to fail (spec
+   * D19, `POST /control/fail-next-send`); re-arming a party replaces its
+   * arming. A bad arming throws a TypeError (the route's 400). `reject` and
+   * `drop_before_create` end the create BEFORE `recordOutboundFromApp`, so a
+   * delivery profile armed for the same party is NOT consumed: it applies to
+   * the next create that goes through, the re-drive (T11-6).
+   */
+  setFailNextSend(input: FailNextSendInput): void {
+    const partyNumber = armedParty(input, 'fail-next-send');
+    const mode: unknown = (input as { mode?: unknown }).mode;
+    if (mode !== 'reject' && mode !== 'drop_before_create' && mode !== 'accept_then_drop') {
+      throw new TypeError("fail-next-send: mode must be 'reject', 'drop_before_create' or 'accept_then_drop'");
+    }
+    const code: unknown = (input as { code?: unknown }).code;
+    if (code !== undefined && mode !== 'reject') {
+      throw new TypeError('fail-next-send: code applies to mode reject only');
+    }
+    if (code !== undefined && !isPositiveInteger(code)) {
+      throw new TypeError('fail-next-send: code must be a positive integer');
+    }
+    const remaining = armedCount(input, 'fail-next-send');
+    this.failNextSend.set(partyNumber, { mode, ...(code !== undefined && { code }), remaining });
+  }
+
+  /** Consume one fail-next-send arming for a create to `partyNumber`, if any. */
+  takeFailNextSend(partyNumber: string): { mode: FailNextSendMode; code?: number } | undefined {
+    const armed = this.failNextSend.get(partyNumber);
+    if (armed === undefined) return undefined;
+    if (armed.remaining > 1) armed.remaining -= 1;
+    else this.failNextSend.delete(partyNumber);
+    return { mode: armed.mode, ...(armed.code !== undefined && { code: armed.code }) };
+  }
+
+  /**
+   * Arm the next `count` (default 1) Messages LIST calls whose To is the party,
+   * and FETCHes of a message whose `to` is the party, to answer a Twilio 500
+   * (spec D19, `POST /control/fail-list`); re-arming replaces the count.
+   */
+  setFailList(input: FailListInput): void {
+    const partyNumber = armedParty(input, 'fail-list');
+    this.failList.set(partyNumber, armedCount(input, 'fail-list'));
+  }
+
+  /** Consume one fail-list arming for `partyNumber`; true when one was armed. */
+  takeFailList(partyNumber: string): boolean {
+    const remaining = this.failList.get(partyNumber);
+    if (remaining === undefined) return false;
+    if (remaining > 1) this.failList.set(partyNumber, remaining - 1);
+    else this.failList.delete(partyNumber);
+    return true;
+  }
+
+  /** One stored message by SID (the Messages fetch route). */
+  getMessageBySid(sid: string): ThreadMessage | undefined {
+    return this.store.messageBySid(sid);
+  }
+
+  /**
+   * The Messages LIST (spec D19): every stored message whose resource `to` is
+   * `filter.to` and whose resource `from` (messageResourceFrom) is
+   * `filter.from` - each filter optional - NEWEST FIRST by REVERSE STORE
+   * ORDER, never a createdAt sort, which cannot order two messages created in
+   * the same instant.
+   */
+  listMessages(filter: { to?: string; from?: string }): ThreadMessage[] {
+    return this.store
+      .messagesInStoreOrder()
+      .filter(
+        (m) =>
+          (filter.to === undefined || m.to === filter.to) &&
+          (filter.from === undefined || messageResourceFrom(m) === filter.from),
+      )
+      .reverse();
+  }
+
   reset(): void {
     // Cancel every in-flight status-callback timer so a stale 'delivered' webhook
     // can't fire against a freshly-reseeded app (FIX 1). Bump the generation so any
@@ -182,6 +302,10 @@ export class FakeTwilioEngine {
     // Personas persist, as before.
     this.groups.reset();
     this.nextProfile.clear();
+    // The send-outcome seams are armings like nextProfile: an unconsumed one
+    // must not outlive the suite (T11-7).
+    this.failNextSend.clear();
+    this.failList.clear();
     this.emit({ type: 'reset' });
   }
 
@@ -360,11 +484,24 @@ export class FakeTwilioEngine {
    * webhook: the ConversationsEngine owns that half.
    */
   advanceLegState(sid: string, partyNumber: string, state: DeliveryState, errorCode?: string): void {
-    const updated = this.store.updateState(sid, state);
+    const updated = this.transition(sid, state);
     if (!updated) return;
-    updated.updatedAt = this.clock.nowIso();
     if (errorCode !== undefined) updated.errorCode = errorCode;
     this.emit({ type: 'message.updated', partyNumber, message: updated });
+  }
+
+  /**
+   * Apply a delivery-state transition to a stored message: the state, its
+   * `updatedAt`, and - on the FIRST move out of `queued` - its `sentAt`, which
+   * the Messages list/fetch resource reports as `date_sent`. Later transitions
+   * never move `sentAt`.
+   */
+  private transition(sid: string, state: DeliveryState): ThreadMessage | undefined {
+    const updated = this.store.updateState(sid, state);
+    if (!updated) return undefined;
+    updated.updatedAt = this.clock.nowIso();
+    if (state !== 'queued' && updated.sentAt === undefined) updated.sentAt = updated.updatedAt;
+    return updated;
   }
 
   /**
@@ -401,7 +538,14 @@ export class FakeTwilioEngine {
    * (messages.create). Records it into the recipient's thread and schedules the
    * status-callback progression for the active delivery profile. Returns the SID.
    */
-  recordOutboundFromApp(input: { to: string; from?: string; body?: string; mediaUrls?: string[] }): string {
+  recordOutboundFromApp(input: {
+    to: string;
+    from?: string;
+    body?: string;
+    mediaUrls?: string[];
+    /** The REST create's MessagingServiceSid (the resource's messaging_service_sid). */
+    messagingServiceSid?: string;
+  }): string {
     // AUTO-REGISTER (DX, 2026-07-02): an app send to a number with NO persona
     // used to land in a thread the UI never shows (the fake-phones UI lists
     // PERSONAS) — the app reported "sent" and the message silently vanished
@@ -429,6 +573,8 @@ export class FakeTwilioEngine {
     const now = this.clock.nowIso();
     const message: ThreadMessage = {
       sid, direction: 'outbound', from: input.from ?? this.appNumber, to: input.to,
+      ...(input.from === undefined && { fromOmitted: true }),
+      ...(input.messagingServiceSid !== undefined && { messagingServiceSid: input.messagingServiceSid }),
       ...(input.body !== undefined && { body: input.body }),
       ...(mediaUrls !== undefined && { mediaUrls }),
       state: 'queued', createdAt: now, updatedAt: now,
@@ -476,9 +622,8 @@ export class FakeTwilioEngine {
         this.pendingCancels.delete(cancel);
         // FIX 1 (belt-and-suspenders): a reset() bumped the generation; no-op.
         if (myGeneration !== this.generation) return;
-        const updated = this.store.updateState(sid, state);
+        const updated = this.transition(sid, state);
         if (updated) {
-          updated.updatedAt = this.clock.nowIso();
           // FIX 2: when this resolves to the profile's fail state, persist the
           // Twilio ErrorCode on the message itself (not just the status webhook)
           // so the UI can render it — set it BEFORE emitting so the event carries it.

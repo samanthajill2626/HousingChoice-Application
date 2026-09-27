@@ -2,7 +2,9 @@
 import { Router } from 'express';
 import type { FakeTwilioEngine } from '../engine/engine.js';
 import type { NumberRegistry } from '../engine/numberRegistry.js';
-import type { AddAdHocInput, SendAsPartyInput, SetDeliveryOutcomeInput } from '../engine/types.js';
+import type {
+  AddAdHocInput, FailListInput, FailNextSendInput, SendAsPartyInput, SetDeliveryOutcomeInput,
+} from '../engine/types.js';
 
 /** CloudEvents `type` (schema v1) for a successful A2P number-registration - the
  *  signal the app's events sink promotes a `warming` pool number on (mirrors app T3). */
@@ -79,6 +81,49 @@ export function createControlRouter(
   router.post('/control/delivery-outcome', (req, res) => {
     try {
       engine.setDeliveryOutcome(req.body as SetDeliveryOutcomeInput);
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Send-outcome seams (spec D19). Both are armings keyed by PARTY number and
+  // consumed per call, like /control/delivery-outcome, and both survive until
+  // consumed or until /control/reset - which runs ONCE per e2e suite - so a
+  // spec arms per-run-unique numbers. Body errors answer 400 { error }.
+  //
+  // POST /control/fail-next-send { partyNumber, mode, code?, count? } -> { ok: true }
+  // The next `count` (default 1) Messages creates TO partyNumber:
+  //   reject             -> 400 { code: code ?? 21211, message, more_info, status: 400 };
+  //                         nothing recorded
+  //   drop_before_create -> the socket is destroyed, no response; nothing recorded
+  //   accept_then_drop   -> recorded (its status callbacks fire as normal), then
+  //                         the socket is destroyed with no response
+  // reject and drop_before_create end the create BEFORE it is recorded, so a
+  // /control/delivery-outcome profile armed for the same party is NOT consumed
+  // and applies to the next create that goes through (the re-drive), and a
+  // never-seen number is not auto-registered as a persona. Do not arm a
+  // delivery-outcome profile beside a reject or drop_before_create for one
+  // party unless the re-drive is meant to get it (T11-6). Arming fail-list
+  // beside any of the three is fine.
+  router.post('/control/fail-next-send', (req, res) => {
+    try {
+      engine.setFailNextSend(req.body as FailNextSendInput);
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /control/fail-list { partyNumber, count? } -> { ok: true }
+  // The next `count` (default 1) Messages LIST calls whose To is partyNumber,
+  // and FETCHes of a message whose `to` is partyNumber, answer
+  // 500 { code: 20500, message: 'fail-list: provider unavailable', more_info, status: 500 }.
+  // A list with no To, another party's list or fetch, and a 404 fetch consume
+  // nothing. This is how the e2e and the self-QA drive `unresolved`.
+  router.post('/control/fail-list', (req, res) => {
+    try {
+      engine.setFailList(req.body as FailListInput);
       res.status(200).json({ ok: true });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });

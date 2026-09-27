@@ -123,6 +123,8 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   entry(ENDPOINTS, 'startCellVerify', 'request:POST', '/api/users/me/cell/verify-start'),
   entry(ENDPOINTS, 'confirmCellVerify', 'request:POST', '/api/users/me/cell/verify-confirm'),
   entry(ENDPOINTS, 'putSettings', 'request:PUT', '/api/settings'),
+  entry(ENDPOINTS, 'uploadVoicemailGreeting', 'request:PUT', '/api/settings/voicemail-greeting'),
+  entry(ENDPOINTS, 'removeVoicemailGreeting', 'request:DELETE', '/api/settings/voicemail-greeting'),
   entry(ENDPOINTS, 'subscribePush', 'request:POST', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'unsubscribePush', 'request:DELETE', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'sendPushTest', 'request:POST', '/api/push/test'),

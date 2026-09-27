@@ -141,6 +141,8 @@ const ENDPOINT_TEMPLATES = Object.freeze([
   '/api/email-media/presign',
   '/api/email-media/confirm',
   '/api/settings',
+  '/api/settings/voicemail-greeting',
+  '/api/settings/voicemail-greeting/audio',
   '/api/users/me/cell/verify-start',
   '/api/users/me/cell/verify-confirm',
   '/api/users/me',

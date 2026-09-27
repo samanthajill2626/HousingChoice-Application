@@ -297,7 +297,13 @@ const BROADCAST_LIST_GETS = Object.freeze([required('/api/broadcasts', ['limit']
 const TEAM_GETS = Object.freeze([required('/api/users')]);
 const TEMPLATE_GETS = Object.freeze([required('/api/settings')]);
 const NOTIFICATION_GETS = Object.freeze([] as EndpointContract[]);
-const VOICE_GETS = Object.freeze([required('/api/users/me')]);
+// Voice tab (voicemail greeting): the org settings are required; the
+// player's preload="metadata" audio GET happens only when a greeting is set.
+const VOICE_GETS = Object.freeze([
+  required('/api/users/me'),
+  required('/api/settings'),
+  conditional('/api/settings/voicemail-greeting/audio', ['v']),
+]);
 const SYSTEM_GETS = Object.freeze([
   required('/api/settings'), required('/api/system/flags'), required('/api/system/alarms'),
   required('/api/system/errors', ['since']),
@@ -696,7 +702,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/team': { base: 'dashboard/src/routes/settings/useTeam.ts:16-37' },
     '/settings/templates': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62' },
     '/settings/notifications': { base: 'dashboard/src/routes/settings/NotificationsSection.tsx:22-100' },
-    '/settings/voice': { base: 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176' },
+    '/settings/voice': { base: 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176; dashboard/src/routes/settings/useVoicemailGreeting.ts:1-40' },
     '/settings/system': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62; dashboard/src/routes/settings/useSystemStatus.ts:86-141' },
     '/settings/ai-runs': { base: 'dashboard/src/routes/settings/aiRuns/useAiRuns.ts:32-105' },
     '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,207-244' },
@@ -750,7 +756,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/team': 'dashboard/src/routes/settings/TeamSection.tsx:42-91',
     '/settings/templates': 'dashboard/src/routes/settings/TemplatesSection.tsx:62-108',
     '/settings/notifications': 'dashboard/src/routes/settings/NotificationsSection.tsx:22-100',
-    '/settings/voice': 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176',
+    '/settings/voice': 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176; dashboard/src/routes/settings/useVoicemailGreeting.ts:1-40',
     '/settings/system': 'dashboard/src/routes/settings/QuietHoursSection.tsx:135-155; dashboard/src/routes/settings/FlagPills.tsx:41-69; dashboard/src/routes/settings/AlarmGrid.tsx:43-95; dashboard/src/routes/settings/RecentErrors.tsx:69-129',
     '/settings/ai-runs': 'dashboard/src/routes/settings/aiRuns/AiRunList.tsx:43-47',
     '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,207-244',

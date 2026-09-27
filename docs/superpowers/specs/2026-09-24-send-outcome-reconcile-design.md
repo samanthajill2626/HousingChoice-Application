@@ -2,10 +2,11 @@
 
 Anchor issue: `throw-for-redelivery-defeated-by-job-marker` (high).
 Branch `feat/send-outcome-reconcile`, cut from `main@685f2ede`, 2026-09-24.
-Revision 7 (after design review rounds 1-4, the 2026-09-25 cross-branch
-sequencing with `feat/retry-send-window` and `feat/share-skip-fix`, and the
-RSW planner's 2026-09-26 relay, kept verbatim at
-`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/handoffs/rsw-relay-2026-09-26.md`;
+Revision 8 (after design review rounds 1-4, the 2026-09-25 cross-branch
+sequencing with `feat/retry-send-window` and `feat/share-skip-fix`, the RSW
+planner's 2026-09-26 relay, kept verbatim at
+`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/handoffs/rsw-relay-2026-09-26.md`,
+and the 2026-09-26 plan-research findings in that directory's `research/`;
 see the adjudications and Sec 2a).
 
 | sev | issue | this branch |
@@ -145,13 +146,16 @@ carries because it lands after the other two:
    and honest counts). Its interim "Already sent" rule counts every
    failed-class slot as sent - including this branch's `failed` +
    `send_unconfirmed` - which is the safe direction and needs no cross-branch
-   rule. What this branch meets from it: the `skippedTotal` balance in
-   `broadcastFormat.ts`, which the `unconfirmed` bucket (D22) joins; the
-   results-row reason gate `shareRecipientReason` there, which the recipient
-   badge calls for skipped AND failed rows, so `send_unconfirmed` needs its
-   OWN arm in it (D20) or it falls through to `deliveryReason`'s whole-group
-   sentence; `SHARE_SKIP_REASONS` beside the internal-code map in
-   `deliveryStatus.ts`; `created_via` on the broadcast row (`'dashboard'` =
+   rule. What this branch meets from it: `skippedTotal` in
+   `broadcastFormat.ts`, which also drives the "Not sent" pill - the
+   `unconfirmed` bucket (D22) must NOT join it; it joins the audience sum as
+   its own chip; the results-row reason gate `shareRecipientReason` there,
+   which the recipient badge calls for skipped AND failed rows and which
+   sends a failed row through `deliveryReason`, whose internal-code map is
+   checked FIRST - so the internal-map entry for `send_unconfirmed` (D23) is
+   the edit that matters, and no own arm is needed; `SHARE_SKIP_REASONS`
+   beside that map in `deliveryStatus.ts`; `created_via` on the broadcast
+   row (`'dashboard'` =
    a person's send, absent = automated), which adoption reads (D15); and the
    lean seed's deliberately switched-off tenant `contact-tenant-0002` /
    `conv-0002`, which this branch's e2e must never use as the recipient of
@@ -382,13 +386,25 @@ The claim is one conditional write:
 
 Every later write to the record by the same site (the D5/D6/D7 transitions
 and the record-phase `done` / `sent`) is conditioned on `state = attempting`
-AND `attemptedAt` equal to this attempt's, so a stale writer cannot overwrite
-a newer attempt. The claim also writes `attemptedAt` onto the slot (an
-additive attribute, best-effort: a wholesale slot write may erase it; the
-record stays authoritative) so a stranded slot can age (D20a). Both slot types
-gain the field. A `queued` slot with a SID recorded on its record can never be
-claimed again, whatever the slot's status says: this is what makes a relay
-success that leaves the slot `queued` safe against a duplicate.
+AND `attemptNo` AND `attemptedAt` equal to this attempt's, so a stale writer
+cannot overwrite a newer attempt. The claim also writes `attemptedAt` onto
+the RELAY slot (an additive attribute, best-effort: a wholesale slot write
+may erase it; the record stays authoritative; a legacy slot that does not
+exist yet is created by the same write) so a stranded relay leg can age
+(D20a). Broadcast slots do NOT get it: nothing renders broadcast staleness,
+and a 1500-recipient broadcast item is already large enough that another
+attribute per slot matters. A `queued` slot with a SID recorded on its
+record can never be claimed again, whatever the slot's status says: this is
+what makes a relay success that leaves the slot `queued` safe against a
+duplicate.
+
+The claim's transaction also writes a second, RECIPIENT-KEYED index item -
+partition by the sender number and the recipient digest (D12), sort by the
+attempt start with the owner reference - so the lookup can find other
+attempts to the same recipient from the same sender (D13's same-fingerprint
+rule) with a strongly consistent Query on that partition. This is the one
+"index" in the design and it is a plain item family, because a GSI cannot
+be read consistently (D11). Both families carry the 30-day cleanup TTL.
 
 **D9. Outage brake.** Three consecutive `unknown` outcomes in one pass end the
 pass early: every recipient not yet attempted is deferred to the continuation
@@ -424,9 +440,14 @@ two chains for one recipient converge on one outcome:**
   and every verdict is idempotent, so a duplicate chain costs a few extra
   list calls and nothing else.
 - Adoption first CLAIMS the message: the `sid#` row append (broadcast, 1:1),
-  which dedupes on the SID, or a conditional `relaysid#` pointer put (relay).
-  A claim that loses to a DIFFERENT attempt means that message is someone
-  else's; the job takes the next candidate (D13). The rest of the adoption is
+  which dedupes on the SID, or a conditional `relaysid#` pointer put (relay;
+  today's put swallows the conflict and is replaced by one that reports
+  created / mine / another's). A dedupe on the append is not by itself "lost":
+  two broadcasts to one tenant share a conversation, so the job re-reads the
+  existing row consistently and compares its `broadcast_id` and the record's
+  owner - mine means the send was recorded after all (a repair), another's
+  means the message is someone else's and the job takes the next candidate
+  (D13). The rest of the adoption is
   individually idempotent writes (a forward-only slot write that reports
   whether it moved; the stats bump, the best-effort rows and the emits only
   when it moved), then the record `done` / `adopted` with the SID. Re-running
@@ -443,10 +464,15 @@ two chains for one recipient converge on one outcome:**
 Every condition above is evaluated by DynamoDB against the base-table item,
 atomically with the write; no index is involved. Every READ that a decision
 in this design rests on - the close gate (D8), the continuation snapshot
-(D16), finalize (D16a), the SID-pointer checks (D13) - is a strongly
-consistent primary-key read on the base table. No coordination read may go
-through a GSI: a GSI is eventually consistent and cannot be read
-consistently, so a decision made from one can act on a stale image.
+(D16), finalize (D16a), the SID-pointer checks (D13), the recipient-index
+Query (D8a) - is a strongly consistent primary-key read or Query on the base
+table. The repo methods those reads use today (`getByProviderSid`,
+`getRelaySidPointer`, the system-send marker read, the broadcast `getById`,
+the relay source reads) are eventually consistent; each gets a consistent
+variant for these call sites and the existing callers keep the cheap one. No
+coordination read may go through a GSI: a GSI is eventually consistent and
+cannot be read consistently, so a decision made from one can act on a stale
+image.
 
 Because nothing in the chain depends on being the single winner, a throw
 inside the job is a genuine retry: five failures reach the DLQ and page
@@ -463,9 +489,11 @@ the body hash, the media count, a known SID - is read from the attempt record
 at run time. Never a body or a recipient phone. On the LOOKUP path the job
 re-reads the recipient's CURRENT number from the owner (the contact, the
 roster member, the 1:1 conversation) and compares its keyed digest (SHA-256
-over the owner reference and the E.164) with the record's; a mismatch is
-`unresolved` - a text, if any, went to a number we can no longer look up. The
-known-SID path needs no number and skips that check. (When the `retrySend`
+over the SENDER number and the E.164 - owner-independent, so the same digest
+keys the recipient index in D8a) with the record's; a mismatch is
+`unresolved` - a text, if any, went to a number we can no longer look up. A
+record with no sender (an unpinned dev send) is `unresolved` too: there is
+nothing to list by. The known-SID path needs no number and skips that check. (When the `retrySend`
 adoption is built later, its record will key on the original message and the
 retry rung; not this branch.)
 
@@ -489,7 +517,11 @@ retry rung; not this branch.)
   letters and digits only), because Smart Encoding rewrites punctuation in
   the stored body (Sec 1); when the normalized body is shorter than three
   characters (a media-only or emoji-only message) the media count must match
-  instead. The job then tries to CLAIM matching candidates oldest-first
+  instead. (A native group-text leg to the same recipient carries no pointer
+  of ours, so it appears as an unmatched candidate; its body will not match
+  a relay or share body, and it becomes one more named cause of
+  `unresolved` at the final check.) The job then tries to CLAIM matching
+  candidates oldest-first
   (D11); the first claim that wins is `found`. Two text attempts with
   identical bodies to the same member may thereby adopt each other's
   messages, which changes no delivery and no count - but two MEDIA attempts
@@ -621,10 +653,16 @@ here), and otherwise flips the status on the condition `status = sending`;
 only the writer that wins it writes the `broadcast_sent` audit row and emits
 the terminal event. Every writer that could be the last - the pass, a
 continuation, a cap-close, a verdict handler - simply calls `finalize` after
-its own writes, and N callers produce one finalize. The terminal status:
-`failed` when no recipient reached `sent` or `delivered` AND at least one is
-`failed` or unconfirmed (`last_error` names which; skipped recipients count
-for neither side), else `sent` as today.
+its own writes, and N callers produce one finalize. The terminal status is
+decided from the RECIPIENTS MAP it just read, never from the persisted
+counters (today's finalize reads `stats.failed`, which the callback rollup
+and the reconcile verdicts do not keep in step): `failed` when no recipient
+reached `sent` or `delivered` AND at least one is `failed` or unconfirmed,
+else `sent` as today; skipped recipients count for neither side. The
+broadcast has no "not confirmed" status (D10), so an all-unconfirmed share
+reads a red "Failed" pill; its `last_error`, which the results header shows
+verbatim, is prose for that case - "Couldn't confirm any text went out" -
+rather than today's "all recipients failed".
 
 ## 6. Decisions: the adapter port and the hermetic fake
 
@@ -658,50 +696,67 @@ status read is what carries the delivered state (D15).
 
 ## 7. Decisions: dashboard
 
-**D20. `send_unconfirmed` is presented by CODE, the way `contact_opted_out`
-already is.** It only ever appears on a CLOSED (`failed`) slot, where it
-renders the label "Not confirmed", danger tone, `isFailure: false` (so no
-Retry that could double-send is offered), with the reason "Couldn't confirm
-whether this text went out." - true for every cause D16 names, since in each
-the platform does not know; the cause is for the log, not the row. A
-recipient still being reconciled is a plain `queued` slot and renders as one.
-Every render position keys on the code together: the relay rollup, the
-per-recipient row, the accessible name, the broadcast row, AND the relay retry
-join (`relayRetryJoin.ts`), which today projects a rung's terminal code onto
-the root leg as a failure and must not turn an unresolved rung into a Retry
-offer.
+**D20. `send_unconfirmed` is presented by CODE ALONE, the way
+`contact_opted_out` already is.** The app writes it only on a CLOSED
+(`failed`) slot, but readers must never key on the status: the relay retry
+join projects a rung's terminal code onto the ORIGINAL leg, whose status
+stays `undelivered`. Wherever the code appears it renders the label "Not
+confirmed", danger tone, `isFailure: false`, with the reason "Couldn't
+confirm whether this text went out" (no trailing period: the accessible
+name appends its own) - true for every cause D16 names, since in each the
+platform does not know; the cause is for the log, not the row. Because
+`isFailure: false` is what HIDES a reason on the row and in the accessible
+name, the leg presenter carries this reason itself, the way `Retrying`
+does, and the rollup chip carries it as its reason too. No relay position
+offers a Retry today; the broadcast row's "open conversation to retry" hint,
+its red styling and its failed-first sort key on `status === 'failed'`, and
+the hint is suppressed for this code while the styling and sort stay (a
+danger-toned row sorted first is right). A recipient still being reconciled
+is a plain `queued` slot and renders as one. Every render position keys on
+the code together: the relay rollup, the per-recipient row, the accessible
+name, the broadcast row (`presentRecipientStatus` gains the errorCode it
+lacks today), AND the relay retry join (`relayRetryJoin.ts`). Each new code
+gets a mirror test pinning the dashboard token to the app constant, on the
+`relayWindowCloseMirror.test.ts` precedent.
 
-**D20a. A queued leg with no provider clock ages from its attempt clock.** The
-relay staleness rules gain one row: a `queued` slot with no `sentAt` but an
-`attemptedAt` ages from `attemptedAt`, so a leg stranded mid-send or
-mid-reconcile reads "Queued - not confirmed" after the existing 15-minute
-budget instead of "Sending..." for ever. A `queued` slot with neither clock
-still never ages (the held-message case that rule protects). A wholesale slot
-write can erase `attemptedAt`; that leg falls back to today's behavior.
+**D20a. A queued relay leg with no provider clock ages from its attempt
+clock.** The relay staleness rules gain one row: a `queued` slot with no
+`sentAt` but an `attemptedAt` ages from `attemptedAt`, so a leg stranded
+mid-send or mid-reconcile reads "Queued - not confirmed" after the existing
+15-minute budget instead of "Sending..." for ever. A `queued` slot with
+neither clock still never ages (the held-message case that rule protects). A
+wholesale slot write can erase `attemptedAt`; that leg falls back to today's
+behavior. Relay only: broadcast slots carry no attempt clock (D8a) and have
+no staleness rendering.
 
 **D21. The relay rollup counts an unresolved leg under "not confirmed", not
-"failed".** `presentRelayDelivery`'s K (failed) excludes `failed` slots
-carrying `send_unconfirmed`; they join J (not confirmed). The chip stays
-danger-toned and `isFailure: false`.
+"failed".** `presentRelayDelivery`'s K (failed) excludes any slot carrying
+`send_unconfirmed`, whatever its status (D20); they join J (not confirmed).
+The chip stays danger-toned and `isFailure: false`.
 
 **D22. Broadcast stats gain an `unconfirmed` bucket and the results page a
 "Not confirmed" chip.** `deriveBroadcastStats` routes a `failed` slot with
 `send_unconfirmed` there instead of `failed`; the persisted counter the
-unresolved write bumps is `unconfirmed`, not `failed`. The recipient row reads
-"Not confirmed" with the D20 reason rendered (the badge shows a reason for this
-code even though `isFailure` is false; since Branch A the badge routes failed
-rows through `shareRecipientReason`, so that gate gets its own
-`send_unconfirmed` arm rather than falling through to `deliveryReason`) and no
-"open conversation to retry" link. Readers that change together: the
-`BroadcastStats` API type, the `broadcast.updated` SSE payload, the StatChips
-balance rule (`skippedTotal` and the audience sum), the results and list
-routes, and the two seed files that build stats.
+unresolved write bumps is `unconfirmed`, not `failed` (the persisted counters
+are displayed only for an empty-map draft; every route and the SSE payload
+derive from the map already, so they need no edit). The bucket is OPTIONAL
+in both `BroadcastStats` types and read as `?? 0`, is its own chip in the
+audience sum, and never joins `skippedTotal` (which drives the "Not sent"
+pill). The recipient row reads "Not confirmed" with the D20 reason rendered
+(the badge shows a reason for this code even though `isFailure` is false)
+and no "open conversation to retry" hint. Readers that change together: the
+`BroadcastStats` API type, `deriveBroadcastStats`, the StatChips audience
+sum and its order test, `presentRecipientStatus`, and the two seed files
+that build broadcasts (`matrix.ts`, `performance.ts`), whose seeded stats
+gain `unconfirmed: 0`.
 
 **D23. New codes render as prose, never as fake carrier numbers.** The
 app-invented codes this branch writes (`send_unconfirmed`, `redrive_refused`)
 and the existing `sms_sending_disabled` token go in the delivery-reason
 internal-code map (`redrive_refused`: "Wasn't resent: the group closed or the
-member left"). A Twilio rejection code renders through the existing carrier
+member left"; `sms_sending_disabled`: "SMS sending is switched off, so
+nothing was sent", the wording the dashboard already uses for that token
+elsewhere). A Twilio rejection code renders through the existing carrier
 map or its `(error N)` fallback, which is correct for a real Twilio number.
 The pre-existing `transient_cap` copy widens from "carrier deferrals" to
 "temporary errors", because D6 routes 20429 and connection refusals through
@@ -795,7 +850,11 @@ Test INTENTIONS; the plan specifies seams, fixtures and mechanics.
     broadcast chip shows the `unconfirmed` bucket and the balance rule still
     holds; `redrive_refused` renders its prose (D20-D23).
 15. Stats: a `failed` slot with `send_unconfirmed` lands in `unconfirmed` and
-    in no other bucket, in `deriveBroadcastStats` and in both seeds (D10, D22).
+    in no other bucket in `deriveBroadcastStats`; the two seeds that build
+    broadcasts carry `unconfirmed: 0` and still type-check (D10, D22).
+16. Finalize decides from the recipients map: a broadcast whose persisted
+    `stats.failed` is stale still finalizes correctly; an all-unconfirmed
+    share finalizes `failed` with the D16a `last_error` prose.
 
 **E2E (hermetic), one spec per fake mode (D19), under the lane window
 override (D13a):** `accept_then_drop` on a relay leg ends with the leg adopted

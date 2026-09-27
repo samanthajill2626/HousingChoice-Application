@@ -723,21 +723,51 @@ export interface NewMessage {
    */
   broadcastId?: string;
   /**
-   * Manual retry (dashboard Retry button): the tsMsgId of the FAILED message this
-   * send supersedes. Stamped as `retry_of` at append so the timeline can collapse
-   * the stale failed bubble atomically (no annotate-after race). The 30003
-   * auto-retry job sets retry_of via annotateMessage instead (it also writes
-   * retry_attempt for the chain cap).
+   * Retry lineage, stamped AT APPEND so the new row carries it atomically (no
+   * annotate-after race): the tsMsgId of the FAILED message this send
+   * supersedes, which the timeline collapses. The manual Retry passes it
+   * alone; the automatic 30003 retry passes it together with retryAttempt and
+   * retryWindowStart (retry-send-window D6).
    */
   retryOf?: string;
+  /**
+   * retry-send-window D6: the 1-based attempt number of an automatic 30003
+   * retry, stored as `retry_attempt` - the field the next 30003 callback reads
+   * for the chain cap, so it exists the moment the row does.
+   */
+  retryAttempt?: number;
+  /**
+   * retry-send-window D2/D6: the ORIGIN of the automatic 30003 retry chain (the
+   * first send's provider_ts), stored as `retry_window_start` on every automatic
+   * retry row so attempts 2 and 3 still measure the 15-minute window from the
+   * first send. Never on a manual Retry: a human chose to send now.
+   */
+  retryWindowStart?: string;
+  /**
+   * retry-send-window D14: whether the one-to-one send that appended this row
+   * was automated. Stored as `automated`, FALSE INCLUDED - a row without it
+   * (written before the field existed) is retried as automated. The send
+   * wrapper (services/sendMessage.ts) sets it on every row it appends; no other
+   * writer does.
+   */
+  automated?: boolean;
+  /**
+   * retry-send-window D14: the contact the caller named as the recipient (the
+   * send wrapper's `recipient`, share-skip-fix I8), stored as
+   * `recipient_contact_id` so a retry judges that same contact while it still
+   * holds the thread's number. Absent when the phone lookup decided, and when a
+   * named recipient no longer held the number (sendMessage ignored it).
+   */
+  recipientContactId?: string;
 
   // --- Relay 30003 retry lineage (spec D11/D12) -----------------------------
   // A relay retry is a NEW source row addressed to ONE member, not a promotion
   // of the failed leg (D1), so it carries its own lineage back to the leg it
-  // retries. Six values stored; the dashboard PROJECTS four (D11). All six
-  // reach the browser - GET /conversations/:id/messages returns the row as-is -
-  // so "projected" is the honest word and "on the wire" is not. Absent on every
-  // other message - a row carrying relayRetryOf IS a retry row.
+  // retries. Six lineage values stored, plus the window origin retry-send-window
+  // adds (relayRetryWindowStart, D2); the dashboard PROJECTS four (D11). All of
+  // them reach the browser - GET /conversations/:id/messages returns the row
+  // as-is - so "projected" is the honest word and "on the wire" is not. Absent
+  // on every other message - a row carrying relayRetryOf IS a retry row.
   /** D11: the root source row's tsMsgId - the key the thread-level join buckets on. */
   relayRetryOf?: string;
   /** D11: the member key of the leg being retried - it must match the ORIGINAL's slot map, because that is what the presenter joins on. */
@@ -756,6 +786,14 @@ export interface NewMessage {
    * between attempts from rewriting what was already sent.
    */
   relayRetryLegBody?: string;
+  /**
+   * retry-send-window D2: the member's ORIGINAL leg send time (the root slot's
+   * `sentAt`), carried forward on every rung as `relay_retry_window_start` -
+   * never re-derived from a retry row's own slot, which would restart the
+   * window. OPTIONAL by design (D5): a rung claimed before the field existed, or
+   * from a slot with no `sentAt`, has none and is not windowed.
+   */
+  relayRetryWindowStart?: string;
 
   // --- Voice calls (M1.9a) -------------------------------------------------
   // A `type:'call'` message is a metadata-only timeline entry for a masked
@@ -998,6 +1036,22 @@ export interface MessageItem {
   retry_of?: string;
   /** 1-based retry attempt number (caps the 30003 retry chain, doc §7.1). */
   retry_attempt?: number;
+  /** retry-send-window D2/D6: the automatic retry chain's origin, written at append (see NewMessage.retryWindowStart). */
+  retry_window_start?: string;
+  /**
+   * retry-send-window D7: when the automatic 30003 retry of THIS failed
+   * one-to-one message runs (ISO 8601). Written in the SAME conditional write
+   * as the failure (updateDeliveryStatus's `retryDueAt`), so the failure and the
+   * promise become visible together; re-written through annotateMessage to
+   * RETRY_PROMISE_WITHDRAWN_AT (lib/retrySendWindow.ts, already expired) when
+   * the enqueue fails. The promise is live while now < retry_due_at +
+   * RETRY_PROMISE_GRACE_MS. Absent when no retry was scheduled.
+   */
+  retry_due_at?: string;
+  /** retry-send-window D14: the send's automated flag, false included (see NewMessage.automated). */
+  automated?: boolean;
+  /** retry-send-window D14: the recipient contact the send named (see NewMessage.recipientContactId). */
+  recipient_contact_id?: string;
   // --- Relay 30003 retry lineage (spec D11/D12) -----------------------------
   // The stored twins of NewMessage.relayRetry*. NOT `retry_of`: that field
   // supersedes a 1:1 bubble, and stamping it here would DELETE the original
@@ -1014,6 +1068,8 @@ export interface MessageItem {
   relay_retry_origin_direction?: 'inbound' | 'outbound';
   /** D12: the composed leg copy sent verbatim on every rung; the ROW body above stays RAW, so the inbox preview and the timeline show one string for one logical message. */
   relay_retry_leg_body?: string;
+  /** retry-send-window D2/D5: the member's original leg send time, carried on every rung; absent = not windowed (see NewMessage.relayRetryWindowStart). */
+  relay_retry_window_start?: string;
   /** 1-based pass number of the relay fan-out CONTINUATION ladder (M5) - a
    *  sibling of the 1:1 retry ladder above, never shared with it: a continuation
    *  would otherwise silently consume the retry budget. Claimed by
@@ -1172,8 +1228,16 @@ export interface MessageItem {
  */
 export interface MessageAnnotations {
   mediaAttachments?: MediaAttachment[];
-  retryOf?: string;
-  retryAttempt?: number;
+  // No retry lineage here, deliberately: retry_of / retry_attempt /
+  // retry_window_start are written ONLY at append (NewMessage.retryOf and
+  // siblings, retry-send-window D6). An annotate-after path would reopen the
+  // race D6 closed - a fast 30003 reading the retry row before its lineage.
+  /**
+   * retry-send-window D7: re-write `retry_due_at`. The status webhook sets it
+   * to RETRY_PROMISE_WITHDRAWN_AT when the retry's enqueue fails, so a promise
+   * with no retry behind it is withdrawn at once.
+   */
+  retryDueAt?: string;
 }
 
 /**
@@ -1258,7 +1322,18 @@ export interface MessagesRepo {
    * message is unknown or the transition would move backwards — delivery
    * callbacks arrive out of order and redelivered (doc §7.1).
    */
-  updateDeliveryStatus(sid: string, status: DeliveryStatus, errorCode?: string): Promise<boolean>;
+  updateDeliveryStatus(
+    sid: string,
+    status: DeliveryStatus,
+    errorCode?: string,
+    /**
+     * retry-send-window D7: `retryDueAt` (the one-to-one retry's run time,
+     * ISO 8601) is SET as `retry_due_at` in the SAME conditional write as the
+     * status, so it lands only if the transition does - a redelivered or
+     * regressing callback writes neither. Every other caller passes nothing.
+     */
+    options?: { retryDueAt?: string },
+  ): Promise<boolean>;
   /**
    * Email channel v1 (A5): alias a provider SID to an ALREADY-persisted message.
    * An outbound email persists under our own RFC Message-ID as `provider_sid`
@@ -1402,7 +1477,7 @@ export interface MessagesRepo {
    * UnprocessedKeys retry. Missing ids are simply absent from the map.
    */
   getManyByTsMsgIds(conversationId: string, tsMsgIds: string[]): Promise<Map<string, MessageItem>>;
-  /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
+  /** Stamp operational metadata (media S3 keys / the retry promise's retry_due_at) onto a message. Never retry lineage: that is append-only (D6). */
   annotateMessage(conversationId: string, tsMsgId: string, annotations: MessageAnnotations): Promise<void>;
   /**
    * Newest-first page of ONE conversation's media pointers (2026-08-18) - the
@@ -2259,10 +2334,23 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           group_participant_map: message.groupRailSnapshot.participantMap,
         }),
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
-        // Manual retry (dashboard Retry button): stamp retry_of AT APPEND so the
-        // new message carries its lineage atomically — no annotate-after race. The
-        // 30003 auto-retry still annotates post-send (it also needs retry_attempt).
+        // Retry lineage AT APPEND, so the row carries it atomically (no
+        // annotate-after race): the manual Retry stamps retry_of alone; the
+        // automatic 30003 retry also stamps retry_attempt (the chain cap) and
+        // retry_window_start (the chain's origin, retry-send-window D2/D6), so a
+        // fast 30003 on the retry can never read a row without them.
         ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
+        ...(message.retryAttempt !== undefined && { retry_attempt: message.retryAttempt }),
+        ...(message.retryWindowStart !== undefined && {
+          retry_window_start: message.retryWindowStart,
+        }),
+        // retry-send-window D14: the send's own flags, so its retry is sent the
+        // same way. `automated` is written for FALSE too - absent means a row
+        // from before the field existed, which is retried as automated.
+        ...(message.automated !== undefined && { automated: message.automated }),
+        ...(message.recipientContactId !== undefined && {
+          recipient_contact_id: message.recipientContactId,
+        }),
         // Relay 30003 retry lineage (D11/D12): a retry is a NEW source row, so
         // its lineage back to the leg it retries is stamped AT APPEND, in the
         // same transaction as the sid# pointer that IS the claim (D3).
@@ -2281,6 +2369,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         }),
         ...(message.relayRetryLegBody !== undefined && {
           relay_retry_leg_body: message.relayRetryLegBody,
+        }),
+        // retry-send-window D2: the member's original leg send time, carried on
+        // every rung; optional (D5 - absent = not windowed).
+        ...(message.relayRetryWindowStart !== undefined && {
+          relay_retry_window_start: message.relayRetryWindowStart,
         }),
         // Voice call (M1.9a): metadata-only fields on a type:'call' item. The
         // same sid#<CallSid> pointer the append already writes lets the status
@@ -2538,7 +2631,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       return { deduped: false, tsMsgId };
     },
 
-    async updateDeliveryStatus(sid, status, errorCode) {
+    async updateDeliveryStatus(sid, status, errorCode, options) {
       const existing = await getByProviderSid(sid);
       if (!existing) {
         log.warn({ providerSid: sid, status }, 'delivery status for unknown provider SID ignored');
@@ -2546,21 +2639,27 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
       const allowed = allowedPriorStatuses(status);
       if (allowed.length === 0) return false; // nothing may transition INTO queued
+      // retry-send-window D7: the one-to-one retry decision rides the SAME
+      // conditional write as the failure, so `retry_due_at` lands only when the
+      // transition does - a redelivered or regressing callback writes neither,
+      // and the transition's one `message.persisted` carries both.
+      const retryDueAt = options?.retryDueAt;
+      const sets = ['delivery_status = :s'];
+      if (errorCode !== undefined) sets.push('error_code = :e');
+      if (retryDueAt !== undefined) sets.push('retry_due_at = :r');
       try {
         await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
-            UpdateExpression:
-              errorCode !== undefined
-                ? 'SET delivery_status = :s, error_code = :e'
-                : 'SET delivery_status = :s',
+            UpdateExpression: `SET ${sets.join(', ')}`,
             // Forward-only: the write commits only from an allowed prior
             // status, so out-of-order callbacks can never regress `delivered`.
             ConditionExpression: `delivery_status IN (${allowed.map((_, i) => `:p${i}`).join(', ')})`,
             ExpressionAttributeValues: {
               ':s': status,
               ...(errorCode !== undefined && { ':e': errorCode }),
+              ...(retryDueAt !== undefined && { ':r': retryDueAt }),
               ...Object.fromEntries(allowed.map((p, i) => [`:p${i}`, p])),
             },
           }),
@@ -2575,7 +2674,10 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         }
         throw err;
       }
-      log.info({ providerSid: sid, status, errorCode }, 'delivery status updated');
+      log.info(
+        { providerSid: sid, status, errorCode, ...(retryDueAt !== undefined && { retryDueAt }) },
+        'delivery status updated',
+      );
       return true;
     },
 
@@ -2909,13 +3011,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         sets.push('media_attachments = :mediaAttachments');
         values[':mediaAttachments'] = annotations.mediaAttachments;
       }
-      if (annotations.retryOf !== undefined) {
-        sets.push('retry_of = :retryOf');
-        values[':retryOf'] = annotations.retryOf;
-      }
-      if (annotations.retryAttempt !== undefined) {
-        sets.push('retry_attempt = :retryAttempt');
-        values[':retryAttempt'] = annotations.retryAttempt;
+      // retry-send-window D7: the enqueue-failure withdrawal re-writes the
+      // promise to an already-expired instant.
+      if (annotations.retryDueAt !== undefined) {
+        sets.push('retry_due_at = :retryDueAt');
+        values[':retryDueAt'] = annotations.retryDueAt;
       }
       if (sets.length === 0) return;
       await doc.send(
@@ -2932,8 +3032,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           conversationId,
           tsMsgId,
           mediaKeyCount: annotations.mediaAttachments?.length,
-          retryOf: annotations.retryOf,
-          retryAttempt: annotations.retryAttempt,
+          retryDueAt: annotations.retryDueAt,
         },
         'message annotated',
       );

@@ -60,13 +60,6 @@ const GROUP_ROSTER = [
   { contactId: 'c2', phone: '+14045550112', name: 'Bo Tenant' },
 ];
 
-/** The separator inside the SHIPPED 1:1 / group-text 30003 reason: one U+2014 EM
- *  DASH with an ASCII space each side. Built from a codepoint so every line this
- *  slice added stays ASCII (AGENTS.md), and so the character is never copied into
- *  new copy - the relay override uses a plain hyphen like every newer string in
- *  the presenter module. */
-const EM_DASH = String.fromCharCode(0x2014);
-
 /** Naive-local `at`, three weeks before the pinned clock (setup.ts pins
  *  2026-07-01T12:00:00Z), so a clock-less `sent` leg ages from it and is stale.
  *  formatTime(RELAY_AT) is '9:20a'. */
@@ -459,10 +452,11 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
 
   // ---- Slice 5a: the relay 30003 override (D19-D21) --------------------------
   //
-  // D19: no relay retry is scheduled. The status webhook returns on the
-  // relay-pointer branch BEFORE the 1:1 retry enqueue, and this branch adds no
-  // relay retry - so "will retry" beside a relay member's name is a promise the
-  // product cannot keep, in both worlds.
+  // D19, as it stands since the relay 30003 ladder and the retry send window: a
+  // relay leg's retry IS real, but its promise is the retry join's own
+  // `Retrying` state, never copy keyed on the code - and `relay` wins over the
+  // one-to-one `retryScheduled` option (retry-send-window D8), so "will retry"
+  // never appears beside a relay member's name.
   //
   // D21: one flag feeds the rollup, the recital and the row, so the three cannot
   // disagree; a partial fix that left a row contradicting the chip above it would
@@ -506,14 +500,15 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
   });
 
-  // D20, pinned EXPLICITLY rather than by relying on a default. `rosterKind`
-  // defaults to 'relay' (Timeline.tsx:1519, the operative one - MessageBubble's
-  // own :796 default is dead in production because :2083 always supplies a
-  // value), so exactly ONE production caller opts out: GroupTextView. A
-  // group-text 30003 really does reach the retry enqueue - the 30005/30006 and
-  // 21610 arms each carry a group_text guard and the 30003 arm carries none - so
-  // the promise is TRUE there and must survive byte for byte.
-  it('keeps the retry promise on the SAME leg in a native GROUP TEXT', () => {
+  // retry-send-window D11, pinned EXPLICITLY rather than by relying on a default.
+  // `rosterKind` defaults to 'relay' (the default in the `Timeline` props
+  // destructure, and MessageBubble's own default), so exactly ONE production
+  // caller opts out: GroupTextView. A native group text has NO retry - the
+  // one-to-one arm refuses to schedule one for a group_text conversation - so its
+  // leg promises none either and reads exactly as a relay leg does, at all three
+  // positions. (Until the retry send window this test pinned the opposite; the
+  // promise was never true here.)
+  it('promises NO retry on the SAME leg in a native GROUP TEXT', () => {
     const msg: TimelineItem = {
       ...RELAY_OUT,
       id: 'g-30003',
@@ -525,7 +520,7 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
       },
     };
     renderTimeline({ items: [msg], relayRoster: GROUP_ROSTER, rosterKind: 'group_text' });
-    const base = `Phone unreachable ${EM_DASH} will retry (error 30003)`;
+    const base = 'Phone unreachable (error 30003)';
     const rollup = screen.getByRole('img');
     expect(rollup).toHaveTextContent(`delivered 1/2 - 1 failed - ${base}`);
     expect(rollup).toHaveAccessibleName(
@@ -534,6 +529,7 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     reveal('group text to the pair');
     const failedRow = rows()[1] as HTMLElement;
     expect(within(failedRow).getByText(`Undelivered - ${base}`)).toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
   });
 
   // THE PRECEDENCE, at the CALL SITES rather than in the pure function: both
@@ -567,32 +563,70 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
   });
 
-  // Timeline.tsx:849 - the MESSAGE-LEVEL chip - is NOT overridden. It reads
-  // `msg.error_code`, gets no product flag, and is reached by 1:1 bubbles and by
-  // the native-group-text aggregate (services/groupDelivery.ts copies the worst
-  // leg's code onto the message row for group texts ONLY). Both keep a real
-  // retry, so the base copy has to survive here even though this timeline's
-  // rosterKind is 'relay' by default - which is exactly what would break if the
-  // override were applied to the message level instead of to relay LEGS.
-  it('leaves the MESSAGE-LEVEL chip on the base copy, relay default notwithstanding', () => {
-    const oneToOne: TimelineItem = {
-      kind: 'message',
-      id: 'm-30003',
-      at: RELAY_AT,
-      conversationId: 'c1',
-      tsMsgId: 'm-30003',
-      direction: 'outbound',
-      author: 'teammate',
-      type: 'sms',
-      delivery_status: 'undelivered',
-      error_code: '30003',
-      body: 'one to one, no roster',
-    };
-    renderTimeline({ items: [oneToOne] });
-    expect(
-      screen.getByText(`Undelivered - Phone unreachable ${EM_DASH} will retry (error 30003)`),
-    ).toBeInTheDocument();
+  // retry-send-window D8 and D10, at the MESSAGE-LEVEL chip - the one call site
+  // that passes `retryScheduled`. A one-to-one bubble promises a retry ONLY
+  // while it carries a live `retry_due_at`, judged on the server's clock (no API
+  // response is seen in this file, so the estimate IS the pinned clock), and the
+  // Retry button is hidden while it is live. Every case renders with the
+  // DEFAULT rosterKind, which is 'relay' (the default in the `Timeline` props
+  // destructure) - on purpose: the chip must never pass `relay`, which wins over
+  // `retryScheduled` and would switch the promise off on every contact page.
+  // (Until the retry send window this test pinned the promise on EVERY 30003,
+  // stamp or not.)
+  const ONE_TO_ONE_30003: TimelineItem = {
+    kind: 'message',
+    id: 'm-30003',
+    at: RELAY_AT,
+    conversationId: 'c1',
+    tsMsgId: 'm-30003',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    delivery_status: 'undelivered',
+    error_code: '30003',
+    body: 'one to one, no roster',
+  };
+  const PROMISE_TEXT = 'Undelivered - Phone unreachable - will retry (error 30003)';
+  const PLAIN_TEXT = 'Undelivered - Phone unreachable (error 30003)';
+  const RETRY_BUTTON = { name: 'Retry sending this message' };
+  /** One minute past the pinned clock: the retry's run time. */
+  const liveStamp = (): string => new Date(Date.now() + 60_000).toISOString();
+
+  it('promises the retry and hides Retry while retry_due_at is live - relay default notwithstanding', () => {
+    renderTimeline({ items: [{ ...ONE_TO_ONE_30003, retry_due_at: liveStamp() }], onRetry: vi.fn() });
+    expect(screen.getByText(PROMISE_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole('button', RETRY_BUTTON)).not.toBeInTheDocument();
   });
+
+  it('keeps the promise on an MMS one-to-one bubble - media: true does not suppress the promise', () => {
+    renderTimeline({
+      items: [{ ...ONE_TO_ONE_30003, type: 'mms', retry_due_at: liveStamp() }],
+      onRetry: vi.fn(),
+    });
+    expect(screen.getByText(PROMISE_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole('button', RETRY_BUTTON)).not.toBeInTheDocument();
+  });
+
+  it('reads the plain failure and offers Retry with NO stamp - declined, exhausted or a manual-mode thread', () => {
+    renderTimeline({ items: [ONE_TO_ONE_30003], onRetry: vi.fn() });
+    expect(screen.getByText(PLAIN_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', RETRY_BUTTON)).toBeInTheDocument();
+  });
+
+  it.each([
+    ['EXPIRED - its grace ran out on the server clock', () => new Date(Date.now() - 3 * 60_000).toISOString()],
+    ['WITHDRAWN - the epoch stamp a failed enqueue writes', () => '1970-01-01T00:00:00.000Z'],
+    ['UNPARSEABLE', () => 'not a time'],
+  ] as Array<[string, () => string]>)(
+    'reads the plain failure and offers Retry when the stamp is %s',
+    (_label, stamp) => {
+      renderTimeline({ items: [{ ...ONE_TO_ONE_30003, retry_due_at: stamp() }], onRetry: vi.fn() });
+      expect(screen.getByText(PLAIN_TEXT)).toBeInTheDocument();
+      expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', RETRY_BUTTON)).toBeInTheDocument();
+    },
+  );
 
   it('revealed, a queued_pending HOLD still renders no list', () => {
     const msg: TimelineItem = {
@@ -1010,6 +1044,68 @@ describe('Timeline relay retry states - the chip, the recital and the row togeth
       within(screen.getByRole('list', { name: LIST_NAME })).getByText(
         'Undelivered - Not retried - number changed since',
       ),
+    ).toBeInTheDocument();
+  });
+
+  // retry-send-window D8: a WINDOW decline is a plain failed attempt. The rung
+  // closes `retry_window_closed` - kept for data and logs - but the join gives
+  // that code NO display code, so the original's 30003 stands at all three
+  // positions: never "Not retried - message too old", and never a promise. The
+  // rung arrives already closed when the claim declines it at once (D3), so this
+  // is also what the FIRST render shows - no "Retrying" in between.
+  it('reads a window-declined rung as the plain 30003 failure at all three positions', () => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'failed', errorCode: 'retry_window_closed', transportAggregationState: 'excluded' },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    const rollup = screen.getByRole('img');
+    expect(rollup).toHaveTextContent('delivered 1/2 - 1 failed - Phone unreachable (error 30003)');
+    expect(rollup).toHaveAccessibleName(/Lars Landlord: Undelivered, Phone unreachable \(error 30003\)/);
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(
+        'Undelivered - Phone unreachable (error 30003)',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Not retried/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/too old/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retrying/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+  });
+
+  // The four GATE declines keep their copy (Cameron's gate answer), whether the
+  // claim closed the rung at once (D3) or the job closed it at send time: one
+  // data shape, one rendering.
+  it.each([
+    ['retry_group_closed', 'Not retried - group closed'],
+    ['retry_member_removed', 'Not retried - no longer in this group'],
+    ['retry_number_changed', 'Not retried - number changed since'],
+    ['retry_opted_out', 'Not retried - opted out'],
+  ] as Array<[string, string]>)('reads a rung closed %s as "%s" at the chip and the row', (code, copy) => {
+    renderTimeline({
+      items: [
+        original(),
+        retryRow({
+          attempt: 1,
+          atMs: FRESH_MS,
+          leg: { status: 'failed', errorCode: code, transportAggregationState: 'excluded' },
+        }),
+      ],
+      relayRoster: RELAY_ROSTER,
+    });
+
+    expect(screen.getByRole('img')).toHaveTextContent(`delivered 1/2 - 1 failed - ${copy}`);
+    revealOriginal();
+    expect(
+      within(screen.getByRole('list', { name: LIST_NAME })).getByText(`Undelivered - ${copy}`),
     ).toBeInTheDocument();
   });
 

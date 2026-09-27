@@ -51,38 +51,72 @@ export interface AuditRepo {
   listByEntity(entityKey: string, opts?: ListByEntityOpts): Promise<AuditEvent[]>;
 }
 
-export function createAuditRepo(deps: RepoDeps = {}): AuditRepo {
+/** The `Put` of one TransactWriteItems element: an audit event that lands
+ *  atomically with the caller's own change (both land or neither). */
+export interface AuditTransactPut {
+  TableName: string;
+  Item: AuditEvent;
+  /** `attribute_not_exists(entityKey)`: never overwrite an existing event (a
+   *  same-key collision cancels the whole transaction instead). */
+  ConditionExpression: string;
+}
+
+/**
+ * What createAuditRepo returns: AuditRepo plus `transactPut`, for a caller that
+ * must land its own change and the audit event ATOMICALLY. It is kept off
+ * AuditRepo itself, the injection seam, so the services' fakes (which record
+ * appends) never have to build items.
+ */
+export interface AuditRepoWithTransactPut extends AuditRepo {
+  /**
+   * The SAME item `append` writes (one builder - the `ts` format and the
+   * actorId hoist live in one place), as the `Put` element of a
+   * TransactWriteItems. Builds only: no I/O, no log line - the caller sends
+   * the transaction and logs once it succeeds.
+   */
+  transactPut(entityKey: string, eventType: string, payload?: Record<string, unknown>): AuditTransactPut;
+}
+
+/** The ONE builder of an audit item: `append` writes it, `transactPut` wraps it. */
+function buildItem(entityKey: string, eventType: string, payload?: Record<string, unknown>): AuditEvent {
+  const ts = `${new Date().toISOString()}#${randomUUID().slice(0, 8)}`;
+  // M1.4 M1: lift the acting user up to a TOP-LEVEL `actorId` so the
+  // byActor GSI (hash key actorId) is populated and "all actions by actor
+  // X" is queryable (section 9). Call sites pass the actor inside the payload
+  // as `actor` (the established convention across M1.1/M1.2/M1.4); we hoist
+  // that single field here, centrally, so no call site has to change. The
+  // actor stays in the payload too (callers/tests read it there); only the
+  // GSI key is added. A non-string/absent actor simply leaves the item off
+  // the GSI (sparse) - exactly the right behavior for a system action.
+  const actor = payload?.['actor'];
+  const actorId = typeof actor === 'string' ? actor : undefined;
+  return {
+    entityKey,
+    ts,
+    event_type: eventType,
+    ...(actorId !== undefined && { actorId }),
+    ...(payload !== undefined && { payload }),
+  };
+}
+
+export function createAuditRepo(deps: RepoDeps = {}): AuditRepoWithTransactPut {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('audit_events', deps.env);
   const log = deps.logger ?? defaultLogger;
 
   return {
     async append(entityKey, eventType, payload) {
-      const ts = `${new Date().toISOString()}#${randomUUID().slice(0, 8)}`;
-      // M1.4 M1: lift the acting user up to a TOP-LEVEL `actorId` so the
-      // byActor GSI (hash key actorId) is populated and "all actions by actor
-      // X" is queryable (§9). Call sites pass the actor inside the payload as
-      // `actor` (the established convention across M1.1/M1.2/M1.4); we hoist
-      // that single field here, centrally, so no call site has to change. The
-      // actor stays in the payload too (callers/tests read it there); only the
-      // GSI key is added. A non-string/absent actor simply leaves the item off
-      // the GSI (sparse) — exactly the right behavior for a system action.
-      const actor = payload?.['actor'];
-      const actorId = typeof actor === 'string' ? actor : undefined;
-      await doc.send(
-        new PutCommand({
-          TableName: table,
-          Item: {
-            entityKey,
-            ts,
-            event_type: eventType,
-            ...(actorId !== undefined && { actorId }),
-            ...(payload !== undefined && { payload }),
-          },
-        }),
-      );
+      await doc.send(new PutCommand({ TableName: table, Item: buildItem(entityKey, eventType, payload) }));
       // IDs only — audit payloads may reference messages but never log bodies.
       log.info({ entityKey, eventType }, 'audit event appended');
+    },
+
+    transactPut(entityKey, eventType, payload) {
+      return {
+        TableName: table,
+        Item: buildItem(entityKey, eventType, payload),
+        ConditionExpression: 'attribute_not_exists(entityKey)',
+      };
     },
 
     async listByEntity(entityKey, opts = {}) {

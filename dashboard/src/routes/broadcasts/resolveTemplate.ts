@@ -1,8 +1,12 @@
 // resolveTemplate (Task 7) - the client-side mirror of the backend's renderBody
-// (app/src/lib/mergeFields.ts) so the SINGLE-recipient editor can show EXACTLY
-// what will send. NO AI: a literal token replace. Unit-derived tokens come from
-// the attached unit; [TenantName] is the one per-recipient token (fallback
-// "there" - never a phone/id). Unresolvable tokens (or no unit) render as ''.
+// (app/src/lib/mergeFields.ts) so the composer can show EXACTLY what will send.
+// NO AI: a literal token replace. Unit-derived tokens come from the attached
+// unit; [TenantName] is the one per-recipient token, which a blast keeps as a
+// token (the backend renders it per recipient at send time). The ONE-recipient
+// editor (share-skip-fix D8) pre-fills ONE_TO_ONE_SEND_TEMPLATE, which carries
+// no [TenantName], through resolveTemplateForUnit - so the dashboard never
+// resolves [TenantName] itself any more (the former resolveTemplateForTenant
+// was removed as dead code). Unresolvable tokens (or no unit) render as ''.
 //
 // Parity notes (keep in lockstep with mergeFields.ts):
 //   [Beds]    - String(beds), finite numbers only.
@@ -20,12 +24,19 @@ import type { UnitItem } from '../../api/index.js';
 /** The default message template: a fresh compose PRE-FILLS it as the actual
  *  message (the send is usually close to it, so staff can go straight to
  *  Preview), and MessageEditor keeps it as the placeholder for a cleared
- *  textarea - ONE source of the copy for both. */
+ *  textarea - ONE source of the copy for both. This is the BLAST default; its
+ *  one-recipient twin, ONE_TO_ONE_SEND_TEMPLATE below, plays both roles in
+ *  resolved (single-recipient) mode. */
 export const DEFAULT_SEND_TEMPLATE =
   'Hi [TenantName], a [Beds]-bedroom home at [Address] is available for [Rent]/mo. Details: [FlyerLink]';
 
-/** Neutral [TenantName] fallback when no first name is known - NEVER a phone. */
-const NEUTRAL_TENANT_NAME = 'there';
+/** share-skip-fix D8 (Sam's #4): the ONE-RECIPIENT default. A navigator sharing
+ *  one property with one tenant is usually mid-conversation, so the text is the
+ *  address and the link and nothing else - no greeting, no beds, no rent. The
+ *  blast default above is unchanged. Resolved through resolveTemplateForUnit
+ *  (no per-recipient token here). Dashboard copy, not catalog copy: the
+ *  operator sees and edits it before anything sends. */
+export const ONE_TO_ONE_SEND_TEMPLATE = '[Address] [FlyerLink]';
 
 /** One-line address, ported verbatim from the backend's formatAddress
  *  (app/src/lib/address.ts) so [Address] previews exactly what will send:
@@ -66,7 +77,9 @@ function tokenRegex(token: string): RegExp {
  *  literal text while PRESERVING [TenantName] - the one per-recipient token,
  *  rendered per recipient by the backend at send time. This is the multi-
  *  recipient prefill (property-first flow): staff see the real property
- *  details, and each tenant still gets their own name. */
+ *  details, and each tenant still gets their own name. It also renders the
+ *  one-recipient default (ONE_TO_ONE_SEND_TEMPLATE), which has no
+ *  [TenantName] to keep. */
 export function resolveTemplateForUnit(
   template: string,
   unit: UnitItem | null,
@@ -78,22 +91,4 @@ export function resolveTemplateForUnit(
     .replace(tokenRegex('[Address]'), unit !== null ? serverFormatAddress(unit.address) : '')
     .replace(tokenRegex('[Rent]'), unit !== null ? rentText(unit) : '')
     .replace(tokenRegex('[FlyerLink]'), flyerLink ?? '');
-}
-
-/** Client-side mirror of the backend's renderBody (mergeFields.ts): the unit
- *  resolution above PLUS [TenantName] (single-recipient resolved mode).
- *  firstName undefined/blank -> the neutral fallback; a null unit (or missing
- *  field) drops the token to ''. */
-export function resolveTemplateForTenant(
-  template: string,
-  unit: UnitItem | null,
-  firstName: string | undefined,
-  flyerLink: string | undefined,
-): string {
-  const name =
-    firstName !== undefined && firstName.trim().length > 0 ? firstName.trim() : NEUTRAL_TENANT_NAME;
-  return resolveTemplateForUnit(template, unit, flyerLink).replace(
-    tokenRegex('[TenantName]'),
-    name,
-  );
 }

@@ -61,3 +61,10 @@ export function useAuth(): AuthState {
   }
   return ctx;
 }
+
+/** The session when a provider is mounted, else undefined. For components and
+ *  hooks that must render in tests without an <AuthProvider> (useInbox reads
+ *  the operator id through this). */
+export function useOptionalAuth(): AuthState | undefined {
+  return useContext(AuthContext);
+}

@@ -180,13 +180,14 @@ function classifyInboxRequestForCollection(
     ) return { requestClass: null, endpointContractMismatch: true };
     const filter = params.get('filter');
     const limit = params.get('limit');
-    if (filter === 'all' && limit === '30') return { requestClass: 'inbox_page_all', endpointContractMismatch: false };
-    if (filter === 'unread' && limit === '30') return { requestClass: 'inbox_page_unread', endpointContractMismatch: false };
-    if (filter === 'unknown' && limit === '30') return { requestClass: 'inbox_page_unknown', endpointContractMismatch: false };
-    if (filter === 'groups' && limit === '30') return { requestClass: 'inbox_page_groups', endpointContractMismatch: false };
-    // No `filter=unread&limit=100` arm any more: that was the OLD badge shape.
-    // A page read at limit 100 now falls through to the contract mismatch below,
-    // which is what it is - the dashboard only ever asks this endpoint for 30.
+    // The dashboard pages at DEFAULT_PAGE_LIMIT = 100
+    // (dashboard/src/routes/inbox/useInbox.ts) since 2026-09-25. Any other
+    // size is a contract mismatch: a 30-row read is the retired shape, and
+    // the badge is classified by path alone above this.
+    if (filter === 'all' && limit === '100') return { requestClass: 'inbox_page_all', endpointContractMismatch: false };
+    if (filter === 'unread' && limit === '100') return { requestClass: 'inbox_page_unread', endpointContractMismatch: false };
+    if (filter === 'unknown' && limit === '100') return { requestClass: 'inbox_page_unknown', endpointContractMismatch: false };
+    if (filter === 'groups' && limit === '100') return { requestClass: 'inbox_page_groups', endpointContractMismatch: false };
   } catch {
     // Invalid tuple details remain internal; only sanitized request evidence leaves the collector.
   }

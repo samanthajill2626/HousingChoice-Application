@@ -8,11 +8,12 @@ import { Scenario, freshTenant } from '../../scenarios/steps.js';
 // BOTH, the row states the same two facts, and a reload restores the selection
 // from the URL.
 //
-// Self-contained: the lean seed world holds exactly ONE tenant (Tasha, 2-BR /
-// atlanta_housing), so nothing in it can make a facet discriminate - the spec
-// creates its own three tenants with run-unique names. DCA and Fulton County are
-// used by no other spec, so the "exactly one row" assertion is stable in a full
-// suite run (other specs' phoneless tenants land in the Not-recorded buckets).
+// Self-contained: the lean seed world holds two tenants (Tasha, 2-BR /
+// atlanta_housing, and Dario, 1-BR / atlanta_housing), neither of which can make
+// the DCA/Fulton or 3-BR facets discriminate - the spec creates its own three
+// tenants with run-unique names. DCA and Fulton County are used by no other
+// spec, so the "exactly one row" assertion is stable in a full suite run (other
+// specs' phoneless tenants land in the Not-recorded buckets).
 //
 // Chip accessible names carry a LIVE COUNT ("2-BR (3)"), and the count moves with
 // whatever earlier specs left in the lane - so every chip locator here is a REGEX
@@ -20,11 +21,11 @@ import { Scenario, freshTenant } from '../../scenarios/steps.js';
 //
 // NOT covered here, by necessity: the PORTING facet. `porting` is written through
 // PATCH /api/contacts/:id/tenant-status (a lifecycle write), not through the
-// identity fields `teamCreatesTenant` sets, and lean's one tenant is
-// `porting: false` - so `showPorting` is false and the group never renders in a
-// lean lane. Adding a status seam for it is out of scope (worklist adjudication
-// A18); the porting chip is covered by the component suite and by live self-QA
-// against the `full` profile.
+// identity fields `teamCreatesTenant` sets, and neither lean tenant is porting
+// (Tasha is `porting: false`, Dario carries no flag) - so `showPorting` is false
+// and the group never renders in a lean lane. Adding a status seam for it is out
+// of scope (worklist adjudication A18); the porting chip is covered by the
+// component suite and by live self-QA against the `full` profile.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 // The row separator is U+00B7 with spaces. ONE construction form, in the source

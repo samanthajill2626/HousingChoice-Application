@@ -3,11 +3,23 @@ id: inbox-reconcile-failure-blanks-list
 title: A failed background reconcile blanks a healthy inbox list into the error state
 type: decision
 severity: low
-status: open
+status: resolved
 area: dashboard/inbox
 refs: dashboard/src/routes/inbox/useInbox.ts, dashboard/src/routes/inbox/Inbox.tsx
 created: 2026-08-24
+resolved: 2026-09-25
 ---
+
+**Resolution (2026-09-25).** Ruled by Cameron and built on
+`feat/inbox-rows-timestamps` (spec
+`docs/superpowers/specs/2026-09-25-inbox-rows-timestamps-design.md`, section
+5.7): a head read that fails while rows are rendered keeps the rows and sets
+`refreshFailed`; `Inbox.tsx` renders a `role="status"` banner ("Couldn't
+refresh the inbox.") with a `Retry refresh` button that re-reads without a
+spinner. A 404 in that state is treated the same way. A failed read with no
+rows rendered keeps the previous error/pending surfaces. Options 1 and 2 of
+the list below together, with the failure made visible (what option 3 wanted
+preserved).
 
 **The question.** `useInbox` refetches the current filter's first page on a
 debounced `conversation.updated`. Nobody asked for that request. If it FAILS -

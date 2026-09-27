@@ -203,12 +203,14 @@ The profiler ranks four independent Inbox surface IDs: `inbox-all`,
 `inbox-unread`, `inbox-unknown`, and `inbox-groups`. Their cold URLs are `/inbox`,
 `/inbox?filter=unread`, `/inbox?filter=unknown`, and `/inbox?filter=groups`.
 Their exact initial page requests are respectively
-`GET /api/inbox?filter=all&limit=30`,
-`GET /api/inbox?filter=unread&limit=30`,
-`GET /api/inbox?filter=unknown&limit=30`, and
-`GET /api/inbox?filter=groups&limit=30`, with no cursor accepted as profiler evidence.
-The shell's unread badge is separately classified traffic:
-`GET /api/inbox?filter=unread&limit=100`. It is not the 30-row page request.
+`GET /api/inbox?filter=all&limit=100`,
+`GET /api/inbox?filter=unread&limit=100`,
+`GET /api/inbox?filter=unknown&limit=100`, and
+`GET /api/inbox?filter=groups&limit=100` (the dashboard's `DEFAULT_PAGE_LIMIT`),
+with no cursor accepted as profiler evidence. A page read of any other size is an
+endpoint contract mismatch. The shell's unread badge is separately classified
+traffic: `GET /api/inbox/unread-count`, classified by its path alone. It is not a
+page request.
 
 Every Inbox warm sample first returns to canonical bare `/inbox` with the exact All
 tab selected, then begins timing immediately before one exact named tab activation.
@@ -406,7 +408,7 @@ grow?). A low-ranked route with a false flag on the relevant axis is not proof t
 scales. Email is the useful split example: its fixed unmatched-email surface does not
 grow, but its passive contact load does.
 
-At higher conversation scales, `/inbox` is legitimately expensive: page 1 renders 30
+At higher conversation scales, `/inbox` is legitimately expensive: page 1 renders 100
 contact rows plus every generated open/connecting relay group, up to the profiler's
 1,000-group ceiling, and each relay row has server-side lookup cost. Inbox is both a
 ranked destination and the warm source for `/conversations/:conversationId`, so read

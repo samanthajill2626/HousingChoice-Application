@@ -6,6 +6,7 @@ severity: low
 status: resolved
 area: app
 created: 2026-08-09
+updated: 2026-09-25
 resolved: 2026-09-02
 refs: app/src/routes/inbox.ts, app/src/routes/aiRuns.ts, app/test/inboxApi.test.ts
 ---
@@ -38,7 +39,9 @@ at the empty string leaves them standing.
 `dashboard/src/api/client.ts` builds the query string by SKIPPING undefined and
 null values, so an omitted limit is dropped from the URL rather than emitted as
 `limit=`, and `dashboard/src/routes/inbox/useInbox.ts` always sends an explicit
-`PAGE_LIMIT = 30` on both the first page and the cursor page. That leaves a
+limit on both the first page and the cursor page: the 100-row page
+(`DEFAULT_PAGE_LIMIT`; `PAGE_LIMIT = 30` until 2026-09-25), or a `?limit=` of
+1 to 100 that `limitFromParam` in `Inbox.tsx` has validated. That leaves a
 hand-edited or bookmarked URL, a script, or a future non-dashboard client of
 `/api/inbox`. The failure mode is a 200 carrying one row, which reads as a
 nearly-empty inbox rather than as an error - confusing, not damaging.

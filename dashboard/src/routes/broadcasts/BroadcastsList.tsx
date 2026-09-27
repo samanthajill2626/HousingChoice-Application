@@ -141,7 +141,7 @@ export function BroadcastsList(): React.JSX.Element {
             {list.rows.map((row) => (
               <li key={row.broadcastId} className={styles.rowItem}>
                 <Link to={rowHref(row)} className={styles.row}>
-                  <BroadcastStatusPill status={row.status} />
+                  <BroadcastStatusPill status={row.status} stats={row.stats} />
                   <span className={styles.audience}>{rowAudienceLabel(row)}</span>
                   {/* Meta (delivered + date) grouped so on a tight content pane it
                    *  wraps to its own line below the audience instead of squeezing

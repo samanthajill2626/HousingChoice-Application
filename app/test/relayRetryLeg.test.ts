@@ -46,6 +46,7 @@ import { createLogger } from '../src/lib/logger.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../src/lib/messageTransport.js';
 import { TokenBucket } from '../src/lib/tokenBucket.js';
 import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
+import { RETRY_SEND_WINDOW_MS } from '../src/lib/retrySendWindow.js';
 import { SendRefusedError } from '../src/services/sendMessage.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
@@ -97,6 +98,15 @@ function legArgs(index: number): LegArgs {
   return legSend.calls[index] as LegArgs;
 }
 
+/**
+ * An ISO instant `minutes` before now: a rung's carried send-window origin
+ * (retry-send-window D2). Wall-clock relative, with a margin of 30 seconds or
+ * more against every boundary a test aims at.
+ */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
 /** Named so the spy's declaration can borrow its precise return type. */
 function spyOnTouchLastActivity(repo: ConversationsRepo) {
   return vi.spyOn(repo, 'touchLastActivity');
@@ -137,6 +147,10 @@ interface SeedRetryOptions {
   /** Transient passes already consumed on THIS row (spec D10's own budget). */
   fanoutAttempt?: number;
   legBody?: string;
+  /** retry-send-window D2: the origin the claim carried on the row
+   *  (`relay_retry_window_start`). Absent = a rung claimed before the window
+   *  shipped (D5). */
+  windowStart?: string;
 }
 
 /**
@@ -181,6 +195,7 @@ function seedRetryRow(world: FakeWorld, opts: SeedRetryOptions = {}): MessageIte
     relay_retry_dest_digest: relayRetryDigest(ROOT_TS_MSG_ID, destination),
     relay_retry_origin_direction: 'inbound',
     relay_retry_leg_body: opts.legBody ?? LEG_BODY,
+    ...(opts.windowStart !== undefined && { relay_retry_window_start: opts.windowStart }),
   };
   world.messages.push(row);
   return row;
@@ -304,7 +319,7 @@ describe('relay.retryLeg (30003 ladder)', () => {
 
   // --- D9: every attempt re-runs the gates; a refusal ends the chain ---
 
-  const gateCases: [string, (world: FakeWorld) => void, string][] = [
+  const gateCases: [string, (world: FakeWorld) => void, string, ('warn' | 'error')?][] = [
     [
       'closed group',
       (w) => {
@@ -337,11 +352,23 @@ describe('relay.retryLeg (30003 ladder)', () => {
       },
       'retry_opted_out',
     ],
+    [
+      // retry-send-window D4: the send window is the LAST gate, and the one
+      // that logs ERROR (D9) - the member never got the text, a dead end like
+      // the cap, not a deliberate human action like the four above.
+      'send window closed',
+      (w) => {
+        const row = w.messages.find((m) => m.relay_retry_of === ROOT_TS_MSG_ID)!;
+        row.relay_retry_window_start = minutesAgo(16);
+      },
+      'retry_window_closed',
+      'error',
+    ],
   ];
 
   it.each(gateCases)(
-    'refuses on %s, closes the retry leg with the gate code, and logs it at WARN',
-    async (_name, arrange, code) => {
+    'refuses on %s, closes the retry leg with its code, and logs it at the ruled level',
+    async (_name, arrange, code, level = 'warn') => {
       seedRelay(world);
       const row = seedRetryRow(world);
       arrange(world);
@@ -354,14 +381,17 @@ describe('relay.retryLeg (30003 ladder)', () => {
       expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
       // The chain ENDS: nothing further is scheduled, on either ladder.
       expect(outbound.delayed).toHaveLength(0);
-      // WARN, not ERROR: a gate refusal is a deliberate human action (Cameron's
-      // Q1 ruling, 2026-09-24), so it must never feed the ErrorLogs alarms.
-      const terminal = warnLogs().filter((l) => l['closeCode'] === code);
+      // WARN for the four human-action gates (Cameron's Q1 ruling,
+      // 2026-09-24), so they never feed the ErrorLogs alarms; ERROR for the
+      // send window (retry-send-window D9).
+      const terminal = (level === 'warn' ? warnLogs() : errorLogs()).filter(
+        (l) => l['closeCode'] === code,
+      );
       expect(terminal).toHaveLength(1);
       expect(terminal[0]).toMatchObject({
         event: 'relay_retry_leg',
         relay: true,
-        retryClaim: 'gate_refused',
+        retryClaim: level === 'warn' ? 'gate_refused' : 'window_closed',
         rootTsMsgId: ROOT_TS_MSG_ID,
         attempt: 1,
       });
@@ -375,6 +405,85 @@ describe('relay.retryLeg (30003 ladder)', () => {
       expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
     },
   );
+
+  // --- retry-send-window D3: the no-pool-number throw now FOLLOWS the four gates ---
+  //
+  // The job used to throw "has no pool number" between the group-open gate and
+  // the roster gate. It now runs all four gates first - the order the claim's
+  // preview shares - so both halves are pinned: on an OPEN group with NO pool
+  // number, a gate that refuses still closes the rung with its own code, and
+  // with every gate passing the job still throws, after the suppression read.
+
+  it.each<[string, (world: FakeWorld) => void, string]>([
+    [
+      'removed member',
+      (w) => {
+        const conv = w.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).filter((m) => m.contactId !== BOB_KEY);
+      },
+      'retry_member_removed',
+    ],
+    [
+      'changed number',
+      (w) => {
+        const conv = w.conversations.get(CONV)!;
+        conv.participants = (conv.participants ?? []).map((m) =>
+          m.contactId === BOB_KEY ? { ...m, phone: BOB_NEW } : m,
+        );
+      },
+      'retry_number_changed',
+    ],
+    [
+      'opted out',
+      (w) => {
+        w.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: true });
+      },
+      'retry_opted_out',
+    ],
+  ])(
+    'closes an OPEN group with NO pool number by its refusing gate (%s) - the gates run before the pool-number throw',
+    async (_name, arrange, code) => {
+      seedRelay(world, { pool_number: undefined });
+      const row = seedRetryRow(world);
+      arrange(world);
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
+      const terminal = warnLogs().filter((l) => l['closeCode'] === code);
+      expect(terminal).toHaveLength(1);
+      expect(terminal[0]).toMatchObject({ retryClaim: 'gate_refused' });
+      // No throw: a deferred job that throws is logged at ERROR by the queue
+      // adapter, and the rung would be left `queued`.
+      expect(errorLogs()).toHaveLength(0);
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+    },
+  );
+
+  it('still THROWS for an OPEN group with NO pool number once all four gates pass - after the suppression read, nothing sent', async () => {
+    seedRelay(world, { pool_number: undefined });
+    const row = seedRetryRow(world);
+    const suppressionRead = vi.spyOn(world.contactsRepo, 'getById');
+    register();
+
+    await expect(
+      dispatchJob({
+        jobId: 'job-poolless-1',
+        jobName: RELAY_RETRY_LEG_JOB,
+        payload: payloadFor(row),
+        enqueuedAt: new Date().toISOString(),
+      } as never),
+    ).rejects.toThrow(/has no pool number/);
+    // The throw now comes AFTER the fourth gate's read ...
+    expect(suppressionRead).toHaveBeenCalledWith(BOB_KEY);
+    // ... and still sends and closes nothing: no gate code describes it.
+    expect(world.sent).toHaveLength(0);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(persistedEmits()).toHaveLength(0);
+  });
 
   it('never stamps contact_opted_out on an opt-out refusal (the rollup drops that code)', async () => {
     seedRelay(world);
@@ -420,6 +529,152 @@ describe('relay.retryLeg (30003 ladder)', () => {
 
     expect(world.sent).toHaveLength(0);
     expect(slotOf(row.tsMsgId)?.errorCode).toBe('retry_number_changed');
+  });
+
+  // --- retry-send-window D4/D5: the send window, the LAST gate ---
+
+  it('retry-send-window D4: sends a rung inside the window, with no window line at all', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent).toHaveLength(1);
+    expect(errorLogs()).toHaveLength(0);
+    expect(warnLogs().some((l) => l['windowOrigin'] !== undefined)).toBe(false);
+  });
+
+  it('retry-send-window D4: the window close leaves the same slot the claim-time window close leaves', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { versioned: true, windowStart: minutesAgo(16) });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    // The identical literal relayRetryClaim.webhook.test.ts pins for the
+    // claim's own window close of a versioned rung (spec D3's one data shape).
+    expect(slotOf(row.tsMsgId)).toEqual({
+      status: 'failed',
+      requestedTransport: 'sms',
+      transportAggregationState: 'excluded',
+      errorCode: 'retry_window_closed',
+    });
+    expect(world.sent).toHaveLength(0);
+    expect(bumps).toHaveLength(0);
+  });
+
+  it('retry-send-window D4: an opt-out is recorded ahead of a closed window - the window is the LAST gate', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(16) });
+    world.contacts.push({ contactId: BOB_KEY, type: 'tenant', phone: BOB, sms_opt_out: true });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'retry_opted_out' });
+    expect(errorLogs()).toHaveLength(0);
+  });
+
+  // Worklist ruling R2: the order is four gates -> no-pool-number throw ->
+  // window gate. An OPEN group with no pool number cannot send at all, so its
+  // throw is checked BEFORE the window gate - a pin, green before and after
+  // the window gate lands, that fails the moment the window gate moves ahead
+  // of the throw.
+  it('retry-send-window D4 (pin): an OPEN group with NO pool number past the window still THROWS "has no pool number" - never retry_window_closed', async () => {
+    seedRelay(world, { pool_number: undefined });
+    const row = seedRetryRow(world, { windowStart: minutesAgo(16) });
+    const suppressionRead = vi.spyOn(world.contactsRepo, 'getById');
+    register();
+
+    await expect(
+      dispatchJob({
+        jobId: 'job-poolless-window-1',
+        jobName: RELAY_RETRY_LEG_JOB,
+        payload: payloadFor(row),
+        enqueuedAt: new Date().toISOString(),
+      } as never),
+    ).rejects.toThrow(/has no pool number/);
+    // All four gates passed first (the fourth gate's read ran) ...
+    expect(suppressionRead).toHaveBeenCalledWith(BOB_KEY);
+    // ... and the throw came before the window gate: nothing sent, the rung
+    // left queued, and no retry_window_closed written or logged.
+    expect(world.sent).toHaveLength(0);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(slotOf(row.tsMsgId)?.errorCode).toBeUndefined();
+    expect(capture.lines.some((l) => l['closeCode'] === 'retry_window_closed')).toBe(false);
+    expect(capture.lines.some((l) => l['retryClaim'] === 'window_closed')).toBe(false);
+    expect(persistedEmits()).toHaveLength(0);
+  });
+
+  it.each<[string, string | undefined]>([
+    ['missing', undefined],
+    ['unparseable', 'not-a-date'],
+  ])('retry-send-window D5: a rung with a %s origin still runs, with one WARN naming the gap', async (label, windowStart) => {
+    seedRelay(world);
+    // `missing` is every rung claimed before the window shipped. The lineage
+    // check must NOT throw on it: it runs after the execution marker, so a
+    // throw would drop the rung for good.
+    const row = seedRetryRow(world, windowStart === undefined ? {} : { windowStart });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent).toHaveLength(1);
+    expect(errorLogs()).toHaveLength(0);
+    const gap = warnLogs().filter((l) => l['windowOrigin'] !== undefined);
+    expect(gap).toHaveLength(1);
+    expect(gap[0]).toMatchObject({
+      event: 'relay_retry_leg',
+      windowOrigin: label,
+      rootTsMsgId: ROOT_TS_MSG_ID,
+      memberKey: BOB_KEY,
+    });
+  });
+
+  it('retry-send-window D4: a transient pass that could not re-run inside the window closes instead of re-enqueueing', async () => {
+    seedRelay(world);
+    // 30 seconds of window left: the job-time gate passes, but a 5s re-run
+    // plus the 60s scheduling grace would land past origin + 15 minutes.
+    const row = seedRetryRow(world, { windowStart: minutesAgo(14.5) });
+    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+      kind: 'transient',
+      errorCode: '429',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(outbound.delayed).toHaveLength(0);
+    expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'retry_window_closed' });
+    expect(errorLogs()).toContainEqual(
+      expect.objectContaining({
+        event: 'relay_retry_leg',
+        retryClaim: 'window_closed',
+        closeCode: 'retry_window_closed',
+        windowCheck: 'transient_reschedule',
+        transientPass: 1,
+      }),
+    );
+    expect(persistedEmits()).toHaveLength(1);
+    expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+  });
+
+  it('retry-send-window D4: a transient pass with room left in the window re-enqueues as before', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+    legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+      kind: 'transient',
+      errorCode: '429',
+    });
+    register();
+
+    await runHandler(payloadFor(row));
+
+    expect(outbound.delayed).toHaveLength(1);
+    expect(outbound.delayed[0]!.delaySeconds).toBe(5);
+    expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+    expect(errorLogs()).toHaveLength(0);
   });
 
   // --- D12: the send, and the leg copy frozen at claim time ---
@@ -933,6 +1188,103 @@ describe('relay.retryLeg (30003 ladder)', () => {
     expect(outbound.delayed).toHaveLength(1);
     expect(slotOf(row.tsMsgId)?.status).toBe('queued');
     expect(persistedEmits()).toHaveLength(0);
+  });
+
+  // --- retry-send-window D4: the bounded token-bucket acquire ---
+
+  /**
+   * One token, refilled at 1 per 1,000 seconds: once drawn, the next draw waits
+   * about 16.7 minutes - longer than any window has left. `sleep` THROWS, so
+   * an unbounded acquire fails the test at once instead of hanging it for the
+   * whole wait.
+   */
+  async function drainedBucket(): Promise<TokenBucket> {
+    const bucket = new TokenBucket({
+      capacity: 1,
+      refillPerSec: 0.001,
+      maxJitterMs: 0,
+      sleep: async () => {
+        throw new Error('the retry leg slept on the A2P meter - its acquire must be bounded');
+      },
+    });
+    await bucket.acquire(1); // take the only token
+    return bucket;
+  }
+
+  it.each([true, false])(
+    'retry-send-window D4: a bounded acquire that outlasts the window closes retry_window_closed through refuseGate - nothing sent, never transient (versioned=%s)',
+    async (versioned) => {
+      seedRelay(world);
+      const origin = minutesAgo(1);
+      const row = seedRetryRow(world, { versioned, windowStart: origin });
+      const bucket = await drainedBucket();
+      const aggregate = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const claimPass = vi.spyOn(world.messagesRepo, 'claimFanoutPass');
+      register({ tokenBucket: bucket });
+
+      await runHandler(payloadFor(row));
+
+      // The job handed the unit the window's end as its deadline.
+      expect(legArgs(0).sendDeadlineMs).toBe(Date.parse(origin) + RETRY_SEND_WINDOW_MS);
+      expect(world.sent).toHaveLength(0);
+      // Returned BEFORE the unit's `attempted` write, and closed - never left queued.
+      expect(aggregate.mock.calls.some((call) => call[3] === 'attempted')).toBe(false);
+      expect(slotOf(row.tsMsgId)).toEqual(
+        versioned
+          ? {
+              status: 'failed',
+              requestedTransport: 'sms',
+              transportAggregationState: 'excluded',
+              errorCode: 'retry_window_closed',
+            }
+          : { status: 'failed', errorCode: 'retry_window_closed' },
+      );
+      // Never the transient branch: no pass claimed, nothing re-enqueued.
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(outbound.delayed).toHaveLength(0);
+      expect(errorLogs()).toContainEqual(
+        expect.objectContaining({
+          event: 'relay_retry_leg',
+          retryClaim: 'window_closed',
+          closeCode: 'retry_window_closed',
+          windowCheck: 'send_deadline',
+        }),
+      );
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+    },
+  );
+
+  it('retry-send-window D4: a rung inside the window draws its token with a wait bounded by the window end, and sends', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+    const bucket = new TokenBucket({ capacity: 5, refillPerSec: 5, maxJitterMs: 0 });
+    const acquire = vi.spyOn(bucket, 'acquire');
+    register({ tokenBucket: bucket });
+
+    await runHandler(payloadFor(row));
+
+    expect(world.sent).toHaveLength(1);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    const [count, opts] = acquire.mock.calls[0]!;
+    expect(count).toBe(1);
+    // About 14 of the window's 15 minutes are left.
+    expect(opts?.timeoutMs).toBeGreaterThan(13 * 60_000);
+    expect(opts?.timeoutMs).toBeLessThanOrEqual(14 * 60_000);
+  });
+
+  it('retry-send-window D5: a rung with no usable origin gets NO send deadline - its acquire stays unbounded', async () => {
+    seedRelay(world);
+    const row = seedRetryRow(world);
+    const bucket = new TokenBucket({ capacity: 5, refillPerSec: 5, maxJitterMs: 0 });
+    const acquire = vi.spyOn(bucket, 'acquire');
+    register({ tokenBucket: bucket });
+
+    await runHandler(payloadFor(row));
+
+    expect(legArgs(0).sendDeadlineMs).toBeUndefined();
+    expect(acquire.mock.calls).toEqual([[1]]);
+    expect(world.sent).toHaveLength(1);
   });
 
   // --- Malformed input is a programming error, not a gate refusal ---

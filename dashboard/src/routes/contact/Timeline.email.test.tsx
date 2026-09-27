@@ -87,13 +87,12 @@ describe('EmailCard (inbound)', () => {
 });
 
 describe('EmailCard (outbound delivery chip)', () => {
-  // Slice 5a, the FIFTH deliveryReason call site (Timeline.tsx:1390). EmailCard
-  // takes ONLY the message - no `rosterKind`, no `media` - so the relay 30003
-  // override cannot reach it, and must not: an email is never a relay leg. The
-  // em dash is the SHIPPED separator inside the base reason, built from a
-  // codepoint so this source line stays ASCII (AGENTS.md) and so the character
-  // is never copied into new copy.
-  it('keeps the BASE 30003 copy on an outbound email failure', () => {
+  // The EmailCard's deliveryReason call (Timeline.tsx EmailCard) takes ONLY the
+  // message - no `rosterKind`, no `media`, no `retryScheduled` - so it reads the
+  // BASE copy, which since the retry send window promises nothing (D8). An
+  // email is never retried automatically, and even a row that somehow carried a
+  // live `retry_due_at` must not make the card promise one.
+  it('reads the plain 30003 failure on an outbound email - an EmailCard never promises a retry', () => {
     renderTimeline({
       items: [
         {
@@ -106,13 +105,12 @@ describe('EmailCard (outbound delivery chip)', () => {
           error_code: '30003',
           email_from: 'team@housing.example',
           email_to: ['renter@example.com'],
+          retry_due_at: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
     });
-    const emDash = String.fromCharCode(0x2014);
-    expect(
-      screen.getByText(`Undelivered - Phone unreachable ${emDash} will retry (error 30003)`),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Undelivered - Phone unreachable (error 30003)')).toBeInTheDocument();
+    expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
   });
 });
 

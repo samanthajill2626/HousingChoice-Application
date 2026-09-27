@@ -208,6 +208,12 @@ export interface InboxRouterDeps {
    */
   unknownQueuePageSize?: number;
   unknownQueueScanBudget?: number;
+  /**
+   * TEST SEAM (spec 5.10): `false` runs the `filter=all` pager without the
+   * prefetch pass, so a test can prove the page is identical either way.
+   * Production leaves it undefined (on).
+   */
+  inboxPrefetch?: boolean;
 }
 
 // --- Tuning -----------------------------------------------------------------
@@ -224,6 +230,13 @@ export const MAX_INBOX_LIMIT = 100;
  * of round-trips low; the consume-boundary cursor makes batching transparent.
  */
 const FETCH_BATCH = 100;
+
+/**
+ * How many per-row read chains the `filter=all` prefetch keeps in flight
+ * (spec 5.10). The decision loop is untouched; this only decides how many of
+ * its awaits resolve immediately.
+ */
+export const HYDRATE_CONCURRENCY = 8;
 
 /** The valid filter values (route allowlist -> 400 on anything else). */
 export const INBOX_FILTERS: ReadonlySet<string> = new Set<InboxFilter>([
@@ -248,9 +261,11 @@ export const GROUP_PAGE_ONE_LIMIT = 50;
  * fixed 8,192 bytes and fronts every deployed environment, so an oversized
  * cursor would fail in dev/prod but not locally. 100 ids (~4.7KB of JSON ->
  * ~6.3KB base64url) plus the rest of the request line stays inside that quota
- * with margin, and ends the feed at ~4 pages (120+ unread contact rows), which
- * has no product meaning to exceed: the badge caps at 100 and triage is
- * top-down.
+ * with margin, and ends the feed once MORE than 100 ids sit behind the cursor:
+ * at the dashboard's 100-row page (useInbox DEFAULT_PAGE_LIMIT) that is the end
+ * of page two, about 200 unread contact rows (page four at a tuned 30-row
+ * page), which has no product meaning to exceed: the badge caps at 100 and
+ * triage is top-down.
  *
  * THE SERVER NEVER MINTS A CURSOR IT WOULD REJECT - past this, the page returns
  * `nextCursor: null` AND `truncated: true` rather than a cursor the decoder
@@ -769,7 +784,17 @@ export async function aggregateInbox(
     filter === 'all' && cursor !== undefined ? decodeCursor(cursor) : undefined;
 
   // Per-request memoization (each contact/placement/user resolved at most once).
-  const contactConvsCache = new Map<string, ConversationItem[]>();
+  //
+  // The first three memoize PROMISES (spec 5.10): a miss stores the in-flight
+  // promise before awaiting it, so two callers for one key share one read and
+  // the prefetch pass (`startPrefetch`, above the pager) can warm every cache
+  // the decision loop reads. Each promise resolves to the degraded fallback the
+  // sequential path produced - never a rejection - with the same WARN. The
+  // placement label stays a VALUE cache: only the sequential loops read it,
+  // never the prefetch.
+  const contactConvsCache = new Map<string, Promise<ConversationItem[]>>();
+  const contactLookupCache = new Map<string, Promise<ContactItem | undefined>>();
+  const latestRawCache = new Map<string, Promise<MessageItem | undefined>>();
   const placementLabelCache = new Map<string, string | undefined>();
   // Contacts already emitted in THIS page (the newest-conversation guard so a
   // multi-number contact never yields two rows on one page).
@@ -839,30 +864,83 @@ export async function aggregateInbox(
   };
 
   /** All open 1:1 conversations a contact owns, across every phone AND email (cached). */
-  const contactConversations = async (contact: ContactItem): Promise<ConversationItem[]> => {
-    if (contactConvsCache.has(contact.contactId)) {
-      return contactConvsCache.get(contact.contactId)!;
-    }
-    let list: ConversationItem[] = [];
-    try {
-      // Email channel v1 (invariant rule): resolve across BOTH phones AND emails
-      // so a mixed contact's unread SUM + newest-conversation choice include
-      // email-only threads. The feed shows OPEN 1:1s only (relay groups are the
-      // separate row source).
-      // A NATIVE GROUP TEXT CAN NEVER APPEAR HERE, for two independent reasons,
-      // and both are worth naming: conversationsForContact resolves only via
-      // findByParticipantPhone / findByParticipantEmail, and a group thread
-      // writes NEITHER key; and the `status === 'open'` clause below excludes
-      // the `group_open` partition anyway. So group unread never enters a
-      // contact's unread SUM - which is the correct product answer too (its
-      // unread belongs to the group row, and no 1:1 mark-read could clear it).
-      const all = await conversationsForContact(contact, conversations);
-      list = all.filter((c) => c.status === 'open' && c.type !== 'relay_group');
-    } catch (err) {
-      log.warn({ err, contactId: contact.contactId }, 'inbox: contact conversations lookup failed (best-effort)');
-    }
-    contactConvsCache.set(contact.contactId, list);
-    return list;
+  const contactConversations = (contact: ContactItem): Promise<ConversationItem[]> => {
+    const cached = contactConvsCache.get(contact.contactId);
+    if (cached !== undefined) return cached;
+    const read = (async (): Promise<ConversationItem[]> => {
+      let list: ConversationItem[] = [];
+      try {
+        // Email channel v1 (invariant rule): resolve across BOTH phones AND emails
+        // so a mixed contact's unread SUM + newest-conversation choice include
+        // email-only threads. The feed shows OPEN 1:1s only (relay groups are the
+        // separate row source).
+        // A NATIVE GROUP TEXT CAN NEVER APPEAR HERE, for two independent reasons,
+        // and both are worth naming: conversationsForContact resolves only via
+        // findByParticipantPhone / findByParticipantEmail, and a group thread
+        // writes NEITHER key; and the `status === 'open'` clause below excludes
+        // the `group_open` partition anyway. So group unread never enters a
+        // contact's unread SUM - which is the correct product answer too (its
+        // unread belongs to the group row, and no 1:1 mark-read could clear it).
+        const all = await conversationsForContact(contact, conversations);
+        list = all.filter((c) => c.status === 'open' && c.type !== 'relay_group');
+      } catch (err) {
+        log.warn({ err, contactId: contact.contactId }, 'inbox: contact conversations lookup failed (best-effort)');
+      }
+      return list;
+    })();
+    contactConvsCache.set(contact.contactId, read);
+    return read;
+  };
+
+  /** EXACTLY the contact lookup `rowForConversation` used to do inline: phone
+   *  first, then email only if the phone found nothing, ONE try/catch (an
+   *  error in either sets undefined with a WARN and skips the rest). Memoized
+   *  as the PAIR so the prefetch and the loop take the same branches. */
+  const resolveContact = (
+    phone: string | undefined,
+    email: string | undefined,
+  ): Promise<ContactItem | undefined> => {
+    // JSON, not a joined string, so two distinct pairs can never share an
+    // entry: a joined key conflates an absent value with an empty one (they
+    // take different branches below) and relies on no phone ever carrying the
+    // separator. A wrong hit would hand one conversation another's contact,
+    // and the equivalence tests cannot see it - both of their arms read
+    // through this cache - so the key has to be right by construction.
+    const key = JSON.stringify([phone ?? null, email ?? null]);
+    const cached = contactLookupCache.get(key);
+    if (cached !== undefined) return cached;
+    const read = (async (): Promise<ContactItem | undefined> => {
+      let contact: ContactItem | undefined;
+      try {
+        if (phone !== undefined) contact = await contacts.findByPhone(phone);
+        if (!contact && email !== undefined) contact = await contacts.findByEmail(email);
+      } catch (err) {
+        log.warn({ err }, 'inbox: contact lookup failed (best-effort)');
+        contact = undefined;
+      }
+      return contact;
+    })();
+    contactLookupCache.set(key, read);
+    return read;
+  };
+
+  /** The RAW latest-message read, memoized per conversation. Derivation
+   *  against a conversation image happens in latestMessageOf, so two images
+   *  of one conversation never share a derived preview. */
+  const latestRaw = (conversationId: string): Promise<MessageItem | undefined> => {
+    const cached = latestRawCache.get(conversationId);
+    if (cached !== undefined) return cached;
+    const read = (async (): Promise<MessageItem | undefined> => {
+      try {
+        const page = await messages.listByConversation(conversationId, { limit: 1 });
+        return page[0];
+      } catch (err) {
+        log.warn({ err, conversationId }, 'inbox: latest-message hydration failed (best-effort)');
+        return undefined;
+      }
+    })();
+    latestRawCache.set(conversationId, read);
+    return read;
   };
 
   /** The newest conversation in a set (max last_activity_at); undefined if empty. */
@@ -892,16 +970,7 @@ export async function aggregateInbox(
   const latestMessageOf = async (
     conversationId: string,
     conv: ConversationItem,
-  ): Promise<DerivedLatest> => {
-    let latest: MessageItem | undefined;
-    try {
-      const page = await messages.listByConversation(conversationId, { limit: 1 });
-      latest = page[0];
-    } catch (err) {
-      log.warn({ err, conversationId }, 'inbox: latest-message hydration failed (best-effort)');
-    }
-    return deriveLatest(latest, conv);
-  };
+  ): Promise<DerivedLatest> => deriveLatest(await latestRaw(conversationId), conv);
 
   /** Does the row pass the active filter? EXHAUSTIVE on purpose - the `default:`
    *  arm this switch used to carry made a missing filter case SILENT (every row
@@ -1076,14 +1145,7 @@ export async function aggregateInbox(
     // unknown.
     const phone = conv.participant_phone;
     const email = conv.participant_email;
-    let contact: ContactItem | undefined;
-    try {
-      if (phone !== undefined) contact = await contacts.findByPhone(phone);
-      if (!contact && email !== undefined) contact = await contacts.findByEmail(email);
-    } catch (err) {
-      log.warn({ err }, 'inbox: contact lookup failed (best-effort)');
-      contact = undefined;
-    }
+    const contact: ContactItem | undefined = await resolveContact(phone, email);
 
     if (!contact) {
       // No contact. A phoneless conversation (an email thread that resolved to no
@@ -1961,13 +2023,15 @@ export async function aggregateInbox(
         //     dashboard's edit form). The row leaves the block behind the
         //     cursor and joins a block not yet read, so it ships on TWO pages.
         //     The dashboard keys the wire row by contactId (useInbox `rowKey`
-        //     -> `c:<contactId>`), so that is a doubled row under a duplicate
-        //     React key - ugly, but VISIBLE.
+        //     -> `c:<contactId>`), and its appendPage dedupes a loaded page by
+        //     that key, so the second copy is DROPPED: the stale page-one copy
+        //     (still showing Needs triage) silently wins until the next head
+        //     read.
         //   * 'active' -> 'needs_review' (un-triage) is the RARE one and moves
         //     the row backward into a block already read, so it ships on NO
         //     page. INVISIBLE, and no guard here can see it.
         //
-        // THE THRESHOLD IS THE REQUEST `limit` (30 from the dashboard,
+        // THE THRESHOLD IS THE REQUEST `limit` (100 from the dashboard,
         // useInbox), NOT UNKNOWN_QUEUE_PAGE_SIZE - a queue only has to exceed
         // ONE PAGE for a second request to exist. AND THE WINDOW IS THE
         // OPERATOR'S GAP BETWEEN LOAD-MORE CLICKS - seconds to minutes, not the
@@ -2302,6 +2366,46 @@ export async function aggregateInbox(
   // contacts fills in one Query), capped at FETCH_BATCH.
   const chunkSize = Math.min(FETCH_BATCH, Math.max(limit, DEFAULT_INBOX_LIMIT));
 
+  /**
+   * THE PREFETCH PASS (spec 5.10). Warms the three caches for a chunk's
+   * conversations with a bounded window, so the sequential decision loop
+   * below performs the same awaits in the same order and most of them resolve
+   * immediately. It reads only through the caches, never writes any loop
+   * state, and stops scheduling as soon as the loop is done with the chunk
+   * (chains already in flight finish and are discarded).
+   */
+  const startPrefetch = (items: ConversationItem[]): { stop: () => void } => {
+    let stopped = false;
+    const queue = items.filter((c) => c.type !== 'relay_group' && c.type !== 'group_text');
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (!stopped && next < queue.length) {
+        const c = queue[next]!;
+        next += 1;
+        try {
+          const contact = await resolveContact(c.participant_phone, c.participant_email);
+          if (stopped) return;
+          if (contact !== undefined) {
+            const convs = await contactConversations(contact);
+            if (stopped) return;
+            const newest = newestOf(convs) ?? c;
+            await latestRaw(newest.conversationId);
+          } else {
+            await latestRaw(c.conversationId);
+          }
+        } catch {
+          // The caches never reject; defensive only.
+        }
+      }
+    };
+    for (let w = 0; w < HYDRATE_CONCURRENCY; w++) void worker();
+    return {
+      stop: () => {
+        stopped = true;
+      },
+    };
+  };
+
   pager: for (;;) {
     const chunk = await conversations.listByLastActivity({
       status: 'open',
@@ -2317,37 +2421,51 @@ export async function aggregateInbox(
     rawQueries += 1;
     rawScanned += chunk.items.length;
 
-    for (let i = 0; i < chunk.items.length; i++) {
-      const conv = chunk.items[i]!;
-      const row = await rowForConversation(conv);
-      if (row === undefined) continue;
-      if (!passesFilter(row)) {
-        drops['filtered'] = (drops['filtered'] ?? 0) + 1;
-        continue;
-      }
-      rows.push(row);
-      if (rows.length === limit) {
-        // Page full at chunk index i. The resume boundary is the LEK AFTER this
-        // conversation. When it's the chunk's LAST consumed conversation, that's
-        // the chunk LEK; otherwise re-query exactly (i+1) conversations from this
-        // chunk's start key to recover the precise per-conversation boundary —
-        // ONE extra Query, only when a page fills mid-chunk.
-        let boundaryKey: Record<string, unknown> | undefined;
-        if (i === chunk.items.length - 1) {
-          boundaryKey = chunk.lastEvaluatedKey;
-        } else {
-          const boundary = await conversations.listByLastActivity({
-            status: 'open',
-            limit: i + 1,
-            ...(chunkStartKeyForThisChunk !== undefined && {
-              exclusiveStartKey: chunkStartKeyForThisChunk,
-            }),
-          });
-          boundaryKey = boundary.lastEvaluatedKey;
+    // This chunk's prefetch pass (spec 5.10): started before the loop consumes
+    // the chunk, stopped however the chunk ends. The page filling stops it
+    // inside the loop, ahead of the boundary Query; the `finally` covers every
+    // exit (the chunk running out, `break pager`, a throw).
+    const prefetch = deps.inboxPrefetch !== false ? startPrefetch(chunk.items) : undefined;
+    try {
+      for (let i = 0; i < chunk.items.length; i++) {
+        const conv = chunk.items[i]!;
+        const row = await rowForConversation(conv);
+        if (row === undefined) continue;
+        if (!passesFilter(row)) {
+          drops['filtered'] = (drops['filtered'] ?? 0) + 1;
+          continue;
         }
-        nextCursor = boundaryKey !== undefined ? encodeCursor(boundaryKey) : null;
-        break pager;
+        rows.push(row);
+        if (rows.length === limit) {
+          // Nothing past this row will be consumed, so stop the prefetch
+          // scheduling chains NOW rather than at the `finally`, which runs only
+          // after the boundary Query below. A flag write: it touches no
+          // decision, count or cursor.
+          prefetch?.stop();
+          // Page full at chunk index i. The resume boundary is the LEK AFTER this
+          // conversation. When it's the chunk's LAST consumed conversation, that's
+          // the chunk LEK; otherwise re-query exactly (i+1) conversations from this
+          // chunk's start key to recover the precise per-conversation boundary -
+          // ONE extra Query, only when a page fills mid-chunk.
+          let boundaryKey: Record<string, unknown> | undefined;
+          if (i === chunk.items.length - 1) {
+            boundaryKey = chunk.lastEvaluatedKey;
+          } else {
+            const boundary = await conversations.listByLastActivity({
+              status: 'open',
+              limit: i + 1,
+              ...(chunkStartKeyForThisChunk !== undefined && {
+                exclusiveStartKey: chunkStartKeyForThisChunk,
+              }),
+            });
+            boundaryKey = boundary.lastEvaluatedKey;
+          }
+          nextCursor = boundaryKey !== undefined ? encodeCursor(boundaryKey) : null;
+          break pager;
+        }
       }
+    } finally {
+      prefetch?.stop();
     }
 
     if (!moreChunks) {

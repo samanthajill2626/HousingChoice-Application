@@ -29,6 +29,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Timeline } from './Timeline.js';
 import type { RelayRecipientDelivery, TimelineItem, TimelineMessage } from '../../api/index.js';
+import { noteServerDate, resetServerClockForTests } from '../../api/serverClock.js';
+import { RETRY_PROMISE_GRACE_MS } from './retryPromise.js';
 
 const BODY = 'Team reply to the group';
 const LIST_NAME = 'Delivery by recipient';
@@ -122,6 +124,43 @@ function spyOnIntervals() {
 function reveal(): void {
   fireEvent.click(screen.getByText(BODY));
 }
+
+/** `startFakeClock`, moved on to the next whole second: an HTTP `Date` header
+ *  has one-second resolution, so a server instant round-trips through
+ *  `noteServerDate` exactly only when it is aligned. Still derived from the
+ *  fake clock's own `Date.now()`. */
+function startAlignedClock(): number {
+  const aligned = Math.ceil(startFakeClock() / 1000) * 1000;
+  vi.setSystemTime(aligned);
+  return aligned;
+}
+
+const ONE_TO_ONE_BODY = 'Your showing is confirmed for Tuesday';
+
+/** A FAILED one-to-one bubble - no recipient map, so no LEG clause can ever arm
+ *  for it - carrying the webhook's `retry_due_at` stamp when one is given. */
+function failedOneToOneAt(atMs: number, retryDueAt: string | undefined): TimelineMessage {
+  return {
+    kind: 'message',
+    id: 'o1',
+    at: new Date(atMs).toISOString(),
+    conversationId: 'c1',
+    tsMsgId: 'o1',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    delivery_status: 'undelivered',
+    error_code: '30003',
+    body: ONE_TO_ONE_BODY,
+    ...(retryDueAt !== undefined && { retry_due_at: retryDueAt }),
+  };
+}
+
+// The server-clock estimate is module state: every test leaves it at a zero
+// offset, so a skewed estimate can never leak into the next one.
+afterEach(() => {
+  resetServerClockForTests();
+});
 
 describe('Timeline staleness ticker', () => {
   afterEach(() => {
@@ -409,12 +448,28 @@ const SILENT_CASES: TickerCase[] = [
       ),
   },
   {
-    title: 'a bubble with NO delivery_recipients map at all has no legs to age',
+    title:
+      'a bubble with NO delivery_recipients map and NO live retry promise has nothing to age (a one-to-one bubble with a live promise arms - see the promise clause below)',
     build: (t0) => {
       const msg = outboundAt(t0, {});
       delete msg.delivery_recipients;
       return msg;
     },
+  },
+  {
+    title:
+      'a FAILED one-to-one bubble with NO retry stamp - declined, exhausted, a manual-mode thread - promises nothing, so nothing is scheduled',
+    build: (t0) => failedOneToOneAt(t0, undefined),
+  },
+  {
+    title:
+      'a one-to-one promise that already EXPIRED on the server clock can never be live again, so nothing is scheduled',
+    build: (t0) => failedOneToOneAt(t0, new Date(t0 - 3 * 60 * 1000).toISOString()),
+  },
+  {
+    title:
+      'a WITHDRAWN one-to-one promise - the epoch stamp a failed enqueue writes (the app RETRY_PROMISE_WITHDRAWN_AT) - schedules nothing',
+    build: (t0) => failedOneToOneAt(t0, '1970-01-01T00:00:00.000Z'),
   },
 ];
 
@@ -918,4 +973,105 @@ describe('Timeline staleness ticker - the relay retry clause', () => {
     });
     expect(spies.set).toHaveBeenCalledTimes(1);
   });
+});
+
+// retry-send-window D8 - the SEVENTH clause. A one-to-one bubble has no
+// recipient map, so no leg clause can ever arm for it, and its "will retry" copy
+// and hidden Retry button change only when `retry_due_at` plus
+// RETRY_PROMISE_GRACE_MS passes on the SERVER's clock. Judged on the browser's
+// clock, a fast browser disarms while the promise is still live - and the
+// promise never leaves the screen - and a slow one keeps it up for as long as
+// the skew.
+describe('Timeline staleness ticker - the one-to-one retry promise clause', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  /** A first retry's backoff: the stamp is the retry's run time, one minute out. */
+  const BACKOFF_MS = 60_000;
+  /** The promise's whole life on screen, from the failure. Three tick periods. */
+  const PROMISE_LIFE_MS = BACKOFF_MS + RETRY_PROMISE_GRACE_MS;
+  const PROMISE_CHIP = 'Undelivered - Phone unreachable - will retry (error 30003)';
+  const PLAIN_CHIP = 'Undelivered - Phone unreachable (error 30003)';
+  const RETRY_BUTTON = { name: 'Retry sending this message' };
+
+  it('ARMS for a live promise on a bubble with NO legs, drops it once retry_due_at + grace passes on the server clock, then STOPS - observable: the chip text and the Retry button, window.setInterval once, window.clearInterval with the ticker id', () => {
+    const t0 = startAlignedClock();
+    noteServerDate(new Date(t0).toUTCString(), t0);
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [failedOneToOneAt(t0, new Date(t0 + BACKOFF_MS).toISOString())],
+      relayRoster: undefined,
+      onRetry: vi.fn(),
+    });
+
+    expect(screen.getByText(PROMISE_CHIP)).toBeInTheDocument();
+    expect(screen.queryByRole('button', RETRY_BUTTON)).not.toBeInTheDocument();
+    // Nothing else on this thread can arm - the bubble has no legs - so this
+    // call is the promise clause's.
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    // One millisecond before the promise runs out: still promised.
+    act(() => {
+      vi.advanceTimersByTime(PROMISE_LIFE_MS - 1);
+    });
+    expect(screen.getByText(PROMISE_CHIP)).toBeInTheDocument();
+    expect(screen.queryByRole('button', RETRY_BUTTON)).not.toBeInTheDocument();
+
+    // The tick that crosses the edge drops the copy, returns Retry and disarms.
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText(PLAIN_CHIP)).toBeInTheDocument();
+    expect(screen.getByRole('button', RETRY_BUTTON)).toBeInTheDocument();
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
+
+    // And it does NOT re-arm: an expired promise can never be live again.
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['in step with the server', 0],
+    ['10 minutes FAST', 10 * 60 * 1000],
+    ['10 minutes SLOW', -10 * 60 * 1000],
+  ] as Array<[string, number]>)(
+    'shows the promise for the SAME real duration on a browser clock %s - observable: window.setInterval at mount, the chip one millisecond either side of the edge, window.clearInterval with the ticker id',
+    (_label, browserAheadMs) => {
+      const t0 = startAlignedClock();
+      // The server's clock is the browser's minus the skew, and the first
+      // response told the dashboard so.
+      const serverT0 = t0 - browserAheadMs;
+      noteServerDate(new Date(serverT0).toUTCString(), t0);
+      const spies = spyOnIntervals();
+      renderTimeline({
+        items: [failedOneToOneAt(serverT0, new Date(serverT0 + BACKOFF_MS).toISOString())],
+        relayRoster: undefined,
+        onRetry: vi.fn(),
+      });
+
+      // ARMED on the server's clock. On the FAST browser its own clock already
+      // reads the promise as expired, so a ticker judging by it would arm
+      // nothing and the promise would never leave the screen.
+      expect(screen.getByText(PROMISE_CHIP)).toBeInTheDocument();
+      expect(spies.set).toHaveBeenCalledTimes(1);
+      const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+      act(() => {
+        vi.advanceTimersByTime(PROMISE_LIFE_MS - 1);
+      });
+      expect(screen.getByText(PROMISE_CHIP)).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.getByText(PLAIN_CHIP)).toBeInTheDocument();
+      expect(screen.getByRole('button', RETRY_BUTTON)).toBeInTheDocument();
+      expect(spies.clear).toHaveBeenCalledWith(tickerId);
+    },
+  );
 });

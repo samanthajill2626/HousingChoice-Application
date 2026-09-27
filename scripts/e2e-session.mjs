@@ -270,6 +270,16 @@ const childEnv = {
   // at 10000 the window dwarfs it. It costs the suite about seven seconds, and
   // the spec's own 60s settle budget absorbed a 3.3s reality with room to spare.
   E2E_RELAY_RETRY_BACKOFF_MS: '10000',
+  // One-to-one 30003 retry chain (retry-send-window D13): the same lane-only
+  // seam for messaging.retrySend, so the one-to-one browser proof can watch a
+  // bubble read "will retry" and then be replaced by the retry's own bubble
+  // inside its budget. Read by app/src/jobs/retrySend.ts
+  // (resolveSendRetryBackoffMs) under the SAME two guards as the relay value
+  // above - ignored whenever JOBS_QUEUE_URL is set, ignored unless it parses to
+  // a positive integer - so production keeps 60/120/240. Ten seconds for the
+  // relay value's reason: it is the observation window. share-skip-fix Branch
+  // B and send-outcome-reconcile reuse it.
+  E2E_SEND_RETRY_BACKOFF_MS: '10000',
   // Pass the lane to child processes so they can self-identify if needed.
   E2E_LANE: String(lane),
 };

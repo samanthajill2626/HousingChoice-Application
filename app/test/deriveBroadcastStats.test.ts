@@ -49,6 +49,7 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
       failed: 1,
       skipped_opted_out: 1,
       skipped_no_consent: 1,
+      skipped_other: 0,
     });
   });
 
@@ -71,15 +72,22 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
     expect(out.audience).toBe(4);
   });
 
-  it('skipped split: only errorCode "no_consent" is skipped_no_consent; every other skip is opted_out', () => {
+  it('skipped split (share-skip-fix D7): consent codes -> no_consent; opt-out codes and code-less -> opted_out; everything else -> skipped_other', () => {
     const recipients = recips([
       ['c-1', { status: 'skipped', errorCode: 'no_consent' }],
+      ['c-1b', { status: 'skipped', errorCode: 'contact_no_consent' }],
       ['c-2', { status: 'skipped', errorCode: 'contact_opted_out' }],
-      ['c-3', { status: 'skipped' }], // no errorCode -> opted_out bucket
+      ['c-2b', { status: 'skipped', errorCode: 'opted_out' }],
+      ['c-3', { status: 'skipped' }], // legacy first-fence skip: opt-out or unreachable, unknown which
+      ['c-4', { status: 'skipped', errorCode: 'manual_mode' }],
+      ['c-5', { status: 'skipped', errorCode: 'unreachable' }],
+      ['c-6', { status: 'skipped', errorCode: 'contact_deleted' }],
     ]);
     const out = deriveBroadcastStats({ recipients, stats: zeroStats() });
-    expect(out.skipped_no_consent).toBe(1);
-    expect(out.skipped_opted_out).toBe(2);
+    expect(out.skipped_no_consent).toBe(2);
+    expect(out.skipped_opted_out).toBe(3);
+    expect(out.skipped_other).toBe(3);
+    expect(out.audience).toBe(8);
   });
 
   it('INVARIANT: queued+sent+delivered+failed+skipped_opted_out+skipped_no_consent == audience == map size', () => {
@@ -108,7 +116,8 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
       out.delivered +
       out.failed +
       out.skipped_opted_out +
-      out.skipped_no_consent;
+      out.skipped_no_consent +
+      (out.skipped_other ?? 0);
     expect(sum).toBe(out.audience);
     expect(out.audience).toBe(Object.keys(recipients).length);
   });

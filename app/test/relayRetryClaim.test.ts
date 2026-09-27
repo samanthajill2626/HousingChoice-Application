@@ -48,7 +48,7 @@ describe('RelayRetryClaimOutcome', () => {
   // retryClaim log field and the job's own close paths. A Record keyed by the
   // union is exhaustive in BOTH directions - a missing member and an extra key
   // are each a compile error - so this list cannot drift from the type.
-  it('enumerates exactly the thirteen claim outcomes', () => {
+  it('enumerates exactly the fourteen claim outcomes', () => {
     const outcomes: Record<RelayRetryClaimOutcome, true> = {
       claimed: true,
       already_claimed: true,
@@ -67,6 +67,9 @@ describe('RelayRetryClaimOutcome', () => {
       enqueue_failed: true,
       // Code review R1, F2: an internal fault WHILE claiming - the helper threw.
       claim_failed: true,
+      // retry-send-window D3/D9: the claim appended the rung already closed
+      // because it could not go out inside the 15-minute send window.
+      window_closed: true,
     };
     expect(Object.keys(outcomes).sort()).toEqual(
       [
@@ -83,6 +86,7 @@ describe('RelayRetryClaimOutcome', () => {
         'source_unreadable',
         'to_malformed',
         'to_missing',
+        'window_closed',
       ].sort(),
     );
   });

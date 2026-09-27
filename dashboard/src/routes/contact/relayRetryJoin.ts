@@ -93,6 +93,16 @@ const TERMINAL_RUNG_STATUSES: ReadonlySet<DeliveryStatus> = new Set<DeliveryStat
   'failed',
 ]);
 
+/** retry-send-window D8: the close a WINDOW decline writes on its rung - the
+ *  relay claim (D3) or the job (D4) found the retry would go out more than 15
+ *  minutes after the original. Kept on the rung for data and logs, and
+ *  deliberately carrying NO display code here: the ruling is that a declined
+ *  late retry reads as a plain failed attempt, so the original leg's own 30003
+ *  stands. A copy of the app's RETRY_WINDOW_CLOSED_CODE
+ *  (app/src/lib/retrySendWindow.ts), since the dashboard cannot import app
+ *  code; exported so relayWindowCloseMirror.test.ts pins the two together. */
+export const WINDOW_CLOSED_CODE = 'retry_window_closed';
+
 /** The bucket key: the ROOT row plus the member key. Exported so no consumer
  *  builds it by hand - a key built the other way round silently finds nothing. */
 export function relayRetryKey(rootTsMsgId: string, memberKey: string): string {
@@ -405,9 +415,13 @@ function projectOneLeg(
   // 4. Otherwise every rung ended and none delivered. The close code comes from
   //    the LAST rung when it carries one - a D9 gate refusal or an enqueue
   //    failure has no bubble of its own, so its reason can only be read here -
-  //    and otherwise the original's carrier code stands (D19).
+  //    and otherwise the original's carrier code stands (D19). A WINDOW decline
+  //    counts as carrying none (retry-send-window D8): the ruling is that a
+  //    late retry the window declined reads as a plain failed attempt, so the
+  //    original's 30003 stands, never "Not retried - message too old".
   const last = rungs[rungs.length - 1];
-  const closeCode = last?.leg.errorCode;
+  const lastCode = last?.leg.errorCode;
+  const closeCode = lastCode === WINDOW_CLOSED_CODE ? undefined : lastCode;
   return {
     ...slot,
     ...(closeCode !== undefined && { errorCode: closeCode }),
@@ -426,7 +440,8 @@ function projectOneLeg(
  *    original leg is still the one being described: `retrying` recites its
  *    carrier reason ("Retrying - Phone unreachable (error 30003)") and
  *    `terminal` only replaces `errorCode` when the last rung carries a close
- *    code of its own.
+ *    code of its own - never `retry_window_closed`, which carries no display
+ *    code (retry-send-window D8), so a window decline reads the plain failure.
  *  - `delivered-on-retry` and `unconfirmed` overlay the DECIDING rung's leg -
  *    `status`, `sid`, `sentAt`, `deliveredAt`, `actualTransport`,
  *    `transportAggregationState`. `delivered-on-retry` also clears `errorCode`;

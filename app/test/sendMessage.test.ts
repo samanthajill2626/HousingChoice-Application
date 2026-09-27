@@ -31,7 +31,9 @@ import {
   SmsSendingDisabledError,
   createSendMessageService,
 } from '../src/services/sendMessage.js';
+import { previewSendRefusal } from '../src/services/sendRefusalPreview.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
+import { SEND_REFUSAL_CASES, SEND_REFUSAL_PHONE } from './helpers/sendRefusalCases.js';
 import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 const ERROR = 50;
@@ -658,6 +660,71 @@ describe('sendMessage service', () => {
         ContactOptedOutError,
       );
     });
+
+    it('share-skip-fix I8: a `recipient` item makes the consent + deleted gates judge THAT contact, not the phone-matched one', async () => {
+      // The phone lookup finds a NO-consent duplicate; the caller resolved the
+      // real recipient separately and hands it over.
+      const f = makeFakes({
+        contact: { contactId: 'c-dup', type: 'tenant', phone: '+15550100001' }, // no consent_method
+      });
+      const real: ContactItem = { contactId: 'c-real', type: 'tenant', phone: '+15550100001', consent_method: 'verbal_in_person' };
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false }),
+      ).rejects.toBeInstanceOf(ContactNoConsentError);
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: real }),
+      ).resolves.toMatchObject({ providerSid: 'SMfake-1' });
+      // A deleted RECIPIENT is refused even when the phone-matched contact is live and consenting.
+      const g = makeFakes();
+      const gone: ContactItem = { ...real, contactId: 'c-gone', deleted_at: '2026-09-01T00:00:00.000Z' };
+      await expect(
+        g.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: gone }),
+      ).rejects.toBeInstanceOf(ContactDeletedError);
+      // The recipient's own opt-out refuses too (either contact's flag wins).
+      const h = makeFakes();
+      await expect(
+        h.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: { ...real, sms_opt_out: true } }),
+      ).rejects.toBeInstanceOf(ContactOptedOutError);
+    });
+
+    it('share-skip-fix I8: an OPTED-OUT phone-matched contact refuses even when the resolved recipient is clean (Do Not Contact)', async () => {
+      // Staff Do Not Contact sets only the phone-matched contact's flag; the
+      // caller hands over a different, clean recipient on the same phone. The
+      // opt-out gate reads the phone lookup's flag, never only the recipient's.
+      const f = makeFakes({
+        contact: { contactId: 'c-dnc', type: 'tenant', phone: '+15550100001', consent_method: 'inbound_text', sms_opt_out: true },
+      });
+      const real: ContactItem = { contactId: 'c-real', type: 'tenant', phone: '+15550100001', consent_method: 'verbal_in_person' };
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: real }),
+      ).rejects.toBeInstanceOf(ContactOptedOutError);
+      expect(f.sent).toHaveLength(0);
+      expect(f.appended).toHaveLength(0);
+    });
+
+    it('share-skip-fix I8: a DELETED phone-matched contact does not block a live recipient on the same phone', async () => {
+      // The deleted and consent gates judge `recipient ?? phoneContact`, so a
+      // soft-deleted duplicate the phone lookup finds first must not refuse the
+      // live, consenting recipient the caller resolved.
+      const f = makeFakes({
+        contact: {
+          contactId: 'c-gone',
+          type: 'tenant',
+          phone: '+15550100001',
+          consent_method: 'inbound_text',
+          deleted_at: '2026-09-01T00:00:00.000Z',
+        },
+      });
+      const real: ContactItem = { contactId: 'c-real', type: 'tenant', phone: '+15550100001', consent_method: 'verbal_in_person' };
+      // Control: with no recipient the phone-matched contact IS judged, and refused.
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false }),
+      ).rejects.toBeInstanceOf(ContactDeletedError);
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'hi', automated: false, recipient: real }),
+      ).resolves.toMatchObject({ providerSid: 'SMfake-1' });
+      expect(f.sent).toHaveLength(1);
+    });
   });
 
   it('writes a message_sent audit event after a successful send (IDs only, never the body)', async () => {
@@ -853,5 +920,157 @@ describe('deleted-contact send guard (2026-08-03 spec)', () => {
     await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
       ContactOptedOutError,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retry-send-window D3a: PARITY between previewSendRefusal and the real send
+// wrapper. ONE table (helpers/sendRefusalCases.ts) drives both: every row runs
+// through the pure preview AND through createSendMessageService with this
+// file's fakes, and the refusal code must match (undefined = the send went
+// out). A gate reordered in or removed from sendMessage turns a row red; a NEW
+// gate turns nothing red until a row exercises it - add its row with the gate.
+// The same table drives the retry decision's own test
+// (test/oneToOneRetryDecision.test.ts), so the decision cannot drift either.
+// ---------------------------------------------------------------------------
+describe('previewSendRefusal parity with the send wrapper (retry-send-window D3a)', () => {
+  it.each(SEND_REFUSAL_CASES)('$name', async (c) => {
+    const preview = previewSendRefusal({
+      smsSendingEnabled: c.smsSendingEnabled,
+      conversation: c.conversation,
+      phoneContact: c.phoneContact,
+      recipient: c.recipient,
+      participantPhone: SEND_REFUSAL_PHONE,
+      automated: c.automated,
+    });
+
+    const f = makeFakes({
+      conversation: c.conversation,
+      contact: c.phoneContact ?? null,
+      env: { SMS_SENDING_ENABLED: c.smsSendingEnabled ? 'true' : 'false' },
+    });
+    let thrown: SendRefusedError['code'] | undefined;
+    try {
+      await f.service({
+        conversationId: 'conv-1',
+        body: 'parity',
+        automated: c.automated,
+        recipient: c.recipient,
+      });
+    } catch (err) {
+      if (!(err instanceof SendRefusedError)) throw err;
+      thrown = err.code;
+    }
+
+    // Compile-time half: every preview code IS a code the wrapper throws.
+    const previewAsSendCode: SendRefusedError['code'] | undefined = preview;
+    expect(previewAsSendCode).toBe(thrown);
+    expect(preview).toBe(c.expected);
+    // A refused row never reached the provider; a sent row did, exactly once.
+    expect(f.sent).toHaveLength(c.expected === undefined ? 1 : 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retry-send-window D6 + D14 (spec test intention 6a): what the wrapper writes
+// at append so a retry can follow the original send. `automated` goes on EVERY
+// row (the default false included), the caller's recipient by id only when one
+// was named, and the automatic retry's lineage - attempt and window origin - at
+// append rather than annotated afterwards.
+// ---------------------------------------------------------------------------
+describe('append-time retry lineage and the send flags (retry-send-window D6, D14)', () => {
+  it('records automated on EVERY append: the default false, an explicit false and true', async () => {
+    const f = makeFakes();
+    await f.service({ conversationId: 'conv-1', body: 'default' });
+    await f.service({ conversationId: 'conv-1', body: 'person', automated: false });
+    await f.service({ conversationId: 'conv-1', body: 'machine', automated: true });
+    // toHaveProperty WITH the value: an ABSENT flag must fail here, because a
+    // row without it is retried as automated (D14's pre-deploy default).
+    expect(f.appended[0]).toHaveProperty('automated', false);
+    expect(f.appended[1]).toHaveProperty('automated', false);
+    expect(f.appended[2]).toHaveProperty('automated', true);
+  });
+
+  it('records recipientContactId ONLY when the caller named a recipient', async () => {
+    const f = makeFakes();
+    const real: ContactItem = {
+      contactId: 'c-real',
+      type: 'tenant',
+      phone: '+15550100001',
+      consent_method: 'verbal_in_person',
+    };
+    await f.service({ conversationId: 'conv-1', body: 'fenced', automated: false, recipient: real });
+    await f.service({ conversationId: 'conv-1', body: 'by phone' });
+    expect(f.appended[0]).toHaveProperty('recipientContactId', 'c-real');
+    expect(f.appended[1]).not.toHaveProperty('recipientContactId');
+  });
+
+  it('ignores a named recipient that no longer holds the thread number: judges the phone-matched contact, records none, WARNs (retry-send-window planner review)', async () => {
+    // A retry replays the recipient recorded at the original send; that contact
+    // may have moved off this number since. The text still goes to the
+    // thread's number, so consent is judged on whoever holds it now.
+    const holderWithoutConsent: ContactItem = {
+      contactId: 'c-holder',
+      type: 'tenant',
+      phone: '+15550100001',
+    };
+    const moved: ContactItem = {
+      contactId: 'c-moved',
+      type: 'tenant',
+      phone: '+15550100099',
+      consent_method: 'verbal_in_person',
+    };
+    const refused = makeFakes({ contact: holderWithoutConsent });
+    await expect(
+      refused.service({ conversationId: 'conv-1', body: 'retry', automated: false, recipient: moved }),
+    ).rejects.toMatchObject({ code: 'contact_no_consent' });
+    expect(refused.sent).toHaveLength(0);
+    expect(
+      refused.capture.lines.some(
+        (l) =>
+          l['recipientContactId'] === 'c-moved' &&
+          String(l['msg']).includes('no longer holds this thread number'),
+      ),
+    ).toBe(true);
+
+    const sent = makeFakes();
+    await sent.service({ conversationId: 'conv-1', body: 'retry', automated: false, recipient: moved });
+    expect(sent.sent).toHaveLength(1);
+    expect(sent.appended[0]).not.toHaveProperty('recipientContactId');
+  });
+
+  it('passes retryOf, retryAttempt and retryWindowStart into the append, and none of them on a normal send', async () => {
+    const f = makeFakes();
+    await f.service({
+      conversationId: 'conv-1',
+      body: 'retry body',
+      automated: true,
+      retryOf: '2026-06-12T09:58:00.000Z#SMorig',
+      retryAttempt: 2,
+      retryWindowStart: '2026-06-12T09:58:00.000Z',
+    });
+    await f.service({ conversationId: 'conv-1', body: 'normal' });
+    expect(f.appended[0]).toMatchObject({
+      retryOf: '2026-06-12T09:58:00.000Z#SMorig',
+      retryAttempt: 2,
+      retryWindowStart: '2026-06-12T09:58:00.000Z',
+      automated: true,
+    });
+    for (const field of ['retryOf', 'retryAttempt', 'retryWindowStart']) {
+      expect(f.appended[1]).not.toHaveProperty(field);
+    }
+  });
+
+  it('the manual Retry shape (retryOf alone, a person send) carries no attempt and no window origin (D2)', async () => {
+    const f = makeFakes();
+    await f.service({
+      conversationId: 'conv-1',
+      body: 'again',
+      automated: false,
+      retryOf: '2026-06-12T09:58:00.000Z#SMorig',
+    });
+    expect(f.appended[0]).toMatchObject({ retryOf: '2026-06-12T09:58:00.000Z#SMorig', automated: false });
+    expect(f.appended[0]).not.toHaveProperty('retryAttempt');
+    expect(f.appended[0]).not.toHaveProperty('retryWindowStart');
   });
 });

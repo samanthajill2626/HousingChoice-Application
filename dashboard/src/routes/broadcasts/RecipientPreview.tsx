@@ -5,10 +5,14 @@
 // row from view, hiding the record-consent reminder), add tenants the filter
 // didn't catch (tenant search → append), search-within-recipients (filter by
 // name/phone), and bulk Select all / Deselect all. Excluded rows stay VISIBLE
-// (auditable: staff can see who's left out and re-check them). Already-sent-
-// this-property rows render amber + UNCHECKED (a SOFT opt-in-to-resend flag,
-// never a hard gate); "Select all" SKIPS already-sent rows. A live selected
-// count drives "Send to N tenants", which posts the EXACT checked contactIds.
+// (auditable: staff can see who's left out and re-check them).
+// Already-sent-this-property rows render amber and start UNCHECKED (a SOFT
+// opt-in-to-resend flag, never a hard gate) - UNLESS the row is SEEDED: a seed
+// (the one-to-one tenant, a preview-returned hand-pick, or a tenant added right
+// here) is a deliberate choice and stays checked, through "Select all" too
+// (share-skip-fix D5 / I4). "Select all" skips UNSEEDED already-sent rows.
+// A live selected count drives "Send to N tenants", which posts the EXACT
+// checked contactIds.
 // 400/409 are surfaced inline. A "Delete draft" button removes the unsent draft.
 import { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -43,6 +47,10 @@ interface Row {
   checked: boolean;
   /** True for a manually-added tenant (badge cue). */
   added?: boolean;
+  /** share-skip-fix D5: a deliberate pick (a preview-returned seed, or a tenant
+   *  added or picked in this session). Seeded rows start checked even when
+   *  already sent, and "Select all" keeps them checked. */
+  seeded: boolean;
 }
 
 export interface RecipientPreviewProps {
@@ -56,15 +64,18 @@ export interface RecipientPreviewProps {
    *  (spec 2026-07-10): a non-Available unit's flyer link is dead, so the send
    *  is blocked behind a "Make Available & send" dialog. */
   unitId?: string;
-  /** Resolved 1:1 mode (matching sends): the body was rendered with ONE tenant's
-   *  name baked in ("Hi Brianna, ..."), so it must reach exactly that tenant and
-   *  nobody else. When set: the add-a-tenant search is hidden, and Send is blocked
-   *  unless the checked set is exactly [contactId]. */
+  /** Resolved 1:1 mode (matching sends): the message was composed for exactly
+   *  ONE tenant (the one-to-one default is the address and the flyer link,
+   *  share-skip-fix D8, and any edit was written for them), so it must reach
+   *  exactly that tenant and nobody else. When set: the add-a-tenant search is
+   *  hidden, and Send is blocked unless the checked set is exactly [contactId]. */
   resolvedFor?: { contactId: string; name: string };
 }
 
-/** Build the initial rows from the preview candidates — already-sent rows start
- *  UNCHECKED (soft opt-in to resend); everyone else starts checked. */
+/** Build the initial rows from the preview candidates - an already-sent row
+ *  starts UNCHECKED (soft opt-in to resend) unless it is SEEDED (a deliberate
+ *  pick stays checked, share-skip-fix D5), a no-consent row is never checked,
+ *  and everyone else starts checked. */
 function initialRows(preview: PreviewResponse): Row[] {
   return preview.candidates.map((c) => ({
     contactId: c.contactId,
@@ -73,6 +84,7 @@ function initialRows(preview: PreviewResponse): Row[] {
     phone: c.phone,
     alreadySentThisProperty: c.alreadySentThisProperty,
     hasConsent: c.has_consent,
+    seeded: c.seeded,
     // No-consent rows are a HARD fence — never checked. Already-sent rows start
     // unchecked (soft opt-in) UNLESS they were hand-seeded: a seed is a
     // deliberate choice, so pre-check it even when already sent this property.
@@ -116,9 +128,10 @@ export function RecipientPreview({
   const [checkingUnit, setCheckingUnit] = useState(false);
 
   const checkedCount = rows.filter((r) => r.checked).length;
-  // Resolved 1:1 mode: the body names ONE tenant, so the send must land on exactly
-  // that contactId — no more, no fewer. A mismatched selection (extra recipients,
-  // or the seeded row unchecked) hard-blocks Send behind an inline explanation.
+  // Resolved 1:1 mode: the message was composed for ONE tenant, so the send must
+  // land on exactly that contactId - no more, no fewer. A mismatched selection
+  // (extra recipients, or the seeded row unchecked) hard-blocks Send behind an
+  // inline explanation.
   const resolvedMismatch =
     resolvedFor !== undefined &&
     !(checkedCount === 1 && rows.some((r) => r.checked && r.contactId === resolvedFor.contactId));
@@ -146,11 +159,12 @@ export function RecipientPreview({
     );
   }
 
-  /** Select all — but SKIP already-sent rows (opt-in only) AND no-consent rows
-   *  (hard fence; they can never be sent to). */
+  /** Select all - but SKIP unseeded already-sent rows (opt-in only) AND
+   *  no-consent rows (hard fence). A SEEDED row stays checked whatever its flag
+   *  (share-skip-fix D5): the operator picked them on purpose. */
   function selectAll(): void {
     setRows((prev) =>
-      prev.map((r) => ({ ...r, checked: r.hasConsent && !r.alreadySentThisProperty })),
+      prev.map((r) => ({ ...r, checked: r.hasConsent && (r.seeded || !r.alreadySentThisProperty) })),
     );
   }
   function deselectAll(): void {
@@ -158,10 +172,12 @@ export function RecipientPreview({
   }
 
   /** Add a tenant from the search (must resolve to a contactId). Annotate
-   *  already-sent locally via priorRecipientContactIds; ignore duplicates. We
-   *  VALIDATE before clearing the search box so a can't-add surfaces an inline
-   *  reason instead of vanishing silently. Mirrors the server fence: an opted-out
-   *  / unreachable tenant is NOT added (the server would drop it anyway). */
+   *  already-sent locally via priorRecipientContactIds; a pick of a tenant who is
+   *  already listed promotes that row to a seed (checked) instead of adding a
+   *  duplicate (share-skip-fix D5). We VALIDATE before clearing the search box
+   *  so a can't-add surfaces an inline reason instead of vanishing silently.
+   *  Mirrors the server fence: an opted-out / unreachable tenant is NOT added
+   *  (the server would drop it anyway). */
   function addTenant(picked: ContactSearchValue): void {
     setAddNote(null);
     if (picked.contactId === undefined) return;
@@ -194,10 +210,19 @@ export function RecipientPreview({
       return;
     }
     setSearch({ name: '' });
-    // Only a genuine add (not a dedupe hit) persists to the draft's seed list.
-    const alreadyListed = rows.some((r) => r.contactId === candidate.contactId);
+    // Only a genuine add, or the promotion of a listed row that was not yet a
+    // seed, persists to the draft's seed list (a repeat pick of a seed does not).
+    const listed = rows.find((r) => r.contactId === candidate.contactId);
     setRows((prev) => {
-      if (prev.some((r) => r.contactId === candidate.contactId)) return prev; // already listed
+      if (prev.some((r) => r.contactId === candidate.contactId)) {
+        // share-skip-fix D5: picking a tenant who is ALREADY listed (e.g. a
+        // filter-proposed row flagged "Already sent", so unchecked) is a
+        // deliberate pick too - promote that row to a seed and check it, never
+        // discard the pick. A no-consent row stays unchecked (hard fence).
+        return prev.map((r) =>
+          r.contactId === candidate.contactId ? { ...r, seeded: true, checked: r.hasConsent } : r,
+        );
+      }
       const already = priorIds.has(candidate.contactId);
       return [
         ...prev,
@@ -207,12 +232,16 @@ export function RecipientPreview({
           phone,
           alreadySentThisProperty: already,
           hasConsent: true,
-          checked: !already,
+          // share-skip-fix D5: a hand-pick is a seed from the moment it is added -
+          // the same row the server returns as `seeded: true` after a re-preview,
+          // so it must not start unchecked here and checked there.
+          checked: true,
           added: true,
+          seeded: true,
         },
       ];
     });
-    if (!alreadyListed) {
+    if (listed === undefined || !listed.seeded) {
       // Best-effort persistence — a failed PATCH never blocks or surfaces in the
       // review UI (the send still posts the exact checked ids either way).
       seedsRef.current = [...seedsRef.current, candidate.contactId];
@@ -332,7 +361,7 @@ export function RecipientPreview({
       </div>
 
       <p className={styles.note}>
-        Already-sent tenants are unchecked — check one to resend. “Select all” skips them.
+        Flagged tenants you picked stay checked; &quot;Select all&quot; skips the others.
       </p>
 
       {/* A2P/CTIA: surface no-consent recipients (fenced out of the send) with a
@@ -425,7 +454,7 @@ export function RecipientPreview({
       )}
 
       {/* Add a tenant the filter didn't catch. Hidden in resolved 1:1 mode: the
-          body is written for one named tenant, so a broader audience is unsafe. */}
+          message was composed for one tenant, so a broader audience is unsafe. */}
       {resolvedFor === undefined ? (
         <>
           <div className={styles.addRow}>

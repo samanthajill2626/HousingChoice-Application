@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InboxRow as InboxRowData } from '../../api/index.js';
@@ -30,6 +30,11 @@ function renderRow(row: InboxRowData): void {
       </ul>
     </MemoryRouter>,
   );
+}
+
+function cleanupAndRender(row: InboxRowData): void {
+  cleanup();
+  renderRow(row);
 }
 
 beforeEach(() => {
@@ -197,6 +202,120 @@ describe('InboxRow', () => {
     );
     expect(screen.getByText('Closed')).toBeInTheDocument();
   });
+
+  it('renders the placement tag with its full stage label as a title (it truncates before the name, R3-1)', () => {
+    renderRow(mkRow({ placementContext: { placementId: 'p1', label: 'Awaiting receipt confirmation' } }));
+    expect(screen.getByText('Awaiting receipt confirmation')).toHaveAttribute('title', 'Awaiting receipt confirmation');
+  });
+
+  describe('the last-activity time (spec 5.4)', () => {
+    // setup.ts pins Date to 2026-07-01T12:00:00Z; the fixture row is
+    // 2026-06-17, earlier the same year -> "Jun 17".
+    it('renders a <time> with dateTime, a full-stamp title and the tier label', () => {
+      renderRow(mkRow({ unreadCount: 0 }));
+      const link = screen.getByRole('link', { name: /Tasha Williams/ });
+      const time = link.querySelector('time');
+      expect(time).not.toBeNull();
+      expect(time).toHaveAttribute('dateTime', '2026-06-17T10:00:00.000Z');
+      expect(time?.getAttribute('title')).toMatch(/^Jun 17, 2026, \d{1,2}:\d{2} [AP]M$/);
+      expect(time).toHaveTextContent(/^Jun 17$/);
+    });
+
+    it('marks the time on an unread row and not on a read row', () => {
+      renderRow(mkRow({ unreadCount: 3 }));
+      const unreadTime = screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time');
+      expect(unreadTime?.closest('div')?.className).toMatch(/unread/);
+      cleanupAndRender(mkRow({ unreadCount: 0 }));
+      const readTime = screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time');
+      expect(readTime?.closest('div')?.className).not.toMatch(/unread/);
+    });
+
+    it('renders the time on relay_group and group_text rows too', () => {
+      renderRow(
+        mkRow({
+          kind: 'relay_group',
+          contactId: undefined,
+          conversationId: 'conv-relay-1',
+          name: 'With Ana & Ben',
+          status: 'open',
+          // Six days before the pinned clock: a date, never "Yesterday", in
+          // any runner time zone.
+          lastActivityAt: '2026-06-25T10:00:00.000Z',
+        }),
+      );
+      const relayTime = screen.getByRole('link', { name: /With Ana/ }).querySelector('time');
+      expect(relayTime).toHaveTextContent(/^Jun 25$/);
+      // SC-12: the same dateTime and full-stamp title as a contact row.
+      expect(relayTime).toHaveAttribute('dateTime', '2026-06-25T10:00:00.000Z');
+      expect(relayTime?.getAttribute('title')).toMatch(/^Jun 25, 2026, \d{1,2}:\d{2} [AP]M$/);
+      cleanupAndRender(
+        mkRow({
+          kind: 'group_text',
+          contactId: undefined,
+          conversationId: 'conv-group-1',
+          name: 'Ana & Ben',
+          lastActivityAt: '2025-12-18T10:00:00.000Z',
+        }),
+      );
+      const groupTime = screen.getByRole('link', { name: /Ana & Ben/ }).querySelector('time');
+      expect(groupTime).toHaveTextContent(/^Dec 18, 2025$/);
+      expect(groupTime).toHaveAttribute('dateTime', '2025-12-18T10:00:00.000Z');
+      expect(groupTime?.getAttribute('title')).toMatch(/^Dec 18, 2025, \d{1,2}:\d{2} [AP]M$/);
+    });
+
+    it('renders NO <time> for an unparseable instant', () => {
+      renderRow(mkRow({ lastActivityAt: 'garbage' }));
+      expect(screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time')).toBeNull();
+    });
+
+    it('keeps the Mark read / Mark unread actions and their names', () => {
+      renderRow(mkRow({ unreadCount: 1 }));
+      expect(screen.getByRole('button', { name: 'Mark Tasha Williams read' })).toBeInTheDocument();
+    });
+  });
+
+  // Build review R2-4: the row is memoized, so a render after local midnight
+  // relabels it only when a prop changed. Inbox hands every row the local day
+  // as `dayKey`, which changes exactly once a day. Local wall-clock instants,
+  // so both pins hold in any runner time zone.
+  describe('the day key (R2-4)', () => {
+    const beforeMidnight = new Date(2026, 6, 1, 23, 59, 30);
+    const afterMidnight = new Date(2026, 6, 2, 0, 0, 30);
+    // ONE row object for every render, as an unpatched row keeps its identity.
+    const row = mkRow({ unreadCount: 0, lastActivityAt: new Date(2026, 6, 1, 23, 59, 0).toISOString() });
+
+    function tree(dayKey: string): React.JSX.Element {
+      return (
+        <MemoryRouter>
+          <ul>
+            <InboxRow row={row} dayKey={dayKey} onOpen={onOpen} onMarkRead={onMarkRead} />
+          </ul>
+        </MemoryRouter>
+      );
+    }
+    function timeText(): string | null | undefined {
+      return screen.getByRole('link', { name: /Tasha Williams/ }).querySelector('time')?.textContent;
+    }
+
+    it('a new dayKey after local midnight relabels the same row object', () => {
+      vi.setSystemTime(beforeMidnight);
+      const view = render(tree(new Date().toDateString()));
+      expect(timeText()).toBe('11:59 PM');
+      vi.setSystemTime(afterMidnight);
+      view.rerender(tree(new Date().toDateString()));
+      expect(timeText()).toBe('Yesterday');
+    });
+
+    it('the same dayKey keeps the memoized label (the stale label the prop exists to refresh)', () => {
+      vi.setSystemTime(beforeMidnight);
+      const dayKey = new Date().toDateString();
+      const view = render(tree(dayKey));
+      expect(timeText()).toBe('11:59 PM');
+      vi.setSystemTime(afterMidnight);
+      view.rerender(tree(dayKey));
+      expect(timeText()).toBe('11:59 PM');
+    });
+  });
 });
 
 describe('InboxRow - Deleted chip (deleted-contact resurfacing)', () => {
@@ -208,5 +327,17 @@ describe('InboxRow - Deleted chip (deleted-contact resurfacing)', () => {
   it('renders NO Deleted chip on a live contact row', () => {
     renderRow(mkRow());
     expect(screen.queryByText('Deleted')).toBeNull();
+  });
+});
+
+describe('InboxRow - a phone-named row keeps every digit (spec 5.4)', () => {
+  // The stub contact a first inbound creates is named by its formatted number;
+  // that name carries the `numberName` class so it never yields to a chip.
+  it('marks a formatted-number name and not an ordinary name', () => {
+    renderRow(mkRow({ name: '(555) 123-4567', role: 'unknown', needsTriage: true }));
+    const numberName = screen.getByText('(555) 123-4567');
+    expect(numberName.className).toMatch(/numberName/);
+    cleanupAndRender(mkRow());
+    expect(screen.getByText('Tasha Williams').className).not.toMatch(/numberName/);
   });
 });

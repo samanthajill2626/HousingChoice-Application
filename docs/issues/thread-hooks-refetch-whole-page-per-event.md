@@ -6,6 +6,7 @@ severity: med
 status: open
 area: dashboard
 created: 2026-08-13
+updated: 2026-09-25
 refs: dashboard/src/routes/conversation/useRelayThread.ts:196, dashboard/src/routes/conversation/useRelayThread.ts:238, dashboard/src/routes/conversation/useGroupThread.ts:128, dashboard/src/routes/conversation/useGroupThread.ts:188, dashboard/src/routes/contact/useContactTimeline.ts:141, dashboard/src/routes/contact/useContactTimeline.ts:318, dashboard/src/routes/placements/usePlacements.ts:244, dashboard/src/routes/inbox/useInbox.ts:376, dashboard/src/routes/inbox/useInbox.ts:205
 ---
 
@@ -109,10 +110,12 @@ nothing was run.
 
 **THE DECISIVE POINT, which outranks everything else here: the proposed change
 saves ZERO round trips and ZERO bytes.** It leaves
-`getInbox({ filter, limit: PAGE_LIMIT })` (`useInbox.ts:205`, `PAGE_LIMIT = 30`
-at `useInbox.ts:94`) exactly as it is and alters only how the response is
-installed into `base`. The round trip, the server's unread fill loop, the
-per-candidate hydration and the 30 serialized rows all remain. This issue's title
+`getInbox({ filter, limit })` (`useInbox.ts:205` on that commit) exactly as it
+is and alters only how the response is installed into `base`. The round trip,
+the server's unread fill loop, the per-candidate hydration and the 100
+serialized rows all remain (the page is `DEFAULT_PAGE_LIMIT = 100` in
+`dashboard/src/routes/inbox/useInbox.ts` since 2026-09-25; it was
+`PAGE_LIMIT = 30` at `useInbox.ts:94` on that commit). This issue's title
 is about re-READING the whole page per event; R11 re-reads the whole page. It is
 not a smaller version of this issue's remedy, it is a different change that
 leaves this issue's subject untouched.
@@ -121,10 +124,10 @@ leaves this issue's subject untouched.
 cost with no user-visible symptom. `useInbox.ts:376` wires
 `useEventStream({ onConversationUpdated: scheduleRefetch })`; `scheduleRefetch`
 (`useInbox.ts:366-372`) debounces 300ms (`REFETCH_DEBOUNCE_MS`,
-`useInbox.ts:97`) and calls `fetchFirstPage`, which reads 30 rows and installs
-them wholesale (`useInbox.ts:205`, `useInbox.ts:238-243`). Any
-`conversation.updated` from anywhere in the org triggers it, for every mounted
-inbox.
+`useInbox.ts:97`) and calls `fetchFirstPage`, which reads 100 rows (30 on that
+commit) and installs them wholesale (`useInbox.ts:205`, `useInbox.ts:238-243`).
+Any `conversation.updated` from anywhere in the org triggers it, for every
+mounted inbox.
 
 **Finding 1 - the DOM-node justification is false; the row already keeps its
 node AND its component instance.** `Inbox.tsx:209-217` renders
@@ -208,8 +211,8 @@ One further edge for whoever revisits this: `loadMore` appends with
 `[...prev, ...pageData.rows]` (`useInbox.ts:343`) and does NOT dedupe -
 `useInbox.ts:155` already names the consequence ("duplicate rowKeys, silently
 skipped rows - `rows` is not deduped"). Under a merge, `cursor` addresses
-position 30 of the SERVER feed while `base` may hold more, so page two
-re-delivers rows already present.
+position 100 (30 on that commit) of the SERVER feed while `base` may hold
+more, so page two re-delivers rows already present.
 
 **WHAT ACTUALLY BLOCKS THE REAL REMEDY, and what would have to change.** This
 issue's Suggested fix - apply the event instead of re-reading the page - cannot

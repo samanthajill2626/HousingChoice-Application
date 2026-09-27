@@ -6,8 +6,12 @@
 //
 // PII: the payload carries IDs only (provider SID + conversation), never the
 // message body — the handler re-reads body/media from the messages table.
-// Attempt count rides the payload; the handler stamps retry_attempt onto the
-// NEW message so the next 30003 callback can see how deep the chain is.
+// Attempt count rides the payload. The handler passes it into the send with
+// retry_of and the chain's window origin (retry_window_start), so the NEW
+// message carries all three from its append (retry-send-window D6) - the next
+// 30003 callback reads retry_attempt for the cap and retry_window_start for the
+// 15-minute window. The retry follows the ORIGINAL send (D14): its `automated`
+// flag and its recorded recipient.
 import {
   createMessagesRepo,
   mediaAttachmentsOf,
@@ -15,12 +19,22 @@ import {
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
 import {
+  createContactsRepo,
+  type ContactItem,
+  type ContactsRepo,
+} from '../repos/contactsRepo.js';
+import {
   createSendMessageService,
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
+import {
+  oneToOneRetryWindowOrigin,
+  parseRetryWindowOrigin,
+  withinRetrySendWindow,
+} from '../lib/retrySendWindow.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { defineJobHandler, enqueue } from './jobs.js';
 
@@ -69,11 +83,49 @@ export function parseRetrySendPayload(payload: unknown): RetrySendPayload {
   return { providerSid: p.providerSid, conversationId: p.conversationId, attempt: p.attempt };
 }
 
-/** Producer side (status webhook): schedule ONE backed-off retry. */
-export async function enqueueSendRetry(payload: RetrySendPayload): Promise<void> {
-  await enqueue(RETRY_SEND_JOB, payload, {
-    runAt: new Date(Date.now() + retryBackoffMs(payload.attempt)),
-  });
+/**
+ * The lane's one-to-one backoff override (retry-send-window D13). LANE-ONLY:
+ * set in scripts/e2e-session.mjs's childEnv, never in dev or prod, and absent
+ * from every `.env*`. The relay ladder's twin is E2E_RELAY_RETRY_BACKOFF_MS
+ * (relayRetryLeg.ts), and this one takes the SAME two guards.
+ */
+const SEND_RETRY_BACKOFF_ENV_KEY = 'E2E_SEND_RETRY_BACKOFF_MS';
+
+/**
+ * retryBackoffMs(attempt) unless the lane override applies: env
+ * E2E_SEND_RETRY_BACKOFF_MS (positive integer) honored ONLY when
+ * JOBS_QUEUE_URL is unset (the relay seam's guard).
+ *
+ * JOBS_QUEUE_URL IS the topology: every deployed environment sets it
+ * (Terraform's jobs module), and the one-to-one retry is scheduled by the
+ * status webhook in the APP process - so without the guard a stray value in a
+ * deployed environment would reshape every real retry, texting a tenant again
+ * seconds after a failure. The hermetic lane and local dev leave it unset; an
+ * EMPTY value counts as unset. Anything that does not parse to a positive
+ * integer is ignored. Read from `process.env`, not config, on purpose: this is
+ * a leaf on the enqueue path and the queue URL is only tested for presence.
+ * The status webhook computes the retry's run time from this one function, so
+ * the schedule and the promise it writes share the lane's value.
+ */
+export function resolveSendRetryBackoffMs(attempt: number): number {
+  const queueUrl = process.env['JOBS_QUEUE_URL'];
+  if (typeof queueUrl !== 'string' || queueUrl.length === 0) {
+    const parsed = Number.parseInt(process.env[SEND_RETRY_BACKOFF_ENV_KEY] ?? '', 10);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return retryBackoffMs(attempt);
+}
+
+/**
+ * Producer side (status webhook): schedule ONE retry at an explicit run time.
+ * The caller decides `runAt` (now plus the resolved backoff) and writes the
+ * same instant as the failed message's `retry_due_at`, so the promise on
+ * screen and the job's schedule are one value (retry-send-window D7).
+ * `payload.attempt` rides along for the job's cap; it no longer picks the
+ * delay here.
+ */
+export async function enqueueSendRetry(payload: RetrySendPayload, runAt: Date): Promise<void> {
+  await enqueue(RETRY_SEND_JOB, payload, { runAt });
 }
 
 export interface RetrySendJobDeps {
@@ -86,6 +138,14 @@ export interface RetrySendJobDeps {
    * relayFanOut's mediaStore dep.
    */
   mediaStore?: MediaStore;
+  /**
+   * retry-send-window D14: reads the recipient the original was fenced to
+   * (`recipient_contact_id`), by id, BEFORE the execution marker. Built lazily,
+   * and only when a row records a recipient.
+   */
+  contactsRepo?: ContactsRepo;
+  /** The D4 window check's clock (tests pin it); Date.now by default. */
+  now?: () => number;
   logger?: Logger;
 }
 
@@ -95,6 +155,8 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
   // Lazy: repos/services touch config + DynamoDB only on first job run.
   let sendMessage = deps.sendMessage;
   let messages = deps.messagesRepo;
+  let contacts = deps.contactsRepo;
+  const now = deps.now ?? Date.now;
   // MediaStore can legitimately resolve to undefined (no MEDIA_BUCKET), so a
   // separate init flag drives the lazy build (not `??=`, which would rebuild).
   let mediaStore = deps.mediaStore;
@@ -117,6 +179,25 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     if (original.direction !== 'outbound') {
       log.warn({ providerSid: payload.providerSid }, 'retrySend: original message is not outbound — refusing');
       return;
+    }
+
+    // retry-send-window D14: the retry is judged against the contact the
+    // original was fenced to (share-skip-fix I8), read by id BEFORE the
+    // execution marker - a read that throws fails this delivery and SQS
+    // redelivers it, instead of dropping the retry behind a marker. A recorded
+    // recipient that no longer exists falls back to the phone-matched contact,
+    // and sendMessage judges it only while it still holds the thread's number.
+    const recipientContactId = original.recipient_contact_id;
+    let recipient: ContactItem | undefined;
+    if (typeof recipientContactId === 'string' && recipientContactId.length > 0) {
+      contacts ??= createContactsRepo({ logger: deps.logger });
+      recipient = await contacts.getById(recipientContactId);
+      if (recipient === undefined) {
+        log.warn(
+          { providerSid: payload.providerSid, conversationId: payload.conversationId, recipientContactId },
+          'retrySend: recorded recipient no longer exists - retrying to the phone-matched contact',
+        );
+      }
     }
 
     // Execution guard (M1.2): SQS is at-least-once — a DeleteMessage
@@ -143,6 +224,34 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
         { providerSid: payload.providerSid },
         'retrySend: no jobId in context — duplicate-delivery guard skipped',
       );
+    }
+
+    // retry-send-window D4: the strict window check, right before the send and
+    // AFTER the execution marker (a redelivery of a job that ended here ends at
+    // the marker). The grace was spent when the webhook scheduled this retry
+    // (D3a), so nothing may go out past origin + 15 minutes. The origin is the
+    // chain's FIRST send (D2): retry_window_start on a retry row, else this
+    // row's own provider_ts - the rule the 30003 decision reads too, one copy
+    // in lib/retrySendWindow.ts. A missing or unparseable origin fails OPEN
+    // (D5): the retry goes out unwindowed, with a WARN naming the gap.
+    const windowStart = oneToOneRetryWindowOrigin(original);
+    const originMs = parseRetryWindowOrigin(windowStart);
+    if (originMs === undefined) {
+      log.warn(
+        { providerSid: payload.providerSid, conversationId: payload.conversationId, attempt: payload.attempt },
+        'retrySend: no usable window origin - sending without a window check (fail open)',
+      );
+    } else if (!withinRetrySendWindow({ originMs, nowMs: now() })) {
+      log.error(
+        {
+          providerSid: payload.providerSid,
+          conversationId: payload.conversationId,
+          attempt: payload.attempt,
+          retryDecision: 'window_closed',
+        },
+        'retrySend: retry window closed - retry chain ended without sending',
+      );
+      return;
     }
 
     // PRESIGN PER ATTEMPT (design Sec 5 - the Cameron rule): a retry is a NEW
@@ -193,17 +302,29 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
 
     let outcome;
     try {
-      // automated: true on purpose — retries are machine-initiated and
-      // breaker-metered by design (a retry storm must trip the breaker).
+      // retry-send-window D14: the retry FOLLOWS THE ORIGINAL SEND. An automated
+      // original (a reminder, the missed-call text, an automated share) is
+      // retried automated and breaker-metered - a retry storm must still trip
+      // the breaker. A person's original is retried as a person's send: manual
+      // mode and the breaker do not apply, the consent gate does. A row with no
+      // `automated` (sent before this deploy) is retried automated, as before.
       // The retried message keeps the ORIGINAL author (the retry is the same
       // logical message, not a new teammate action).
+      //
+      // D6: the lineage rides the APPEND - retry_of, retry_attempt and the
+      // chain's window origin - so the next 30003 callback reads it from the
+      // new row with no annotate-after race.
       outcome = await sendMessage({
         conversationId: payload.conversationId,
         ...(original.body !== undefined && { body: original.body }),
         ...(retryMediaUrls !== undefined && { mediaUrls: retryMediaUrls }),
         ...(retryAttachments !== undefined && { attachments: retryAttachments }),
-        automated: true,
+        automated: original.automated ?? true,
         author: original.author === 'ai' ? 'ai' : 'teammate',
+        ...(recipient !== undefined && { recipient }),
+        retryOf: original.tsMsgId,
+        retryAttempt: payload.attempt,
+        ...(typeof windowStart === 'string' && { retryWindowStart: windowStart }),
       });
     } catch (err) {
       if (err instanceof SendRefusedError) {
@@ -218,15 +339,6 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
       throw err;
     }
 
-    // Lineage: the new message records what it retried and how deep the
-    // chain is — the next 30003 callback reads retry_attempt for the cap.
-    // Accepted risk: if this annotate loses the race to the NEXT 30003
-    // callback for the new SID, that callback sees no retry_attempt and the
-    // chain counter resets — the 60s+ backoff makes that window unrealistic.
-    await messages.annotateMessage(payload.conversationId, outcome.tsMsgId, {
-      retryOf: original.tsMsgId,
-      retryAttempt: payload.attempt,
-    });
     log.info(
       {
         conversationId: payload.conversationId,

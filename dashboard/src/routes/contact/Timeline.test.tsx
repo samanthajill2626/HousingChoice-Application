@@ -928,6 +928,25 @@ describe('Timeline', () => {
     expect(alert).toHaveTextContent('Sending too fast — wait a moment and try again.');
   });
 
+  it('retry-send-window D10: a 409 retry_pending on the manual Retry reads its own sentence, never the generic line', async () => {
+    // A stale tab: the bubble never learned of the scheduled retry, so it still
+    // offers Retry, and the server refuses the press while the retry is pending.
+    const failed: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail',
+      tsMsgId: 'm-fail',
+      delivery_status: 'undelivered',
+      error_code: '30003',
+      body: 'This one failed',
+    };
+    const onRetry = vi.fn().mockRejectedValue(new ApiError(409, 'retry_pending', 'retry_pending'));
+    renderTimeline({ items: [failed], onRetry });
+    fireEvent.click(screen.getByRole('button', { name: /Retry sending/i }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('A retry is already scheduled for this message.');
+    expect(alert).not.toHaveTextContent(/Couldn't send/);
+  });
+
   it('hides a failed message that a delivered retry superseded (retry_of), keeping only the retry', () => {
     const failed: TimelineItem = {
       ...MESSAGE_OUT,

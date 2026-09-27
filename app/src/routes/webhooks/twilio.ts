@@ -76,6 +76,7 @@ import {
   type DeliveryStatus,
   type MediaAttachment,
   type MessagesRepo,
+  type RelayRecipientDelivery,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
@@ -116,10 +117,11 @@ import { capPushText, PUSH_BODY_MAX, PUSH_TITLE_MAX } from '../../lib/pushText.j
 import { contactDisplayName } from '../../lib/contactName.js';
 import { groupThreadLabel, relayThreadLabel } from '../../lib/groupTitle.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
+import { enqueueSendRetry } from '../../jobs/retrySend.js';
 import {
-  enqueueSendRetry,
-  MAX_SEND_RETRY_ATTEMPTS,
-} from '../../jobs/retrySend.js';
+  decideOneToOneRetry,
+  type OneToOneRetryDecision,
+} from '../../services/oneToOneRetryDecision.js';
 import { enqueueImmediate } from '../../jobs/jobs.js';
 import {
   enqueueMediaMirror,
@@ -136,13 +138,20 @@ import {
   type RelayLegPayload,
   type RelayTransportMode,
 } from '../../jobs/relayFanOut.js';
-import { enqueueRelayRetryLeg } from '../../jobs/relayRetryLeg.js';
+import { enqueueRelayRetryLeg, resolveRelayRetryBackoff } from '../../jobs/relayRetryLeg.js';
 import {
   MAX_RELAY_RETRY_ATTEMPTS,
   relayRetryDigest,
   relayRetryProviderSid,
   type RelayRetryClaimOutcome,
 } from '../../lib/relayRetryClaim.js';
+import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../../lib/relayRetryGates.js';
+import {
+  parseRetryWindowOrigin,
+  RETRY_PROMISE_WITHDRAWN_AT,
+  RETRY_WINDOW_CLOSED_CODE,
+  retryFitsSendWindow,
+} from '../../lib/retrySendWindow.js';
 import { resolveMessage } from '../../messages/index.js';
 
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
@@ -314,39 +323,48 @@ const STATUS_UNKNOWN_SID_RETRY_DELAY_MS = 2_500;
 
 // --- Delivery-failure severity taxonomy --------------------------------------
 // Policy: a message that ends UNDELIVERED and won't be retried is a TERMINAL
-// failure → log at ERROR (it degraded a real send, is operator-actionable, and
+// failure - log at ERROR (it degraded a real send, is operator-actionable, and
 // feeds the hc-<env>-error-logs alarm + the Recent Errors panel). Two carve-outs
-// stay WARN: a transient code we're still auto-retrying (not yet terminal), and a
-// provider-side opt-out (21610 = correctly honoring STOP — the platform working,
-// not a failure). See docs/GLOSSARY / the error-vs-warn decision rule.
+// keep the per-callback `delivery_failed` marker at WARN: 30003 (handset
+// unreachable, the one code with an automatic retry) and a provider-side opt-out
+// (21610 = correctly honoring STOP - the platform working, not a failure). See
+// docs/GLOSSARY / the error-vs-warn decision rule.
 //
-// READ THIS BEFORE TRUSTING THE 30003 CARVE-OUT. "still auto-retrying" is a
-// claim about the path the leg is on, and it is NOT true on every path:
+// THE 30003 CARVE-OUT GOVERNS THE MARKER, NOT A PROMISE (retry-send-window D9).
+// The marker stays WARN on every 30003, retried or not, so no alarm threshold
+// moves. Whether a retry will actually be attempted is decided per message and
+// logged on a line of its own:
 //
-//   - NATIVE GROUP TEXT: the 30003 arm below enqueues messaging.retrySend, whose
-//     handler goes through sendMessage, which REFUSES a group_text conversation
-//     outright (GroupTextSendNotSupportedError, services/sendMessage.ts:298-300).
-//     The retry is enqueued and never sends, so the WARN records a promise the
-//     repo already disproves. Tracked, unverified end to end, in
-//     docs/issues/group-text-30003-leg-retry-promise-unverified.md - which is
-//     where a fix belongs; do not "fix" it by widening this set.
-//   - RELAY: this set no longer decides relay severity at all. The relay branch
-//     reads isTerminalRelayLegFailure below, which is attempt-aware - WARN while
-//     a rung is actually claimed or the leg's own slot is already SETTLED on
-//     some other end state (slot_settled), ERROR once the ladder is a real dead
-//     end - including the internal anomaly where the slot is missing or was
-//     never written (slot_ineligible).
+//   - ONE-TO-ONE: decideOneToOneRetry (services/oneToOneRetryDecision.ts) runs
+//     BEFORE the status write (D3a), and a retry verdict rides that same
+//     conditional write as retry_due_at (D7), so the screen never sees the
+//     failure without its decision. The 30003 arm below logs the verdict once,
+//     on the transition: a dead end (retries exhausted, the 15-minute send
+//     window closed) is its own ERROR line; a retry the send path would
+//     refuse right now (kill switch, opt-out, a deleted recipient, manual mode
+//     for an automated original, no consent for a person's original), a native
+//     group text, a thread that is not a one-to-one SMS thread and a missing
+//     conversation row are WARN.
+//   - NATIVE GROUP TEXT: no retry exists (D11). The decision refuses to
+//     schedule one for a `group_text` conversation, and sendMessage refuses the
+//     send anyway (GroupTextSendNotSupportedError) should a failed read let one
+//     through. Whether a classic callback reaches this path for a group leg at
+//     all is unverified live behavior (services/groupReceipts.ts:3-10).
+//   - RELAY: this set does not decide relay severity at all. The relay branch
+//     reads isTerminalRelayLegFailure below, which is attempt-aware; its own
+//     comment names which claim outcomes stay WARN.
 //
-// The set's VALUES are unchanged, and the 1:1 path they still govern is the one
-// path where the promise holds.
+// The set's VALUES are unchanged.
 const TRANSIENT_RETRYING_DELIVERY_CODES = new Set(['30003']);
 const EXPECTED_NONFAILURE_DELIVERY_CODES = new Set(['21610']);
 
 /**
  * True when an undelivered/failed delivery callback is a TERMINAL, operator-
- * actionable failure (→ log at ERROR). False for a transient code we auto-retry
- * (30003) or a provider-side opt-out (21610), which stay WARN. A failure with no
- * code, or any unrecognized code, is treated as terminal (fail loud, not silent).
+ * actionable failure (log at ERROR). False for 30003, the one code with an
+ * automatic retry, whose per-callback marker stays WARN whether or not a retry
+ * is attempted (retry-send-window D9: the retry decision logs its own line),
+ * and for a provider-side opt-out (21610). A failure with no code, or any
+ * unrecognized code, is treated as terminal (fail loud, not silent).
  */
 export function isTerminalDeliveryFailure(errorCode: string | undefined): boolean {
   if (errorCode !== undefined && EXPECTED_NONFAILURE_DELIVERY_CODES.has(errorCode)) return false;
@@ -389,6 +407,14 @@ interface RelayRetryClaimResult {
   outcome: RelayRetryClaimOutcome;
   /** The 1-based rung, present only where a retry ROW exists for it. */
   attempt?: number;
+  /**
+   * retry-send-window D3: the code a declined rung was APPENDED with (a gate
+   * code, or `retry_window_closed` - RETRY_WINDOW_CLOSED_CODE) - set on exactly
+   * `gate_refused` and `window_closed`, the two claim-time declines. The
+   * failure marker carries it, as the enqueue-failure line carries the code
+   * its close wrote.
+   */
+  closeCode?: RelayRetryGateCode | typeof RETRY_WINDOW_CLOSED_CODE;
 }
 
 /**
@@ -396,7 +422,7 @@ interface RelayRetryClaimResult {
  * shared carve-outs rather than instead of them. A relay leg logs WARN while a
  * retry is actually claimed and ERROR once the chain is a real dead end.
  *
- * Four properties are load-bearing and none is obvious:
+ * Five properties are load-bearing and none is obvious:
  *
  *   - 21610 keeps its carve-out. A purely attempt-aware rule would alarm on the
  *     platform correctly honoring STOP, which is a strictly larger increase than
@@ -420,12 +446,21 @@ interface RelayRetryClaimResult {
  *     whose write was refused and still reads `sent` - two internal anomalies
  *     on a leg that DID end terminally on 30003, silenced on a brand-new alarm.
  *     They are a separate outcome now and they ERROR.
+ *   - `gate_refused` stays WARN (retry-send-window spec D3, by Cameron's Q1
+ *     ruling of 2026-09-24). The claim now previews the retry job's four gates
+ *     and, when one would refuse, appends the rung already closed with that
+ *     gate's code. A closed group, a removed member, a changed number and an
+ *     opt-out are deliberate human actions, not faults - the job's own refusal
+ *     of the same rung has logged WARN since that ruling, and the claim seeing
+ *     it sooner must not turn it into an alarm.
  *   - Every OTHER terminal 30003 on a fan-out or team leg is ERROR, whether the
- *     ladder ran to its cap, was refused at a gate, or was never claimed at all
- *     (`to_missing`, `to_malformed`, `source_unreadable`, `slot_ineligible`,
- *     `enqueue_failed`, `claim_failed`). What matters is the PRODUCT the leg
- *     belongs to, not whether the ladder happened to start - that whole set is
- *     what was approved.
+ *     ladder ran to its cap, could not go out inside the 15-minute send window
+ *     (`window_closed`, retry-send-window D9 - the member never got the text, a
+ *     dead end like the cap), or was never claimed at all (`to_missing`,
+ *     `to_malformed`, `source_unreadable`, `slot_ineligible`, `enqueue_failed`,
+ *     `claim_failed`). What matters is the PRODUCT the leg belongs to, not
+ *     whether the ladder happened to start - that whole set is what was
+ *     approved.
  *
  * This function is the relay branch's ONLY severity reader; the shared set above
  * still decides the 1:1 and native-group-text paths, which are fenced.
@@ -440,7 +475,8 @@ function isTerminalRelayLegFailure(
     claim !== 'claimed' &&
     claim !== 'already_claimed' &&
     claim !== 'fenced_announcement' &&
-    claim !== 'slot_settled'
+    claim !== 'slot_settled' &&
+    claim !== 'gate_refused'
   );
 }
 
@@ -2667,6 +2703,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
      * atomic claim - a duplicate, redelivered or concurrent callback loses that
      * create and claims nothing.
      *
+     * It also DECIDES, before the rung exists, whether the rung will be
+     * attempted (retry-send-window spec D3): the retry job's four gates are
+     * previewed through the job's own evaluator, then the 15-minute send window
+     * is checked, and a rung that either check refuses is APPENDED already
+     * CLOSED - in that same single write - and never enqueued, so the leg
+     * shows at once whether a retry is coming.
+     *
      * THIS FUNCTION NEVER RETURNS OUT OF ITS CALLER. It reports an outcome and
      * control always falls through to the handler's tail, because that tail
      * carries three things a claim must not skip: the delivery-failure marker,
@@ -2778,6 +2821,118 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // mid-ladder must not change the wording of what is being retried.
             src.relay_retry_leg_body
           : await composeRelayLegCopy(ptr.conversationId, senderKey, rawBody, sourceMedia.length);
+
+      // 7a. Decide NOW whether rung N will be attempted (retry-send-window spec
+      // D3), so the leg shows at once whether a retry is coming - never
+      // "Retrying" for the 1 to 4 minutes before the job refuses a rung the
+      // claim could already see was doomed. The decision is known BEFORE the
+      // append, so it is recorded IN the append: a declined rung is written
+      // already closed, ONE data shape (the one a job-time refusal already
+      // leaves), and the append's SID dedupe still answers a duplicate callback
+      // with no separate lookup. The member's slot on the ROOT is never touched.
+      //
+      // First the job's four gates, in the job's own order (group open, on the
+      // roster, number unchanged, not opted out), through the SAME evaluator
+      // the job runs, so "that gate's code" is deterministic when two apply.
+      // The job still re-runs every gate at send time: a group can close during
+      // the backoff.
+      // The gate preview FAILS OPEN (planner review): Twilio does not redeliver
+      // a 5xx status callback by default (its retry policy is `ct` - connection
+      // failures only), so a claim that threw here would lose this leg's retry
+      // for good. The preview is only an early answer - the retry job re-runs
+      // every gate at send time - so a failed read claims the rung open, as the
+      // one-to-one decision fails open.
+      let gate: Awaited<ReturnType<typeof evaluateRelayRetryGates>> | undefined;
+      try {
+        const conversation = await conversations.getById(ptr.conversationId);
+        gate = await evaluateRelayRetryGates({
+          conversation,
+          memberKey: ptr.memberKey,
+          rootTsMsgId,
+          destDigest,
+          isSuppressed: (member) => isMemberSuppressed(contacts, conversations, member),
+        });
+      } catch (err) {
+        log.warn(
+          {
+            err,
+            conversationId: ptr.conversationId,
+            rootTsMsgId,
+            attempt,
+            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
+          },
+          'relay retry claim: gate preview read failed - the gates are skipped here; the retry job re-checks every gate (fail open)',
+        );
+      }
+      // D2: where this ladder's window started. Step 6 fell back to
+      // `ptr.tsMsgId` for the root key exactly when this callback is for the
+      // ROOT's own leg - rung 1 - whose origin is that member slot's `sentAt`:
+      // the leg's real send time (Twilio's dateCreated), never the root row's
+      // timestamp, which is receipt or compose time and, for a message held
+      // while a group connects, can precede the send by a long time. Rungs 2-3
+      // are claimed off the previous RETRY row and copy the origin it carries -
+      // never re-derived from that row's own slot, which would restart the
+      // window on every rung.
+      const onRootLeg = rootTsMsgId === ptr.tsMsgId;
+      const originRaw: unknown = onRootLeg ? slot.sentAt : src.relay_retry_window_start;
+      const originMs = parseRetryWindowOrigin(originRaw);
+      let decline: RelayRetryGateCode | typeof RETRY_WINDOW_CLOSED_CODE | undefined;
+      let originGap: 'missing' | 'unparseable' | undefined;
+      if (gate !== undefined && gate.refused) {
+        decline = gate.code;
+      } else if (originMs === undefined) {
+        // D5: no usable origin fails OPEN - the rung is claimed without a
+        // window check, and a WARN names the gap once the rung exists (below).
+        originGap = originRaw === undefined ? 'missing' : 'unparseable';
+      } else if (
+        !retryFitsSendWindow({
+          originMs,
+          nowMs: Date.now(),
+          // The SAME resolution chain `enqueueRelayRetryLeg` schedules this
+          // rung with, so the check measures the send time the queue honors.
+          backoffMs: resolveRelayRetryBackoff()(attempt),
+        })
+      ) {
+        // Then the window (D1, D3 step 2): now + backoff + RETRY_JOB_GRACE_MS
+        // must still fit inside origin + RETRY_SEND_WINDOW_MS.
+        decline = RETRY_WINDOW_CLOSED_CODE;
+      }
+      // The rung's member slot. An OPEN rung is seeded `queued` for its job,
+      // as always. A DECLINED rung is appended ALREADY CLOSED, with exactly the
+      // slot the job's own pre-send refusal (`refuseGate` in
+      // `jobs/relayRetryLeg.ts`) leaves for that code - in this one write, not
+      // a second one, so no open rung ever exists to be stranded or to be read
+      // as "Retrying" by a refetch. The refusal's writers touch nothing but
+      // this slot (`setRecipientTransportAggregationState`,
+      // `applyRecipientSendResult`, `setRecipientDelivery` in
+      // `repos/messagesRepo.ts`), so every other field of the rung - its
+      // row-level `delivery_status` included - is the same either way; and
+      // `append`'s shape check covers transport fields only, so it accepts a
+      // closed slot.
+      let rungSlot: RelayRecipientDelivery;
+      if (decline === undefined) {
+        rungSlot = versioned
+          ? {
+              status: 'queued',
+              ...(requestedTransport !== undefined && { requestedTransport }),
+              // `attempted` is reachable ONLY from `planned`, so a slot seeded
+              // without it throws on the first retry send.
+              transportAggregationState: 'planned',
+            }
+          : { status: 'queued' };
+      } else if (versioned) {
+        // The versioned refusal's two writes - aggregation `excluded`, then
+        // the failed slot with the code - folded into the one.
+        rungSlot = {
+          status: 'failed',
+          ...(requestedTransport !== undefined && { requestedTransport }),
+          transportAggregationState: 'excluded',
+          errorCode: decline,
+        };
+      } else {
+        // `markRecipient`'s whole-slot write: nothing else survives in it.
+        rungSlot = { status: 'failed', errorCode: decline };
+      }
       const appended = await messages.append({
         conversationId: ptr.conversationId,
         providerSid,
@@ -2799,17 +2954,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         // inbound prohibition is on the MESSAGE's requestedTransport, never on
         // the SLOT's, which is permitted and required.
         ...(versioned && { transportSchemaVersion: TRANSPORT_SCHEMA_VERSION }),
-        deliveryRecipients: {
-          [ptr.memberKey]: versioned
-            ? {
-                status: 'queued' as const,
-                ...(requestedTransport !== undefined && { requestedTransport }),
-                // `attempted` is reachable ONLY from `planned`, so a slot seeded
-                // without it throws on the first retry send.
-                transportAggregationState: 'planned' as const,
-              }
-            : { status: 'queued' as const },
-        },
+        // The member slot step 7a decided: open for its job, or - for a
+        // decline - already closed, in this same write.
+        deliveryRecipients: { [ptr.memberKey]: rungSlot },
         // The RAW body on the row, the composed leg copy beside it (D12): the row
         // body is what is persisted, previewed and inherited by the inbox
         // preview, while the sender prefix belongs to the outbound LEG only.
@@ -2824,19 +2971,69 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         relayRetryOriginDirection:
           src.relay_retry_origin_direction ?? (src.direction === 'inbound' ? 'inbound' : 'outbound'),
         relayRetryLegBody: legBody,
+        // retry-send-window D2: the ladder's window origin, carried on every
+        // rung so rungs 2-3 measure from the member's ORIGINAL leg send.
+        // Normalized to ISO; absent when there is no usable origin (D5).
+        ...(originMs !== undefined && {
+          relayRetryWindowStart: new Date(originMs).toISOString(),
+        }),
         // DELIBERATELY no `retryOf`: stamping it would add the ORIGINAL to the
         // timeline's supersededIds and DELETE the bubble this retry is meant to
         // render beside - the display contract, inverted.
       });
       if (appended.deduped) {
-        // A sibling callback won the create. The ladder is running; claim nothing
-        // further and do not re-emit for it.
+        // A sibling callback won the create. The ladder is running - or its
+        // rung was already appended CLOSED - so claim nothing further and do
+        // not re-emit for it. The dedupe also means THIS callback wrote
+        // nothing, whatever its own preview decided (retry-send-window D3): a
+        // duplicate can never close a rung an earlier callback opened, nor
+        // open one it closed.
         return { outcome: 'already_claimed', attempt };
+      }
+      const retryTsMsgId = appended.tsMsgId;
+      if (originGap !== undefined) {
+        // D5, logged only for a rung THIS claim created (a duplicate returned
+        // above), so a redelivered callback does not repeat it.
+        log.warn(
+          {
+            conversationId: ptr.conversationId,
+            retryTsMsgId,
+            rootTsMsgId,
+            attempt,
+            memberKey: logSafeStoredRelayMemberKey(ptr.memberKey),
+            windowOrigin: originGap,
+            originField: onRootLeg ? 'sentAt' : 'relay_retry_window_start',
+          },
+          'relay retry claim: no usable send-window origin - rung claimed without a window check (spec D5)',
+        );
+      }
+      /** Step 9's emit, shared by both exits below (see step 9). */
+      const announceRootClaim = (): void => {
+        events.emit('message.persisted', {
+          conversationId: ptr.conversationId,
+          tsMsgId: rootTsMsgId,
+          direction: 'inbound',
+          deliveryStatus: mapped,
+        });
+      };
+
+      if (decline !== undefined) {
+        // 8a. A DECLINED rung (retry-send-window D3). The append above wrote it
+        // already CLOSED, in the one transaction that IS the claim, so there is
+        // nothing to enqueue and nothing left to close. The dashboard join
+        // renders it exactly as a rung the job refused: a gate code reads "Not
+        // retried - ...", and `retry_window_closed` leaves the original's 30003
+        // standing. Step 9's SSE fires after that one write.
+        announceRootClaim();
+        return {
+          outcome: decline === RETRY_WINDOW_CLOSED_CODE ? 'window_closed' : 'gate_refused',
+          attempt,
+          closeCode: decline,
+        };
       }
 
       // 8. Hand the rung to the queue. The claim defeats duplicate CALLBACKS;
       // the job's own execution marker defeats duplicate DELIVERIES.
-      const retryTsMsgId = appended.tsMsgId;
       let outcome: RelayRetryClaimOutcome = 'claimed';
       try {
         await enqueueRelayRetryLeg(
@@ -2897,12 +3094,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // addresses the ROOT (adjudication S4): the existing emit below carries
       // `ptr.tsMsgId`, which on rungs 2-3 is a retry row, and does not fire at
       // all in the crash-recovery case where nothing transitioned.
-      events.emit('message.persisted', {
-        conversationId: ptr.conversationId,
-        tsMsgId: rootTsMsgId,
-        direction: 'inbound',
-        deliveryStatus: mapped,
-      });
+      announceRootClaim();
       return { outcome, attempt };
     };
 
@@ -3076,6 +3268,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           // 30003" with the internal fault the one nobody expects.
           retryClaim: retryClaim.outcome,
           ...(retryClaim.attempt !== undefined && { retryAttempt: retryClaim.attempt }),
+          // retry-send-window D3: the code a declined rung was appended with -
+          // present on `gate_refused` and `window_closed` only.
+          ...(retryClaim.closeCode !== undefined && { closeCode: retryClaim.closeCode }),
         };
         // The three INTERNAL ANOMALIES take their own message rather than the
         // shared carrier-shaped one, so each alarm names its own cause instead
@@ -3248,7 +3443,28 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }),
       authenticatedProviderTraffic: true,
     });
-    const transitioned = await messages.updateDeliveryStatus(MessageSid, mappedStatus, ErrorCode);
+    // retry-send-window D3a/D7: a 30003 FAILURE decides NOW - before the status
+    // write - whether a retry will be attempted, and a retry verdict rides the
+    // SAME conditional write as retry_due_at (= the retry's run time), so the
+    // failure and its promise become visible together, in the transition's one
+    // SSE below. Only a failed/undelivered callback carrying 30003 decides; the
+    // verdict is logged and acted on in the 30003 arm, only on the transition.
+    const oneToOneRetry: OneToOneRetryDecision | undefined =
+      (mappedStatus === 'undelivered' || mappedStatus === 'failed') && ErrorCode === '30003'
+        ? await decideOneToOneRetry({
+            message,
+            conversations,
+            contacts,
+            smsSendingEnabled: config.smsSendingEnabled,
+            nowMs: Date.now(),
+          })
+        : undefined;
+    const transitioned = await messages.updateDeliveryStatus(
+      MessageSid,
+      mappedStatus,
+      ErrorCode,
+      oneToOneRetry?.kind === 'retry' ? { retryDueAt: oneToOneRetry.runAt.toISOString() } : undefined,
+    );
     const transportOutcome =
       transportEvidence.kind === 'observed'
         ? await messages.setMessageActualTransport(
@@ -3269,13 +3485,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       'twilio delivery status callback processed',
     );
 
-    // Delivery-failure marker (doc §9 "Send failures / delivery errors"): a
-    // callback that resolves to undelivered/failed is a countable failed
-    // delivery. Severity follows the taxonomy — a TERMINAL failure is an ERROR
-    // (feeds the error-logs alarm + Recent Errors panel); a transient-retrying /
-    // opt-out (21610) callback stays WARN. The `event` field is unchanged, so the
-    // DeliveryFailures count metric (keyed on `event`, not level) is unaffected.
-    // IDs/codes only, never the body (PII).
+    // Delivery-failure marker (doc section 9 "Send failures / delivery errors"):
+    // a callback that resolves to undelivered/failed is a countable failed
+    // delivery. Severity follows the taxonomy above - a TERMINAL failure is an
+    // ERROR (feeds the error-logs alarm + Recent Errors panel); a 30003 (retried
+    // or not - the retry decision logs its own line, retry-send-window D9) or a
+    // provider-side opt-out (21610) stays WARN. The `event` field is unchanged,
+    // so the DeliveryFailures count metric (keyed on `event`, not level) is
+    // unaffected. IDs/codes only, never the body (PII).
     if (mappedStatus === 'undelivered' || mappedStatus === 'failed') {
       const failure = {
         event: 'delivery_failed',
@@ -3348,10 +3565,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       try {
         switch (ErrorCode) {
           case '30003': {
-            // Transient (handset unreachable): ONE scheduled retry with
-            // backoff, capped chain (attempt count rides the job payload).
+            // Transient (handset unreachable). retry-send-window D3a/D9: WHETHER
+            // to retry was decided above, BEFORE the status write, and a retry
+            // verdict rode that write as retry_due_at (D7). This arm runs only on
+            // the transition, so a redelivered callback logs and enqueues
+            // nothing twice. A non-failure status carrying 30003 decided nothing.
+            if (oneToOneRetry === undefined) break;
             const priorAttempt = message.retry_attempt ?? 0;
-            if (priorAttempt >= MAX_SEND_RETRY_ATTEMPTS) {
+            if (oneToOneRetry.kind === 'decline' && oneToOneRetry.reason === 'cap_exhausted') {
               // Retries exhausted → the transient failure is now TERMINAL, so it
               // graduates to an error (the delivery_failed marker above logged
               // this callback at warn, as 30003 is in the transient set).
@@ -3361,11 +3582,80 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
               );
               break;
             }
-            await enqueueSendRetry({
+            if (oneToOneRetry.kind === 'decline') {
+              // D9: a closed window is a dead end and is ERROR; a retry the send
+              // path would refuse now, a native group text (D11), a thread that
+              // is not one-to-one SMS, or a missing conversation (the level it
+              // logs at today) is WARN. Nothing was stamped, so the bubble shows
+              // the plain failure and its Retry.
+              const declined = {
+                providerSid: MessageSid,
+                errorCode: ErrorCode,
+                attempt: priorAttempt + 1,
+                retryDecision: oneToOneRetry.reason,
+              };
+              const declinedMsg = `one-to-one 30003 retry not scheduled: ${oneToOneRetry.reason}`;
+              if (oneToOneRetry.level === 'error') log.error(declined, declinedMsg);
+              else log.warn(declined, declinedMsg);
+              break;
+            }
+            const scheduled = {
               providerSid: MessageSid,
-              conversationId: message.conversationId,
-              attempt: priorAttempt + 1,
-            });
+              errorCode: ErrorCode,
+              attempt: oneToOneRetry.attempt,
+              runAt: oneToOneRetry.runAt.toISOString(),
+            };
+            // D3a/D5: a failed read or a missing/unparseable origin FAILS OPEN -
+            // the retry is attempted (and promised) anyway; say which gap it
+            // crossed.
+            if (oneToOneRetry.failOpen === 'read_failed') {
+              log.warn(
+                { ...scheduled, failOpen: 'read_failed', err: oneToOneRetry.readError },
+                'one-to-one 30003 retry scheduled without its checks: a conversation or contact read failed (fail open)',
+              );
+            } else if (oneToOneRetry.failOpen === 'no_origin') {
+              log.warn(
+                { ...scheduled, failOpen: 'no_origin' },
+                'one-to-one 30003 retry scheduled without a window check: the message has no usable send time (fail open)',
+              );
+            }
+            try {
+              // Enqueued at EXACTLY the run time the stamp promised.
+              await enqueueSendRetry(
+                {
+                  providerSid: MessageSid,
+                  conversationId: message.conversationId,
+                  attempt: oneToOneRetry.attempt,
+                },
+                oneToOneRetry.runAt,
+              );
+            } catch (enqueueErr) {
+              // D7: a promise with no retry behind it is withdrawn AT ONCE -
+              // retry_due_at is rewritten to an already-expired instant and the
+              // row is re-emitted, so the bubble drops "will retry" and shows
+              // its Retry button. The enqueue failure itself rethrows to the
+              // arm's catch below, which logs today's ERROR (D9).
+              try {
+                await messages.annotateMessage(message.conversationId, message.tsMsgId, {
+                  retryDueAt: RETRY_PROMISE_WITHDRAWN_AT,
+                });
+                events.emit('message.persisted', {
+                  conversationId: message.conversationId,
+                  tsMsgId: message.tsMsgId,
+                  direction: message.direction,
+                  deliveryStatus: mappedStatus,
+                });
+              } catch (withdrawErr) {
+                // Spec section 9: the promise then stands until it expires (at
+                // most the backoff plus RETRY_PROMISE_GRACE_MS).
+                log.error(
+                  { err: withdrawErr, providerSid: MessageSid },
+                  'one-to-one 30003 retry promise NOT withdrawn after a failed enqueue - it stands until it expires',
+                );
+              }
+              throw enqueueErr;
+            }
+            log.info(scheduled, 'one-to-one 30003 retry scheduled');
             break;
           }
           case '30005':
@@ -3419,14 +3709,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
               break;
             }
             const conversation = await conversations.getById(message.conversationId);
-            // NATIVE GROUP TEXTS ARE REACHABLE HERE. A classic status callback
-            // for a group leg in the pre-marker window resolves to the GROUP
-            // thread, which carries NO participant_phone - so the lookup below
-            // finds no contact and the whole case degrades to a log line. That
-            // outcome is CORRECT (there is no single member to flag: a group
-            // failure says nothing about any one number), but it is a distinct
-            // situation from "we have a number and no contact record", so it
-            // says so and logs ONCE per sid instead of on every redelivery.
+            // NATIVE GROUP TEXTS MAY REACH THIS ARM - UNVERIFIED (retry-send-window
+            // D11). Classic status callbacks were proven NOT to fire for
+            // Conversations-originated sends (services/groupReceipts.ts:3-10), and
+            // no build can settle whether a classic callback for a group leg
+            // still lands here live, so the arm is written as if it can. IF one
+            // does, it resolves to the GROUP thread, which carries NO
+            // participant_phone - so there is no member phone to look up: the
+            // branch below breaks before the lookup, and the case degrades to one
+            // log line. That outcome is CORRECT (there is
+            // no single member to flag: a group failure says nothing about any one
+            // number), but it is a distinct situation from "we have a number and
+            // no contact record", so it says so and logs ONCE per sid instead of
+            // on every redelivery.
             if (conversation?.type === 'group_text') {
               logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
                 log.warn(
@@ -3474,9 +3769,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — a 21610 on a SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
-            // NATIVE GROUP TEXTS ARE REACHABLE HERE, exactly as on the
-            // 30005/30006 twin above: a classic status callback for a group leg
-            // resolves to the GROUP thread, which carries no participant_phone.
+            // NATIVE GROUP TEXTS MAY REACH THIS ARM - UNVERIFIED (retry-send-window
+            // D11), exactly as on the 30005/30006 twin above: IF a classic status
+            // callback for a group leg lands here, it resolves to the GROUP
+            // thread, which carries no participant_phone.
             // RULING (invariant 13.8): this arm writes NOTHING for a group
             // thread. A 21610 on a group leg is per-RECIPIENT information that
             // the classic callback does not carry, so there is no number to

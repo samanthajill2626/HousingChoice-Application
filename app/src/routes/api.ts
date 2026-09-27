@@ -40,6 +40,7 @@ import {
 } from '../lib/outboundMediaLimits.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { normalizeEmailAddress } from '../lib/email.js';
+import { isRetryPromiseLive } from '../lib/retrySendWindow.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
   appEvents,
@@ -1593,6 +1594,37 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.status(409).json({ error: 'not_failed' });
       return;
     }
+    // retry-send-window D10: while an automatic 30003 retry is scheduled for
+    // this message - its promise, retry_due_at plus RETRY_PROMISE_GRACE_MS, is
+    // still ahead on THIS server's clock - a manual Retry would text the member
+    // twice. Refuse it; the dashboard hides the button over the same window (it
+    // re-judges it on a 60-second ticker, so it can lag this guard by up to one
+    // tick) and maps this code to its own sentence. An expired or withdrawn promise
+    // (RETRY_PROMISE_WITHDRAWN_AT) lets the Retry through; the windows the
+    // time-based guard leaves are filed as
+    // manual-retry-double-send-residual-windows.
+    if (isRetryPromiseLive(original.retry_due_at, Date.now())) {
+      res.status(409).json({ error: 'retry_pending' });
+      return;
+    }
+    // retry-send-window D14: a staff Retry of a property send is judged against
+    // the contact the original was fenced to (share-skip-fix I8), read by id; a
+    // recorded recipient that no longer exists falls back to the phone-matched
+    // contact, and sendMessage judges it only while it still holds this thread's
+    // number. It stays a person's send (automated: false below) and never
+    // copies the original's retry_window_start: a human chose to send now (D2),
+    // so this row starts a window of its own.
+    const recipientContactId = original.recipient_contact_id;
+    let recipient: ContactItem | undefined;
+    if (typeof recipientContactId === 'string' && recipientContactId.length > 0) {
+      recipient = await contacts.getById(recipientContactId);
+      if (recipient === undefined) {
+        log.warn(
+          { conversationId, providerSid, recipientContactId },
+          'retry: recorded recipient no longer exists - judging the phone-matched contact',
+        );
+      }
+    }
 
     // PRESIGN PER ATTEMPT (design Sec 5 - the Cameron rule): a retry is a NEW
     // provider create + fetch. Presigned URLs are short-lived bearer tokens, so
@@ -1649,6 +1681,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         author: original.author === 'ai' ? 'ai' : 'teammate',
         // Lineage: the new message supersedes the failed one in the timeline.
         retryOf: original.tsMsgId,
+        // retry-send-window D14: the recorded recipient, when it still exists.
+        ...(recipient !== undefined && { recipient }),
       });
       res.status(201).json(outcome);
     } catch (err) {

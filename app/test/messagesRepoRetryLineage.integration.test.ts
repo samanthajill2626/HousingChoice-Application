@@ -240,4 +240,32 @@ describe.skipIf(!reachable)('relay retry lineage against DynamoDB Local', () => 
     expect(row?.transport_schema_version).toBeUndefined();
     expect(row?.delivery_recipients?.[MEMBER]?.transportAggregationState).toBeUndefined();
   });
+
+  // retry-send-window D2/D5: the member's ORIGINAL leg send time rides every
+  // rung as relay_retry_window_start. It is OPTIONAL: a rung claimed before the
+  // field existed has none and must still append (the job then skips the
+  // window check, with a WARN).
+  it('round-trips the carried window origin, and appends a row without it', async () => {
+    const withOrigin = await messages.append(
+      retryRow({
+        providerSid: relayRetryProviderSid(relayRetryDigest(ROOT, '+15558675316'), 2),
+        providerTs: '2026-09-02T10:10:00.000Z',
+        relayRetryAttempt: 2,
+        relayRetryWindowStart: '2026-09-02T10:00:04.000Z',
+      }),
+    );
+    expect((await messages.getByTsMsgId(CONV, withOrigin.tsMsgId))?.relay_retry_window_start).toBe(
+      '2026-09-02T10:00:04.000Z',
+    );
+
+    const without = await messages.append(
+      retryRow({
+        providerSid: relayRetryProviderSid(relayRetryDigest(ROOT, '+15558675317'), 1),
+        providerTs: '2026-09-02T10:11:00.000Z',
+      }),
+    );
+    expect(await messages.getByTsMsgId(CONV, without.tsMsgId)).not.toHaveProperty(
+      'relay_retry_window_start',
+    );
+  });
 });

@@ -31,6 +31,7 @@ import type { MessageTransport } from '../lib/messageTransport.js';
 import type { DeliveryStatus } from '../repos/messagesRepo.js';
 import { normalizeTwilioTransportEvidence } from './twilioMessageTransport.js';
 import { createRedirectingHttpClient } from './twilioHttpClient.js';
+import { SmsSendingDisabledError } from './messagingErrors.js';
 
 export interface SendMessageParams {
   /** Recipient phone, E.164. */
@@ -372,20 +373,10 @@ export class VoiceCapabilityError extends Error {
  */
 export class NumberUnavailableError extends VoiceCapabilityError {}
 
-/**
- * The outbound-SMS kill-switch (A2P) tripped (config.smsSendingEnabled false):
- * the Twilio driver REFUSES to hand a message to Twilio before A2P approval, so
- * a deployed stack can't emit unregistered-A2P traffic (30034) and damage
- * sender reputation. This is the lowest-level BACKSTOP — the send wrapper
- * (services/sendMessage.ts) refuses earlier with a SendRefusedError so the
- * common paths degrade gracefully; this guards any direct-adapter caller.
- */
-export class SmsSendingDisabledError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = new.target.name;
-  }
-}
+// The outbound-SMS kill-switch error (SmsSendingDisabledError) lives in the
+// dependency-free leaf ./messagingErrors.ts, so lib/sendOutcome.ts can name it
+// without importing this adapter; re-exported here for every existing importer.
+export { SmsSendingDisabledError } from './messagingErrors.js';
 
 /**
  * The A2P Messaging Service's phone-number sender pool is full (Twilio error
@@ -539,8 +530,13 @@ interface MessageMediaResource {
  * `send_throttled` marker per throttled send at this single provider-send
  * boundary so the metric counts each occurrence exactly once (no per-path
  * double-logging).
+ *
+ * 20429 is the code twilio-node attaches to a real HTTP 429 (spec D4); the
+ * bare 429 stays for status-only fixtures. A connection that never opened
+ * (ECONNREFUSED and friends) is retryable but is not a throttle: it never
+ * fires the marker.
  */
-const SEND_THROTTLE_CODES = new Set(['429', '30022']);
+const SEND_THROTTLE_CODES = new Set(['429', '20429', '30022']);
 
 /** Best-effort provider error-code extraction (Twilio attaches `code`/`status`). */
 function providerErrorCode(err: unknown): string | undefined {

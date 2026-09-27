@@ -411,6 +411,45 @@ describe('TwilioMessagingDriver', () => {
     expect(capture.lines.some((l) => l['event'] === 'send_throttled')).toBe(false);
   });
 
+  it('fires send_throttled on a real 20429 and not on ECONNREFUSED (spec D4)', async () => {
+    // twilio-node attaches code 20429 to a real HTTP 429 (a RestException with
+    // both fields); a connection that never opened is retryable but is NOT a
+    // throttle, so it must never feed the SendThrottled alarm.
+    const capture = createLogCapture();
+    const driverThrowing = (err: unknown) =>
+      new TwilioMessagingDriver({
+        accountSid: 'AC1',
+        apiKeySid: 'SK1',
+        apiKeySecret: 's',
+        messagingServiceSid: 'MG1',
+        appEnv: 'test',
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+        client: {
+          messages: {
+            create: async () => {
+              throw err;
+            },
+          },
+        } as never,
+      });
+    await expect(
+      driverThrowing(Object.assign(new Error('rate'), { status: 429, code: 20429 })).sendMessage({
+        to: '+15550001111',
+        body: 'x',
+      }),
+    ).rejects.toThrow('rate');
+    await expect(
+      driverThrowing(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })).sendMessage({
+        to: '+15550001111',
+        body: 'x',
+      }),
+    ).rejects.toThrow('refused');
+    const throttled = capture.lines.filter((l) => l['event'] === 'send_throttled');
+    expect(throttled).toHaveLength(1);
+    expect(throttled[0]!['level']).toBe(40);
+    expect(throttled[0]!['errorCode']).toBe('20429');
+  });
+
   it('maps every Twilio status onto the delivery-status machine', () => {
     expect(mapTwilioStatus('accepted')).toBe('queued');
     expect(mapTwilioStatus('queued')).toBe('queued');

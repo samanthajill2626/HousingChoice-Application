@@ -50,6 +50,7 @@ export function StaffNotesCard({
   const stored = typeof value === 'string' ? value : '';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(stored);
+  const [baseline, setBaseline] = useState(stored);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -63,6 +64,7 @@ export function StaffNotesCard({
 
   const startEdit = (): void => {
     setDraft(stored);
+    setBaseline(stored);
     setError(null);
     setEditing(true);
   };
@@ -73,7 +75,8 @@ export function StaffNotesCard({
   const save = async (): Promise<void> => {
     // An unchanged draft is a no-op: no request, back to read mode.
     // Trimmed: the server stores it trimmed, so a whitespace-only edit would re-stamp.
-    if (draft.trim() === stored.trim()) {
+    // vs the text the editor OPENED with: a refetch can move the prop mid-edit; untouched never sends.
+    if (draft.trim() === baseline.trim()) {
       setEditing(false);
       return;
     }

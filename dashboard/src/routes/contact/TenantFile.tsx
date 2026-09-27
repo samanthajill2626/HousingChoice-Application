@@ -252,9 +252,13 @@ export function TenantFile({
 
       {/* Staff notes (item 22): the hand-written box, kept apart from the
           AI-appended "Preferences & notes" below. TENANTS ONLY - this file
-          also serves team_member contacts, who do not get it. */}
+          also serves team_member contacts, who do not get it. Keyed by the
+          contact: the file pane re-renders (never remounts) on a
+          contact-to-contact navigation, so an editor open on tenant A must
+          not carry A's draft - or a Save of it - over to tenant B. */}
       {contact.type === 'tenant' ? (
         <StaffNotesCard
+          key={contact.contactId}
           contactId={contact.contactId}
           value={contact.staff_notes}
           updatedAt={contact.staff_notes_updated_at}

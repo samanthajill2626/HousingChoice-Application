@@ -153,6 +153,39 @@ describe('StaffNotesCard - edit mode', () => {
     expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
   });
 
+  it('an untouched Save after the stored value moved under the open editor sends NO request and returns to read mode', async () => {
+    // The page swaps the contact in the background (a refetch) while the
+    // editor is open: the baseline is the text the editor OPENED with, so a
+    // Save with nothing edited must not write that old text over the new one.
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <StaffNotesCard contactId="c1" value="X" updatedAt={undefined} onContactUpdated={() => {}} />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    rerender(<StaffNotesCard contactId="c1" value="Y" updatedAt={undefined} onContactUpdated={() => {}} />);
+    expect(screen.getByLabelText('Staff notes')).toHaveValue('X');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
+    expect(screen.getByText('Y')).toBeInTheDocument();
+  });
+
+  it('an EDITED draft still saves after the stored value moved under the open editor (last write wins)', async () => {
+    const user = userEvent.setup();
+    const onContactUpdated = vi.fn();
+    updateContact.mockResolvedValue({ ...CONTACT, staff_notes: 'X2' });
+    const { rerender } = render(
+      <StaffNotesCard contactId="c1" value="X" updatedAt={undefined} onContactUpdated={onContactUpdated} />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    rerender(<StaffNotesCard contactId="c1" value="Y" updatedAt={undefined} onContactUpdated={onContactUpdated} />);
+    await user.type(screen.getByLabelText('Staff notes'), '2');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onContactUpdated).toHaveBeenCalledTimes(1));
+    expect(updateContact).toHaveBeenCalledTimes(1);
+    expect(updateContact).toHaveBeenCalledWith('c1', { staff_notes: 'X2' });
+  });
+
   it('while a save is in flight, Save and Cancel are disabled and the textarea is read-only', async () => {
     const user = userEvent.setup();
     let release: ((c: Contact) => void) | undefined;

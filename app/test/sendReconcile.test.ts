@@ -49,7 +49,13 @@ import { DEV_SESSION_SECRET_DEFAULT, loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
 import { bodyFingerprint, hashRecipientKey, recipientDigest } from '../src/lib/sendFingerprint.js';
-import { RECONCILE_CHECK_DELAYS_MS } from '../src/lib/sendOutcome.js';
+import {
+  RECONCILE_CHECK_DELAYS_MS,
+  RECONCILE_SIBLING_SPAN_MS,
+  RECONCILE_WINDOW_LEAD_MS,
+  RECONCILE_WINDOW_TRAIL_MS,
+  SEND_CLAIM_TTL_MS,
+} from '../src/lib/sendOutcome.js';
 import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationParticipant } from '../src/repos/conversationsRepo.js';
@@ -605,7 +611,7 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMsmart-1' });
     });
 
-    it('6b a media-only attempt matches a candidate on media count; a long-bodied candidate with the same count is not ours (deviation: the STOP guard)', async () => {
+    it('6b a media-only attempt matches an empty-bodied candidate with the same media count; a long body or another count is not ours (the fingerprint is body hash AND media for every body - FW1-3)', async () => {
       register();
       const t = seedTenant();
       seedBroadcast([t.contactId]);
@@ -2063,6 +2069,156 @@ describe('send.reconcile (spec D11-D16)', () => {
       await runChain(legPayload(b, atB));
       expect(await recordOf(b)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
       expect(redrives).toHaveLength(0);
+    });
+
+    // ---- FW1-3 (S3b F-2): the fingerprint is the body hash AND the media count, for every body ----
+
+    it('F-2: two short-named members\' media-only legs to one recipient never adopt each other - the body hash decides for every body (FW1-3)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const sAl = seedSource();
+      const sJo = seedSource();
+      const al = legOwner(sAl);
+      const jo = legOwner(sJo);
+      // composeRelayBody('Al', '') and ('Jo', ''): both normalize under three characters.
+      expect(bodyFingerprint('Al: ').short && bodyFingerprint('Jo: ').short).toBe(true);
+      const atAl = await reconciling(al, legFacts({ body: 'Al: ', mediaCount: 1 }));
+      const atJo = await reconciling(jo, legFacts({ body: 'Jo: ', mediaCount: 1 }));
+      plantLeg('SMjo-photo', { body: 'Jo: ', mediaCount: 1 });
+      await runChain(legPayload(al, atAl));
+      // Jo's photo is not Al's message: an unmatched candidate, unresolved at the last check - never adopted, never re-driven.
+      expect(await recordOf(al)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'unidentified_candidate' });
+      await runChain(legPayload(jo, atJo));
+      expect(await recordOf(jo)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMjo-photo' });
+      expect(world.relaySidPointers.get('SMjo-photo')).toMatchObject({ tsMsgId: sJo.tsMsgId });
+      expect(redrives).toHaveLength(0);
+    });
+
+    it('F-2 mirror: an open short-bodied sibling with ANOTHER short body does not withhold never_sent; one with the same body does (FW1-3)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      await reconciling(legOwner(seedSource()), legFacts({ body: 'Jo: ', mediaCount: 1 }));
+      const al = legOwner(seedSource());
+      const atAl = await reconciling(al, legFacts({ body: 'Al: ', mediaCount: 1 }));
+      await runChain(legPayload(al, atAl));
+      expect(await recordOf(al)).toMatchObject({ state: 'redriven' });
+      expect(redrives).toHaveLength(1);
+      const twin = legOwner(seedSource());
+      await reconciling(twin, legFacts({ body: 'Al: ', mediaCount: 1 }));
+      const al2 = legOwner(seedSource());
+      const atAl2 = await reconciling(al2, legFacts({ body: 'Al: ', mediaCount: 1 }));
+      await runChain(legPayload(al2, atAl2));
+      expect(await recordOf(al2)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+    });
+
+    it('the STOP auto-reply still never matches: an emoji-only text with no media is not adopted onto it (FW1-3 guard)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const owner = legOwner(seedSource());
+      // A short-named member's emoji: 'Al: ' plus a thumbs-up normalizes to 'Al' - a short body with no media.
+      expect(bodyFingerprint('Al: \u{1F44D}').short).toBe(true);
+      const at = await reconciling(owner, legFacts({ body: 'Al: \u{1F44D}', mediaCount: 0 }));
+      plantLeg('SMstop-2', { body: 'You have successfully been unsubscribed. You will not receive any more messages from this number.' });
+      await runChain(legPayload(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'unidentified_candidate' });
+      expect(world.relaySidPointers.has('SMstop-2')).toBe(false);
+      expect(redrives).toHaveLength(0);
+    });
+
+    // ---- FW1-2 (code review C-1, S3b F-1): the two-sided window and the sibling span ----
+
+    /** S3b F-1: S claims at t0; O, the same fingerprint, claims `gapMs` later and its message lands, unrecorded. */
+    async function laterSibling(gapMs: number): Promise<{ S: SendAttemptOwner; O: SendAttemptOwner; sS: MessageItem; atS: string; atO: string }> {
+      const photo = 'Alice sent a photo';
+      const sS = seedSource();
+      const sO = seedSource();
+      const S = legOwner(sS);
+      const O = legOwner(sO);
+      const t0 = Date.now() - 900_000;
+      const atS = await reconciling(S, legFacts({ body: photo, mediaCount: 1 }), { at: new Date(t0).toISOString() });
+      const atO = await reconciling(O, legFacts({ body: photo, mediaCount: 1 }), { at: new Date(t0 + gapMs).toISOString() });
+      plantLeg('SMo-photo', { body: photo, mediaCount: 1, createdAt: new Date(t0 + gapMs + 1_000).toISOString() });
+      return { S, O, sS, atS, atO };
+    }
+
+    it('F-1: O claims 238 s after S with the same fingerprint - S cannot adopt O\'s message (outside S\'s window); O adopts it; S is re-driven (FW1-2, C-1)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const { S, O, sS, atS, atO } = await laterSibling(238_000);
+      await runChain(legPayload(S, atS));
+      expect(await recordOf(S)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(world.relaySidPointers.has('SMo-photo')).toBe(false);
+      await runChain(legPayload(O, atO));
+      expect(await recordOf(O)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMo-photo' });
+      // One re-drive, S's: O's photo goes once, S's is sent again.
+      expect(redrives).toHaveLength(1);
+      expect(redrives[0]).toMatchObject({ sourceTsMsgId: sS.tsMsgId, recipientKeys: ['c-bob'] });
+    });
+
+    it('C-1 late-S variant: however late S\'s final check runs, it never adopts a message created after its window - O\'s, ten minutes on (FW1-2)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const { S, O, atS, atO } = await laterSibling(600_000);
+      await runChain(legPayload(S, atS));
+      expect(await recordOf(S)).toMatchObject({ state: 'redriven' });
+      await runChain(legPayload(O, atO));
+      expect(await recordOf(O)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMo-photo' });
+      expect(redrives).toHaveLength(1);
+    });
+
+    it('the window\'s upper edge is inclusive: a message created EXACTLY attemptedAt + TTL + LEAD is a candidate; one millisecond later is not (FW1-2)', async () => {
+      expect(RECONCILE_WINDOW_TRAIL_MS).toBe(SEND_CLAIM_TTL_MS + RECONCILE_WINDOW_LEAD_MS);
+      expect(RECONCILE_SIBLING_SPAN_MS).toBe(2 * RECONCILE_WINDOW_LEAD_MS + SEND_CLAIM_TTL_MS);
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const s1 = seedSource();
+      const a = legOwner(s1);
+      const t0 = Date.now() - 900_000;
+      const atA = await reconciling(a, legFacts(), { at: new Date(t0).toISOString() });
+      plantLeg('SMedge-in', { createdAt: new Date(t0 + RECONCILE_WINDOW_TRAIL_MS).toISOString() });
+      await runCheck(legPayload(a, atA));
+      expect(await recordOf(a)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMedge-in' });
+
+      const s2 = seedSource();
+      const b = legOwner(s2);
+      const t1 = t0 - 3_600_000;
+      const atB = await reconciling(b, legFacts(), { at: new Date(t1).toISOString() });
+      plantLeg('SMedge-out', { createdAt: new Date(t1 + RECONCILE_WINDOW_TRAIL_MS + 1).toISOString() });
+      await runChain(legPayload(b, atB));
+      // Outside the window: not a candidate at all, so not even an unidentified one.
+      expect(await recordOf(b)).toMatchObject({ state: 'redriven' });
+      expect(redrives).toHaveLength(1);
+    });
+
+    it('the sibling span is two-sided and inclusive: an open same-fingerprint attempt EXACTLY SPAN before or after withholds never_sent; one millisecond beyond either edge does not (FW1-2)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const cases: Array<{ offset: number; withheld: boolean }> = [
+        { offset: -RECONCILE_SIBLING_SPAN_MS, withheld: true },
+        { offset: RECONCILE_SIBLING_SPAN_MS, withheld: true },
+        { offset: -RECONCILE_SIBLING_SPAN_MS - 1, withheld: false },
+        { offset: RECONCILE_SIBLING_SPAN_MS + 1, withheld: false },
+      ];
+      for (const [i, { offset, withheld }] of cases.entries()) {
+        // Each pair far from the others (an hour apart), so no two cases see each other.
+        const t = Date.now() - 36_000_000 + i * 3_600_000;
+        const sib = legOwner(seedSource());
+        await reconciling(sib, legFacts(), { at: new Date(t + offset).toISOString() });
+        const self = legOwner(seedSource());
+        const at = await reconciling(self, legFacts(), { at: new Date(t).toISOString() });
+        await runChain(legPayload(self, at));
+        expect(await recordOf(self), `offset ${offset}`).toMatchObject(
+          withheld ? { state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' } : { state: 'redriven' },
+        );
+      }
+      expect(redrives).toHaveLength(2);
     });
 
     it('14e relay: a redrive_refused close that dies at its slot write is COMPLETED by the redelivery - the slot first, then the record (D8)', async () => {

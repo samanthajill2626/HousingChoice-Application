@@ -59,7 +59,9 @@ import {
   RECONCILE_CHECK_DELAYS_MS,
   RECONCILE_LIST_PAGE_SIZE,
   RECONCILE_MAX_PAGES,
+  RECONCILE_SIBLING_SPAN_MS,
   RECONCILE_WINDOW_LEAD_MS,
+  RECONCILE_WINDOW_TRAIL_MS,
   REDRIVE_REFUSED_CODE,
   SEND_UNCONFIRMED_CODE,
 } from '../lib/sendOutcome.js';
@@ -509,27 +511,28 @@ async function currentPhone(c: Ctx, r: Resolved): Promise<string | undefined> {
 // ---------------------------------------------------------------------------
 
 /**
- * Is `m` this attempt's message? The fingerprint must match (spec D13, lossy):
- * the normalized body's hash AND the media count; a SHORT body (a media- or
- * emoji-only text) matches on the media count, and only a short candidate -
- * so a short attempt never adopts Twilio's STOP auto-reply (build deviation;
- * stricter than the plan's rule, never looser).
+ * Is `m` this attempt's message? Its fingerprint must EQUAL this attempt's
+ * (spec D13, lossy): the normalized body's hash AND the media count, for every
+ * body. A short body (a media- or emoji-only text) no longer matches any short
+ * candidate (S3b F-2, fix FW1-3 - a declared spec-text deviation extending
+ * S3a deviation 1): two short-named members' photo legs would adopt each
+ * other's photos. Safe in one direction only, which is the point: an own
+ * orphan that does not match is an UNMATCHED candidate - unresolved at the
+ * final check, never never_sent - so this rule cannot cause a re-send, and
+ * the STOP auto-reply still never matches.
  */
 function matches(record: SendAttemptFacts, m: ProviderMessageSummary): boolean {
-  if (m.mediaCount !== record.mediaCount) return false;
-  const fp = bodyFingerprint(m.body);
-  return record.bodyShort ? fp.short : fp.hash === record.bodyHash;
+  return m.mediaCount === record.mediaCount && bodyFingerprint(m.body).hash === record.bodyHash;
 }
 
 /**
  * Could an attempt with facts `a` have claimed the message an attempt with
- * facts `b` sent? Exactly `matches` seen from the other side - so the D13
- * same-fingerprint rule withholds never_sent from every sibling whose own
- * lookup might hold our message.
+ * facts `b` sent? Exactly `matches` seen from the other side (body hash AND
+ * media count) - so the D13 same-fingerprint rule withholds never_sent from
+ * every sibling whose own lookup might hold our message.
  */
 function sameFingerprint(a: SendAttemptFacts, b: SendAttemptFacts): boolean {
-  if (a.mediaCount !== b.mediaCount) return false;
-  return a.bodyShort || b.bodyShort ? a.bodyShort && b.bodyShort : a.bodyHash === b.bodyHash;
+  return a.mediaCount === b.mediaCount && a.bodyHash === b.bodyHash;
 }
 
 function holderOf(held: Held): string {
@@ -721,7 +724,8 @@ async function adoptKnown(c: Ctx, r: Resolved, sid: string): Promise<Verdict> {
  * The LOOKUP path (D12, D13). List the provider's messages to the recipient's
  * CURRENT number from the attempt's sender - proven to be the number the
  * attempt went to by the digest - walking at most RECONCILE_MAX_PAGES pages,
- * and keep those created from RECONCILE_WINDOW_LEAD_MS before the attempt.
+ * and keep those created inside the window [attemptedAt -
+ * RECONCILE_WINDOW_LEAD_MS, attemptedAt + RECONCILE_WINDOW_TRAIL_MS].
  * Oldest first: a SID another owner holds (a sibling record, a pointer, a
  * row, the system marker) is skipped; one this owner holds is a repair; a
  * matching free candidate is claimed, and the first claim that wins is
@@ -736,13 +740,28 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
   if (phone === undefined || recipientDigest(sender, phone) !== record.recipientDigest) {
     return { kind: 'unresolved', cause: 'digest_mismatch' };
   }
-  const windowStartMs = Date.parse(record.attemptedAt) - RECONCILE_WINDOW_LEAD_MS;
-  // SIBLINGS: other attempts to the same number from the same sender in the
-  // window - compared by RECORD identity (attemptKey), never ownerKey: two
-  // contacts on one phone in one share are two records (R3 #5). Read once.
+  // THE WINDOW is two-sided (code review C-1, fix FW1-2): our message can only
+  // have been created while our request was in flight, which starts at the
+  // attempt's last re-arm - so a check that runs late (a redelivery, a
+  // backlogged worker) never adopts a message a LATER attempt created.
+  const attemptMs = Date.parse(record.attemptedAt);
+  const windowStartMs = attemptMs - RECONCILE_WINDOW_LEAD_MS;
+  const windowEndMs = attemptMs + RECONCILE_WINDOW_TRAIL_MS;
+  // SIBLINGS: other attempts to the same number from the same sender whose
+  // windows overlap this one (their starts within RECONCILE_SIBLING_SPAN_MS of
+  // ours, either side) - any of them could have claimed a message in our
+  // window, or we one in theirs (S3b F-1). Compared by RECORD identity
+  // (attemptKey), never ownerKey: two contacts on one phone in one share are
+  // two records (R3 #5). The index is sorted by attempt start; the records
+  // are LIVE. Read once.
   const self = attemptKey(r.owner);
-  const siblings = (await c.attempts.listByRecipient(sender, record.recipientDigest, new Date(windowStartMs).toISOString())).filter(
-    (s) => attemptKey(s.owner) !== self,
+  const siblingFromMs = attemptMs - RECONCILE_SIBLING_SPAN_MS;
+  const siblingToMs = attemptMs + RECONCILE_SIBLING_SPAN_MS;
+  const siblings = (await c.attempts.listByRecipient(sender, record.recipientDigest, new Date(siblingFromMs).toISOString())).filter(
+    (s) => {
+      const startMs = Date.parse(s.attemptedAt);
+      return attemptKey(s.owner) !== self && startMs >= siblingFromMs && startMs <= siblingToMs;
+    },
   );
   const siblingSids = new Set(siblings.flatMap((s) => (s.sid !== undefined ? [s.sid] : [])));
 
@@ -765,7 +784,8 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
     }
     pages += 1;
     for (const m of page.messages) {
-      if (Date.parse(m.createdAt) >= windowStartMs && !bySid.has(m.providerSid)) bySid.set(m.providerSid, m);
+      const createdMs = Date.parse(m.createdAt);
+      if (createdMs >= windowStartMs && createdMs <= windowEndMs && !bySid.has(m.providerSid)) bySid.set(m.providerSid, m);
     }
     pageToken = page.nextPageToken;
     if (pageToken !== undefined && pages >= RECONCILE_MAX_PAGES) {

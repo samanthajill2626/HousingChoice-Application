@@ -28,7 +28,23 @@ export const ENQUEUE_FAILED_CODE = 'enqueue_failed';
  */
 export const SEND_CLAIM_TTL_MS = 30_000;
 export const RECONCILE_CHECK_DELAYS_MS: readonly number[] = [5_000, 30_000, 240_000];
+/** How long BEFORE an attempt's start its message can carry a creation time: clock skew plus the provider's 1 s resolution. */
 export const RECONCILE_WINDOW_LEAD_MS = 60_000;
+/**
+ * How long AFTER an attempt's start (its last re-arm, taken just before the
+ * provider call) its message can have been created: the request timeout plus
+ * the same skew allowance (code review C-1, fix FW1-2). The lookup's window is
+ * [attemptedAt - LEAD, attemptedAt + TRAIL], both edges inclusive, so a late
+ * check - an SQS redelivery, a backlogged worker - can never adopt a message a
+ * LATER attempt created.
+ */
+export const RECONCILE_WINDOW_TRAIL_MS = SEND_CLAIM_TTL_MS + RECONCILE_WINDOW_LEAD_MS;
+/**
+ * Two attempts' windows overlap exactly when their starts are at most this far
+ * apart (LEAD + TRAIL): the siblings a lookup must weigh - whose SIDs it
+ * excludes and whose open or adopted state withholds never_sent (D13).
+ */
+export const RECONCILE_SIBLING_SPAN_MS = 2 * RECONCILE_WINDOW_LEAD_MS + SEND_CLAIM_TTL_MS;
 export const RECONCILE_LIST_PAGE_SIZE = 1000;
 export const RECONCILE_MAX_PAGES = 5;
 export const OUTAGE_BRAKE_UNKNOWN_STREAK = 3;

@@ -15,7 +15,11 @@ export function normalizeBodyForMatch(body: string | undefined): string {
 export interface BodyFingerprint {
   /** sha256 hex of the normalized body. */
   hash: string;
-  /** Fewer than 3 normalized characters: the reconcile matches on media count instead (D13). */
+  /**
+   * Fewer than 3 normalized characters (a media- or emoji-only text). Kept on
+   * the attempt record; it no longer decides a match - the reconcile compares
+   * the hash AND the media count for every body (code review F-2, fix FW1-3).
+   */
   short: boolean;
 }
 

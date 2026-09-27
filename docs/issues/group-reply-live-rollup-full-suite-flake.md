@@ -28,7 +28,7 @@ dead Conversations rail". The other three full-run failures that day
 time-of-day or wall-clock dependent (compare
 `group-crosscheck-wiring-test-wall-clock-dependent`) or fake-twilio
 Conversations state; run the suggested trace below before touching any
-timeout. Logs: `W:/tmp/voicemail-greeting/.superpowers/planner-gates/`
+timeout. Logs (the worktree is retired; preserved with a SHA-256 manifest): `W:/tmp/_preserved-artifacts/voicemail-greeting-20260927/superpowers/planner-gates/`
 (`final-e2e.log`, `final-e2e-rerun5.log`, `base-e2e-grouptext.log`).
 
 **Resolution (2026-08-24): single sighting from the one sick gate run.** The

@@ -153,6 +153,31 @@ describe('StaffNotesCard - edit mode', () => {
     expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
   });
 
+  it('while a save is in flight, Save and Cancel are disabled and the textarea is read-only', async () => {
+    const user = userEvent.setup();
+    let release: ((c: Contact) => void) | undefined;
+    updateContact.mockImplementation(
+      () =>
+        new Promise<Contact>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const onContactUpdated = vi.fn();
+    render(<StaffNotesCard contactId="c1" value="keep" updatedAt={undefined} onContactUpdated={onContactUpdated} />);
+    await user.click(screen.getByRole('button', { name: 'Edit staff notes' }));
+    await user.type(screen.getByLabelText('Staff notes'), ' more');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(updateContact).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    expect(screen.getByLabelText('Staff notes')).toHaveAttribute('readonly');
+
+    release!({ ...CONTACT, staff_notes: 'keep more' });
+    await waitFor(() => expect(onContactUpdated).toHaveBeenCalledTimes(1));
+    expect(screen.queryByLabelText('Staff notes')).not.toBeInTheDocument();
+  });
+
   it('a failed save keeps the draft, stays in edit mode and shows the fixed alert (no server text)', async () => {
     const user = userEvent.setup();
     updateContact.mockRejectedValue(new ApiError(500, 'boom', 'boom'));

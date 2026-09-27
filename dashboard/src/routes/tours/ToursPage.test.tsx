@@ -504,6 +504,13 @@ describe('ToursPage', () => {
     expect(useClosedToursSpy.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
   });
 
+  it('the view tabs read Active, Past, Closed - in that order (spec 4.1)', () => {
+    readyAll([], []);
+    renderPage();
+    const tabs = screen.getByRole('navigation', { name: 'Tours view' });
+    expect(within(tabs).getAllByRole('link').map((l) => l.textContent)).toEqual(['Active', 'Past', 'Closed']);
+  });
+
   it('clicking the Closed tab switches views: title, rows with tenant, property, DATE, and badges', async () => {
     const user = userEvent.setup();
     readyAll([], []);
@@ -688,7 +695,9 @@ describe('ToursPage - Past view', () => {
   // u1 = "123 Peachtree St, Atlanta, GA, 30303", u2 = "456 Oak Ave, Decatur,
   // GA, 30030" (formatAddress joins line1, city, state, zip with ", ").
   const U1 = '123 Peachtree St, Atlanta, GA, 30303';
+  const U2 = '456 Oak Ave, Decatur, GA, 30030';
   const P1_LABEL = `Alice Smith at ${U1} on ${whenLabel(NOT_MARKED.scheduledAt!)}`;
+  const P2_LABEL = `Bob Jones at ${U2} on ${whenLabel(NEEDS_OUTCOME.scheduledAt!)}`;
   const P4_LABEL = `Bob Jones at ${U1} on ${whenLabel(NOT_MARKED_2.scheduledAt!)}`;
 
   function readyPast(rows: Tour[], reloadFailed = false): void {
@@ -781,6 +790,33 @@ describe('ToursPage - Past view', () => {
     expect(screen.getByTestId('loc')).toHaveTextContent('/tours/p2?outcome=1|{"back":"/tours/past"}');
   });
 
+  it('the Record outcome link is named exactly "Record outcome: <tenant> at <property> on <date-time>"', () => {
+    readyPast([NEEDS_OUTCOME]);
+    renderPage('/tours/past');
+    // A string name is an exact, whole-name match; the attribute compare adds
+    // no whitespace normalization at all.
+    const record = screen.getByRole('link', { name: `Record outcome: ${P2_LABEL}` });
+    expect(record).toHaveAttribute('aria-label', `Record outcome: ${P2_LABEL}`);
+    expect(record).toHaveAttribute('href', '/tours/p2?outcome=1');
+  });
+
+  it('select-all reads INDETERMINATE while some but not all Not marked rows are ticked', async () => {
+    const user = userEvent.setup();
+    readyPast([NOT_MARKED, NOT_MARKED_2]);
+    renderPage('/tours/past');
+    const all = screen.getByRole('checkbox', { name: 'Select all not marked' });
+    expect(all).not.toBePartiallyChecked();
+    expect(all).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: `Select tour for ${P1_LABEL}` }));
+    expect(all).toBePartiallyChecked();
+    expect(all).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Mark toured (1)' })).toBeEnabled();
+    await user.click(screen.getByRole('checkbox', { name: `Select tour for ${P4_LABEL}` }));
+    expect(all).not.toBePartiallyChecked();
+    expect(all).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Mark toured (2)' })).toBeEnabled();
+  });
+
   it('bulk: select all -> Mark toured (N) re-reads then PATCHes each id sequentially, disables every control meanwhile, reports per row, reloads', async () => {
     const user = userEvent.setup();
     readyPast([NOT_MARKED, NEEDS_OUTCOME, NOT_MARKED_2]);
@@ -829,6 +865,43 @@ describe('ToursPage - Past view', () => {
     expect(screen.getByRole('button', { name: 'Mark toured (1)' })).toBeEnabled();
     expect(within(items[2]!).getByRole('checkbox')).toBeChecked();
     expect(within(items[0]!).getByRole('checkbox')).not.toBeChecked();
+  });
+
+  it('bulk: two ids still scheduled at the SAME time are PATCHed one at a time in list order - the second only after the first resolves', async () => {
+    const user = userEvent.setup();
+    readyPast([NOT_MARKED, NOT_MARKED_2]);
+    // Both re-reads agree with the list: status scheduled, scheduledAt unchanged.
+    getTour.mockImplementation((id: string) => Promise.resolve(id === 'p4' ? NOT_MARKED_2 : NOT_MARKED));
+    const releases: (() => void)[] = [];
+    patchTour.mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          releases.push(() => resolve({ ...(id === 'p4' ? NOT_MARKED_2 : NOT_MARKED), status: 'toured' }));
+        }),
+    );
+    renderPage('/tours/past');
+    await user.click(screen.getByRole('checkbox', { name: 'Select all not marked' }));
+    await user.click(screen.getByRole('button', { name: 'Mark toured (2)' }));
+
+    // PATCH 1 is held. Give a wrongly concurrent runner every chance to start
+    // the second one, then prove it has not: one PATCH, one re-read.
+    await waitFor(() => expect(patchTour).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(patchTour).toHaveBeenCalledTimes(1);
+    expect(patchTour).toHaveBeenNthCalledWith(1, 'p1', { status: 'toured' });
+    expect(getTour).toHaveBeenCalledTimes(1);
+
+    releases[0]!();
+    await waitFor(() => expect(patchTour).toHaveBeenCalledTimes(2));
+    expect(patchTour.mock.calls.map(([id]) => id)).toEqual(['p1', 'p4']);
+    expect(patchTour).toHaveBeenNthCalledWith(2, 'p4', { status: 'toured' });
+    releases[1]!();
+    await waitFor(() => expect(reloadPast).toHaveBeenCalledTimes(1));
+
+    const items = within(screen.getByRole('region', { name: 'Past tours' })).getAllByRole('listitem');
+    expect(within(items[0]!).getByRole('status')).toHaveTextContent('Marked toured');
+    expect(within(items[1]!).getByRole('status')).toHaveTextContent('Marked toured');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('results whose rows the reload dropped are reported above the toolbar (a failure as alert, a success as status), from the snapshot', async () => {
@@ -1048,5 +1121,41 @@ describe('ToursPage - Past view', () => {
     expect(within(region).getByRole('alert')).toHaveTextContent(
       'Could not refresh the list. Reload the page to see the latest.',
     );
+  });
+
+  it('a failed RELOAD after a batch keeps the rows AND the per-row results, with exactly one refresh alert, before the toolbar', async () => {
+    const REFRESH_FAILED = 'Could not refresh the list. Reload the page to see the latest.';
+    const user = userEvent.setup();
+    readyPast([NOT_MARKED, NOT_MARKED_2]);
+    // p1 is marked; p4 re-reads as canceled and is skipped.
+    getTour.mockImplementation((id: string) =>
+      Promise.resolve(id === 'p4' ? { ...NOT_MARKED_2, status: 'canceled' } : NOT_MARKED),
+    );
+    patchTour.mockResolvedValue({ ...NOT_MARKED, status: 'toured' });
+    // The batch's reload FAILS: the hook keeps the same rows and flags it.
+    reloadPast.mockImplementation(() => {
+      pastRows = { ...pastRows, reloadFailed: true };
+    });
+    renderPage('/tours/past');
+    await user.click(screen.getByRole('checkbox', { name: 'Select all not marked' }));
+    await user.click(screen.getByRole('button', { name: 'Mark toured (2)' }));
+    await waitFor(() => expect(reloadPast).toHaveBeenCalledTimes(1));
+
+    const region = screen.getByRole('region', { name: 'Past tours' });
+    await within(region).findByText(REFRESH_FAILED);
+    // The rows and BOTH per-row results survive the failed reload.
+    const items = within(region).getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    expect(within(items[0]!).getByRole('status')).toHaveTextContent('Marked toured');
+    expect(within(items[1]!).getByRole('alert')).toHaveTextContent(
+      'Could not mark toured: Changed since the list loaded',
+    );
+    // Exactly one refresh alert, and it comes before the toolbar.
+    const refreshAlerts = within(region)
+      .getAllByRole('alert')
+      .filter((a) => a.textContent === REFRESH_FAILED);
+    expect(refreshAlerts).toHaveLength(1);
+    const toolbarBox = screen.getByRole('checkbox', { name: 'Select all not marked' });
+    expect(refreshAlerts[0]!.compareDocumentPosition(toolbarBox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

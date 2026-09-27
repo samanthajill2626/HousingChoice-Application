@@ -1895,4 +1895,18 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
     await waitLoaded();
     expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours');
   });
+
+  it('the back arrow goes to /tours when the location carries NO router state at all', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('');
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours');
+  });
+
+  it('the back arrow honors state.back = /tours/closed', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('', { back: '/tours/closed' });
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours/closed');
+  });
 });

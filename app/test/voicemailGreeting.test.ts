@@ -1,6 +1,6 @@
 // app/test/voicemailGreeting.test.ts
 import { Readable } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   GreetingRejectedError,
   GreetingLookupTimeoutError,
@@ -156,15 +156,27 @@ describe('sanitizeGreetingFileName', () => {
 });
 
 describe('withTimeout', () => {
-  it('resolves and rejects through, clearing its timer when the promise wins', async () => {
+  it('resolves and rejects through, settling well inside the budget', async () => {
     await expect(withTimeout(Promise.resolve(7), 1000, 'x')).resolves.toBe(7);
     await expect(withTimeout(Promise.reject(new Error('boom')), 1000, 'x')).rejects.toThrow('boom');
-    // If the timer were NOT cleared the process would hold a 1000ms handle;
-    // vitest's own leak detection would flag it. Assert the observable part:
-    // a resolved race settles well inside the budget.
+    // The timer clearing itself is pinned with fake timers in the next test:
+    // vitest has no open-handle detection, so an uncleared timer passes here
+    // unseen. Assert the observable part: a resolved race settles well inside
+    // the budget.
     const t0 = Date.now();
     await withTimeout(Promise.resolve(1), 1000, 'x');
     expect(Date.now() - t0).toBeLessThan(200);
+  });
+  it('clears its timer when the promise wins the race, resolving or rejecting', async () => {
+    vi.useFakeTimers();
+    try {
+      await withTimeout(Promise.resolve(1), 1000, 'x');
+      expect(vi.getTimerCount()).toBe(0);
+      await withTimeout(Promise.reject(new Error('boom')), 1000, 'x').catch(() => undefined);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it('times out with GreetingLookupTimeoutError and swallows the late rejection', async () => {
     let release!: (err: Error) => void;

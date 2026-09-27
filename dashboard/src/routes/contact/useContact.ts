@@ -44,8 +44,12 @@ export function useContact(contactId: string): ContactState {
     return () => controller.abort();
   }, [contactId]);
 
+  // Bound to THIS contactId: a caller still holding the setter it got for an
+  // earlier id (a save on contact A that resolves after the page moved to B -
+  // this component re-renders, not remounts, on that navigation) is a no-op,
+  // never a write of A over B that would leave B deriving "loading" forever.
   const setContact = useCallback((contact: Contact) => {
-    setState({ status: 'ready', contact, forId: contactId });
+    setState((prev) => (prev.forId === contactId ? { status: 'ready', contact, forId: contactId } : prev));
   }, [contactId]);
 
   // Live IN-PLACE refresh (suggestion-event-no-contact-refetch): when an

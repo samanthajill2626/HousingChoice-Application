@@ -210,6 +210,22 @@ describe('REST impersonation: Messages list and fetch (spec D19)', () => {
     }
   });
 
+  it('a message still queued after its queued-step callback ran keeps date_sent: null', async () => {
+    // On the lane the queued-step callback fires at once (RealClock, delay 0):
+    // it must not count as leaving queued.
+    const clock = new ManualClock('2026-06-15T00:00:00.000Z');
+    const { app } = makeApp(clock);
+    await request(app)
+      .post('/control/delivery-outcome')
+      .send({ partyNumber: TO, profile: { kind: 'stall', stallAt: 'queued' } })
+      .expect(200);
+    const created = await create(app, { To: TO, From: FROM, Body: 'stuck' });
+    clock.advance(3000);
+    clock.flush(); // runs the queued-step callback, and nothing else
+    const fetched = await fetchSid(app, created.body.sid as string);
+    expect(fetched.body).toMatchObject({ status: 'queued', date_sent: null });
+  });
+
   it('date_sent is when the message FIRST left queued, in RFC 2822; a later transition never moves it', async () => {
     const clock = new ManualClock('2026-06-15T00:00:00.000Z');
     const { app, engine } = makeApp(clock);

@@ -413,7 +413,9 @@ async function runCheck(c: Ctx, payload: SendReconcilePayload): Promise<void> {
         },
         'send.reconcile: found - the message the provider holds is adopted',
       );
-      await afterClose(c, r, verdict.status);
+      // A slot that did not move (a receipt raced ahead) is announced as it
+      // IS, not with the provider's stale status.
+      await afterClose(c, r, verdict.adoption === 'adopted' ? verdict.status : undefined);
       return;
     }
     case 'continue': {

@@ -1265,8 +1265,10 @@ export function isBroadcastRowFor(
  *      `failed` with the provider's code; `carrierSentAt` from the provider's
  *      date_sent. A slot that is no longer queued did not move: `skipped`.
  *   3. THEN, only because the slot moved: the derived progress tick, the
- *      message_sent audit row, the status-preserving inbox touch (never
- *      backwards), the emits, and - only for an adopted sent/delivered - the
+ *      message_sent audit row (only for a row this call appended - a row
+ *      that was there already was audited by the send wrapper that wrote
+ *      it), the status-preserving inbox touch (never backwards), the emits,
+ *      and - only for an adopted sent/delivered - the
  *      listing_sent milestone and the listing-send row. An adopted failure
  *      takes the pass's own arm for 30005/30006 (flag the contact
  *      sms_unreachable) and WARNs: the webhook's side effects for the code
@@ -1353,14 +1355,19 @@ export async function adoptBroadcastRecipient(
 
   // 3. Only because the slot moved.
   if (recorded.item) emitBroadcastProgress(deps.events, broadcastId, recorded.item);
-  try {
-    await deps.audit.append(`conversations#${appended.conversationId}`, 'message_sent', {
-      providerSid,
-      automated,
-      author: 'teammate',
-    });
-  } catch (err) {
-    deps.log.error({ err, ...ctx }, 'broadcastFanOut: adoption audit row failed (best-effort)');
+  // The send wrapper's audit row, once per message: a row that was ALREADY
+  // there (the pass's slot write threw after sendMessage had appended - and
+  // audited - it) carries its audit row already.
+  if (!appended.deduped) {
+    try {
+      await deps.audit.append(`conversations#${appended.conversationId}`, 'message_sent', {
+        providerSid,
+        automated,
+        author: 'teammate',
+      });
+    } catch (err) {
+      deps.log.error({ err, ...ctx }, 'broadcastFanOut: adoption audit row failed (best-effort)');
+    }
   }
   // The status-preserving touch with no preview (the relay retry job's
   // shape): never moves the inbox backwards (a read-then-write guard, build

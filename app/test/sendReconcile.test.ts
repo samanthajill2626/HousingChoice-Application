@@ -383,6 +383,37 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(found[0]).toMatchObject({ owner: { kind: 'broadcast', broadcastId: 'bcast-1' }, recipientKey: t.contactId, sid: 'SMorphan-1' });
     });
 
+    it('2a a known SID whose row the send wrapper already recorded (the pass\'s slot write threw) repairs the slot once: no second row, no second audit row; the property-sent rows the pass never reached are written', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      // What sendMessage left behind before the pass's record-phase write threw: its row and its audit row.
+      const conv = await world.conversationsRepo.createOrGetByParticipantPhone(t.phone!, 'tenant_1to1');
+      const recorded = await world.messagesRepo.append({
+        conversationId: conv.conversationId,
+        providerSid: 'SMrec-1',
+        providerTs: new Date().toISOString(),
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: BODY,
+        deliveryStatus: 'queued',
+        broadcastId: 'bcast-1',
+        automated: true,
+        recipientContactId: t.contactId,
+      });
+      await world.auditRepo.append(`conversations#${conv.conversationId}`, 'message_sent', { providerSid: 'SMrec-1', automated: true, author: 'teammate' });
+      const at = await reconciling(bOwner(t.contactId), factsFor(t.phone!), { sid: 'SMrec-1' });
+      plant({ providerSid: 'SMrec-1', providerStatus: 'sent', sentAt: new Date().toISOString() });
+      await runCheck(payloadOf(bOwner(t.contactId), at));
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent', conversationId: conv.conversationId, tsMsgId: recorded.tsMsgId });
+      expect(world.messages.filter((m) => m.provider_sid === 'SMrec-1')).toHaveLength(1);
+      expect(world.auditEvents.filter((e) => e.event_type === 'message_sent')).toHaveLength(1);
+      expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(1);
+      expect(world.listingSends).toHaveLength(1);
+      expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMrec-1' });
+    });
+
     it('2b a dashboard share adopts its row as a person\'s send (automated false)', async () => {
       register();
       const t = seedTenant();
@@ -1447,6 +1478,21 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(await recordOf(owner3)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'digest_mismatch' });
       expect(slotAt(row3)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
       expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: ROOT, direction: 'inbound', deliveryStatus: 'failed' }]);
+    });
+
+    it('16b a rung found whose slot a receipt already advanced moves nothing and announces the slot\'s REAL status, not the stale provider one', async () => {
+      register();
+      seedRelay();
+      const row = seedRetryRow();
+      const owner = rungOwner(row);
+      const at = await reconciling(owner, legFacts(), { sid: 'SMrung-9' });
+      rowOf(row).delivery_recipients = { 'c-bob': { status: 'delivered', sid: 'SMrung-9', sentAt: at } };
+      plantLeg('SMrung-9', { providerStatus: 'sent' });
+      await runCheck({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 0 });
+      expect(slotAt(row)).toEqual({ status: 'delivered', sid: 'SMrung-9', sentAt: at });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMrung-9' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: ROOT, direction: 'inbound', deliveryStatus: 'delivered' }]);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')[0]).toMatchObject({ adoption: 'skipped' });
     });
 
     it('17 a relay re-drive enqueue that throws closes enqueue_failed: the record FIRST, then the slot, then the thread or the root is told', async () => {

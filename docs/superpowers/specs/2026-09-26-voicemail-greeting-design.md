@@ -1,13 +1,17 @@
 # Recorded voicemail greeting - design specification
 
-Status: DRAFT 2 - written under Cameron's overnight, unattended mission block
-(every product decision in section 3 was handed down in that block; none is
-reopened here). DRAFT 2 folds in spec review round 1 (two reviewers, 31
-findings, one decision changed: the webhook lookup time bound, 4.6).
-Adjudications: `docs/superpowers/reviews/2026-09-26-voicemail-greeting/
-spec-r1-adjudications.md`.
+Status: DRAFT 3 - APPROVED for build under Cameron's overnight, unattended
+mission block (every product decision in section 3 was handed down in that
+block; none is reopened here). DRAFT 2 folded in spec review round 1 (two
+reviewers, 31 findings, one decision changed: the webhook lookup time bound,
+4.6). DRAFT 3 folds in round 2 (one continued reviewer, 9 findings, no
+decision changed; the round-1 refusal wiring was proven broken on Node 24
+and replaced, 4.3; the lookup closure now returns a result, 4.6). Round 2
+was terminal. Adjudications: `docs/superpowers/reviews/
+2026-09-26-voicemail-greeting/spec-r1-adjudications.md` and
+`spec-r2-adjudications.md`.
 Date: 2026-09-26
-Revised: 2026-09-26 (DRAFT 2)
+Revised: 2026-09-26 (DRAFT 3)
 Branch: `feat/voicemail-greeting`
 Worktree: `W:\tmp\voicemail-greeting`
 Base: `main` at `0dafe3c12291f60a69cccaf5a8a65bcb8d252452`
@@ -56,12 +60,15 @@ fallback. No message-catalog copy is added (staff-facing settings copy only).
   `voice.missed_call_goodbye` and hangs up. This `/status` handler is the ONLY
   place the voicemail prompt is spoken. `/voicemail-done` (line ~2118) says
   the thanks only; the recording callback (`/voice/recording`) never emits
-  TwiML with a prompt. The `/status` miss path today does NOT read settings;
-  before the TwiML it already awaits the missed-call push fan-out and a job
-  enqueue (`onFounderBridgeMissed`), so the greeting lookup is added to a
-  webhook budget that is already partly spent. The file names the ~15s
-  Twilio webhook budget (line ~723) and fire-and-forgets the pre-ring push
-  for that reason.
+  TwiML with a prompt. On the FIRST delivery of a terminal miss, the
+  `/status` handler already awaits `onFounderBridgeMissed` before the TwiML:
+  the missed-call push (`sendMissedCallPush`, which reads
+  `settings.getOrgSettings()` for the quick replies, line ~2350) and the
+  auto-text job enqueue. So the greeting lookup adds a SECOND settings read
+  plus a HEAD to a webhook budget that is already partly spent (a redelivered
+  summary skips `onFounderBridgeMissed` and would carry only the greeting's
+  read). The file names the ~15s Twilio webhook budget (line ~723) and
+  fire-and-forgets the pre-ring push for that reason.
 - The router already holds `settings` (a `SettingsRepo`, injectable through
   `TwilioVoiceWebhookDeps.settingsRepo`) and `mediaStore` (a `MediaStore |
   undefined`, injectable through `deps.mediaStore`, undefined when
@@ -262,16 +269,21 @@ flagged for the handback as questions the planner would have asked):
   out); NO log line when no greeting is set, because that is the default
   state of every org and a WARN per missed call there is the warn-flood class
   the log-hygiene work removed.
-- G. Decision 2's "never buffer the whole file" is delivered at the APP level:
-  the route holds no buffer and pipes the request into the media store.
-  lib-storage holds at most one 5 MiB part in memory before its single
-  `PutObject`, which at this cap is the whole file (section 2). That is the
-  repo's existing "streams only" posture for voicemail recordings, which use
-  the same `put`. Routing the bytes through the app (rather than the
-  direct-to-S3 pattern MMS and photos use) is what decision 2 says, and the
-  2026-07-15 reason for the direct pattern (20 MB photo batches on one EC2
-  instance) does not apply to a <= 5 MB file uploaded a handful of times a
-  year by one admin.
+- G. Decision 2's "never buffer the whole file": the route holds no buffer
+  and pipes the request into the media store's existing `put`, and
+  lib-storage (in the app process) holds at most one 5 MiB part in heap
+  before its single `PutObject`, which at this cap is the whole file
+  (section 2) - the same posture the voicemail-recording mirror ships with.
+  A LITERAL delivery exists: a streamed `PutObjectCommand` with an explicit
+  `ContentLength` taken from the request behind an additive adapter method
+  (S3 creates the object only on a complete body, so atomicity holds). It is
+  DECLINED for this build, not because decision 2 cannot be met, but because
+  it adds a new adapter path whose behavior against the local MinIO's
+  streamed-checksum handling is UNVERIFIED, for a gain of at most 5 MiB of
+  transient heap on an admin-only, 10/min route. Routing the bytes through
+  the app (rather than the direct-to-S3 pattern MMS and photos use) is what
+  decision 2 says; the 2026-07-15 reason for the direct pattern (20 MB photo
+  batches on one EC2 instance) does not apply here.
 - H. Removing or replacing on a VERSIONED bucket keeps prior versions
   (section 2). "Removing clears both" is delivered for the current version
   and the record; true deletion of old versions needs a lifecycle rule (an
@@ -330,11 +342,18 @@ export const VOICEMAIL_GREETING_SNIFF_BYTES = 12;
   .slice(0, 120).join('')`, never splitting a surrogate pair), and falls
   back to `greeting.mp3` / `greeting.wav` when empty.
 - `withTimeout<T>(promise: Promise<T>, ms: number, label: string):
-  Promise<T>`: races `promise` against a timer; on timeout rejects with
-  `GreetingLookupTimeoutError(label)` and attaches a no-op `catch` to the
-  original promise so its eventual rejection is never unhandled. (A small
-  generic helper; if `app/src/lib` already has an equivalent when the builder
-  looks, reuse it.)
+  Promise<T>`: a plain race of `promise` against a timer; on timeout rejects
+  with `GreetingLookupTimeoutError(label, ms)`, clears the timer when the
+  promise wins, and attaches a no-op `catch` to the original promise so its
+  eventual rejection is never unhandled. It carries NO flag: the caller
+  makes the abandoned work harmless by having it return a RESULT and touch
+  nothing (4.6). (`services/inboundEmail.ts` has a private helper of the
+  same shape; this one is exported from the greeting library.)
+- The gate compares the running byte count BEFORE pushing a chunk: the
+  chunk that would cross `maxBytes` is never forwarded, so downstream sees
+  at most `maxBytes` bytes and lib-storage never opens a multipart upload
+  for a refused body (there is no `s3:AbortMultipartUpload` grant to clean
+  one up).
 
 ### 4.2 Settings record (`app/src/repos/settingsRepo.ts`)
 
@@ -391,10 +410,16 @@ OTel span exports the query and the mutation catalog needs a literal path
 (section 2). Express's JSON and urlencoded parsers skip an `audio/*` body, so
 `req` is the unread stream.
 
-Handler order (each step's failure answers before any storage write; every
-refusal sets `Connection: close` and reads nothing further - the unread
-remainder of the body is dropped with the connection, never drained without
-bound):
+Handler order (each step's failure answers before any storage write). A
+refusal must REACH the browser as JSON: the route never destroys the request
+socket before the response is flushed, and it never sets `Connection: close`
+(both were proven on Node 24 to reset the client mid-upload - review round
+2). The bound on what a refused body costs comes from step 3: every
+known-length body that reaches the gate is at most 5 MiB, so draining it is
+bounded. Middleware refusals ahead of the handler (401, 403, 429) let Node
+dump the body as they do for every route today. See
+`docs/issues/mms-upload-endpoint-hardening.md` for the same trade-off on the
+retired MMS endpoint.
 
 1. `!mediaStore` -> 503 `{ error: 'media_storage_unavailable' }`.
 2. `normalizeGreetingContentType(req.headers['content-type'])` undefined ->
@@ -405,28 +430,38 @@ bound):
    `{ error: 'file_too_large', maxBytes }` (cheap refusal before reading; the
    gate below is the authority when the header is absent or lies).
    `Content-Length: 0` -> 400 `{ error: 'empty_file' }`.
-4. Build `gate = new GreetingUploadGate({ format, maxBytes })`; wire
-   `pipeline(req, gate, (err) => { /* errors surface through the gate */ })`
-   (callback form from `node:stream`, so a `req` error or abort destroys the
-   gate and a gate error destroys `req`), then IN THE SAME TICK call
-   `const putPromise = mediaStore.put(VOICEMAIL_GREETING_S3_KEY, gate,
-   contentType)` (lib-storage attaches its consumer synchronously inside
-   `put`; no `await` may sit between the pipeline call and the put, or an
-   error can fire with no listener). `await putPromise`.
+4. Build `gate = new GreetingUploadGate({ format, maxBytes })` and attach a
+   no-op `'error'` listener to it at once (so a gate error can never surface
+   as an unhandled event before a consumer is attached). Wire the request
+   with `req.pipe(gate)` - NOT `stream.pipeline`, which destroys `req` (and
+   its socket) on a gate error, so the 400 could never be written; `pipe`
+   merely unpipes. Forward request-side failures explicitly: on `req`
+   `'error'`, and on `'aborted'` / a `'close'` before `req.complete`, call
+   `gate.destroy(new GreetingClientAbortedError())`. Then call `const
+   putPromise = mediaStore.put(VOICEMAIL_GREETING_S3_KEY, gate,
+   contentType)` in the same tick and `await putPromise`. Classification is
+   by the ERROR ALONE (never by `req.destroyed` / `req.aborted`, which say
+   nothing reliable about who failed):
    - `GreetingRejectedError('invalid_format')` -> 400 `unsupported_media_type`
      with the same message; `'too_large'` -> 413 `file_too_large`; `'empty'`
-     -> 400 `empty_file`.
-   - A client abort (`req.destroyed` / `req.aborted`, or an error whose
-     `code` is `ECONNRESET` / `'aborted'`): WARN `{ actor, reason:
-     'client_aborted' }`, no response (the connection is gone), nothing
-     stored.
+     -> 400 `empty_file`. Before answering, `req.unpipe(gate)` and
+     `req.resume()` to drain the remainder (at most 5 MiB for a known
+     length, per step 3). The ONE unbounded shape - a CHUNKED body (no
+     Content-Length) that tripped `too_large` - answers 413 and then
+     destroys the request once the response has flushed (`res.once('finish',
+     () => req.destroy())`); browsers never send a Blob body chunked.
+   - `GreetingClientAbortedError`: WARN `{ actor, reason: 'client_aborted' }`,
+     no response (the connection is gone), nothing stored.
    - Any other error -> 500 `{ error: 'upload_failed' }` with an ERROR log
      `{ err, actor, s3Key }` (no bytes, no name).
    - Because the gate errors BEFORE pushing any byte when the header is bad,
-     and lib-storage sends its single `PutObject` only after the gate ENDS
-     cleanly, a refused or aborted upload never reaches S3: the previously
-     stored greeting is byte-identical afterwards (a route test pins this).
-     Replacing is atomic for the same reason: one `PutObject`, sent whole.
+     never forwards the chunk that crosses the cap, and lib-storage sends its
+     single `PutObject` only after the gate ENDS cleanly, a refused or
+     aborted upload never reaches S3: the previously stored greeting is
+     byte-identical afterwards and no put is recorded (route tests pin both,
+     with bodies of at least 3 MiB so an in-flight window cannot hide a
+     reset). Replacing is atomic for the same reason: one `PutObject`, sent
+     whole.
 5. On success: `const record: VoicemailGreeting = { s3Key, contentType,
    fileName: sanitizeGreetingFileName(decodedHeader, format), sizeBytes:
    gate.bytesSeen, uploadedAt: new Date().toISOString(), uploadedByUserId:
@@ -508,51 +543,81 @@ single `reply.say(voice.voicemail_prompt)` line with a call to a local helper
 `await addVoicemailGreeting(reply, entryCallSid)`:
 
 ```
-let played = false;
-try {
-  played = await withTimeout(
-    (async () => {
-      const org = await settings.getOrgSettings();
-      const greeting = org.voicemailGreeting;
-      if (greeting === undefined) return false;          // normal state: no log
-      if (!mediaStore) {
-        log.warn({ callSid, s3Key: greeting.s3Key },
-          'voicemail greeting set but no media store configured - using the spoken prompt');
-        return false;
-      }
-      const head = await mediaStore.head(greeting.s3Key);
-      if (head === undefined) {
-        log.warn({ callSid, s3Key: greeting.s3Key },
-          'voicemail greeting object missing - using the spoken prompt');
-        return false;
-      }
-      const url = await mediaStore.presign(greeting.s3Key, VOICEMAIL_GREETING_PLAY_TTL_SECONDS);
-      reply.play(url);
-      log.info({ callSid, s3Key: greeting.s3Key }, 'voicemail greeting offered');
-      return true;
-    })(),
-    VOICEMAIL_GREETING_LOOKUP_BUDGET_MS,
-    'voicemail greeting lookup',
-  );
-} catch (err) {
-  // A thrown store/settings error OR the budget expiring land here.
-  log.warn({ err, callSid, budgetMs: VOICEMAIL_GREETING_LOOKUP_BUDGET_MS },
-    'voicemail greeting lookup failed or timed out - using the spoken prompt');
+// The LOOKUP returns a result and touches nothing: no TwiML, no log line.
+// Only the caller, and only when the race resolves in time, emits <Play>
+// and writes the one INFO or WARN - so a lookup that resolves AFTER the
+// budget has nothing to append and nothing to log.
+type GreetingLookup =
+  | { kind: 'play'; url: string; s3Key: string }
+  | { kind: 'absent' }
+  | { kind: 'no_store'; s3Key: string }
+  | { kind: 'missing'; s3Key: string };
+
+async function lookupVoicemailGreeting(signal: AbortSignal): Promise<GreetingLookup> {
+  const org = await settings.getOrgSettings();
+  const greeting = org.voicemailGreeting;
+  if (greeting === undefined) return { kind: 'absent' };
+  if (!mediaStore) return { kind: 'no_store', s3Key: greeting.s3Key };
+  const head = await mediaStore.head(greeting.s3Key, { signal });
+  if (head === undefined) return { kind: 'missing', s3Key: greeting.s3Key };
+  const url = await mediaStore.presign(greeting.s3Key, VOICEMAIL_GREETING_PLAY_TTL_SECONDS);
+  return { kind: 'play', url, s3Key: greeting.s3Key };
 }
+
+async function offerVoicemailGreeting(reply: VoiceResponse, callSid: string): Promise<boolean> {
+  let result: GreetingLookup;
+  try {
+    result = await withTimeout(
+      lookupVoicemailGreeting(AbortSignal.timeout(greetingLookupBudgetMs)),
+      greetingLookupBudgetMs,
+      'voicemail greeting lookup',
+    );
+  } catch (err) {
+    // A thrown store/settings error OR the budget expiring land here.
+    log.warn({ err, callSid, budgetMs: greetingLookupBudgetMs },
+      'voicemail greeting lookup failed or timed out - using the spoken prompt');
+    return false;
+  }
+  switch (result.kind) {
+    case 'absent':
+      return false;                                    // the normal state: no log line
+    case 'no_store':
+      log.warn({ callSid, s3Key: result.s3Key },
+        'voicemail greeting set but no media store configured - using the spoken prompt');
+      return false;
+    case 'missing':
+      log.warn({ callSid, s3Key: result.s3Key },
+        'voicemail greeting object missing - using the spoken prompt');
+      return false;
+    case 'play':
+      reply.play(result.url);
+      log.info({ callSid, s3Key: result.s3Key }, 'voicemail greeting offered');
+      return true;
+  }
+}
+
+// In the /status miss branch:
+const played = await offerVoicemailGreeting(reply, entryCallSid);
 if (!played) reply.say(resolveMessage('voice.voicemail_prompt'));
 ```
 
+- `greetingLookupBudgetMs = deps.voicemailGreetingLookupBudgetMs ??
+  VOICEMAIL_GREETING_LOOKUP_BUDGET_MS` - a new optional dep on
+  `TwilioVoiceWebhookDeps` so the harness can shrink the budget for the
+  hang test; production always uses the constant.
 - The WHOLE lookup (GetItem + HeadObject + presign) is bounded by
   `VOICEMAIL_GREETING_LOOKUP_BUDGET_MS = 2500` because neither the DynamoDB
   nor the S3 client has a request timeout (section 2) and a hung call would
   otherwise hold the TwiML past Twilio's webhook budget - the exact failure
-  decision 3 forbids. On timeout the still-pending lookup is abandoned
-  (`withTimeout` swallows its eventual rejection); if it later resolves, its
-  `reply.play` cannot run because the closure has already returned - the
-  builder guards this explicitly: the closure checks a `settled` flag before
-  touching `reply` (set by `withTimeout` on expiry), so a late resolution
-  never appends a `<Play>` after `<Say>`.
-- `played` is set ONLY when `reply.play` was called; a `<Play>` and the
+  decision 3 forbids. The HEAD also receives `AbortSignal.timeout(budget)`
+  through a new optional `opts.signal` on `MediaStore.head` (the S3 store
+  passes it as `abortSignal` to `client.send`), so an abandoned HEAD releases
+  its pooled socket instead of holding one until the OS gives up; the
+  DynamoDB read rides the shared document client and is left as is. On
+  timeout the pending lookup is abandoned (`withTimeout` swallows its
+  eventual rejection) and, because it returns a result rather than acting,
+  a late resolution changes nothing and logs nothing.
+- `played` is true ONLY when `reply.play` was called; a `<Play>` and the
   `<Say>` prompt are never both emitted.
 - The `<Record>`, `voicemail_thanks` and `<Hangup>` that follow are untouched;
   `VOICEMAIL_MAX_LENGTH_SECONDS` / `VOICEMAIL_SILENCE_TIMEOUT_SECONDS` are
@@ -585,7 +650,11 @@ if (!played) reply.say(resolveMessage('voice.voicemail_prompt'));
   programmer error to pass both - throw). Everything else (credentials,
   `noteServerDate` on every response, `parseBody`, `errorFrom`) is reused, so
   the upload's errors become `ApiError`s with the server's `code` and the
-  server-clock hook keeps its "every response" rule.
+  server-clock hook keeps its "every response" rule. The function keeps
+  EXACTLY ONE `fetch(buildUrl(path, query), {...})` call whose body
+  expression is `payload ?? rawBody`: the mutation-catalog scanner
+  fingerprints that one delegated fetch and fails on a duplicate, and it
+  recognizes the fetch only with the literal `buildUrl(...)` argument.
 - `endpoints.ts` (additive; every call has a LITERAL path for the mutation
   scanner): `uploadVoicemailGreeting(file: File, contentType: string):
   Promise<VoicemailGreeting>` = `request<{ voicemailGreeting }>(
@@ -633,11 +702,14 @@ if (!played) reply.say(resolveMessage('voice.voicemail_prompt'));
     built-in prompt." and, for admins, a button "Upload greeting".
   - Greeting set: the file name (as text), "Uploaded <Mon D, YYYY> by <email>"
     (`toLocaleDateString` like `fmtVerifiedAt`), an `<audio controls
-    preload="none" aria-label="Voicemail greeting" src={audioUrl}>` (a plain
-    `<audio>`; no downmix), and for admins the buttons "Replace greeting" and
-    "Remove greeting". The audio element's `onError` sets a `role="status"`
-    line "The greeting file is missing or can't be played. Upload it again."
-    (the 4.3 interleave state made visible).
+    preload="metadata" aria-label="Voicemail greeting" src={audioUrl}>` (a
+    plain `<audio>`; no downmix; `metadata` rather than `none` so the browser
+    fetches the header at load - one bounded ranged request per Voice-tab
+    view - and a missing object surfaces without anyone pressing play), and
+    for admins the buttons "Replace greeting" and "Remove greeting". The
+    audio element's `onError` sets a `role="status"` line "The greeting file
+    is missing or can't be played. Upload it again." (the 4.3 interleave
+    state made visible at load).
   - The upload/replace button opens a hidden `<input type="file"
     accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" aria-label="Greeting
     audio file">` (same hidden-input pattern as ListingDetail photos; the e2e
@@ -730,7 +802,9 @@ Static/test surfaces that must stay green (gate 2):
 | `e2e/performance/routes.ts` + `routes.test.ts` | `VOICE_GETS` gains `/api/settings` |
 | `e2e/support/viewport.guard.test.ts` | the new spec uses the viewport helpers, never `documentElement.scrollWidth` |
 | `app/test/voiceRecording.test.ts` | unchanged assertions guard the `serveMediaObject` extraction |
-| `app/test/helpers/twilioWebhookHarness.ts` | settings fake learns the field; media fake gains `mediaHeads` / `mediaPresigns` recorders and `failMediaHeads` / `hangMediaHeads` seams |
+| `app/test/helpers/twilioWebhookHarness.ts` | settings fake learns the field; media fake gains `mediaHeads` / `mediaPresigns` recorders, `failMediaHeads` / `hangMediaHeads` seams (a hung head rejects when its `signal` aborts), and accepts the new `head(key, { signal })` shape; harness option `voicemailGreetingLookupBudgetMs` |
+| `dashboard/src/api/client.ts` | ONE `fetch(buildUrl(path, query), {...})` call remains (body `payload ?? rawBody`); a second fetch or a hoisted URL fails the mutation-catalog scan |
+| `app/src/adapters/mediaStore.ts` + every `MediaStore` implementation (`S3MediaStore`, the harness fake, any other fake found by grep) | `head(key, opts?: { signal?: AbortSignal })` - additive, optional |
 
 ### 4.10 Logging, PII, limits
 
@@ -765,11 +839,13 @@ Unit (vitest, `app/test/`):
   0xFFF9 rejected under both formats; a WAV header declared MP3 rejected and
   vice versa); `GreetingUploadGate` (passes a valid stream byte-exact; rejects
   a bad header with `invalid_format` having pushed 0 bytes downstream; rejects
-  at `maxBytes + 1` with `too_large`; `empty` on a zero-byte stream; a 2-byte
-  stream -> `invalid_format`); `sanitizeGreetingFileName` (non-string, path
-  stripping, control chars, code-point cap on a string of astral characters,
-  fallback); `withTimeout` (resolves, rejects, times out, and a late
-  rejection of the abandoned promise is not unhandled).
+  at `maxBytes + 1` with `too_large` having forwarded AT MOST `maxBytes`
+  bytes downstream; `empty` on a zero-byte stream; a 2-byte stream ->
+  `invalid_format`); `sanitizeGreetingFileName` (non-string, path stripping,
+  control chars, code-point cap on a string of astral characters, fallback);
+  `withTimeout` (resolves, rejects, times out with
+  `GreetingLookupTimeoutError`, clears its timer when the promise wins, and
+  a late rejection of the abandoned promise is not unhandled).
 - `settings.test.ts` additions (stubbed DocumentClient, the file's existing
   style): projection of a well-formed map; `null` -> a REMOVE expression; a
   map with a foreign `s3Key`, a missing `contentType`, or a wrong-typed
@@ -778,17 +854,20 @@ Unit (vitest, `app/test/`):
   `makeWebhookHarness`): 401 no session; 403 VA on PUT/DELETE; 503 when
   `withoutMediaStore`; 400 `unsupported_media_type` with the exact message for
   `audio/mp4`, for an ABSENT Content-Type, and for `audio/mpeg` declared over
-  WAV bytes (sniff); 413 via `Content-Length` and via a chunked body that
-  exceeds the cap; 400 `empty_file`; every refusal carries `Connection:
-  close`; happy path MP3 (`minimalMp3()`) and WAV (a 44-byte PCM header +
-  silence built inline) -> 200 with the record, the harness `mediaPuts` shows
-  ONE put under the fixed key with the canonical content type, `GET
-  /api/settings` carries the record, audit event appended with `action:
-  'uploaded'`; the file name from `X-Greeting-File-Name` is decoded and
-  sanitized (a percent-encoded non-ASCII name round-trips; a bad encoding
-  falls back); replace overwrites (second put, record updated, `uploadedAt`
-  advances); a refused second upload (bad header, too large) leaves the
-  stored object BYTE-IDENTICAL and the record unchanged; DELETE -> 204,
+  a 3 MiB body of WAV bytes (sniff) - the JSON body must arrive, and the
+  refusal is NOT logged as `client_aborted`; 413 via `Content-Length` over
+  the cap with a real 6 MiB body, and via a CHUNKED 6 MiB body with no
+  Content-Length (both must receive the 413 JSON); 400 `empty_file`; a
+  refused upload records ZERO puts; happy path MP3 (`minimalMp3()`) and WAV
+  (a 44-byte PCM header + silence built inline) -> 200 with the record, the
+  harness `mediaPuts` shows ONE put under the fixed key with the canonical
+  content type, `GET /api/settings` carries the record, audit event
+  appended with `action: 'uploaded'`; the file name from
+  `X-Greeting-File-Name` is decoded and sanitized (a percent-encoded
+  non-ASCII name round-trips; a bad encoding falls back); replace overwrites
+  (second put, record updated, `uploadedAt` advances); a refused second
+  upload (bad header at 3 MiB, too large) leaves the stored object
+  BYTE-IDENTICAL and the record unchanged; DELETE -> 204,
   record gone, `deletedMediaKeys` contains the key, audit `removed`; DELETE
   when the object delete rejects (`world.failMediaDeletes`) still clears the
   record and answers 204 with a WARN; an audit failure after a successful
@@ -810,13 +889,18 @@ Unit (vitest, `app/test/`):
   greeting set but the object missing from the fake store -> `<Say>` prompt
   AND a WARN line matching /voicemail greeting object missing/ with no URL in
   it; (d) greeting set and `head` throwing (`failMediaHeads`) -> `<Say>` +
-  WARN, 200; (e) greeting set and `head` NEVER settling (`hangMediaHeads`)
-  -> the response arrives with `<Say>` within the budget (fake timers or a
-  budget injected through a dep; the test must prove the bound, not just the
-  fallback) and a WARN mentioning the timeout, and no `<Play>` is ever
-  appended afterwards; (f) greeting set, `withoutMediaStore` -> `<Say>` +
-  WARN; (g) masked relay miss with a greeting set -> still the goodbye, no
-  `<Play>`.
+  WARN, 200; (e) greeting set and `head` NEVER settling (`hangMediaHeads`,
+  with the harness option `voicemailGreetingLookupBudgetMs: 50`) -> the
+  response arrives with `<Say>` and no `<Play>`, in well under a second
+  (the test measures elapsed time against the budget, proving the bound,
+  not just the fallback), the capture holds EXACTLY ONE WARN (mentioning
+  the timeout) and NO `voicemail greeting offered` line, and after the hung
+  head is released (the fake resolves it once the abort signal fires, or a
+  test seam releases it) and a tick has passed, STILL no `offered` line and
+  no second WARN; (f) greeting set, `withoutMediaStore` -> `<Say>` + WARN;
+  (g) masked relay miss with a greeting set -> still the goodbye, no
+  `<Play>`; (h) the `head` call receives an `AbortSignal` (the harness
+  records `mediaHeads` entries as `{ key, signal: boolean }`).
 - fake-twilio (`fake-twilio/test`): `interpretTwiml` on Play+Record+Say yields
   `greeting: 'play'` + `playUrl`; on Say+Record+Say yields `'say'`; on
   Record+Say yields `'none'`; on Say+Play+Record (a Say then a Play) yields

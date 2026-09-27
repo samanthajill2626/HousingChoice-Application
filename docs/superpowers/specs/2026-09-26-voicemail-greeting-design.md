@@ -442,14 +442,6 @@ retired MMS endpoint.
    contentType)` in the same tick and `await putPromise`. Classification is
    by the ERROR ALONE (never by `req.destroyed` / `req.aborted`, which say
    nothing reliable about who failed):
-
-   Erratum (build, 2026-09-27; measured on Node 24.14.1 in slice S4 and review
-   round 1): `stream.pipeline` does NOT stop the 400 from being written - the
-   response arrives - but it never drains the refused body, so the keep-alive
-   connection stalls until the server's keep-alive timeout resets it. The rule
-   (pipe + unpipe + resume; never pipeline) stands for that reason, and the
-   route tests pin it through connection reuse.
-
    - `GreetingRejectedError('invalid_format')` -> 400 `unsupported_media_type`
      with the same message; `'too_large'` -> 413 `file_too_large`; `'empty'`
      -> 400 `empty_file`. Before answering, `req.unpipe(gate)` and
@@ -488,6 +480,14 @@ retired MMS endpoint.
      with bodies of at least 3 MiB so an in-flight window cannot hide a
      reset). Replacing is atomic for the same reason: one `PutObject`, sent
      whole.
+
+   Erratum (build, 2026-09-27; measured on Node 24.14.1 in slice S4 and review
+   round 1): `stream.pipeline` does NOT stop the 400 from being written - the
+   response arrives - but it never drains the refused body, so the keep-alive
+   connection stalls until the server's keep-alive timeout resets it. The rule
+   (pipe + unpipe + resume; never pipeline) stands for that reason, and the
+   route tests pin it through connection reuse.
+
 5. On success: `const record: VoicemailGreeting = { s3Key, contentType,
    fileName: sanitizeGreetingFileName(decodedHeader, format), sizeBytes:
    gate.bytesSeen, uploadedAt: new Date().toISOString(), uploadedByUserId:

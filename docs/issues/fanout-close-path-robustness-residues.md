@@ -169,3 +169,123 @@ with `deferred` counting every key passed in (`broadcastFanOut.ts:487-497`,
 its own live attempt is not marked (an INFO names each one, `:461` and
 `:1260`). Left unchanged on the branch because the close tests match the line
 (build S2a concern 3).
+
+## Addendum 2026-09-27 - code review rounds 1-4
+
+The branch's code review changed two statements in the section above and left
+four more residues on these paths. Records under
+`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/code-review/`
+(`r1-adjudications.md` sections 1 and 4, `r1-conformance.md` C-11,
+`fw2-report.md` and `fw4-report.md` "New residues", `r2-adjudications.md`
+section 3); anchors at the code-final commit `52220729`. None was fixed on
+the branch: each needs a double fault, mislabels or logs, and never sends
+twice, and all fall under the human's standing ruling there (Cameron,
+2026-09-27, `r1-adjudications.md` section 6: a double text is annoying, not
+critical; no new machinery on a double-fault path). Severity is unchanged.
+
+**Corrections to the section above.**
+
+- "Each arm writes the slot first and the attempt record second, as two
+  separate guarded writes" - still the order, but since FW2-2 (commit
+  `b339ee0d`, round 1 C-2 / R-e) a TERMINAL arm writes the record only once
+  its slot write RESOLVED. A slot write that throws leaves the record open:
+  broadcast carries the recipient (`onRejected`,
+  `app/src/jobs/broadcastFanOut.ts:755-766`; the refusal arm `:997-1009`;
+  the second unknown `:784-801`), relay returns `stranded`
+  (`app/src/jobs/relayFanOut.ts:2148`, `:2170`, `:2198`, `:2245`), and an
+  enqueue-failure close whose slot write throws leaves the record
+  `reconciling` and not carried (`broadcastFanOut.ts:554-583`,
+  `relayFanOut.ts:1204-1240`, `app/src/jobs/relayRetryLeg.ts:610-648`). The
+  record is never closed over a slot left open.
+- "on broadcast a continuation's claim or the cap-close takes the stale
+  record over into reconcile" - true only for a strand from pass 1; one in
+  pass 2 or 3, or in any re-drive pass, stays `attempting` and the share
+  stays Sending until the sweeper. See
+  [send-attempt-sweeper](./send-attempt-sweeper.md), Addendum 2026-09-27
+  (round 2 N-1).
+
+**New item 6 - a known send whose reconcile hand-off cannot be enqueued
+closes "Not confirmed" (low; round 1 C-11, held item R-c2).** When a send
+landed but a record-phase write threw (broadcast `broadcastFanOut.ts:975-984`,
+or the wrapper's append failed, `:1029-1035`; relay `sent_unrecorded`,
+`relayFanOut.ts:2125-2138`, handed off at `:1411-1424`; the rung at
+`relayRetryLeg.ts:917-928`), the record moves to `reconciling` WITH the SID
+and the site enqueues the reconcile. If that enqueue throws, the hand-off's
+close runs as for an unknown send: the slot `failed` / `send_unconfirmed`,
+then the record `done` / `unresolved` with cause `enqueue_failed`
+(`handOff`: `broadcastFanOut.ts:554-583`, `relayFanOut.ts:1204-1240`,
+`relayRetryLeg.ts:610-648`) - although the provider ACCEPTED the message and
+the record holds its SID. The dashboard's "Couldn't confirm whether this
+text went out" (spec D20) is then false: D20's premise, that the platform
+does not know, fails here. It follows D7's letter. When the write that threw
+was `finishAttempt` rather than the slot write, the slot already reads `sent`
+and the conditional close leaves it (only the record is mislabeled). A double
+fault: a record-phase failure AND a failed enqueue. Fix direction recorded by
+the review: close known-SID cases as sent, or accept and record.
+
+**New item 7 - a won record close whose slot write then throws (low; FW2
+residue 4).** FW2-4 (commit `c44216cd`, round 1 C-4 / R-a) makes each close
+of a `redriven` record by another writer close the RECORD first
+(`closeRedriven`) and write its slot only when that won. When the record
+close wins and the slot write then throws, the record ends `done`
+(`refused`, `enqueue_failed` or `redrive_refused`) while the slot stays open:
+
+- the broadcast fence (`declineAtFence`, `broadcastFanOut.ts:656-664`): the
+  throw reaches the unit's prepare catch, which defers the slot
+  (`queued` / `send_retryable`) and carries the key (`:961-971`);
+- the broadcast cap-close (`closeBroadcast`, `:442-452`; its per-key catch
+  `:454-456`);
+- the relay suppression arm (`relayFanOut.ts:1875-1888`; the pre-claim catch
+  `:2075-2083` defers with no slot write);
+- the relay cap-close (`closeRelay`, `:1280-1296`);
+- the rung (`closeUnlessOwned`, `relayRetryLeg.ts:680-700`): its slot write
+  (`refuseGate` / `closeTerminally`, `:552-583`) is unguarded and throws out
+  of the job under its marker (listed in
+  [fanout-pass-setup-throw-strands-pass](./fanout-pass-setup-throw-strands-pass.md));
+- the same shape predates FW2-4 in the relay's own `closeRedriveRefused`
+  (`relayFanOut.ts:1697-1707`, build finding T8-9; FW2-5's `member_removed`
+  close runs through it), whose guarded slot write logs
+  `redriveRefusedSlot` on a throw.
+
+Every later gate SKIPs the `done` record (`app/src/lib/sendAttemptGate.ts:33`)
+and every later claim refuses it, so nothing re-applies the slot: FW1-4's
+re-apply (`app/src/jobs/sendReconcile.ts:405-421`) runs only for a redelivered
+reconcile check of that attempt. On broadcast `finalize` defers on the queued
+slot (`broadcastFanOut.ts:1526-1531`) and the share stays Sending; on relay
+the leg keeps its prior state (with an attempt clock it ages into "Queued -
+not confirmed", spec D20a). A sweeper that scans only OPEN records will not
+see these - the record is `done`. Round 1 conformance named the same cost
+for the reconcile's own record-first close (build finding T10-14: "a slot
+write that throws after the record close leaves a queued slot that A7 cannot
+finish"); FW1-4's re-apply later covered that one, because a reconcile check
+is redelivered - these closes are not. No fix was designed.
+
+**New item 8 - on relay a stranded rejection or refusal counts toward the
+outage brake; on broadcast it does not (low; FW2 residue 8, FW2 deviation
+5).** A relay terminal arm whose slot write threw returns `stranded` without
+`afterSend` (`relayFanOut.ts:2148`, `:2170`, `:2198`), and
+`isUnknownOutcome` counts such a strand toward D9's brake
+(`:1625-1645`), although spec D9 says a rejection resets it (round 2
+R2C-4 (d), a declared spec-text deviation). The broadcast twin carries the
+recipient and returns `other` (`broadcastFanOut.ts:1005-1008`,
+`:1041-1042`), which resets the streak. On relay, three consecutive
+double-faulted rejections or refusals brake the pass and defer its untried
+remainder to the continuation - a delay, not a loss. Also stale since FW2-3
+(commit `f890d711`): the build's S2a record lists a `fenceWrite` guardWrite
+label
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/build/S2a-report.md:416-419`)
+that no longer exists - a fence write that throws now reaches the prepare
+catch and logs the WARN "prepare failed - recipient deferred to the
+continuation" (`broadcastFanOut.ts:968-970`; the test asserts no `fenceWrite`
+ERROR, `app/test/broadcastFanOut.test.ts:2409`). The build record is
+historical and is not edited; an operator query or alarm keyed on that label
+would find nothing.
+
+**New item 9 - on the 30005/30006 throw path no line says the contact was
+flagged (low, log-only; FW4 residue 3).** `onRejected` flags the contact
+`sms_unreachable` unconditionally (`broadcastFanOut.ts:724-728`; a failed
+flag write logs its own ERROR at `:727`), but the arm's "contact flagged
+unreachable" WARN is logged only when the guarded slot write resolved
+(`:729-731`). On the throw path the only line is the carry WARN
+(`:761-764`), which carries the `errorCode` but does not say the contact was
+flagged. Fix: add the flag to the carry line's fields.

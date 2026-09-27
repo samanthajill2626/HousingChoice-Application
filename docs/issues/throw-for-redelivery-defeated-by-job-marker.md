@@ -210,3 +210,27 @@ this mission's Stage 1b), and the nine sweep sites in the table above.
 the fix (the units, the classifier, the record's claim, the reconcile), the
 marker (`jobs.ts:188`, `:262`; `app/src/repos/messagesRepo.ts:3285`) and
 `retrySend` (`app/src/jobs/retrySend.ts:212`, `:339`).
+
+## Addendum 2026-09-27 - code review rounds 1-4
+
+The sentence above that a re-run "never texts anyone twice" holds for every
+path the build and its four code review rounds tested, with narrow
+exceptions the review found and the human accepted under his standing ruling
+on the branch - a double text is annoying, not critical
+(`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/code-review/r1-adjudications.md`,
+section 6). Each is filed:
+
+- a stall of about 90 s or more inside the pre-send re-arm with a concurrent
+  taker, or a provider request that trickles past the reconcile window
+  ([send-attempt-rearm-residues](./send-attempt-rearm-residues.md), items 1
+  and 2);
+- a message held in Twilio's queue past the last check, if unsent messages
+  turn out not to be listed
+  ([send-reconcile-hosted-dev-checks](./send-reconcile-hosted-dev-checks.md),
+  item 1 - owed at the first hosted-dev run);
+- a filer's reading of a phone-keyed recipient's contact read after a crash
+  ([send-reconcile-job-residues](./send-reconcile-job-residues.md), item 10).
+
+The stale-claim takeover is now measured from the attempt's last RE-ARM,
+taken immediately before the provider call (code review ADV-1; FW1-1 and
+FW2-1), not from the claim. Nothing here changes this issue's status.

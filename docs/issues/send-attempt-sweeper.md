@@ -219,3 +219,153 @@ A reconcile that keeps failing - a relay adoption onto a missing row, item 7
 of [send-reconcile-job-residues](./send-reconcile-job-residues.md) - also ends
 with a `reconciling` record after the DLQ, so a sweeper that re-enqueues
 `send.reconcile` for such a record must bound its own retries.
+
+## Addendum 2026-09-27 - code review rounds 1-4
+
+The branch's code review corrected one claim in the section above and added
+three strands for this sweeper, and its fix waves changed the record the
+sweeper reads. Records under
+`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/code-review/`
+(`r2-adjudications.md` sections 2 and 4, `r2-adversarial.md` N-1 and A-3,
+`r2-conformance.md` R2C-3 and R2C-5, `fw1-report.md`, `fw2-report.md` and
+`fw4-report.md` "New residues", `r3-adjudications.md`); anchors at the
+code-final commit `52220729`. Status and severity are unchanged: the
+correction widens the sweeper's broadcast work, which `med` already covers.
+
+**Correction to item 2: the broadcast ladder clears the TTL only for a
+pass-1 strand (round 2 N-1 / R2C-3 / A-3 / F-2, LOW, a double fault).** Item
+2 says the 10 s + 20 s broadcast ladder clears the 30 s claim TTL, "so a
+continuation's claim or the cap-close takes the record over into reconcile:
+this item is relay-only". Each continuation waits its OWN backoff - 10 s
+before pass 2, 20 s before pass 3 (`broadcastBackoffMs`,
+`app/src/jobs/broadcastFanOut.ts:148-150`, scheduled at `:1146` and `:1164`;
+`MAX_BROADCAST_ATTEMPTS` 3, `:136`) - against the 30 s TTL
+(`SEND_CLAIM_TTL_MS`, `app/src/lib/sendOutcome.ts:29`). Only a strand from
+PASS 1 is old enough, by pass 3 or at its cap, to be taken over (`gateFor`,
+`app/src/lib/sendAttemptGate.ts:35-37`). A strand in pass 2 or 3, or in ANY
+re-drive pass (which meets a spent ladder, or reaches its cap about 20 s
+later), is still fresh at the cap: the cap-close's gate defers it
+(`closeBroadcast`, `broadcastFanOut.ts:431-439`), no continuation follows
+close A (`:1147-1151`) or a re-drive's capped claim (`:1132-1135`), and
+`finalize` waits on the queued slot (`:1526-1531`). The record stays
+`attempting`, the slot `queued`, and the share reads Sending until this
+sweeper. Round 2 reproduced it (throwaway probe zz-r2a-1: a last-rung 21211
+whose reject-slot write throws ends slot `queued`, record `attempting`,
+status `sending` at pass 3, no pending job, the cap gate `defer`).
+
+The strands that reach it, each a DynamoDB write that throws after a
+provider outcome:
+
+- pre-existing: a lost hand-off (`handToReconcile`'s write threw,
+  `broadcastFanOut.ts:598-614`, carried at `:613`);
+- added by FW2-2 (round 1 C-2 / R-e), which keeps the record open when a
+  terminal arm's slot write throws: a rejection (`onRejected`, carried at
+  `:755-766`), a refusal (`:997-1009`) and a re-drive's second unknown
+  (`onUnknown`, `:784-801`) - the last runs only on re-drive passes, so the
+  carry never rescues it;
+- relay: every strand, since the 5 s + 10 s relay ladder never clears the
+  TTL (the concession at `app/src/jobs/relayFanOut.ts:1400-1408`; item 2).
+
+What a pass-1 strand then gets (FW2 residue 3, corrected by N-1): a
+REJECTED recipient whose slot write threw still has a `queued` slot, so once
+taken over the reconcile finds nothing at the provider (a synchronous
+rejection created no message), rules `never_sent` and re-drives once - a
+second provider call for a rejected send, which for 30007 re-offers filtered
+content to the carrier. Every later strand waits here.
+
+FW2-2 is kept (round 2's answer to A-3): a record left `attempting` conforms
+to D7a and stays visible to this sweeper, where a terminal record beside a
+stuck `queued` slot would not. The reviewers' fix directions - hand the
+attempt to reconcile directly from the failed arm, or let the cap-close take
+over records this same pass abandoned (a local set), whatever their age - are
+new machinery on a double-fault path and were declined under the human's
+standing ruling on the branch (Cameron, 2026-09-27, `r1-adjudications.md`
+section 6: a double text is annoying, not critical; no new failure points).
+
+FW4-2 (commit `5d373ae9`) corrected the broadcast comments that promised the
+takeover (`closeBroadcast` `:401-415`, `handToReconcile` `:585-596`,
+`onRejected` `:672-685`). Three texts still carry the old promise:
+
+- the approved spec, D8a revision 11
+  (`docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md:444-445`:
+  "the broadcast ladder (10 s + 20 s) clears it, so a stuck broadcast attempt
+  is taken over at the cap"), true for a pass-1 strand only. The spec is the
+  approved contract and is not edited on the branch; this is its erratum
+  (FW4 residue 1);
+- `app/src/lib/guardWrite.ts:4-6` ("a lost write is logged at ERROR and left
+  to the stale-claim takeover") - true only where a later pass meets the
+  record stale (filer's note, FW3);
+- [fanout-close-path-robustness-residues](./fanout-close-path-robustness-residues.md),
+  2026-09-27 section ("on broadcast a continuation's claim or the cap-close
+  takes the stale record over"), corrected by its own Addendum 2026-09-27.
+
+**New for the sweeper.**
+
+7. **A false open record beside a terminal slot (round 2 R2C-5, LOW).** The
+   broadcast known arms (30007, 30005, 30006) write the slot and then bump
+   the stats inside ONE guarded write (`onRejected`,
+   `broadcastFanOut.ts:696-705`). When the slot write succeeds and the stats
+   bump throws, the guarded write reports failure, so the record stays
+   `attempting` and the recipient is carried (`:755-766`) beside a slot that
+   already reads `failed` with the provider code. The next pass skips the
+   terminal slot before any claim (`:1073`), and so does the cap-close
+   (`:427`), so nothing meets the record: it stays `attempting` until its
+   30-day cleanup horizon. Harmless to the user today (round 3's probe
+   zz-r3-2): finalize reads the slot. For 30005/30006 the contact is flagged
+   `sms_unreachable` regardless (`:724-728`). **The sweeper must read the
+   SLOT before it takes over or re-drives any open record**: a recipient
+   whose slot is already terminal is finished - close its record, never
+   re-drive it. Splitting the guarded write is a write-structure change,
+   left here (`r3-adjudications.md` sections 1-2); FW5-2 only made its log
+   line say "its slot or stats write failed" (`:761-764`). The FW5-2 test
+   pins today's state (`app/test/broadcastFanOut.test.ts:2319`), so a fix
+   restates it.
+8. **A re-arm that committed and then threw** leaves `attempting` on the
+   re-armed clock beside a `queued` / `send_retryable` slot, nothing sent
+   (round 2 R2C-6) - item 4 of
+   [send-attempt-rearm-residues](./send-attempt-rearm-residues.md).
+9. **A rung's `closeRedriven` that throws (FW2 residue 5, LOW).** The rung's
+   gated closes close a `redriven` record FIRST (`closeUnlessOwned`,
+   `app/src/jobs/relayRetryLeg.ts:680-699`, FW2-4). That write stays guarded
+   on the rung - unguarded it would throw out of the job (FW2 deviation 6) -
+   so a throw logs one ERROR and returns without closing: the record stays
+   `redriven`, the retry leg's slot `queued`, and the rung's chain ends. The
+   orphaned-`redriven` class of the problem's third bullet, the same end
+   state as the rung's gate-read throws in
+   [fanout-pass-setup-throw-strands-pass](./fanout-pass-setup-throw-strands-pass.md)
+   (build finding T9-7).
+
+**The record as the fix waves left it** (supersedes the matching sentences
+of the section above):
+
+- **The re-arm (FW1-1, FW2-1).** Every send site re-arms its attempt as the
+  last step before the provider call (`rearm`,
+  `app/src/repos/sendAttemptsRepo.ts:379-420`): `attempted_at` becomes the
+  LAST re-arm's instant, not the claim's; `expires_at` moves with it; and a
+  SECOND recipient-index item is written at the re-armed instant. So
+  "`attempted_at` is the latest claim's instant" and "`expires_at` ... written
+  only by a claim" above no longer hold. The claim TTL and the takeover
+  (`claim`, `:440-444`; `gateFor`, `sendAttemptGate.ts:35`) and the
+  reconcile's window are all measured from the last re-arm. Its residues are
+  [send-attempt-rearm-residues](./send-attempt-rearm-residues.md).
+- **The op token (FW1-5).** Every fenced transition writes a fresh random
+  `last_op` and, on ConditionalCheckFailed, re-reads it consistently and
+  answers `true` when the stored token is its own - its write committed on an
+  earlier SDK attempt (`transition`, `:448-482`). `true` now means "written by
+  this call, on this request or an earlier attempt of it". The claim and the
+  re-arm write no token: they are TransactWrites and rely on the SDK's
+  ClientRequestToken (item 7 of the re-arm issue). `finalizeStatus` does the
+  same with `finalize_op` (`app/src/repos/broadcastsRepo.ts:937-983`).
+- **The op token's re-read window (FW1 residue 3; the narrow class of round
+  1's ADV-3 note).** A write that committed and was then overwritten by
+  ANOTHER writer's transition before the re-read reports `false`: the caller
+  takes its lost-fence path while the record already carries the later
+  writer's state. A sweeper is one more writer whose transitions can land in
+  that window; it should read its own `false` the same way - someone else
+  moved the record. The slot and stats writes carry no token at all (item 15
+  of [send-reconcile-job-residues](./send-reconcile-job-residues.md)).
+- **The window and the siblings are two-sided (FW1-2).** A reconcile's
+  candidates lie in [attemptedAt - 60 s, attemptedAt + 90 s] and its siblings
+  are the attempts whose start lies within 150 s of it, either side
+  (`sendOutcome.ts:31-47`), whenever the check runs - so a sweeper that
+  re-enqueues `send.reconcile` for an old record re-judges the same window.

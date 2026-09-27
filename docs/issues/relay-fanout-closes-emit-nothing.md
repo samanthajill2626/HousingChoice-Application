@@ -61,3 +61,34 @@ no new dependency to the fan-out (build ruling A8).
 **Related.** [relay-staleness-alarm-assumed-not-built](./relay-staleness-alarm-assumed-not-built.md),
 [fanout-close-path-robustness-residues](./fanout-close-path-robustness-residues.md),
 [send-reconcile-job-residues](./send-reconcile-job-residues.md).
+
+## Addendum 2026-09-27 - code review rounds 1-4
+
+Anchors at the branch's code-final commit `52220729` (the ones above predate
+the code review). The class grew by one site and gained one related path:
+
+- **One more silent close (FW2-5, round 1 ADV-5).** A relay re-drive pass
+  now closes each carried member no longer on the roster
+  `redrive_refused` / `member_removed` (`app/src/jobs/relayFanOut.ts:1143-1149`)
+  through the same `closeRedriveRefused` (`:1680-1719`), which emits nothing.
+- **The rung's stranded arm emits no root close (round 2 R2C log wording,
+  ruled RESIDUE in `r2-adjudications.md` section 2; LOW, a double fault).**
+  When the leg unit returns `stranded` to the relay retry rung - a
+  failure-arm write failed: its hand-off to reconcile, or, since FW2-2, the
+  slot write of a terminal close (a refusal, a 30007, a rejection, a
+  re-drive's second unknown) - the rung logs one ERROR and returns: no close,
+  no enqueue, no emit, no root close
+  (`app/src/jobs/relayRetryLeg.ts:932-952`; FW4-2 made the ERROR name both
+  causes). Unlike the fan-out closes above, nothing durable changed, so an
+  emit would only refetch the same state: what is stale is the durable state
+  itself - the record `attempting`, the rung's slot as it was - and that is
+  [send-attempt-sweeper](./send-attempt-sweeper.md)'s. What this adds to the
+  sweeper's design: whatever later closes such a rung must announce the
+  root, as the rung's `announceRootClose` (`relayRetryLeg.ts:542-549`) and
+  the reconcile's `afterClose` (`app/src/jobs/sendReconcile.ts:967-993`) do.
+  The fan-out's own `stranded` path (`relayFanOut.ts:1400-1410`) emits nothing
+  either, like every fan-out close above.
+
+Not fixed on the branch: the fan-out still takes no event bus (build ruling
+A8), and the stranded rung is a double-fault path left to the sweeper under
+the human's standing ruling (no new machinery on a double-fault path).

@@ -71,6 +71,12 @@ export interface CallState {
   transcript?: string;
   /** The Voice Intelligence transcript sid (GTfake...) minted for this call's recording. */
   viTranscriptSid?: string;
+  /** Voicemail greeting observation (voicemail-greeting spec 4.8): the verb the
+   *  app's Dial-action TwiML placed immediately BEFORE <Record>. */
+  voicemailGreeting?: 'play' | 'say' | 'none';
+  /** HTTP status the fake got when it GET the <Play> URL (0 = network error);
+   *  set only when the greeting was 'play'. */
+  voicemailGreetingFetchStatus?: number;
   /** ISO-8601 (matches ThreadMessage); the CallEngine sets these via clock.nowIso(). */
   createdAt: string;
   updatedAt: string;

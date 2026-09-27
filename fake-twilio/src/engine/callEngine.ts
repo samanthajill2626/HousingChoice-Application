@@ -80,6 +80,11 @@ export interface CallEngineDeps {
    *  getRecordingStream fetch (via the Phase-1 SSRF dev-override) resolves here.
    *  Injectable so unit tests assert against an explicit base. */
   recordingServeBase?: string;
+  /** GET a <Play> URL and return its HTTP status (voicemail-greeting spec 4.8):
+   *  the e2e's proof that the app's presigned MinIO URL actually serves the
+   *  file. Defaults to a real fetch with a 5s timeout; 0 on any failure. Unit
+   *  tests inject a stub. */
+  fetchStatus?: (url: string) => Promise<number>;
 }
 
 export interface PlaceCallInput {
@@ -136,12 +141,23 @@ function outcomeToDialStatus(outcome: NonNullable<CallScenario['outcome']>): Cal
   }
 }
 
+async function defaultFetchStatus(url: string): Promise<number> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    await res.arrayBuffer(); // consume and discard
+    return res.status;
+  } catch {
+    return 0;
+  }
+}
+
 export class CallEngine {
   private readonly clock: Clock;
   private readonly dispatcher: VoiceDispatcher;
   private readonly registry: NumberRegistry;
   private readonly appNumberFor: ((number: string) => string | undefined) | undefined;
   private readonly recordingServeBase: string;
+  private readonly fetchStatus: (url: string) => Promise<number>;
   readonly hub: EventHub;
 
   private readonly calls = new Map<string, CallState>();
@@ -171,6 +187,7 @@ export class CallEngine {
     this.registry = deps.registry;
     this.appNumberFor = deps.appNumberFor;
     this.recordingServeBase = deps.recordingServeBase ?? 'http://localhost:8889';
+    this.fetchStatus = deps.fetchStatus ?? defaultFetchStatus;
   }
 
   getCalls(): CallState[] {
@@ -635,12 +652,25 @@ export class CallEngine {
    * channel), then POST the Record action (/voicemail-done) to close the call. The call
    * ends 'completed'. Only reached when the Dial-action response was a <Record> AND
    * scenario.voicemail !== false (masked/outbound/answered never get a record plan).
+   * First it records the greeting verb that preceded <Record> (a recorded greeting
+   * is Play+Record+Say+Hangup) and, for a <Play>, the HTTP status of fetching its URL.
    */
   private async leaveVoicemail(
     call: CallState,
     plan: Extract<TwimlPlan, { kind: 'record' }>,
     scenario: CallScenario,
   ): Promise<void> {
+    call.voicemailGreeting = plan.greeting;
+    if (plan.playUrl !== undefined) {
+      // Best effort and never fatal: the observation is for the e2e, the call
+      // proceeds whatever the fetch returned - including an injected
+      // fetchStatus that THROWS (the default never does; a stub might).
+      try {
+        call.voicemailGreetingFetchStatus = await this.fetchStatus(plan.playUrl);
+      } catch {
+        call.voicemailGreetingFetchStatus = 0;
+      }
+    }
     const vm = scenario.voicemail;
     const durationSec = vm && vm.durationSec !== undefined ? vm.durationSec : 6;
     if (plan.recordingStatusCallback !== undefined) {

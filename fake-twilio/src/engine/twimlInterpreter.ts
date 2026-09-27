@@ -5,11 +5,12 @@ export interface DialNumber {
   whisperUrl?: string;
   statusCallback?: string;
 }
+export type VoicemailGreetingVerb = 'play' | 'say' | 'none';
 export type TwimlPlan =
   | { kind: 'dial'; callerId?: string; record?: string; actionUrl?: string; recordingStatusCallback?: string; pauseBeforeMs: number; numbers: DialNumber[] }
   | { kind: 'gather'; actionUrl?: string; numDigits: number; timeoutSec: number; sayContainsPress0: boolean }
   | { kind: 'pause'; lengthSec: number }
-  | { kind: 'record'; maxLength?: number; playBeep?: boolean; actionUrl?: string; recordingStatusCallback?: string }
+  | { kind: 'record'; maxLength?: number; playBeep?: boolean; actionUrl?: string; recordingStatusCallback?: string; greeting: VoicemailGreetingVerb; playUrl?: string }
   | { kind: 'hangup' }
   | { kind: 'say'; text: string }
   | { kind: 'empty' };
@@ -18,6 +19,36 @@ export type TwimlPlan =
 // numbers like "+15550100002" as <Number> text; the default numeric coercion
 // would strip the leading "+" and yield the number 15550100002.
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', isArray: (name) => name === 'Number', parseTagValue: false });
+
+// A SECOND, order-preserving parse used only to answer "which verb comes
+// immediately before <Record>?" - the tag-keyed parse above discards sibling
+// order, and a voicemail response always carries a thanks <Say> AFTER <Record>,
+// so presence alone cannot tell a spoken prompt from a played greeting.
+const orderedParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', preserveOrder: true, parseTagValue: false });
+
+type OrderedNode = Record<string, unknown>;
+
+function textOf(node: unknown): string | undefined {
+  if (!Array.isArray(node)) return undefined;
+  const text = (node as OrderedNode[]).find((n) => '#text' in n);
+  return text !== undefined ? String(text['#text']) : undefined;
+}
+
+/** The verb immediately preceding <Record> in document order, plus a <Play>'s URL. */
+export function greetingBeforeRecord(xml: string): { greeting: VoicemailGreetingVerb; playUrl?: string } {
+  const doc = orderedParser.parse(xml) as OrderedNode[];
+  const response = doc.find((n) => 'Response' in n);
+  const children = (response?.['Response'] as OrderedNode[] | undefined) ?? [];
+  const at = children.findIndex((c) => 'Record' in c);
+  if (at <= 0) return { greeting: 'none' };
+  const prev = children[at - 1]!;
+  if ('Play' in prev) {
+    const url = textOf(prev['Play']);
+    return { greeting: 'play', ...(url !== undefined && { playUrl: url }) };
+  }
+  if ('Say' in prev) return { greeting: 'say' };
+  return { greeting: 'none' };
+}
 
 function asArray<T>(v: T | T[] | undefined): T[] {
   return v === undefined ? [] : Array.isArray(v) ? v : [v];
@@ -67,12 +98,14 @@ export function interpretTwiml(xml: string): TwimlPlan {
     return { kind: 'gather', ...(g['@_action'] !== undefined && { actionUrl: String(g['@_action']) }), numDigits: Number(g['@_numDigits'] ?? 1), timeoutSec: Number(g['@_timeout'] ?? 5), sayContainsPress0: /press 0/i.test(say) };
   }
   if ('Pause' in r) return { kind: 'pause', lengthSec: Number((r['Pause'] as Record<string, unknown>)['@_length'] ?? 1) };
-  // A voicemail response is Say+Record+Say+Hangup: check for the self-closing <Record/>
-  // BEFORE the Hangup/Say fallbacks (Hangup would otherwise win the first-match ladder).
+  // A voicemail response is Say+Record+Say+Hangup (Play+Record+Say+Hangup with a
+  // recorded greeting): check for the self-closing <Record/> BEFORE the Hangup/Say
+  // fallbacks (Hangup would otherwise win the first-match ladder).
   if ('Record' in r) {
     const rec = r['Record'] as Record<string, unknown>;
     return {
       kind: 'record',
+      ...greetingBeforeRecord(xml),
       ...(rec['@_maxLength'] !== undefined && { maxLength: Number(rec['@_maxLength']) }),
       ...(rec['@_playBeep'] !== undefined && { playBeep: String(rec['@_playBeep']) === 'true' }),
       ...(rec['@_action'] !== undefined && { actionUrl: String(rec['@_action']) }),

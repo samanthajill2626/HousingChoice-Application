@@ -79,3 +79,29 @@ describe('interpretTwiml', () => {
     expect(plan.recordingStatusCallback).toContain('/voice/recording');
   });
 });
+
+const REC = '<Record maxLength="120" playBeep="true" action="https://app/webhooks/twilio/voice/voicemail-done" recordingStatusCallback="https://app/webhooks/twilio/voice/recording" recordingStatusCallbackEvent="completed"/>';
+const wrap = (inner: string) => `<?xml version="1.0" encoding="UTF-8"?><Response>${inner}</Response>`;
+
+describe('interpretTwiml - the verb immediately before <Record> (voicemail greeting)', () => {
+  it('Play+Record+Say -> play with the URL (entities decoded)', () => {
+    const plan = interpretTwiml(wrap(`<Play>https://s3.local/settings/voicemail-greeting?a=1&amp;b=2</Play>${REC}<Say>Thanks.</Say><Hangup/>`));
+    expect(plan.kind).toBe('record');
+    expect(plan).toMatchObject({ greeting: 'play', playUrl: 'https://s3.local/settings/voicemail-greeting?a=1&b=2' });
+  });
+  it('Say+Record+Say -> say (the thanks after Record does not count)', () => {
+    const plan = interpretTwiml(wrap(`<Say>Leave a message.</Say>${REC}<Say>Thanks.</Say><Hangup/>`));
+    expect(plan).toMatchObject({ kind: 'record', greeting: 'say' });
+    expect((plan as { playUrl?: string }).playUrl).toBeUndefined();
+  });
+  it('Record+Say -> none', () => {
+    expect(interpretTwiml(wrap(`${REC}<Say>Thanks.</Say>`))).toMatchObject({ kind: 'record', greeting: 'none' });
+  });
+  it('Say+Play+Record -> play (only the verb immediately before Record counts)', () => {
+    expect(interpretTwiml(wrap(`<Say>Hi</Say><Play>https://x/y</Play>${REC}`))).toMatchObject({ kind: 'record', greeting: 'play', playUrl: 'https://x/y' });
+  });
+  it('the existing record attributes are unchanged', () => {
+    const plan = interpretTwiml(wrap(`<Say>Hi</Say>${REC}`));
+    expect(plan).toMatchObject({ kind: 'record', maxLength: 120, playBeep: true, actionUrl: 'https://app/webhooks/twilio/voice/voicemail-done' });
+  });
+});

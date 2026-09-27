@@ -29,7 +29,16 @@
 // same app process (e.g. --repeat-each=4 on a live session) therefore trip
 // that limiter's 429 BY DESIGN - the upload then shows "Couldn't upload the
 // greeting." - which is not a flake. A fresh or restarted app resets it.
-import { test, expect, type Page } from '@playwright/test';
+//
+// Known callers: the missed business-line calls come from NAMED tenant
+// contacts made through the API (createContact, the voice-transcription.spec.ts
+// precedent), not from unknown numbers. The 2026-08-19 intake gate withholds
+// the missed-call auto-text from a caller we already hold, so no auto-text SMS
+// is sent - its async delivery receipts used to land after the NEXT test's
+// reseed had wiped the message, and the app logged "status callback for
+// unknown provider SID" ERRORs. What this file proves is unchanged: a missed
+// business-line call hears the greeting (spec 5 step 2).
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { listCalls, placeCall } from '../../fixtures/fakeVoice.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { uniqueVoicePhone, NEXT } from '../../fixtures/voiceSetup.js';
@@ -69,6 +78,22 @@ function minimalWav(silenceBytes = 4000): Buffer {
   header.write('data', 36, 'latin1');
   header.writeUInt32LE(silenceBytes, 40);
   return Buffer.concat([header, Buffer.alloc(silenceBytes, 0)]);
+}
+
+/**
+ * Create a NAMED tenant contact through the authenticated API and return its
+ * phone (voice-transcription.spec.ts's helper): a missed call FROM it is from a
+ * caller we already know, so the intake gate withholds the missed-call
+ * auto-text (see the header note).
+ */
+async function createContact(api: APIRequestContext): Promise<{ contactId: string; phone: string }> {
+  const phone = uniqueVoicePhone();
+  const res = await api.post(`${NEXT}/api/contacts`, {
+    data: { type: 'tenant', firstName: 'Greeting', lastName: 'Caller', phone },
+  });
+  expect(res.status(), await res.text()).toBe(201);
+  const { contact } = (await res.json()) as { contact: { contactId: string } };
+  return { contactId: contact.contactId, phone };
 }
 
 async function devLoginAs(page: Page, email: string): Promise<void> {
@@ -134,8 +159,10 @@ test('admin uploads a greeting; a missed call plays it (fake fetched the presign
   expect(served.headers()['content-type']).toContain('audio/wav');
   expect(served.headers()['accept-ranges']).toBe('bytes');
 
-  // (2) a missed business-line call: <Play> before <Record>, and the fake GOT the file
-  const first = await placeCall(page.request, { from: uniqueVoicePhone(), to: BUSINESS, scenario: { digit: null, voicemail: { durationSec: 3 } } });
+  // (2) a missed business-line call (from a KNOWN caller - no auto-text, see
+  // the header): <Play> before <Record>, and the fake GOT the file
+  const firstCaller = await createContact(page.request);
+  const first = await placeCall(page.request, { from: firstCaller.phone, to: BUSINESS, scenario: { digit: null, voicemail: { durationSec: 3 } } });
   const played = await greetingVerbOf(page, first);
   expect(played.verb).toBe('play');
   expect(played.fetchStatus).toBe(200);
@@ -150,7 +177,8 @@ test('admin uploads a greeting; a missed call plays it (fake fetched the presign
   await expect(page.getByText(NO_GREETING)).toBeVisible();
   expect((await page.request.get(`${NEXT}${src}`)).status()).toBe(404);
 
-  const second = await placeCall(page.request, { from: uniqueVoicePhone(), to: BUSINESS, scenario: { digit: null, voicemail: { durationSec: 3 } } });
+  const secondCaller = await createContact(page.request);
+  const second = await placeCall(page.request, { from: secondCaller.phone, to: BUSINESS, scenario: { digit: null, voicemail: { durationSec: 3 } } });
   const spoken = await greetingVerbOf(page, second);
   expect(spoken.verb).toBe('say');
   expect(spoken.fetchStatus).toBeUndefined();

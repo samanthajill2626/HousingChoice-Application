@@ -2,9 +2,11 @@
 
 Anchor issue: `throw-for-redelivery-defeated-by-job-marker` (high).
 Branch `feat/send-outcome-reconcile`, cut from `main@685f2ede`, 2026-09-24.
-Revision 6 (after design review rounds 1-4 and the 2026-09-25 cross-branch
-sequencing with `feat/retry-send-window` and `feat/share-skip-fix`; see the
-adjudications and Sec 2a).
+Revision 7 (after design review rounds 1-4, the 2026-09-25 cross-branch
+sequencing with `feat/retry-send-window` and `feat/share-skip-fix`, and the
+RSW planner's 2026-09-26 relay, kept verbatim at
+`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/handoffs/rsw-relay-2026-09-26.md`;
+see the adjudications and Sec 2a).
 
 | sev | issue | this branch |
 |---|---|---|
@@ -138,14 +140,22 @@ echoes what was submitted. All of these shape Sec 5.
 Three branches touch the same objects. The agreed order, and what this branch
 carries because it lands after the other two:
 
-1. **`feat/share-skip-fix` Branch A** merges first (census, fix script,
-   import default, skipped-recipient reasons and honest counts). Its interim
-   "Already sent" rule counts every failed-class slot as sent - including this
-   branch's `failed` + `send_unconfirmed` - which is the safe direction and
-   needs no cross-branch rule. Its stats bucket and internal codes will
-   conflict textually with D22 and D23 in `deriveBroadcastStats`, the
-   StatChips balance rule and the delivery-reason map; this branch's one
-   main-sync before handback resolves them.
+1. **`feat/share-skip-fix` Branch A** merged first (observed in `main`
+   2026-09-26: census, fix script, import default, skipped-recipient reasons
+   and honest counts). Its interim "Already sent" rule counts every
+   failed-class slot as sent - including this branch's `failed` +
+   `send_unconfirmed` - which is the safe direction and needs no cross-branch
+   rule. What this branch meets from it: the `skippedTotal` balance in
+   `broadcastFormat.ts`, which the `unconfirmed` bucket (D22) joins; the
+   results-row reason gate `shareRecipientReason` there, which the recipient
+   badge calls for skipped AND failed rows, so `send_unconfirmed` needs its
+   OWN arm in it (D20) or it falls through to `deliveryReason`'s whole-group
+   sentence; `SHARE_SKIP_REASONS` beside the internal-code map in
+   `deliveryStatus.ts`; `created_via` on the broadcast row (`'dashboard'` =
+   a person's send, absent = automated), which adoption reads (D15); and the
+   lean seed's deliberately switched-off tenant `contact-tenant-0002` /
+   `conv-0002`, which this branch's e2e must never use as the recipient of
+   anything automated.
 2. **`feat/retry-send-window` (RSW)** merges second. **This branch's PLAN is
    written after that merge**, because RSW restructures the same relay retry
    rung this branch adopts. Requirements RSW states on any later path, carried
@@ -165,7 +175,22 @@ carries because it lands after the other two:
    - RSW #7: both branches edit the retry join's terminal step
      (`relayRetryJoin.ts`); this branch's "Not confirmed, not a failure" for
      `send_unconfirmed` and RSW's "no display code" for `retry_window_closed`
-     must both survive the merge, each with its test.
+     (the exported `WINDOW_CLOSED_CODE`, pinned to the app constant by
+     `relayWindowCloseMirror.test.ts`) must both survive the merge, each
+     with its test.
+   - From RSW's 2026-09-26 relay, also carried: a CLAIM-TIME decline in the
+     status webhook appends the rung already closed and never enqueues it,
+     so no attempt record can exist for it and nothing here reads one; RSW's
+     `sendOneRelayLeg(args.sendDeadlineMs)` returns `deadline_exceeded`
+     BEFORE any `attempted` write and the fan-out passes no deadline (D7a);
+     `sendMessage`'s refusal gates are pinned to `previewSendRefusal` by a
+     parity table (`app/test/helpers/sendRefusalCases.ts`) - this branch
+     adds NO new gate to `sendMessage`, only typed errors, so no row is
+     owed; Twilio's default retry policy never redelivers a 5xx status
+     callback, so nothing here may count on webhook redelivery
+     (`relay-retry-claim-assumes-5xx-redelivery`); RSW's lane seam
+     `E2E_SEND_RETRY_BACKOFF_MS` is reused, never rebuilt, and a running
+     lane must be booted fresh to pick up `childEnv` changes.
 3. **This branch** (Stage 1) merges third.
 4. **Stage 1b - THIS mission's, in its own worktree after Stage 1 lands
    (Cameron's ruling, 2026-09-25):** the `retrySend` adoption - the one-to-one
@@ -277,7 +302,7 @@ differently.**
 
 | phase | what runs | on failure |
 |---|---|---|
-| PREPARE | reads and writes before the provider call: contact, conversation, roster suppression check, presign, the aggregation-state write, the claim itself (D8a) | nothing was sent: the recipient is deferred as `retryable` (D6), and the record - if it was claimed - is released to `done` / `retryable`; a refused claim is handled by D8a, not here. ONE exception (Sec 2a, RSW #5): on the relay retry rung, RSW's window deadline expiring during the bounded token acquire is a TERMINAL close (`retry_window_closed`; the record `done` / `window_closed`), never a deferral |
+| PREPARE | reads and writes before the provider call: contact, conversation, roster suppression check, presign, the aggregation-state write, the claim itself (D8a) | nothing was sent: the recipient is deferred as `retryable` (D6), and the record - if it was claimed - is released to `done` / `retryable`; a refused claim is handled by D8a, not here. ONE exception (Sec 2a, RSW #5): on the relay retry rung, RSW's window deadline expiring during the bounded token acquire - the unit's existing `deadline_exceeded` outcome, returned before any `attempted` write - is a TERMINAL close through the job's `refuseGate` (`retry_window_closed`; the record, if claimed by then, `done` / `window_closed`), never a deferral |
 | SEND | the provider call, or `sendMessage` | classified (D1) |
 | RECORD | writes after a successful send that the receipts depend on: the SID pointer (relay), the message row (`sendMessage`'s append), then LAST the slot together with the stats bump in one conditional write, then the record's `done` / `sent` | the send HAPPENED and its SID is known: `sent_unrecorded` - one ERROR line carrying the SID and the owner, then the record goes to `reconciling` WITH the SID and a reconcile is enqueued (D13's known-SID path), whose adoption re-runs those writes idempotently; the loop continues. The token acquire, the milestone and listing-send rows and the SSE emits are best-effort and stay so |
 
@@ -535,8 +560,14 @@ it) and records:
   made, deduped on the SID; relay - the conditional `relaysid#` pointer put,
   which today swallows a conditional failure and must instead report a lost
   claim), THEN the slot (broadcast: with `conversationId`+`tsMsgId` so later
-  receipts roll up), THEN, only when the slot write moved, the stats bump,
-  the audit row and the SSE emits, and - only when the adopted status is
+  receipts roll up; the row carries `automated` and, for a recipient who
+  still holds the thread's number, `recipient_contact_id`, both derived the
+  way the success path derives them - `automated` false when the broadcast's
+  `created_via` is `'dashboard'` (a person's send), true otherwise - because
+  RSW's automatic 30003 retry reads those two fields to decide how to gate
+  the retry), THEN, only when the slot write moved, the stats bump, the audit
+  row (its `automated` flag from the same `created_via` rule) and the SSE
+  emits, and - only when the adopted status is
   `sent` or `delivered`, never `failed` - the `listing_sent` milestone and
   the "Properties sent" listing-send row (a message the carrier says never
   arrived must not count as a property sent; share-skip-fix's Branch B builds
@@ -658,10 +689,13 @@ danger-toned and `isFailure: false`.
 `send_unconfirmed` there instead of `failed`; the persisted counter the
 unresolved write bumps is `unconfirmed`, not `failed`. The recipient row reads
 "Not confirmed" with the D20 reason rendered (the badge shows a reason for this
-code even though `isFailure` is false) and no "open conversation to retry"
-link. Readers that change together: the `BroadcastStats` API type, the
-`broadcast.updated` SSE payload, the StatChips balance rule, the results and
-list routes, and the two seed files that build stats.
+code even though `isFailure` is false; since Branch A the badge routes failed
+rows through `shareRecipientReason`, so that gate gets its own
+`send_unconfirmed` arm rather than falling through to `deliveryReason`) and no
+"open conversation to retry" link. Readers that change together: the
+`BroadcastStats` API type, the `broadcast.updated` SSE payload, the StatChips
+balance rule (`skippedTotal` and the audience sum), the results and list
+routes, and the two seed files that build stats.
 
 **D23. New codes render as prose, never as fake carrier numbers.** The
 app-invented codes this branch writes (`send_unconfirmed`, `redrive_refused`)

@@ -29,6 +29,7 @@ import {
   configureJobsLogger,
   configureOutboundQueue,
   configureScheduler,
+  defineJobHandler,
   dispatchJob,
   enqueueImmediate,
 } from '../src/jobs/jobs.js';
@@ -51,8 +52,9 @@ import { SendRefusedError } from '../src/services/sendMessage.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import type { SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
-import { SEND_RECONCILE_JOB } from '../src/jobs/sendReconcile.js';
+import { SEND_RECONCILE_JOB, type SendReconcilePayload } from '../src/jobs/sendReconcile.js';
 import { hashRecipientKey } from '../src/lib/sendFingerprint.js';
+import { SEND_RETRYABLE_CODE } from '../src/lib/sendOutcome.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
@@ -1364,13 +1366,54 @@ describe('relay.retryLeg (30003 ladder)', () => {
   // outbound.delayed, a delay-0 one through a recording stub (build finding G4).
   // -------------------------------------------------------------------------
   describe('send outcomes and the record gate (SOR D7a, D8, D16) - the first test must fail on main', () => {
+    /** A fixed instant, used ONLY where no hand-off enqueue is observed (build finding T9-1). */
+    const T0 = '2026-09-26T12:00:00.000Z';
+    /** Facts for a record a test seeds directly (the values are never matched here). */
+    const facts = { recipientDigest: 'd'.repeat(32), sender: POOL, bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 };
+    /** The default versioned retry row's slot as seedRetryRow writes it. */
+    const SEEDED_SLOT = { status: 'queued', requestedTransport: 'sms', transportAggregationState: 'planned' } as const;
     const rungOwner = (row: MessageItem): SendAttemptOwner => ({
       kind: 'relay_rung',
       relayConversationId: CONV,
       retryTsMsgId: row.tsMsgId,
       memberKey: BOB_KEY,
     });
+    const rungRef = (row: MessageItem) => ({
+      kind: 'relay_rung',
+      relayConversationId: CONV,
+      retryTsMsgId: row.tsMsgId,
+      recipientKeyHash: hashRecipientKey(BOB_KEY),
+    });
     const delayedOf = (jobName: string) => outbound.delayed.filter((d) => d.envelope.jobName === jobName);
+    /** An UNKNOWN provider outcome (a socket drop) on the versioned send path. */
+    function unknownSend(): void {
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+      };
+    }
+    /** G4: a delay-0 reconcile hand-off never reaches outbound.delayed - record it with a stub handler. */
+    function recordReconciles(): SendReconcilePayload[] {
+      const got: SendReconcilePayload[] = [];
+      defineJobHandler(SEND_RECONCILE_JOB, async (p) => {
+        got.push(p as SendReconcilePayload);
+      });
+      return got;
+    }
+    /** DELAY-SELECTIVE queue refusal: the entry enqueue (delay 0) and a delay-0 hand-off still pass. */
+    function refuseDelayedEnqueues(): void {
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+    }
+    /** A record the reconcile ruled never_sent and re-drove: redriven, redriveCount 1. */
+    async function seedRedriven(owner: SendAttemptOwner, at = new Date().toISOString()): Promise<void> {
+      await world.sendAttemptsRepo.claim(owner, facts, at);
+      await world.sendAttemptsRepo.handToReconcile(owner, { attemptNo: 1, attemptedAt: at });
+      await world.sendAttemptsRepo.markRedriven(owner, at);
+    }
 
     it('handed_to_reconcile enqueues send.reconcile for the rung with the hashed key and neither closes nor emits', async () => {
       seedRelay(world);
@@ -1409,6 +1452,585 @@ describe('relay.retryLeg (30003 ladder)', () => {
         transportAggregationState: 'planned',
       });
       expect(await world.sendAttemptsRepo.get(rungOwner(row))).toBeUndefined();
+    });
+
+    it('an unknown send on the real unit leaves the rung reconciling and hands it off once, with no close and no emit', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      unknownSend();
+      register();
+
+      await runHandler(payloadFor(row));
+
+      const record = await world.sendAttemptsRepo.get(rungOwner(row));
+      expect(record).toMatchObject({ state: 'reconciling', attemptNo: 1, checkNo: 0, sender: POOL });
+      expect(delayedOf(SEND_RECONCILE_JOB).map((d) => d.envelope.payload)).toEqual([
+        { owner: rungRef(row), attemptedAt: record!.attemptedAt, checkNo: 0 },
+      ]);
+      // The slot keeps `queued` with no code (D7): only the unit's attempt
+      // clock and its `attempted` aggregation write touched it.
+      expect(slotOf(row.tsMsgId)).toEqual({
+        ...SEEDED_SLOT,
+        transportAggregationState: 'attempted',
+        attemptedAt: record!.attemptedAt,
+      });
+      expect(bumps).toHaveLength(0);
+      expect(persistedEmits()).toEqual([]);
+      expect(errorLogs()).toEqual([]);
+      expect(warnLogs()).toContainEqual(
+        expect.objectContaining({ event: 'relay_retry_leg', legOutcome: 'handed_to_reconcile', reason: 'unknown' }),
+      );
+    });
+
+    it('sent_unrecorded hands the rung to reconcile, makes NO inbox touch, and neither closes nor emits', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      const at = new Date().toISOString();
+      legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+        kind: 'sent_unrecorded',
+        providerSid: 'SMunrecorded-1',
+        attemptRef: { attemptNo: 1, attemptedAt: at },
+      });
+      register();
+
+      await runHandler(payloadFor(row));
+
+      // The adoption makes the touch (spec D15); here it would be premature.
+      expect(bumps).toHaveLength(0);
+      expect(outbound.delayed.map((d) => d.envelope.payload)).toEqual([
+        { owner: rungRef(row), attemptedAt: at, checkNo: 0 },
+      ]);
+      expect(errorLogs()).toHaveLength(1);
+      expect(errorLogs()[0]).toMatchObject({
+        event: 'relay_retry_leg',
+        legOutcome: 'sent_unrecorded',
+        providerSid: 'SMunrecorded-1',
+      });
+      expect(persistedEmits()).toEqual([]);
+      expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+    });
+
+    it('a record-phase failure on the real unit hands the rung to reconcile WITH its SID after one send, and makes no inbox touch', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      vi.spyOn(world.messagesRepo, 'claimRelaySidPointer').mockRejectedValueOnce(new Error('dynamo down'));
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(1);
+      const record = await world.sendAttemptsRepo.get(rungOwner(row));
+      expect(record).toMatchObject({ state: 'reconciling', sid: expect.stringMatching(/^SMfake-out-/) });
+      expect(delayedOf(SEND_RECONCILE_JOB).map((d) => d.envelope.payload)).toEqual([
+        { owner: rungRef(row), attemptedAt: record!.attemptedAt, checkNo: 0 },
+      ]);
+      expect(bumps).toHaveLength(0);
+      expect(persistedEmits()).toEqual([]);
+    });
+
+    it.each([false, true])(
+      'stranded (afterSend=%s) neither closes nor enqueues nor emits - one ERROR names the rung',
+      async (afterSend) => {
+        seedRelay(world);
+        const row = seedRetryRow(world);
+        legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+          kind: 'stranded',
+          ...(afterSend && { afterSend: true as const }),
+        });
+        register();
+
+        await runHandler(payloadFor(row));
+
+        expect(outbound.delayed).toHaveLength(0);
+        expect(persistedEmits()).toEqual([]);
+        expect(bumps).toHaveLength(0);
+        expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+        expect(errorLogs()).toHaveLength(1);
+        expect(errorLogs()[0]).toMatchObject({
+          event: 'relay_retry_leg',
+          retryTsMsgId: row.tsMsgId,
+          legOutcome: 'stranded',
+        });
+        expect(errorLogs()[0]!['afterSend']).toBe(afterSend ? true : undefined);
+      },
+    );
+
+    it('a lost hand-off write on the real unit strands the rung: the record stays attempting, no envelope, no close, no emit', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      unknownSend();
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockRejectedValueOnce(new Error('dynamo down'));
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({ state: 'attempting' });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toEqual([]);
+      expect(slotOf(row.tsMsgId)?.status).toBe('queued');
+      expect(slotOf(row.tsMsgId)?.errorCode).toBeUndefined();
+      expect(errorLogs().filter((l) => l['legOutcome'] === 'stranded')).toHaveLength(1);
+    });
+
+    it('rejected closes nothing further (the unit wrote the slot) and announces the root close once', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      legSend.override = async (): Promise<RelayLegSendOutcome> => ({ kind: 'rejected', errorCode: '21211' });
+      register();
+
+      await runHandler(payloadFor(row));
+
+      // The override stands in for the unit, so a slot write here would be the JOB's.
+      expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+      expect(errorLogs()).toEqual([
+        expect.objectContaining({
+          event: 'relay_retry_leg',
+          legOutcome: 'rejected',
+          errorCode: '21211',
+          retryClaim: 'code_not_retryable',
+        }),
+      ]);
+      expect(errorLogs()[0]!['closeCode']).toBeUndefined();
+    });
+
+    it('a re-driven rung whose send is unknown AGAIN is closed by the unit (send_unconfirmed, record unresolved); the job closes nothing more, hands nothing off, and announces the root', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      await seedRedriven(rungOwner(row));
+      unknownSend();
+      const slotClose = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      register();
+
+      await runHandler({ ...payloadFor(row), redrive: true });
+
+      expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+        state: 'done',
+        outcome: 'unresolved',
+        cause: 'second_unknown',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      // The unit's own close only - the job never closes a second time.
+      expect(slotClose).toHaveBeenCalledTimes(1);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+      expect(errorLogs()).toContainEqual(
+        expect.objectContaining({
+          event: 'relay_retry_leg',
+          redrive: true,
+          legOutcome: 'rejected',
+          errorCode: 'send_unconfirmed',
+          retryClaim: 'send_unconfirmed',
+        }),
+      );
+    });
+
+    it('a reconcile enqueue that throws closes the rung unresolved - the slot send_unconfirmed FIRST, then the record - with an ERROR and the root close', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      // The REAL unit (build finding T9-3): it claims now and hands off, so the
+      // hand-off is delayed about 5 s and the delay-selective seam refuses it.
+      unknownSend();
+      refuseDelayedEnqueues();
+      const slotClose = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeFromReconcile');
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+        state: 'done',
+        outcome: 'unresolved',
+        cause: 'enqueue_failed',
+      });
+      expect(slotClose).toHaveBeenCalledTimes(1);
+      expect(recordClose).toHaveBeenCalledTimes(1);
+      expect(slotClose.mock.invocationCallOrder[0]!).toBeLessThan(recordClose.mock.invocationCallOrder[0]!);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+      expect(errorLogs()).toContainEqual(
+        expect.objectContaining({
+          event: 'relay_retry_leg',
+          retryClaim: 'reconcile_enqueue_failed',
+          closeCode: 'send_unconfirmed',
+          cause: 'enqueue_failed',
+        }),
+      );
+    });
+
+    it('a stale attempt the unit takes over at its claim is handed to reconcile once and at once - no send, no close, no emit', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      const stale = new Date(Date.now() - 31_000).toISOString();
+      await world.sendAttemptsRepo.claim(rungOwner(row), facts, stale);
+      const reconciles = recordReconciles();
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(0);
+      expect(reconciles).toEqual([{ owner: rungRef(row), attemptedAt: stale, checkNo: 0 }]);
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+        state: 'reconciling',
+        attemptedAt: stale,
+      });
+      expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+      expect(persistedEmits()).toEqual([]);
+      expect(errorLogs()).toEqual([]);
+      expect(warnLogs()).toContainEqual(
+        expect.objectContaining({ legOutcome: 'handed_to_reconcile', reason: 'takeover' }),
+      );
+    });
+
+    it('a hand-off outcome without an attempt record hands nothing off, closes nothing and emits nothing - one ERROR', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      legSend.override = async (): Promise<RelayLegSendOutcome> => ({ kind: 'handed_to_reconcile', reason: 'unknown' });
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toEqual([]);
+      expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+      expect(errorLogs()).toEqual([
+        expect.objectContaining({ event: 'relay_retry_leg', legOutcome: 'handed_to_reconcile' }),
+      ]);
+    });
+
+    it('skipped_terminal with reason unknown (a hand-off that lost its fence to a takeover) does nothing - no close, no enqueue, no emit', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      legSend.override = async (): Promise<RelayLegSendOutcome> => ({ kind: 'skipped_terminal', reason: 'unknown' });
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toEqual([]);
+      expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+      expect(errorLogs()).toEqual([]);
+      expect(infoLogs()).toContainEqual(expect.objectContaining({ event: 'relay_retry_leg', reason: 'unknown' }));
+    });
+
+    it('a failed inbox touch after a sent leg is logged at ERROR and never fails the job', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      world.conversationsRepo.touchLastActivityPreservingStatus = async () => {
+        throw new Error('dynamo down');
+      };
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(1);
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({ state: 'done', outcome: 'sent' });
+      // The job's own line - not the queue adapter's "deferred dispatch failed".
+      expect(errorLogs()).toEqual([
+        expect.objectContaining({ event: 'relay_retry_leg', providerSid: expect.stringMatching(/^SMfake-out-/) }),
+      ]);
+      expect(infoLogs().some((l) => l['msg'] === 'relayRetryLeg: retry leg sent')).toBe(true);
+      expect(persistedEmits()).toEqual([]);
+    });
+
+    it('a re-driven rung declined by the window gate closes the record done/refused with retry_window_closed (RSW #1, D8)', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world, { attempt: 1, windowStart: minutesAgo(20) });
+      await seedRedriven(rungOwner(row), T0);
+      register();
+
+      await runHandler({ ...payloadFor(row), redrive: true });
+
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'retry_window_closed' });
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+        state: 'done',
+        outcome: 'refused',
+        cause: 'retry_window_closed',
+      });
+      expect(persistedEmits()).toHaveLength(1);
+      expect(errorLogs()).toContainEqual(
+        expect.objectContaining({ redrive: true, retryClaim: 'window_closed', windowCheck: 'gate' }),
+      );
+    });
+
+    it('a re-driven rung whose deadline expires during the acquire closes retry_window_closed and the record done/refused - before any claim (RSW #5)', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+      await seedRedriven(rungOwner(row), T0);
+      const aggregate = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const claimPass = vi.spyOn(world.messagesRepo, 'claimFanoutPass');
+      const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
+      register({ tokenBucket: await drainedBucket() });
+
+      await runHandler({ ...payloadFor(row), redrive: true });
+
+      expect(world.sent).toHaveLength(0);
+      expect(claim).not.toHaveBeenCalled();
+      expect(aggregate.mock.calls.some((call) => call[3] === 'attempted')).toBe(false);
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(slotOf(row.tsMsgId)).toEqual({
+        status: 'failed',
+        requestedTransport: 'sms',
+        transportAggregationState: 'excluded',
+        errorCode: 'retry_window_closed',
+      });
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+        state: 'done',
+        outcome: 'refused',
+        cause: 'retry_window_closed',
+      });
+      expect(persistedEmits()).toHaveLength(1);
+      expect(errorLogs()).toContainEqual(
+        expect.objectContaining({ redrive: true, retryClaim: 'window_closed', windowCheck: 'send_deadline' }),
+      );
+    });
+
+    it('a foreign fresh attempt on the rung skips the send (transient deferredByClaim) and re-enqueues the same rung once, writing no slot', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      const foreignAt = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(rungOwner(row), facts, foreignAt);
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(1);
+      expect(outbound.delayed[0]!.envelope.jobName).toBe(RELAY_RETRY_LEG_JOB);
+      expect(outbound.delayed[0]!.envelope.payload).toEqual({ relayConversationId: CONV, retryTsMsgId: row.tsMsgId });
+      expect(outbound.delayed[0]!.delaySeconds).toBe(5);
+      expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+        state: 'attempting',
+        attemptNo: 1,
+        attemptedAt: foreignAt,
+      });
+      expect(warnLogs()).toContainEqual(
+        expect.objectContaining({ event: 'relay_retry_leg', deferredByClaim: true, transientPass: 1 }),
+      );
+      expect(persistedEmits()).toEqual([]);
+      expect(errorLogs()).toEqual([]);
+    });
+
+    it('a transient re-enqueue of a re-driven rung does not carry redrive', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      legSend.override = async (): Promise<RelayLegSendOutcome> => ({ kind: 'transient', errorCode: '429' });
+      register();
+
+      await runHandler({ ...payloadFor(row), redrive: true });
+
+      expect(outbound.delayed).toHaveLength(1);
+      const again = outbound.delayed[0]!.envelope.payload as Record<string, unknown>;
+      expect(again).toEqual({ relayConversationId: CONV, retryTsMsgId: row.tsMsgId });
+      expect(Object.keys(again)).not.toContain('redrive');
+    });
+
+    // --- SOR D8 / build ruling A4: every close by a writer other than the
+    // rung's own attempt passes the record gate, at every site that writes one.
+    // Each site is driven with each record state the gate distinguishes.
+    const closeSites: [string, string, () => Promise<MessageItem>][] = [
+      [
+        'a gate refusal (closed group)',
+        'retry_group_closed',
+        async () => {
+          seedRelay(world).status = 'closed';
+          const row = seedRetryRow(world);
+          register();
+          return row;
+        },
+      ],
+      [
+        'the window gate',
+        'retry_window_closed',
+        async () => {
+          seedRelay(world);
+          const row = seedRetryRow(world, { windowStart: minutesAgo(16) });
+          register();
+          return row;
+        },
+      ],
+      [
+        'the send deadline',
+        'retry_window_closed',
+        async () => {
+          seedRelay(world);
+          const row = seedRetryRow(world, { windowStart: minutesAgo(1) });
+          register({ tokenBucket: await drainedBucket() });
+          return row;
+        },
+      ],
+      [
+        'the transient pass cap',
+        'transient_cap',
+        async () => {
+          seedRelay(world);
+          const row = seedRetryRow(world, { fanoutAttempt: 3 });
+          legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+            kind: 'transient',
+            errorCode: SEND_RETRYABLE_CODE,
+            deferredByClaim: true,
+          });
+          register();
+          return row;
+        },
+      ],
+      [
+        'the transient window reschedule',
+        'retry_window_closed',
+        async () => {
+          seedRelay(world);
+          const row = seedRetryRow(world, { windowStart: minutesAgo(14.5) });
+          legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+            kind: 'transient',
+            errorCode: SEND_RETRYABLE_CODE,
+            deferredByClaim: true,
+          });
+          register();
+          return row;
+        },
+      ],
+      [
+        'the transient re-enqueue failure',
+        'enqueue_failed',
+        async () => {
+          seedRelay(world);
+          const row = seedRetryRow(world);
+          legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+            kind: 'transient',
+            errorCode: SEND_RETRYABLE_CODE,
+            deferredByClaim: true,
+          });
+          refuseDelayedEnqueues();
+          register();
+          return row;
+        },
+      ],
+    ];
+
+    /** The close line a site logs ONLY when it wrote the close (a keep line carries `gate`). */
+    const closeLines = (code: string) =>
+      capture.lines.filter((l) => l['closeCode'] === code && l['gate'] === undefined && l['event'] === 'relay_retry_leg');
+
+    describe.each(closeSites)('the record gate at %s', (_site, code, arrange) => {
+      it('closes as today and creates no record when the rung has none', async () => {
+        const row = await arrange();
+
+        await runHandler(payloadFor(row));
+
+        expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
+        expect(await world.sendAttemptsRepo.get(rungOwner(row))).toBeUndefined();
+        expect(closeLines(code)).toHaveLength(1);
+        expect(persistedEmits()).toHaveLength(1);
+        expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
+      });
+
+      it('closes a redriven record with the close code as its cause, after the slot (spec D8)', async () => {
+        const row = await arrange();
+        await seedRedriven(rungOwner(row));
+
+        await runHandler(payloadFor(row));
+
+        expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: code });
+        expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+          state: 'done',
+          outcome: code === 'enqueue_failed' ? 'enqueue_failed' : 'refused',
+          cause: code,
+        });
+        expect(closeLines(code)).toHaveLength(1);
+        expect(persistedEmits()).toHaveLength(1);
+      });
+
+      it.each<[string, 'attempting' | 'reconciling']>([
+        ['a live attempt', 'attempting'],
+        ['a reconcile', 'reconciling'],
+      ])('writes nothing when %s owns the rung - WARN, no emit', async (_owner, state) => {
+        const row = await arrange();
+        const at = new Date().toISOString();
+        await world.sendAttemptsRepo.claim(rungOwner(row), facts, at);
+        if (state === 'reconciling') {
+          await world.sendAttemptsRepo.handToReconcile(rungOwner(row), { attemptNo: 1, attemptedAt: at });
+        }
+
+        await runHandler(payloadFor(row));
+
+        expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+        expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({ state, attemptedAt: at });
+        const keep = warnLogs().filter((l) => l['gate'] === 'defer' && l['closeCode'] === code);
+        expect(keep).toHaveLength(1);
+        if (code === 'enqueue_failed') expect(keep[0]!['err']).toBeDefined();
+        expect(closeLines(code)).toHaveLength(0);
+        expect(persistedEmits()).toEqual([]);
+        expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(0);
+      });
+
+      it('writes nothing when the attempt is already resolved (done/sent, a queued+sid slot) - INFO, no emit', async () => {
+        const row = await arrange();
+        const at = new Date().toISOString();
+        await world.sendAttemptsRepo.claim(rungOwner(row), facts, at);
+        await world.sendAttemptsRepo.finishAttempt(rungOwner(row), { attemptNo: 1, attemptedAt: at }, {
+          outcome: 'sent',
+          sid: 'SMprev',
+        });
+        storedRow(row.tsMsgId).delivery_recipients = { [BOB_KEY]: { ...SEEDED_SLOT, status: 'queued', sid: 'SMprev' } };
+
+        await runHandler(payloadFor(row));
+
+        expect(slotOf(row.tsMsgId)).toEqual({ ...SEEDED_SLOT, sid: 'SMprev' });
+        expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({ state: 'done', outcome: 'sent' });
+        expect(infoLogs().filter((l) => l['gate'] === 'skip' && l['closeCode'] === code)).toHaveLength(1);
+        expect(closeLines(code)).toHaveLength(0);
+        expect(persistedEmits()).toEqual([]);
+      });
+
+      it('takes a stale attempt over into reconcile, hands it off once and at once, and writes nothing - WARN', async () => {
+        const row = await arrange();
+        const stale = new Date(Date.now() - 31_000).toISOString();
+        await world.sendAttemptsRepo.claim(rungOwner(row), facts, stale);
+        const reconciles = recordReconciles();
+
+        await runHandler(payloadFor(row));
+
+        expect(reconciles).toEqual([{ owner: rungRef(row), attemptedAt: stale, checkNo: 0 }]);
+        expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+          state: 'reconciling',
+          attemptedAt: stale,
+        });
+        expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
+        expect(warnLogs().filter((l) => l['gate'] === 'taken_over' && l['closeCode'] === code)).toHaveLength(1);
+        expect(closeLines(code)).toHaveLength(0);
+        expect(persistedEmits()).toEqual([]);
+        expect(errorLogs()).toEqual([]);
+      });
+    });
+
+    it("the unit's own retryable on the last pass leaves its record done/retryable, which the gated cap close proceeds past (A4)", async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world, { fanoutAttempt: 3 });
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('rate limited'), { code: 30022 });
+      };
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(slotOf(row.tsMsgId)).toMatchObject({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({
+        state: 'done',
+        outcome: 'retryable',
+        cause: '30022',
+      });
+      expect(closeLines('transient_cap')).toHaveLength(1);
+      expect(persistedEmits()).toHaveLength(1);
+      expect(persistedEmits()[0]!.payload).toEqual(ROOT_CLOSE_EMIT);
     });
   });
 });

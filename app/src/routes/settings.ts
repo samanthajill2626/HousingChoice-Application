@@ -304,6 +304,10 @@ export function createSettingsRouter(deps: SettingsRouterDeps): Router {
   // PUT /api/settings/voicemail-greeting (voicemail-greeting spec 4.3): the RAW
   // file bytes as the body, streamed through the sniff-and-cap gate into the
   // media store under the fixed key, then the record SET on the org settings.
+  // Memory bound (spec assumption G): this route holds no buffer, but the
+  // store's lib-storage upload holds the accepted greeting in memory - at most
+  // one 5 MiB part, which at this cap is the whole file - before sending it as
+  // a single PutObject once the gate ends.
   // A refusal must REACH the browser as JSON and leave the connection usable,
   // which is why this uses req.pipe plus a drain - never stream.pipeline and
   // never Connection: close. Measured on Node 24: pipeline destroys req on a

@@ -79,9 +79,14 @@ export class GreetingRejectedError extends Error {
  * checks them against the declared format, and only then lets ANY byte
  * through; it also counts bytes and destroys itself the moment the cap is
  * exceeded. The route pipes the request into it and hands IT to
- * mediaStore.put, so the app never holds the file: on a refusal downstream
- * has seen either nothing (bad header) or a stream that errors before it
- * ends (too large), and lib-storage sends nothing to S3 either way.
+ * mediaStore.put: on a refusal downstream has seen either nothing (bad
+ * header) or a stream that errors before it ends (too large), and
+ * lib-storage sends nothing to S3 either way.
+ *
+ * Memory (spec assumption G): the gate holds at most the sniff window and the
+ * route holds no buffer of its own, but lib-storage, downstream, buffers what
+ * the gate forwards - the accepted greeting, at most one 5 MiB part, which at
+ * this cap is the whole file - in memory before its single PutObject.
  */
 export class GreetingUploadGate extends Transform {
   bytesSeen = 0;

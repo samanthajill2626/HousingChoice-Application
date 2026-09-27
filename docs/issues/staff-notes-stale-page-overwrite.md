@@ -3,7 +3,8 @@ id: staff-notes-stale-page-overwrite
 title: A Staff notes save from a stale page silently overwrites a colleague's newer note, and the old text is unrecoverable
 type: decision
 severity: med
-status: open
+status: resolved
+resolved: 2026-09-27
 area: dashboard/contact
 created: 2026-09-27
 refs: dashboard/src/routes/contact/StaffNotesCard.tsx:65-86, app/src/routes/contacts.ts:1521, app/src/routes/contacts.ts:1573, dashboard/src/routes/contact/useContact.ts
@@ -37,3 +38,13 @@ returns the current contact; the card shows "Someone else changed these notes
 side. Nothing else in the PATCH contract changes. Alternatively (cheaper,
 weaker) record the previous text in the audit payload so a loss is at least
 recoverable. Ask Sam how often two people work one tenant at the same time.
+
+**Resolution (2026-09-27).** Built on `feat/staff-notes-past-tours` at
+Cameron's request (spec section 3.9): the card sends the stamp its editor
+opened with as `staff_notes_expected_updated_at`; the PATCH route enforces it
+in the same conditional UpdateItem as the write (`contactsRepo.update`'s new
+`expect` option) and refuses a stale save with 409 `staff_notes_stale` plus
+the current contact; the card shows the colleague's newer note above the box,
+keeps the draft, and re-bases so a second Save is an informed overwrite.
+Tests at the route, the real repo (DynamoDB Local), the card, and Playwright
+with two pages on one tenant.

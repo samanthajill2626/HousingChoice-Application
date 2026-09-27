@@ -1,6 +1,6 @@
 # Staff notes on the tenant file and a Past tab on the Tours page - design specification
 
-Status: DRAFT 4 - APPROVED FOR BUILD by the planner after spec review rounds 1-3 (round 3 changed no decision; adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/spec-r1-adjudications.md`, `spec-r2-adjudications.md`, `spec-r3-adjudications.md`); written for an OVERNIGHT UNATTENDED mission (Cameron 2026-09-26): every product decision below was given in the mission text or is recorded in section 9 as a decision the planner took alone
+Status: DRAFT 4 + AMENDMENT 3.9 (2026-09-27, stale-save guard, Cameron) - APPROVED FOR BUILD by the planner after spec review rounds 1-3 (round 3 changed no decision; adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/spec-r1-adjudications.md`, `spec-r2-adjudications.md`, `spec-r3-adjudications.md`); written for an OVERNIGHT UNATTENDED mission (Cameron 2026-09-26): every product decision below was given in the mission text or is recorded in section 9 as a decision the planner took alone
 Date: 2026-09-26
 Branch: `feat/staff-notes-past-tours`
 Worktree: `W:\tmp\staff-notes-past-tours`
@@ -291,8 +291,9 @@ Edit mode (entered by the aside action):
 "Preferences & notes" and `ContactEditForm` are unchanged - the edit dialog does
 NOT get a staff-notes field; the card is the one editor.
 
-Two staff saving the same box at once is last-write-wins, like every other
-contact field (section 9, Q12).
+Two staff saving the same box at once is guarded (section 3.9, added
+2026-09-27 at Cameron's request; this replaced the original last-write-wins
+of section 9, Q12).
 
 Copy is staff-facing only (no catalog). Source stays ASCII.
 
@@ -323,6 +324,49 @@ directly above the Unit `notes` entry:
 and the Unit `notes` line becomes "free-form INTERNAL notes on a property (the
 counterpart of contact `notes`, the Preferences & notes field - not of the
 contact's Staff notes)".
+
+### 3.9 Stale-save guard (AMENDMENT 2026-09-27, Cameron)
+
+Found by the planner's adversarial review (issue
+`staff-notes-stale-page-overwrite`): nothing refreshes Staff notes on an open
+page, so a Save from a page loaded before a colleague's save silently replaced
+the newer note, unrecoverably. Cameron asked for the cheap guard.
+
+- Request: the PATCH body may carry `staff_notes_expected_updated_at` - the
+  `staff_notes_updated_at` the editor OPENED with, or `null` for a box that had
+  never been saved. Neither a string nor null -> 400
+  `staff_notes_expected_updated_at must be a string or null`. It is a guard,
+  never stored, and does not count as a changed field.
+- Enforcement: only when the body also carries `staff_notes`. The route passes
+  `{ expect: { attr: 'staff_notes_updated_at', value } }` to
+  `contactsRepo.update`, which adds `#attr = :value` (or
+  `attribute_not_exists(#attr)` for null) to the SAME conditional UpdateItem
+  as the write - no read-then-write window.
+- Refusal: a failed guarded write is re-read with a consistent read; if the
+  contact exists the route answers 409 `staff_notes_stale` with
+  `{ contact }` (the current item, the same shape as a 200), writes nothing and
+  audits nothing; if it does not, 404 `contact_not_found` as before.
+- Without the key the PATCH is unchanged (last-write-wins); only the card
+  sends it. A cleared box keeps its stamp, so a stale save after a colleague
+  CLEARED the box is refused too.
+- Card: every Save sends the stamp captured at edit start. On a 409
+  `staff_notes_stale` it stays in edit mode with the draft intact, hands the
+  current contact up (so the read-mode text updates behind it), re-bases its
+  baseline text and stamp on the colleague's version, and shows a
+  `role="alert"` panel above the box: "Someone else saved these notes while
+  you were editing. Their version is below; your text is still in the box.
+  Save again to replace theirs, or Cancel to keep theirs." followed by their
+  text (or "They cleared the notes."). A second Save is then a deliberate,
+  informed overwrite; Cancel keeps theirs. Any other failure is the existing
+  plain alert.
+- Tests: route (match lands; stale 409 with the current contact and no write
+  or audit; null on a never-set box lands and is refused once stamped; a
+  cleared box refuses; 400 on a bad type; no key = unchanged; key without
+  `staff_notes` guards nothing; unknown contact stays 404); the real repo
+  against DynamoDB Local (the condition itself); the card (sends the opened
+  stamp; conflict panel, draft kept, contact handed up, second Save sends
+  their stamp; Cancel keeps theirs; cleared variant; other 409s stay plain);
+  Playwright with two pages on one tenant.
 
 ## 4. Part 2 - the Past tab
 
@@ -777,9 +821,10 @@ the broadcast seed fixtures. `dashboard/src/api/types.ts`, `client.ts`,
 - Q11 No-show rows have no way off the Past list until they age out at 90 days
   (the tour page offers only reschedule and the check-in text). Filed
   `past-tab-no-show-rows-need-an-exit`.
-- Q12 Two staff editing the same Staff notes box at once is last-write-wins,
-  like every other contact field (the AI's own notes append accepts the same
-  race). No optimistic concurrency is added.
+- Q12 SUPERSEDED 2026-09-27 by section 3.9. Originally: two staff editing the
+  same Staff notes box at once is last-write-wins, like every other contact
+  field. Cameron chose the cheap stale-save guard after the planner's review
+  showed the loss is silent and unrecoverable for this box in particular.
 - Q13 The tour page's back arrow returns to the tab that opened it, via router
   state carried by the Past tab's links. Without this, working through Past
   dropped staff on Active after every tour.

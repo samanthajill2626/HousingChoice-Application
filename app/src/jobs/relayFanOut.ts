@@ -1,4 +1,4 @@
-// relay.fanOut (M1.7) — fan an inbound relay-group message out to the OTHER
+// relay.fanOut (M1.7) - fan an inbound relay-group message out to the OTHER
 // members, throttled and idempotent.
 //
 // The relayed message is stored ONCE (the inbound SOURCE message); this job
@@ -7,31 +7,75 @@
 // in the source message's delivery_recipients map + a relaysid pointer (so the
 // per-recipient delivery callback can find the right slot).
 //
+// Each member is ONE leg (`sendOneRelayLeg`) with three phases (SOR spec
+// D7a), run inside one try/catch that tracks the phase, so nothing in the leg
+// throws out of the loop and a failure is handled by WHERE it happened:
+//   - PREPARE: skip a TERMINAL slot (sent/delivered/failed); the roster
+//     suppression check (an opted-out member is failed contact_opted_out,
+//     behind the D8 gate so it never overwrites a member another attempt
+//     owns); the A2P token acquire (bounded only for the 30003 retry rung,
+//     whose deadline is `deadline_exceeded`, never a claim); then the CLAIM on
+//     the member's send-attempt record (D8a) - a fresh foreign attempt defers
+//     the member, a terminal one skips it, a stale one is taken over into
+//     reconcile; the attempt clock on the slot; the per-leg presign; the
+//     `attempted` aggregation write. A throw before the claim sent nothing
+//     and defers the member with NO slot write; a throw after it releases the
+//     attempt as retryable and defers.
+//   - SEND: the provider call. A failure is classified (D1-D6): a refusal
+//     fails the member with its code; `rejected` fails it with the provider
+//     code (30007 never retried; an HTTP status never reaches a slot);
+//     `retryable` defers it to the backed-off continuation (capped at
+//     MAX_FANOUT_ATTEMPTS); `unknown` hands it to the send.reconcile job (D7) -
+//     the slot stays `queued` and only the verdict writes it.
+//   - RECORD: the slot (sent/queued, sid, sentAt), then the relaysid pointer,
+//     then the record done/sent. A failure here is `sent_unrecorded`: the text
+//     went out, so the member is handed to reconcile WITH its SID and never
+//     re-sent (D3a).
+//
+// The leg never enqueues: the loop hands a `handed_to_reconcile` /
+// `sent_unrecorded` outcome to the reconcile job with the continuation
+// context it holds. Every failure-arm write goes through guardWrite: a lost
+// write is logged at ERROR and the attempt record decides. The outage brake
+// (D9): three consecutive UNKNOWN outcomes end the pass early - every member
+// not yet attempted is deferred to the continuation and one WARN (event
+// `outage_brake`) names the count. A cap-close passes the D8 gate per member.
+//
 // Idempotency (SQS at-least-once + our own continuation re-enqueues):
 //   - the job execution marker (existing pattern) guards the WHOLE job per
 //     envelope jobId;
-//   - per recipient, a slot already in a TERMINAL state (sent/delivered/
-//     failed) is SKIPPED, so a redelivered/continuation job never double-sends.
+//   - per recipient, a slot already in a TERMINAL state is SKIPPED, and the
+//     claim on the send-attempt record refuses a second attempt while one is
+//     open or after one sent (a relay success may leave the slot `queued`), so
+//     a redelivered / continuation / re-drive job never double-sends.
 //
-// Error handling per recipient:
-//   - transient (429 / Twilio 30022) → re-enqueue a continuation relay.fanOut
-//     for the REMAINING recipients with exponential backoff (attempt cap 3);
-//   - 30007 (carrier filtering) → mark the recipient failed, NEVER retry;
-//   - SendRefusedError (opt-out / breaker / manual) → mark the recipient
-//     failed and CONTINUE with the others.
-//
-// PII (doc §9): never log the body, the sender's phone, or member phones —
-// IDs / member keys / counts only, correlated via the pino mixin.
+// PII (doc Sec 9): never log the body, the sender's phone, or member phones -
+// IDs / member keys (through logSafeMemberKey / safeRecipientKey) / counts
+// only, correlated via the pino mixin.
 import {
   createMessagingAdapter,
   type CarrierMessageSender,
   type MessagingAdapter,
   type MessageTransportIntent,
   type SendMessageParams,
+  type SendMessageResult,
 } from '../adapters/messaging.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
+import { guardWrite } from '../lib/guardWrite.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { bodyFingerprint, recipientDigest, safeRecipientKey } from '../lib/sendFingerprint.js';
+import {
+  classifySendFailure,
+  ENQUEUE_FAILED_CODE,
+  isProviderCode,
+  OUTAGE_BRAKE_UNKNOWN_STREAK,
+  REDRIVE_REFUSED_CODE,
+  SEND_CLAIM_TTL_MS,
+  SEND_RETRYABLE_CODE,
+  SEND_UNCONFIRMED_CODE,
+  SMS_SENDING_DISABLED_CODE,
+  TRANSIENT_CAP_CODE,
+} from '../lib/sendOutcome.js';
 import { TokenBucketBusyError, type TokenBucket } from '../lib/tokenBucket.js';
 import {
   createConversationsRepo,
@@ -59,7 +103,13 @@ import {
   type RelayRecipientDelivery,
   type TransportMutationOutcome,
 } from '../repos/messagesRepo.js';
-import type { SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
+import {
+  createSendAttemptsRepo,
+  type AttemptRef,
+  type SendAttemptOwner,
+  type SendAttemptRecord,
+  type SendAttemptsRepo,
+} from '../repos/sendAttemptsRepo.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
 import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
@@ -71,6 +121,7 @@ import {
 } from '../services/relayAnnouncements.js';
 import { resolveMessage } from '../messages/index.js';
 import { defineJobHandler, enqueue } from './jobs.js';
+import { enqueueSendReconcile, reconcileDelayMs, toOwnerRef } from './sendReconcile.js';
 
 // Canonical home moved to services/relayAnnouncements.ts (tourReminders.ts and
 // this module's fan-out loop import it from here historically) — re-exported.
@@ -101,8 +152,6 @@ export function fanOutBackoffMs(attempt: number): number {
   return 5_000 * 2 ** (attempt - 1);
 }
 
-/** Twilio transient error codes that warrant a backed-off continuation. */
-const TRANSIENT_CODES = new Set(['429', '30022']);
 /** Twilio carrier-filtering: NEVER retry (re-sending filtered content compounds harm). */
 const CARRIER_FILTERED_CODE = '30007';
 
@@ -148,6 +197,16 @@ export interface RelayFanOutPayload {
    * non-sender members.
    */
   recipientKeys?: string[];
+  /**
+   * SOR D13a/D16: a RE-DRIVE pass - the reconcile ruled one member
+   * never_sent and re-drove it. Such a pass claims no ladder rung up front
+   * (only after its loop, and only for a transient remainder), so a spent
+   * ladder cannot close the member before it is tried; and an early return
+   * (the group closed, the source gone) closes the member it carries
+   * redrive_refused. A transient continuation never carries it: the gate and
+   * the claim treat a `redriven` record the same on every pass.
+   */
+  redrive?: true;
 }
 
 export function parseRelayFanOutPayload(payload: unknown): RelayFanOutPayload {
@@ -183,6 +242,7 @@ export function parseRelayFanOutPayload(payload: unknown): RelayFanOutPayload {
     ...(senderNameOverride !== undefined && { senderNameOverride }),
     attempt,
     ...(recipientKeys !== undefined && { recipientKeys }),
+    ...(p.redrive === true && { redrive: true as const }),
   };
 }
 
@@ -657,9 +717,10 @@ export interface RelayFanOutJobDeps {
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   /**
-   * The per-recipient send-attempt records (SOR spec D8a). Accepted and not
-   * yet read (SOR Task 8 wires the claim); a test passes its fake world's so
-   * no job run ever opens a real DynamoDB connection.
+   * The per-recipient send-attempt records (SOR spec D8a): claimed before
+   * every relay.fanOut leg and read by the D8 gate. Lazily created on the
+   * first fan-out run; a test passes its fake world's so no job run ever
+   * opens a real DynamoDB connection.
    */
   sendAttemptsRepo?: SendAttemptsRepo;
   /**
@@ -694,6 +755,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
   // separate init flag drives the lazy build (not `??=`, which would rebuild).
   let mediaStore = deps.mediaStore;
   let mediaStoreInit = deps.mediaStore !== undefined;
+  let sendAttempts = deps.sendAttemptsRepo;
 
   /**
    * The owner-routed copy inputs for both announcement handlers (spec 9.3).
@@ -742,10 +804,22 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
     contacts ??= createContactsRepo({ logger: deps.logger });
+    sendAttempts ??= createSendAttemptsRepo({ logger: deps.logger });
     if (!mediaStoreInit) {
       mediaStore = createMediaStore();
       mediaStoreInit = true;
     }
+    // Pinned for the closures below: a captured reassignable `let` loses its
+    // non-undefined narrowing inside a closure (build finding T7-4).
+    const attempts = sendAttempts;
+    const messageStore = messages;
+    /**
+     * Build finding T8-9: a RE-DRIVE pass that returns before its loop closes
+     * the member it carries (record FIRST, then the slot) - see
+     * closeRedriveRefused. A no-op on every other pass.
+     */
+    const refuseRedrive = (cause: string): Promise<void> =>
+      closeRedriveRefused(messageStore, attempts, payload, log, payload.recipientKeys ?? [], cause);
 
     // Whole-job duplicate-delivery guard (existing pattern): conditionally
     // mark this envelope jobId executed BEFORE any send. A redelivery resolves
@@ -768,6 +842,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     const conversation = await conversations.getById(payload.relayConversationId);
     if (!conversation) {
       log.warn({ conversationId: payload.relayConversationId }, 'relayFanOut: relay conversation not found — nothing to fan out');
+      await refuseRedrive('conversation_not_found');
       return;
     }
     // AF-2 status gate: the group may have CLOSED between enqueue and now (a
@@ -781,22 +856,29 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         { conversationId: payload.relayConversationId, status: conversation.status },
         'relay fan-out skipped - group not open',
       );
+      await refuseRedrive('group_not_open');
       return;
     }
     const poolNumber = conversation.pool_number;
     if (typeof poolNumber !== 'string' || poolNumber.length === 0) {
       log.warn({ conversationId: payload.relayConversationId }, 'relayFanOut: relay conversation has no pool number — skipping');
+      await refuseRedrive('no_pool_number');
       return;
     }
 
     // Re-read the exact source message by SK (a tight window that includes it).
-    const window = await messages.listByConversation(payload.relayConversationId, {
-      before: bumpKey(payload.sourceTsMsgId),
-      limit: 5,
-    });
+    // A continuation or a re-drive decides from a strongly consistent snapshot
+    // (SOR D11, D16): the pass before it, or the reconcile, wrote the slots it
+    // reads. The first pass keeps the cheap read.
+    const consistent = payload.recipientKeys !== undefined;
+    const windowOpts = { before: bumpKey(payload.sourceTsMsgId), limit: 5 };
+    const window = consistent
+      ? await messages.listByConversationConsistent(payload.relayConversationId, windowOpts)
+      : await messages.listByConversation(payload.relayConversationId, windowOpts);
     const sourceMessage = window.find((m) => m.tsMsgId === payload.sourceTsMsgId);
     if (!sourceMessage) {
       log.warn({ conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId }, 'relayFanOut: source message not found');
+      await refuseRedrive('source_not_found');
       return;
     }
     const execution: RelayFanOutExecutionDeps = {
@@ -808,6 +890,8 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       poolNumber,
       mediaStore,
       tokenBucket: deps.tokenBucket,
+      sendAttempts: attempts,
+      consistent,
       log,
     };
     if (sourceMessage.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) {
@@ -973,6 +1057,10 @@ interface RelayFanOutExecutionDeps {
   poolNumber: string;
   mediaStore: MediaStore | undefined;
   tokenBucket: TokenBucket | undefined;
+  /** The send-attempt records (SOR D8a): the legs' claims and the cap-close gate. */
+  sendAttempts: SendAttemptsRepo;
+  /** A continuation or a re-drive: every source re-read is strongly consistent (SOR D11). */
+  consistent: boolean;
   log: Logger;
 }
 
@@ -1013,6 +1101,7 @@ async function runRelayFanOutExecution(
   transport: RelayTransportMode,
 ): Promise<void> {
   const { adapter, conversations, messages, contacts, conversation, poolNumber, mediaStore, log } = deps;
+  const attempts = deps.sendAttempts;
   const body = typeof source.body === 'string' ? source.body : '';
   const sourceMedia = mediaAttachmentsOf(source);
   const hasMedia = sourceMedia.length > 0;
@@ -1031,6 +1120,7 @@ async function runRelayFanOutExecution(
       { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId },
       'relayFanOut: source has neither text nor media - nothing relayed',
     );
+    await closeRedriveRefused(messages, attempts, payload, log, payload.recipientKeys ?? [], 'nothing_to_relay');
     return;
   }
   if (hasMedia && !mediaStore) {
@@ -1060,6 +1150,7 @@ async function runRelayFanOutExecution(
       currentRoster,
       transport.intent,
       messages,
+      deps.consistent,
     );
     const persistedRequests = new Set(
       recipients
@@ -1085,6 +1176,71 @@ async function runRelayFanOutExecution(
 
   let claim: FanoutClaimResult | undefined;
 
+  /** The log context of a member known only by its key: through safeRecipientKey, never a raw phone key (G9). */
+  function keyCtx(memberKey: string): { conversationId: string; tsMsgId: string; recipientKey: string } {
+    return {
+      conversationId: payload.relayConversationId,
+      tsMsgId: payload.sourceTsMsgId,
+      recipientKey: safeRecipientKey(memberKey),
+    };
+  }
+
+  /**
+   * Enqueue check 0 of the send.reconcile chain for one member (D7), carrying
+   * the continuation context a never_sent verdict needs to re-drive it - the
+   * sender key and name override this pass holds (D12). NEVER throws: an
+   * enqueue that fails closes the member unresolved on the spot - the slot
+   * `failed` / send_unconfirmed FIRST, then the record done / unresolved (D7,
+   * D13a) - so nothing waits on a chain that never started.
+   */
+  async function handOff(owner: RelayLegOwner, attemptedAt: string): Promise<void> {
+    const ctx = keyCtx(owner.memberKey);
+    try {
+      await enqueueSendReconcile(
+        {
+          owner: toOwnerRef(owner),
+          attemptedAt,
+          checkNo: 0,
+          continuation: {
+            senderKey: payload.senderKey,
+            ...(payload.senderNameOverride !== undefined && { senderNameOverride: payload.senderNameOverride }),
+          },
+        },
+        reconcileDelayMs(attemptedAt, 0, Date.now()),
+      );
+    } catch (err) {
+      await guardWrite(log, ctx, 'closeUnconfirmed', () =>
+        messages.closeRelayRecipientIfUnsent(payload.relayConversationId, payload.sourceTsMsgId, owner.memberKey, {
+          status: 'failed',
+          errorCode: SEND_UNCONFIRMED_CODE,
+        }),
+      );
+      await guardWrite(log, ctx, 'closeFromReconcile', () =>
+        attempts.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }),
+      );
+      log.error(
+        { err, ...ctx, cause: ENQUEUE_FAILED_CODE },
+        'relayFanOut: reconcile enqueue failed - member closed unresolved (send_unconfirmed)',
+      );
+    }
+  }
+
+  /**
+   * M5 D8: terminal-close every still-open member in `memberKeys` with `code`
+   * - the cap reached mid-ladder (close A), a pass beginning with the ladder
+   * spent (close B), a continuation the queue refused (close C, `code`
+   * enqueue_failed) - and write one operator ERROR line.
+   *
+   * SOR D8: this is a close by a writer OTHER than the member's own attempt,
+   * so each member passes the D8 gate first: an absent, done/retryable or
+   * redriven record is closed (a redriven one's record too - `code` keeps
+   * the caller's reason, build finding G7); a stale attempting record is
+   * taken over and handed to reconcile; a live or terminal one is left to
+   * its owner. The slot close itself is conditional: it writes an ABSENT slot
+   * (a legacy source starts with an empty map) or a `queued` one with no
+   * sid, never a send that landed. Each member is its own try/catch: one
+   * failure never skips the rest or the operator line (build finding T8-6).
+   */
   async function closeRelay(
     memberKeys: string[],
     code: string,
@@ -1092,13 +1248,33 @@ async function runRelayFanOutExecution(
   ): Promise<void> {
     for (const key of memberKeys) {
       if (isTerminal(currentSource.delivery_recipients?.[key]?.status)) continue;
-      await persistRelayRecipientResult(
-        messages,
-        payload,
-        key,
-        { status: 'failed', errorCode: code },
-        transport,
-      );
+      const owner = legOwner(payload, key);
+      const ctx = keyCtx(key);
+      try {
+        const gate = await gateFor(attempts, owner, Date.now());
+        if (gate.kind === 'taken_over') {
+          await handOff(owner, gate.record.attemptedAt);
+          continue;
+        }
+        if (gate.kind !== 'proceed') {
+          log.info({ ...ctx, gate: gate.kind, closeCode: code }, 'relayFanOut: close left the member to its own attempt');
+          continue;
+        }
+        await messages.closeRelayRecipientIfUnsent(payload.relayConversationId, payload.sourceTsMsgId, key, {
+          status: 'failed',
+          errorCode: code,
+        });
+        if (gate.record?.state === 'redriven') {
+          await guardWrite(log, ctx, 'closeRedriven', () =>
+            attempts.closeRedriven(owner, {
+              outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
+              cause: code,
+            }),
+          );
+        }
+      } catch (err) {
+        log.error({ err, ...ctx, label: 'capClose' }, 'relayFanOut: closing one member failed; the rest still close');
+      }
     }
     const fanoutAttempt =
       claim !== undefined && claim.outcome !== 'missing' ? claim.attempt : undefined;
@@ -1118,11 +1294,14 @@ async function runRelayFanOutExecution(
 
   // The continuation budget is stored on the source message. This preserves
   // main's durable cap for both schema-absent jobs and versioned transport jobs.
+  // SOR D13a: a RE-DRIVE pass claims nothing up front - only after its loop,
+  // and only if it has a transient remainder - so a spent ladder cannot close
+  // the re-driven member before it is tried.
   const pending = recipients.filter(
     (member) =>
       !isTerminal(currentSource.delivery_recipients?.[relayMemberKey(member)]?.status),
   );
-  if (pending.length > 0) {
+  if (pending.length > 0 && payload.redrive !== true) {
     claim = await messages.claimFanoutPass(
       payload.relayConversationId,
       payload.sourceTsMsgId,
@@ -1136,35 +1315,126 @@ async function runRelayFanOutExecution(
       return;
     }
     if (claim.outcome === 'capped') {
-      await closeRelay(pending.map(relayMemberKey), 'transient_cap');
+      await closeRelay(pending.map(relayMemberKey), TRANSIENT_CAP_CODE);
       return;
     }
   }
 
   const transientRemaining: string[] = [];
   let sentCount = 0;
+  let handedCount = 0;
+  // D9 outage brake: consecutive UNKNOWN outcomes in THIS pass (see
+  // isUnknownOutcome). Any other outcome - sent, rejected, retryable,
+  // refused, a skip, a deferral, a takeover - resets it. Once braked, every
+  // member not yet attempted in this pass is deferred with no slot write,
+  // whatever its record says.
+  let unknownStreak = 0;
+  let braked = false;
+  let untried = 0;
   for (const member of recipients) {
-    const outcome = await sendOneRelayLeg({
-      messages,
-      conversations,
-      contacts,
-      adapter,
-      mediaStore,
-      log,
-      tokenBucket: deps.tokenBucket,
-      payload,
-      member,
-      currentSource,
-      poolNumber,
-      legBody: relayBody,
-      sourceMedia,
-      transport,
-    });
-    // The two bindings the loop body used to mutate in place. They feed the
-    // completion log below and the transient continuation after it, so the
-    // counts must stay exactly what the inlined body produced.
-    if (outcome.kind === 'transient') transientRemaining.push(relayMemberKey(member));
-    if (outcome.kind === 'sent') sentCount += 1;
+    const memberKey = relayMemberKey(member);
+    // Already terminal - never re-sent. Checked BEFORE the brake, so a
+    // terminal member is never carried (build finding T7-12).
+    if (isTerminal(currentSource.delivery_recipients?.[memberKey]?.status)) continue;
+    if (braked) {
+      transientRemaining.push(memberKey);
+      untried += 1;
+      continue;
+    }
+    const owner = legOwner(payload, memberKey);
+    let unknown = false;
+    // The leg never throws (D7a); this catch is the loop's own guarantee that
+    // a member is deferred, never dropped, and nothing leaves the job.
+    try {
+      const outcome = await sendOneRelayLeg({
+        messages,
+        conversations,
+        contacts,
+        adapter,
+        mediaStore,
+        log,
+        tokenBucket: deps.tokenBucket,
+        payload,
+        member,
+        currentSource,
+        poolNumber,
+        legBody: relayBody,
+        sourceMedia,
+        transport,
+        sendAttempts: attempts,
+        owner,
+      });
+      unknown = isUnknownOutcome(outcome);
+      switch (outcome.kind) {
+        case 'sent':
+          sentCount += 1;
+          break;
+        case 'transient':
+          // A deferral because a FOREIGN attempt owns the member wrote no slot;
+          // it is carried only by a continuation (D8a: "a refused claim on a
+          // recipient a continuation carries is deferred again") - on a first
+          // pass the attempt that owns it is another pass's, which carries it.
+          if (outcome.deferredByClaim !== true || payload.recipientKeys !== undefined) {
+            transientRemaining.push(memberKey);
+          }
+          break;
+        case 'stranded':
+          // The hand-off write failed: the record stays attempting, the slot
+          // untouched. Carried with no slot write; the relay ladder (5 s + 10 s)
+          // cannot outlast the claim TTL, so a still-fresh record is deferred
+          // at the cap and left for the sweeper (spec D8a, revision 11).
+          transientRemaining.push(memberKey);
+          break;
+        case 'handed_to_reconcile':
+        case 'sent_unrecorded':
+          if (outcome.attemptRef === undefined) {
+            log.error(
+              { ...memberCtx(payload, member), legOutcome: outcome.kind },
+              'relayFanOut: a leg outcome for the reconcile came back without an attempt record - nothing handed off',
+            );
+            break;
+          }
+          handedCount += 1;
+          await handOff(owner, outcome.attemptRef.attemptedAt);
+          break;
+        case 'skipped_terminal':
+        case 'suppressed':
+        case 'refused':
+        case 'filtered':
+        case 'rejected':
+        case 'deadline_exceeded':
+          break;
+        default: {
+          const unhandled: never = outcome.kind;
+          throw new Error(`relayFanOut: unhandled leg outcome ${String(unhandled)}`);
+        }
+      }
+    } catch (err) {
+      log.error(
+        { err, ...memberCtx(payload, member) },
+        'relayFanOut: a leg failed outside its own handling - member deferred to the continuation',
+      );
+      transientRemaining.push(memberKey);
+    }
+    if (unknown) {
+      unknownStreak += 1;
+      if (unknownStreak >= OUTAGE_BRAKE_UNKNOWN_STREAK) braked = true;
+    } else {
+      unknownStreak = 0;
+    }
+  }
+  if (braked) {
+    log.warn(
+      {
+        event: 'outage_brake',
+        conversationId: payload.relayConversationId,
+        tsMsgId: payload.sourceTsMsgId,
+        untried,
+        deferred: transientRemaining.length,
+        attempt: payload.attempt,
+      },
+      'relayFanOut: outage brake - consecutive unknown send outcomes; the untried remainder is deferred',
+    );
   }
 
   log.info(
@@ -1173,6 +1443,7 @@ async function runRelayFanOutExecution(
       tsMsgId: payload.sourceTsMsgId,
       recipientCount: recipients.length,
       sentCount,
+      handed: handedCount,
       deferred: transientRemaining.length,
       attempt: payload.attempt,
     },
@@ -1180,16 +1451,43 @@ async function runRelayFanOutExecution(
   );
 
   if (transientRemaining.length === 0) return;
-  if (claim?.outcome !== 'claimed') {
-    await closeRelay(transientRemaining, 'transient_cap');
+  if (claim === undefined) {
+    // Reached only by a RE-DRIVE pass (every other pass with a non-terminal
+    // member claimed above): it claims its rung now, because it has a
+    // remainder to defer, and takes the same branches the up-front claim
+    // takes - never a close for want of a claim.
+    claim = await messages.claimFanoutPass(
+      payload.relayConversationId,
+      payload.sourceTsMsgId,
+      MAX_FANOUT_ATTEMPTS,
+    );
+    if (claim.outcome === 'missing') {
+      log.warn(
+        { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId },
+        'relayFanOut: source message vanished before the pass claim - nothing to defer',
+      );
+      await closeRedriveRefused(messages, attempts, payload, log, transientRemaining, 'source_vanished');
+      return;
+    }
+    if (claim.outcome === 'capped') {
+      await closeRelay(transientRemaining, TRANSIENT_CAP_CODE);
+      return;
+    }
+  }
+  if (claim.outcome !== 'claimed') {
+    // Unreachable by construction: both claims return above on `missing` and
+    // `capped`. Narrowed rather than asserted, and closed rather than ignored.
+    await closeRelay(transientRemaining, TRANSIENT_CAP_CODE);
     return;
   }
   if (claim.attempt >= MAX_FANOUT_ATTEMPTS) {
-    await closeRelay(transientRemaining, 'transient_cap');
+    await closeRelay(transientRemaining, TRANSIENT_CAP_CODE);
     return;
   }
   const nextAttempt = claim.attempt + 1;
   try {
+    // A transient continuation never carries `redrive` (SOR D13a): a
+    // redriven record is claimable and closable by any pass.
     await enqueue(
       RELAY_FANOUT_JOB,
       {
@@ -1205,7 +1503,7 @@ async function runRelayFanOutExecution(
       { runAt: new Date(Date.now() + fanOutBackoffMs(claim.attempt)) },
     );
   } catch (err) {
-    await closeRelay(transientRemaining, 'enqueue_failed', err);
+    await closeRelay(transientRemaining, ENQUEUE_FAILED_CODE, err);
   }
 }
 
@@ -1224,19 +1522,51 @@ export type RelayLegPayload = Pick<
 >;
 
 /**
- * How one relay leg ended. `kind` mirrors the fan-out loop body's five early
- * exits plus its success fall-through, so a caller can rebuild the two counters
- * the loop used to mutate in place: `transient` re-defers the member to the
- * continuation, `sent` counts toward the completion log. `providerSid` is
- * present on `sent` only; `errorCode` carries the code that was persisted to
- * the member's slot on `suppressed`, `refused`, `filtered` and `transient`.
+ * How one relay leg ended (SOR spec D7a). The unit writes every slot it
+ * decides itself and NEVER enqueues; the caller counts the kind, carries the
+ * member when told to, and enqueues the reconcile for the two hand-off kinds.
  *
- * `deadline_exceeded` (retry-send-window spec D4) is reachable ONLY for a
- * caller that passed `sendDeadlineMs` - the 30003 retry job; the fan-out never
- * does. The bounded token-bucket wait ran out: NOTHING was written (no slot,
- * no aggregation state) and nothing was sent, so the caller owns the close. It
- * is terminal for a retry rung - never a `transient` to re-defer, whose branch
- * assumes a provider refusal and would re-open a send past the window.
+ * - `sent`: the provider accepted; the slot, the relaysid pointer and the
+ *   record done/sent are written. `providerSid`.
+ * - `skipped_terminal`: nothing done - the slot was terminal, the member's
+ *   attempt record is terminal or being reconciled (a refused claim, or the
+ *   D8 gate's skip on the suppression arm), or a takeover or a hand-off lost
+ *   its fence to another writer, which owns the record. Never carried.
+ *   `reason: 'unknown'` marks the lost hand-off of an UNKNOWN send outcome:
+ *   it counts toward the outage brake like any unknown (the broadcast twin).
+ * - `suppressed` / `refused` / `filtered`: a TERMINAL slot with that arm's
+ *   code (`contact_opted_out`, the refusal code, 30007) is written.
+ * - `rejected`: the provider refused (D5): the slot is failed with the
+ *   provider code (`errorCode`; ABSENT for a code-less 4xx - an HTTP status
+ *   never reaches a slot, D10) and the record done/rejected. Also the D13a
+ *   close of a re-drive attempt whose outcome is unknown AGAIN: `errorCode`
+ *   send_unconfirmed, the record done/unresolved, no second reconcile.
+ * - `transient`: defer to the continuation. `errorCode` is the slot code
+ *   written (the provider's, or send_retryable). With `deferredByClaim` NO
+ *   slot was written: a FOREIGN attempt owns the member (the gate's defer or
+ *   a fresh refused claim). A throw before the claim also writes no slot
+ *   (build ruling A3).
+ * - `deadline_exceeded` (retry-send-window spec D4) is reachable ONLY for a
+ *   caller that passed `sendDeadlineMs` - the 30003 retry job; the fan-out
+ *   never does. The bounded token-bucket wait ran out BEFORE the claim:
+ *   NOTHING was written (no slot, no aggregation state, no record) and
+ *   nothing was sent, so the caller owns the close. It is terminal for a
+ *   retry rung - never a `transient` to re-defer, whose branch assumes a
+ *   provider refusal and would re-open a send past the window.
+ * - `sent_unrecorded` (D3a): the provider ACCEPTED but a record-phase write
+ *   threw. `providerSid`; `attemptRef` when the record moved to reconciling
+ *   WITH the SID - the caller hands off (the known-SID reconcile repairs the
+ *   writes). Without the record args there is no `attemptRef`.
+ * - `handed_to_reconcile`: the record is reconciling and the caller must hand
+ *   off, exactly once. `reason: 'unknown'` - the provider outcome was unknown
+ *   (D7); `reason: 'takeover'` - a stale attempt was taken over (D8a) and
+ *   `attemptRef` carries THAT attempt's clock. Without the record args an
+ *   unknown returns this with NO `attemptRef`: there is no record to hand.
+ * - `stranded`: the hand-off write itself failed (D7a): the record stays
+ *   attempting, the slot untouched; the caller carries the member with no
+ *   slot write, and the claim refuses any re-send. `afterSend` - the send is
+ *   KNOWN to have happened (a record-phase failure), so it does not count
+ *   toward the outage brake.
  */
 export interface RelayLegSendOutcome {
   kind:
@@ -1245,10 +1575,148 @@ export interface RelayLegSendOutcome {
     | 'suppressed'
     | 'refused'
     | 'filtered'
+    | 'rejected'
     | 'transient'
-    | 'deadline_exceeded';
+    | 'deadline_exceeded'
+    | 'sent_unrecorded'
+    | 'handed_to_reconcile'
+    | 'stranded';
   providerSid?: string;
   errorCode?: string;
+  /** On `sent_unrecorded` / `handed_to_reconcile`: the attempt to hand off. */
+  attemptRef?: AttemptRef;
+  /** On `handed_to_reconcile` (and a lost hand-off's `skipped_terminal`): why. */
+  reason?: 'unknown' | 'takeover';
+  /** On `transient`: a FOREIGN attempt owns the member; no slot was written. */
+  deferredByClaim?: true;
+  /** On `stranded`: the send is known to have happened. */
+  afterSend?: true;
+}
+
+/**
+ * D9: did this leg end in an UNKNOWN provider outcome? A hand-off, a strand
+ * before any known send, a re-drive attempt's second unknown (closed
+ * send_unconfirmed - it counts, as the broadcast twin's does) and the lost
+ * hand-off of an unknown all count toward the outage brake; everything else -
+ * a takeover, a strand after a KNOWN send, a rejection, a retryable - resets.
+ */
+function isUnknownOutcome(outcome: RelayLegSendOutcome): boolean {
+  switch (outcome.kind) {
+    case 'handed_to_reconcile':
+    case 'skipped_terminal':
+      return outcome.reason === 'unknown';
+    case 'stranded':
+      return outcome.afterSend !== true;
+    case 'rejected':
+      return outcome.errorCode === SEND_UNCONFIRMED_CODE;
+    default:
+      return false;
+  }
+}
+
+/** The relay-leg member of the send-attempt owner union. */
+type RelayLegOwner = Extract<SendAttemptOwner, { kind: 'relay_leg' }>;
+
+function legOwner(payload: RelayLegPayload, memberKey: string): RelayLegOwner {
+  return {
+    kind: 'relay_leg',
+    relayConversationId: payload.relayConversationId,
+    sourceTsMsgId: payload.sourceTsMsgId,
+    memberKey,
+  };
+}
+
+/** The log context of one roster member: through logSafeMemberKey, never a phone (G9). */
+function memberCtx(
+  payload: RelayLegPayload,
+  member: ConversationParticipant,
+): { conversationId: string; tsMsgId: string; memberKey: string } {
+  return {
+    conversationId: payload.relayConversationId,
+    tsMsgId: payload.sourceTsMsgId,
+    memberKey: logSafeMemberKey(member),
+  };
+}
+
+/** What the D8 gate decided for one member (spec D8, revision 11). */
+type GateResult =
+  | { kind: 'proceed'; record?: SendAttemptRecord }
+  | { kind: 'skip' }
+  | { kind: 'defer' }
+  | { kind: 'taken_over'; record: SendAttemptRecord };
+
+/**
+ * Spec D8 (revision 11): a pre-claim decline or a close by another writer
+ * touches the slot ONLY when the member's attempt record cannot belong to a
+ * live attempt. An ALLOW-list: an ABSENT record, done/retryable and redriven
+ * PROCEED (a redriven record is claimable by ANY pass, so any pass's decline
+ * may close it - the caller then runs closeRedriven); done with any other
+ * outcome SKIPS (terminal, never carried forward); a STALE attempting record
+ * (older than the claim TTL) is TAKEN OVER into reconcile and returned - the
+ * CALLER hands off, exactly once: this gate never enqueues; a fresh attempting
+ * or a reconciling record DEFERS. The broadcast twin's body (Task 7), the repo
+ * a parameter (build finding T7-4); the read is strongly consistent and a read
+ * that throws is the caller's prepare-phase throw.
+ */
+async function gateFor(attempts: SendAttemptsRepo, owner: SendAttemptOwner, nowMs: number): Promise<GateResult> {
+  const rec = await attempts.get(owner);
+  if (rec === undefined) return { kind: 'proceed' };
+  if (rec.state === 'done') return rec.outcome === 'retryable' ? { kind: 'proceed', record: rec } : { kind: 'skip' };
+  if (rec.state === 'redriven') return { kind: 'proceed', record: rec };
+  if (rec.state === 'attempting' && nowMs - Date.parse(rec.attemptedAt) > SEND_CLAIM_TTL_MS) {
+    return (await attempts.takeOver(owner, rec)) ? { kind: 'taken_over', record: rec } : { kind: 'defer' };
+  }
+  return { kind: 'defer' };
+}
+
+/**
+ * SOR D16 / build finding T8-9: a RE-DRIVE pass that cannot run (the group
+ * closed or vanished, no pool number, the source gone, nothing to relay)
+ * closes each member it carries. The RECORD first - closeRedriven is fenced on
+ * `redriven`, so it moves only a record no pass has claimed since - and the
+ * slot `failed` / redrive_refused only when that fence won, so a pass that no
+ * longer owns the record never closes a slot another pass may be sending. A
+ * no-op on any other pass. Every write is best-effort; never throws.
+ */
+async function closeRedriveRefused(
+  messages: MessagesRepo,
+  attempts: SendAttemptsRepo,
+  payload: RelayFanOutPayload,
+  log: Logger,
+  memberKeys: readonly string[],
+  cause: string,
+): Promise<void> {
+  if (payload.redrive !== true) return;
+  let closedCount = 0;
+  for (const memberKey of memberKeys) {
+    const ctx = {
+      conversationId: payload.relayConversationId,
+      tsMsgId: payload.sourceTsMsgId,
+      recipientKey: safeRecipientKey(memberKey),
+    };
+    let closed = false;
+    await guardWrite(log, ctx, 'closeRedriven', async () => {
+      closed = await attempts.closeRedriven(legOwner(payload, memberKey), { outcome: 'redrive_refused', cause });
+    });
+    if (!closed) continue;
+    closedCount += 1;
+    await guardWrite(log, ctx, 'redriveRefusedSlot', () =>
+      messages.closeRelayRecipientIfUnsent(payload.relayConversationId, payload.sourceTsMsgId, memberKey, {
+        status: 'failed',
+        errorCode: REDRIVE_REFUSED_CODE,
+      }),
+    );
+  }
+  log.warn(
+    {
+      conversationId: payload.relayConversationId,
+      tsMsgId: payload.sourceTsMsgId,
+      cause,
+      carried: memberKeys.length,
+      closed: closedCount,
+    },
+    'relayFanOut: re-drive refused - the carried members were closed redrive_refused',
+  );
 }
 
 /**
@@ -1257,22 +1725,28 @@ export interface RelayLegSendOutcome {
  * THIS UNIT ALREADY PERSISTS - callers must not repeat either write. On the
  * success path it writes the member's delivery slot (sent/queued, sid, sentAt,
  * actualTransport) AND the `relaysid#` pointer the per-recipient status
- * callback resolves through. On `suppressed`, `refused` and `filtered` it has
- * already written a TERMINAL slot carrying that arm's specific error code, so
- * re-closing the slot afterwards would only overwrite it with a vaguer one.
+ * callback resolves through. On `suppressed`, `refused`, `filtered` and
+ * `rejected` it has already written a TERMINAL slot carrying that arm's
+ * specific error code, so re-closing the slot afterwards would only overwrite
+ * it with a vaguer one.
  *
- * Extracted verbatim from the fan-out loop body (spec D10) so the 30003 retry
- * job reuses the transport-fidelity machinery instead of forking code that is
- * hours old. Behavior-preserving: the only edits were closure captures becoming
- * parameters and each `continue` becoming a returned outcome. A send error that
- * is neither a refusal, nor 30007, nor transient still THROWS out of here, as
- * it did out of the loop.
+ * Extracted from the fan-out loop body (spec D10) so the 30003 retry job
+ * reuses the transport-fidelity machinery instead of forking it. SOR spec D7a
+ * split it into PREPARE / SEND / RECORD phases inside ONE try/catch that
+ * tracks the phase, and the phase decides the catch - so NOTHING in here
+ * throws: a throw before the claim defers the member with no slot write; a
+ * throw after the claim and before the send releases the attempt retryable
+ * and defers; a throw at 'sending' is classified and is NEVER turned into a
+ * re-send (unknown -> reconcile); a throw at 'record' happened after a KNOWN
+ * send and hands the SID to reconcile. Every failure-arm write goes through
+ * guardWrite (a lost write is logged at ERROR and the attempt record decides).
  *
  * `suppressionChecked` and `sendDeadlineMs` (both optional) are the two
  * behavioral knobs, and the fan-out passes neither - see each one's own doc
  * below: why a caller that has just run the same suppression check must not
  * let this unit run it a second time, and why a retry rung's wait on the A2P
- * meter is bounded by its send window.
+ * meter is bounded by its send window. `sendAttempts` + `owner` switch on the
+ * send-attempt record (SOR D8a); see their doc.
  */
 export async function sendOneRelayLeg(args: {
   messages: MessagesRepo;
@@ -1330,6 +1804,18 @@ export async function sendOneRelayLeg(args: {
    * origin - the acquire is unbounded exactly as before.
    */
   sendDeadlineMs?: number;
+  /**
+   * SOR spec D8a: the send-attempt records and THIS leg's owner. With both,
+   * the leg gates its suppression close on the member's record (D8), claims
+   * the member after the token acquire and before the presign (D7a "Claim
+   * placement"), stamps the attempt clock on the slot, and fences every later
+   * record write on its own attempt. Absent (the 30003 retry rung until SOR
+   * Task 9) = the pre-claim legacy path: no gate, no claim, no attempt clock
+   * and no record write; an unknown error returns `handed_to_reconcile` with
+   * NO attemptRef.
+   */
+  sendAttempts?: SendAttemptsRepo;
+  owner?: SendAttemptOwner;
 }): Promise<RelayLegSendOutcome> {
   const {
     messages,
@@ -1348,6 +1834,8 @@ export async function sendOneRelayLeg(args: {
     transport,
     suppressionChecked = false,
     sendDeadlineMs,
+    sendAttempts,
+    owner,
   } = args;
   const hasMedia = sourceMedia.length > 0;
 
@@ -1355,169 +1843,418 @@ export async function sendOneRelayLeg(args: {
   const priorSlot = currentSource.delivery_recipients?.[key];
   if (isTerminal(priorSlot?.status)) return { kind: 'skipped_terminal' };
 
-  if (!suppressionChecked && (await isMemberSuppressed(contacts, conversations, member))) {
-    if (transport.kind === 'versioned') {
-      await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
-    }
-    await persistRelayRecipientResult(messages, payload, key, {
-      status: 'failed',
-      errorCode: 'contact_opted_out',
-    }, transport);
-    try {
-      await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
-        ...(member.contactId !== undefined &&
-          member.contactId.length > 0 && { contactId: member.contactId }),
-        phone: member.phone,
-        ...(member.name !== undefined && { name: member.name }),
-        at: new Date().toISOString(),
-      });
-    } catch (err) {
-      log.error(
+  const ctx = memberCtx(payload, member);
+  // Both or neither: the tracked path gates, claims and fences on the record.
+  const tracked = sendAttempts !== undefined && owner !== undefined ? { attempts: sendAttempts, owner } : undefined;
+  let phase: 'prepare' | 'sending' | 'record' = 'prepare';
+  let ref: AttemptRef | undefined;
+  let result: SendMessageResult | undefined;
+  let secondUnknownWouldClose = false;
+  try {
+    // PREPARE. The roster suppression check: an opted-out member's decline is
+    // a pre-claim close by a writer other than its own attempt, so it passes
+    // the D8 gate first (a live foreign attempt defers it, a terminal record
+    // skips it, a stale one is taken over - the caller hands off).
+    if (!suppressionChecked && (await isMemberSuppressed(contacts, conversations, member))) {
+      let redriven = false;
+      if (tracked !== undefined) {
+        const gate = await gateFor(tracked.attempts, tracked.owner, Date.now());
+        if (gate.kind === 'skip') {
+          log.info({ ...ctx }, 'relayFanOut: suppression not written - the member attempt is terminal');
+          return { kind: 'skipped_terminal' };
+        }
+        if (gate.kind === 'defer') {
+          log.info({ ...ctx }, 'relayFanOut: suppression deferred - another attempt owns the member');
+          return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true };
+        }
+        if (gate.kind === 'taken_over') {
+          return {
+            kind: 'handed_to_reconcile',
+            reason: 'takeover',
+            attemptRef: { attemptNo: gate.record.attemptNo, attemptedAt: gate.record.attemptedAt },
+          };
+        }
+        redriven = gate.record?.state === 'redriven';
+      }
+      if (transport.kind === 'versioned') {
+        await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
+      }
+      await persistRelayRecipientResult(messages, payload, key, {
+        status: 'failed',
+        errorCode: 'contact_opted_out',
+      }, transport);
+      if (redriven && tracked !== undefined) {
+        // A redriven record belongs to whichever pass reaches it (spec D8): the
+        // decline would have applied to the re-drive equally, so it closes it.
+        await guardWrite(log, ctx, 'closeRedriven', () =>
+          tracked.attempts.closeRedriven(tracked.owner, { outcome: 'refused', cause: 'contact_opted_out' }),
+        );
+      }
+      try {
+        await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
+          ...(member.contactId !== undefined &&
+            member.contactId.length > 0 && { contactId: member.contactId }),
+          phone: member.phone,
+          ...(member.name !== undefined && { name: member.name }),
+          at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.error(
+          {
+            err,
+            conversationId: payload.relayConversationId,
+            memberKey: logSafeMemberKey(member),
+          },
+          'relayFanOut: annotating conversation with member opt-out failed - continuing',
+        );
+      }
+      log.info(
         {
-          err,
           conversationId: payload.relayConversationId,
           memberKey: logSafeMemberKey(member),
         },
-        'relayFanOut: annotating conversation with member opt-out failed - continuing',
+        'relayFanOut: recipient opted out (sms_opt_out) - skipped, not sent',
       );
+      return { kind: 'suppressed', errorCode: 'contact_opted_out' };
     }
-    log.info(
-      {
-        conversationId: payload.relayConversationId,
-        memberKey: logSafeMemberKey(member),
-      },
-      'relayFanOut: recipient opted out (sms_opt_out) - skipped, not sent',
-    );
-    return { kind: 'suppressed', errorCode: 'contact_opted_out' };
-  }
 
-  if (tokenBucket !== undefined) {
-    if (sendDeadlineMs === undefined) {
-      await tokenBucket.acquire(1);
-    } else {
-      // retry-send-window D4. BOUNDED for a caller with a send deadline, and
-      // the timeout is an OUTCOME, not a throw: this acquire sits outside the
-      // send's only try below, this unit lets unclassified errors escape, and
-      // the retry job - its execution marker already set - has no catch
-      // around this call, so a thrown TokenBucketBusyError would strand the
-      // rung at `queued`. It returns BEFORE the presign, the `attempted`
-      // aggregation write and the provider call: nothing was attempted.
-      try {
-        await tokenBucket.acquire(1, { timeoutMs: Math.max(0, sendDeadlineMs - Date.now()) });
-      } catch (err) {
-        if (err instanceof TokenBucketBusyError) return { kind: 'deadline_exceeded' };
-        throw err;
+    if (tokenBucket !== undefined) {
+      if (sendDeadlineMs === undefined) {
+        await tokenBucket.acquire(1);
+      } else {
+        // retry-send-window D4. BOUNDED for a caller with a send deadline, and
+        // the timeout is an OUTCOME, not a throw: the retry rung owns the close
+        // (a terminal retry_window_closed, never a deferral - RSW #5). It
+        // returns BEFORE the claim, the presign, the `attempted` aggregation
+        // write and the provider call: nothing was attempted and no record is
+        // held (RSW #6). Any other acquire failure is a pre-claim throw below.
+        try {
+          await tokenBucket.acquire(1, { timeoutMs: Math.max(0, sendDeadlineMs - Date.now()) });
+        } catch (err) {
+          if (err instanceof TokenBucketBusyError) return { kind: 'deadline_exceeded' };
+          throw err;
+        }
       }
     }
-  }
-  let legMediaUrls: string[] | undefined;
-  if (hasMedia && mediaStore) {
-    legMediaUrls = await Promise.all(
-      sourceMedia.map((attachment) =>
-        mediaStore.presign(attachment.s3Key, RELAY_PRESIGN_TTL_SECONDS),
-      ),
-    );
-  }
-  const params: SendMessageParams = {
-    to: member.phone,
-    from: poolNumber,
-    body: legBody,
-    ...(legMediaUrls !== undefined && { mediaUrls: legMediaUrls }),
-  };
-  const prepared =
-    transport.kind === 'versioned'
-      ? adapter.prepareMessageSend(transport.intent, params)
-      : undefined;
 
-  if (transport.kind === 'versioned') {
-    await setVersionedAggregationState(messages, payload, key, 'attempted', ['attempted']);
-  }
+    // CLAIM (D8a) - AFTER the bounded acquire and BEFORE the presign (spec
+    // D7a "Claim placement"), so a deadline never holds a claim. The facts are
+    // THIS attempt's, the ones a reconcile matches on: the pool number it
+    // sends from, the member's number, the composed leg copy, the media it
+    // will carry (none without a store to presign it).
+    if (tracked !== undefined) {
+      const fp = bodyFingerprint(legBody);
+      const claim = await tracked.attempts.claim(
+        tracked.owner,
+        {
+          recipientDigest: recipientDigest(poolNumber, member.phone),
+          sender: poolNumber,
+          bodyHash: fp.hash,
+          bodyShort: fp.short,
+          mediaCount: hasMedia && mediaStore !== undefined ? sourceMedia.length : 0,
+        },
+        new Date().toISOString(),
+      );
+      if (claim.outcome === 'refused') {
+        // A live foreign attempt (fresh): defer with no slot write. Terminal
+        // or reconciling: skip - never carried, never re-sent.
+        log.info(
+          { ...ctx, state: claim.record.state, fresh: claim.fresh },
+          'relayFanOut: claim refused - another attempt owns the member or it is resolved',
+        );
+        return claim.fresh
+          ? { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true }
+          : { kind: 'skipped_terminal' };
+      }
+      if (claim.outcome === 'takeover') {
+        // A stale attempt: a process died mid-send, or the call overran. The
+        // outcome is unknown - take it over into reconcile, never re-send.
+        if (!(await tracked.attempts.takeOver(tracked.owner, claim.record))) {
+          log.info({ ...ctx }, 'relayFanOut: takeover lost - another writer moved the stale attempt');
+          return { kind: 'skipped_terminal' };
+        }
+        return {
+          kind: 'handed_to_reconcile',
+          reason: 'takeover',
+          attemptRef: { attemptNo: claim.record.attemptNo, attemptedAt: claim.record.attemptedAt },
+        };
+      }
+      ref = { attemptNo: claim.record.attemptNo, attemptedAt: claim.record.attemptedAt };
+      secondUnknownWouldClose = claim.record.redriveCount >= 1;
+      // The attempt clock on the slot (D8a, D20a): best-effort - a wholesale
+      // slot write may erase it; the record stays authoritative. An absent
+      // legacy slot is created `queued` by the same write.
+      try {
+        await messages.setRelayRecipientAttemptedAt(
+          payload.relayConversationId,
+          payload.sourceTsMsgId,
+          key,
+          ref.attemptedAt,
+        );
+      } catch (err) {
+        log.warn({ err, ...ctx }, 'relayFanOut: attempt clock write failed (best-effort) - the record decides');
+      }
+    }
 
-  let result;
-  try {
+    let legMediaUrls: string[] | undefined;
+    if (hasMedia && mediaStore) {
+      legMediaUrls = await Promise.all(
+        sourceMedia.map((attachment) =>
+          mediaStore.presign(attachment.s3Key, RELAY_PRESIGN_TTL_SECONDS),
+        ),
+      );
+    }
+    const params: SendMessageParams = {
+      to: member.phone,
+      from: poolNumber,
+      body: legBody,
+      ...(legMediaUrls !== undefined && { mediaUrls: legMediaUrls }),
+    };
+    const prepared =
+      transport.kind === 'versioned'
+        ? adapter.prepareMessageSend(transport.intent, params)
+        : undefined;
+
+    if (transport.kind === 'versioned') {
+      await setVersionedAggregationState(messages, payload, key, 'attempted', ['attempted']);
+    }
+
+    // SEND.
+    phase = 'sending';
     result =
       transport.kind === 'versioned'
         ? await adapter.sendPreparedMessage(prepared!)
         : await adapter.sendMessage(params);
-  } catch (err) {
-    if (err instanceof SendRefusedError) {
-      await persistRelayRecipientResult(
-        messages,
-        payload,
-        key,
-        { status: 'failed', errorCode: err.code },
-        transport,
+
+    // RECORD, in today's order: the slot FIRST, then the relaysid pointer -
+    // SECOND, because on a legacy row a fast receipt that found the pointer
+    // before the slot existed would be erased by the wholesale slot write
+    // (spec D7a) - then the record done/sent.
+    phase = 'record';
+    await persistRelayRecipientResult(
+      messages,
+      payload,
+      key,
+      {
+        status: result.status === 'queued' ? 'queued' : 'sent',
+        sid: result.providerSid,
+        sentAt: result.providerTs,
+        ...(transport.kind === 'versioned' &&
+          result.actualTransport !== undefined && { actualTransport: result.actualTransport }),
+      },
+      transport,
+    );
+    const pointer = await messages.claimRelaySidPointer(result.providerSid, {
+      conversationId: payload.relayConversationId,
+      tsMsgId: payload.sourceTsMsgId,
+      memberKey: key,
+    });
+    if (pointer === 'other') {
+      // Never rewritten: the leg stays recorded as sent; a reconcile of either
+      // owner would rule sid_held_elsewhere (D13).
+      log.error(
+        { ...ctx, providerSid: result.providerSid },
+        'relayFanOut: the SID pointer already names another leg - this leg is recorded as sent anyway',
       );
+    }
+    if (tracked !== undefined && ref !== undefined) {
+      if (!(await tracked.attempts.finishAttempt(tracked.owner, ref, { outcome: 'sent', sid: result.providerSid }))) {
+        // Plan deviation 3: the slot is not rolled back - the takeover's
+        // reconcile finds the SID through the pointer and repairs.
+        log.warn(
+          { ...ctx, providerSid: result.providerSid },
+          'relayFanOut: attempt fence lost after the slot write; the takeover reconcile repairs',
+        );
+      }
+    }
+    return { kind: 'sent', providerSid: result.providerSid };
+  } catch (err) {
+    if (phase === 'prepare') {
+      if (tracked === undefined || ref === undefined) {
+        // Before the claim (the suppression read and writes, the gate, the
+        // acquire, the claim itself - or any prepare step on the legacy path):
+        // nothing was sent and no attempt of ours exists. Deferred with NO slot
+        // write on either row kind (build ruling A3): the record's state is
+        // unknown here and a legacy row's only slot writer is wholesale.
+        log.warn({ err, ...ctx }, 'relayFanOut: prepare failed before the claim - member deferred to the continuation');
+        return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE };
+      }
+      // After the claim, before the send (the presign, the prepare, the
+      // aggregation write): nothing was sent. Release THIS attempt as
+      // retryable and defer - the slot first, then the record (deviation 3).
+      const held = { ...tracked, ref };
+      log.warn({ err, ...ctx }, 'relayFanOut: prepare failed after the claim - attempt released retryable, member deferred');
+      await guardWrite(log, ctx, 'deferSlot', () =>
+        persistRelayRecipientResult(messages, payload, key, { status: 'queued', errorCode: SEND_RETRYABLE_CODE }, transport),
+      );
+      await guardWrite(log, ctx, 'finishAttempt', () =>
+        held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'retryable', cause: SEND_RETRYABLE_CODE }),
+      );
+      return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE };
+    }
+    const held = tracked !== undefined && ref !== undefined ? { ...tracked, ref } : undefined;
+
+    /**
+     * Move this attempt to `reconciling` (with the SID when one is known).
+     * Build finding G5: guardWrite's `true` means the write RESOLVED, not that
+     * its fence won - the fence's own answer decides: written AND won ->
+     * handed; written but LOST (a takeover owns the record and handed it off
+     * itself) -> nothing to do; not written -> STRANDED.
+     */
+    const handToReconcile = async (
+      attempt: NonNullable<typeof held>,
+      sid?: string,
+    ): Promise<'handed' | 'fence_lost' | 'stranded'> => {
+      let handed = false;
+      const wrote = await guardWrite(log, ctx, 'handToReconcile', async () => {
+        handed = await attempt.attempts.handToReconcile(attempt.owner, attempt.ref, sid);
+      });
+      if (wrote && handed) return 'handed';
+      if (wrote) {
+        log.info({ ...ctx }, 'relayFanOut: hand-off fence lost - the takeover owns the record');
+        return 'fence_lost';
+      }
+      return 'stranded';
+    };
+
+    if (phase === 'record') {
+      // The send HAPPENED and its SID is known; a record-phase write threw.
+      // Never classified, never re-sent (D3a): handed to reconcile WITH the
+      // SID, whose known-SID adoption re-runs those writes idempotently.
+      const providerSid = result!.providerSid;
+      log.error(
+        { err, ...ctx, providerSid },
+        'relayFanOut: sent_unrecorded - member sent but not recorded; its SID goes to reconcile',
+      );
+      if (held === undefined) return { kind: 'sent_unrecorded', providerSid };
+      const handed = await handToReconcile(held, providerSid);
+      if (handed === 'handed') return { kind: 'sent_unrecorded', providerSid, attemptRef: held.ref };
+      if (handed === 'fence_lost') return { kind: 'skipped_terminal' };
+      return { kind: 'stranded', afterSend: true };
+    }
+
+    // phase === 'sending': the provider call threw.
+    if (err instanceof SendRefusedError) {
+      const refusal = err.code;
+      await guardWrite(log, ctx, 'refusedSlot', () =>
+        persistRelayRecipientResult(messages, payload, key, { status: 'failed', errorCode: refusal }, transport),
+      );
+      if (held !== undefined) {
+        await guardWrite(log, ctx, 'finishAttempt', () =>
+          held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'refused', cause: refusal }),
+        );
+      }
       log.warn(
         {
           conversationId: payload.relayConversationId,
           memberKey: logSafeMemberKey(member),
-          refusal: err.code,
+          refusal,
         },
         'relayFanOut: send refused for recipient - marked failed, continuing',
       );
-      return { kind: 'refused', errorCode: err.code };
+      return { kind: 'refused', errorCode: refusal };
     }
-    const code = errorCodeOf(err);
-    if (code === CARRIER_FILTERED_CODE) {
-      await persistRelayRecipientResult(
-        messages,
-        payload,
-        key,
-        { status: 'failed', errorCode: code },
-        transport,
+    const classification = classifySendFailure(err);
+    if (classification.kind === 'rejected') {
+      const code = classification.code;
+      if (code === CARRIER_FILTERED_CODE) {
+        // Today's arm, write unchanged: never retried.
+        await guardWrite(log, ctx, 'rejectSlot', () =>
+          persistRelayRecipientResult(messages, payload, key, { status: 'failed', errorCode: code }, transport),
+        );
+        if (held !== undefined) {
+          await guardWrite(log, ctx, 'finishAttempt', () =>
+            held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'rejected', cause: code }),
+          );
+        }
+        log.error(
+          {
+            conversationId: payload.relayConversationId,
+            memberKey: logSafeMemberKey(member),
+            errorCode: code,
+          },
+          'relayFanOut: carrier filtering (30007) - recipient failed, NOT retried',
+        );
+        return { kind: 'filtered', errorCode: code };
+      }
+      // D5: failed with the provider code. An HTTP status NEVER reaches a slot
+      // (D10, D23): a code-less 4xx fails the slot with no errorCode; the kill
+      // switch's token has prose, so it is kept. Relay records the code only -
+      // an MMS leg's 30005 says nothing about SMS reachability.
+      const slotCode = isProviderCode(code) || code === SMS_SENDING_DISABLED_CODE ? code : undefined;
+      await guardWrite(log, ctx, 'rejectSlot', () =>
+        persistRelayRecipientResult(
+          messages,
+          payload,
+          key,
+          { status: 'failed', ...(slotCode !== undefined && { errorCode: slotCode }) },
+          transport,
+        ),
       );
-      log.error(
-        {
-          conversationId: payload.relayConversationId,
-          memberKey: logSafeMemberKey(member),
-          errorCode: code,
-        },
-        'relayFanOut: carrier filtering (30007) - recipient failed, NOT retried',
-      );
-      return { kind: 'filtered', errorCode: code };
-    }
-    if (code !== undefined && TRANSIENT_CODES.has(code)) {
-      await persistRelayRecipientResult(
-        messages,
-        payload,
-        key,
-        { status: 'queued', errorCode: code },
-        transport,
-      );
+      // The record's cause keeps what the slot may not: the HTTP status of a code-less 4xx.
+      const cause = code ?? (classification.status !== undefined ? String(classification.status) : undefined);
+      if (held !== undefined) {
+        await guardWrite(log, ctx, 'finishAttempt', () =>
+          held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'rejected', ...(cause !== undefined && { cause }) }),
+        );
+      }
       log.warn(
-        {
-          conversationId: payload.relayConversationId,
-          memberKey: logSafeMemberKey(member),
-          errorCode: code,
-          attempt: payload.attempt,
-        },
-        'relayFanOut: transient send error - deferring recipient to continuation',
+        { ...ctx, errorCode: code, status: classification.status },
+        'relayFanOut: send rejected by the provider - recipient failed, NOT retried',
+      );
+      return { kind: 'rejected', ...(slotCode !== undefined && { errorCode: slotCode }) };
+    }
+    if (classification.kind === 'retryable') {
+      // D6: defer to the backed-off continuation; the slot stays `queued` with
+      // the provider code, or send_retryable when there is none (a network
+      // string never reaches a slot).
+      const code = isProviderCode(classification.code) ? classification.code! : SEND_RETRYABLE_CODE;
+      await guardWrite(log, ctx, 'deferSlot', () =>
+        persistRelayRecipientResult(messages, payload, key, { status: 'queued', errorCode: code }, transport),
+      );
+      if (held !== undefined) {
+        await guardWrite(log, ctx, 'finishAttempt', () =>
+          held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'retryable', cause: code }),
+        );
+      }
+      log.warn(
+        { ...ctx, errorCode: code, attempt: payload.attempt },
+        'relayFanOut: transient send error - deferring recipient to the continuation',
       );
       return { kind: 'transient', errorCode: code };
     }
-    throw err;
+    // UNKNOWN (D2, D7): the request may have reached the provider. Never
+    // re-sent and never failed here - the reconcile decides; the slot stays
+    // `queued` with no code.
+    if (held === undefined) {
+      log.warn({ err, ...ctx }, 'relayFanOut: unknown send outcome - no attempt record on this path; nothing is re-sent');
+      return { kind: 'handed_to_reconcile', reason: 'unknown' };
+    }
+    if (secondUnknownWouldClose) {
+      // D13a: at most ONE re-drive per member. A re-drive attempt whose
+      // outcome is unknown AGAIN closes unresolved here, with no second
+      // reconcile: the slot first (conditional on no known send), then the record.
+      await guardWrite(log, ctx, 'closeUnconfirmed', () =>
+        messages.closeRelayRecipientIfUnsent(payload.relayConversationId, payload.sourceTsMsgId, key, {
+          status: 'failed',
+          errorCode: SEND_UNCONFIRMED_CODE,
+        }),
+      );
+      await guardWrite(log, ctx, 'finishAttempt', () =>
+        held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'unresolved', cause: 'second_unknown' }),
+      );
+      log.error(
+        { err, ...ctx, cause: 'second_unknown' },
+        'relayFanOut: unknown send outcome after a re-drive - member closed unresolved (send_unconfirmed)',
+      );
+      return { kind: 'rejected', errorCode: SEND_UNCONFIRMED_CODE };
+    }
+    log.warn({ err, ...ctx }, 'relayFanOut: unknown send outcome - member handed to reconcile');
+    const handed = await handToReconcile(held);
+    if (handed === 'handed') return { kind: 'handed_to_reconcile', reason: 'unknown', attemptRef: held.ref };
+    if (handed === 'fence_lost') return { kind: 'skipped_terminal', reason: 'unknown' };
+    return { kind: 'stranded' };
   }
-
-  await persistRelayRecipientResult(
-    messages,
-    payload,
-    key,
-    {
-      status: result.status === 'queued' ? 'queued' : 'sent',
-      sid: result.providerSid,
-      sentAt: result.providerTs,
-      ...(transport.kind === 'versioned' &&
-        result.actualTransport !== undefined && { actualTransport: result.actualTransport }),
-    },
-    transport,
-  );
-  await messages.putRelaySidPointer(result.providerSid, {
-    conversationId: payload.relayConversationId,
-    tsMsgId: payload.sourceTsMsgId,
-    memberKey: key,
-  });
-  return { kind: 'sent', providerSid: result.providerSid };
 }
 
 async function preflightVersionedRecipients(
@@ -1527,6 +2264,8 @@ async function preflightVersionedRecipients(
   currentRoster: ConversationParticipant[],
   intent: MessageTransportIntent,
   messages: MessagesRepo,
+  /** A continuation or a re-drive: every re-read is strongly consistent (SOR D11, build finding T8-3). */
+  consistent: boolean,
 ): Promise<MessageItem> {
   const currentRosterKeys = new Set(currentRoster.map((member) => relayMemberKey(member)));
   const requestedTransport = source.requested_transport ?? intent.requestedTransport;
@@ -1549,7 +2288,7 @@ async function preflightVersionedRecipients(
     }
   }
 
-  let current = await readVersionedSource(messages, payload);
+  let current = await readVersionedSource(messages, payload, consistent);
   for (const member of recipients) {
     const key = relayMemberKey(member);
     const slot = current.delivery_recipients?.[key];
@@ -1561,11 +2300,12 @@ async function preflightVersionedRecipients(
         key,
         'planned',
         ['planned', 'attempted'],
+        consistent,
       );
     }
   }
 
-  current = await readVersionedSource(messages, payload);
+  current = await readVersionedSource(messages, payload, consistent);
   for (const [key, slot] of Object.entries(current.delivery_recipients ?? {})) {
     if (
       !currentRosterKeys.has(key) &&
@@ -1582,10 +2322,11 @@ async function preflightVersionedRecipients(
         key,
         'excluded',
         ['excluded', 'attempted'],
+        consistent,
       );
     }
   }
-  return readVersionedSource(messages, payload);
+  return readVersionedSource(messages, payload, consistent);
 }
 
 function canReopenExcludedSlot(slot: RelayRecipientDelivery): boolean {
@@ -1602,11 +2343,11 @@ function canReopenExcludedSlot(slot: RelayRecipientDelivery): boolean {
 async function readVersionedSource(
   messages: MessagesRepo,
   payload: RelayLegPayload,
+  consistent = false,
 ): Promise<MessageItem> {
-  const source = await messages.getByTsMsgId(
-    payload.relayConversationId,
-    payload.sourceTsMsgId,
-  );
+  const source = consistent
+    ? await messages.getByTsMsgIdConsistent(payload.relayConversationId, payload.sourceTsMsgId)
+    : await messages.getByTsMsgId(payload.relayConversationId, payload.sourceTsMsgId);
   if (!source || source.transport_schema_version !== TRANSPORT_SCHEMA_VERSION) {
     throw new Error('relayFanOut: v1 preflight source missing or changed schema');
   }
@@ -1625,6 +2366,8 @@ export async function setVersionedAggregationState(
   memberKey: string,
   next: NonNullable<RelayRecipientDelivery['transportAggregationState']>,
   acceptableStates: NonNullable<RelayRecipientDelivery['transportAggregationState']>[],
+  /** The conflict re-read's consistency (SOR D11): the preflight of a continuation or re-drive passes true. */
+  consistent = false,
 ): Promise<void> {
   const outcome = await messages.setRecipientTransportAggregationState(
     payload.relayConversationId,
@@ -1634,7 +2377,7 @@ export async function setVersionedAggregationState(
   );
   if (outcome === 'updated' || outcome === 'idempotent') return;
   if (outcome === 'conflict') {
-    const source = await readVersionedSource(messages, payload);
+    const source = await readVersionedSource(messages, payload, consistent);
     const current = source.delivery_recipients?.[memberKey]?.transportAggregationState;
     if (current !== undefined && acceptableStates.includes(current)) return;
   }
@@ -1693,16 +2436,4 @@ async function markRecipient(
  */
 function bumpKey(tsMsgId: string): string {
   return `${tsMsgId}￿`;
-}
-
-/** Best-effort provider error-code extraction (Twilio attaches `code`). */
-function errorCodeOf(err: unknown): string | undefined {
-  if (typeof err === 'object' && err !== null) {
-    const code = (err as { code?: unknown }).code;
-    if (typeof code === 'number') return String(code);
-    if (typeof code === 'string' && code.length > 0) return code;
-    const status = (err as { status?: unknown }).status;
-    if (typeof status === 'number') return String(status);
-  }
-  return undefined;
 }

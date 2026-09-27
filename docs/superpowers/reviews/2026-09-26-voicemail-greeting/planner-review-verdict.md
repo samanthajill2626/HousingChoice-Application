@@ -150,3 +150,34 @@ watchdog cadence held from dispatch to handback.
 
 Cleanup (worktree + branch + HISTORICAL stamps) only on an explicit go after
 the merge.
+
+## Addendum 2026-09-27 13:10 - Cameron's rulings, second merge owed
+
+State: `main` already contains this branch through **65015b2c** (merged
+before the rulings below). The branch now carries ONE code commit on top,
+**c3b66108**, plus this addendum and an issue sighting (docs only).
+
+Cameron's rulings (spec amended in the 2026-09-27 block under its header):
+greeting length uncapped with a helper-text hint ("Keep it short - under 30
+seconds works best, ..."); a greeting that IS set but cannot be offered logs
+ERROR (a settings-read failure, where whether a greeting is set is unknown,
+stays WARN); the uploader email to every logged-in user stays; old greeting
+versions stay on the versioned bucket (no lifecycle rule); the 12-byte
+tiny-upload floor stays.
+
+Gates on c3b66108 (bare, from the worktree):
+
+| gate | result |
+|---|---|
+| 1 typecheck | `EXIT=0` |
+| 2 npm test | `EXIT=0`; app 379 files / `7278 passed / 1 skipped`; dashboard `3393 passed`; e2e workspace `499 passed`; fake-twilio `252 passed`; fake-twilio-web `111 passed`; `[dynamoAdmin]` 0 |
+| 3 smoke | `EXIT=0`, 1437 specifiers / 254 files |
+| 4 e2e | `EXIT=1`, `284 passed, 5 failed (38.6m)`; all 4 voicemail-greeting tests and every voice/settings spec passed. Of the 5: `group-text-stop`, `matching-entry-points`, `relay-30003-retry` passed alone; `group-text-reply-all` and `group-text-per-recipient-delivery` FAIL ALONE here AND at main @65015b2c (before c3b66108), so they are pre-existing and unrelated (c3b66108 touches only greeting log levels and one line of copy). They passed on this machine at 09:16 the same morning. Recorded as a sighting on `docs/issues/group-reply-live-rollup-full-suite-flake.md` (its reopen signature, now deterministic in isolation). |
+| 5 eslint (touched vs main: 4 files) | `EXIT=0` |
+
+Verdict: **MERGE-READY @c3b66108** for the rulings commit - the e2e red is
+main's, not this branch's (proven at the base). UNMERGED (human gate).
+
+```powershell
+cd "W:\AI Projects\Housing Choice\HC Application"; git merge --no-ff feat/voicemail-greeting -m "Merge feat/voicemail-greeting: Cameron's rulings (ERROR on an unplayable greeting; length hint)"
+```

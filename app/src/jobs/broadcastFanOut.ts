@@ -362,13 +362,12 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       );
     }
 
-    // A continuation or a re-drive decides from a strongly consistent snapshot
-    // (SOR D11, D16): the pass before it, or the reconcile, wrote the slots it
-    // reads. The first pass keeps the cheap read.
-    const broadcast =
-      payload.recipientKeys !== undefined
-        ? await broadcasts.getByIdConsistent(payload.broadcastId)
-        : await broadcasts.getById(payload.broadcastId);
+    // Every pass decides from a strongly consistent snapshot (SOR D11, D16;
+    // code review ADV-7): a continuation or a re-drive reads the slots the
+    // pass before it, or the reconcile, wrote - and the FIRST pass runs
+    // milliseconds after the route's markSending, which an eventually
+    // consistent read could miss (the draft, with no recipients).
+    const broadcast = await broadcasts.getByIdConsistent(payload.broadcastId);
     if (!broadcast) {
       log.warn({ broadcastId: payload.broadcastId }, 'broadcastFanOut: broadcast not found — nothing to send');
       return;

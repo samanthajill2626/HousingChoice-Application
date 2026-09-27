@@ -2050,7 +2050,7 @@ describe('broadcast.send (M1.8a)', () => {
       });
     });
 
-    it('a continuation reads its snapshot strongly consistently; a first pass does not (D11, D16)', async () => {
+    it('every pass reads its snapshot strongly consistently - the first pass too (D11, D16; code review ADV-7)', async () => {
       seedUnit(world);
       seedBroadcast(world, tenants(1));
       wire();
@@ -2059,12 +2059,31 @@ describe('broadcast.send (M1.8a)', () => {
       // First pass: a prepare throw defers t-1 (a continuation is pending, so no finalize reads either).
       vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
       await runFirstPass();
-      expect(consistent).not.toHaveBeenCalled();
+      expect(consistent).toHaveBeenCalledTimes(1);
       // A continuation: a foreign fresh attempt defers t-1 again - the one consistent read is the snapshot.
       await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, new Date().toISOString());
       await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
-      expect(consistent).toHaveBeenCalledTimes(1);
+      expect(consistent).toHaveBeenCalledTimes(2);
       expect(consistent).toHaveBeenCalledWith('bcast-1');
+    });
+
+    it('ADV-7: a FIRST pass milliseconds after the route marked the share sending still sends - an eventually consistent read that shows the draft decides nothing (FW2-7)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      // The eventual read lags the route's markSending (the draft, no recipients);
+      // the consistent read sees the stored item. (The fake's consistent read
+      // delegates through getById, so it is given its own here.)
+      const draft: BroadcastItem = { ...world.broadcasts.get('bcast-1')!, status: 'draft', recipients: {} };
+      vi.spyOn(world.broadcastsRepo, 'getById').mockResolvedValue(draft);
+      vi.spyOn(world.broadcastsRepo, 'getByIdConsistent').mockImplementation(async (id) => {
+        const stored = world.broadcasts.get(id);
+        return stored === undefined ? undefined : structuredClone(stored);
+      });
+      await runFirstPass();
+      expect(world.sent.map((s) => s.to)).toEqual(['+15550100001']);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toMatchObject({ status: 'sent' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
     });
 
     // --- code review ADV-1 (FW2-1): the re-arm immediately before the send ---

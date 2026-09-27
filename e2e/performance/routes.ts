@@ -128,7 +128,7 @@ export const CONTRACT_SOURCES = Object.freeze({
   contacts: 'dashboard/src/routes/contacts/useContacts.ts:14-99',
   units: 'dashboard/src/routes/listings/useListings.ts:10-60',
   today: 'dashboard/src/routes/today/useToday.ts:41-74',
-  tours: 'dashboard/src/routes/tours/useTours.ts:37-123',
+  tours: 'dashboard/src/routes/tours/useTours.ts:46-132',
   placements: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225',
   details: 'dashboard/src/routes/contact/ContactDetail.tsx:111-140; dashboard/src/routes/listing/useListing.ts:110-185',
   threads: 'dashboard/src/routes/tours/useTourChannels.ts:166-323; dashboard/src/routes/placements/usePlacementChannels.ts:167-333',
@@ -683,8 +683,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/listings': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
     '/listings/deleted': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
-    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
-    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
+    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:46-132; dashboard/src/routes/tours/ToursPage.tsx:618-622' },
+    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:46-132; dashboard/src/routes/tours/ToursPage.tsx:618-622' },
     '/placements': { base: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225' },
     'inbox-all': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
     'inbox-unread': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
@@ -713,7 +713,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
       reason: 'The sibling route changes the unmatched-email filter while the same EmailTriage tree keeps the contacts hook mounted, so only the filtered unmatched-email request is passive navigation work.',
     }),
     '/tours/closed': Object.freeze({
-      source: 'dashboard/src/routes/tours/ToursPage.tsx:181-198; dashboard/src/routes/tours/useTours.ts:112-149',
+      source: 'dashboard/src/routes/tours/ToursPage.tsx:618-635; dashboard/src/routes/tours/useTours.ts:121-150',
       reason: 'The sibling route enables useClosedTours while the active-tour and cross-reference hooks remain mounted, so only the status-filtered closed-tour request is passive navigation work.',
     }),
   } as const),
@@ -737,8 +737,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/listings': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
     '/listings/deleted': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
-    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
-    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
+    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:695-793',
+    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:695-793',
     '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
     'inbox-all': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
     'inbox-unread': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
@@ -756,7 +756,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,207-244',
     '/contacts/:contactId': 'dashboard/src/routes/contact/ContactDetail.tsx:151-164; dashboard/src/routes/contact/TenantFile.tsx:152; dashboard/src/routes/contact/Card.tsx:18-25',
     '/listings/:unitId': 'dashboard/src/routes/listing/ListingDetail.tsx:1180-1187',
-    '/tours/:tourId': 'dashboard/src/routes/tours/TourDetail.tsx:551',
+    '/tours/:tourId': 'dashboard/src/routes/tours/TourDetail.tsx:630',
     '/placements/:placementId': 'dashboard/src/routes/placements/PlacementDetail.tsx:515',
     '/conversations/:conversationId': 'dashboard/src/routes/conversation/ConversationDetail.tsx:397-402',
     '/broadcasts/:broadcastId': 'dashboard/src/routes/broadcasts/BroadcastResults.tsx:159-162',
@@ -765,7 +765,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     static: 'dashboard/src/App.tsx:117-249; dashboard/src/app/nav.ts:55-100',
     contact: 'dashboard/src/routes/contacts/useContacts.ts:14-99',
     unit: 'dashboard/src/routes/listings/useListings.ts:10-60',
-    tour: 'dashboard/src/routes/tours/useTours.ts:37-72',
+    tour: 'dashboard/src/routes/tours/useTours.ts:46-81',
     placement: 'dashboard/src/routes/placements/usePlacements.ts:50-64,214-225',
     conversation: 'dashboard/src/routes/inbox/useInbox.ts:48-120',
     broadcast: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108',
@@ -1074,7 +1074,7 @@ export async function resolveUnitDetail(api: ResolverApi, dom: ResolverDom): Pro
   return { kind: 'skip', reason: 'fixture_absent' };
 }
 
-// Parity with dashboard/src/routes/tours/useTours.ts:37-42. The resolver owns the live clock.
+// Parity with dashboard/src/routes/tours/useTours.ts:46-51. The resolver owns the live clock.
 export function computeTourWindow(now: Date): { from: string; to: string } {
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
   const end = new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);

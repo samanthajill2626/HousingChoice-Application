@@ -49,7 +49,7 @@ import {
   type SendAttemptsRepo,
 } from '../src/repos/sendAttemptsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
+import { createFakeWorld, makeWebhookHarness, signedTwilioPost, statusParams } from './helpers/twilioWebhookHarness.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://127.0.0.1:8000';
 
@@ -88,12 +88,18 @@ const realAttempts = createSendAttemptsRepo(repoDeps);
 describe.skipIf(!reachable)('send.reconcile over the real repos (DynamoDB Local)', () => {
   /** The provider's view: the messages the stub adapter answers getMessage from. */
   const provider = new Map<string, ProviderMessageSummary>();
+  /** The provider's list view (FW1-8): orphans the lookup path finds, by their parties. */
+  const listed: Array<ProviderMessageSummary & { to: string; from: string }> = [];
   const adapter = {
     async getMessage(sid: string) {
       return provider.get(sid);
     },
-    async listMessages() {
-      return { messages: [] };
+    async listMessages(args: { to: string; from: string }) {
+      return {
+        messages: listed
+          .filter((m) => m.to === args.to && m.from === args.from)
+          .map(({ to: _to, from: _from, ...summary }) => summary),
+      };
     },
   } as unknown as MessagingAdapter;
   /** How many times the record close must die (the process that dies after its writes). */
@@ -167,6 +173,20 @@ describe.skipIf(!reachable)('send.reconcile over the real repos (DynamoDB Local)
     );
     expect(claimed.outcome).toBe('claimed');
     expect(await realAttempts.handToReconcile(owner, { attemptNo: 1, attemptedAt: at }, sid)).toBe(true);
+    return at;
+  }
+
+  /** Claim and hand to reconcile with NO SID - an ambiguous send the lookup path must find. */
+  async function reconcilingNoSid(owner: SendAttemptOwner, sender: string, phone: string, body: string): Promise<string> {
+    const at = new Date().toISOString();
+    const fp = bodyFingerprint(body);
+    const claimed = await realAttempts.claim(
+      owner,
+      { recipientDigest: recipientDigest(sender, phone), sender, bodyHash: fp.hash, bodyShort: fp.short, mediaCount: 0 },
+      at,
+    );
+    expect(claimed.outcome).toBe('claimed');
+    expect(await realAttempts.handToReconcile(owner, { attemptNo: 1, attemptedAt: at })).toBe(true);
     return at;
   }
 
@@ -314,5 +334,72 @@ describe.skipIf(!reachable)('send.reconcile over the real repos (DynamoDB Local)
     expect(b!.recipients[contactId]).toEqual({ status: 'delivered', conversationId: 'conv-x', tsMsgId: 'ts-x' });
     expect(b!.stats).toMatchObject({ sent: 0, delivered: 0, queued: 1 });
     expect(await realAttempts.get(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: bsid });
+  }, 60_000);
+
+  it('C-7: a receipt for an ADOPTED orphan routes through the status webhook onto the adopted slot - a relay leg and a broadcast recipient (FW1-8)', async () => {
+    const u = randomUUID().slice(0, 8);
+    // The app's status webhook over the SAME real repos the adoption wrote through.
+    const world = createFakeWorld();
+    Object.assign(world, { messagesRepo: messages, broadcastsRepo: broadcasts, conversationsRepo: conversations, contactsRepo: contacts });
+    const { app } = makeWebhookHarness({ world, statusUnknownSidRetryDelayMs: 1 });
+    const digits = () => String(Math.floor(1_000_000 + Math.random() * 8_999_999));
+
+    // Relay leg: an orphan the provider lists, adopted by check 0 of the lookup path.
+    const pool = `+1557${digits()}`;
+    const bob = `+1558${digits()}`;
+    const group = await conversations.createRelayGroup({ poolNumber: pool, members: [{ contactId: 'c-bob', phone: bob, name: 'Bob' }] });
+    const source = await messages.append({
+      conversationId: group.conversationId,
+      providerSid: `SMin-${u}`,
+      providerTs: new Date(Date.now() - 5000).toISOString(),
+      type: 'sms',
+      direction: 'inbound',
+      author: 'unknown',
+      body: 'is the unit still available?',
+      deliveryStatus: 'delivered',
+      relaySenderKey: 'c-alice',
+      deliveryRecipients: { 'c-bob': { status: 'queued' } },
+    });
+    const leg: SendAttemptOwner = { kind: 'relay_leg', relayConversationId: group.conversationId, sourceTsMsgId: source.tsMsgId, memberKey: 'c-bob' };
+    const atLeg = await reconcilingNoSid(leg, pool, bob, LEG_BODY);
+    const legSid = `SMleg-${u}`;
+    listed.push({ providerSid: legSid, providerStatus: 'sent', body: LEG_BODY, mediaCount: 0, createdAt: new Date().toISOString(), to: bob, from: pool });
+    const legSlot = async () => (await messages.getByTsMsgIdConsistent(group.conversationId, source.tsMsgId))!.delivery_recipients!['c-bob'];
+    const legStatus = (MessageStatus: string) =>
+      signedTwilioPost(app, '/webhooks/twilio/status', statusParams({ MessageSid: legSid, MessageStatus, To: bob, From: pool }));
+    // Before the adoption the SID is nobody's: the fenced webhook drops the receipt (spec Sec 2).
+    await legStatus('sent');
+    expect(await legSlot()).toEqual({ status: 'queued' });
+    await runCheck({ owner: toOwnerRef(leg), attemptedAt: atLeg, checkNo: 0, continuation: { senderKey: 'c-alice' } });
+    expect(await realAttempts.get(leg)).toMatchObject({ state: 'done', outcome: 'adopted', sid: legSid });
+    expect(await legSlot()).toMatchObject({ status: 'sent', sid: legSid });
+    expect((await legStatus('delivered')).status).toBe(200);
+    expect(await legSlot()).toMatchObject({ status: 'delivered', sid: legSid });
+
+    // Broadcast recipient: the adoption appends the 1:1 row with the share's stamp; the receipt rolls into the slot.
+    const broadcastId = `b-${u}`;
+    const contactId = `t-${u}`;
+    const phone = `+1559${digits()}`;
+    await seedBroadcast(broadcastId, contactId, phone);
+    const owner: SendAttemptOwner = { kind: 'broadcast', broadcastId, contactKey: contactId };
+    const at = await reconcilingNoSid(owner, MAIN, phone, BODY);
+    const bsid = `SMb-${u}`;
+    listed.push({ providerSid: bsid, providerStatus: 'sent', body: BODY, mediaCount: 0, createdAt: new Date().toISOString(), to: phone, from: MAIN });
+    await signedTwilioPost(app, '/webhooks/twilio/status', statusParams({ MessageSid: bsid, MessageStatus: 'delivered', To: phone, From: MAIN }));
+    expect((await broadcasts.getByIdConsistent(broadcastId))!.recipients[contactId]).toEqual({ status: 'queued' });
+    await runCheck({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 0 });
+    expect(await realAttempts.get(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: bsid });
+    const row = await messages.getByProviderSidConsistent(bsid);
+    expect((await broadcasts.getByIdConsistent(broadcastId))!.recipients[contactId]).toMatchObject({
+      status: 'sent',
+      conversationId: row!.conversationId,
+      tsMsgId: row!.tsMsgId,
+    });
+    const receipt = await signedTwilioPost(app, '/webhooks/twilio/status', statusParams({ MessageSid: bsid, MessageStatus: 'delivered', To: phone, From: MAIN }));
+    expect(receipt.status).toBe(200);
+    const after = await broadcasts.getByIdConsistent(broadcastId);
+    expect(after!.recipients[contactId]).toMatchObject({ status: 'delivered', conversationId: row!.conversationId, tsMsgId: row!.tsMsgId });
+    expect(after!.stats).toMatchObject({ delivered: 1 });
+    expect((await messages.getByProviderSidConsistent(bsid))!.delivery_status).toBe('delivered');
   }, 60_000);
 });

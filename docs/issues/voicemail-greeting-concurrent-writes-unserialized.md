@@ -17,10 +17,12 @@ and the same settings map with no coordination between requests:
 - remove (`DELETE`): the record REMOVE (`settings.ts:436`), then a
   best-effort `deleteObject` of the fixed key.
 
-Two admin writes that land inside one put-to-record window leave a
-persistent inconsistent state, and both admins are told they succeeded:
+Two admin writes that land inside one put-to-record or remove-to-delete
+window leave a persistent inconsistent state, and both admins are told they
+succeeded:
 
-1. PUT vs DELETE (put A -> REMOVE record + delete object -> SET record A): a
+1. PUT vs DELETE (put A -> REMOVE record + delete object -> SET record A;
+   or DELETE first, REMOVE record -> put A -> SET record A -> delete object): a
    record with NO object. `GET /api/settings` lists greeting A, the audio
    route answers 404, and every missed business-line call logs WARN "voicemail
    greeting object missing" and speaks the built-in prompt - until someone
@@ -34,7 +36,7 @@ persistent inconsistent state, and both admins are told they succeeded:
 Both end states are ACCEPTED by the approved spec, 4.3 "Concurrency (single
 org, admin-only, accepted; the end states are named so nobody is
 surprised)". Likelihood is low: it takes two admin writes inside one
-put-to-record window, from two admins or two tabs (one tab's `busy` flag
+such window, from two admins or two tabs (one tab's `busy` flag
 prevents it). Found by code review round 1 (adversarial finding A1,
 CONFIRMED with a probe that paused A's record write until B finished);
 ruled accept-by-spec, no code change, in the round 1 adjudications.

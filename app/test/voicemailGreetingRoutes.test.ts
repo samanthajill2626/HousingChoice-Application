@@ -579,9 +579,13 @@ describe('GET /api/settings/voicemail-greeting/audio', () => {
   // Fix wave R1, FW4 (spec 4.2 fixed-key rule, plan Review Focus 5): the
   // harness settings fake projects the record like the real repo, so a record
   // naming any key but the fixed one is NO greeting here too. The object at the
-  // foreign key EXISTS, so serving it would be observable.
+  // foreign key EXISTS, so serving it would be observable. An object at the
+  // FIXED key exists too (review R2, F1), so the audio 404 can come only from
+  // the projection, never from serveMediaObject's object-missing branch:
+  // without the projection the route answers 200 with the fixed key's bytes.
   it('a record naming a FOREIGN key (a call recording) is no greeting: 404 greeting_not_found, never the recording bytes', async () => {
     const { app, world } = makeWebhookHarness();
+    world.mediaObjects.set(KEY, { body: Buffer.from('GREETING-BYTES'), contentType: 'audio/mpeg' });
     world.mediaObjects.set('recordings/CA1/RE1', { body: Buffer.from('RECORDING-BYTES'), contentType: 'audio/mpeg' });
     world.settings.voicemailGreeting = { ...GREETING, s3Key: 'recordings/CA1/RE1' };
     const res = await bytesOf(request(app).get(AUDIO).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE));

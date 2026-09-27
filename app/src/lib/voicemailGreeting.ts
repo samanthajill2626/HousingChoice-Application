@@ -87,6 +87,9 @@ export class GreetingRejectedError extends Error {
  * route holds no buffer of its own, but lib-storage, downstream, buffers what
  * the gate forwards - the accepted greeting, at most one 5 MiB part, which at
  * this cap is the whole file - in memory before its single PutObject.
+ * lib-storage's part concatenation also makes a transient copy (Buffer.concat
+ * while the chunk list is still referenced), so the peak per upload is about
+ * twice the accepted file: about 10 MiB at the 5 MiB cap.
  */
 export class GreetingUploadGate extends Transform {
   bytesSeen = 0;

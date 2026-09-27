@@ -307,7 +307,10 @@ export function createSettingsRouter(deps: SettingsRouterDeps): Router {
   // Memory bound (spec assumption G): this route holds no buffer, but the
   // store's lib-storage upload holds the accepted greeting in memory - at most
   // one 5 MiB part, which at this cap is the whole file - before sending it as
-  // a single PutObject once the gate ends.
+  // a single PutObject once the gate ends. lib-storage's part concatenation
+  // also makes a transient copy (Buffer.concat while the chunk list is still
+  // referenced), so the peak per upload is about twice the accepted file:
+  // about 10 MiB at the 5 MiB cap.
   // A refusal must REACH the browser as JSON and leave the connection usable,
   // which is why this uses req.pipe plus a drain - never stream.pipeline and
   // never Connection: close. Measured on Node 24: pipeline destroys req on a

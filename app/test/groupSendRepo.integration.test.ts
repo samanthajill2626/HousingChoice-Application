@@ -16,7 +16,7 @@
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green without
 // Docker (`npm run db:start` to exercise it).
 import { randomUUID } from 'node:crypto';
-import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -28,6 +28,7 @@ import {
   createMessagesRepo,
   GROUP_SEND_DUE_PARTITION,
   GROUP_SEND_DUE_KIND,
+  type DeliveryStatus,
 } from '../src/repos/messagesRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -296,6 +297,123 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
       expect(slot?.sid).toBe(`SM-${i}`);
       expect(slot?.status).toBe('sent');
     }
+  });
+
+  // THE LOST FORWARD TRANSITION (docs/issues/group-reply-live-rollup-full-suite-flake.md).
+  // Two receipts for ONE member in flight together: both read the slot, the
+  // first commits, then the second writes. The guard used to be "status still
+  // equals what I read", so a `delivered` that read `queued` and found `sent`
+  // failed its condition and was DROPPED - a legal sent -> delivered move,
+  // logged "lost a race (regressed)" and never retried. The slot sat at `sent`
+  // for good and the thread read `Delivered 2/3` for a message every handset
+  // received. The relay path shares this method, so a 30003 `undelivered`
+  // could lose to `sent` the same way and never claim its retry.
+  //
+  // GATED, never left to chance: whether the two in-flight windows overlap
+  // depends on machine load, which is how this hid for five weeks as a
+  // "full-suite flake" that passed on a quiet machine. The gates force the
+  // exact order the failing e2e logs show, on every run.
+  async function raceTwoTransitions(opts: {
+    firstToCommit: DeliveryStatus;
+    secondToCommit: DeliveryStatus;
+    context?: 'group';
+  }): Promise<{
+    firstApplied: boolean;
+    secondApplied: boolean;
+    final: DeliveryStatus | undefined;
+    msgs: unknown[];
+  }> {
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    let secondReadDone!: () => void;
+    const secondRead = new Promise<void>((resolve) => (secondReadDone = resolve));
+    let firstCommitDone!: () => void;
+    const firstCommitted = new Promise<void>((resolve) => (firstCommitDone = resolve));
+    // The first writer's UPDATE waits for the second writer's READ, so both
+    // read the same seeded status; the second writer's UPDATE waits for the
+    // first to commit, so it writes against a slot that has already moved.
+    const firstDoc = {
+      send: async (cmd: GetCommand | UpdateCommand) => {
+        if (!(cmd instanceof UpdateCommand)) return doc.send(cmd);
+        await secondRead;
+        try {
+          return await doc.send(cmd);
+        } finally {
+          firstCommitDone();
+        }
+      },
+    } as unknown as typeof doc;
+    const secondDoc = {
+      send: async (cmd: GetCommand | UpdateCommand) => {
+        if (cmd instanceof UpdateCommand) await firstCommitted;
+        const out = await doc.send(cmd);
+        if (cmd instanceof GetCommand) secondReadDone();
+        return out;
+      },
+    } as unknown as typeof doc;
+    const first = createMessagesRepo({ doc: firstDoc, env: testEnv, logger: log });
+    const second = createMessagesRepo({ doc: secondDoc, env: testEnv, logger: log });
+
+    const conversationId = `group-${randomUUID().slice(0, 8)}`;
+    const memberKey = 'phone#+16175550444';
+    const providerSid = nextSid();
+    const providerTs = '2026-09-27T17:01:06.224Z';
+    await messages.append({
+      conversationId,
+      providerSid,
+      providerTs,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'race',
+      deliveryStatus: 'queued',
+      deliveryRecipients: { [memberKey]: { status: 'queued' } },
+    });
+    const tsMsgId = `${providerTs}#${providerSid}`;
+    const ctx = opts.context !== undefined ? { context: opts.context } : undefined;
+    const [firstApplied, secondApplied] = await Promise.all([
+      first.updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, opts.firstToCommit, undefined, ctx),
+      second.updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, opts.secondToCommit, undefined, ctx),
+    ]);
+    const stored = await messages.getByProviderSid(providerSid);
+    return {
+      firstApplied,
+      secondApplied,
+      final: stored?.delivery_recipients?.[memberKey]?.status,
+      msgs: capture.lines.map((l) => l['msg']),
+    };
+  }
+
+  it.each([
+    { name: 'group delivered after sent', context: 'group' as const, second: 'delivered' as const },
+    { name: 'relay delivered after sent', context: undefined, second: 'delivered' as const },
+    { name: 'relay undelivered (30003) after sent', context: undefined, second: 'undelivered' as const },
+  ])('a forward transition that read a stale status still lands: $name', async ({ context, second }) => {
+    const result = await raceTwoTransitions({
+      firstToCommit: 'sent',
+      secondToCommit: second,
+      ...(context !== undefined && { context }),
+    });
+
+    expect(result.firstApplied).toBe(true);
+    expect(result.secondApplied).toBe(true);
+    expect(result.final).toBe(second);
+    expect(result.msgs.some((m) => typeof m === 'string' && m.includes('lost a race'))).toBe(false);
+  });
+
+  // ...and the fix must not buy that by letting a LATE lower status through. A
+  // `sent` that read `queued` and finds `delivered` is a genuine regression.
+  it('a stale lower transition that finds a terminal status is still refused', async () => {
+    const result = await raceTwoTransitions({
+      firstToCommit: 'delivered',
+      secondToCommit: 'sent',
+      context: 'group',
+    });
+
+    expect(result.firstApplied).toBe(true);
+    expect(result.secondApplied).toBe(false);
+    expect(result.final).toBe('delivered');
+    expect(result.msgs).toContain('group recipient delivery status transition lost a race (regressed)');
   });
 
   it('records the channel SID only when the slot has none - a duplicate receipt never overwrites it', async () => {

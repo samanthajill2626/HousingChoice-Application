@@ -1,14 +1,59 @@
 ---
 id: group-reply-live-rollup-full-suite-flake
-title: Live group delivery rollup can miss SSE completion under full-suite load
+title: Concurrent receipts for one member dropped a legal forward transition (seen as a live group rollup that never finalized)
 type: bug
 severity: med
-status: open
-area: e2e/messaging
+status: resolved
+area: app/messaging
 created: 2026-08-21
-resolved: 2026-08-24
-refs: e2e/tests/dashboard-next/group-text-reply-all.spec.ts:121, dashboard/src/routes/conversation/GroupTextView.tsx, dashboard/src/api/EventStreamProvider.tsx
+resolved: 2026-09-27
+refs: app/src/repos/messagesRepo.ts:3688, app/test/groupSendRepo.integration.test.ts:391, e2e/tests/dashboard-next/group-text-reply-all.spec.ts:121, e2e/tests/dashboard-next/group-text-per-recipient-delivery.spec.ts:126
 ---
+
+**ROOT CAUSE AND FIX (2026-09-27, `fix/recipient-delivery-race`). Not load,
+not the SSE push, not the clock - a product race that load exposed.**
+`messagesRepo.updateRecipientDeliveryStatus` read the member's slot, then
+wrote with `ConditionExpression: delivery_recipients.#mk.#st = :prev` - the
+EXACT status it had read. When a member's `sent` and `delivered` receipts were
+in flight together, both read `queued`; `sent` committed first; `delivered`
+then failed its condition and was DROPPED with the INFO line "group recipient
+delivery status transition lost a race (regressed)" and no retry. sent ->
+delivered is legal, so a valid receipt was lost for good: the slot stayed
+`sent`, the rollup never reached N/N (or 2/3), and no SSE could show a state
+that was never stored. The aggregate twin `updateDeliveryStatus` never had
+this - it conditions on `delivery_status IN (allowed priors)` - and neither
+did the in-memory harness fake (`app/test/helpers/twilioWebhookHarness.ts`),
+which applies `allowedPriorStatuses`, so no unit suite could see it.
+
+WHY IT TRACKED LOAD. The fake emits each leg's `sent` 150 ms after the post
+and `delivered` at 300 ms (`fake-twilio/src/engine/delivery.ts`). When the
+send's post -> append took longer than ~150 ms, `sent` missed the row, slept
+the 250 ms `UNKNOWN_MESSAGE_RETRY_DELAY_MS`, and landed in the same window as
+`delivered`. Measured over every group send in the preserved logs:
+post -> append 8-76 ms gave 0-1 lost receipts; 194-807 ms gave 2-3 lost per
+send and the failures. The afternoon of 2026-09-27 ran 2-7x slower on every
+DynamoDB-bound route (group-members p50 30 ms -> 214 ms), which is what made it
+look deterministic; the same specs passed 3/3 on a quiet machine at 15:24 EDT
+the same day (append 8-11 ms, zero losses). The 08:06 EDT full run had already
+failed reply-all once with a fast append. The rail "refused / dropped /
+deleted" log lines come only from `group-text-reply-all.spec.ts:158`, which
+closes a rail on purpose, and are unrelated.
+
+SAME CAUSE, OTHER SPECS. The relay status route shares the method: in the
+12:15 full run `group-text-stop.spec.ts:48` lost 4 `delivered` receipts and
+`relay-30003-retry.spec.ts:135` lost its 30003 `undelivered` to `sent` (so no
+retry claim, no "1 retrying" chip); eight passing relay specs also logged
+losses. Production exposure is the same race at real-DynamoDB latency: rarer,
+but a lost `delivered` shows staff a member who "never confirmed".
+
+FIX. The condition is now `delivery_recipients.#mk.#st IN (allowed priors)`,
+matching `updateDeliveryStatus`; nothing is built from the read since the
+child-field writes of spec 15.2b, so the exact-match guard protected nothing.
+A late lower status (`sent` after `delivered`) is still refused. Pinned by a
+GATED DynamoDB Local test that forces the logged interleave on every run
+(group delivered, relay delivered, relay undelivered after `sent`; plus the
+reverse refusal) - red on the old condition (3 failed), green on the new. The
+e2e specs and their 60 s no-reload polls are unchanged; they were right.
 
 **Sighting (2026-09-27 afternoon, `feat/voicemail-greeting` gate runs) -
 the reopen signature, now DETERMINISTIC IN ISOLATION.** A full `npm run e2e`

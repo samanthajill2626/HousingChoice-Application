@@ -1614,8 +1614,12 @@ export interface MessagesRepo {
    * entire `delivery_recipients.<memberKey>` map from a value read moments
    * earlier, which silently discarded any field written in between - and the
    * group receipts path writes `sid` for one member while another member's
-   * status transition is in flight. The prior-status ConditionExpression is
-   * unchanged, so the forward-only guarantee is exactly what it was.
+   * status transition is in flight.
+   *
+   * The write commits from ANY allowed prior status, not only the one read
+   * first, so two receipts for one member in flight together both land in
+   * forward order instead of the later one being dropped (see the condition in
+   * the implementation). The forward-only guarantee is unchanged.
    *
    * `opts.sid` records the per-member channel SID (Twilio SMxx) alongside the
    * transition. `opts.context` labels the log lines: it defaults to 'relay' so
@@ -3714,7 +3718,10 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       // updateDeliveryStatus already uses.
       const sets = ['delivery_recipients.#mk.#st = :s'];
       const names: Record<string, string> = { '#mk': memberKey, '#st': 'status' };
-      const values: Record<string, unknown> = { ':s': status, ':prev': slot.status };
+      const values: Record<string, unknown> = {
+        ':s': status,
+        ...Object.fromEntries(allowed.map((p, i) => [`:p${i}`, p])),
+      };
       if (errorCode !== undefined) {
         sets.push('delivery_recipients.#mk.#ec = :e');
         names['#ec'] = 'errorCode';
@@ -3736,14 +3743,27 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             TableName: table,
             Key: { conversationId, tsMsgId },
             UpdateExpression: `SET ${sets.join(', ')}`,
-            // Guard the read-modify-write: only commit if the slot is still on
-            // the status we just read (forward-only under concurrent callbacks).
-            ConditionExpression: 'delivery_recipients.#mk.#st = :prev',
+            // Forward-only, and NOTHING stricter: commit from ANY status this
+            // one may follow, exactly as updateDeliveryStatus does. It used to
+            // demand the status read above (`= :prev`), so when a member's
+            // `sent` and `delivered` receipts were in flight together and both
+            // read `queued`, whichever committed second failed the condition
+            // and was dropped - a legal sent -> delivered move lost for good,
+            // leaving the slot at `sent` (docs/issues/
+            // group-reply-live-rollup-full-suite-flake.md). Nothing else is
+            // built from the read now that the writes are child fields (spec
+            // 15.2b), so the exact-match guard protected nothing. `allowed` is
+            // never empty here: the would-regress check above returns first.
+            ConditionExpression: `delivery_recipients.#mk.#st IN (${allowed.map((_, i) => `:p${i}`).join(', ')})`,
             ExpressionAttributeNames: names,
             ExpressionAttributeValues: values,
           }),
         );
       } catch (err) {
+        // A concurrent writer moved the slot to a status this one may not
+        // follow (a genuine regression, e.g. a late `sent` after `delivered`),
+        // or the slot vanished. The log string is kept byte-identical for
+        // continuity with older sightings.
         if (err instanceof ConditionalCheckFailedException) {
           log.info(
             { conversationId, tsMsgId, status },

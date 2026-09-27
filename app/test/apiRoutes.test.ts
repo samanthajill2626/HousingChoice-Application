@@ -16,12 +16,14 @@ import {
   ContactNoConsentError,
   ContactOptedOutError,
   ConversationNotFoundError,
+  createSendMessageService,
   type SendMessageInput,
 } from '../src/services/sendMessage.js';
 import type { ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import type { ContactsRepo } from '../src/repos/contactsRepo.js';
 import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = 'test-origin-secret';
 
@@ -113,6 +115,56 @@ describe('POST /api/conversations/:conversationId/messages', () => {
     const res = await request(app).post('/api/conversations/conv-1/messages').send({ body: 'x' });
     expect(res.status).toBe(403);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// SOR D3 (code review D-5): the staff send route answers 201 - not 500 - when a
+// step AFTER the append fails. The REAL send wrapper runs here, not makeApp's
+// stand-in: the text went out and its row is written, so the failed inbox
+// touch is logged and the send returns its normal result.
+describe('POST /api/conversations/:conversationId/messages - a post-append failure (SOR D3, code review D-5)', () => {
+  it('answers 201 with the outcome when the inbox touch fails after a successful send', async () => {
+    const world = createFakeWorld();
+    const conversation = await world.conversationsRepo.createOrGetByParticipantPhone('+15550100001', 'tenant_1to1');
+    world.contacts.push({ contactId: 'c-1', type: 'tenant', phone: '+15550100001', consent_method: 'inbound_text' });
+    world.conversationsRepo.touchLastActivity = async () => {
+      throw new Error('dynamo down');
+    };
+    const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
+    const capture = createLogCapture();
+    const logger = createLogger({ level: 'info', destination: capture.stream });
+    const app = buildApp({
+      config,
+      logger,
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        conversationsRepo: world.conversationsRepo,
+        sendMessageService: createSendMessageService({
+          config,
+          logger,
+          adapter: world.adapter,
+          conversationsRepo: world.conversationsRepo,
+          messagesRepo: world.messagesRepo,
+          contactsRepo: world.contactsRepo,
+          auditRepo: world.auditRepo,
+          events: world.events,
+        }),
+      },
+    });
+
+    const res = await request(app)
+      .post(`/api/conversations/${conversation.conversationId}/messages`)
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
+      .send({ body: 'hello' });
+
+    expect(res.status).toBe(201);
+    expect(world.sent).toHaveLength(1);
+    const sid = world.sentDetails[0]!.sid;
+    expect(res.body).toMatchObject({ conversationId: conversation.conversationId, providerSid: sid });
+    expect(world.messages.filter((m) => m.provider_sid === sid)).toHaveLength(1);
+    const errors = capture.atLevel(50).filter((l) => String(l['msg']).includes('post-append step failed'));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ step: 'touchLastActivity', providerSid: sid });
   });
 });
 

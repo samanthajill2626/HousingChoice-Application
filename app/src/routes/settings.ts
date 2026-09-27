@@ -413,15 +413,21 @@ export function createSettingsRouter(deps: SettingsRouterDeps): Router {
     try {
       await settings.putOrgSettings({ voicemailGreeting: record });
     } catch (err) {
-      // The object holds the new bytes; the record is stale or absent. The
-      // webhook reads the record, so the worst case is a stale name/date at the
-      // same fixed key - never a broken call.
+      // The object under the fixed key already holds the NEW bytes; the record
+      // is absent (a first upload) or STALE (a replace: it still describes the
+      // previous file's name, type, size and uploadedAt). The webhook offers
+      // the fixed key, so callers hear the new file either way - never a broken
+      // call. What is wrong is the description: the dashboard shows the old
+      // name/date and its player URL (`?v=<old uploadedAt>`) now serves the new
+      // bytes. The distinct error code lets the dashboard say so and re-fetch;
+      // the next successful upload rewrites both (spec 4.3, planner review AD1).
       log.error({ err, actor, s3Key: VOICEMAIL_GREETING_S3_KEY }, 'voicemail greeting stored but the settings record write failed');
       res.status(500).json({ error: 'greeting_record_failed' });
       return;
     }
-    // Best effort: the greeting is LIVE once the record is written; a 500 here
-    // would tell the admin the upload failed while callers already hear it.
+    // Best effort: the greeting is LIVE (the object is stored and the record
+    // now matches it); a 500 here would tell the admin the upload failed while
+    // callers already hear it.
     await audit
       .append(ORG_SETTINGS_ENTITY_KEY, 'settings_updated', { fields: ['voicemailGreeting'], action: 'uploaded', actor })
       .catch((err: unknown) => log.error({ err, actor }, 'voicemail greeting audit append failed'));

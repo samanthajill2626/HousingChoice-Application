@@ -52,7 +52,10 @@ export function normalizeGreetingContentType(raw: string | undefined): Normalize
  * Does the first few bytes look like the declared format? WAV: RIFF....WAVE.
  * MP3: an ID3v2 tag, or an MPEG audio frame sync (11 set bits) whose LAYER
  * bits are non-zero - layer `00` is reserved and is exactly what an ADTS AAC
- * frame carries, so an AAC file declared as MP3 is refused here.
+ * frame carries, so a BARE AAC stream declared as MP3 is refused here. An
+ * AAC (or anything else) wrapped in an ID3v2 tag passes on the tag alone: the
+ * sniff reads the container prefix, not the frames behind it. That limit is
+ * recorded in docs/issues/voicemail-greeting-format-normalization.md.
  */
 export function sniffGreetingHeader(head: Buffer, format: VoicemailGreetingFormat): boolean {
   if (format === 'wav') {
@@ -147,7 +150,9 @@ export class GreetingUploadGate extends Transform {
   }
 }
 
-/** The staff-facing display name: last path segment, no control characters,
+/** The staff-facing display name: last path segment, no C0 control characters
+ *  or DEL (C1 controls, bidi overrides, line separators and zero-width
+ *  characters are KEPT - display-only, admin input, React-escaped; spec 4.1),
  *  trimmed, capped by CODE POINTS (never splitting a surrogate pair), with a
  *  per-format fallback. Never logged. */
 export function sanitizeGreetingFileName(raw: unknown, format: VoicemailGreetingFormat): string {

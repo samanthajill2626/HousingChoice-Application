@@ -272,7 +272,9 @@ flagged for the handback as questions the planner would have asked):
 - G. Decision 2's "never buffer the whole file": the route holds no buffer
   and pipes the request into the media store's existing `put`, and
   lib-storage (in the app process) holds at most one 5 MiB part in heap
-  before its single `PutObject`, which at this cap is the whole file
+  before its single `PutObject`, which at this cap is the whole file (the
+  build measured the transient PEAK at about twice the file, ~10 MiB at the
+  cap, because the part is concatenated before it is sent)
   (section 2) - the same posture the voicemail-recording mirror ships with.
   A LITERAL delivery exists: a streamed `PutObjectCommand` with an explicit
   `ContentLength` taken from the request behind an additive adapter method

@@ -1231,6 +1231,9 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
       expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
       expect(res.text).not.toContain('<Play>');
       expect(greetingWarns(capture)).toHaveLength(1);
+      // The abort signal ended the hung head: the WARN is the lookup-failure
+      // line (its `err` is the AbortError), never the object-missing line.
+      expect(greetingWarns(capture)[0]?.['msg']).toBe('voicemail greeting lookup failed or timed out - using the spoken prompt');
       expect(world.mediaHeads[0]?.signal).toBe(true);
       await new Promise((r) => setTimeout(r, 120));
       expect(greetingWarns(capture)).toHaveLength(1);

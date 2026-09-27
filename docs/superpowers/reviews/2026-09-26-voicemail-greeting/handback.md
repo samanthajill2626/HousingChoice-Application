@@ -262,3 +262,21 @@ MERGE-READY on feat/voicemail-greeting (W:/tmp/voicemail-greeting) at the
 branch head - the commit that adds this handback record, whose parent de4df265
 is where all five gates ran (the record is the only later change; no code) -
 0 behind main (@0dafe3c1), UNMERGED (human gate).
+
+## Planner addendum (independent review, 2026-09-27 08:40)
+
+- Fork 7 (recorded as FW4 in the build's records, missing from the six
+  above): the webhook and the audio route HEAD, presign and serve the FIXED
+  key constant rather than the record's `s3Key` (the projection already pins
+  the two equal; this is defense in depth against a second writer of the
+  map).
+- Planner fix wave (review AD1, CF7, CF8, CF9, CF11; all small, test-first
+  where code changed): a replace whose settings-record write fails now tells
+  the admin the file IS live and re-fetches the server record (dashboard
+  `greeting_record_failed` mapping + block test; route test pins the state:
+  new bytes stored, old record kept, one ERROR); comment corrections in
+  `settings.ts` and `voicemailGreeting.ts` (ID3-prefixed AAC passes the
+  sniff on the tag; the sanitizer strips C0 + DEL only); exact-message and
+  WARN-wording test pins; the concurrent-writes issue's line refs
+  re-pointed; spec assumption G names the ~2x memory peak.
+- Planner gates and verdict: `planner-review-verdict.md`.

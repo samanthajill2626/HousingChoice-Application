@@ -37,6 +37,7 @@ import { VoicemailGreetingBlock } from './VoicemailGreetingBlock.js';
 import {
   GREETING_EMPTY_MESSAGE,
   GREETING_FORBIDDEN_MESSAGE,
+  GREETING_RECORD_FAILED_MESSAGE,
   GREETING_REJECT_MESSAGE,
   GREETING_STORAGE_MESSAGE,
   GREETING_TOO_LARGE_MESSAGE,
@@ -269,6 +270,23 @@ describe('VoicemailGreetingBlock', () => {
     await screen.findByRole('button', { name: 'Upload greeting' });
     await user.upload(screen.getByLabelText('Greeting audio file'), mp3());
     expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_FORBIDDEN_MESSAGE);
+  });
+
+  // Planner review AD1 (spec 4.3): the server stored the NEW file but could not
+  // write its record. The message must say the file is live and the block must
+  // re-fetch so it shows what the server holds (here: the OLD greeting), never
+  // the optimistic local state.
+  it('greeting_record_failed: says the file is live, and re-fetches the server record', async () => {
+    getSettings.mockResolvedValue(wrap({ ...BASE, voicemailGreeting: GREETING }));
+    uploadVoicemailGreeting.mockRejectedValue(new ApiError(500, 'greeting_record_failed', 'greeting_record_failed'));
+    render(<VoicemailGreetingBlock />);
+    await screen.findByRole('button', { name: 'Replace greeting' });
+    expect(getSettings).toHaveBeenCalledTimes(1);
+    await user.upload(screen.getByLabelText('Greeting audio file'), mp3('new-file.mp3'));
+    expect(await screen.findByRole('alert')).toHaveTextContent(GREETING_RECORD_FAILED_MESSAGE);
+    await waitFor(() => expect(getSettings).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('sam-greeting.mp3')).toBeInTheDocument();
+    expect(screen.queryByText('new-file.mp3')).not.toBeInTheDocument();
   });
 
   // Fix wave R1, FW5 (plan Review Focus 1; spec 4.7 server error map). The M4A

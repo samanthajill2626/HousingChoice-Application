@@ -21,6 +21,12 @@ export const GREETING_TOO_LARGE_MESSAGE = 'That file is over 5 MB. Trim or re-ex
 export const GREETING_EMPTY_MESSAGE = 'That file is empty.';
 export const GREETING_STORAGE_MESSAGE = "Media storage isn't available right now. Try again in a minute.";
 export const GREETING_FORBIDDEN_MESSAGE = 'Only an admin can change the greeting.';
+/** The server stored the file but could not write its record (spec 4.3): the
+ *  greeting callers hear IS the new file; the details shown may be stale until
+ *  the next successful upload. The block re-fetches so it shows what the
+ *  server holds. */
+export const GREETING_RECORD_FAILED_MESSAGE =
+  "The file was stored, but its details couldn't be saved. Callers hear the new greeting; upload it again to fix the name and date.";
 export const GREETING_UPLOAD_FAILED_MESSAGE = "Couldn't upload the greeting. Try again.";
 export const GREETING_REMOVE_FAILED_MESSAGE = "Couldn't remove the greeting. Try again.";
 
@@ -72,6 +78,8 @@ function messageFor(err: unknown, fallback: string): string {
         return GREETING_EMPTY_MESSAGE;
       case 'media_storage_unavailable':
         return GREETING_STORAGE_MESSAGE;
+      case 'greeting_record_failed':
+        return GREETING_RECORD_FAILED_MESSAGE;
       case 'forbidden':
         return GREETING_FORBIDDEN_MESSAGE;
       default:
@@ -140,10 +148,14 @@ export function useVoicemailGreeting(): VoicemailGreetingState {
       setNotice(replacing ? 'Greeting replaced.' : 'Greeting uploaded.');
     } catch (err) {
       setError(messageFor(err, GREETING_UPLOAD_FAILED_MESSAGE));
+      // The object was stored but its record was not: show what the server
+      // actually holds (the previous record, or none) rather than the stale
+      // local state - the caller can then upload again to repair the details.
+      if (err instanceof ApiError && err.code === 'greeting_record_failed') void load();
     } finally {
       setBusy(false);
     }
-  }, [greeting]);
+  }, [greeting, load]);
 
   const remove = useCallback(async () => {
     setError(null);

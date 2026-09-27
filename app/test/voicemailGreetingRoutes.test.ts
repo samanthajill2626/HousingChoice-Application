@@ -100,7 +100,7 @@ describe('PUT /api/settings/voicemail-greeting - gates', () => {
     expect(res.body).toEqual({ error: 'unsupported_media_type', message: VOICEMAIL_GREETING_REJECT_MESSAGE });
     const absent = await admin(request(app).put(PATH)).send(minimalMp3());
     expect(absent.status).toBe(400);
-    expect(absent.body.error).toBe('unsupported_media_type');
+    expect(absent.body).toEqual({ error: 'unsupported_media_type', message: VOICEMAIL_GREETING_REJECT_MESSAGE });
     expect(world.mediaPuts).toHaveLength(0);
   });
 
@@ -473,6 +473,36 @@ describe('PUT/DELETE /api/settings/voicemail-greeting - happy paths', () => {
     expect(res.status).toBe(200);
     expect(world.settings.voicemailGreeting?.s3Key).toBe(KEY);
     expect(capture.atLevel(50).some((l) => String(l['msg']).includes('audit'))).toBe(true);
+  });
+
+  // Planner review AD1 (spec 4.3 accepted state, now pinned): a REPLACE whose
+  // settings-record write fails after the single PutObject succeeded answers
+  // 500 greeting_record_failed; the object under the fixed key holds the NEW
+  // bytes (that is what callers hear) while the record still describes the OLD
+  // upload. The next successful upload rewrites both.
+  it('a replace whose record write fails: 500 greeting_record_failed, new bytes stored, old record kept, ONE ERROR', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    const first = await upload(app, minimalMp3(), 'audio/mpeg', 'A-old.mp3');
+    expect(first.status).toBe(200);
+    const originalPut = world.settingsRepo.putOrgSettings;
+    world.settingsRepo.putOrgSettings = async () => {
+      throw new Error('fake DynamoDB UpdateItem failure');
+    };
+    try {
+      const res = await upload(app, minimalWav(4000), 'audio/wav', 'B-new.wav');
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('greeting_record_failed');
+    } finally {
+      world.settingsRepo.putOrgSettings = originalPut;
+    }
+    expect(world.mediaPuts).toHaveLength(2);
+    expect(world.mediaObjects.get(KEY)?.body.equals(minimalWav(4000))).toBe(true);
+    expect(world.settings.voicemailGreeting).toMatchObject({ fileName: 'A-old.mp3', contentType: 'audio/mpeg', sizeBytes: minimalMp3().length });
+    expect(capture.atLevel(50).filter((l) => String(l['msg']).includes('settings record write failed'))).toHaveLength(1);
+    // The next successful upload repairs the description.
+    const repaired = await upload(app, minimalWav(4000), 'audio/wav', 'B-new.wav');
+    expect(repaired.status).toBe(200);
+    expect(world.settings.voicemailGreeting?.fileName).toBe('B-new.wav');
   });
 
   it('a failed put is a server fault: 500 upload_failed, ONE ERROR, nothing recorded', async () => {

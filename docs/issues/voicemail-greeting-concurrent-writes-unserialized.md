@@ -6,15 +6,15 @@ severity: low
 status: deferred
 area: app/voice
 created: 2026-09-27
-refs: app/src/routes/settings.ts:366, app/src/routes/settings.ts:411, app/src/routes/settings.ts:436, app/src/middleware/rateLimit.ts:19, docs/superpowers/specs/2026-09-26-voicemail-greeting-design.md
+refs: app/src/routes/settings.ts:369, app/src/routes/settings.ts:414, app/src/routes/settings.ts:445, app/src/middleware/rateLimit.ts:19, docs/superpowers/specs/2026-09-26-voicemail-greeting-design.md
 ---
 
 **Problem.** The greeting's two write routes touch the same fixed media key
 and the same settings map with no coordination between requests:
 
 - upload (`PUT /api/settings/voicemail-greeting`): `mediaStore.put` of the
-  fixed key (`settings.ts:366`), then the record SET (`settings.ts:411`);
-- remove (`DELETE`): the record REMOVE (`settings.ts:436`), then a
+  fixed key (`settings.ts:369`), then the record SET (`settings.ts:414`);
+- remove (`DELETE`): the record REMOVE (`settings.ts:445`), then a
   best-effort `deleteObject` of the fixed key.
 
 Two admin writes that land inside one put-to-record or remove-to-delete

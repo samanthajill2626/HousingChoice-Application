@@ -22,12 +22,20 @@
 // Row keys, SIDs and broadcast ids are unique per case: the tables are
 // created once per file and never reset.
 import { randomUUID } from 'node:crypto';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
+import {
+  createBroadcastsRepo,
+  type BroadcastItem,
+  type BroadcastRecipient,
+  type BroadcastsRepo,
+  type BroadcastStats,
+} from '../src/repos/broadcastsRepo.js';
 import {
   allowedPriorStatuses,
   createMessagesRepo,
@@ -432,6 +440,229 @@ const MSG_CASES: MsgCase[] = [
   },
 ];
 
+// ===========================================================================
+// broadcastsRepo: the one-write recipient outcome, the queued close, the
+// finalize flip and the consistent read
+// ===========================================================================
+
+interface BcCtx {
+  id: string;
+}
+
+interface BcStep {
+  label: string;
+  run: (repo: BroadcastsRepo, ctx: BcCtx, impl: Impl) => Promise<unknown>;
+  /** What the REAL answer must be (toBe for a primitive, toMatchObject otherwise). */
+  expect?: unknown;
+}
+
+interface BcCase {
+  name: string;
+  /** The broadcasts the state check reads after every step. */
+  watch: string[];
+  steps: BcStep[];
+}
+
+const FILTER = { contact_type: 'tenant' as const, excludeOptedOut: true, excludeUnreachable: true };
+
+function bid(ctx: BcCtx, name: string): string {
+  return `b-${ctx.id}-${name}`;
+}
+
+/** An item without its wall clocks, deep-copied so a later write cannot reach it. */
+function normalize(item: BroadcastItem | undefined): Record<string, unknown> | undefined {
+  if (item === undefined) return undefined;
+  const { created_at: _created, updated_at: _updated, ...rest } = item;
+  return structuredClone(rest);
+}
+
+function normalizeOutcome(result: { moved: boolean; item?: BroadcastItem }): Record<string, unknown> {
+  return { moved: result.moved, ...(result.item !== undefined && { item: normalize(result.item) }) };
+}
+
+/** A rejection, reduced to what both implementations must agree on. */
+async function rejection(run: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return { resolved: await run() };
+  } catch (err) {
+    return { rejected: err instanceof TypeError ? 'TypeError' : 'Error', message: (err as Error).message };
+  }
+}
+
+const createB = (name: string): BcStep => ({
+  label: `create ${name}`,
+  run: async (repo, ctx) =>
+    normalize(await repo.create({ broadcastId: bid(ctx, name), created_by: 'usr_test', audience_filter: FILTER, body_template: 'Hi [TenantName]' })),
+});
+
+const sendingB = (name: string, keys: string[]): BcStep => ({
+  label: `markSending ${name} ${keys.join(',')}`,
+  run: async (repo, ctx) =>
+    normalize(
+      await repo.markSending(
+        bid(ctx, name),
+        Object.fromEntries(keys.map((k): [string, BroadcastRecipient] => [k, { status: 'queued' }])),
+      ),
+    ),
+});
+
+const record = (
+  name: string,
+  contactKey: string,
+  recipient: BroadcastRecipient,
+  delta: Partial<BroadcastStats>,
+  priors: BroadcastRecipient['status'][],
+  moved: boolean,
+): BcStep => ({
+  label: `recordRecipientOutcome ${name}/${contactKey} ${JSON.stringify(recipient)} ${JSON.stringify(delta)} from ${priors.join('|')}`,
+  run: async (repo, ctx) =>
+    normalizeOutcome(await repo.recordRecipientOutcome(bid(ctx, name), contactKey, { ...recipient }, { ...delta }, [...priors])),
+  expect: { moved },
+});
+
+const closeQueued = (name: string, contactKey: string, errorCode: string, bucket: 'failed' | 'unconfirmed', moved: boolean): BcStep => ({
+  label: `closeRecipientIfQueued ${name}/${contactKey} ${errorCode} -> ${bucket}`,
+  run: async (repo, ctx) => normalizeOutcome(await repo.closeRecipientIfQueued(bid(ctx, name), contactKey, errorCode, bucket)),
+  expect: { moved },
+});
+
+const finalize = (name: string, status: 'sent' | 'failed', won: boolean, lastError?: string): BcStep => ({
+  label: `finalizeStatus ${name} ${status}${lastError !== undefined ? ` (${lastError})` : ''}`,
+  run: async (repo, ctx) => {
+    const result = await repo.finalizeStatus(bid(ctx, name), status, lastError);
+    return { won: result.won, item: normalize(result.item) };
+  },
+  expect: { won },
+});
+
+/** Plant a stats map that predates a bucket - the raw edit on the real item, the same edit on the fake's. */
+const dropBucket = (name: string, bucket: keyof BroadcastStats): BcStep => ({
+  label: `REMOVE stats.${bucket} on ${name}`,
+  run: async (_repo, ctx, impl) => {
+    if (impl.kind === 'fake') {
+      const item = impl.world.broadcasts.get(bid(ctx, name));
+      if (item === undefined) throw new Error('script error: no broadcast to edit');
+      delete (item.stats as unknown as Record<string, unknown>)[bucket];
+      return 'dropped';
+    }
+    await doc.send(
+      new UpdateCommand({
+        TableName: tableName('broadcasts', testEnv),
+        Key: { broadcastId: bid(ctx, name) },
+        UpdateExpression: 'REMOVE stats.#b',
+        ExpressionAttributeNames: { '#b': bucket },
+      }),
+    );
+    return 'dropped';
+  },
+});
+
+/** Scribble on a returned item: nothing stored may change. */
+const scribble = (name: string, contactKey: string): BcStep => ({
+  label: `scribble on the item returned for ${name}/${contactKey}`,
+  run: async (repo, ctx) => {
+    const r = await repo.recordRecipientOutcome(bid(ctx, name), contactKey, { status: 'queued' }, {}, ['queued']);
+    const f = await repo.finalizeStatus(bid(ctx, name), 'sent').catch(() => undefined);
+    for (const item of [r.item, f?.item]) {
+      if (item === undefined) continue;
+      item.stats.sent = 999;
+      item.recipients[contactKey] = { status: 'skipped' };
+      item.status = 'draft';
+    }
+    return { moved: r.moved, won: f?.won ?? null };
+  },
+});
+
+const BC_STATUSES: BroadcastRecipient['status'][] = ['queued', 'sent', 'delivered', 'failed', 'skipped'];
+const PRIOR_SETS: BroadcastRecipient['status'][][] = [['queued'], ['sent'], ['queued', 'sent'], ['delivered', 'failed', 'skipped']];
+
+const BC_CASES: BcCase[] = [
+  {
+    name: 'recordRecipientOutcome: single- and multi-bucket deltas, an EMPTY delta writes the slot only, a zero delta is skipped; priors, a missing slot and a missing broadcast refuse; an empty prior list throws',
+    watch: ['b1'],
+    steps: [
+      createB('b1'),
+      sendingB('b1', ['c-1', 'c-2', 'c-3', 'c-4']),
+      record('b1', 'c-1', { status: 'skipped', errorCode: 'opted_out' }, { skipped_opted_out: 1 }, ['queued'], true),
+      record('b1', 'c-2', { status: 'sent', conversationId: 'conv-2', tsMsgId: 'ts-2' }, { sent: 1, queued: -1 }, ['queued'], true),
+      record('b1', 'c-2', { status: 'failed', errorCode: 'x' }, { failed: 1, queued: -1 }, ['queued'], false),
+      record('b1', 'c-3', { status: 'queued', errorCode: 'send_retryable' }, {}, ['queued'], true),
+      record('b1', 'c-3', { status: 'queued', errorCode: 'send_retryable' }, {}, ['sent'], false),
+      record('b1', 'c-4', { status: 'sent' }, { sent: 1, failed: 0, queued: -1 }, ['queued'], true),
+      record('b1', 'c-absent', { status: 'sent' }, { sent: 1, queued: -1 }, ['queued'], false),
+      record('b-missing', 'c-1', { status: 'sent' }, { sent: 1 }, ['queued'], false),
+      {
+        label: 'recordRecipientOutcome with an empty prior list',
+        run: (repo, ctx) => rejection(() => repo.recordRecipientOutcome(bid(ctx, 'b1'), 'c-3', { status: 'sent' }, { sent: 1 }, [])),
+        expect: { rejected: 'TypeError' },
+      },
+    ],
+  },
+  {
+    name: 'recordRecipientOutcome moves a slot only from an allowed prior, over every status and several prior sets',
+    watch: ['mx'],
+    steps: [
+      createB('mx'),
+      sendingB(
+        'mx',
+        BC_STATUSES.flatMap((status) => PRIOR_SETS.map((_, j) => `c-${status}-${j}`)),
+      ),
+      ...BC_STATUSES.flatMap((status) =>
+        PRIOR_SETS.flatMap((priors, j) => [
+          ...(status === 'queued'
+            ? []
+            : [record('mx', `c-${status}-${j}`, { status }, {}, ['queued'], true)]),
+          record('mx', `c-${status}-${j}`, { status: 'failed', errorCode: 'probe' }, { failed: 1 }, priors, priors.includes(status)),
+        ]),
+      ),
+    ],
+  },
+  {
+    name: 'closeRecipientIfQueued: the unconfirmed and failed buckets; a legacy stats map without the bucket; a second close refused',
+    watch: ['b1', 'b2'],
+    steps: [
+      createB('b1'),
+      sendingB('b1', ['c-1', 'c-2', 'c-3']),
+      dropBucket('b1', 'unconfirmed'),
+      closeQueued('b1', 'c-1', 'send_unconfirmed', 'unconfirmed', true),
+      closeQueued('b1', 'c-1', 'send_unconfirmed', 'unconfirmed', false),
+      closeQueued('b1', 'c-2', 'transient_cap', 'failed', true),
+      record('b1', 'c-3', { status: 'sent' }, { sent: 1, queued: -1 }, ['queued'], true),
+      closeQueued('b1', 'c-3', 'enqueue_failed', 'failed', false),
+      createB('b2'),
+      sendingB('b2', ['c-1']),
+      closeQueued('b2', 'c-1', 'send_unconfirmed', 'unconfirmed', true),
+      closeQueued('b2', 'c-absent', 'send_unconfirmed', 'unconfirmed', false),
+    ],
+  },
+  {
+    name: 'finalizeStatus: wins once from sending; a second call gets won:false and the item; a draft never flips; a missing broadcast throws',
+    watch: ['b1', 'b2', 'draft'],
+    steps: [
+      createB('b1'),
+      sendingB('b1', ['c-1']),
+      finalize('b1', 'sent', true),
+      finalize('b1', 'failed', false, 'late'),
+      createB('b2'),
+      sendingB('b2', ['c-1']),
+      finalize('b2', 'failed', true, "Couldn't confirm any text went out"),
+      finalize('b2', 'failed', false, 'all recipients failed'),
+      createB('draft'),
+      finalize('draft', 'sent', false),
+      {
+        label: 'finalizeStatus on a missing broadcast',
+        run: (repo, ctx) => rejection(() => repo.finalizeStatus(bid(ctx, 'nope'), 'sent')),
+        expect: { rejected: 'Error' },
+      },
+    ],
+  },
+  {
+    name: 'returned items are snapshots: scribbling on them changes nothing stored',
+    watch: ['b1'],
+    steps: [createB('b1'), sendingB('b1', ['c-1']), scribble('b1', 'c-1')],
+  },
+];
+
 // ---- the harness -----------------------------------------------------------
 
 const client = createDynamoClient({ endpoint });
@@ -439,6 +670,17 @@ const doc = createDocumentClient({ endpoint });
 const testEnv = { TABLE_PREFIX: `hc-test-repoaddmirror-${randomUUID().slice(0, 8)}-` };
 const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
 const realMessages = createMessagesRepo({ doc, env: testEnv, logger });
+const realBroadcasts = createBroadcastsRepo({ doc, env: testEnv, logger });
+
+/** Both implementations' watched broadcasts must agree after every step. */
+async function broadcastsAgree(world: FakeWorld, ctx: BcCtx, watch: string[], where: string): Promise<void> {
+  for (const name of watch) {
+    const id = bid(ctx, name);
+    expect(normalize(await world.broadcastsRepo.getByIdConsistent(id)), `${where}: broadcast ${name}`).toStrictEqual(
+      normalize(await realBroadcasts.getByIdConsistent(id)),
+    );
+  }
+}
 
 /**
  * A slot map with its wall-clock stamp reduced to presence: a delivered
@@ -489,11 +731,15 @@ function expectScripted(realAnswer: unknown, expectation: unknown, where: string
 
 describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror the real repos on the SOR additions (DynamoDB Local)', () => {
   beforeAll(async () => {
-    await ensureTable(client, getTableSpec('messages'), tableName('messages', testEnv));
+    for (const base of ['messages', 'broadcasts'] as const) {
+      await ensureTable(client, getTableSpec(base), tableName(base, testEnv));
+    }
   }, 120_000);
 
   afterAll(async () => {
-    await deleteTableIfExists(client, tableName('messages', testEnv));
+    for (const base of ['messages', 'broadcasts'] as const) {
+      await deleteTableIfExists(client, tableName(base, testEnv));
+    }
     doc.destroy();
     client.destroy();
   }, 120_000);
@@ -512,6 +758,23 @@ describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror th
           expect(fakeAnswer, `${where}: result`).toStrictEqual(realAnswer);
           expectScripted(realAnswer, step.expect, where);
           await messagesAgree(world, realCtx, fakeCtx, where);
+        }
+      }, 60_000);
+    }
+  });
+
+  describe('broadcastsRepo', () => {
+    for (const [caseNo, c] of BC_CASES.entries()) {
+      it(c.name, async () => {
+        const ctx: BcCtx = { id: `${caseNo}-${randomUUID().slice(0, 8)}` };
+        const world = createFakeWorld();
+        for (const [stepNo, step] of c.steps.entries()) {
+          const where = `${c.name} / step ${stepNo} ${step.label}`;
+          const realAnswer = await step.run(realBroadcasts, ctx, { kind: 'real' });
+          const fakeAnswer = await step.run(world.broadcastsRepo, ctx, { kind: 'fake', world });
+          expect(fakeAnswer, `${where}: result`).toStrictEqual(realAnswer);
+          expectScripted(realAnswer, step.expect, where);
+          await broadcastsAgree(world, ctx, c.watch, where);
         }
       }, 60_000);
     }

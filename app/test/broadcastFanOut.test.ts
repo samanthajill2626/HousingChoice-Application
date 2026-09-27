@@ -1122,6 +1122,7 @@ describe('broadcast.send (M1.8a)', () => {
         s.sent +
         s.delivered +
         s.failed +
+        (s.unconfirmed ?? 0) +
         s.skipped_opted_out +
         s.skipped_no_consent +
         (s.skipped_other ?? 0) ===

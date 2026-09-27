@@ -139,6 +139,7 @@ import {
 } from '../../src/repos/contactVocabularyRepo.js';
 import {
   type BroadcastItem,
+  type BroadcastRecipient,
   type BroadcastsRepo,
   type BroadcastStats,
   LIST_PARTITION,
@@ -3058,6 +3059,33 @@ export function createFakeWorld(): FakeWorld {
       }),
     };
   };
+  /**
+   * SOR Task 6: the fake recordRecipientOutcome, a closure so the fake's
+   * closeRecipientIfQueued reaches it WITHOUT going through the object - a spy
+   * on recordRecipientOutcome does not see a queued close, as in the real repo.
+   */
+  const recordBroadcastOutcome = async (
+    broadcastId: string,
+    contactKey: string,
+    recipient: BroadcastRecipient,
+    statsDelta: Partial<BroadcastStats>,
+    allowedPriorStatuses: ReadonlyArray<BroadcastRecipient['status']>,
+  ): Promise<{ moved: boolean; item?: BroadcastItem }> => {
+    if (allowedPriorStatuses.length === 0) {
+      throw new TypeError('recordRecipientOutcome: at least one allowed prior status is required');
+    }
+    const b = broadcasts.get(broadcastId);
+    const current = b?.recipients?.[contactKey]?.status;
+    if (!b || current === undefined || !allowedPriorStatuses.includes(current)) return { moved: false };
+    b.recipients = { ...b.recipients, [contactKey]: { ...recipient } };
+    const stats = b.stats as unknown as Record<string, number>;
+    for (const [bucket, delta] of Object.entries(statsDelta)) {
+      if (typeof delta !== 'number' || delta === 0) continue;
+      stats[bucket] = (stats[bucket] ?? 0) + delta;
+    }
+    b.updated_at = new Date().toISOString();
+    return { moved: true, item: structuredClone(b) };
+  };
   /** byCreated GSI order: every stamped item, newest-first. */
   const broadcastsNewestFirst = (): BroadcastItem[] =>
     [...broadcasts.values()]
@@ -3092,6 +3120,12 @@ export function createFakeWorld(): FakeWorld {
     async getById(broadcastId) {
       const b = broadcasts.get(broadcastId);
       return b ? { ...b } : undefined;
+    },
+    // SOR Task 6: delegates THROUGH THE OBJECT PROPERTY like the messages
+    // twins (build finding T8-3) - a spy on getById observes it. A map has no
+    // eventual consistency to model.
+    async getByIdConsistent(broadcastId) {
+      return broadcastsRepo.getById(broadcastId);
     },
     async list(opts = {}) {
       return pageBroadcasts(broadcastsNewestFirst(), opts);
@@ -3174,6 +3208,26 @@ export function createFakeWorld(): FakeWorld {
       }
       b.updated_at = new Date().toISOString();
       return { ...b };
+    },
+    // SOR Task 6 (spec D8, D8a): the one-write outcome, modelled on the real
+    // condition - the slot must hold one of the priors (a missing broadcast or
+    // slot refuses) - and returning a SNAPSHOT, as ALL_NEW does. Held to the
+    // real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    recordRecipientOutcome: recordBroadcastOutcome,
+    async closeRecipientIfQueued(broadcastId, contactKey, errorCode, statsBucket) {
+      const delta: Partial<BroadcastStats> = { queued: -1 };
+      delta[statsBucket] = 1;
+      return recordBroadcastOutcome(broadcastId, contactKey, { status: 'failed', errorCode }, delta, ['queued']);
+    },
+    // SOR Task 6 (spec D16a): the flip only ONE caller wins - from `sending`.
+    async finalizeStatus(broadcastId, status, lastError) {
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw new Error(`finalizeStatus: broadcast ${broadcastId} not found`);
+      if (b.status !== 'sending') return { won: false, item: structuredClone(b) };
+      b.status = status;
+      if (lastError !== undefined) b.last_error = lastError;
+      b.updated_at = new Date().toISOString();
+      return { won: true, item: structuredClone(b) };
     },
     async markSent(broadcastId) {
       const b = broadcasts.get(broadcastId);

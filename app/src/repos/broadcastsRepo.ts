@@ -32,6 +32,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import { SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import type { FanoutClaimResult } from './fanoutClaim.js';
 
@@ -91,6 +92,13 @@ export interface BroadcastStats {
   delivered: number;
   /** Sends that failed (carrier filter / invalid number / cap). */
   failed: number;
+  /**
+   * SOR D22: closed `failed` slots carrying `send_unconfirmed` - the platform
+   * could not confirm whether the text went out. Never counted in `failed`,
+   * never a skip. Optional - persisted rows predate it, readers default 0 (the
+   * close's ADD creates it on such a row).
+   */
+  unconfirmed?: number;
   /** Recipients skipped at send time for opt-out (no token spent), plus legacy
    *  reason-less skips (opt-out or unreachable, recorded before 2026-09-25). */
   skipped_opted_out: number;
@@ -238,7 +246,9 @@ export function isOptedOutCode(code: string | undefined): boolean {
  *                 carrier not yet confirmed
  *     sent      = status 'sent' AND carrierSentAt (carrier-confirmed)
  *     delivered = slots with status 'delivered'
- *     failed    = slots with status 'failed'
+ *     failed    = slots with status 'failed', EXCEPT those carrying
+ *                 send_unconfirmed, which count as
+ *     unconfirmed (SOR D22) and in no other bucket
  *     skipped_no_consent = 'skipped' slots with errorCode no_consent | contact_no_consent
  *     skipped_opted_out  = 'skipped' slots with errorCode opted_out | contact_opted_out,
  *                          or NO errorCode (a legacy first-fence skip: opt-out or
@@ -262,6 +272,7 @@ export function deriveBroadcastStats(
   let sent = 0;
   let delivered = 0;
   let failed = 0;
+  let unconfirmed = 0;
   let skipped_no_consent = 0;
   let skipped_opted_out = 0;
   let skipped_other = 0;
@@ -283,7 +294,8 @@ export function deriveBroadcastStats(
         delivered += 1;
         break;
       case 'failed':
-        failed += 1;
+        if (slot.errorCode === SEND_UNCONFIRMED_CODE) unconfirmed += 1;
+        else failed += 1;
         break;
       case 'skipped':
         if (isNoConsentCode(slot.errorCode)) skipped_no_consent += 1;
@@ -299,6 +311,7 @@ export function deriveBroadcastStats(
     sent,
     delivered,
     failed,
+    unconfirmed,
     skipped_opted_out,
     skipped_no_consent,
     skipped_other,
@@ -312,6 +325,7 @@ export function zeroStats(): BroadcastStats {
     sent: 0,
     delivered: 0,
     failed: 0,
+    unconfirmed: 0,
     skipped_opted_out: 0,
     skipped_no_consent: 0,
     skipped_other: 0,
@@ -345,6 +359,11 @@ export interface BroadcastsRepo {
   /** Create a DRAFT broadcast (generates broadcastId); returns the stored item. */
   create(input: CreateBroadcastInput): Promise<BroadcastItem>;
   getById(broadcastId: string): Promise<BroadcastItem | undefined>;
+  /**
+   * SOR (spec D11, D16a): `getById` with ConsistentRead - for a continuation's
+   * snapshot and for finalize, which must not decide from a stale image.
+   */
+  getByIdConsistent(broadcastId: string): Promise<BroadcastItem | undefined>;
   /** ALL broadcasts (team-wide), newest-first, via the byCreated GSI. */
   list(opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
   /**
@@ -424,6 +443,46 @@ export interface BroadcastsRepo {
   claimFanoutPass(broadcastId: string, cap: number): Promise<FanoutClaimResult>;
   /** Atomically add a delta to stats counters (ADD on each present field). */
   bumpStats(broadcastId: string, delta: Partial<BroadcastStats>): Promise<BroadcastItem>;
+  /**
+   * SOR (spec D8, D8a): ONE conditional write that sets a recipient's slot
+   * wholesale AND adds `statsDelta` to the stats counters, only while the
+   * slot's current status is one of `allowedPriorStatuses` - so a slot move
+   * and its counters can never disagree, and a stale snapshot never overwrites
+   * a later outcome. Buckets with a zero (or absent) delta are left out; an
+   * EMPTY delta writes the slot only. `{ moved: true, item }` (the item as
+   * written) or `{ moved: false }` (the slot is absent or in another status,
+   * or the broadcast is missing). An empty prior list is a TypeError.
+   */
+  recordRecipientOutcome(
+    broadcastId: string,
+    contactKey: string,
+    recipient: BroadcastRecipient,
+    statsDelta: Partial<BroadcastStats>,
+    allowedPriorStatuses: ReadonlyArray<BroadcastRecipient['status']>,
+  ): Promise<{ moved: boolean; item?: BroadcastItem }>;
+  /**
+   * SOR (spec D8, D22): close a still-`queued` recipient `failed` with
+   * `errorCode`, moving one count from `queued` to `statsBucket` - the cap and
+   * enqueue-failure closes (`failed`) and the unresolved close (`unconfirmed`).
+   * `recordRecipientOutcome` with `['queued']` as the only prior.
+   */
+  closeRecipientIfQueued(
+    broadcastId: string,
+    contactKey: string,
+    errorCode: string,
+    statsBucket: 'failed' | 'unconfirmed',
+  ): Promise<{ moved: boolean; item?: BroadcastItem }>;
+  /**
+   * SOR (spec D16a): the terminal flip ONE writer wins - conditional on the
+   * broadcast still being `sending`. `{ won: true, item }` for the writer that
+   * flipped it (it alone audits and emits); `{ won: false, item }` (a
+   * consistent read) for everyone else. Throws when the broadcast is missing.
+   */
+  finalizeStatus(
+    broadcastId: string,
+    status: 'sent' | 'failed',
+    lastError?: string,
+  ): Promise<{ won: boolean; item: BroadcastItem }>;
   /** Flip to `sent` (terminal). */
   markSent(broadcastId: string): Promise<BroadcastItem>;
   /** Flip to `failed` (terminal); records last_error. */
@@ -451,9 +510,66 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
   const table = tableName('broadcasts', deps.env);
   const log = deps.logger ?? defaultLogger;
 
-  async function getById(broadcastId: string): Promise<BroadcastItem | undefined> {
-    const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { broadcastId } }));
+  /** SOR (spec D11): `getById` and its consistent twin share this ONE read. */
+  async function readById(broadcastId: string, consistent: boolean): Promise<BroadcastItem | undefined> {
+    const { Item } = await doc.send(
+      new GetCommand({ TableName: table, Key: { broadcastId }, ...(consistent && { ConsistentRead: true }) }),
+    );
     return Item as BroadcastItem | undefined;
+  }
+
+  async function getById(broadcastId: string): Promise<BroadcastItem | undefined> {
+    return readById(broadcastId, false);
+  }
+
+  /**
+   * SOR (spec D8, D8a): the slot AND its counters in ONE conditional write.
+   * Names and values are built per statement - only buckets with a non-zero
+   * delta are aliased (an unused alias is a ValidationException), and an
+   * EMPTY delta leaves the ADD clause out entirely.
+   */
+  async function recordOutcome(
+    broadcastId: string,
+    contactKey: string,
+    recipient: BroadcastRecipient,
+    statsDelta: Partial<BroadcastStats>,
+    allowedPriorStatuses: ReadonlyArray<BroadcastRecipient['status']>,
+  ): Promise<{ moved: boolean; item?: BroadcastItem }> {
+    if (allowedPriorStatuses.length === 0) {
+      throw new TypeError('recordRecipientOutcome: at least one allowed prior status is required');
+    }
+    const names: Record<string, string> = { '#ck': contactKey, '#updatedAt': 'updated_at', '#status': 'status' };
+    const values: Record<string, unknown> = { ':rec': recipient, ':now': new Date().toISOString() };
+    const priors = allowedPriorStatuses.map((status, i) => {
+      values[`:ps${i}`] = status;
+      return `:ps${i}`;
+    });
+    const adds: string[] = [];
+    for (const [bucket, delta] of Object.entries(statsDelta)) {
+      if (typeof delta !== 'number' || delta === 0) continue;
+      const i = adds.length;
+      names[`#a${i}`] = bucket;
+      values[`:v${i}`] = delta;
+      adds.push(`stats.#a${i} :v${i}`);
+    }
+    try {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { broadcastId },
+          UpdateExpression:
+            `SET recipients.#ck = :rec, #updatedAt = :now` + (adds.length > 0 ? ` ADD ${adds.join(', ')}` : ''),
+          ConditionExpression: `attribute_exists(broadcastId) AND recipients.#ck.#status IN (${priors.join(', ')})`,
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      return { moved: true, item: Attributes as BroadcastItem };
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) return { moved: false };
+      throw err;
+    }
   }
 
   /** Shared GSI query (one partition, optional status filter + pagination). */
@@ -524,6 +640,10 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
 
   return {
     getById,
+
+    async getByIdConsistent(broadcastId) {
+      return readById(broadcastId, true);
+    },
 
     async create(input) {
       const now = new Date().toISOString();
@@ -798,6 +918,52 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
         }),
       );
       return Attributes as BroadcastItem;
+    },
+
+    recordRecipientOutcome: recordOutcome,
+
+    async closeRecipientIfQueued(broadcastId, contactKey, errorCode, statsBucket) {
+      const delta: Partial<BroadcastStats> = { queued: -1 };
+      delta[statsBucket] = 1;
+      return recordOutcome(broadcastId, contactKey, { status: 'failed', errorCode }, delta, ['queued']);
+    },
+
+    async finalizeStatus(broadcastId, status, lastError) {
+      // flipStatus's expression, conditioned on `sending`: N callers, ONE flip.
+      const sets = ['#s = :status', 'updated_at = :now'];
+      const values: Record<string, unknown> = {
+        ':status': status,
+        ':now': new Date().toISOString(),
+        ':sending': 'sending',
+      };
+      if (lastError !== undefined) {
+        sets.push('last_error = :err');
+        values[':err'] = lastError;
+      }
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { broadcastId },
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            ConditionExpression: 'attribute_exists(broadcastId) AND #s = :sending',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: values,
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ broadcastId, status }, 'broadcast status finalized');
+        return { won: true, item: Attributes as BroadcastItem };
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      const item = await readById(broadcastId, true);
+      if (item === undefined) throw new Error(`finalizeStatus: broadcast ${broadcastId} not found`);
+      log.info(
+        { broadcastId, status, currentStatus: item.status },
+        'broadcast finalize not taken - the broadcast is no longer sending',
+      );
+      return { won: false, item };
     },
 
     async markSent(broadcastId) {

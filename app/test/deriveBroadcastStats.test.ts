@@ -4,6 +4,7 @@
 // buckets always sum to the audience (the map size). An empty map (drafts, or a
 // legacy row with no map) passes the persisted stats through unchanged.
 import { describe, expect, it } from 'vitest';
+import { SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
 import {
   deriveBroadcastStats,
   zeroStats,
@@ -47,10 +48,34 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
       sent: 1,
       delivered: 1,
       failed: 1,
+      unconfirmed: 0,
       skipped_opted_out: 1,
       skipped_no_consent: 1,
       skipped_other: 0,
     });
+  });
+
+  it('routes a failed slot carrying send_unconfirmed to unconfirmed and to no other bucket (D22)', () => {
+    const s = deriveBroadcastStats({
+      recipients: recips([
+        ['a', { status: 'failed', errorCode: SEND_UNCONFIRMED_CODE }],
+        ['b', { status: 'failed', errorCode: '30007' }],
+        ['c', { status: 'failed' }],
+      ]),
+      stats: zeroStats(),
+    });
+    expect(s).toMatchObject({ unconfirmed: 1, failed: 2, audience: 3 });
+    expect(s.skipped_opted_out + s.skipped_no_consent + (s.skipped_other ?? 0)).toBe(0);
+    // The code alone decides: a slot that is not failed keeps its own bucket.
+    const queued = deriveBroadcastStats({
+      recipients: recips([['a', { status: 'queued', errorCode: SEND_UNCONFIRMED_CODE }]]),
+      stats: zeroStats(),
+    });
+    expect(queued).toMatchObject({ queued: 1, unconfirmed: 0, failed: 0 });
+  });
+
+  it('zeroStats carries the unconfirmed bucket at zero', () => {
+    expect(zeroStats().unconfirmed).toBe(0);
   });
 
   it("splits the in-flight states: on-our-box 'queued' vs dispatched-unconfirmed 'sending' vs carrier-confirmed 'sent'", () => {
@@ -104,17 +129,22 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
       statuses.push(
         status === 'skipped' && i % 2 === 0
           ? { status, errorCode: 'no_consent' }
-          : { status },
+          : status === 'failed' && i % 2 === 1
+            ? { status, errorCode: SEND_UNCONFIRMED_CODE }
+            : { status },
       );
     }
     const recipients = recips(statuses.map((r, i) => [`c-${i}`, r]));
     const out = deriveBroadcastStats({ recipients, stats: zeroStats() });
+    // The unconfirmed bucket is exercised, not vacuously zero.
+    expect(out.unconfirmed).toBeGreaterThan(0);
     const sum =
       out.queued +
       (out.sending ?? 0) +
       out.sent +
       out.delivered +
       out.failed +
+      (out.unconfirmed ?? 0) +
       out.skipped_opted_out +
       out.skipped_no_consent +
       (out.skipped_other ?? 0);

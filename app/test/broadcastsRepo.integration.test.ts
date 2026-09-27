@@ -652,6 +652,142 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
     expect(await readStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId })).toBe(1);
   });
 
+  // --- SOR Task 6: the broadcast-side send-outcome additions ----------------
+  //
+  // One conditional write per recipient outcome (slot + stats together), the
+  // unconfirmed bucket, and the finalize flip only ONE writer wins (spec D8,
+  // D16a, D22). No shared seeded broadcast: each case creates its own and
+  // marks it sending (build finding T6-2).
+  describe('SOR send-outcome additions: broadcast slots, stats and finalize', () => {
+    async function sendingBroadcast(recipients: Record<string, BroadcastRecipient>): Promise<string> {
+      const created = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'Hi [TenantName]',
+      });
+      await broadcasts.markSending(created.broadcastId, recipients);
+      return created.broadcastId;
+    }
+
+    it('recordRecipientOutcome writes the slot and bumps stats in ONE conditional write', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const sent: BroadcastRecipient = { status: 'sent', conversationId: 'conv-1', tsMsgId: 'ts-1' };
+      const r = await broadcasts.recordRecipientOutcome(id, 'c-1', sent, { sent: 1, queued: -1 }, ['queued']);
+      expect(r.moved).toBe(true);
+      expect(r.item!.stats).toMatchObject({ sent: 1, queued: 0 });
+      expect(r.item!.recipients['c-1']).toEqual(sent);
+      const again = await broadcasts.recordRecipientOutcome(
+        id,
+        'c-1',
+        { status: 'failed', errorCode: 'x' },
+        { failed: 1, queued: -1 },
+        ['queued'],
+      );
+      expect(again).toEqual({ moved: false });
+      const stored = await broadcasts.getByIdConsistent(id);
+      expect(stored!.stats).toMatchObject({ sent: 1, failed: 0, queued: 0 });
+      expect(stored!.recipients['c-1']).toEqual(sent);
+    });
+
+    it('recordRecipientOutcome with a single-bucket delta lists only that bucket, and skips a zero delta', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' }, 'c-2': { status: 'queued' } });
+      // An unused alias would be a ValidationException here.
+      const r = await broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'skipped', errorCode: 'opted_out' }, { skipped_opted_out: 1 }, ['queued']);
+      expect(r.moved).toBe(true);
+      expect(r.item!.stats).toMatchObject({ skipped_opted_out: 1, queued: 2 });
+      const z = await broadcasts.recordRecipientOutcome(id, 'c-2', { status: 'sent' }, { sent: 1, failed: 0, queued: -1 }, ['queued']);
+      expect(z.moved).toBe(true);
+      expect(z.item!.stats).toMatchObject({ sent: 1, failed: 0, queued: 1 });
+    });
+
+    it('recordRecipientOutcome with an EMPTY delta writes the slot only, under the priors', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const r = await broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'queued', errorCode: 'send_retryable' }, {}, ['queued']);
+      expect(r.moved).toBe(true);
+      expect(r.item!.recipients['c-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(r.item!.stats.queued).toBe(1); // untouched
+      expect(
+        await broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'queued', errorCode: 'send_retryable' }, {}, ['sent']),
+      ).toEqual({ moved: false });
+    });
+
+    it('recordRecipientOutcome refuses a missing slot and a missing broadcast, and rejects an empty prior list before any write', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      expect(
+        await broadcasts.recordRecipientOutcome(id, 'c-absent', { status: 'sent' }, { sent: 1, queued: -1 }, ['queued']),
+      ).toEqual({ moved: false });
+      expect(
+        await broadcasts.recordRecipientOutcome(`bcast-${randomUUID()}`, 'c-1', { status: 'sent' }, { sent: 1 }, ['queued']),
+      ).toEqual({ moved: false });
+      await expect(
+        broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'sent' }, { sent: 1 }, []),
+      ).rejects.toThrow(TypeError);
+      const stored = await broadcasts.getByIdConsistent(id);
+      expect(stored!.recipients).toEqual({ 'c-1': { status: 'queued' } });
+      expect(stored!.stats).toMatchObject({ sent: 0, queued: 1 });
+    });
+
+    it('closeRecipientIfQueued bumps the unconfirmed bucket, creating it on a legacy stats map', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' }, 'c-2': { status: 'queued' } });
+      // create() persists `unconfirmed: 0` now; a share mid-send at deploy lacks it.
+      await doc.send(
+        new UpdateCommand({
+          TableName: broadcastsTable,
+          Key: { broadcastId: id },
+          UpdateExpression: 'REMOVE stats.unconfirmed',
+        }),
+      );
+      const { Item: stored } = await doc.send(
+        new GetCommand({ TableName: broadcastsTable, Key: { broadcastId: id }, ConsistentRead: true }),
+      );
+      expect((stored as { stats: Record<string, unknown> }).stats).not.toHaveProperty('unconfirmed');
+      const r = await broadcasts.closeRecipientIfQueued(id, 'c-1', 'send_unconfirmed', 'unconfirmed');
+      expect(r.moved).toBe(true);
+      expect(r.item!.stats).toMatchObject({ unconfirmed: 1, failed: 0, queued: 1 });
+      expect(r.item!.recipients['c-1']).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      const f = await broadcasts.closeRecipientIfQueued(id, 'c-2', 'transient_cap', 'failed');
+      expect(f.item!.stats).toMatchObject({ unconfirmed: 1, failed: 1, queued: 0 });
+      expect(f.item!.recipients['c-2']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await broadcasts.closeRecipientIfQueued(id, 'c-1', 'send_unconfirmed', 'unconfirmed')).toEqual({ moved: false });
+    });
+
+    it('create persists the unconfirmed bucket at zero', async () => {
+      const created = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'Hi [TenantName]',
+      });
+      expect((await broadcasts.getByIdConsistent(created.broadcastId))!.stats.unconfirmed).toBe(0);
+    });
+
+    it('finalizeStatus wins once from sending; a later call reads the item back; a draft never flips; a missing broadcast throws', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const a = await broadcasts.finalizeStatus(id, 'sent');
+      expect(a.won).toBe(true);
+      expect(a.item).toMatchObject({ broadcastId: id, status: 'sent' });
+      expect(a.item).not.toHaveProperty('last_error');
+      const b = await broadcasts.finalizeStatus(id, 'failed', 'late');
+      expect(b).toMatchObject({ won: false, item: { status: 'sent' } });
+      expect(b.item).not.toHaveProperty('last_error');
+      const failedId = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const lost = await broadcasts.finalizeStatus(failedId, 'failed', "Couldn't confirm any text went out");
+      expect(lost).toMatchObject({ won: true, item: { status: 'failed', last_error: "Couldn't confirm any text went out" } });
+      const draft = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'still a draft',
+      });
+      expect(await broadcasts.finalizeStatus(draft.broadcastId, 'sent')).toMatchObject({ won: false, item: { status: 'draft' } });
+      await expect(broadcasts.finalizeStatus(`bcast-${randomUUID()}`, 'sent')).rejects.toThrow(/not found/);
+    });
+
+    it('getByIdConsistent reads what getById reads', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      expect(await broadcasts.getByIdConsistent(id)).toEqual(await broadcasts.getById(id));
+      expect(await broadcasts.getByIdConsistent(`bcast-${randomUUID()}`)).toBeUndefined();
+    });
+  });
+
   // --- SOR Task 6: the relay-side send-outcome additions --------------------
   //
   // The conditional closes, the forward-only adoption, the attempt clock and

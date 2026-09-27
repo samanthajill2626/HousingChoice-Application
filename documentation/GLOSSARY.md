@@ -138,8 +138,19 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   with `<field>_source` provenance). Not a "flag" or "nudge" (those are placement
   signals - see above).
 
-- **Unit `notes`** — free-form INTERNAL staff notes on a property (the contact
-  `notes` counterpart): amenity/quirk facts that are neither utilities nor
+- **Staff notes** (contact `staff_notes`, 2026-09-26, Sam's item 22) - the
+  tenant file's hand-written box, kept apart from contact `notes`. Contact
+  `notes` is the "Preferences & notes" card, which the AI appends dated
+  `[Auto - <date>]` lines to and reads as its profile; `staff_notes` is
+  human-only - never machine-written or machine-read (not the import, the
+  seeds, the public sign-up, the transition service, or extraction). Human
+  label: "Staff notes" (staff only; no tenant-facing surface). Companion
+  `staff_notes_updated_at` is server-stamped on every write and renders as
+  "Last edited <date>".
+
+- **Unit `notes`** - free-form INTERNAL staff notes on a property (the
+  counterpart of contact `notes`, the Preferences & notes field - not of the
+  contact's Staff notes): amenity/quirk facts that are neither utilities nor
   accessibility, e.g. "In-unit washer/dryer", "No dishwasher". Never on the
   public flyer projections (`unitFields.ts` allowlists exclude it by
   construction).

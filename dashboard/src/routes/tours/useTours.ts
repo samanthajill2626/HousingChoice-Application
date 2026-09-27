@@ -11,14 +11,23 @@
 // tours (the two "not live" states staff may need to find - closed is
 // terminal, canceled is revivable from its detail page), newest first.
 // Nothing is fetched until the Closed view shows.
+// Plus usePastTours(enabled) - the Past tab's fetch (spec 4.2): ONE range
+// query over [start of the local day 90 days ago, end of today], selected
+// on the client (the range GSI matches on scheduledAt alone, same as
+// Upcoming): scheduled / toured / no_show only, minus a still-scheduled
+// tour dated today (Active's Today group has it) and minus a toured tour
+// whose outcome is recorded - unless that outcome is a move-forward whose
+// placement was never created (Needs placement). Most recent first.
+// `reload()` refetches after a bulk action while keeping the current rows
+// on screen; a failed reload keeps them too and sets reloadFailed.
 //
 // Both fetches run in parallel, each with its own AbortController so the caller
 // (useEffect cleanup) can cancel both together. Mirrors useContacts / useListings:
 // - A single status field drives loading/ready/error.
 // - AbortError / signal-aborted responses are silently swallowed.
 // - Any other error sets status to 'error'.
-import { useEffect, useState } from 'react';
-import { getTours, type Tour } from '../../api/index.js';
+import { useCallback, useEffect, useState } from 'react';
+import { getTours, TOUR_STATUS_LABELS, type Tour, type TourStatus } from '../../api/index.js';
 
 export type ToursPageStatus = 'loading' | 'ready' | 'error';
 
@@ -138,4 +147,132 @@ export function useClosedTours(enabled: boolean): ClosedToursState {
   }, [enabled]);
 
   return state;
+}
+
+// ---------------------------------------------------------------------------
+// Past tab (spec 4.2 / 4.3)
+// ---------------------------------------------------------------------------
+
+/** How far back the Past tab looks. Said aloud in the tab's intro line. */
+export const PAST_TAB_DAYS = 90;
+
+/** The Past tab's statuses: a tour whose time has passed and that still needs a
+ *  human decision. Canceled and closed belong to Closed; requested has no time. */
+export const PAST_TAB_STATUSES: ReadonlySet<TourStatus> = new Set<TourStatus>([
+  'scheduled',
+  'toured',
+  'no_show',
+]);
+
+/** Start of `now`'s LOCAL calendar day. */
+function startOfLocalDay(now: Date): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+}
+
+/** [start of the local day 90 calendar days ago, end of today local] as UTC
+ *  ISO strings. Calendar arithmetic, not a millisecond subtraction: across a
+ *  DST change the two differ by an hour and the window would start at 23:00
+ *  or 01:00. The window runs THROUGH today (not to `now`) so a tour marked
+ *  toured or no-show before its time today is listed; selectPastTours drops
+ *  today's still-scheduled rows, which Active's Today group already shows. */
+export function pastToursDateRange(now: Date = new Date()): { from: string; to: string } {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - PAST_TAB_DAYS, 0, 0, 0, 0);
+  const to = new Date(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0).getTime() - 1);
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
+/** A toured tour whose move-forward decision never became a placement (a
+ *  failed conversion - the tour page's "Start placement" is the retry). */
+function needsPlacement(t: Tour): boolean {
+  return t.status === 'toured' && t.convertible === true && t.convertedPlacementId === undefined;
+}
+
+/** Select and order the Past rows (spec 4.2). Pure; never mutates its input.
+ *  1. keep scheduled / toured / no_show;
+ *  2. drop a scheduled row dated today (Active's Today group shows it all day;
+ *     it is not "past" until the day ends);
+ *  3. drop a toured row that carries an outcome (its decision is recorded)
+ *     UNLESS it still needs its placement;
+ *  4. most recent scheduledAt first, ties by tourId. */
+export function selectPastTours(tours: Tour[], now: Date = new Date()): Tour[] {
+  const todayStart = startOfLocalDay(now).toISOString();
+  return tours
+    .filter((t) => PAST_TAB_STATUSES.has(t.status))
+    .filter((t) => !(t.status === 'scheduled' && (t.scheduledAt ?? '') >= todayStart))
+    .filter((t) => !(t.status === 'toured' && t.outcome !== undefined && !needsPlacement(t)))
+    .sort((a, b) => {
+      const aAt = a.scheduledAt ?? '';
+      const bAt = b.scheduledAt ?? '';
+      if (aAt !== bAt) return aAt > bAt ? -1 : 1;
+      return a.tourId < b.tourId ? -1 : a.tourId > b.tourId ? 1 : 0;
+    });
+}
+
+/** The plain-words state chip for a Past row (spec 4.3). Any other status
+ *  falls back to its label so a mis-selected row is never blank. */
+export function pastState(tour: Tour): string {
+  if (tour.status === 'scheduled') return 'Not marked';
+  if (tour.status === 'toured' && tour.outcome === undefined) return 'Needs outcome';
+  if (needsPlacement(tour)) return 'Needs placement';
+  if (tour.status === 'no_show') return 'No show';
+  return TOUR_STATUS_LABELS[tour.status] ?? tour.status;
+}
+
+export interface PastToursState {
+  /** 'idle' until the first result lands (the page shows its spinner for idle);
+   *  'error' ONLY when the first load fails (a failed reload keeps the rows
+   *  and sets reloadFailed). There is no 'loading' value: writing one
+   *  synchronously in the effect is what react-hooks/set-state-in-effect
+   *  forbids, and idle already means "nothing shown yet". */
+  status: 'idle' | 'ready' | 'error';
+  /** The selected Past rows, most recent first. */
+  past: Tour[];
+  /** Refetch (after a bulk action). Keeps the current rows until the new page lands. */
+  reload: () => void;
+  /** The last reload failed; the rows on screen are stale. Cleared by the next
+   *  successful load. Never true alongside status 'error'. */
+  reloadFailed: boolean;
+}
+
+/** LAZY fetch for the Past view - one range query, client-selected. */
+export function usePastTours(enabled: boolean): PastToursState {
+  const [state, setState] = useState<{
+    status: PastToursState['status'];
+    past: Tour[];
+    reloadFailed: boolean;
+  }>({ status: 'idle', past: [], reloadFailed: false });
+  const [epoch, setEpoch] = useState(0);
+  const reload = useCallback(() => setEpoch((e) => e + 1), []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    // NO synchronous setState here (react-hooks/set-state-in-effect is an
+    // error in this workspace): the first load leaves status 'idle', which
+    // the page renders as its spinner; a reload keeps the rows on screen (no
+    // spinner flash under a bulk result). Every write below is in the async
+    // callback.
+
+    (async () => {
+      try {
+        const now = new Date();
+        const { from, to } = pastToursDateRange(now);
+        const rows = await getTours({ from, to }, signal);
+        if (signal.aborted) return;
+        setState({ status: 'ready', past: selectPastTours(rows, now), reloadFailed: false });
+      } catch (err) {
+        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+        // A failed RELOAD must not wipe the rows and the per-row results under
+        // them (spec 4.2): stay ready, flag it. A failed FIRST load is an error.
+        setState((s) =>
+          s.status === 'ready' ? { ...s, reloadFailed: true } : { status: 'error', past: [], reloadFailed: false },
+        );
+      }
+    })();
+
+    return () => controller.abort();
+  }, [enabled, epoch]);
+
+  return { status: state.status, past: state.past, reload, reloadFailed: state.reloadFailed };
 }

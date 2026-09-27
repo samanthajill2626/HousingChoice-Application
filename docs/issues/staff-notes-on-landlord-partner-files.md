@@ -27,3 +27,9 @@ too: "prefers calls after 5", "owner's brother handles showings".
 to the same `onContactUpdated` prop. The card is self-contained, so this is a
 small change; the open question is product, not code: does Sam want it there?
 Ask before building.
+
+**Note (build research, 2026-09-27).** The PATCH is not type-gated, so a tenant
+who is later retyped to landlord, partner, team member or unknown KEEPS the
+stored `staff_notes` and its stamp, but no file renders them until the contact
+is retyped back to tenant (or this issue is built). Nothing is lost; the box is
+merely invisible on the other kinds.

@@ -1570,6 +1570,55 @@ describe('relay.fanOut (M1.7)', () => {
       expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
     });
 
+    it('4c a cap-close takeover whose fence is lost leaves the member alone', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      const reconciles = recordReconciles();
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, agoIso(31_000));
+      vi.spyOn(world.sendAttemptsRepo, 'takeOver').mockResolvedValueOnce(false);
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(reconciles).toHaveLength(0);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting' });
+    });
+
+    it('4d stale attempting records are taken over by the claim and handed off by the loop - never re-sent, and takeovers do not count toward the brake (D8a)', async () => {
+      seedRelay(world, { participants: FIVE });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      const stale = agoIso(31_000);
+      for (const k of ['c-bob', 'c-carol', 'c-dave']) await world.sendAttemptsRepo.claim(ownerOf(source, k), seedFacts, stale);
+      await run(source, { recipientKeys: ['c-bob', 'c-carol', 'c-dave', 'c-erin'], attempt: 2 });
+      for (const k of ['c-bob', 'c-carol', 'c-dave']) {
+        expect(await recordOf(source, k), k).toMatchObject({ state: 'reconciling', attemptedAt: stale, attemptNo: 1 });
+        expect(slotOf(source, k), k).toBeUndefined();
+      }
+      expect(reconciles.map((r) => r.owner.recipientKeyHash)).toEqual(['c-bob', 'c-carol', 'c-dave']);
+      expect(reconciles[0]).toMatchObject({ attemptedAt: stale, checkNo: 0, continuation: { senderKey: 'c-alice' } });
+      // Three takeovers in a row are NOT an outage: erin still sends.
+      expect(sends).toEqual([ERIN]);
+      expect(brakeLines()).toHaveLength(0);
+      expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+    });
+
+    it('4e a claim-time takeover whose fence is lost hands off nothing and sends nothing (INFO)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, agoIso(31_000));
+      vi.spyOn(world.sendAttemptsRepo, 'takeOver').mockResolvedValueOnce(false);
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(reconciles).toHaveLength(0);
+      expect(sends).toHaveLength(0);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting' });
+      expect(capture.atLevel(30).filter((l) => String(l['msg']).includes('takeover lost'))).toHaveLength(1);
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
     it('4b a cap-close whose gate read throws for one member logs it and still closes the rest (T8-6)', async () => {
       seedRelay(world);
       const source = seedSource(world, 'hello', 'c-alice');
@@ -1620,9 +1669,32 @@ describe('relay.fanOut (M1.7)', () => {
       expect(line).toHaveLength(1);
       expect(line[0]).toMatchObject({ providerSid: sid, memberKey: 'c-bob' });
       expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
-      // Never re-sent: the record is being reconciled, so a second pass skips it.
+      // Never re-sent: the record is being reconciled, so a second pass skips it - and does not carry it.
       await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
       expect(world.sent).toHaveLength(1);
+      expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+    });
+
+    it('6b a record-phase failure whose hand-off fence is lost hands off nothing and carries nothing (G5)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      vi.spyOn(world.messagesRepo, 'claimRelaySidPointer').mockRejectedValueOnce(new Error('dynamo blip'));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockResolvedValueOnce(false);
+      await run(source);
+      expect(world.sent).toHaveLength(1);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(capture.atLevel(30).filter((l) => String(l['msg']).includes('hand-off fence lost'))).toHaveLength(1);
+    });
+
+    it('6c an attempt clock write that throws is best-effort: the leg still sends and records', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      vi.spyOn(world.messagesRepo, 'setRelayRecipientAttemptedAt').mockRejectedValueOnce(new Error('dynamo blip'));
+      await run(source);
+      expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent' });
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('attempt clock write failed'))).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
     });
 
     it('7 an unknown whose handToReconcile throws returns stranded: NO second provider call, record still attempting, carried, and at the cap left for the sweeper (R2 #1, D8a rev 11)', async () => {
@@ -2106,8 +2178,9 @@ describe('relay.fanOut (M1.7)', () => {
       seedRelay(world, {
         participants: [
           { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
-          { phone: PHONE_ONLY },
-          { phone: '+15550100082' },
+          // A phone-only member: no contact id, so its key is `phone#<E164>`.
+          { contactId: '', phone: PHONE_ONLY },
+          { contactId: '', phone: '+15550100082' },
         ],
       });
       const source = seedSource(world, 'hello', 'c-alice');
@@ -2128,7 +2201,7 @@ describe('relay.fanOut (M1.7)', () => {
       seedRelay(world, {
         participants: [
           { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
-          { phone: '+15550100083' },
+          { contactId: '', phone: '+15550100083' },
         ],
       });
       const source = seedSource(world, 'hello', 'c-alice');

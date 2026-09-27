@@ -4200,6 +4200,8 @@ export interface HarnessOptions {
   withoutMediaStore?: boolean;
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
   statusUnknownSidRetryDelayMs?: number;
+  /** Voicemail-greeting lookup budget for the voice webhook (tests shrink the 2500ms default). */
+  voicemailGreetingLookupBudgetMs?: number;
   /** Native group texting (S5): replace the Conversations receipts pipeline. */
   groupReceipts?: GroupReceiptsService;
   /** Native group texting (S5): replace the group send service on /api. */
@@ -4548,6 +4550,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       }),
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
+      }),
+      ...(opts.voicemailGreetingLookupBudgetMs !== undefined && {
+        voicemailGreetingLookupBudgetMs: opts.voicemailGreetingLookupBudgetMs,
       }),
       // relay-number-buying T3: the Event Streams sink router (POST
       // /webhooks/twilio/events) promotes a warming pool number on registration.

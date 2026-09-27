@@ -1062,7 +1062,7 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(lines(30).some((l) => l['state'] === 'absent')).toBe(true);
     });
 
-    it('14d an unresolved close that dies at its slot write is COMPLETED by the redelivery: the slot is written before the record, so the record is still this chain\'s (D8)', async () => {
+    it('14d an unresolved close that dies at its slot write is COMPLETED by the redelivery: the RECORD is closed first, and the superseded exit re-applies the slot close (FW1-4, ruling A7 extended)', async () => {
       register();
       const t = seedTenant();
       seedBroadcast([t.contactId]);
@@ -1071,11 +1071,135 @@ describe('send.reconcile (spec D11-D16)', () => {
       t.phone = '+15558675309';
       vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued').mockRejectedValueOnce(new Error('the process died at the slot write'));
       await expect(runCheck(payloadOf(owner, at))).rejects.toThrow('the process died at the slot write');
-      expect(await recordOf(owner)).toMatchObject({ state: 'reconciling' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'digest_mismatch' });
+      expect(slotOf(t.contactId)).toEqual({ status: 'queued' });
       await runCheck(payloadOf(owner, at));
       expect(slotOf(t.contactId)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(world.broadcasts.get('bcast-1')!.stats).toMatchObject({ unconfirmed: 1, queued: 0 });
       expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'digest_mismatch' });
       expect(world.broadcasts.get('bcast-1')!.status).toBe('failed');
+      // The verdict's ERROR was logged once, by the close that won the record.
+      expect(lines(50)).toHaveLength(1);
+    });
+
+    it('ADV-2 (zz-adv-3): a duplicate delivery of the last check that closes unresolved while the re-drive is mid-send writes NOTHING - its record close comes first and loses; the re-drive\'s text lands on its queued slot (FW1-4)', async () => {
+      register();
+      seedUnit();
+      const config = loadConfig({
+        NODE_ENV: 'test',
+        MESSAGING_DRIVER: 'console',
+        PUBLIC_BASE_URL: 'https://dxxxx.cloudfront.example',
+        SESSION_SECRET: DEV_SESSION_SECRET_DEFAULT,
+        BUSINESS_PHONE_NUMBER: MAIN,
+      } as NodeJS.ProcessEnv);
+      registerBroadcastSendJobHandler({
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        config,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        unitsRepo: world.unitsRepo,
+        sendMessageService: createSendMessageService({
+          config,
+          logger,
+          adapter: world.adapter,
+          conversationsRepo: world.conversationsRepo,
+          messagesRepo: world.messagesRepo,
+          contactsRepo: world.contactsRepo,
+          auditRepo: world.auditRepo,
+          events: world.events,
+        }),
+        auditRepo: world.auditRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        events: world.events,
+        logger,
+      });
+      const t = seedTenant();
+      seedBroadcast([t.contactId], { fanout_attempt: 1 });
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      // The last check, delivered TWICE (an SQS duplicate). Delivery B lists first and hangs.
+      const [last] = outbound.delayed.splice(outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB), 1);
+      const wire = JSON.stringify(last!.envelope);
+      const realList = world.adapter.listMessages.bind(world.adapter);
+      let releaseB!: (err: Error) => void;
+      let bListing!: () => void;
+      const bIsListing = new Promise<void>((resolve) => {
+        bListing = resolve;
+      });
+      let listCalls = 0;
+      world.adapter.listMessages = async (args) => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          bListing();
+          await new Promise<never>((_resolve, reject) => {
+            releaseB = reject;
+          });
+        }
+        return realList(args);
+      };
+      // The re-drive's provider call hangs until released.
+      const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+      let releaseSend!: () => void;
+      let sendStarted!: () => void;
+      const sendIsWaiting = new Promise<void>((resolve) => {
+        sendStarted = resolve;
+      });
+      world.adapter.sendPreparedMessage = async (prepared) => {
+        sendStarted();
+        await new Promise<void>((resolve) => {
+          releaseSend = resolve;
+        });
+        return realSend(prepared);
+      };
+      const deliveryB = dispatchJob(JSON.parse(wire) as unknown);
+      await bIsListing;
+      // Delivery A: never_sent - the record goes redriven and the re-drive pass claims attempt 2 and calls the provider.
+      await dispatchJob(JSON.parse(wire) as unknown);
+      await sendIsWaiting;
+      expect(await recordOf(owner)).toMatchObject({ state: 'attempting', attemptNo: 2 });
+      // B's list answers a 5xx at the last check: provider_unreachable.
+      releaseB(Object.assign(new Error('Service Unavailable'), { status: 503 }));
+      await deliveryB;
+      expect(slotOf(t.contactId)).toEqual({ status: 'queued' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+      releaseSend();
+      await outbound.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([t.phone]);
+      expect(slotOf(t.contactId)).toMatchObject({ status: 'sent' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2 });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+      expect(lines(50)).toHaveLength(0);
+    });
+
+    it('an enqueue_failed close that dies at its slot write is COMPLETED by the redelivery: the superseded exit re-applies the enqueue_failed slot close and finalizes (FW1-4)', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if (envelope.jobName === BROADCAST_SEND_JOB) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      const last = scheduledChecks()[0]!.envelope.payload as SendReconcilePayload;
+      vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued').mockRejectedValueOnce(new Error('the process died at the slot write'));
+      await expect(runNextCheck()).rejects.toThrow('the process died at the slot write');
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'enqueue_failed' });
+      expect(slotOf(t.contactId)).toEqual({ status: 'queued' });
+      await runCheck(last);
+      expect(slotOf(t.contactId)).toEqual({ status: 'failed', errorCode: 'enqueue_failed' });
+      expect(world.broadcasts.get('bcast-1')!.stats).toMatchObject({ failed: 1, queued: 0 });
+      expect(world.broadcasts.get('bcast-1')).toMatchObject({ status: 'failed', last_error: 'all recipients failed' });
+      expect(lines(50)).toHaveLength(1);
     });
 
     it('11c a duplicate chain whose markRedriven lost to its twin closes nothing and enqueues nothing: the twin owns the one re-drive (D11, D13a)', async () => {
@@ -2221,7 +2345,7 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(redrives).toHaveLength(2);
     });
 
-    it('14e relay: a redrive_refused close that dies at its slot write is COMPLETED by the redelivery - the slot first, then the record (D8)', async () => {
+    it('14e relay: a redrive_refused close that dies at its slot write is COMPLETED by the redelivery - the RECORD first, then the superseded exit re-applies the slot close and tells the thread (FW1-4)', async () => {
       register();
       const conv = seedRelay();
       const source = seedSource();
@@ -2233,10 +2357,60 @@ describe('send.reconcile (spec D11-D16)', () => {
       const last = scheduledChecks()[0]!.envelope.payload as SendReconcilePayload;
       vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent').mockRejectedValueOnce(new Error('the process died at the slot write'));
       await expect(runNextCheck()).rejects.toThrow('the process died at the slot write');
-      expect(await recordOf(owner)).toMatchObject({ state: 'reconciling' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'group_not_open' });
+      expect(slotAt(source)).toEqual({ status: 'queued' });
+      world.emitted.length = 0;
       await runCheck(last);
       expect(slotAt(source)).toEqual({ status: 'failed', errorCode: 'redrive_refused' });
+      expect(persisted()).toEqual([{ conversationId: CONV, tsMsgId: source.tsMsgId, direction: 'inbound', deliveryStatus: 'failed' }]);
       expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'group_not_open' });
+    });
+
+    it('ADV-2 relay twin: a duplicate last check that rules redrive_refused from a stale roster read AFTER its twin re-drove the leg writes nothing - the record close comes first and loses (FW1-4)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      const conv = seedRelay();
+      const source = seedSource();
+      const owner = legOwner(source);
+      const at = await reconciling(owner, legFacts());
+      await runCheck(legPayload(owner, at));
+      await runNextCheck();
+      const [last] = outbound.delayed.splice(outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB), 1);
+      const wire = JSON.stringify(last!.envelope);
+      // Delivery B reads the group from a lagging replica (closed) and hangs in its list call.
+      vi.spyOn(world.conversationsRepo, 'getById').mockResolvedValueOnce({ ...conv, status: 'closed' });
+      const realList = world.adapter.listMessages.bind(world.adapter);
+      let releaseB!: () => void;
+      let bListing!: () => void;
+      const bIsListing = new Promise<void>((resolve) => {
+        bListing = resolve;
+      });
+      let listCalls = 0;
+      world.adapter.listMessages = async (args) => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          bListing();
+          await new Promise<void>((resolve) => {
+            releaseB = resolve;
+          });
+        }
+        return realList(args);
+      };
+      const deliveryB = dispatchJob(JSON.parse(wire) as unknown);
+      await bIsListing;
+      // Delivery A: the group is open - never_sent, the record goes redriven, ONE re-drive.
+      await dispatchJob(JSON.parse(wire) as unknown);
+      await outbound.settle();
+      expect(redrives).toHaveLength(1);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven' });
+      world.emitted.length = 0;
+      releaseB();
+      await deliveryB;
+      // B's stale read refuses the re-drive, but the record is no longer this chain's: nothing is closed.
+      expect(slotAt(source)).toEqual({ status: 'queued' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven' });
+      expect(persisted()).toEqual([]);
+      expect(lines(40).filter((l) => l['cause'] === 'group_not_open')).toHaveLength(0);
     });
 
     it('15d a relay never_sent whose source row is gone is refused (source_not_found); a rung\'s whose retry row is gone (retry_row_not_found) announces nothing and throws nothing', async () => {

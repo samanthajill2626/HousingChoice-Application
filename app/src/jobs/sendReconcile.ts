@@ -28,15 +28,17 @@
 // The flow of one check:
 //   resolve the owner -> the record (consistent); a record that is no longer
 //   this chain's (another state, another attempt) is superseded - and a `done`
-//   one of THIS attempt still runs afterClose (build ruling A7) -> record the
+//   one of THIS attempt re-applies the slot close its outcome implies and
+//   runs afterClose (build ruling A7, extended by FW1-4) -> record the
 //   check (from n or n+1: tolerant of its own duplicate) -> a KNOWN SID is
 //   fetched and adopted (no digest check); otherwise the D13 lookup lists the
 //   provider's messages to the recipient from the sender and adopts the first
 //   match it can claim -> the verdict: `found` closes the record adopted;
 //   `continue` schedules the next check; `never_sent` marks the record
-//   redriven and enqueues ONE re-drive; `unresolved` closes the slot
-//   send_unconfirmed and the record done. Every enqueue is wrapped: a throw
-//   closes the recipient (enqueue_failed after never_sent, else unresolved).
+//   redriven and enqueues ONE re-drive; `unresolved` closes the record done
+//   and then, only if that close won, the slot send_unconfirmed. Every
+//   enqueue is wrapped: a throw closes the recipient (enqueue_failed after
+//   never_sent, else unresolved).
 //
 // IMPORT CYCLE (build finding T10-10): this module imports the three send
 // sites, and they import this module's enqueue helpers back. Nothing here or
@@ -87,6 +89,7 @@ import {
   attemptKey,
   createSendAttemptsRepo,
   type SendAttemptFacts,
+  type SendAttemptOutcome,
   type SendAttemptOwner,
   type SendAttemptRecord,
   type SendAttemptsRepo,
@@ -390,9 +393,16 @@ async function runCheck(c: Ctx, payload: SendReconcilePayload): Promise<void> {
       { ...base, state: record?.state ?? 'absent', ...(record?.outcome !== undefined && { outcome: record.outcome }) },
       'send.reconcile: superseded - the attempt is no longer this chain\'s',
     );
-    // Build ruling A7: a close of THIS attempt whose afterClose threw is
-    // finished here - finalize is conditional and the emits idempotent.
-    if (record?.state === 'done' && record.attemptedAt === payload.attemptedAt) await afterClose(c, r);
+    // Build ruling A7, extended by FW1-4: a close of THIS attempt that died
+    // after its record close is finished here - the job's own closes write the
+    // record FIRST, so the slot close its outcome implies is re-applied (from
+    // queued / unsent only - idempotent), then afterClose (finalize is
+    // conditional and the emits idempotent).
+    if (record?.state === 'done' && record.attemptedAt === payload.attemptedAt) {
+      const reapply = slotCloseOf(record.outcome);
+      if (reapply !== undefined) await closeSlot(c, r, reapply.code, reapply.bucket);
+      await afterClose(c, r);
+    }
     return;
   }
   if (!(await c.attempts.recordCheck(r.owner, payload.attemptedAt, payload.checkNo + 1))) {
@@ -829,10 +839,29 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
 
 // ---------------------------------------------------------------------------
 // The verdicts' writes (spec D16). The job's OWN closes are exempt from the
-// D8 gate: they close the attempt they own, the slot FIRST and the record
-// after it, so a redelivered close re-applies the (forward-only) slot write
-// before it finds the record done (D8).
+// D8 gate: they close the attempt they own. Each writes the RECORD first,
+// fenced on this chain's state and attemptedAt, and touches the slot only
+// when that close won (code review ADV-2, fix FW1-4 - a declared deviation
+// from D8's "slot FIRST"): a duplicate check that loses its record close to a
+// re-drive that is already sending can no longer mark that send's slot
+// unconfirmed. Crash safety moves to the superseded exit: a redelivery that
+// finds the record `done` for its own attempt re-applies the slot close the
+// outcome implies (`slotCloseOf`), which is idempotent.
 // ---------------------------------------------------------------------------
+
+/** The slot close each job-owned record close implies - what a redelivery re-applies (FW1-4). */
+function slotCloseOf(outcome: SendAttemptOutcome | undefined): { code: string; bucket: 'failed' | 'unconfirmed' } | undefined {
+  switch (outcome) {
+    case 'unresolved':
+      return { code: SEND_UNCONFIRMED_CODE, bucket: 'unconfirmed' };
+    case 'redrive_refused':
+      return { code: REDRIVE_REFUSED_CODE, bucket: 'failed' };
+    case 'enqueue_failed':
+      return { code: ENQUEUE_FAILED_CODE, bucket: 'failed' };
+    default:
+      return undefined;
+  }
+}
 
 /** Close the recipient's slot `failed` with `code` - only while it still holds no send. */
 async function closeSlot(c: Ctx, r: Resolved, code: string, bucket: 'failed' | 'unconfirmed'): Promise<void> {
@@ -894,7 +923,14 @@ async function afterClose(c: Ctx, r: Resolved, deliveryStatus?: DeliveryStatus):
   }
 }
 
-/** `unresolved` (D16): the slot failed / send_unconfirmed, then the record done, then ONE ERROR naming the cause. */
+/**
+ * `unresolved` (D16): the record done / unresolved FIRST (fenced on
+ * reconciling + attemptedAt); only when that close won, ONE ERROR naming the
+ * cause, then the slot failed / send_unconfirmed, then afterClose. The ERROR
+ * precedes the slot write so a close that dies there has still logged its
+ * verdict once; the redelivery completes the slot (FW1-4). A lost record
+ * close is someone else's attempt now: nothing is written.
+ */
 async function closeUnresolved(
   c: Ctx,
   r: Resolved,
@@ -903,12 +939,18 @@ async function closeUnresolved(
   base: LogBase,
   extra: Record<string, unknown> = {},
 ): Promise<void> {
-  await closeSlot(c, r, SEND_UNCONFIRMED_CODE, 'unconfirmed');
-  const closed = await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'unresolved', cause });
+  if (!(await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'unresolved', cause }))) {
+    c.log.info(
+      { ...base, verdict: 'unresolved', cause },
+      'send.reconcile: unresolved, but the attempt moved on before the close - nothing closed',
+    );
+    return;
+  }
   c.log.error(
-    { ...base, verdict: 'unresolved', cause, ...extra, ...(!closed && { recordClosed: false }) },
+    { ...base, verdict: 'unresolved', cause, ...extra },
     'send.reconcile: unresolved - the platform cannot tell whether this text went out; closed send_unconfirmed, never re-sent',
   );
+  await closeSlot(c, r, SEND_UNCONFIRMED_CODE, 'unconfirmed');
   await afterClose(c, r, 'failed');
 }
 
@@ -945,11 +987,13 @@ async function enqueueOrClose(
       );
       return false;
     }
-    await closeSlot(c, r, ENQUEUE_FAILED_CODE, 'failed');
+    // The ERROR before the slot write, as closeUnresolved (FW1-4): a death at
+    // the slot write has logged once, and the redelivery re-applies the slot.
     c.log.error(
       { ...base, verdict: 'never_sent', cause: ENQUEUE_FAILED_CODE, err },
       'send.reconcile: the re-drive enqueue failed - recipient closed enqueue_failed (nothing was sent)',
     );
+    await closeSlot(c, r, ENQUEUE_FAILED_CODE, 'failed');
     await afterClose(c, r, 'failed');
     return false;
   }
@@ -1017,10 +1061,12 @@ function redriveRefusal(r: Resolved, continuation: SendReconcilePayload['continu
 }
 
 /**
- * A relay never_sent whose re-drive could not send (D16): the slot failed /
- * redrive_refused FIRST, then the record done / redrive_refused - the job's
- * own close - then one WARN naming the cause (a closed group or a departed
- * member is a human action, not a fault), then afterClose.
+ * A relay never_sent whose re-drive could not send (D16): the record done /
+ * redrive_refused FIRST - the job's own close, fenced on reconciling +
+ * attemptedAt - and only when it won, one WARN naming the cause (a closed
+ * group or a departed member is a human action, not a fault), the slot
+ * failed / redrive_refused, then afterClose (FW1-4). A lost record close
+ * (a twin chain re-drove the leg) writes nothing.
  */
 async function closeRedriveRefused(
   c: Ctx,
@@ -1029,12 +1075,18 @@ async function closeRedriveRefused(
   cause: string,
   base: LogBase,
 ): Promise<void> {
-  await closeSlot(c, r, REDRIVE_REFUSED_CODE, 'failed');
-  const closed = await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'redrive_refused', cause });
+  if (!(await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'redrive_refused', cause }))) {
+    c.log.info(
+      { ...base, verdict: 'never_sent', cause },
+      'send.reconcile: never_sent and the re-drive cannot send, but the attempt moved on before the close - nothing closed',
+    );
+    return;
+  }
   c.log.warn(
-    { ...base, verdict: 'never_sent', cause, ...(!closed && { recordClosed: false }) },
+    { ...base, verdict: 'never_sent', cause },
     'send.reconcile: never_sent, but the re-drive cannot send - recipient closed redrive_refused',
   );
+  await closeSlot(c, r, REDRIVE_REFUSED_CODE, 'failed');
   await afterClose(c, r, 'failed');
 }
 

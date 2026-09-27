@@ -6,7 +6,8 @@ severity: med
 status: open
 area: app/messaging
 created: 2026-09-25
-refs: app/src/jobs/retrySend.ts:122, app/src/jobs/retrySend.ts:131, app/src/jobs/retrySend.ts:164, app/src/jobs/retrySend.ts:200, app/src/jobs/retrySend.ts:218, app/src/jobs/retrySend.ts:226, app/src/routes/webhooks/twilio.ts:3358, app/src/routes/webhooks/twilio.ts:3364, app/src/services/sendMessage.ts:278, app/src/services/sendMessage.ts:394, app/src/services/sendMessage.ts:398, docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
+updated: 2026-09-27
+refs: app/src/jobs/retrySend.ts:203, app/src/jobs/retrySend.ts:212, app/src/jobs/retrySend.ts:274, app/src/jobs/retrySend.ts:317, app/src/jobs/retrySend.ts:339, app/src/routes/webhooks/twilio.ts:3581, app/src/routes/webhooks/twilio.ts:3624, app/src/services/sendMessage.ts:442, app/src/services/sendMessage.ts:608, app/src/services/sendMessage.ts:661, app/src/repos/sendAttemptsRepo.ts:329, app/src/jobs/sendReconcile.ts:369, docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
 ---
 
 **Problem.** `messaging.retrySend` is the one automatic retry for a one-to-one
@@ -124,3 +125,28 @@ issue to close).
 (on `feat/retry-send-window` until it merges),
 [send-attempt-sweeper](./send-attempt-sweeper.md). Sweep finding F4 in
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/research/marker-sweep-findings.md`.
+
+## 2026-09-27 - feat/send-outcome-reconcile (SOR Stage 1)
+
+Stage 1 landed the core this Stage 1b adoption builds on, and nothing more:
+the classifier (`app/src/lib/sendOutcome.ts:69`); `sendMessage`'s typed errors
+(`app/src/services/sendMessage.ts:217-287`), thrown from the pre-provider
+steps (`:442`, `:471`, `:541-554`, `:580-594`), the provider call (`:611`)
+and the append (`:663-669`); the send-attempt record and its index
+(`app/src/repos/sendAttemptsRepo.ts`, the shapes as built in
+[send-attempt-sweeper](./send-attempt-sweeper.md)'s 2026-09-27 section);
+`guardWrite` (`app/src/lib/guardWrite.ts`); and the `send.reconcile` job
+(`app/src/jobs/sendReconcile.ts`), whose owner kinds are a broadcast
+recipient, a relay leg and a relay retry rung only. `retrySend` itself is
+unchanged on the branch (no diff against `main`): it still claims its marker
+(`app/src/jobs/retrySend.ts:203-212`) and rethrows every error that is not a
+refusal (`:339`), which now arrives as one of the typed errors - so a
+one-to-one retry that errors under the marker is still lost exactly as
+described above.
+
+Anchors at HEAD, since the body's predate the `feat/retry-send-window` merge:
+the re-presign is `retrySend.ts:274` and the send `:317`; RSW D6 moved the
+lineage into the append itself (`:314-327`), so the post-append annotate the
+body lists no longer exists; the webhook logs the exhausted chain at
+`app/src/routes/webhooks/twilio.ts:3581` and schedules the retry at `:3624`;
+the post-append steps D3 made best-effort are `sendMessage.ts:672-698`.

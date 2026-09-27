@@ -6,8 +6,8 @@ severity: low
 status: open
 area: app/messaging
 created: 2026-09-24
-updated: 2026-09-26
-refs: app/src/routes/api.ts, app/src/services/oneToOneRetryDecision.ts, app/src/routes/webhooks/twilio.ts, app/src/jobs/retrySend.ts, app/src/lib/retrySendWindow.ts, app/src/adapters/scheduler.ts, dashboard/src/routes/contact/retryPromise.ts, dashboard/src/routes/contact/Timeline.tsx, docs/superpowers/specs/2026-09-24-retry-send-window-design.md, docs/superpowers/reviews/2026-09-24-retry-send-window/build-review-adversarial.md
+updated: 2026-09-27
+refs: app/src/routes/api.ts, app/src/services/oneToOneRetryDecision.ts, app/src/routes/webhooks/twilio.ts, app/src/routes/webhooks/twilio.ts:663, app/src/jobs/relayRetryLeg.ts:395, app/src/jobs/retrySend.ts, app/src/lib/retrySendWindow.ts, app/src/adapters/scheduler.ts, dashboard/src/routes/contact/retryPromise.ts, dashboard/src/routes/contact/Timeline.tsx, docs/superpowers/specs/2026-09-24-retry-send-window-design.md, docs/superpowers/reviews/2026-09-24-retry-send-window/build-review-adversarial.md
 ---
 
 **Problem.** `feat/retry-send-window` (spec D7, D10) hides the manual Retry button
@@ -61,6 +61,9 @@ still time-based, and it is withdrawn at once when the retry's enqueue fails
    "Suggested fix" below: with the manual route and the job contending on one
    claim, whichever sends second refuses.
 
+   The relay retry rung has a twin of this gap that the send-attempt record
+   cannot cover - see the 2026-09-27 section at the end.
+
 Gaps 3 and 4 belong to reconcile's `retrySend` adoption, planned after
 `feat/retry-send-window` merges.
 
@@ -75,3 +78,26 @@ call, and keys `retrySend`'s record on the original message and the rung. That i
 most of the needed substrate: have the manual retry route claim against the same
 record, so whichever of the two sends second finds the claim taken and refuses.
 Related: `send-idempotency-key`, `accepted-send-lost-when-append-fails`.
+
+## 2026-09-27 - feat/send-outcome-reconcile (SOR Stage 1)
+
+**Beside gap 5: the relay retry rung's twin, which the send-attempt record
+cannot cover.** When the status webhook's enqueue of a just-claimed relay
+retry rung throws (`app/src/routes/webhooks/twilio.ts:3039-3042`), it closes
+the retry leg `failed`/`enqueue_failed` through `closeRetryLegEnqueueFailed`
+(`:663-694`, called at `:3058`), the transport-aware persist path - a
+whole-slot write on a legacy retry row. That is a close by a writer other than
+the rung's own attempt, so the send-outcome spec's D8 would put it behind the
+send-attempt record gate, as the rung job gates its own six such closes
+(`gateFor`, `app/src/jobs/relayRetryLeg.ts:395-404`). But
+`routes/webhooks/twilio.ts` is fenced on `feat/send-outcome-reconcile` (spec
+Sec 2), so this one close is not gated; spec D8 records it here. Gap 5's
+ambiguity applies to it: an enqueue that throws after SQS accepted the job
+closes the slot while the rung may still run. A rung that starts after the
+close finds a terminal slot and sends nothing
+(`app/src/jobs/relayFanOut.ts:1845`); one already past its claim can have the
+close land over its attempt, so the slot can read `enqueue_failed` for a leg
+that went out. At most one text either way (the rung's claim on its record);
+what can be wrong is the slot. Closing it means gating that close on the
+rung's record once the webhook is in scope. Pre-existing, not introduced by
+the branch.

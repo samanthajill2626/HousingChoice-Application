@@ -1,6 +1,6 @@
 # Staff notes on the tenant file and a Past tab on the Tours page - design specification
 
-Status: DRAFT 4 + AMENDMENT 3.9 (2026-09-27, stale-save guard, Cameron) - APPROVED FOR BUILD by the planner after spec review rounds 1-3 (round 3 changed no decision; adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/spec-r1-adjudications.md`, `spec-r2-adjudications.md`, `spec-r3-adjudications.md`); written for an OVERNIGHT UNATTENDED mission (Cameron 2026-09-26): every product decision below was given in the mission text or is recorded in section 9 as a decision the planner took alone
+Status: DRAFT 4 + AMENDMENTS 3.9 (stale-save guard) and 4.2a (undated toured tours), 2026-09-27, Cameron - APPROVED FOR BUILD by the planner after spec review rounds 1-3 (round 3 changed no decision; adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/spec-r1-adjudications.md`, `spec-r2-adjudications.md`, `spec-r3-adjudications.md`); written for an OVERNIGHT UNATTENDED mission (Cameron 2026-09-26): every product decision below was given in the mission text or is recorded in section 9 as a decision the planner took alone
 Date: 2026-09-26
 Branch: `feat/staff-notes-past-tours`
 Worktree: `W:\tmp\staff-notes-past-tours`
@@ -335,7 +335,8 @@ the newer note, unrecoverably. Cameron asked for the cheap guard.
 - Request: the PATCH body may carry `staff_notes_expected_updated_at` - the
   `staff_notes_updated_at` the editor OPENED with, or `null` for a box that had
   never been saved. Neither a string nor null -> 400
-  `staff_notes_expected_updated_at must be a string or null`. It is a guard,
+  `staff_notes_expected_updated_at must be a non-empty string or null` (''
+  can never match a stamp). It is a guard,
   never stored, and does not count as a changed field.
 - Enforcement: only when the body also carries `staff_notes`. The route passes
   `{ expect: { attr: 'staff_notes_updated_at', value } }` to
@@ -353,10 +354,12 @@ the newer note, unrecoverably. Cameron asked for the cheap guard.
   `staff_notes_stale` it stays in edit mode with the draft intact, hands the
   current contact up (so the read-mode text updates behind it), re-bases its
   baseline text and stamp on the colleague's version, and shows a
-  `role="alert"` panel above the box: "Someone else saved these notes while
-  you were editing. Their version is below; your text is still in the box.
-  Save again to replace theirs, or Cancel to keep theirs." followed by their
-  text (or "They cleared the notes."). A second Save is then a deliberate,
+  `role="alert"` panel above the box, linked to it by `aria-describedby`:
+  "These notes were changed since this page loaded. The current version is
+  below, and your text is still in the box. Save again to replace it, or Cancel
+  to keep it." followed by the current text (or a muted "(The notes were
+  cleared.)"). The wording names what changed, not who: the same person in
+  another tab, or a page simply left open, trips the guard as well. A second Save is then a deliberate,
   informed overwrite; Cancel keeps theirs. Any other failure is the existing
   plain alert.
 - Tests: route (match lands; stale 409 with the current contact and no write
@@ -379,8 +382,8 @@ the newer note, unrecoverably. Cameron asked for the cheap guard.
   current tab carries `aria-current="page"` as today.
 - Heading: "Past tours". Intro line: "Last 90 days: tours that were never
   marked toured, toured tours still waiting on an outcome or a placement, and
-  no-shows." (A toured tour with no date at all is not listed - section 9,
-  Q10; the intro does not say so.)
+  no-shows." A toured tour recorded with no date is listed LAST, as
+  "Undated" (section 4.2a, amendment 2026-09-27).
 - The "+ New tour" button stays Active-only.
 
 ### 4.2 Data
@@ -435,10 +438,43 @@ that replaces the list.
 - Known limits, filed not fixed: `listByScheduledRange` reads one ascending
   Query page (no `LastEvaluatedKey` follow), so a window past 1 MB would drop
   the NEWEST tours - the top of this list (`tours-scheduled-range-query-unpaginated`,
-  debt, low; the Active window has the same ceiling today). A `toured` tour
-  with no `scheduledAt` ("already toured", date left blank) is never returned
-  by a range query and so never appears here (`past-tab-timeless-toured-tours`,
-  improvement, med; section 9, Q10).
+  debt, low; the Active window has the same ceiling today).
+
+### 4.2a Undated toured tours (AMENDMENT 2026-09-27, Cameron)
+
+A requested tour marked "already toured" with the date left blank becomes
+`toured` with NO `scheduledAt`, so the range query never returns it and DRAFT 4
+listed it nowhere - staff looking for it could not find it. Cameron ruled: list
+them, labeled "Undated", at the bottom.
+
+- Data: `usePastTours` makes a SECOND read in parallel with the range read,
+  `getTours({ status: 'toured' })` (`listByStatus`, which paginates). Both reads
+  succeed or the load fails as one (first load -> error; reload ->
+  `reloadFailed`, rows kept), and `reload()` refetches both.
+- Selection (`selectUndatedTours(touredRows, now)`, pure): keep a row with
+  status `toured`, NO `scheduledAt`, and either no `outcome` or the
+  Needs-placement shape (4.2 step 3's rule, same exception); keep it only if
+  its `updatedAt ?? createdAt` is on or after the Past window's `from` (the
+  same 90 days, measured by when it was last touched since it has no tour
+  date); order most recently touched first, ties by `tourId`.
+- The Past list is the dated rows (4.2, unchanged) followed by the undated
+  rows. The two sets are disjoint by construction (a range row always has a
+  `scheduledAt`).
+- Row: the date-time column reads "Undated"; the chip is the usual state
+  ("Needs outcome" or "Needs placement"); every accessible name uses
+  "<tenant> at <property>, undated" in place of "<tenant> at <property> on
+  <date-time>" (e.g. "Tour for Tasha Nguyen at 1450 Joseph E. Boone Blvd NW,
+  undated, Needs outcome"). Actions as 4.4: "Record outcome" on a Needs-outcome
+  row. An undated row is never "Not marked" (only a `requested` tour can
+  become toured without a date), so it never carries a checkbox and never
+  enters a bulk batch.
+- Cost: the status read returns every toured tour ever; at this org's volume a
+  toured tour normally leaves that status within days (the outcome closes it),
+  so the set stays small. Noted, not engineered around.
+- Tests: `selectUndatedTours` (kept / dropped / window / order / the two
+  exceptions), the hook's two reads and the merged order, a page row with
+  "Undated" and its label, and Playwright: a requested tour marked toured with
+  no date appears LAST as "Undated" with "Record outcome".
 
 ### 4.3 The row
 
@@ -766,7 +802,7 @@ the broadcast seed fixtures. `dashboard/src/api/types.ts`, `client.ts`,
 - `extraction-prompt-read-staff-notes` - improvement, low.
 - `staff-notes-on-landlord-partner-files` - improvement, low.
 - `tours-scheduled-range-query-unpaginated` - debt, low, pre-existing.
-- `past-tab-timeless-toured-tours` - improvement, med (section 9, Q10).
+- `past-tab-timeless-toured-tours` - improvement, med - RESOLVED on this branch 2026-09-27 (section 4.2a).
 - `past-tab-no-show-rows-need-an-exit` - decision, med (section 9, Q11).
 - `tour-conversion-pending-placeholder-view-link` - bug, low, pre-existing
   (found by spec review R3; 4.2 step 3).
@@ -812,12 +848,9 @@ the broadcast seed fixtures. `dashboard/src/api/types.ts`, `client.ts`,
   day ends). A tour scheduled for 9:00 today and never marked reaches Past at
   midnight. A tour marked toured or no-show on a FUTURE date is on no list
   until that date arrives (pre-existing; not changed here).
-- Q10 `toured` tours with NO scheduled time ("already toured", date left blank)
-  never appear in Past: the range query cannot see them, and listing them
-  needs a second read by status plus a rule for placing undated rows in a list
-  ordered by date - a product call, deferred on cost, not because the mission
-  text forbids it (Q9 already reads that text as intent, not letter). The
-  intro copy does not carve them out. Filed `past-tab-timeless-toured-tours`.
+- Q10 SUPERSEDED 2026-09-27 by section 4.2a. Originally deferred: `toured`
+  tours with NO scheduled time never appeared in Past. Cameron ruled they must
+  be findable: list them last as "Undated".
 - Q11 No-show rows have no way off the Past list until they age out at 90 days
   (the tour page offers only reschedule and the check-in text). Filed
   `past-tab-no-show-rows-need-an-exit`.

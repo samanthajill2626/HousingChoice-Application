@@ -3,7 +3,8 @@ id: past-tab-timeless-toured-tours
 title: A toured tour with no scheduled time ("already toured", date blank) never appears on the Tours Past tab
 type: improvement
 severity: med
-status: open
+status: resolved
+resolved: 2026-09-27
 area: dashboard/tours
 created: 2026-09-26
 refs: dashboard/src/routes/tours/TourModals.tsx:212, dashboard/src/routes/tours/useTours.ts, app/src/routes/tours.ts:1086
@@ -32,3 +33,10 @@ the rows WITHOUT `scheduledAt` and without an `outcome`, place them by
 column as "No date". Merge by `tourId` with the range rows. Decide with Sam
 whether an undated toured tour sorts to the top (it was most recently touched)
 or the bottom.
+
+**Resolution (2026-09-27).** Built on `feat/staff-notes-past-tours` at
+Cameron's ruling (spec section 4.2a): `usePastTours` also reads
+`status=toured` and `selectUndatedTours` keeps the toured tours with no
+`scheduledAt` that still need a decision, inside the same 90 days by their last
+touch; they are listed LAST, labeled "Undated", with "Record outcome". Pinned
+in the hook, page and Playwright tests.

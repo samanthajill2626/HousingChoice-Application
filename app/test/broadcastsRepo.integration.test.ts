@@ -651,4 +651,245 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
     });
     expect(await readStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId })).toBe(1);
   });
+
+  // --- SOR Task 6: the relay-side send-outcome additions --------------------
+  //
+  // The conditional closes, the forward-only adoption, the attempt clock and
+  // the reporting SID claim the send sites and send.reconcile rest on (spec
+  // D8, D8a, D11, D13, D15). Every case builds its OWN source row and SIDs:
+  // this file's tables are shared by every case and never reset (build
+  // finding T6-1).
+  describe('SOR send-outcome additions: relay pointers and slots', () => {
+    const T0 = '2026-09-26T12:00:00.000Z';
+    const T1 = '2026-09-26T12:00:05.000Z';
+    const relayCapture = createLogCapture();
+    const relayMessages = createMessagesRepo({
+      doc,
+      env: testEnv,
+      logger: createLogger({ level: 'info', destination: relayCapture.stream }),
+    });
+
+    /** A LEGACY relay inbound source (no transport schema version), seeded with an empty map. */
+    async function legacySource(): Promise<{ conversationId: string; tsMsgId: string }> {
+      const conversationId = `conv-relay-${randomUUID().slice(0, 8)}`;
+      const appended = await relayMessages.append({
+        conversationId,
+        providerSid: `SM${randomUUID().slice(0, 12)}`,
+        providerTs: new Date().toISOString(),
+        type: 'sms',
+        direction: 'inbound',
+        author: 'unknown',
+        deliveryStatus: 'delivered',
+        relaySenderKey: 'c-alice',
+        deliveryRecipients: {},
+        body: 'is the unit still available?',
+      });
+      return { conversationId, tsMsgId: appended.tsMsgId };
+    }
+
+    /** A VERSIONED relay source (transport schema 1) with the given seeded slots. */
+    async function versionedSource(
+      slots: Record<string, RelayRecipientDelivery>,
+    ): Promise<{ conversationId: string; tsMsgId: string }> {
+      const conversationId = `conv-relay-${randomUUID().slice(0, 8)}`;
+      const appended = await relayMessages.append({
+        conversationId,
+        providerSid: `SM${randomUUID().slice(0, 12)}`,
+        providerTs: new Date().toISOString(),
+        type: 'sms',
+        direction: 'inbound',
+        author: 'unknown',
+        deliveryStatus: 'delivered',
+        transportSchemaVersion: 1,
+        relaySenderKey: 'c-alice',
+        deliveryRecipients: slots,
+        body: 'is the unit still available?',
+      });
+      return { conversationId, tsMsgId: appended.tsMsgId };
+    }
+
+    async function slotOf(
+      src: { conversationId: string; tsMsgId: string },
+      memberKey: string,
+    ): Promise<RelayRecipientDelivery | undefined> {
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      return row?.delivery_recipients?.[memberKey];
+    }
+
+    const planned: RelayRecipientDelivery = {
+      status: 'queued',
+      requestedTransport: 'sms',
+      transportAggregationState: 'planned',
+    };
+
+    it('claimRelaySidPointer reports created / mine / other, and the consistent read returns the ref', async () => {
+      const sid = `SMclaim${randomUUID().slice(0, 12)}`;
+      const ref = { conversationId: `conv-${randomUUID().slice(0, 8)}`, tsMsgId: `${T0}#SMsrc`, memberKey: 'c-1' };
+      expect(await relayMessages.getRelaySidPointerConsistent(sid)).toBeUndefined();
+      expect(await relayMessages.claimRelaySidPointer(sid, ref)).toBe('created');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref })).toBe('mine');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref, memberKey: 'c-2' })).toBe('other');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref, tsMsgId: `${T1}#SMsrc` })).toBe('other');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref, conversationId: 'conv-else' })).toBe('other');
+      // A lost claim never rewrites the pointer.
+      expect(await relayMessages.getRelaySidPointerConsistent(sid)).toEqual(ref);
+      expect(await relayMessages.getRelaySidPointer(sid)).toEqual(ref);
+      // A pointer the existing put wrote is claimable as mine by the same ref.
+      const putSid = `SMput${randomUUID().slice(0, 12)}`;
+      await relayMessages.putRelaySidPointer(putSid, ref);
+      expect(await relayMessages.claimRelaySidPointer(putSid, ref)).toBe('mine');
+    });
+
+    it('closeRelayRecipientIfUnsent closes an absent legacy slot and a queued sid-less slot, skips a queued slot with a sid, a terminal slot and a re-close, and reports a missing row', async () => {
+      const src = await legacySource();
+      const cap = { status: 'failed' as const, errorCode: 'transient_cap' };
+      // Absent slot: a legacy source starts with an empty map (D8).
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-1')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      // Queued with no sid: closed in place, the attempt clock kept.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-2', { status: 'queued', attemptedAt: T0 });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-2', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-2')).toEqual({ status: 'failed', errorCode: 'transient_cap', attemptedAt: T0 });
+      // Queued WITH a sid: the provider accepted it - never overwritten.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-3', { status: 'queued', sid: 'SM7', sentAt: T0 });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-3', cap)).toBe('skipped_sent');
+      expect(await slotOf(src, 'c-3')).toEqual({ status: 'queued', sid: 'SM7', sentAt: T0 });
+      // A sent slot and a re-close of a closed slot are skipped too.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-4', { status: 'sent', sid: 'SM8', sentAt: T0 });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-4', cap)).toBe('skipped_sent');
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', { status: 'failed', errorCode: 'other' })).toBe('skipped_sent');
+      expect(await slotOf(src, 'c-1')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      // No row at all.
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, `${T0}#SMnope`, 'c-1', cap)).toBe('missing');
+    });
+
+    it('closeRelayRecipientIfUnsent on a versioned row keeps requestedTransport and every sibling field, and is forward-only', async () => {
+      const src = await versionedSource({ 'c-1': { ...planned } });
+      const cap = { status: 'failed' as const, errorCode: 'transient_cap' };
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-1')).toEqual({ ...planned, status: 'failed', errorCode: 'transient_cap' });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', { status: 'failed', errorCode: 'other' })).toBe('skipped_sent');
+      expect(await slotOf(src, 'c-1')).toEqual({ ...planned, status: 'failed', errorCode: 'transient_cap' });
+      // A member with no slot on a versioned row is created closed, like a legacy one.
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-9', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-9')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+    });
+
+    it('setRelayRecipientAttemptedAt seeds an absent slot, never touches an existing slot\'s other fields, and is best-effort on a missing row', async () => {
+      const src = await legacySource();
+      await relayMessages.setRelayRecipientAttemptedAt(src.conversationId, src.tsMsgId, 'c-3', T0);
+      expect(await slotOf(src, 'c-3')).toEqual({ status: 'queued', attemptedAt: T0 });
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-2', { status: 'queued', sid: 'SM7', sentAt: T0 });
+      await relayMessages.setRelayRecipientAttemptedAt(src.conversationId, src.tsMsgId, 'c-2', T1);
+      expect(await slotOf(src, 'c-2')).toEqual({ status: 'queued', sid: 'SM7', sentAt: T0, attemptedAt: T1 });
+      // A later attempt stamps its own clock.
+      await relayMessages.setRelayRecipientAttemptedAt(src.conversationId, src.tsMsgId, 'c-3', T1);
+      expect(await slotOf(src, 'c-3')).toEqual({ status: 'queued', attemptedAt: T1 });
+      // A versioned slot keeps its transport fields.
+      const vsrc = await versionedSource({ 'c-1': { ...planned } });
+      await relayMessages.setRelayRecipientAttemptedAt(vsrc.conversationId, vsrc.tsMsgId, 'c-1', T0);
+      expect(await slotOf(vsrc, 'c-1')).toEqual({ ...planned, attemptedAt: T0 });
+      // Best-effort: a missing row WARNs and resolves.
+      const missingTs = `${T0}#SMnope${randomUUID().slice(0, 8)}`;
+      await expect(
+        relayMessages.setRelayRecipientAttemptedAt(src.conversationId, missingTs, 'c-1', T0),
+      ).resolves.toBeUndefined();
+      const warned = relayCapture.atLevel(40).filter((l) => l['tsMsgId'] === missingTs);
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toMatchObject({ conversationId: src.conversationId, memberKey: 'c-1' });
+    });
+
+    it('adoptRelayRecipientIfUnsent on a legacy row seeds an absent slot and is forward-only', async () => {
+      const src = await legacySource();
+      const adopt = (patch: { status: 'queued' | 'sent'; sid: string; sentAt: string; errorCode?: string }, memberKey = 'c-9', tsMsgId = src.tsMsgId) =>
+        relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, tsMsgId, memberKey, patch);
+      expect(await adopt({ status: 'queued', sid: 'SM9', sentAt: T0 })).toBe('adopted'); // absent -> seeded -> adopted
+      expect(await slotOf(src, 'c-9')).toEqual({ status: 'queued', sid: 'SM9', sentAt: T0 });
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 })).toBe('adopted');
+      expect(await slotOf(src, 'c-9')).toEqual({ status: 'sent', sid: 'SM9', sentAt: T0 }); // the earlier sentAt is kept
+      expect(await adopt({ status: 'queued', sid: 'SM9', sentAt: T1 })).toBe('skipped'); // sent -> queued is a regression
+      expect((await slotOf(src, 'c-9'))?.status).toBe('sent');
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 })).toBe('adopted'); // same status: idempotent
+      expect(await relayMessages.updateRecipientDeliveryStatus(src.conversationId, src.tsMsgId, 'c-9', 'delivered')).toBe(true);
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 })).toBe('skipped'); // a raced receipt is never regressed
+      expect((await slotOf(src, 'c-9'))?.status).toBe('delivered');
+      // First write wins on the sid; an error code rides a terminal adoption.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-8', { status: 'queued', sid: 'SMold', attemptedAt: T0 });
+      expect(
+        await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-8', { status: 'failed', sid: 'SMnew', sentAt: T1, errorCode: '30007' }),
+      ).toBe('adopted');
+      expect(await slotOf(src, 'c-8')).toEqual({ status: 'failed', sid: 'SMold', sentAt: T1, errorCode: '30007', attemptedAt: T0 });
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 }, 'c-9', `${T0}#SMnope`)).toBe('missing');
+    });
+
+    it('adoptRelayRecipientIfUnsent on a versioned row adopts once and skips the re-run and a regression', async () => {
+      const src = await versionedSource({ 'c-1': { ...planned } });
+      const patch = { status: 'sent' as const, sid: 'SM1', sentAt: T0 };
+      expect(await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', patch)).toBe('adopted');
+      expect(await slotOf(src, 'c-1')).toEqual({ ...planned, status: 'sent', sid: 'SM1', sentAt: T0 });
+      expect(await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', patch)).toBe('skipped');
+      expect(
+        await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', { ...patch, status: 'queued' }),
+      ).toBe('skipped');
+      expect((await slotOf(src, 'c-1'))?.status).toBe('sent');
+      // A versioned member with no slot is missing - the fan-out preflight always seeds one.
+      expect(await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-absent', patch)).toBe('missing');
+    });
+
+    it('a row with NO delivery map: close and adopt answer missing and the attempt clock only WARNs - never a ValidationException', async () => {
+      // No relay source row is written without the map today (build report
+      // S1c, row shapes), but a nested SET under an absent map is a
+      // ValidationException, not a condition failure - so the guard is
+      // load-bearing, as the unguarded setRecipientDelivery shows.
+      const conversationId = `conv-relay-${randomUUID().slice(0, 8)}`;
+      const appended = await relayMessages.append({
+        conversationId,
+        providerSid: `SM${randomUUID().slice(0, 12)}`,
+        providerTs: new Date().toISOString(),
+        type: 'sms',
+        direction: 'inbound',
+        author: 'unknown',
+        deliveryStatus: 'delivered',
+        relaySenderKey: 'c-alice',
+        body: 'no delivery map on this row',
+      });
+      const src = { conversationId, tsMsgId: appended.tsMsgId };
+      await expect(
+        relayMessages.setRecipientDelivery(conversationId, appended.tsMsgId, 'c-1', { status: 'queued' }),
+      ).rejects.toMatchObject({ name: 'ValidationException' });
+      expect(
+        await relayMessages.closeRelayRecipientIfUnsent(conversationId, appended.tsMsgId, 'c-1', { status: 'failed', errorCode: 'transient_cap' }),
+      ).toBe('missing');
+      expect(
+        await relayMessages.adoptRelayRecipientIfUnsent(conversationId, appended.tsMsgId, 'c-1', { status: 'sent', sid: 'SM1', sentAt: T0 }),
+      ).toBe('missing');
+      await expect(
+        relayMessages.setRelayRecipientAttemptedAt(conversationId, appended.tsMsgId, 'c-1', T0),
+      ).resolves.toBeUndefined();
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      expect(row).toBeDefined();
+      expect(row).not.toHaveProperty('delivery_recipients');
+    });
+
+    it('the consistent reads exist and agree with their eventual twins', async () => {
+      const absent = `SMabsent${randomUUID().slice(0, 12)}`;
+      expect(await relayMessages.getByProviderSidConsistent(absent)).toBeUndefined();
+      expect(await relayMessages.getSystemSidMarkerConsistent(absent)).toBeUndefined();
+      const src = await legacySource();
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      expect(await relayMessages.getByProviderSidConsistent(row!.provider_sid)).toEqual(row);
+      expect(await relayMessages.getByProviderSidConsistent(row!.provider_sid)).toEqual(
+        await relayMessages.getByProviderSid(row!.provider_sid),
+      );
+      const marked = `SMsys${randomUUID().slice(0, 12)}`;
+      await relayMessages.putSystemSidMarker(marked, 'cell_verification');
+      expect(await relayMessages.getSystemSidMarkerConsistent(marked)).toEqual({ kind: 'cell_verification' });
+      expect(await relayMessages.getSystemSidMarkerConsistent(marked)).toEqual(await relayMessages.getSystemSidMarker(marked));
+      expect(await relayMessages.listByConversationConsistent(src.conversationId, { limit: 5 })).toEqual(
+        await relayMessages.listByConversation(src.conversationId, { limit: 5 }),
+      );
+      expect(await relayMessages.listByConversationConsistent(src.conversationId)).toEqual([row]);
+      expect(await relayMessages.listByConversationConsistent(src.conversationId, { before: src.tsMsgId })).toEqual([]);
+    });
+  });
 });

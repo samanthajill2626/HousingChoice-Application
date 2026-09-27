@@ -237,7 +237,7 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
     const second = await appendGroupSend({ conversationId, providerSid, providerTs, deadlineAt });
 
     expect(first.deduped).toBe(false);
-    expect(second).toEqual({ deduped: true, tsMsgId: first.tsMsgId });
+    expect(second).toEqual({ deduped: true, tsMsgId: first.tsMsgId, conversationId });
   });
 
   // The whole reason updateRecipientDeliveryStatus stopped rebuilding the slot:

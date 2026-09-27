@@ -273,9 +273,14 @@ function makeSendFakes(
   const messagesRepo: MessagesRepo = {
     append: async (message) => {
       appended.push(message);
-      return { deduped: false, tsMsgId: buildTsMsgId(message.providerTs, message.providerSid) };
+      return {
+        deduped: false,
+        tsMsgId: buildTsMsgId(message.providerTs, message.providerSid),
+        conversationId: message.conversationId,
+      };
     },
     getByProviderSid: async () => undefined,
+    getByProviderSidConsistent: async () => undefined,
     getByRfcMessageId: async () => undefined,
     recordProviderSidAlias: async () => {},
     updateDeliveryStatus: async () => true,
@@ -287,6 +292,7 @@ function makeSendFakes(
     setTranscriptFailed: async () => false,
     upgradeCallOutcomeToVoicemail: async () => false,
     listByConversation: async () => [],
+    listByConversationConsistent: async () => [],
     getByTsMsgId: async () => undefined,
     getByTsMsgIdConsistent: async () => undefined,
     getManyByTsMsgIds: async () => new Map(),
@@ -309,10 +315,19 @@ function makeSendFakes(
     },
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,
+    // SOR Task 6 relay additions - no relay send runs in this suite.
+    closeRelayRecipientIfUnsent: async () => 'missing',
+    adoptRelayRecipientIfUnsent: async () => 'missing',
+    setRelayRecipientAttemptedAt: async () => {},
     putRelaySidPointer: async () => {},
+    claimRelaySidPointer: async () => {
+      throw new Error('claimRelaySidPointer: not used in this suite');
+    },
     getRelaySidPointer: async () => undefined,
+    getRelaySidPointerConsistent: async () => undefined,
     putSystemSidMarker: async () => {},
     getSystemSidMarker: async () => undefined,
+    getSystemSidMarkerConsistent: async () => undefined,
     // Group-texting deadline partition (S5) - unreachable from this suite.
     listDueRows: async () => [],
     deleteDueRow: async () => {},

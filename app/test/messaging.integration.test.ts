@@ -134,11 +134,11 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
 
     it('append persists once; the same provider SID dedupes to a no-op', async () => {
       const first = await messages.append(outbound(convId, 'SMdup1', '2026-06-12T10:00:00.000Z', 'hello'));
-      expect(first).toEqual({ deduped: false, tsMsgId: '2026-06-12T10:00:00.000Z#SMdup1' });
+      expect(first).toEqual({ deduped: false, tsMsgId: '2026-06-12T10:00:00.000Z#SMdup1', conversationId: convId });
 
       // Twilio redelivery / webhook echo: identical provider message again.
       const second = await messages.append(outbound(convId, 'SMdup1', '2026-06-12T10:00:00.000Z', 'hello'));
-      expect(second).toEqual({ deduped: true, tsMsgId: '2026-06-12T10:00:00.000Z#SMdup1' });
+      expect(second).toEqual({ deduped: true, tsMsgId: '2026-06-12T10:00:00.000Z#SMdup1', conversationId: convId });
 
       const page = await messages.listByConversation(convId);
       expect(page.filter((m) => m.provider_sid === 'SMdup1')).toHaveLength(1);
@@ -149,13 +149,52 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
       // delivery computes a NEW first-seen ts — the SID pointer still
       // collides, and the result must carry the PERSISTED key.
       const first = await messages.append(outbound(convId, 'SMdiffts1', '2026-06-12T10:05:00.000Z', 'first'));
-      expect(first).toEqual({ deduped: false, tsMsgId: '2026-06-12T10:05:00.000Z#SMdiffts1' });
+      expect(first).toEqual({ deduped: false, tsMsgId: '2026-06-12T10:05:00.000Z#SMdiffts1', conversationId: convId });
 
       const second = await messages.append(outbound(convId, 'SMdiffts1', '2026-06-12T10:06:11.000Z', 'first'));
-      expect(second).toEqual({ deduped: true, tsMsgId: '2026-06-12T10:05:00.000Z#SMdiffts1' });
+      expect(second).toEqual({ deduped: true, tsMsgId: '2026-06-12T10:05:00.000Z#SMdiffts1', conversationId: convId });
 
       const page = await messages.listByConversation(convId);
       expect(page.filter((m) => m.provider_sid === 'SMdiffts1')).toHaveLength(1);
+    });
+
+    // SOR Task 6 (spec D11): a reconcile adopting a message appends it and, on
+    // a dedupe, re-reads the row the SID already lives in - so the result must
+    // name THAT row's conversation, never echo this call's input.
+    it('append reports the conversation of a deduped row', async () => {
+      const first = await messages.append(outbound('conv-it-owner-a', 'SMconvdup1', '2026-06-12T10:07:00.000Z', 'hi'));
+      expect(first).toEqual({
+        deduped: false,
+        tsMsgId: '2026-06-12T10:07:00.000Z#SMconvdup1',
+        conversationId: 'conv-it-owner-a',
+      });
+      const dup = await messages.append(outbound('conv-it-owner-b', 'SMconvdup1', '2026-06-12T10:07:30.000Z', 'hi'));
+      expect(dup).toEqual({ deduped: true, tsMsgId: first.tsMsgId, conversationId: 'conv-it-owner-a' });
+    });
+
+    it('an email deduped on its RFC Message-ID pointer reports the first row\'s conversation', async () => {
+      const rfcId = `<hc-${randomUUID()}@mail.local.test>`;
+      const email = (conversationId: string, providerSid: string): NewMessage => ({
+        conversationId,
+        providerSid,
+        providerTs: '2026-06-12T10:08:00.000Z',
+        type: 'email',
+        direction: 'outbound',
+        author: 'teammate',
+        subject: 'Welcome',
+        body: 'Hello there',
+        email_from: 'team@mail.local.test',
+        email_to: ['landlord@example.com'],
+        email_message_id: rfcId,
+        deliveryStatus: 'queued',
+        rfcMessageIdPointer: rfcId,
+      });
+      const first = await messages.append(email('conv-it-email-a', `SES-${randomUUID().slice(0, 8)}`));
+      expect(first.deduped).toBe(false);
+      // A DIFFERENT provider SID under the SAME Message-ID: only the email
+      // pointer's condition fails, which is the second dedupe return site.
+      const dup = await messages.append(email('conv-it-email-b', `SES-${randomUUID().slice(0, 8)}`));
+      expect(dup).toEqual({ deduped: true, tsMsgId: first.tsMsgId, conversationId: 'conv-it-email-a' });
     });
 
     it('getByProviderSid resolves a message via the SID pointer (doc §9 lookup)', async () => {

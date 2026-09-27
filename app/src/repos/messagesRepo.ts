@@ -166,6 +166,8 @@ export interface RelayRecipientDelivery {
   requestedTransport?: MessageTransport;
   actualTransport?: MessageTransport;
   transportAggregationState?: TransportAggregationState;
+  /** OUR attempt clock (D8a), best-effort; a wholesale write may drop it; never a provider timestamp. */
+  attemptedAt?: string;
 }
 
 export type TransportMutationOutcome =
@@ -1261,6 +1263,13 @@ export interface AppendResult {
   deduped: boolean;
   /** The PERSISTED message's SK — on dedupe, the FIRST write's key (which can differ from this call's providerTs). */
   tsMsgId: string;
+  /**
+   * The conversation the PERSISTED row lives in. Fresh: this call's. Dedupe:
+   * the conversation the provider SID's pointer resolves to - which can differ
+   * from this call's (a SID lives in exactly one row), so a caller adopting a
+   * message re-reads THAT row (SOR spec D11).
+   */
+  conversationId: string;
 }
 
 export interface ListByConversationOptions {
@@ -1309,6 +1318,13 @@ export interface MessagesRepo {
   append(message: NewMessage): Promise<AppendResult>;
   /** Resolve a provider SID to its message via the pointer item (doc §9). */
   getByProviderSid(sid: string): Promise<MessageItem | undefined>;
+  /**
+   * SOR (spec D11): the same resolve with BOTH reads - the SID pointer and the
+   * row - strongly consistent. For a coordination decision (does this SID
+   * already belong to a row, and whose); `getByProviderSid` stays the cheap
+   * read for the callback paths.
+   */
+  getByProviderSidConsistent(sid: string): Promise<MessageItem | undefined>;
   /**
    * Email channel v1 - resolve an RFC Message-ID to its message. Checks the
    * emailmsgid#<id> pointer (OUTBOUND: our own <hc-...> id, distinct from the SES
@@ -1450,6 +1466,15 @@ export interface MessagesRepo {
   upgradeCallOutcomeToVoicemail(callSid: string): Promise<boolean>;
   /** Newest-first page of a conversation's log. */
   listByConversation(conversationId: string, opts?: ListByConversationOptions): Promise<MessageItem[]>;
+  /**
+   * SOR (spec D11): the same page read with ConsistentRead - for a send site's
+   * continuation snapshot, which must not act on a stale image of the rows it
+   * is about to write.
+   */
+  listByConversationConsistent(
+    conversationId: string,
+    opts?: ListByConversationOptions,
+  ): Promise<MessageItem[]>;
   /**
    * Point-get ONE message by its exact key. Added for the AI run log's window
    * rehydration (design 2026-08-06 section 9): the run stores message IDs, not
@@ -1630,6 +1655,54 @@ export interface MessagesRepo {
     opts?: { sid?: string; context?: 'relay' | 'group' },
   ): Promise<boolean>;
   /**
+   * SOR (spec D8): close ONE relay recipient slot `failed` with `errorCode`,
+   * ONLY if no send landed there - the slot is ABSENT (a legacy source starts
+   * with an empty map; the close creates the slot) or `queued` with no `sid`.
+   * Legacy and versioned rows alike; an existing slot keeps every other field
+   * (`requestedTransport`, `attemptedAt`, ...).
+   *
+   * - `closed`: this call wrote the close.
+   * - `skipped_sent`: the slot carries a sid, a status other than `queued`, or
+   *   was already closed - a stale snapshot never overwrites a send.
+   * - `missing`: no such row, or a row with no `delivery_recipients` map (a
+   *   nested write there would be a ValidationException, so it is refused).
+   */
+  closeRelayRecipientIfUnsent(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    delivery: { status: 'failed'; errorCode: string },
+  ): Promise<'closed' | 'skipped_sent' | 'missing'>;
+  /**
+   * SOR (spec D15): record a message the provider already holds on ONE relay
+   * recipient slot, forward-only. A versioned row goes through
+   * `applyRecipientSendResult` (`updated` -> `adopted`; `idempotent`, `stale`,
+   * `conflict` -> `skipped`; `missing` -> `missing`). A LEGACY row seeds an
+   * absent slot `queued`, then moves the status only from a prior
+   * `allowedPriorStatuses(patch.status)` allows or from the same status
+   * (idempotent), keeping an existing `sid` and `sentAt` (first write wins) -
+   * so a receipt that raced ahead is never regressed (`skipped`). `missing`:
+   * no row, no map, or (versioned) no slot. Never a wholesale slot write.
+   */
+  adoptRelayRecipientIfUnsent(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    patch: { status: DeliveryStatus; sid: string; sentAt: string; errorCode?: string },
+  ): Promise<'adopted' | 'skipped' | 'missing'>;
+  /**
+   * SOR (spec D8a, D20a): stamp OUR attempt clock on one relay recipient slot,
+   * seeding an absent slot `queued` first; never touches another field.
+   * BEST-EFFORT: a missing row, map or slot is WARNed and swallowed; any other
+   * error throws.
+   */
+  setRelayRecipientAttemptedAt(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    attemptedAt: string,
+  ): Promise<void>;
+  /**
    * Record the per-member channel SID on a slot ONLY IF it has none yet - the
    * targeted write that keeps a DUPLICATE receipt useful. A redelivered receipt
    * carries the same SMxx but its status transition is rejected as a regression,
@@ -1657,8 +1730,23 @@ export interface MessagesRepo {
     providerSid: string,
     ref: { conversationId: string; tsMsgId: string; memberKey: string },
   ): Promise<void>;
+  /**
+   * SOR (spec D11, D13): the same conditional create, REPORTING the outcome
+   * instead of swallowing a conflict: `created` (this call wrote it), `mine`
+   * (it already names this exact source, tsMsgId and member), `other` (it
+   * names anything else - the SID is held elsewhere). An existing pointer is
+   * never rewritten.
+   */
+  claimRelaySidPointer(
+    providerSid: string,
+    ref: { conversationId: string; tsMsgId: string; memberKey: string },
+  ): Promise<'created' | 'mine' | 'other'>;
   /** Resolve a relay-recipient provider SID to its source message + member slot. */
   getRelaySidPointer(
+    providerSid: string,
+  ): Promise<{ conversationId: string; tsMsgId: string; memberKey: string } | undefined>;
+  /** SOR (spec D11): `getRelaySidPointer` with ConsistentRead, for coordination decisions. */
+  getRelaySidPointerConsistent(
     providerSid: string,
   ): Promise<{ conversationId: string; tsMsgId: string; memberKey: string } | undefined>;
   /**
@@ -1674,6 +1762,8 @@ export interface MessagesRepo {
   putSystemSidMarker(providerSid: string, kind: string): Promise<void>;
   /** The system-send marker for a provider SID, or undefined. */
   getSystemSidMarker(providerSid: string): Promise<{ kind: string } | undefined>;
+  /** SOR (spec D11): `getSystemSidMarker` with ConsistentRead, for coordination decisions. */
+  getSystemSidMarkerConsistent(providerSid: string): Promise<{ kind: string } | undefined>;
 
   // --- Group texting: the deadline partition (spec 15.5) --------------------
 
@@ -2049,16 +2139,115 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     return pointer.Item as { ref_conversationId: string; ref_tsMsgId: string } | undefined;
   }
 
-  async function getByProviderSid(sid: string): Promise<MessageItem | undefined> {
-    const ptr = await getSidPointer(sid);
+  /**
+   * Pointer, then row. SOR (spec D11): `getByProviderSid` and its consistent
+   * twin share this ONE body, so the two reads cannot drift apart - only
+   * ConsistentRead differs, on both Gets.
+   */
+  async function readByProviderSid(sid: string, consistent: boolean): Promise<MessageItem | undefined> {
+    const ptr = await getSidPointer(sid, { consistent });
     if (!ptr) return undefined;
     const { Item } = await doc.send(
       new GetCommand({
         TableName: table,
         Key: { conversationId: ptr.ref_conversationId, tsMsgId: ptr.ref_tsMsgId },
+        ...(consistent && { ConsistentRead: true }),
       }),
     );
     return Item as MessageItem | undefined;
+  }
+
+  async function getByProviderSid(sid: string): Promise<MessageItem | undefined> {
+    return readByProviderSid(sid, false);
+  }
+
+  /** The relaysid# pointer, as its three ref fields (eventual or consistent). */
+  async function readRelaySidPointer(
+    providerSid: string,
+    consistent: boolean,
+  ): Promise<{ conversationId: string; tsMsgId: string; memberKey: string } | undefined> {
+    const { Item } = await doc.send(
+      new GetCommand({
+        TableName: table,
+        Key: { conversationId: relaySidPk(providerSid), tsMsgId: 'ptr' },
+        ...(consistent && { ConsistentRead: true }),
+      }),
+    );
+    const ptr = Item as
+      | { ref_conversationId: string; ref_tsMsgId: string; ref_member_key: string }
+      | undefined;
+    if (!ptr) return undefined;
+    return {
+      conversationId: ptr.ref_conversationId,
+      tsMsgId: ptr.ref_tsMsgId,
+      memberKey: ptr.ref_member_key,
+    };
+  }
+
+  /** The syssid# marker's kind (eventual or consistent). */
+  async function readSystemSidMarker(
+    providerSid: string,
+    consistent: boolean,
+  ): Promise<{ kind: string } | undefined> {
+    const { Item } = await doc.send(
+      new GetCommand({
+        TableName: table,
+        Key: { conversationId: sysSidPk(providerSid), tsMsgId: 'ptr' },
+        ...(consistent && { ConsistentRead: true }),
+      }),
+    );
+    if (!Item) return undefined;
+    return { kind: (Item as { kind?: string }).kind ?? 'unknown' };
+  }
+
+  /**
+   * SOR (spec D8a, D15): make sure ONE relay recipient slot exists, seeding an
+   * absent one `{ status: 'queued' }` - a no-op on an existing slot. False when
+   * there is no row, or a row with no `delivery_recipients` map: the condition
+   * refuses both, because a nested SET under an absent map is a
+   * ValidationException, never a condition failure.
+   */
+  async function seedRelaySlot(conversationId: string, tsMsgId: string, memberKey: string): Promise<boolean> {
+    try {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId, tsMsgId },
+          UpdateExpression: 'SET #dr.#mk = if_not_exists(#dr.#mk, :seed)',
+          ConditionExpression: 'attribute_exists(tsMsgId) AND attribute_exists(#dr)',
+          ExpressionAttributeNames: { '#dr': 'delivery_recipients', '#mk': memberKey },
+          ExpressionAttributeValues: { ':seed': { status: 'queued' } },
+        }),
+      );
+      return true;
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) return false;
+      throw err;
+    }
+  }
+
+  /** One newest-first page of a conversation partition (eventual or consistent). */
+  async function queryConversation(
+    conversationId: string,
+    opts: ListByConversationOptions,
+    consistent: boolean,
+  ): Promise<MessageItem[]> {
+    const { Items } = await doc.send(
+      new QueryCommand({
+        TableName: table,
+        KeyConditionExpression: opts.before
+          ? 'conversationId = :c AND tsMsgId < :before'
+          : 'conversationId = :c',
+        ExpressionAttributeValues: {
+          ':c': conversationId,
+          ...(opts.before && { ':before': opts.before }),
+        },
+        ScanIndexForward: false, // newest-first
+        Limit: opts.limit ?? DEFAULT_PAGE_LIMIT,
+        ...(consistent && { ConsistentRead: true }),
+      }),
+    );
+    return (Items ?? []) as MessageItem[];
   }
 
   async function getMessageConsistent(
@@ -2261,8 +2450,14 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     );
   }
 
-  return {
+  // A named object (not a bare `return {`) so `adoptRelayRecipientIfUnsent`
+  // can delegate to `applyRecipientSendResult` without moving its body.
+  const repo: MessagesRepo = {
     getByProviderSid,
+
+    async getByProviderSidConsistent(sid) {
+      return readByProviderSid(sid, true);
+    },
 
     async getByRfcMessageId(messageId) {
       // OUTBOUND: emailmsgid#<rfcId> maps our own RFC id -> the message (the SES
@@ -2555,7 +2750,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
               { conversationId: message.conversationId, providerSid: message.providerSid },
               'message append deduped (provider SID already persisted)',
             );
-            return { deduped: true, tsMsgId: ptr.ref_tsMsgId };
+            return { deduped: true, tsMsgId: ptr.ref_tsMsgId, conversationId: ptr.ref_conversationId };
           }
           // THE EMAIL POINTER IS NOT THIS BRANCH'S BUSINESS (fix wave 5,
           // adversarial 36). Precise attribution was the right change, but it
@@ -2585,7 +2780,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                 ConsistentRead: true,
               }),
             );
-            const ptr = Item as { ref_tsMsgId?: string } | undefined;
+            const ptr = Item as { ref_tsMsgId?: string; ref_conversationId?: string } | undefined;
             log.warn(
               {
                 conversationId: message.conversationId,
@@ -2595,7 +2790,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
               'message append deduped on the RFC Message-ID pointer - this email is already persisted under that Message-ID',
             );
             if (typeof ptr?.ref_tsMsgId === 'string') {
-              return { deduped: true, tsMsgId: ptr.ref_tsMsgId };
+              return {
+                deduped: true,
+                tsMsgId: ptr.ref_tsMsgId,
+                conversationId: ptr.ref_conversationId ?? message.conversationId,
+              };
             }
             // The pointer's own condition just failed, so it exists; an
             // unreadable one is a real fault and must not be guessed at.
@@ -2628,7 +2827,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         },
         'message appended',
       );
-      return { deduped: false, tsMsgId };
+      return { deduped: false, tsMsgId, conversationId: message.conversationId };
     },
 
     async updateDeliveryStatus(sid, status, errorCode, options) {
@@ -3176,21 +3375,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     async listByConversation(conversationId, opts = {}) {
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          KeyConditionExpression: opts.before
-            ? 'conversationId = :c AND tsMsgId < :before'
-            : 'conversationId = :c',
-          ExpressionAttributeValues: {
-            ':c': conversationId,
-            ...(opts.before && { ':before': opts.before }),
-          },
-          ScanIndexForward: false, // newest-first
-          Limit: opts.limit ?? DEFAULT_PAGE_LIMIT,
-        }),
-      );
-      return (Items ?? []) as MessageItem[];
+      return queryConversation(conversationId, opts, false);
+    },
+
+    async listByConversationConsistent(conversationId, opts = {}) {
+      return queryConversation(conversationId, opts, true);
     },
 
     async getByTsMsgId(conversationId, tsMsgId) {
@@ -3757,6 +3946,156 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       return true;
     },
 
+    async closeRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, delivery) {
+      // (1) An EXISTING slot closes only while `queued` with no sid: a sid means
+      // the provider accepted a send, and any other status means a send (or an
+      // earlier close) got there first (D8). Child fields only, so
+      // requestedTransport, attemptedAt and every sibling field survive.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET #dr.#mk.#st = :failed, #dr.#mk.#ec = :ec',
+            ConditionExpression:
+              'attribute_exists(tsMsgId) AND attribute_exists(#dr.#mk) AND #dr.#mk.#st = :queued AND attribute_not_exists(#dr.#mk.#sid)',
+            ExpressionAttributeNames: {
+              '#dr': 'delivery_recipients',
+              '#mk': memberKey,
+              '#st': 'status',
+              '#ec': 'errorCode',
+              '#sid': 'sid',
+            },
+            ExpressionAttributeValues: {
+              ':failed': delivery.status,
+              ':ec': delivery.errorCode,
+              ':queued': 'queued',
+            },
+          }),
+        );
+        return 'closed';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      // (2) An ABSENT slot (a legacy source starts with an empty map, and
+      // today's close creates the slot): create it closed. `attribute_exists(#dr)`
+      // makes a row with no map a condition failure rather than a
+      // ValidationException.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET #dr.#mk = :fresh',
+            ConditionExpression:
+              'attribute_exists(tsMsgId) AND attribute_exists(#dr) AND attribute_not_exists(#dr.#mk)',
+            ExpressionAttributeNames: { '#dr': 'delivery_recipients', '#mk': memberKey },
+            ExpressionAttributeValues: {
+              ':fresh': { status: delivery.status, errorCode: delivery.errorCode },
+            },
+          }),
+        );
+        return 'closed';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      // Both refused: a consistent read tells a missing row from a slot a send
+      // (or another close) already owns.
+      const message = await getMessageConsistent(conversationId, tsMsgId);
+      if (!message) return 'missing';
+      if (message.delivery_recipients === undefined) {
+        log.warn(
+          { conversationId, tsMsgId, memberKey: safeMemberKey(memberKey) },
+          'relay recipient close refused - the row has no delivery map',
+        );
+        return 'missing';
+      }
+      return 'skipped_sent';
+    },
+
+    async adoptRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, patch) {
+      // A versioned row: the transport-aware writer already is forward-only and
+      // first-write-wins; its `legacy_noop` IS the legacy discriminator.
+      const outcome = await repo.applyRecipientSendResult(conversationId, tsMsgId, memberKey, patch);
+      if (outcome === 'updated') return 'adopted';
+      if (outcome === 'missing') return 'missing';
+      if (outcome !== 'legacy_noop') return 'skipped';
+      // A LEGACY row (D15), never markRecipient's wholesale SET: (a) seed an
+      // absent slot, then (b) move the status only from a prior the
+      // forward-only table allows or from itself (a re-run is idempotent), the
+      // sid and sentAt keeping the FIRST write - a raced receipt is never
+      // regressed.
+      if (!(await seedRelaySlot(conversationId, tsMsgId, memberKey))) return 'missing';
+      const names: Record<string, string> = {
+        '#dr': 'delivery_recipients',
+        '#mk': memberKey,
+        '#st': 'status',
+        '#sid': 'sid',
+        '#sa': 'sentAt',
+      };
+      const values: Record<string, unknown> = { ':st': patch.status, ':sid': patch.sid, ':sa': patch.sentAt };
+      const sets = [
+        '#dr.#mk.#st = :st',
+        '#dr.#mk.#sid = if_not_exists(#dr.#mk.#sid, :sid)',
+        '#dr.#mk.#sa = if_not_exists(#dr.#mk.#sa, :sa)',
+      ];
+      if (patch.errorCode !== undefined) {
+        names['#ec'] = 'errorCode';
+        values[':ec'] = patch.errorCode;
+        sets.push('#dr.#mk.#ec = :ec');
+      }
+      const priors = [...allowedPriorStatuses(patch.status), patch.status].map((status, i) => {
+        values[`:p${i}`] = status;
+        return `:p${i}`;
+      });
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            ConditionExpression: `attribute_exists(#dr.#mk) AND #dr.#mk.#st IN (${priors.join(', ')})`,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+          }),
+        );
+        return 'adopted';
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'skipped';
+        throw err;
+      }
+    },
+
+    async setRelayRecipientAttemptedAt(conversationId, tsMsgId, memberKey, attemptedAt) {
+      // BEST-EFFORT (D8a): the attempt record is the authority; this clock only
+      // lets a stranded leg age (D20a). Seed, then stamp the one child field.
+      try {
+        if (await seedRelaySlot(conversationId, tsMsgId, memberKey)) {
+          await doc.send(
+            new UpdateCommand({
+              TableName: table,
+              Key: { conversationId, tsMsgId },
+              UpdateExpression: 'SET #dr.#mk.#at = :at',
+              ConditionExpression: 'attribute_exists(#dr.#mk)',
+              ExpressionAttributeNames: {
+                '#dr': 'delivery_recipients',
+                '#mk': memberKey,
+                '#at': 'attemptedAt',
+              },
+              ExpressionAttributeValues: { ':at': attemptedAt },
+            }),
+          );
+          return;
+        }
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      log.warn(
+        { conversationId, tsMsgId, memberKey: safeMemberKey(memberKey) },
+        'relay recipient attempt clock not recorded - no such row, delivery map or slot (best-effort)',
+      );
+    },
+
     async setRecipientDeliverySid(conversationId, tsMsgId, memberKey, sid) {
       try {
         await doc.send(
@@ -3805,19 +4144,48 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
     },
 
+    async claimRelaySidPointer(providerSid, ref) {
+      // putRelaySidPointer's conditional create, but a conflict is REPORTED:
+      // the reconcile adopts a message only through a claim it can see (D11).
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: {
+              conversationId: relaySidPk(providerSid),
+              tsMsgId: 'ptr',
+              ref_conversationId: ref.conversationId,
+              ref_tsMsgId: ref.tsMsgId,
+              ref_member_key: ref.memberKey,
+            },
+            ConditionExpression: 'attribute_not_exists(tsMsgId)',
+          }),
+        );
+        return 'created';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      const held = await readRelaySidPointer(providerSid, true);
+      if (held === undefined) {
+        // The put's own condition just failed, so the pointer exists; one that
+        // cannot be read back is a fault, never guessed at (the append rule).
+        throw new Error(
+          `claimRelaySidPointer: the relaysid pointer for ${providerSid} could not be read after its conditional put failed`,
+        );
+      }
+      return held.conversationId === ref.conversationId &&
+        held.tsMsgId === ref.tsMsgId &&
+        held.memberKey === ref.memberKey
+        ? 'mine'
+        : 'other';
+    },
+
     async getRelaySidPointer(providerSid) {
-      const { Item } = await doc.send(
-        new GetCommand({ TableName: table, Key: { conversationId: relaySidPk(providerSid), tsMsgId: 'ptr' } }),
-      );
-      const ptr = Item as
-        | { ref_conversationId: string; ref_tsMsgId: string; ref_member_key: string }
-        | undefined;
-      if (!ptr) return undefined;
-      return {
-        conversationId: ptr.ref_conversationId,
-        tsMsgId: ptr.ref_tsMsgId,
-        memberKey: ptr.ref_member_key,
-      };
+      return readRelaySidPointer(providerSid, false);
+    },
+
+    async getRelaySidPointerConsistent(providerSid) {
+      return readRelaySidPointer(providerSid, true);
     },
 
     async putSystemSidMarker(providerSid, kind) {
@@ -3853,11 +4221,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     async getSystemSidMarker(providerSid) {
-      const { Item } = await doc.send(
-        new GetCommand({ TableName: table, Key: { conversationId: sysSidPk(providerSid), tsMsgId: 'ptr' } }),
-      );
-      if (!Item) return undefined;
-      return { kind: (Item as { kind?: string }).kind ?? 'unknown' };
+      return readSystemSidMarker(providerSid, false);
+    },
+
+    async getSystemSidMarkerConsistent(providerSid) {
+      return readSystemSidMarker(providerSid, true);
     },
 
     async listDueRows(partition, throughIso, limit = DEFAULT_PAGE_LIMIT) {
@@ -4432,4 +4800,5 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       );
     },
   };
+  return repo;
 }

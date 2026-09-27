@@ -254,7 +254,11 @@ function makeFakes(
     messagesRepo: {
       append: async (message) => {
         fakes.appended.push(message);
-        return { deduped: false, tsMsgId: `${message.providerTs}#${message.providerSid}` };
+        return {
+          deduped: false,
+          tsMsgId: `${message.providerTs}#${message.providerSid}`,
+          conversationId: message.conversationId,
+        };
       },
     },
     contactsRepo: {

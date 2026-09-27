@@ -98,6 +98,7 @@ import {
   type MediaPointer,
   type MessageItem,
   type MessagesRepo,
+  type RelayRecipientDelivery,
   type ParkedEmailEvent,
   groupCrossCheckDueSortKey,
   GROUP_CROSSCHECK_DUE_KIND,
@@ -1151,7 +1152,11 @@ export function createFakeWorld(): FakeWorld {
       // twice, even when providerTs differs across redeliveries — and the
       // dedupe result carries the PERSISTED (first write's) tsMsgId.
       const existing = findBySid(message.providerSid);
-      if (existing) return { deduped: true, tsMsgId: existing.tsMsgId };
+      // SOR build finding T6-5: a dedupe reports the STORED row's conversation
+      // (the real repo reads it off the SID pointer), never this call's input.
+      if (existing) {
+        return { deduped: true, tsMsgId: existing.tsMsgId, conversationId: existing.conversationId };
+      }
       messages.push({
         conversationId: message.conversationId,
         tsMsgId,
@@ -1277,10 +1282,17 @@ export function createFakeWorld(): FakeWorld {
         ...(message.email_new_address === true && { email_new_address: true }),
         ...(message.attachments_truncated === true && { attachments_truncated: true }),
       });
-      return { deduped: false, tsMsgId };
+      return { deduped: false, tsMsgId, conversationId: message.conversationId };
     },
     async getByProviderSid(sid) {
       return findBySid(sid);
+    },
+    // SOR Task 6: the consistent twins DELEGATE THROUGH THE OBJECT PROPERTY
+    // (build finding T8-3), so a spy on the eventual read still observes a
+    // caller that moved to the consistent one. An array has no eventual
+    // consistency to model. To fail ONLY the consistent read, spy on the twin.
+    async getByProviderSidConsistent(sid) {
+      return messagesRepo.getByProviderSid(sid);
     },
     async getByRfcMessageId(messageId) {
       // OUTBOUND: our own email_message_id; INBOUND: provider_sid IS the RFC id.
@@ -1408,6 +1420,11 @@ export function createFakeWorld(): FakeWorld {
         .filter((m) => (opts.before === undefined ? true : m.tsMsgId < opts.before))
         .sort((a, b) => (a.tsMsgId < b.tsMsgId ? 1 : -1))
         .slice(0, opts.limit ?? 50);
+    },
+    // Delegates through the object (T8-3): relayFanOut.test.ts spies
+    // `listByConversation` and must keep observing the snapshot read.
+    async listByConversationConsistent(...args) {
+      return messagesRepo.listByConversation(...args);
     },
     async getByTsMsgId(conversationId, tsMsgId) {
       return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
@@ -1662,6 +1679,59 @@ export function createFakeWorld(): FakeWorld {
       item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
       return true;
     },
+    // SOR Task 6 (spec D8): the conditional relay close, modelled on the real
+    // repo's two statements and its read-back - held to it by
+    // twilioWebhookHarnessRepoAdditions.integration.test.ts. A row with no map
+    // answers `missing` (the real guard turns that ValidationException into a
+    // refusal).
+    async closeRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, delivery) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item || item.delivery_recipients === undefined) return 'missing';
+      const slot = item.delivery_recipients[memberKey];
+      if (slot !== undefined && !(slot.status === 'queued' && slot.sid === undefined)) return 'skipped_sent';
+      const next: RelayRecipientDelivery =
+        slot === undefined
+          ? { status: delivery.status, errorCode: delivery.errorCode }
+          : { ...slot, status: delivery.status, errorCode: delivery.errorCode };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
+      return 'closed';
+    },
+    // SOR Task 6 (spec D15): the forward-only adoption. A versioned row goes
+    // through this fake's applyRecipientSendResult, called THROUGH THE OBJECT
+    // exactly as the real repo does; a legacy row seeds an absent slot (the
+    // seed persists even when the move is then refused, as the real first
+    // statement does) and moves from an allowed prior or the same status.
+    async adoptRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, patch) {
+      const outcome = await messagesRepo.applyRecipientSendResult(conversationId, tsMsgId, memberKey, patch);
+      if (outcome === 'updated') return 'adopted';
+      if (outcome === 'missing') return 'missing';
+      if (outcome !== 'legacy_noop') return 'skipped';
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item || item.delivery_recipients === undefined) return 'missing';
+      const slot: RelayRecipientDelivery = item.delivery_recipients[memberKey] ?? { status: 'queued' };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: slot };
+      if (slot.status !== patch.status && !allowedPriorStatuses(patch.status).includes(slot.status)) {
+        return 'skipped';
+      }
+      const next: RelayRecipientDelivery = {
+        ...slot,
+        status: patch.status,
+        sid: slot.sid ?? patch.sid,
+        sentAt: slot.sentAt ?? patch.sentAt,
+        ...(patch.errorCode !== undefined && { errorCode: patch.errorCode }),
+      };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
+      return 'adopted';
+    },
+    // SOR Task 6 (spec D8a): best-effort attempt clock - seed an absent slot,
+    // then stamp the one child field. The real repo WARNs a missing row, map or
+    // slot; this fake has no logger and simply resolves.
+    async setRelayRecipientAttemptedAt(conversationId, tsMsgId, memberKey, attemptedAt) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item || item.delivery_recipients === undefined) return;
+      const slot: RelayRecipientDelivery = item.delivery_recipients[memberKey] ?? { status: 'queued' };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: { ...slot, attemptedAt } };
+    },
     // Group texting (S5): the sid-IF-ABSENT write that keeps a duplicate receipt
     // useful. Models the real repo's condition, absence included.
     async setRecipientDeliverySid(conversationId, tsMsgId, memberKey, sid) {
@@ -1693,8 +1763,31 @@ export function createFakeWorld(): FakeWorld {
     async putRelaySidPointer(providerSid, ref) {
       if (!relaySidPointers.has(providerSid)) relaySidPointers.set(providerSid, ref);
     },
+    // SOR Task 6 (spec D11): the reporting claim over the same map - created /
+    // mine (all three ref fields equal) / other; an existing pointer is never
+    // rewritten. It stores only the three fields, as the real item does.
+    async claimRelaySidPointer(providerSid, ref) {
+      const held = relaySidPointers.get(providerSid);
+      if (held === undefined) {
+        relaySidPointers.set(providerSid, {
+          conversationId: ref.conversationId,
+          tsMsgId: ref.tsMsgId,
+          memberKey: ref.memberKey,
+        });
+        return 'created';
+      }
+      return held.conversationId === ref.conversationId &&
+        held.tsMsgId === ref.tsMsgId &&
+        held.memberKey === ref.memberKey
+        ? 'mine'
+        : 'other';
+    },
     async getRelaySidPointer(providerSid) {
       return relaySidPointers.get(providerSid);
+    },
+    // Delegates through the object (T8-3), like every consistent twin here.
+    async getRelaySidPointerConsistent(providerSid) {
+      return messagesRepo.getRelaySidPointer(providerSid);
     },
     // System-send markers (syssid#): verify-start registers its code SMS here;
     // the /status webhook checks it before the unknown-SID ERROR backstop.
@@ -1704,6 +1797,10 @@ export function createFakeWorld(): FakeWorld {
     async getSystemSidMarker(providerSid) {
       const kind = systemSidMarkers.get(providerSid);
       return kind === undefined ? undefined : { kind };
+    },
+    // Delegates through the object (T8-3), like every consistent twin here.
+    async getSystemSidMarkerConsistent(providerSid) {
+      return messagesRepo.getSystemSidMarker(providerSid);
     },
     // Group-texting deadline partition (S5): the webhook path never writes or
     // reads a due row - throw so an accidental call is loud rather than a

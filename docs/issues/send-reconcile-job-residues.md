@@ -251,3 +251,14 @@ needs a crash and a number change together.
     versioned relay slot writer's answer to a replay was not checked. See
     also [send-attempt-sweeper](./send-attempt-sweeper.md), Addendum
     2026-09-27, on the op token's own narrow re-read window.
+16. **A provider-error check logs a generic "nothing adoptable yet" INFO
+    after its WARN (live self-QA, 2026-09-27).** A check whose lookup failed
+    logs the WARN "the provider lookup failed at this check - the next check
+    tries again" (`app/src/jobs/sendReconcile.ts:448-450`) and then, once the
+    next check is enqueued, the INFO "nothing adoptable yet - the next check
+    is scheduled" (`:456-459`) - which carries `reason: provider_error` but
+    says something that was never found out: the lookup never ran to
+    judging. Log wording only; seen on the lane in self-QA scenario 3
+    (`docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/self-qa.md`).
+    Fix: word the INFO by its reason ("the next check is scheduled" alone, or
+    one line per reason).

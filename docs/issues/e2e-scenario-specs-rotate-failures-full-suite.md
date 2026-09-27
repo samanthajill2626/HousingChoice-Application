@@ -82,3 +82,34 @@ Not the closed `tour-reminders-panel-e2e-flake` signature, which was a rung row
 invisible inside its own 10s budget; this is a message missing from the comms
 region entirely. The branch fences `jobs/tourReminders.ts` and touches no tour
 path, and its own relay retry spec passed in the same run (#137, 19.1s).
+
+**Sighting 2026-09-27, `feat/send-outcome-reconcile` (the build orchestrator's
+gate run P3d, commit 1d3bc869, code 52220729).** One full `npm run e2e` ended
+EXIT 1 with 287 passed and 2 failed (23.7m); one of the two was
+`e2e/tests/scenarios/landlord-onboarding.spec.ts:98` at the step "Team creates
+the unit under the landlord (New-property form)": after the Create click the
+dialog showed its own alert "Couldn't create the property - please try again."
+(the form caught a `createUnit` failure; the page snapshot held the dialog
+open), and `page.waitForURL(/\/listings\/[^/]+$/)` timed out at
+`e2e/scenarios/steps.ts:1630`. The same file passed ALONE twice on the same code
+(`npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/outbound-mms.spec.ts
+tests/scenarios/landlord-onboarding.spec.ts`: `13 passed (1.3m)`, EXIT 0, both
+times), and the next full run on the same code was `289 passed (23.2m)`, EXIT 0.
+
+What this adds:
+
+- **A fifth scenario file joins the rotation** (`landlord-onboarding`), and the
+  rotation still holds - no file has failed twice.
+- **The signature is again a missing server outcome, not a slow render**, but
+  this time a WRITE: the unit create itself failed as the client saw it. The
+  failing request's completion line was not found in the run's `[WebServer]`
+  output, so whether it reached the app, and with what status, is not
+  established.
+- **Contention was present and known**: during that run the same worktree's
+  read-only reviewer ran single-file vitest suites against the shared DynamoDB
+  Local container (its global setup created and dropped 22 tables under its own
+  key), and an issue-filing agent worked in the tree. The run's other failure
+  (`outbound-mms.spec.ts:517`, see
+  [`e2e-outbound-mms-viewer-wheel-scale-full-suite`](e2e-outbound-mms-viewer-wheel-scale-full-suite.md))
+  is also full-suite-only. This supports the entry's "contention" reading over
+  "cross-spec state", without proving it.

@@ -807,18 +807,21 @@ function showsRetryPromise(msg: TimelineMessage, promiseNowMs: number): boolean 
  *  1. "any non-terminal leg" - a STALE leg stays non-terminal for ever, so the
  *     interval would run permanently on exactly the threads this feature
  *     targets. Closed by `!isStaleLeg(...)`.
- *  2. "non-terminal AND not-yet-stale" - a `queued` leg with no `sentAt` is BOTH
- *     for ever (that is the deliberate, human-decided silence), so it would spin
- *     for ever on a group text after a receipts-webhook outage and on a relay
- *     message whose fan-out never ran. Closed by `canEverGoStale(...)`, which
+ *  2. "non-terminal AND not-yet-stale" - a `queued` leg with neither a `sentAt`
+ *     nor an `attemptedAt` is BOTH for ever (that is the deliberate,
+ *     human-decided silence), so it would spin for ever on a group text after
+ *     a receipts-webhook outage and on a relay message whose fan-out never
+ *     ran. Closed by `canEverGoStale(...)`, which
  *     answers false for exactly the rows of the S3 table that have no ageing
- *     clock.
+ *     clock. (A CLAIMED relay leg carries OUR `attemptedAt` and ages from it -
+ *     SOR D20a - so it arms and terminates like any clocked leg.)
  *  3. a WITHHELD clock - an imported bubble's `nowMs` is undefined and must
  *     contribute NOTHING. Closed by passing the BUBBLE's clock (see
  *     `bubbleClocks`), not the raw tick.
  *  4. a clock that parses to NaN - a real handled shape here, not a defensive
  *     hypothetical. Closed by `canEverGoStale`'s finiteness clause.
- *  5. a clock in the FUTURE - the ageing clocks are the PROVIDER's and `nowMs`
+ *  5. a clock in the FUTURE - the ageing clocks are stamped SERVER-side (the
+ *     provider's `sentAt`, the message instant, OUR `attemptedAt`) and `nowMs`
  *     is the OPERATOR'S BROWSER clock, so a browser running slow puts every
  *     freshly-sent leg ahead of us, where it is "eligible" and "not yet stale"
  *     at once. Closed by `canEverGoStale`'s FUTURITY BOUND, which keeps ordinary

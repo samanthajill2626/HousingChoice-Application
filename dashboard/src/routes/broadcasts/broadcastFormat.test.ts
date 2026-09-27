@@ -12,6 +12,7 @@ import {
   presentRecipientStatus,
   shareRecipientReason,
   presentShareLabel,
+  skippedTotal,
 } from './broadcastFormat.js';
 
 describe('voucherSizeLabel', () => {
@@ -127,6 +128,31 @@ describe('presentRecipientStatus', () => {
     expect(byKey.get('c-1')?.carrierSentAt).toBe('2026-07-16T00:00:01.000Z');
     expect(byKey.get('c-2')?.carrierSentAt).toBeUndefined();
   });
+
+  // SOR D20/D22: the recipient row keys on `send_unconfirmed` BEFORE the
+  // status - the same "Not confirmed" the relay row reads, never "Failed".
+  it('keys on send_unconfirmed before status', () => {
+    const notConfirmed = {
+      label: 'Not confirmed',
+      tone: 'danger',
+      isFailure: false,
+      reason: "Couldn't confirm whether this text went out",
+    };
+    expect(presentRecipientStatus('failed', undefined, 'send_unconfirmed')).toEqual(notConfirmed);
+    expect(presentRecipientStatus('queued', undefined, 'send_unconfirmed')).toEqual(notConfirmed);
+    // Any other code keeps the status-keyed presentation.
+    expect(presentRecipientStatus('failed', undefined, '30007').isFailure).toBe(true);
+    expect(presentRecipientStatus('failed', undefined, '30007').label).toBe('Failed');
+    expect(presentRecipientStatus('queued', undefined, 'send_retryable').isFailure).toBe(false);
+  });
+
+  it('toRecipientViews still sorts an unconfirmed row first - it is failed-status, and danger-toned', () => {
+    const views = toRecipientViews({
+      c2: { status: 'delivered' },
+      c1: { status: 'failed', errorCode: 'send_unconfirmed' },
+    });
+    expect(views.map((v) => v.contactKey)).toEqual(['c1', 'c2']);
+  });
 });
 
 describe('shareRecipientReason (share-skip-fix D7)', () => {
@@ -150,7 +176,7 @@ describe('shareRecipientReason (share-skip-fix D7)', () => {
   it('failed rows: no_contact has its own line; carrier and fan-out codes keep deliveryReason; no code = Delivery failed', () => {
     expect(shareRecipientReason('failed', 'no_contact')).toBe('No contact or phone on file');
     expect(shareRecipientReason('failed', '30007')).toBe('Carrier filtered the message (error 30007)');
-    expect(shareRecipientReason('failed', 'transient_cap')).toBe('Sending gave up after repeated carrier deferrals');
+    expect(shareRecipientReason('failed', 'transient_cap')).toBe('Sending gave up after repeated temporary errors');
     expect(shareRecipientReason('failed', 'enqueue_failed')).toBe('Sending could not be scheduled');
     expect(shareRecipientReason('failed', undefined)).toBe('Delivery failed');
     // retry-send-window D8: a failed share row reads the PLAIN 30003. The slot
@@ -164,6 +190,20 @@ describe('shareRecipientReason (share-skip-fix D7)', () => {
     for (const s of ['queued', 'sent', 'delivered'] as const) {
       expect(shareRecipientReason(s, 'anything')).toBeUndefined();
     }
+  });
+
+  // SOR Sec 2a item 1 / D23: a failed row falls through to deliveryReason,
+  // whose internal map answers the SOR codes first - prose, never a tail.
+  it('answers the internal map for the failed SOR codes', () => {
+    expect(shareRecipientReason('failed', 'send_unconfirmed')).toBe(
+      "Couldn't confirm whether this text went out",
+    );
+    expect(shareRecipientReason('failed', 'redrive_refused')).toBe(
+      "Wasn't resent: the group closed or the member left",
+    );
+    expect(shareRecipientReason('failed', 'sms_sending_disabled')).toBe(
+      'SMS sending is switched off, so nothing was sent',
+    );
   });
 });
 
@@ -187,5 +227,21 @@ describe('presentShareLabel (share-skip-fix D6)', () => {
     expect(presentShareLabel('draft', stats({ audience: 5 }))).toEqual({ label: 'Draft', tone: 'neutral' });
     expect(presentShareLabel('sent', stats())).toEqual({ label: 'Sent', tone: 'positive' }); // audience 0 is not "all skipped"
     expect(presentShareLabel('sent')).toEqual({ label: 'Sent', tone: 'positive' }); // no stats at hand
+  });
+});
+
+// SOR D22: `unconfirmed` is its own bucket, NEVER a skip. Those recipients MAY
+// have been texted, so a share of them must never read "Not sent".
+describe('the unconfirmed bucket (SOR D22)', () => {
+  it('skippedTotal never includes unconfirmed', () => {
+    expect(skippedTotal(stats({ unconfirmed: 5 }))).toBe(0);
+    expect(skippedTotal(stats({ skipped_other: 1, unconfirmed: 5 }))).toBe(1);
+  });
+
+  it('a sent share whose other recipients were all skipped still reads Sent', () => {
+    expect(presentShareLabel('sent', stats({ audience: 2, skipped_other: 1, unconfirmed: 1 }))).toEqual({
+      label: 'Sent',
+      tone: 'positive',
+    });
   });
 });

@@ -11,12 +11,15 @@ import {
   InProcessOutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
 import type { PreparedMessageSend, SendMessageParams } from '../src/adapters/messaging.js';
+import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messagingErrors.js';
 import {
   _resetForTests,
   configureJobsLogger,
   configureOutboundQueue,
   configureScheduler,
+  defineJobHandler,
   dispatchJob,
+  enqueue,
   enqueueImmediate,
 } from '../src/jobs/jobs.js';
 import {
@@ -30,14 +33,23 @@ import {
   composeNameList,
   composeRelayBody,
   joinedName,
+  parseRelayFanOutPayload,
   registerRelayFanOutJobHandler,
   resolveRelayComposeInputs,
+  sendOneRelayLeg,
   type RelayComposeDeps,
   type RelayComposeInputs,
 } from '../src/jobs/relayFanOut.js';
+import {
+  SEND_RECONCILE_JOB,
+  registerSendReconcileJobHandler,
+  type SendReconcilePayload,
+} from '../src/jobs/sendReconcile.js';
+import { hashRecipientKey } from '../src/lib/sendFingerprint.js';
 import { createLogger } from '../src/lib/logger.js';
 import { TokenBucket } from '../src/lib/tokenBucket.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
+import type { SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -196,6 +208,7 @@ describe('relay.fanOut (M1.7)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -1354,6 +1367,1246 @@ describe('relay.fanOut (M1.7)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.body).toBe('Hey, adding a new member to the group.');
   });
+
+  // -------------------------------------------------------------------------
+  // SOR (send-outcome-reconcile) Task 8: the relay leg claims its member on the
+  // send-attempt record before the provider call, tracks its phase, classifies
+  // a failure and hands an UNKNOWN outcome to the send.reconcile job; the loop
+  // never throws, brakes on an outage and closes through the record gate. No
+  // send.reconcile handler exists yet: a test drains only the relay.fanOut
+  // envelopes it needs and observes a reconcile envelope by inspection (a
+  // delayed one) or through a recording stub (a delay-0 one, build finding G4).
+  // -------------------------------------------------------------------------
+  describe('send outcomes (SOR spec D5-D9, D7a, D8, D8a, D13a) - the first test must fail on main', () => {
+    const DAVE = '+15550100004';
+    const ERIN = '+15550100005';
+    const FRANK = '+15550100006';
+    /** The sender (alice) plus four recipients, in roster order: bob, carol, dave, erin. */
+    const FIVE = [
+      { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+      { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      { contactId: 'c-carol', phone: CAROL, name: 'Carol' },
+      { contactId: 'c-dave', phone: DAVE, name: 'Dave' },
+      { contactId: 'c-erin', phone: ERIN, name: 'Erin' },
+    ];
+    // The override REPLACES the adapter and records nothing in world.sent:
+    // its own list is the only honest send count.
+    const sends: string[] = [];
+    beforeEach(() => {
+      sends.length = 0;
+    });
+    /** Both adapter methods (legacy and versioned) answer `sent`, except a socket drop (an UNKNOWN) for `phones`. */
+    function unknownOn(phones: Set<string>): void {
+      const answer = (to: string) => {
+        sends.push(to);
+        if (phones.has(to)) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        return { providerSid: `SM-${to}`, status: 'sent' as const, providerTs: new Date().toISOString() };
+      };
+      world.adapter.sendMessage = async (params: SendMessageParams) => answer(params.to);
+      world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => ({
+        ...answer(prepared.params.to),
+        actualTransport: 'sms' as const,
+      });
+    }
+    const ownerOf = (source: MessageItem, memberKey: string): SendAttemptOwner => ({
+      kind: 'relay_leg',
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      memberKey,
+    });
+    const slotOf = (source: MessageItem, memberKey: string) =>
+      world.messages.find((m) => m.tsMsgId === source.tsMsgId)!.delivery_recipients?.[memberKey];
+    const delayedOf = (jobName: string) => outbound.delayed.filter((d) => d.envelope.jobName === jobName);
+    async function run(source: MessageItem, extra: Record<string, unknown> = {}): Promise<void> {
+      await enqueueImmediate(RELAY_FANOUT_JOB, {
+        relayConversationId: 'conv-relay-1',
+        sourceTsMsgId: source.tsMsgId,
+        senderKey: 'c-alice',
+        ...extra,
+      });
+      await outbound.settle();
+    }
+
+    it.each([false, true])(
+      '1 an unknown on member 2 of 4 leaves 3 and 4 sent, 2 handed to reconcile, no throw (versioned=%s)',
+      async (versioned) => {
+        seedRelay(world, { participants: FIVE });
+        const source = versioned
+          ? seedVersionedSource(world, 'hello', 'c-alice')
+          : seedSource(world, 'hello', 'c-alice');
+        unknownOn(new Set([CAROL]));
+        const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
+
+        await run(source);
+
+        // The anchor bug: on main the unrecognised error THREW out of the loop,
+        // so dave and erin were never attempted and nothing retried.
+        expect(sends).toEqual([BOB, CAROL, DAVE, ERIN]);
+        for (const k of ['c-bob', 'c-dave', 'c-erin']) expect(slotOf(source, k)?.status, k).toBe('sent');
+        const record = await world.sendAttemptsRepo.get(ownerOf(source, 'c-carol'));
+        expect(record).toMatchObject({ state: 'reconciling', attemptNo: 1, checkNo: 0, sender: POOL });
+        // The slot is untouched but for the attempt clock (D7: only a verdict
+        // writes it). The clock is the CLAIM instant; the record's attemptedAt
+        // is its later re-arm (code review ADV-1), which the payload carries.
+        const claimedAt = claim.mock.calls.find(([owner]) => owner.kind === 'relay_leg' && owner.memberKey === 'c-carol')![2];
+        if (versioned) {
+          expect(slotOf(source, 'c-carol')).toMatchObject({
+            status: 'queued',
+            attemptedAt: claimedAt,
+            transportAggregationState: 'attempted',
+          });
+          expect(slotOf(source, 'c-carol')?.sid).toBeUndefined();
+          expect(slotOf(source, 'c-carol')?.errorCode).toBeUndefined();
+        } else {
+          expect(slotOf(source, 'c-carol')).toEqual({ status: 'queued', attemptedAt: claimedAt });
+        }
+        const reconcile = delayedOf(SEND_RECONCILE_JOB);
+        expect(reconcile).toHaveLength(1);
+        expect(reconcile[0]!.envelope.payload).toEqual({
+          owner: {
+            kind: 'relay_leg',
+            relayConversationId: 'conv-relay-1',
+            sourceTsMsgId: source.tsMsgId,
+            recipientKeyHash: hashRecipientKey('c-carol'),
+          },
+          attemptedAt: record!.attemptedAt,
+          checkNo: 0,
+          continuation: { senderKey: 'c-alice' },
+        });
+        // Check 0 runs about 5 s after the ATTEMPT (the list lag, D13a).
+        expect(reconcile[0]!.delaySeconds).toBeGreaterThanOrEqual(4);
+        expect(reconcile[0]!.delaySeconds).toBeLessThanOrEqual(5);
+        expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+        expect(capture.atLevel(50)).toHaveLength(0);
+      },
+    );
+
+    /** Facts for a record a test seeds directly (the values are never matched here). */
+    const seedFacts = { recipientDigest: 'd'.repeat(32), sender: POOL, bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 };
+    const agoIso = (ms: number) => new Date(Date.now() - ms).toISOString();
+    const recordOf = (source: MessageItem, memberKey: string) => world.sendAttemptsRepo.get(ownerOf(source, memberKey));
+    /** G4: a delay-0 reconcile hand-off never reaches outbound.delayed - record it with a stub handler. */
+    function recordReconciles(): SendReconcilePayload[] {
+      const got: SendReconcilePayload[] = [];
+      defineJobHandler(SEND_RECONCILE_JOB, async (p) => {
+        got.push(p as SendReconcilePayload);
+      });
+      return got;
+    }
+    /** A record the reconcile ruled never_sent and re-drove: redriven, redriveCount 1. */
+    async function seedRedriven(owner: SendAttemptOwner): Promise<void> {
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(owner, seedFacts, at);
+      await world.sendAttemptsRepo.handToReconcile(owner, { attemptNo: 1, attemptedAt: at });
+      await world.sendAttemptsRepo.markRedriven(owner, at);
+    }
+    function refuseDelayedEnqueues(): void {
+      // DELAY-SELECTIVE: the entry enqueue (delay 0) must still pass.
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+    }
+    const continuationOf = () =>
+      delayedOf(RELAY_FANOUT_JOB)[0]?.envelope.payload as Record<string, unknown> | undefined;
+    /** Drain ONE relay.fanOut continuation (the shift idiom); nothing else is dispatched. */
+    async function drainContinuation(): Promise<void> {
+      const idx = outbound.delayed.findIndex((d) => d.envelope.jobName === RELAY_FANOUT_JOB);
+      expect(idx).toBeGreaterThanOrEqual(0);
+      const [item] = outbound.delayed.splice(idx, 1);
+      await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)));
+      await outbound.settle();
+    }
+    const errorLabels = () => capture.atLevel(50).map((l) => l['label']).filter((l) => l !== undefined);
+    const brakeLines = () => capture.atLevel(40).filter((l) => l['event'] === 'outage_brake');
+    const TWO = FIVE.slice(0, 2);
+    const SIX = [...FIVE, { contactId: 'c-frank', phone: FRANK, name: 'Frank' }];
+
+    it('2 a queued+sid success refuses a second claim: the same payload dispatched twice makes one provider call per member', async () => {
+      seedRelay(world);
+      const source = seedSource(world, 'hello', 'c-alice');
+      await run(source);
+      // A second envelope (a fresh jobId, so the marker cannot help) for the same source.
+      await run(source);
+      expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
+      // A relay success keeps the slot `queued` with its sid: not terminal, so only the record stops the re-send.
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'queued', sid: world.sentDetails[0]!.sid });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 1 });
+    });
+
+    it('4 closeRelay on a legacy row with an empty map closes an absent record, leaves reconciling, done/sent and fresh attempting ones alone, and takes over a stale attempting one (ONE reconcile, carrying the continuation)', async () => {
+      seedRelay(world, { participants: SIX });
+      const source = seedSource(world, 'hello', 'c-alice');
+      // Close B: the ladder is spent when this first pass begins.
+      source.fanout_attempt = 3;
+      const send = neverSends();
+      world.adapter.sendMessage = send;
+      const reconciles = recordReconciles();
+      const now = new Date().toISOString();
+      const stale = agoIso(31_000);
+      // bob: no record.
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-carol'), seedFacts, now); // reconciling
+      await world.sendAttemptsRepo.handToReconcile(ownerOf(source, 'c-carol'), { attemptNo: 1, attemptedAt: now });
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-dave'), seedFacts, now); // done/sent (its slot absent: the gate alone keeps it)
+      await world.sendAttemptsRepo.finishAttempt(ownerOf(source, 'c-dave'), { attemptNo: 1, attemptedAt: now }, { outcome: 'sent', sid: 'SMd' });
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-erin'), seedFacts, stale); // stale attempting
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-frank'), seedFacts, now); // fresh attempting
+
+      await run(source);
+
+      expect(send).not.toHaveBeenCalled();
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      for (const k of ['c-carol', 'c-dave', 'c-erin', 'c-frank']) expect(slotOf(source, k), k).toBeUndefined();
+      expect(await recordOf(source, 'c-erin')).toMatchObject({ state: 'reconciling', attemptedAt: stale, attemptNo: 1 });
+      expect(await recordOf(source, 'c-frank')).toMatchObject({ state: 'attempting' });
+      expect(await recordOf(source, 'c-dave')).toMatchObject({ state: 'done', outcome: 'sent' });
+      expect(reconciles).toEqual([
+        {
+          owner: {
+            kind: 'relay_leg',
+            relayConversationId: 'conv-relay-1',
+            sourceTsMsgId: source.tsMsgId,
+            recipientKeyHash: hashRecipientKey('c-erin'),
+          },
+          attemptedAt: stale,
+          checkNo: 0,
+          continuation: { senderKey: 'c-alice' },
+        },
+      ]);
+      expect(closeLines(capture)).toHaveLength(1);
+      expect(closeLines(capture)[0]!['fanoutAttempt']).toBe(3);
+    });
+
+    it('4c a cap-close takeover whose fence is lost leaves the member alone', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      const reconciles = recordReconciles();
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, agoIso(31_000));
+      vi.spyOn(world.sendAttemptsRepo, 'takeOver').mockResolvedValueOnce(false);
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(reconciles).toHaveLength(0);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting' });
+    });
+
+    it('4d stale attempting records are taken over by the claim and handed off by the loop - never re-sent, and takeovers do not count toward the brake (D8a)', async () => {
+      seedRelay(world, { participants: FIVE });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      const stale = agoIso(31_000);
+      for (const k of ['c-bob', 'c-carol', 'c-dave']) await world.sendAttemptsRepo.claim(ownerOf(source, k), seedFacts, stale);
+      await run(source, { recipientKeys: ['c-bob', 'c-carol', 'c-dave', 'c-erin'], attempt: 2 });
+      for (const k of ['c-bob', 'c-carol', 'c-dave']) {
+        expect(await recordOf(source, k), k).toMatchObject({ state: 'reconciling', attemptedAt: stale, attemptNo: 1 });
+        expect(slotOf(source, k), k).toBeUndefined();
+      }
+      expect(reconciles.map((r) => r.owner.recipientKeyHash)).toEqual(['c-bob', 'c-carol', 'c-dave']);
+      expect(reconciles[0]).toMatchObject({ attemptedAt: stale, checkNo: 0, continuation: { senderKey: 'c-alice' } });
+      // Three takeovers in a row are NOT an outage: erin still sends.
+      expect(sends).toEqual([ERIN]);
+      expect(brakeLines()).toHaveLength(0);
+      expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+    });
+
+    it('4e a claim-time takeover whose fence is lost hands off nothing and sends nothing (INFO)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, agoIso(31_000));
+      vi.spyOn(world.sendAttemptsRepo, 'takeOver').mockResolvedValueOnce(false);
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(reconciles).toHaveLength(0);
+      expect(sends).toHaveLength(0);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting' });
+      expect(capture.atLevel(30).filter((l) => String(l['msg']).includes('takeover lost'))).toHaveLength(1);
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('4b a cap-close whose gate read throws for one member logs it and still closes the rest (T8-6)', async () => {
+      seedRelay(world);
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockRejectedValueOnce(new Error('dynamo down'));
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(slotOf(source, 'c-carol')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      const capClose = capture.atLevel(50).filter((l) => l['label'] === 'capClose');
+      expect(capClose).toHaveLength(1);
+      expect(capClose[0]).toMatchObject({ conversationId: 'conv-relay-1', recipientKey: 'c-bob', err: { message: 'dynamo down' } });
+      expect(closeLines(capture)).toHaveLength(1);
+    });
+
+    it('5 the adapter kill switch writes sms_sending_disabled and the record done/rejected', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      world.adapter.sendMessage = async () => {
+        throw new AdapterSmsSendingDisabledError('SMS sending is disabled');
+      };
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'sms_sending_disabled' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'rejected', cause: 'sms_sending_disabled' });
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('6 a record-phase failure (claimRelaySidPointer throws once) returns sent_unrecorded: record reconciling with the sid, one reconcile envelope, one provider call', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      vi.spyOn(world.messagesRepo, 'claimRelaySidPointer').mockRejectedValueOnce(new Error('dynamo blip'));
+      await run(source);
+      expect(world.sent).toHaveLength(1);
+      const sid = world.sentDetails[0]!.sid;
+      const record = await recordOf(source, 'c-bob');
+      expect(record).toMatchObject({ state: 'reconciling', sid, attemptNo: 1 });
+      // The slot write landed FIRST; only the pointer failed.
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'queued', sid });
+      const reconcile = delayedOf(SEND_RECONCILE_JOB);
+      expect(reconcile).toHaveLength(1);
+      expect(reconcile[0]!.envelope.payload).toMatchObject({
+        owner: { kind: 'relay_leg', recipientKeyHash: 'c-bob' },
+        attemptedAt: record!.attemptedAt,
+        checkNo: 0,
+        continuation: { senderKey: 'c-alice' },
+      });
+      const line = capture.atLevel(50).filter((l) => String(l['msg']).includes('sent_unrecorded'));
+      expect(line).toHaveLength(1);
+      expect(line[0]).toMatchObject({ providerSid: sid, memberKey: 'c-bob' });
+      expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+      // Never re-sent: the record is being reconciled, so a second pass skips it - and does not carry it.
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(world.sent).toHaveLength(1);
+      expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+    });
+
+    it('6b a record-phase failure whose hand-off fence is lost hands off nothing and carries nothing (G5)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      vi.spyOn(world.messagesRepo, 'claimRelaySidPointer').mockRejectedValueOnce(new Error('dynamo blip'));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockResolvedValueOnce(false);
+      await run(source);
+      expect(world.sent).toHaveLength(1);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(capture.atLevel(30).filter((l) => String(l['msg']).includes('hand-off fence lost'))).toHaveLength(1);
+    });
+
+    it('6c an attempt clock write that throws is best-effort: the leg still sends and records', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      vi.spyOn(world.messagesRepo, 'setRelayRecipientAttemptedAt').mockRejectedValueOnce(new Error('dynamo blip'));
+      await run(source);
+      expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent' });
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('attempt clock write failed'))).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('7 an unknown whose handToReconcile throws returns stranded: NO second provider call, record still attempting, carried, and at the cap left for the sweeper (R2 #1, D8a rev 11)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB]));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockRejectedValueOnce(new Error('dynamo down'));
+      const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
+      await run(source);
+      expect(sends).toEqual([BOB]);
+      const record = await recordOf(source, 'c-bob');
+      expect(record).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(errorLabels()).toEqual(['handToReconcile']);
+      // The slot's attempt clock is the CLAIM instant; the record's is its re-arm (ADV-1).
+      const claimedAt = claim.mock.calls[0]![2];
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'queued', attemptedAt: claimedAt });
+      expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(0);
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'], attempt: 2 });
+      // Pass 2 meets the record still FRESH: refused, carried again - never a second send.
+      await drainContinuation();
+      expect(sends).toEqual([BOB]);
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'], attempt: 3 });
+      // Pass 3 is the last rung: the cap-close gate defers the live record - the slot stays queued.
+      await drainContinuation();
+      expect(sends).toEqual([BOB]);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'queued', attemptedAt: claimedAt });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+      expect(closeLines(capture)).toHaveLength(1);
+    });
+
+    it('7b a stranded unknown counts toward the brake', async () => {
+      seedRelay(world, { participants: FIVE });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB, CAROL, DAVE]));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockRejectedValue(new Error('dynamo down'));
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, DAVE]);
+      // The three stranded members are carried (record attempting, slot untouched), then the untried one.
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob', 'c-carol', 'c-dave', 'c-erin'] });
+      expect(errorLabels()).toEqual(['handToReconcile', 'handToReconcile', 'handToReconcile']);
+      expect(brakeLines()).toHaveLength(1);
+      expect(brakeLines()[0]).toMatchObject({ untried: 1, deferred: 4 });
+    });
+
+    it('8a three consecutive unknowns brake the pass: the untried remainder is deferred, not attempted, and a terminal member is never carried (D9)', async () => {
+      seedRelay(world, { participants: SIX });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.delivery_recipients = { 'c-frank': { status: 'sent', sid: 'SMprev' } };
+      unknownOn(new Set([BOB, CAROL, DAVE]));
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, DAVE]);
+      expect(slotOf(source, 'c-erin')).toBeUndefined();
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-erin'], attempt: 2 });
+      expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(3);
+      expect(brakeLines()).toHaveLength(1);
+      expect(brakeLines()[0]).toMatchObject({ conversationId: 'conv-relay-1', untried: 1, deferred: 1 });
+    });
+
+    it('8b a sent between two unknowns resets the streak', async () => {
+      seedRelay(world, { participants: SIX });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB, CAROL, ERIN, FRANK]));
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, DAVE, ERIN, FRANK]);
+      expect(brakeLines()).toHaveLength(0);
+    });
+
+    it('8c a suppressed (opted-out) member between two unknowns resets the streak', async () => {
+      seedRelay(world, { participants: SIX });
+      world.contacts.push({ contactId: 'c-dave', type: 'tenant', phone: DAVE, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB, CAROL, ERIN, FRANK]));
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, ERIN, FRANK]);
+      expect(slotOf(source, 'c-dave')).toMatchObject({ status: 'failed', errorCode: 'contact_opted_out' });
+      expect(brakeLines()).toHaveLength(0);
+    });
+
+    it('8d three retryable do not brake', async () => {
+      seedRelay(world, { participants: FIVE });
+      const source = seedSource(world, 'hello', 'c-alice');
+      world.adapter.sendMessage = async (params: SendMessageParams) => {
+        sends.push(params.to);
+        if (params.to !== ERIN) throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+        return { providerSid: `SM-${params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+      };
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, DAVE, ERIN]);
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob', 'c-carol', 'c-dave'] });
+      expect(brakeLines()).toHaveLength(0);
+    });
+
+    it('8e three rejected do not brake', async () => {
+      seedRelay(world, { participants: FIVE });
+      const source = seedSource(world, 'hello', 'c-alice');
+      world.adapter.sendMessage = async (params: SendMessageParams) => {
+        sends.push(params.to);
+        if (params.to !== ERIN) throw Object.assign(new Error('invalid'), { status: 400, code: 21211 });
+        return { providerSid: `SM-${params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+      };
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, DAVE, ERIN]);
+      expect(brakeLines()).toHaveLength(0);
+    });
+
+    it('8f a re-drive attempt closed as a second unknown COUNTS toward the brake (the broadcast twin)', async () => {
+      seedRelay(world, { participants: FIVE });
+      const source = seedSource(world, 'hello', 'c-alice');
+      // bob's record was re-driven; an ordinary continuation (no marker) still carries him.
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      unknownOn(new Set([BOB, CAROL, DAVE]));
+      await run(source, { recipientKeys: ['c-bob', 'c-carol', 'c-dave', 'c-erin'], attempt: 2 });
+      expect(sends).toEqual([BOB, CAROL, DAVE]);
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(brakeLines()).toHaveLength(1);
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-erin'] });
+    });
+
+    it('8g a stranded leg whose send is KNOWN (afterSend) resets the streak', async () => {
+      seedRelay(world, { participants: SIX });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB, CAROL, ERIN, FRANK]));
+      // dave SENDS, his pointer write throws, and so does the hand-off of his SID: stranded after a known send.
+      const realClaim = world.messagesRepo.claimRelaySidPointer.bind(world.messagesRepo);
+      vi.spyOn(world.messagesRepo, 'claimRelaySidPointer').mockImplementation(async (sid, ref) => {
+        if (sid === `SM-${DAVE}`) throw new Error('dynamo blip');
+        return realClaim(sid, ref);
+      });
+      const realHand = world.sendAttemptsRepo.handToReconcile.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockImplementation(async (owner, ref, sid) => {
+        if (sid !== undefined) throw new Error('dynamo down');
+        return realHand(owner, ref, sid);
+      });
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, DAVE, ERIN, FRANK]);
+      expect(await recordOf(source, 'c-dave')).toMatchObject({ state: 'attempting' });
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-dave'] });
+      expect(brakeLines()).toHaveLength(0);
+    });
+
+    it('8h an unknown whose hand-off FENCE is lost counts toward the brake and is neither handed off nor carried (G5)', async () => {
+      seedRelay(world, { participants: FIVE });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB, CAROL, DAVE]));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockResolvedValueOnce(false);
+      await run(source);
+      expect(sends).toEqual([BOB, CAROL, DAVE]);
+      expect(capture.atLevel(30).filter((l) => String(l['msg']).includes('hand-off fence lost'))).toHaveLength(1);
+      // carol and dave handed off; bob is the takeover's (no envelope, not carried); erin untried.
+      const hashes = delayedOf(SEND_RECONCILE_JOB).map((d) => (d.envelope.payload as SendReconcilePayload).owner.recipientKeyHash);
+      expect(hashes).toEqual(['c-carol', 'c-dave']);
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-erin'] });
+      expect(brakeLines()).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('9a a re-drive pass (redrive: true, one member, record redriven, fanout_attempt at cap) sends without claiming a rung', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      source.fanout_attempt = 3;
+      const claimPass = vi.spyOn(world.messagesRepo, 'claimFanoutPass');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(source.fanout_attempt).toBe(3);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2, redriveCount: 1 });
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('9b a re-drive pass whose member opted out closes the redriven record done/refused', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      source.fanout_attempt = 3;
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'contact_opted_out' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'contact_opted_out' });
+    });
+
+    it('9c a re-drive pass with a retryable remainder claims its rung AFTER the loop; the continuation carries no marker', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      const refused = vi.fn(async (): Promise<never> => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      });
+      world.adapter.sendMessage = refused;
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      const claimPass = vi.spyOn(world.messagesRepo, 'claimFanoutPass');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(refused).toHaveBeenCalledTimes(1);
+      expect(claimPass).toHaveBeenCalledTimes(1);
+      expect(claimPass.mock.invocationCallOrder[0]!).toBeGreaterThan(refused.mock.invocationCallOrder[0]!);
+      expect(delayedOf(RELAY_FANOUT_JOB).map((d) => d.envelope.payload)).toEqual([
+        { relayConversationId: 'conv-relay-1', sourceTsMsgId: source.tsMsgId, senderKey: 'c-alice', attempt: 2, recipientKeys: ['c-bob'] },
+      ]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'retryable', redriveCount: 1 });
+    });
+
+    it('9d a re-drive pass whose continuation enqueue is refused closes its redriven record enqueue_failed (G7)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      // A pre-claim throw defers bob with his record still redriven.
+      vi.spyOn(world.contactsRepo, 'getById').mockRejectedValueOnce(new Error('dynamo blip'));
+      refuseDelayedEnqueues();
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'enqueue_failed' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'enqueue_failed', cause: 'enqueue_failed' });
+    });
+
+    it('9e a re-drive pass that finds the group closed closes the carried member: the record FIRST, then the slot redrive_refused (T8-9)', async () => {
+      const conv = seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      conv.status = 'closed';
+      const closeRedriven = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const closeSlot = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(world.sent).toHaveLength(0);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'group_not_open' });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'redrive_refused' });
+      expect(closeRedriven.mock.invocationCallOrder[0]!).toBeLessThan(closeSlot.mock.invocationCallOrder[0]!);
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('re-drive refused'))).toHaveLength(1);
+    });
+
+    it('9f a re-drive pass that returns early does not close the slot of a member whose record another pass has claimed since', async () => {
+      const conv = seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      // Another pass claimed the redriven record: it is attempting now.
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, new Date().toISOString());
+      conv.status = 'closed';
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 2 });
+    });
+
+    it('9g an ORDINARY continuation that finds the group closed leaves every record alone (only a re-drive pass closes)', async () => {
+      const conv = seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      conv.status = 'closed';
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'redriven' });
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+    });
+
+    it('10 a re-drive attempt that comes back unknown closes unresolved with no second reconcile (D13a)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      unknownOn(new Set([BOB]));
+      const claimPass = vi.spyOn(world.messagesRepo, 'claimFanoutPass');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(sends).toEqual([BOB]);
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({
+        state: 'done',
+        outcome: 'unresolved',
+        cause: 'second_unknown',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(capture.atLevel(50).filter((l) => l['cause'] === 'second_unknown')).toHaveLength(1);
+    });
+
+    it('11a a foreign open attempt on the suppression arm defers the member instead of writing a terminal slot (D8)', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, new Date().toISOString());
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(world.conversations.get('conv-relay-1')!.relay_opted_out_members?.['c-bob']).toBeUndefined();
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'], attempt: 2 });
+    });
+
+    it('11b a done/sent record (queued+sid slot) makes the suppression arm return skipped_terminal and is NOT carried forward', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.delivery_recipients = { 'c-bob': { status: 'queued', sid: 'SMprev' } };
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, at);
+      await world.sendAttemptsRepo.finishAttempt(ownerOf(source, 'c-bob'), { attemptNo: 1, attemptedAt: at }, { outcome: 'sent', sid: 'SMprev' });
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'queued', sid: 'SMprev' });
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('11c a stale attempting record on the suppression arm is taken over and handed off by the loop; the slot is untouched', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      const reconciles = recordReconciles();
+      const stale = agoIso(31_000);
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, stale);
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'reconciling', attemptedAt: stale });
+      expect(reconciles).toHaveLength(1);
+      expect(reconciles[0]).toMatchObject({ attemptedAt: stale, checkNo: 0, continuation: { senderKey: 'c-alice' } });
+      expect(delayedOf(RELAY_FANOUT_JOB)).toHaveLength(0);
+    });
+
+    it('11d a FIRST pass does not carry a member a foreign fresh attempt owns (the broadcast twin, T7-11)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set());
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, new Date().toISOString());
+      await run(source);
+      expect(sends).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+    });
+
+    it('11e a continuation carries a member whose claim a foreign fresh attempt refuses, with no slot write', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set());
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, new Date().toISOString());
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(sends).toHaveLength(0);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'] });
+    });
+
+    it('11f a done/retryable record on the suppression arm writes the suppression as today and leaves the record alone', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(ownerOf(source, 'c-bob'), seedFacts, at);
+      await world.sendAttemptsRepo.finishAttempt(ownerOf(source, 'c-bob'), { attemptNo: 1, attemptedAt: at }, { outcome: 'retryable', cause: '429' });
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'contact_opted_out' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'retryable' });
+    });
+
+    it('12b mediaCount on the record is 0 without a media store', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'look', 'c-alice');
+      source.type = 'mms';
+      source.media_attachments = [{ s3Key: 'uploads/k', contentType: 'image/png' }];
+      await run(source);
+      expect(world.sent[0]?.mediaUrls).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ mediaCount: 0 });
+    });
+
+    it('14 a re-drive pass that defers before its claim and hits the cap closes its OWN redriven record transient_cap (R2 #11)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      source.fanout_attempt = 3;
+      vi.spyOn(world.contactsRepo, 'getById').mockRejectedValueOnce(new Error('dynamo blip'));
+      const claimPass = vi.spyOn(world.messagesRepo, 'claimFanoutPass');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'transient_cap' });
+      // The rung is claimed only AFTER the loop, because the pass has a remainder - and it is capped.
+      expect(claimPass).toHaveBeenCalledTimes(1);
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('15 a pre-claim throw (isMemberSuppressed throws once) defers the member with NO slot write: carried on the continuation and SENT there (R3 #4, A3)', async () => {
+      seedRelay(world);
+      const source = seedSource(world, 'hello', 'c-alice');
+      vi.spyOn(world.contactsRepo, 'getById').mockRejectedValueOnce(new Error('dynamo blip'));
+      await run(source);
+      expect(world.sent.map((s) => s.to)).toEqual([CAROL]);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toBeUndefined();
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'], attempt: 2 });
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('prepare failed before the claim'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ memberKey: 'c-bob', err: { message: 'dynamo blip' } });
+      expect(capture.atLevel(50)).toHaveLength(0);
+      await drainContinuation();
+      expect(world.sent.map((s) => s.to)).toEqual([CAROL, BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent' });
+    });
+
+    it('15b a pre-claim deferral never overwrites a slot whose send already landed (A3)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.delivery_recipients = { 'c-bob': { status: 'queued', sid: 'SMprev', sentAt: '2026-09-26T12:00:00.000Z' } };
+      vi.spyOn(world.contactsRepo, 'getById').mockRejectedValueOnce(new Error('dynamo blip'));
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'queued', sid: 'SMprev', sentAt: '2026-09-26T12:00:00.000Z' });
+    });
+
+    it('16 a redriven record reached by an ORDINARY continuation (no marker) whose member is opted out closes done/refused (R3 #17)', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'contact_opted_out' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'contact_opted_out' });
+    });
+
+    it('17 a 4xx with no code writes failed with NO errorCode; the record cause keeps the status (R3 #13)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      world.adapter.sendMessage = async () => {
+        throw Object.assign(new Error('bad request'), { status: 400 });
+      };
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'rejected', cause: '400' });
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('18 a Twilio rejection fails with its code; 20429 defers with its code; a refused connection defers send_retryable; each record closes (D5, D6)', async () => {
+      seedRelay(world, { participants: [...FIVE.slice(0, 4)] });
+      const source = seedSource(world, 'hello', 'c-alice');
+      world.adapter.sendMessage = async (params: SendMessageParams) => {
+        if (params.to === BOB) throw Object.assign(new Error('invalid'), { status: 400, code: 21211 });
+        if (params.to === CAROL) throw Object.assign(new Error('too many'), { status: 429, code: 20429 });
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      };
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: '21211' });
+      expect(slotOf(source, 'c-carol')).toEqual({ status: 'queued', errorCode: '20429' });
+      expect(slotOf(source, 'c-dave')).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'rejected', cause: '21211' });
+      expect(await recordOf(source, 'c-carol')).toMatchObject({ state: 'done', outcome: 'retryable', cause: '20429' });
+      expect(await recordOf(source, 'c-dave')).toMatchObject({ state: 'done', outcome: 'retryable', cause: 'send_retryable' });
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-carol', 'c-dave'] });
+    });
+
+    it('19 30007 and a refusal close their records: filtered -> rejected/30007, refused -> refused/<code>', async () => {
+      seedRelay(world);
+      const source = seedSource(world, 'hello', 'c-alice');
+      const { ContactOptedOutError } = await import('../src/services/sendMessage.js');
+      world.adapter.sendMessage = async (params: SendMessageParams) => {
+        if (params.to === BOB) throw Object.assign(new Error('filtered'), { code: 30007 });
+        throw new ContactOptedOutError('conv-relay-1');
+      };
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: '30007' });
+      expect(slotOf(source, 'c-carol')).toEqual({ status: 'failed', errorCode: 'contact_opted_out' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'rejected', cause: '30007' });
+      expect(await recordOf(source, 'c-carol')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'contact_opted_out' });
+    });
+
+    it('20 a reconcile enqueue that throws closes the member unresolved on the spot', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB]));
+      refuseDelayedEnqueues();
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+      const line = capture.atLevel(50).filter((l) => String(l['msg']).includes('reconcile enqueue failed'));
+      expect(line).toHaveLength(1);
+      expect(line[0]).toMatchObject({ recipientKey: 'c-bob', cause: 'enqueue_failed' });
+    });
+
+    it('21 the record phase writes the slot, then the pointer, then the record; a pointer held by another leg is logged and the leg stays sent', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      world.relaySidPointers.set('SMfake-out-1', { conversationId: 'conv-other', tsMsgId: 'ts-other', memberKey: 'c-other' });
+      const slotWrite = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+      const pointer = vi.spyOn(world.messagesRepo, 'claimRelaySidPointer');
+      const finish = vi.spyOn(world.sendAttemptsRepo, 'finishAttempt');
+      await run(source);
+      expect(world.sentDetails[0]!.sid).toBe('SMfake-out-1');
+      const order = [slotWrite, pointer, finish].map((s) => s.mock.invocationCallOrder[0]!);
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+      expect(capture.atLevel(50).filter((l) => String(l['msg']).includes('SID pointer already names another leg'))).toHaveLength(1);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent', sid: 'SMfake-out-1' });
+      expect(world.relaySidPointers.get('SMfake-out-1')).toMatchObject({ memberKey: 'c-other' });
+    });
+
+    it('22 a phone-only member is named redacted in every log line and hashed in the reconcile payload (G9)', async () => {
+      const PHONE_ONLY = '+15550100081';
+      seedRelay(world, {
+        participants: [
+          { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+          // A phone-only member: no contact id, so its key is `phone#<E164>`.
+          { contactId: '', phone: PHONE_ONLY },
+          { contactId: '', phone: '+15550100082' },
+        ],
+      });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([PHONE_ONLY, '+15550100082']));
+      // The first hand-off write fails: its ERROR line carries the member.
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockRejectedValueOnce(new Error('dynamo down'));
+      await run(source);
+      const text = JSON.stringify(capture.lines);
+      expect(text).not.toContain('phone#+');
+      expect(text).not.toContain('+1555010008');
+      expect(text).toContain('phone-only-member');
+      const payloads = JSON.stringify(delayedOf(SEND_RECONCILE_JOB).map((d) => d.envelope.payload));
+      expect(payloads).toContain(hashRecipientKey('phone#+15550100082'));
+      expect(payloads).not.toContain('+1555010008');
+    });
+
+    it('22b a cap-close names a phone-keyed member through safeRecipientKey', async () => {
+      seedRelay(world, {
+        participants: [
+          { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+          { contactId: '', phone: '+15550100083' },
+        ],
+      });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockRejectedValueOnce(new Error('dynamo down'));
+      await run(source);
+      const capClose = capture.atLevel(50).filter((l) => l['label'] === 'capClose');
+      expect(capClose).toHaveLength(1);
+      expect(capClose[0]).toMatchObject({ recipientKey: 'phone#redacted' });
+      expect(JSON.stringify(capture.lines)).not.toContain('+15550100083');
+    });
+
+    it('23 the payload parser carries redrive: true and nothing else', () => {
+      const base = { relayConversationId: 'c', sourceTsMsgId: 't', senderKey: 's' };
+      expect(parseRelayFanOutPayload({ ...base, redrive: true })).toEqual({ ...base, attempt: 1, redrive: true });
+      expect(parseRelayFanOutPayload({ ...base, redrive: 'yes' })).toEqual({ ...base, attempt: 1 });
+    });
+
+    it('24 a continuation reads its source strongly consistently; a first pass does not (D11, D16, T8-3)', async () => {
+      seedRelay(world, { participants: TWO });
+      const legacy = seedSource(world, 'hello', 'c-alice');
+      const consistent = vi.spyOn(world.messagesRepo, 'listByConversationConsistent');
+      await run(legacy);
+      expect(consistent).not.toHaveBeenCalled();
+      await run(legacy, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(consistent).toHaveBeenCalledTimes(1);
+    });
+
+    it('24b a versioned continuation re-reads its source through the consistent twin only', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedVersionedSource(world, 'hello', 'c-alice');
+      const eventual = vi.spyOn(world.messagesRepo, 'getByTsMsgId');
+      const consistent = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
+      await run(source);
+      expect(eventual).toHaveBeenCalled();
+      expect(consistent).not.toHaveBeenCalled();
+      eventual.mockClear();
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(consistent).toHaveBeenCalled();
+      expect(eventual).not.toHaveBeenCalled();
+    });
+
+    // --- code review ADV-1 (FW2-1): the re-arm immediately before the send ---
+
+    /** A real relay.fanOut envelope NOT run by the queue: dispatched by hand, a stalled pass never blocks outbound.settle(). */
+    async function detachedEnvelope(source: MessageItem): Promise<unknown> {
+      const envelope = await enqueue(
+        RELAY_FANOUT_JOB,
+        { relayConversationId: 'conv-relay-1', sourceTsMsgId: source.tsMsgId, senderKey: 'c-alice' },
+        { runAt: new Date(Date.now() + 600_000) },
+      );
+      const [item] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobId === envelope.jobId),
+        1,
+      );
+      return JSON.parse(JSON.stringify(item!.envelope)) as unknown;
+    }
+    const takenOverLines = () => capture.atLevel(30).filter((l) => String(l['msg']).includes('taken over before the send'));
+
+    it('ADV-1 (zz-adv-6): a pass stalled between its claim and the send - taken over, reconciled never_sent and re-driven meanwhile - resumes and does NOT send: its re-arm finds the attempt moved on (FW2-1)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'is the unit still available?', 'c-alice');
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+      // Pass A claims bob and stalls in its attempt-clock write (an unbounded
+      // DynamoDB call) - for 31 s: past the claim TTL, before the provider call.
+      const realClaim = world.sendAttemptsRepo.claim.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'claim').mockImplementationOnce((owner, facts) =>
+        realClaim(owner, facts, agoIso(31_000)),
+      );
+      const realClock = world.messagesRepo.setRelayRecipientAttemptedAt.bind(world.messagesRepo);
+      let resumeA!: () => void;
+      let stalledA!: () => void;
+      const aIsStalled = new Promise<void>((resolve) => {
+        stalledA = resolve;
+      });
+      vi.spyOn(world.messagesRepo, 'setRelayRecipientAttemptedAt').mockImplementationOnce(async (...args) => {
+        stalledA();
+        await new Promise<void>((resolve) => {
+          resumeA = resolve;
+        });
+        return realClock(...args);
+      });
+      const passA = dispatchJob(await detachedEnvelope(source));
+      await aIsStalled;
+      // Pass B - a second first pass under another jobId (relay.numberReady
+      // re-flushed the queued row) - finds the claim stale: it takes it over
+      // and hands off; checks 0 and 1 are due at once and continue.
+      await run(source);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      // Check 2: the provider holds nothing - never_sent. The record is re-driven
+      // and the re-drive pass claims attempt 2 and sends.
+      const [check2] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB),
+        1,
+      );
+      await dispatchJob(JSON.parse(JSON.stringify(check2!.envelope)) as unknown);
+      await outbound.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2, redriveCount: 1 });
+      // Pass A resumes. The attempt it claimed is gone: it must not send.
+      resumeA();
+      await passA;
+      await outbound.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2, redriveCount: 1 });
+      expect(takenOverLines()).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('ADV-1: a re-arm that finds the attempt taken over sends nothing and writes nothing more - the member is neither carried nor handed off (FW2-1)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
+      vi.spyOn(world.sendAttemptsRepo, 'rearm').mockResolvedValueOnce(undefined);
+      // A continuation, so a carried member would show as a new continuation.
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(world.sent).toHaveLength(0);
+      // Only the claim's own writes: the record as claimed, the slot's attempt clock.
+      const claimedAt = claim.mock.calls[0]![2];
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 1, attemptedAt: claimedAt });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'queued', attemptedAt: claimedAt });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(takenOverLines()).toHaveLength(1);
+      expect(takenOverLines()[0]).toMatchObject({ memberKey: 'c-bob' });
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('ADV-1: a re-arm that throws is the post-claim prepare failure - nothing sent, the slot deferred send_retryable, the attempt released retryable on its claimed ref, the member carried (FW2-1)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      vi.spyOn(world.sendAttemptsRepo, 'rearm').mockRejectedValueOnce(new Error('TransactionConflict'));
+      await run(source);
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'queued', errorCode: 'send_retryable' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({
+        state: 'done',
+        outcome: 'retryable',
+        cause: 'send_retryable',
+        attemptNo: 1,
+      });
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'], attempt: 2 });
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('prepare failed after the claim'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ memberKey: 'c-bob', err: { message: 'TransactionConflict' } });
+    });
+
+    it('ADV-1: the leg re-arms as the LAST step before the provider call - after the attempted aggregation write - and fences every later write on the ref the re-arm returned (FW2-1)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedVersionedSource(world, 'hello', 'c-alice');
+      const aggregate = vi.spyOn(world.messagesRepo, 'setRecipientTransportAggregationState');
+      const realRearm = world.sendAttemptsRepo.rearm.bind(world.sendAttemptsRepo);
+      const later = new Date(Date.now() + 1_000).toISOString();
+      const rearm = vi
+        .spyOn(world.sendAttemptsRepo, 'rearm')
+        .mockImplementationOnce((owner, ref) => realRearm(owner, ref, later));
+      const send = vi.spyOn(world.adapter, 'sendPreparedMessage');
+      await run(source);
+      expect(rearm).toHaveBeenCalledTimes(1);
+      const attempted = aggregate.mock.calls.findIndex((call) => call[3] === 'attempted');
+      expect(attempted).toBeGreaterThanOrEqual(0);
+      expect(aggregate.mock.invocationCallOrder[attempted]!).toBeLessThan(rearm.mock.invocationCallOrder[0]!);
+      expect(rearm.mock.invocationCallOrder[0]!).toBeLessThan(send.mock.invocationCallOrder[0]!);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 1, attemptedAt: later });
+    });
+
+    // --- code review C-2 / R-e (FW2-2): a terminal arm closes the record only
+    // after its slot write RESOLVED; a slot write that threw leaves the attempt
+    // open and the member stranded - carried to a pass that can still act.
+
+    it.each<[string, () => Promise<never>, string, string]>([
+      [
+        'a provider rejection (21211)',
+        async () => {
+          throw Object.assign(new Error('invalid'), { status: 400, code: 21211 });
+        },
+        'rejectSlot',
+        'errorCode',
+      ],
+      [
+        'carrier filtering (30007)',
+        async () => {
+          throw Object.assign(new Error('filtered'), { status: 400, code: 30007 });
+        },
+        'rejectSlot',
+        'errorCode',
+      ],
+      [
+        'a refusal',
+        async () => {
+          const { ContactOptedOutError } = await import('../src/services/sendMessage.js');
+          throw new ContactOptedOutError('conv-relay-1');
+        },
+        'refusedSlot',
+        'refusal',
+      ],
+    ])(
+      'C-2 (the relay twin of probe P1): %s whose slot write throws leaves the record attempting and the member stranded - carried, never closed over an open slot (FW2-2)',
+      async (_case, fail, label, codeField) => {
+        seedRelay(world, { participants: TWO });
+        const source = seedSource(world, 'hello', 'c-alice');
+        world.adapter.sendMessage = fail;
+        vi.spyOn(world.messagesRepo, 'setRecipientDelivery').mockRejectedValueOnce(new Error('dynamo down'));
+        await run(source);
+        expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 1 });
+        expect(slotOf(source, 'c-bob')?.status).toBe('queued');
+        expect(slotOf(source, 'c-bob')?.errorCode).toBeUndefined();
+        expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'], attempt: 2 });
+        const slotErrors = capture.atLevel(50).filter((l) => l['label'] === label);
+        expect(slotErrors).toHaveLength(1);
+        expect(slotErrors[0]![codeField]).toBeDefined();
+        expect(errorLabels()).toEqual([label]);
+      },
+    );
+
+    it('C-2: a second unknown whose unresolved slot close throws keeps the re-driven attempt open and strands the member - carried (FW2-2)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      unknownOn(new Set([BOB]));
+      vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent').mockRejectedValueOnce(new Error('dynamo down'));
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(sends).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(slotOf(source, 'c-bob')?.errorCode).toBeUndefined();
+      expect(continuationOf()).toMatchObject({ recipientKeys: ['c-bob'] });
+      expect(errorLabels()).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'second_unknown');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+    });
+
+    it('C-2: a reconcile enqueue that throws, whose unresolved slot close throws too, leaves the record reconciling - not carried, nothing closed (FW2-2)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      unknownOn(new Set([BOB]));
+      refuseDelayedEnqueues();
+      vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent').mockRejectedValueOnce(new Error('dynamo down'));
+      await run(source);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      expect(slotOf(source, 'c-bob')?.errorCode).toBeUndefined();
+      expect(outbound.delayed).toHaveLength(0);
+      expect(errorLabels()).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'enqueue_failed');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+    });
+
+    // --- code review C-4 / R-a (FW2-4): a close of a REDRIVEN record by
+    // another writer closes the record FIRST and writes its slot only when
+    // that won - a pass that re-claimed the record in between keeps the slot.
+
+    /** The R-a race: the gate reads the record redriven, then another pass claims it before the close lands. */
+    function reclaimAfterGateRead(owner: SendAttemptOwner): void {
+      const realGet = world.sendAttemptsRepo.get.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockImplementationOnce(async (o) => {
+        const seen = await realGet(o);
+        await world.sendAttemptsRepo.claim(owner, seedFacts, new Date().toISOString());
+        return seen;
+      });
+    }
+    const reclaimedLines = () => capture.atLevel(30).filter((l) => String(l['msg']).includes('re-claimed'));
+
+    it('C-4 / R-a: a cap-close of a redriven record another pass re-claims after the gate read writes no slot - the re-claimer keeps it (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      reclaimAfterGateRead(ownerOf(source, 'c-bob'));
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(reclaimedLines()).toHaveLength(1);
+      expect(reclaimedLines()[0]).toMatchObject({ recipientKey: 'c-bob', closeCode: 'transient_cap' });
+    });
+
+    it('C-4 / R-a: a cap-close of a redriven record closes the record BEFORE the slot (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      source.fanout_attempt = 3;
+      world.adapter.sendMessage = neverSends();
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotClose = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      await run(source);
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'transient_cap' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotClose.mock.invocationCallOrder[0]!);
+    });
+
+    it('C-4 / R-a: the suppression arm on a redriven record another pass re-claims after the gate read writes nothing and carries nothing (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      reclaimAfterGateRead(ownerOf(source, 'c-bob'));
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(world.sent).toHaveLength(0);
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(world.conversations.get('conv-relay-1')!.relay_opted_out_members?.['c-bob']).toBeUndefined();
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'attempting', attemptNo: 2 });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(reclaimedLines()).toHaveLength(1);
+      expect(reclaimedLines()[0]).toMatchObject({ memberKey: 'c-bob' });
+    });
+
+    it('C-4 / R-a: the suppression arm closes a redriven record BEFORE its slot (FW2-4)', async () => {
+      seedRelay(world, { participants: TWO });
+      world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotWrite = vi.spyOn(world.messagesRepo, 'setRecipientDelivery');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 4, redrive: true });
+      expect(slotOf(source, 'c-bob')).toEqual({ status: 'failed', errorCode: 'contact_opted_out' });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'refused', cause: 'contact_opted_out' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotWrite.mock.invocationCallOrder[0]!);
+    });
+
+    // --- code review ADV-5 (FW2-5) ---
+
+    it('ADV-5 (zz-adv-2): a re-drive pass closes a carried member who left the roster after the reconcile saw them - redrive_refused / member_removed, the record FIRST, then the slot (FW2-5)', async () => {
+      const conv = seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+      // Bob's leg drops before the provider records it: an unknown the reconcile rules never_sent.
+      unknownOn(new Set([BOB]));
+      await run(source);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'reconciling' });
+      // The reconcile's roster pre-check still sees Bob; he leaves the group
+      // right after the record is marked redriven, before the re-drive pass runs.
+      const realMark = world.sendAttemptsRepo.markRedriven.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'markRedriven').mockImplementationOnce(async (owner, at) => {
+        const marked = await realMark(owner, at);
+        conv.participants = conv.participants!.filter((p) => p.contactId !== 'c-bob');
+        return marked;
+      });
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotClose = vi.spyOn(world.messagesRepo, 'closeRelayRecipientIfUnsent');
+      for (let check = 0; check < 3; check++) {
+        const [item] = outbound.delayed.splice(
+          outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB),
+          1,
+        );
+        await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)) as unknown);
+        await outbound.settle();
+      }
+      expect(sends).toEqual([BOB]);
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'member_removed' });
+      expect(slotOf(source, 'c-bob')).toMatchObject({ status: 'failed', errorCode: 'redrive_refused' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotClose.mock.invocationCallOrder[0]!);
+      const refused = capture.atLevel(40).filter((l) => String(l['msg']).includes('re-drive refused'));
+      expect(refused).toHaveLength(1);
+      expect(refused[0]).toMatchObject({ cause: 'member_removed', carried: 1, closed: 1 });
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('ADV-5: an ORDINARY continuation that carries a member who left the roster closes nothing - only a re-drive pass does (FW2-5)', async () => {
+      const conv = seedRelay(world, { participants: TWO });
+      const source = seedSource(world, 'hello', 'c-alice');
+      await seedRedriven(ownerOf(source, 'c-bob'));
+      conv.participants = conv.participants!.filter((p) => p.contactId !== 'c-bob');
+      await run(source, { recipientKeys: ['c-bob'], attempt: 2 });
+      expect(await recordOf(source, 'c-bob')).toMatchObject({ state: 'redriven' });
+      expect(slotOf(source, 'c-bob')).toBeUndefined();
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('re-drive refused'))).toHaveLength(0);
+    });
+  });
 });
 
 /** The no-owner inputs value: a standalone group, or any owner-routed case that
@@ -1573,6 +2826,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -1741,6 +2995,59 @@ describe('relay.fanOut media (outbound MMS)', () => {
       'c-bob': { requestedTransport: 'mms', actualTransport: 'mms' },
       'c-carol': { requestedTransport: 'mms', actualTransport: 'mms' },
     });
+  });
+
+  // SOR Task 8 (build finding T8-4c): the claim's media facts and the
+  // post-claim presign failure need a store, which this describe wires.
+  const legOwnerOf = (source: MessageItem, memberKey: string): SendAttemptOwner => ({
+    kind: 'relay_leg',
+    relayConversationId: 'conv-relay-1',
+    sourceTsMsgId: source.tsMsgId,
+    memberKey,
+  });
+
+  it('SOR 12 mediaCount on the record equals the source media count when a store exists', async () => {
+    seedRelay(world);
+    const source = seedMediaSource('two photos', 'c-alice', [
+      { s3Key: 'media/conv-relay-1/SMrelay-mms-1/0', contentType: 'image/jpeg' },
+      { s3Key: 'media/conv-relay-1/SMrelay-mms-1/1', contentType: 'image/jpeg' },
+    ]);
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+    expect(world.sent.every((s) => s.mediaUrls?.length === 2)).toBe(true);
+    expect(await world.sendAttemptsRepo.get(legOwnerOf(source, 'c-bob'))).toMatchObject({ mediaCount: 2, state: 'done' });
+    expect(await world.sendAttemptsRepo.get(legOwnerOf(source, 'c-carol'))).toMatchObject({ mediaCount: 2 });
+  });
+
+  it('SOR 13 a pre-send throw after the claim (presign fails) releases the record done/retryable and defers', async () => {
+    seedRelay(world);
+    const source = seedMediaSource('look', 'c-alice', [
+      { s3Key: 'media/conv-relay-1/SMrelay-mms-1/0', contentType: 'image/jpeg' },
+    ]);
+    vi.spyOn(world.mediaStore, 'presign').mockRejectedValueOnce(new Error('presign boom'));
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+    // bob (first) never reached the provider; carol did.
+    expect(world.sent.map((s) => s.to)).toEqual([CAROL]);
+    expect(await world.sendAttemptsRepo.get(legOwnerOf(source, 'c-bob'))).toMatchObject({
+      state: 'done',
+      outcome: 'retryable',
+      cause: 'send_retryable',
+      attemptNo: 1,
+    });
+    expect(source.delivery_recipients?.['c-bob']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+    const cont = outbound.delayed.filter((d) => d.envelope.jobName === RELAY_FANOUT_JOB);
+    expect(cont).toHaveLength(1);
+    expect(cont[0]!.envelope.payload).toMatchObject({ recipientKeys: ['c-bob'], attempt: 2 });
+    expect(outbound.delayed.some((d) => d.envelope.jobName === SEND_RECONCILE_JOB)).toBe(false);
   });
 });
 
@@ -2153,6 +3460,7 @@ describe('relay.intro / relay.memberAdded on an OWNED group', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -2335,6 +3643,7 @@ describe('relay.fanOut token-bucket acquire (retry-send-window D4)', () => {
     world = createFakeWorld();
     bucket = new TokenBucket({ capacity: 10, refillPerSec: 10, maxJitterMs: 0 });
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -2366,5 +3675,76 @@ describe('relay.fanOut token-bucket acquire (retry-send-window D4)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
     // Exactly `acquire(1)` per leg - no options object, so no bound.
     expect(acquire.mock.calls).toEqual([[1], [1]]);
+  });
+
+  // SOR spec D7a "Claim placement": the claim sits AFTER the token acquire, so
+  // an acquire that fails is a PRE-claim throw - nothing sent, no record, no
+  // slot write (build ruling A3) - and the member is carried.
+  it('SOR an acquire that throws is a pre-claim throw: no record, no slot write, the member carried', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+    vi.spyOn(bucket, 'acquire').mockRejectedValueOnce(new Error('bucket store down'));
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to)).toEqual([CAROL]);
+    const owner: SendAttemptOwner = {
+      kind: 'relay_leg',
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      memberKey: 'c-bob',
+    };
+    expect(await world.sendAttemptsRepo.get(owner)).toBeUndefined();
+    expect(source.delivery_recipients?.['c-bob']).toBeUndefined();
+    expect(outbound.delayed[0]!.envelope.payload).toMatchObject({ recipientKeys: ['c-bob'] });
+  });
+
+  // RSW #5/#6: a bounded acquire that times out returns `deadline_exceeded`
+  // BEFORE any claim, so the retry rung's window close never holds a record.
+  it('SOR deadline_exceeded returns before any claim: no record, nothing written', async () => {
+    seedRelay(world);
+    const source = seedSource(world, 'hello', 'c-alice');
+    const drained = new TokenBucket({
+      capacity: 1,
+      refillPerSec: 0.001,
+      maxJitterMs: 0,
+      sleep: async () => {
+        throw new Error('the acquire must be bounded');
+      },
+    });
+    await drained.acquire(1);
+    const owner: SendAttemptOwner = {
+      kind: 'relay_leg',
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      memberKey: 'c-bob',
+    };
+    const outcome = await sendOneRelayLeg({
+      messages: world.messagesRepo,
+      conversations: world.conversationsRepo,
+      contacts: world.contactsRepo,
+      adapter: world.adapter,
+      log: createLogger({ level: 'info', destination: createLogCapture().stream }),
+      tokenBucket: drained,
+      payload: { relayConversationId: 'conv-relay-1', sourceTsMsgId: source.tsMsgId, attempt: 1 },
+      member: { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      currentSource: source,
+      poolNumber: POOL,
+      legBody: 'Alice: hello',
+      sourceMedia: [],
+      transport: { kind: 'legacy' },
+      sendDeadlineMs: Date.now() + 50,
+      sendAttempts: world.sendAttemptsRepo,
+      owner,
+    });
+    expect(outcome).toEqual({ kind: 'deadline_exceeded' });
+    expect(world.sent).toHaveLength(0);
+    expect(await world.sendAttemptsRepo.get(owner)).toBeUndefined();
+    expect(source.delivery_recipients?.['c-bob']).toBeUndefined();
   });
 });

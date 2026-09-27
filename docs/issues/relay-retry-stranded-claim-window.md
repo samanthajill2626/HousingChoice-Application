@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/messaging-relay
 created: 2026-09-03
-updated: 2026-09-24
+updated: 2026-09-25
 refs: app/src/routes/webhooks/twilio.ts:2742, app/src/routes/webhooks/twilio.ts:2795, app/src/routes/webhooks/twilio.ts:2803, app/src/repos/messagesRepo.ts:714, app/src/repos/messagesRepo.ts:2342, app/src/index.ts:154
 ---
 
@@ -80,3 +80,12 @@ not lost, would be enqueued a second time under a new job id, clear its own
 marker, find the slot still non-terminal, and text the member twice.
 `sendOneRelayLeg` skips only a TERMINAL slot, so nothing downstream catches it
 either.
+
+**Update 2026-09-25.** The due sweeper this issue calls for is now filed as
+[send-attempt-sweeper](./send-attempt-sweeper.md). The
+[send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md)
+(D14) records its own crash windows as "the same class" as this one and leaves
+all of them to that Stage 2 sweeper, which will read the per-recipient
+send-attempt record that branch adds. This window predates the record (it sits
+in the status webhook, before the rung's job runs), so the sweeper needs a way
+to find an unscheduled rung as well - the due row suggested above.

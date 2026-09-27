@@ -13,7 +13,9 @@ import type {
 } from '../../api/index.js';
 import {
   deliveryReason,
+  NOT_CONFIRMED_PRESENTATION,
   presentDeliveryStatus,
+  SEND_UNCONFIRMED_CODE,
   shareSkipReason,
   type DeliveryPresentation,
 } from '../contact/deliveryStatus.js';
@@ -105,7 +107,9 @@ export function presentShareLabel(
 /** Every skipped recipient across the three skip buckets - the ONE dashboard
  *  definition of "skipped", shared by the Skipped chip and the "Not sent" label
  *  so a fourth bucket changes both at once. `skipped_other` is optional (stats
- *  persisted before 2026-09-25 lack it). */
+ *  persisted before 2026-09-25 lack it). The `unconfirmed` bucket (SOR D22) is
+ *  NOT a skip and never joins this sum: those recipients MAY have been texted,
+ *  so a share of them must never read "Not sent". */
 export function skippedTotal(stats: BroadcastStats): number {
   return stats.skipped_opted_out + stats.skipped_no_consent + (stats.skipped_other ?? 0);
 }
@@ -126,7 +130,14 @@ export function skippedTotal(stats: BroadcastStats): number {
 export function presentRecipientStatus(
   status: BroadcastRecipient['status'],
   carrierSentAt?: string,
+  errorCode?: string,
 ): DeliveryPresentation {
+  // SOR D20/D22: `send_unconfirmed` is presented by the CODE ALONE, ahead of
+  // the status - the same "Not confirmed" (danger, not a failure) the relay
+  // row reads. The badge renders its reason through shareRecipientReason, which
+  // is not gated on isFailure; the results row keeps its failed styling and
+  // sort (both key on the status) and drops only the retry hint.
+  if (errorCode === SEND_UNCONFIRMED_CODE) return { ...NOT_CONFIRMED_PRESENTATION };
   if (status === 'skipped') {
     return { label: 'Skipped', tone: 'neutral', isFailure: false };
   }

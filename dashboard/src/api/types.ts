@@ -1788,6 +1788,11 @@ export interface RelayRecipientDelivery {
   requestedTransport?: MessageTransport;
   actualTransport?: MessageTransport;
   transportAggregationState?: TransportAggregationState;
+  /** OUR attempt clock (SOR D8a/D20a), stamped when a send site claims this
+   *  recipient before its provider call. Best-effort - a wholesale slot write
+   *  can erase it - and never a provider timestamp. A `queued` leg with no
+   *  `sentAt` ages from it (deliveryStatus.ts `stalenessClockMs`). */
+  attemptedAt?: string;
 }
 
 /** GET /api/events 'conversation.updated' payload. */
@@ -2938,16 +2943,20 @@ export type BroadcastMergeField = (typeof BROADCAST_MERGE_FIELDS)[number];
 export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
 
 /** The delivery rollup carried on a summary / results row. Disjoint buckets:
- *  queued + sending + sent + delivered + failed + skipped_opted_out +
- *  skipped_no_consent + skipped_other == audience (the server derives these
- *  from the recipients map). MIRRORS app/src/repos/broadcastsRepo.ts
- *  BroadcastStats - keep in sync. */
+ *  queued + sending + sent + delivered + failed + unconfirmed +
+ *  skipped_opted_out + skipped_no_consent + skipped_other == audience (the
+ *  server derives these from the recipients map). MIRRORS
+ *  app/src/repos/broadcastsRepo.ts BroadcastStats - keep in sync. */
 export interface BroadcastStats {
   /** The resolved audience size at send time. */
   audience: number;
   sent: number;
   delivered: number;
   failed: number;
+  /** SOR D22: closed recipients the platform could not confirm (a `failed`
+   *  slot carrying `send_unconfirmed`) - never in `failed`, never a skip.
+   *  Optional: persisted stats written before the field lack it - default 0. */
+  unconfirmed?: number;
   /** Recipients dropped because they opted out between resolve + send. */
   skipped_opted_out: number;
   /** Recipients fenced out for missing SMS consent (staff can record consent). */

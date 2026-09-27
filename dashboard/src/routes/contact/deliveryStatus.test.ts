@@ -95,7 +95,8 @@ describe('isQuietSince', () => {
 // | sent       | yes              | sentAt    | yes |
 // | sent       | no               | msg.at    | yes |
 // | queued     | yes              | sentAt    | yes |
-// | queued     | no               | -         | NO  |
+// | queued     | no, parseable attemptedAt (SOR D20a) | attemptedAt | yes |
+// | queued     | no, no parseable attemptedAt         | -           | NO  |
 // | queued_pending | either       | -         | no  |
 // | terminal (delivered/failed/undelivered) | either | - | no |
 describe('isStaleLeg / canEverGoStale - the S3 eligibility table', () => {
@@ -171,10 +172,11 @@ describe('isStaleLeg / canEverGoStale - the S3 eligibility table', () => {
     }
   });
 
-  it('canEverGoStale is true for exactly the three stale-CAPABLE rows of the table', () => {
+  it('canEverGoStale is true for exactly the four stale-CAPABLE rows of the table (SOR D20a added the attempt clock)', () => {
     expect(canEverGoStale({ status: 'sent', sentAt: FRESH }, ANCIENT_MS, NOW)).toBe(true);
     expect(canEverGoStale({ status: 'sent' }, FRESH_MS, NOW)).toBe(true);
     expect(canEverGoStale({ status: 'queued', sentAt: FRESH }, undefined, NOW)).toBe(true);
+    expect(canEverGoStale({ status: 'queued', attemptedAt: FRESH }, undefined, NOW)).toBe(true);
     // and stays true once the leg has already crossed the boundary - "can EVER"
     // is about having a clock, not about the answer today.
     expect(canEverGoStale({ status: 'sent', sentAt: QUIET }, undefined, NOW)).toBe(true);
@@ -282,6 +284,56 @@ describe('isStaleLeg / canEverGoStale - the S3 eligibility table', () => {
     expect(isStaleLeg(removed, L0, NOW)).toBe(false);
     expect(canEverGoStale(removed, L0, NOW)).toBe(false);
   });
+
+  // SOR D20a. A send site CLAIMS a relay recipient before its provider call and
+  // stamps the slot with OUR attempt clock, `attemptedAt` (best-effort - a
+  // wholesale slot write can erase it). A leg stranded mid-send or
+  // mid-reconcile is therefore no longer byte-identical to a held message or a
+  // fan-out that never ran, and it ages from that clock after the SAME budget.
+  it('ages a `queued` leg with NO sentAt from its attemptedAt (SOR D20a) - a leg stranded mid-send escalates', () => {
+    const slot = { status: 'queued', attemptedAt: iso(L0) } as const;
+    expect(isStaleLeg(slot, undefined, NOW)).toBe(true);
+    expect(canEverGoStale(slot, undefined, L0 + 1000)).toBe(true);
+    expect(presentLegDelivery(slot, 'relay', undefined, NOW)).toEqual({
+      label: 'Queued - not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+    // Inside the budget it is an ordinary in-flight leg: eligible, not stale.
+    expect(isStaleLeg({ status: 'queued', attemptedAt: FRESH }, undefined, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'queued', attemptedAt: FRESH }, undefined, NOW)).toBe(true);
+  });
+
+  it('still NEVER stales a `queued` leg with neither clock - the held-message silence D20a keeps', () => {
+    expect(isStaleLeg({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
+    // An attemptedAt that does not parse is no clock at all.
+    expect(isStaleLeg({ status: 'queued', attemptedAt: 'not-a-date' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'queued', attemptedAt: 'not-a-date' }, ANCIENT_MS, NOW)).toBe(false);
+  });
+
+  it('lets a parseable sentAt WIN over attemptedAt on a `queued` leg, in both directions', () => {
+    // Fresh provider clock, ancient attempt clock -> not stale.
+    expect(
+      isStaleLeg({ status: 'queued', sentAt: FRESH, attemptedAt: iso(ANCIENT_MS) }, undefined, NOW),
+    ).toBe(false);
+    // Quiet provider clock, fresh attempt clock -> stale.
+    expect(isStaleLeg({ status: 'queued', sentAt: QUIET, attemptedAt: FRESH }, undefined, NOW)).toBe(true);
+    // An UNPARSEABLE sentAt is no provider clock, so the attempt clock decides.
+    expect(
+      isStaleLeg({ status: 'queued', sentAt: 'not-a-date', attemptedAt: QUIET }, undefined, NOW),
+    ).toBe(true);
+  });
+
+  it('reads attemptedAt ONLY on a `queued` leg - it moves no other row of the table', () => {
+    // A `sent` leg keeps sentAt-then-msg.at; the attempt clock is not a third fallback.
+    expect(isStaleLeg({ status: 'sent', attemptedAt: QUIET }, FRESH_MS, NOW)).toBe(false);
+    expect(isStaleLeg({ status: 'queued_pending', attemptedAt: QUIET }, ANCIENT_MS, NOW)).toBe(false);
+    for (const status of ['delivered', 'failed', 'undelivered'] as const) {
+      expect(isStaleLeg({ status, attemptedAt: QUIET }, ANCIENT_MS, NOW)).toBe(false);
+      expect(canEverGoStale({ status, attemptedAt: FRESH }, ANCIENT_MS, NOW)).toBe(false);
+    }
+  });
 });
 
 describe('presentRelayDelivery', () => {
@@ -374,7 +426,7 @@ describe('presentRelayDelivery', () => {
       label: 'delivered 1/3 - 2 failed',
       tone: 'danger',
       isFailure: true,
-      reason: 'Sending gave up after repeated carrier deferrals',
+      reason: 'Sending gave up after repeated temporary errors',
     });
   });
 
@@ -610,7 +662,7 @@ describe('presentRelayDelivery', () => {
     ).toBeNull();
   });
 
-  it('cannot select the not-confirmed branches at all when the clock is withheld, however quiet the legs are', () => {
+  it('cannot select the not-confirmed branches BY CLOCK when the clock is withheld, however quiet the legs are (a send_unconfirmed leg is J by code - see its own describe)', () => {
     // Plan D-a, total: a caller cannot withhold a per-slot sentAt, so withholding
     // the READING clock is the only complete off switch - and it is what keeps
     // every pre-existing no-clock assertion in this file honest rather than lucky.
@@ -778,7 +830,7 @@ describe('deliveryReason', () => {
     );
     expect(deliveryReason('99999', { retryScheduled: true })).toBe('Delivery failed (error 99999)');
     expect(deliveryReason('transient_cap', { retryScheduled: true })).toBe(
-      'Sending gave up after repeated carrier deferrals',
+      'Sending gave up after repeated temporary errors',
     );
     expect(deliveryReason(undefined, { retryScheduled: true })).toBeUndefined();
   });
@@ -836,7 +888,7 @@ describe('deliveryReason', () => {
     expect(deliveryReason('99999', { relay: true })).toBe('Delivery failed (error 99999)');
     // The internal map still early-returns ahead of both override maps.
     expect(deliveryReason('transient_cap', { relay: true })).toBe(
-      'Sending gave up after repeated carrier deferrals',
+      'Sending gave up after repeated temporary errors',
     );
   });
 
@@ -873,7 +925,7 @@ describe('deliveryReason', () => {
   // same sentence renders as a broadcast's results badge AND beside one member's
   // name on a revealed recipient row.
   it('renders the two fan-out close codes as operator prose, never as an error number', () => {
-    expect(deliveryReason('transient_cap')).toBe('Sending gave up after repeated carrier deferrals');
+    expect(deliveryReason('transient_cap')).toBe('Sending gave up after repeated temporary errors');
     expect(deliveryReason('enqueue_failed')).toBe('Sending could not be scheduled');
     for (const code of ['transient_cap', 'enqueue_failed']) {
       const reason = deliveryReason(code) as string;
@@ -891,7 +943,7 @@ describe('deliveryReason', () => {
   // and the hedged MMS copy would be a false reading of what happened.
   it('reads the close codes identically on an attachment leg', () => {
     expect(deliveryReason('transient_cap', { media: true })).toBe(
-      'Sending gave up after repeated carrier deferrals',
+      'Sending gave up after repeated temporary errors',
     );
     expect(deliveryReason('enqueue_failed', { media: true })).toBe('Sending could not be scheduled');
   });
@@ -1403,6 +1455,47 @@ describe('presentRelayDelivery - retry-aware arithmetic (D19)', () => {
     });
   });
 
+  // SOR D21 on the JOIN's real shape (T13-5): a rung the reconcile closed
+  // unresolved projects `send_unconfirmed` onto the ORIGINAL leg, whose status
+  // stays `undelivered`, as `terminal` - with the clock on and retryAware on,
+  // exactly as the relay Timeline calls this. K would count a `terminal`
+  // hard-failed leg; the code takes it out of K and into J first.
+  it('counts a leg whose last rung closed send_unconfirmed under not confirmed, never failed', () => {
+    const chip = presentRelayDelivery(
+      [
+        { status: 'delivered' },
+        { status: 'undelivered', errorCode: 'send_unconfirmed', retryState: 'terminal' },
+      ],
+      { ...RETRY_OPTS, messageAtMs: MSG_AT, nowMs: NOW },
+    );
+    expect(chip).toEqual({
+      label: 'delivered 1/2 - 1 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+      reason: "Couldn't confirm whether this text went out",
+    });
+    expect(chip?.label).not.toContain('failed');
+  });
+
+  // T13-2: the live-rung step keeps the ORIGINAL's code, so a leg can in
+  // principle carry the code AND `retrying`. Its row reads "Not confirmed" (the
+  // code arm sits before the retry states), so the chip must count it in J
+  // ONLY - never "1 retrying, 1 not confirmed" for one member.
+  it('never counts a send_unconfirmed leg as retrying too - K, R and J stay disjoint', () => {
+    const leg: RetryAwareRelayLeg = {
+      status: 'undelivered',
+      errorCode: 'send_unconfirmed',
+      retryState: 'retrying',
+    };
+    expect(presentRelayDelivery([{ status: 'delivered' }, leg], RETRY_OPTS)).toEqual({
+      label: 'delivered 1/2 - 1 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+      reason: "Couldn't confirm whether this text went out",
+    });
+    expect(presentLegDelivery(leg, 'relay')?.label).toBe('Not confirmed');
+  });
+
   // D19: the shared success label serves native group text and the broadcasts
   // routes and must not move.
   it('leaves the all-delivered label untouched without a retry', () => {
@@ -1734,5 +1827,175 @@ describe('deliveryReason - the relay retry close codes (D15, retry-send-window D
     expect(deliveryReason(code)).toBe(copy);
     expect(deliveryReason(code, { media: true })).toBe(copy);
     expect(deliveryReason(code, { retryScheduled: true })).toBe(copy);
+  });
+});
+
+// SOR D20/D21. `send_unconfirmed` is the close the platform writes when it
+// could not confirm whether a text went out (the reconcile's `unresolved`
+// verdict). It is presented by CODE ALONE, the way `contact_opted_out` is: the
+// relay retry join projects a rung's terminal code onto the ORIGINAL leg, whose
+// status stays that original's (`undelivered` / `failed`), so no position may
+// key on the status. Danger, so it draws the eye; NOT a failure, because a
+// failure is what invites the resend that could text someone twice.
+describe('send_unconfirmed - Not confirmed by code alone (SOR D20/D21)', () => {
+  const NOT_CONFIRMED: DeliveryPresentation = {
+    label: 'Not confirmed',
+    tone: 'danger',
+    isFailure: false,
+    reason: "Couldn't confirm whether this text went out",
+  };
+
+  it('presents by code alone on a failed, an undelivered and a queued slot', () => {
+    for (const status of ['failed', 'undelivered', 'queued'] as const) {
+      expect(presentLegDelivery({ status, errorCode: 'send_unconfirmed' }, 'relay')).toEqual(
+        NOT_CONFIRMED,
+      );
+    }
+  });
+
+  // `isFailure: false` is what HIDES a reason on the row and in the recital
+  // (both append one only on a failure), so the presentation carries its own,
+  // the way `Retrying` does.
+  it('carries its own reason, and wins over every retry state and over a quiet clock', () => {
+    for (const retryState of ['terminal', 'retrying', 'unconfirmed'] as const) {
+      expect(
+        presentLegDelivery(
+          { status: 'undelivered', errorCode: 'send_unconfirmed', retryState },
+          'relay',
+        ),
+      ).toEqual(NOT_CONFIRMED);
+    }
+    const NOW = Date.parse('2026-09-02T10:00:00.000Z');
+    const quiet = new Date(NOW - STALE_SENT_AFTER_MS * 4).toISOString();
+    expect(
+      presentLegDelivery(
+        { status: 'queued', errorCode: 'send_unconfirmed', attemptedAt: quiet },
+        'relay',
+        undefined,
+        NOW,
+      ),
+    ).toEqual(NOT_CONFIRMED);
+  });
+
+  // The CODE decides on every roster (S4 mutant pass): the rollup counts a
+  // send_unconfirmed leg in J whatever product it serves, so the row must say
+  // the same - never a status-keyed "Undelivered" beside a chip counting it
+  // under not confirmed. (The native group-text product never writes the code
+  // today; this pins that the rule is the code, not the product.)
+  it('reads Not confirmed on a native group-text row too, matching the rollup', () => {
+    const leg: RetryAwareRelayLeg = { status: 'undelivered', errorCode: 'send_unconfirmed' };
+    expect(presentLegDelivery(leg, 'group_text')).toEqual(NOT_CONFIRMED);
+    expect(presentRelayDelivery([{ status: 'delivered' }, leg])?.label).toBe(
+      'delivered 1/2 - 1 not confirmed',
+    );
+  });
+
+  it('the rollup counts it under not confirmed, never failed, with the reason - no clock, no retryAware', () => {
+    expect(
+      presentRelayDelivery(
+        [{ status: 'delivered' }, { status: 'failed', errorCode: 'send_unconfirmed' }],
+        { relay: true },
+      ),
+    ).toEqual({
+      label: 'delivered 1/2 - 1 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+      reason: "Couldn't confirm whether this text went out",
+    });
+    expect(
+      presentRelayDelivery([
+        { status: 'undelivered', errorCode: 'send_unconfirmed' },
+        { status: 'undelivered', errorCode: 'send_unconfirmed' },
+      ]),
+    ).toEqual({
+      label: 'delivered 0/2 - 2 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+      reason: "Couldn't confirm whether this text went out",
+    });
+  });
+
+  // Beside a REAL failure the chip counts both; its reason is the failed legs'
+  // reason FIRST and then the D20 sentence (code review C-6: D20 says the
+  // rollup chip carries it as its reason too). A stale leg with no code adds
+  // nothing - see "puts the reason LAST and takes it from the FAILED legs only".
+  it('beside a real failure, counts both and joins the D20 sentence after the failed legs reason (code review C-6)', () => {
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'delivered' },
+          { status: 'failed', errorCode: '30007' },
+          { status: 'failed', errorCode: 'send_unconfirmed' },
+        ],
+        { relay: true },
+      ),
+    ).toEqual({
+      label: 'delivered 1/3 - 1 failed, 1 not confirmed',
+      tone: 'danger',
+      isFailure: true,
+      reason: "Carrier filtered the message (error 30007); Couldn't confirm whether this text went out",
+    });
+    // Two unconfirmed legs add the sentence once.
+    expect(
+      presentRelayDelivery([
+        { status: 'failed', errorCode: '21211' },
+        { status: 'failed', errorCode: 'send_unconfirmed' },
+        { status: 'undelivered', errorCode: 'send_unconfirmed' },
+      ])?.reason,
+    ).toBe("Delivery failed (error 21211); Couldn't confirm whether this text went out");
+    // Only the CODE speaks: a stale leg carrying a transient code adds nothing.
+    const now = Date.parse('2026-09-27T12:00:00.000Z');
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'failed', errorCode: '30007' },
+          { status: 'queued', errorCode: '30022', sentAt: new Date(now - STALE_SENT_AFTER_MS * 4).toISOString() },
+        ],
+        { messageAtMs: now - 60_000, nowMs: now },
+      ),
+    ).toMatchObject({
+      label: 'delivered 0/2 - 1 failed, 1 not confirmed',
+      reason: 'Carrier filtered the message (error 30007)',
+    });
+  });
+
+  it('the reason has no trailing period (the accessible name adds its own)', () => {
+    expect(deliveryReason('send_unconfirmed')).toBe("Couldn't confirm whether this text went out");
+    expect(deliveryReason('send_unconfirmed')).not.toMatch(/\.$/);
+  });
+});
+
+// SOR D23: the codes this branch writes render as prose, never as fake carrier
+// numbers; `transient_cap` widens from "carrier deferrals" to "temporary
+// errors" because D6 routes 20429 and connection refusals through that close.
+describe('deliveryReason - the codes send-outcome-reconcile writes (SOR D23)', () => {
+  it.each([
+    ['send_unconfirmed', "Couldn't confirm whether this text went out"],
+    ['redrive_refused', "Wasn't resent: the group closed or the member left"],
+    ['sms_sending_disabled', 'SMS sending is switched off, so nothing was sent'],
+    ['transient_cap', 'Sending gave up after repeated temporary errors'],
+  ])('%s renders as prose with no (error N) tail', (code, copy) => {
+    expect(deliveryReason(code)).toBe(copy);
+    expect(deliveryReason(code, { relay: true })).toBe(copy);
+    expect(deliveryReason(code, { media: true })).toBe(copy);
+    expect(deliveryReason(code, { retryScheduled: true })).toBe(copy);
+    expect(copy).not.toContain('(error ');
+  });
+
+  // A DEFERRAL, not a close: the slot is still `queued` and renders as one, so
+  // no position may print "Delivery failed (error send_retryable)".
+  it('send_retryable yields no reason (the slot renders as queued)', () => {
+    expect(deliveryReason('send_retryable')).toBeUndefined();
+    expect(deliveryReason('send_retryable', { relay: true })).toBeUndefined();
+    // Compared against the SAME leg with no code rather than a copied literal
+    // (the shipped label carries a real U+2026): it reads as a plain queued leg.
+    const deferred = presentLegDelivery({ status: 'queued', errorCode: 'send_retryable' }, 'relay');
+    expect(deferred).toEqual(presentLegDelivery({ status: 'queued' }, 'relay'));
+    expect(deferred).toMatchObject({ tone: 'neutral', isFailure: false });
+    expect(deferred?.label).toMatch(/^Sending/);
+  });
+
+  it('an unmapped provider code keeps the fallback', () => {
+    expect(deliveryReason('21211')).toBe('Delivery failed (error 21211)');
   });
 });

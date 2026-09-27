@@ -32,3 +32,15 @@ unmirrored waits/409s or re-verifies the S3 object exists before acking); or
 (b) on release, enqueue a delayed self-heal job that re-fetches the recording
 from Twilio by RecordingSid via the REST API instead of relying on webhook
 redelivery.
+
+**Update 2026-09-25 - a second way into the same loss.** The 2026-09-24 marker
+sweep (`feat/send-outcome-reconcile`, finding F9) found that the release itself
+is unguarded: `releaseCallRecording` runs inside the mirror-failure catch
+(`app/src/routes/webhooks/voice.ts:2042`), and if it throws, the handler fails
+with the claim still in place. The call entry keeps `recording_s3_key` for an
+object that was never written, and Twilio's redelivery hits the layer-1 early
+return (`:1957-1961`, "recording already stored") - no redelivery race needed.
+Both fix options above cover it, provided the release failure is handled. The
+rest of F9 (a throw AFTER a successful mirror, in the voicemail upgrade or the
+transcript request) is a different loss and is filed as
+[voicemail-upgrade-and-transcript-lost-after-mirror](./voicemail-upgrade-and-transcript-lost-after-mirror.md).

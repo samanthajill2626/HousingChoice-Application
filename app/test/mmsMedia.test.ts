@@ -171,6 +171,7 @@ describe('inbound MMS media mirroring', () => {
   it('RELAY inbound MMS now captures + mirrors media (previously dropped)', async () => {
     const world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

@@ -91,6 +91,7 @@ function wireBroadcastHandler(world: FakeWorld) {
     events: world.events,
   });
   registerBroadcastSendJobHandler({
+    sendAttemptsRepo: world.sendAttemptsRepo,
     config,
     broadcastsRepo: world.broadcastsRepo,
     contactsRepo: world.contactsRepo,
@@ -383,14 +384,15 @@ describe('share-broadcast API (M1.8a)', () => {
     const evt = world.emitted.find((e) => e.event === 'broadcast.updated')!;
     const stats = (evt.payload as { stats: BroadcastStats }).stats;
     expect(stats).toMatchObject({ audience: 1, delivered: 1, sent: 0, queued: 0 });
-    // EVERY bucket, incl. the optional `sending` and `skipped_other` (same sum as
-    // broadcastFanOut.test.ts bucketsSumToAudience).
+    // EVERY bucket, incl. the optional `sending`, `unconfirmed` (SOR D22) and
+    // `skipped_other` (same sum as broadcastFanOut.test.ts bucketsSumToAudience).
     expect(
       stats.queued +
         (stats.sending ?? 0) +
         stats.sent +
         stats.delivered +
         stats.failed +
+        (stats.unconfirmed ?? 0) +
         stats.skipped_opted_out +
         stats.skipped_no_consent +
         (stats.skipped_other ?? 0),
@@ -1271,6 +1273,7 @@ describe('share-broadcast API (M1.8a)', () => {
       delivered: 1,
       sent: 1,
       failed: 0,
+      unconfirmed: 0,
       skipped_no_consent: 1,
       skipped_opted_out: 1,
       skipped_other: 0,

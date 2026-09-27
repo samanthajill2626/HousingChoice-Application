@@ -651,4 +651,454 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions and fan-ou
     });
     expect(await readStoredFanoutAttempt(messagesTable, { conversationId, tsMsgId })).toBe(1);
   });
+
+  // --- SOR Task 6: the broadcast-side send-outcome additions ----------------
+  //
+  // One conditional write per recipient outcome (slot + stats together), the
+  // unconfirmed bucket, and the finalize flip only ONE writer wins (spec D8,
+  // D16a, D22). No shared seeded broadcast: each case creates its own and
+  // marks it sending (build finding T6-2).
+  describe('SOR send-outcome additions: broadcast slots, stats and finalize', () => {
+    async function sendingBroadcast(recipients: Record<string, BroadcastRecipient>): Promise<string> {
+      const created = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'Hi [TenantName]',
+      });
+      await broadcasts.markSending(created.broadcastId, recipients);
+      return created.broadcastId;
+    }
+
+    it('recordRecipientOutcome writes the slot and bumps stats in ONE conditional write', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const sent: BroadcastRecipient = { status: 'sent', conversationId: 'conv-1', tsMsgId: 'ts-1' };
+      const r = await broadcasts.recordRecipientOutcome(id, 'c-1', sent, { sent: 1, queued: -1 }, ['queued']);
+      expect(r.moved).toBe(true);
+      expect(r.item!.stats).toMatchObject({ sent: 1, queued: 0 });
+      expect(r.item!.recipients['c-1']).toEqual(sent);
+      const again = await broadcasts.recordRecipientOutcome(
+        id,
+        'c-1',
+        { status: 'failed', errorCode: 'x' },
+        { failed: 1, queued: -1 },
+        ['queued'],
+      );
+      expect(again).toEqual({ moved: false });
+      const stored = await broadcasts.getByIdConsistent(id);
+      expect(stored!.stats).toMatchObject({ sent: 1, failed: 0, queued: 0 });
+      expect(stored!.recipients['c-1']).toEqual(sent);
+    });
+
+    it('recordRecipientOutcome with a single-bucket delta lists only that bucket, and skips a zero delta', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' }, 'c-2': { status: 'queued' } });
+      // An unused alias would be a ValidationException here.
+      const r = await broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'skipped', errorCode: 'opted_out' }, { skipped_opted_out: 1 }, ['queued']);
+      expect(r.moved).toBe(true);
+      expect(r.item!.stats).toMatchObject({ skipped_opted_out: 1, queued: 2 });
+      const z = await broadcasts.recordRecipientOutcome(id, 'c-2', { status: 'sent' }, { sent: 1, failed: 0, queued: -1 }, ['queued']);
+      expect(z.moved).toBe(true);
+      expect(z.item!.stats).toMatchObject({ sent: 1, failed: 0, queued: 1 });
+    });
+
+    it('recordRecipientOutcome with an EMPTY delta writes the slot only, under the priors', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const r = await broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'queued', errorCode: 'send_retryable' }, {}, ['queued']);
+      expect(r.moved).toBe(true);
+      expect(r.item!.recipients['c-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(r.item!.stats.queued).toBe(1); // untouched
+      expect(
+        await broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'queued', errorCode: 'send_retryable' }, {}, ['sent']),
+      ).toEqual({ moved: false });
+    });
+
+    it('recordRecipientOutcome refuses a missing slot and a missing broadcast, and rejects an empty prior list before any write', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      expect(
+        await broadcasts.recordRecipientOutcome(id, 'c-absent', { status: 'sent' }, { sent: 1, queued: -1 }, ['queued']),
+      ).toEqual({ moved: false });
+      expect(
+        await broadcasts.recordRecipientOutcome(`bcast-${randomUUID()}`, 'c-1', { status: 'sent' }, { sent: 1 }, ['queued']),
+      ).toEqual({ moved: false });
+      await expect(
+        broadcasts.recordRecipientOutcome(id, 'c-1', { status: 'sent' }, { sent: 1 }, []),
+      ).rejects.toThrow(TypeError);
+      const stored = await broadcasts.getByIdConsistent(id);
+      expect(stored!.recipients).toEqual({ 'c-1': { status: 'queued' } });
+      expect(stored!.stats).toMatchObject({ sent: 0, queued: 1 });
+    });
+
+    it('closeRecipientIfQueued bumps the unconfirmed bucket, creating it on a legacy stats map', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' }, 'c-2': { status: 'queued' } });
+      // create() persists `unconfirmed: 0` now; a share mid-send at deploy lacks it.
+      await doc.send(
+        new UpdateCommand({
+          TableName: broadcastsTable,
+          Key: { broadcastId: id },
+          UpdateExpression: 'REMOVE stats.unconfirmed',
+        }),
+      );
+      const { Item: stored } = await doc.send(
+        new GetCommand({ TableName: broadcastsTable, Key: { broadcastId: id }, ConsistentRead: true }),
+      );
+      expect((stored as { stats: Record<string, unknown> }).stats).not.toHaveProperty('unconfirmed');
+      const r = await broadcasts.closeRecipientIfQueued(id, 'c-1', 'send_unconfirmed', 'unconfirmed');
+      expect(r.moved).toBe(true);
+      expect(r.item!.stats).toMatchObject({ unconfirmed: 1, failed: 0, queued: 1 });
+      expect(r.item!.recipients['c-1']).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      const f = await broadcasts.closeRecipientIfQueued(id, 'c-2', 'transient_cap', 'failed');
+      expect(f.item!.stats).toMatchObject({ unconfirmed: 1, failed: 1, queued: 0 });
+      expect(f.item!.recipients['c-2']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await broadcasts.closeRecipientIfQueued(id, 'c-1', 'send_unconfirmed', 'unconfirmed')).toEqual({ moved: false });
+    });
+
+    it('create persists the unconfirmed bucket at zero', async () => {
+      const created = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'Hi [TenantName]',
+      });
+      expect((await broadcasts.getByIdConsistent(created.broadcastId))!.stats.unconfirmed).toBe(0);
+    });
+
+    it('finalizeStatus wins once from sending; a later call reads the item back; a draft never flips; a missing broadcast throws', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const a = await broadcasts.finalizeStatus(id, 'sent');
+      expect(a.won).toBe(true);
+      expect(a.item).toMatchObject({ broadcastId: id, status: 'sent' });
+      expect(a.item).not.toHaveProperty('last_error');
+      const b = await broadcasts.finalizeStatus(id, 'failed', 'late');
+      expect(b).toMatchObject({ won: false, item: { status: 'sent' } });
+      expect(b.item).not.toHaveProperty('last_error');
+      const failedId = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      const lost = await broadcasts.finalizeStatus(failedId, 'failed', "Couldn't confirm any text went out");
+      expect(lost).toMatchObject({ won: true, item: { status: 'failed', last_error: "Couldn't confirm any text went out" } });
+      const draft = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'still a draft',
+      });
+      expect(await broadcasts.finalizeStatus(draft.broadcastId, 'sent')).toMatchObject({ won: false, item: { status: 'draft' } });
+      await expect(broadcasts.finalizeStatus(`bcast-${randomUUID()}`, 'sent')).rejects.toThrow(/not found/);
+    });
+
+    it('finalizeStatus is safe against the SDK\'s replay: a flip that committed on an earlier attempt reports won to ITS caller; a second finalizer still loses (FW1-5, ADV-3)', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      // zz-adv-5's method: the Update commits, then fails the way the SDK's replay of it would.
+      let replays = 1;
+      const send = doc.send.bind(doc) as unknown as (cmd: unknown) => Promise<unknown>;
+      const replaying = {
+        async send(cmd: unknown) {
+          const out = await send(cmd);
+          if (replays > 0 && cmd instanceof UpdateCommand) {
+            replays -= 1;
+            throw new ConditionalCheckFailedException({ message: 'The conditional request failed', $metadata: {} });
+          }
+          return out;
+        },
+      } as unknown as typeof doc;
+      const retried = createBroadcastsRepo({ doc: replaying, env: testEnv, logger });
+      const won = await retried.finalizeStatus(id, 'failed', "Couldn't confirm any text went out");
+      expect(replays).toBe(0);
+      expect(won).toMatchObject({ won: true, item: { status: 'failed', last_error: "Couldn't confirm any text went out" } });
+      const token = won.item['finalize_op'];
+      expect(typeof token).toBe('string');
+      // Any other finalizer - even through the same repo - is a genuine loser, and writes no token.
+      expect(await broadcasts.finalizeStatus(id, 'sent')).toMatchObject({ won: false, item: { status: 'failed', finalize_op: token } });
+      expect(await retried.finalizeStatus(id, 'sent')).toMatchObject({ won: false, item: { finalize_op: token } });
+    });
+
+    it('getByIdConsistent reads what getById reads', async () => {
+      const id = await sendingBroadcast({ 'c-1': { status: 'queued' } });
+      expect(await broadcasts.getByIdConsistent(id)).toEqual(await broadcasts.getById(id));
+      expect(await broadcasts.getByIdConsistent(`bcast-${randomUUID()}`)).toBeUndefined();
+    });
+  });
+
+  // --- SOR Task 6: the relay-side send-outcome additions --------------------
+  //
+  // The conditional closes, the forward-only adoption, the attempt clock and
+  // the reporting SID claim the send sites and send.reconcile rest on (spec
+  // D8, D8a, D11, D13, D15). Every case builds its OWN source row and SIDs:
+  // this file's tables are shared by every case and never reset (build
+  // finding T6-1).
+  describe('SOR send-outcome additions: relay pointers and slots', () => {
+    const T0 = '2026-09-26T12:00:00.000Z';
+    const T1 = '2026-09-26T12:00:05.000Z';
+    const relayCapture = createLogCapture();
+    const relayMessages = createMessagesRepo({
+      doc,
+      env: testEnv,
+      logger: createLogger({ level: 'info', destination: relayCapture.stream }),
+    });
+
+    /** A LEGACY relay inbound source (no transport schema version), seeded with an empty map. */
+    async function legacySource(): Promise<{ conversationId: string; tsMsgId: string }> {
+      const conversationId = `conv-relay-${randomUUID().slice(0, 8)}`;
+      const appended = await relayMessages.append({
+        conversationId,
+        providerSid: `SM${randomUUID().slice(0, 12)}`,
+        providerTs: new Date().toISOString(),
+        type: 'sms',
+        direction: 'inbound',
+        author: 'unknown',
+        deliveryStatus: 'delivered',
+        relaySenderKey: 'c-alice',
+        deliveryRecipients: {},
+        body: 'is the unit still available?',
+      });
+      return { conversationId, tsMsgId: appended.tsMsgId };
+    }
+
+    /** A VERSIONED relay source (transport schema 1) with the given seeded slots. */
+    async function versionedSource(
+      slots: Record<string, RelayRecipientDelivery>,
+    ): Promise<{ conversationId: string; tsMsgId: string }> {
+      const conversationId = `conv-relay-${randomUUID().slice(0, 8)}`;
+      const appended = await relayMessages.append({
+        conversationId,
+        providerSid: `SM${randomUUID().slice(0, 12)}`,
+        providerTs: new Date().toISOString(),
+        type: 'sms',
+        direction: 'inbound',
+        author: 'unknown',
+        deliveryStatus: 'delivered',
+        transportSchemaVersion: 1,
+        relaySenderKey: 'c-alice',
+        deliveryRecipients: slots,
+        body: 'is the unit still available?',
+      });
+      return { conversationId, tsMsgId: appended.tsMsgId };
+    }
+
+    async function slotOf(
+      src: { conversationId: string; tsMsgId: string },
+      memberKey: string,
+    ): Promise<RelayRecipientDelivery | undefined> {
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      return row?.delivery_recipients?.[memberKey];
+    }
+
+    const planned: RelayRecipientDelivery = {
+      status: 'queued',
+      requestedTransport: 'sms',
+      transportAggregationState: 'planned',
+    };
+
+    it('claimRelaySidPointer reports created / mine / other, and the consistent read returns the ref', async () => {
+      const sid = `SMclaim${randomUUID().slice(0, 12)}`;
+      const ref = { conversationId: `conv-${randomUUID().slice(0, 8)}`, tsMsgId: `${T0}#SMsrc`, memberKey: 'c-1' };
+      expect(await relayMessages.getRelaySidPointerConsistent(sid)).toBeUndefined();
+      expect(await relayMessages.claimRelaySidPointer(sid, ref)).toBe('created');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref })).toBe('mine');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref, memberKey: 'c-2' })).toBe('other');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref, tsMsgId: `${T1}#SMsrc` })).toBe('other');
+      expect(await relayMessages.claimRelaySidPointer(sid, { ...ref, conversationId: 'conv-else' })).toBe('other');
+      // A lost claim never rewrites the pointer.
+      expect(await relayMessages.getRelaySidPointerConsistent(sid)).toEqual(ref);
+      expect(await relayMessages.getRelaySidPointer(sid)).toEqual(ref);
+      // A pointer the existing put wrote is claimable as mine by the same ref.
+      const putSid = `SMput${randomUUID().slice(0, 12)}`;
+      await relayMessages.putRelaySidPointer(putSid, ref);
+      expect(await relayMessages.claimRelaySidPointer(putSid, ref)).toBe('mine');
+    });
+
+    it('closeRelayRecipientIfUnsent closes an absent legacy slot and a queued sid-less slot, skips a queued slot with a sid, a terminal slot and a re-close, and reports a missing row', async () => {
+      const src = await legacySource();
+      const cap = { status: 'failed' as const, errorCode: 'transient_cap' };
+      // Absent slot: a legacy source starts with an empty map (D8).
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-1')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      // Queued with no sid: closed in place, the attempt clock kept.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-2', { status: 'queued', attemptedAt: T0 });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-2', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-2')).toEqual({ status: 'failed', errorCode: 'transient_cap', attemptedAt: T0 });
+      // Queued WITH a sid: the provider accepted it - never overwritten.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-3', { status: 'queued', sid: 'SM7', sentAt: T0 });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-3', cap)).toBe('skipped_sent');
+      expect(await slotOf(src, 'c-3')).toEqual({ status: 'queued', sid: 'SM7', sentAt: T0 });
+      // A sent slot and a re-close of a closed slot are skipped too.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-4', { status: 'sent', sid: 'SM8', sentAt: T0 });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-4', cap)).toBe('skipped_sent');
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', { status: 'failed', errorCode: 'other' })).toBe('skipped_sent');
+      expect(await slotOf(src, 'c-1')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      // No row at all.
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, `${T0}#SMnope`, 'c-1', cap)).toBe('missing');
+    });
+
+    it('closeRelayRecipientIfUnsent on a versioned row keeps requestedTransport and every sibling field, and is forward-only', async () => {
+      const src = await versionedSource({ 'c-1': { ...planned } });
+      const cap = { status: 'failed' as const, errorCode: 'transient_cap' };
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-1')).toEqual({ ...planned, status: 'failed', errorCode: 'transient_cap' });
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', { status: 'failed', errorCode: 'other' })).toBe('skipped_sent');
+      expect(await slotOf(src, 'c-1')).toEqual({ ...planned, status: 'failed', errorCode: 'transient_cap' });
+      // A member with no slot on a versioned row is created closed, like a legacy one.
+      expect(await relayMessages.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-9', cap)).toBe('closed');
+      expect(await slotOf(src, 'c-9')).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+    });
+
+    it('setRelayRecipientAttemptedAt seeds an absent slot, never touches an existing slot\'s other fields, and is best-effort on a missing row', async () => {
+      const src = await legacySource();
+      await relayMessages.setRelayRecipientAttemptedAt(src.conversationId, src.tsMsgId, 'c-3', T0);
+      expect(await slotOf(src, 'c-3')).toEqual({ status: 'queued', attemptedAt: T0 });
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-2', { status: 'queued', sid: 'SM7', sentAt: T0 });
+      await relayMessages.setRelayRecipientAttemptedAt(src.conversationId, src.tsMsgId, 'c-2', T1);
+      expect(await slotOf(src, 'c-2')).toEqual({ status: 'queued', sid: 'SM7', sentAt: T0, attemptedAt: T1 });
+      // A later attempt stamps its own clock.
+      await relayMessages.setRelayRecipientAttemptedAt(src.conversationId, src.tsMsgId, 'c-3', T1);
+      expect(await slotOf(src, 'c-3')).toEqual({ status: 'queued', attemptedAt: T1 });
+      // A versioned slot keeps its transport fields.
+      const vsrc = await versionedSource({ 'c-1': { ...planned } });
+      await relayMessages.setRelayRecipientAttemptedAt(vsrc.conversationId, vsrc.tsMsgId, 'c-1', T0);
+      expect(await slotOf(vsrc, 'c-1')).toEqual({ ...planned, attemptedAt: T0 });
+      // Best-effort: a missing row WARNs and resolves.
+      const missingTs = `${T0}#SMnope${randomUUID().slice(0, 8)}`;
+      await expect(
+        relayMessages.setRelayRecipientAttemptedAt(src.conversationId, missingTs, 'c-1', T0),
+      ).resolves.toBeUndefined();
+      const warned = relayCapture.atLevel(40).filter((l) => l['tsMsgId'] === missingTs);
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toMatchObject({ conversationId: src.conversationId, memberKey: 'c-1' });
+    });
+
+    it('adoptRelayRecipientIfUnsent on a legacy row seeds an absent slot and is forward-only', async () => {
+      const src = await legacySource();
+      const adopt = (patch: { status: 'queued' | 'sent'; sid: string; sentAt: string; errorCode?: string }, memberKey = 'c-9', tsMsgId = src.tsMsgId) =>
+        relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, tsMsgId, memberKey, patch);
+      expect(await adopt({ status: 'queued', sid: 'SM9', sentAt: T0 })).toBe('adopted'); // absent -> seeded -> adopted
+      expect(await slotOf(src, 'c-9')).toEqual({ status: 'queued', sid: 'SM9', sentAt: T0 });
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 })).toBe('adopted');
+      expect(await slotOf(src, 'c-9')).toEqual({ status: 'sent', sid: 'SM9', sentAt: T0 }); // the earlier sentAt is kept
+      expect(await adopt({ status: 'queued', sid: 'SM9', sentAt: T1 })).toBe('skipped'); // sent -> queued is a regression
+      expect((await slotOf(src, 'c-9'))?.status).toBe('sent');
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 })).toBe('adopted'); // same status: idempotent
+      expect(await relayMessages.updateRecipientDeliveryStatus(src.conversationId, src.tsMsgId, 'c-9', 'delivered')).toBe(true);
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 })).toBe('skipped'); // a raced receipt is never regressed
+      expect((await slotOf(src, 'c-9'))?.status).toBe('delivered');
+      // First write wins on the sid; an error code rides a terminal adoption.
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-8', { status: 'queued', sid: 'SMold', attemptedAt: T0 });
+      expect(
+        await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-8', { status: 'failed', sid: 'SMnew', sentAt: T1, errorCode: '30007' }),
+      ).toBe('adopted');
+      expect(await slotOf(src, 'c-8')).toEqual({ status: 'failed', sid: 'SMold', sentAt: T1, errorCode: '30007', attemptedAt: T0 });
+      expect(await adopt({ status: 'sent', sid: 'SM9', sentAt: T1 }, 'c-9', `${T0}#SMnope`)).toBe('missing');
+    });
+
+    it('adoptRelayRecipientIfUnsent on a versioned row adopts once and skips the re-run and a regression', async () => {
+      const src = await versionedSource({ 'c-1': { ...planned } });
+      const patch = { status: 'sent' as const, sid: 'SM1', sentAt: T0 };
+      expect(await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', patch)).toBe('adopted');
+      expect(await slotOf(src, 'c-1')).toEqual({ ...planned, status: 'sent', sid: 'SM1', sentAt: T0 });
+      expect(await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', patch)).toBe('skipped');
+      expect(
+        await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-1', { ...patch, status: 'queued' }),
+      ).toBe('skipped');
+      expect((await slotOf(src, 'c-1'))?.status).toBe('sent');
+      // A versioned member with no slot is missing - the fan-out preflight always seeds one.
+      expect(await relayMessages.adoptRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-absent', patch)).toBe('missing');
+    });
+
+    it('a row with NO delivery map: close and adopt answer missing and the attempt clock only WARNs - never a ValidationException', async () => {
+      // No relay source row is written without the map today (build report
+      // S1c, row shapes), but a nested SET under an absent map is a
+      // ValidationException, not a condition failure - so the guard is
+      // load-bearing, as the unguarded setRecipientDelivery shows.
+      const conversationId = `conv-relay-${randomUUID().slice(0, 8)}`;
+      const appended = await relayMessages.append({
+        conversationId,
+        providerSid: `SM${randomUUID().slice(0, 12)}`,
+        providerTs: new Date().toISOString(),
+        type: 'sms',
+        direction: 'inbound',
+        author: 'unknown',
+        deliveryStatus: 'delivered',
+        relaySenderKey: 'c-alice',
+        body: 'no delivery map on this row',
+      });
+      const src = { conversationId, tsMsgId: appended.tsMsgId };
+      await expect(
+        relayMessages.setRecipientDelivery(conversationId, appended.tsMsgId, 'c-1', { status: 'queued' }),
+      ).rejects.toMatchObject({ name: 'ValidationException' });
+      expect(
+        await relayMessages.closeRelayRecipientIfUnsent(conversationId, appended.tsMsgId, 'c-1', { status: 'failed', errorCode: 'transient_cap' }),
+      ).toBe('missing');
+      expect(
+        await relayMessages.adoptRelayRecipientIfUnsent(conversationId, appended.tsMsgId, 'c-1', { status: 'sent', sid: 'SM1', sentAt: T0 }),
+      ).toBe('missing');
+      await expect(
+        relayMessages.setRelayRecipientAttemptedAt(conversationId, appended.tsMsgId, 'c-1', T0),
+      ).resolves.toBeUndefined();
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      expect(row).toBeDefined();
+      expect(row).not.toHaveProperty('delivery_recipients');
+    });
+
+    it('the consistent reads exist and agree with their eventual twins', async () => {
+      const absent = `SMabsent${randomUUID().slice(0, 12)}`;
+      expect(await relayMessages.getByProviderSidConsistent(absent)).toBeUndefined();
+      expect(await relayMessages.getSystemSidMarkerConsistent(absent)).toBeUndefined();
+      const src = await legacySource();
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      expect(await relayMessages.getByProviderSidConsistent(row!.provider_sid)).toEqual(row);
+      expect(await relayMessages.getByProviderSidConsistent(row!.provider_sid)).toEqual(
+        await relayMessages.getByProviderSid(row!.provider_sid),
+      );
+      const marked = `SMsys${randomUUID().slice(0, 12)}`;
+      await relayMessages.putSystemSidMarker(marked, 'cell_verification');
+      expect(await relayMessages.getSystemSidMarkerConsistent(marked)).toEqual({ kind: 'cell_verification' });
+      expect(await relayMessages.getSystemSidMarkerConsistent(marked)).toEqual(await relayMessages.getSystemSidMarker(marked));
+      expect(await relayMessages.listByConversationConsistent(src.conversationId, { limit: 5 })).toEqual(
+        await relayMessages.listByConversation(src.conversationId, { limit: 5 }),
+      );
+      expect(await relayMessages.listByConversationConsistent(src.conversationId)).toEqual([row]);
+      expect(await relayMessages.listByConversationConsistent(src.conversationId, { before: src.tsMsgId })).toEqual([]);
+    });
+
+    it('every read a consistent twin makes carries ConsistentRead; the eventual reads never do (D11)', async () => {
+      // DynamoDB Local answers every read consistently, so only the request
+      // itself can show which read a method asked for.
+      const sent: Array<Record<string, unknown>> = [];
+      const recordingDoc = {
+        send: (command: { input: Record<string, unknown> }) => {
+          sent.push(command.input);
+          return doc.send(command as never);
+        },
+      } as unknown as typeof doc;
+      const m = createMessagesRepo({ doc: recordingDoc, env: testEnv, logger });
+      const b = createBroadcastsRepo({ doc: recordingDoc, env: testEnv, logger });
+      const reads = async (fn: () => Promise<unknown>): Promise<unknown[]> => {
+        sent.length = 0;
+        await fn();
+        return sent.map((input) => input['ConsistentRead']);
+      };
+      const src = await legacySource();
+      const row = await relayMessages.getByTsMsgIdConsistent(src.conversationId, src.tsMsgId);
+      const sid = row!.provider_sid;
+      await relayMessages.claimRelaySidPointer(sid, { ...src, memberKey: 'c-1' });
+      await relayMessages.putSystemSidMarker(sid, 'cell_verification');
+      const created = await broadcasts.create({
+        created_by: 'usr_test',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'Hi [TenantName]',
+      });
+      expect(await reads(() => m.getByProviderSidConsistent(sid))).toEqual([true, true]);
+      expect(await reads(() => m.getByProviderSid(sid))).toEqual([undefined, undefined]);
+      expect(await reads(() => m.listByConversationConsistent(src.conversationId))).toEqual([true]);
+      expect(await reads(() => m.listByConversation(src.conversationId))).toEqual([undefined]);
+      expect(await reads(() => m.getRelaySidPointerConsistent(sid))).toEqual([true]);
+      expect(await reads(() => m.getRelaySidPointer(sid))).toEqual([undefined]);
+      expect(await reads(() => m.getSystemSidMarkerConsistent(sid))).toEqual([true]);
+      expect(await reads(() => m.getSystemSidMarker(sid))).toEqual([undefined]);
+      expect(await reads(() => b.getByIdConsistent(created.broadcastId))).toEqual([true]);
+      expect(await reads(() => b.getById(created.broadcastId))).toEqual([undefined]);
+      // A lost claim, a refused close and a lost finalize each decide from a
+      // CONSISTENT read-back.
+      expect(await reads(() => m.claimRelaySidPointer(sid, { ...src, memberKey: 'c-1' }))).toEqual([undefined, true]);
+      await relayMessages.setRecipientDelivery(src.conversationId, src.tsMsgId, 'c-2', { status: 'sent', sid: 'SM2' });
+      expect(
+        await reads(() => m.closeRelayRecipientIfUnsent(src.conversationId, src.tsMsgId, 'c-2', { status: 'failed', errorCode: 'x' })),
+      ).toEqual([undefined, undefined, true]);
+      expect(await reads(() => b.finalizeStatus(created.broadcastId, 'sent'))).toEqual([undefined, true]);
+    });
+  });
 });

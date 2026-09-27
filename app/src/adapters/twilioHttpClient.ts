@@ -18,6 +18,14 @@ import RequestClient from 'twilio/lib/base/RequestClient.js';
 export interface RedirectingHttpClientOpts {
   /** Base URL of the fake host, e.g. http://localhost:8889 (no trailing slash). */
   baseUrl: string;
+  /**
+   * Request timeout in ms (the RequestClient's defaultTimeout). twilio()
+   * applies its own `timeout` option only to the default client it builds,
+   * never to a passed httpClient, so a caller that pins a timeout passes it
+   * here too (the messaging driver pins TWILIO_REQUEST_TIMEOUT_MS, spec D8a).
+   * Undefined keeps the SDK default (30000).
+   */
+  timeout?: number;
 }
 
 /**
@@ -29,7 +37,7 @@ export interface RedirectingHttpClientOpts {
  */
 export function createRedirectingHttpClient(opts: RedirectingHttpClientOpts): RequestClient {
   const base = opts.baseUrl.replace(/\/$/, '');
-  const client = new RequestClient();
+  const client = new RequestClient({ timeout: opts.timeout });
   // twilio's RequestClient.request takes { method, uri, ... } and returns a
   // promise of { statusCode, body, headers }. Rewrite only the origin of `uri`,
   // delegating to the real implementation (request building, retries, parsing).

@@ -89,6 +89,7 @@ describe('relay inbound webhook (M1.7)', () => {
     // Register the relay handler against the SAME world repos + adapter so the
     // webhook's enqueueImmediate fans out in-process, end-to-end.
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -347,6 +348,7 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -680,6 +682,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

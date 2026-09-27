@@ -83,6 +83,50 @@ const STALE_SENT_PRESENTATION: DeliveryPresentation = {
 };
 
 /**
+ * The slot codes send-outcome-reconcile writes (spec D10), MIRRORED from
+ * app/src/lib/sendOutcome.ts. The dashboard never imports app VALUES at
+ * runtime (the plan's declared deviation 2), so these are hand copies, pinned
+ * to the app constants by sendOutcomeCodesMirror.test.ts:
+ *
+ *  - `send_unconfirmed`: a CLOSED slot the platform could not confirm - the
+ *    reconcile could not tell whether the provider took the text. Presented by
+ *    CODE ALONE as "Not confirmed" (D20); see NOT_CONFIRMED_PRESENTATION.
+ *  - `redrive_refused`: a never-sent recipient whose one re-drive the
+ *    pre-check declined (group closed, member gone) - closed, prose (D23).
+ *  - `send_retryable`: a DEFERRAL with no provider code - the slot is still
+ *    `queued` and renders as queued, so it has NO reason (D10).
+ *  - `sms_sending_disabled`: the adapter kill switch refused the send - prose
+ *    (D23).
+ */
+export const SEND_UNCONFIRMED_CODE = 'send_unconfirmed';
+export const REDRIVE_REFUSED_CODE = 'redrive_refused';
+export const SEND_RETRYABLE_CODE = 'send_retryable';
+export const SMS_SENDING_DISABLED_CODE = 'sms_sending_disabled';
+
+/** D20's reason for `send_unconfirmed`, ONE string shared by the presentation
+ *  below and the reason map, so a row and a chip cannot phrase it apart. No
+ *  trailing period: the accessible-name recital appends its own. */
+const SEND_UNCONFIRMED_REASON = "Couldn't confirm whether this text went out";
+
+/**
+ * A leg or a share recipient carrying `send_unconfirmed` (D20). Danger, so it
+ * draws the eye, and deliberately NOT a failure: a failure is what invites a
+ * resend, and this text may well have gone out - the double text this whole
+ * branch exists to prevent. Because `isFailure: false` is exactly what HIDES a
+ * reason on the relay row and in the recital (both append one only on a
+ * failure), the presentation carries its OWN reason, the way `Retrying` does.
+ * True for every cause the reconcile can end on - in each the platform does
+ * not know; the cause is for the log, not the row. Spread it at the use site;
+ * never hand out this instance.
+ */
+export const NOT_CONFIRMED_PRESENTATION: DeliveryPresentation = {
+  label: 'Not confirmed',
+  tone: 'danger',
+  isFailure: false,
+  reason: SEND_UNCONFIRMED_REASON,
+};
+
+/**
  * THE single clock comparison in this module: has `atMs` been quiet for at least
  * STALE_SENT_AFTER_MS as of `nowMs`? Inclusive at exactly the threshold.
  *
@@ -149,17 +193,22 @@ export function presentDeliveryStatus(
 
 /** The slice of a relay `delivery_recipients` slot the rollup presenter reads.
  *
- *  Both clocks are ISO strings off the wire (`api/types.ts` RelayRecipientDelivery)
- *  and come from DIFFERENT sources: `sentAt` is the PROVIDER's timestamp, written
- *  only by the two relay send paths after a real send returned, and `deliveredAt`
- *  is OUR server clock, written only on the `delivered` transition. Never subtract
- *  one from the other or present the pair as a duration. */
+ *  All three clocks are ISO strings off the wire (`api/types.ts`
+ *  RelayRecipientDelivery) and come from DIFFERENT sources: `sentAt` is the
+ *  PROVIDER's timestamp, written only by the two relay send paths after a real
+ *  send returned; `deliveredAt` is OUR server clock, written only on the
+ *  `delivered` transition; and `attemptedAt` (SOR D8a/D20a) is OUR attempt
+ *  clock, stamped when a send site CLAIMS the recipient before its provider
+ *  call - best-effort (a wholesale slot write can erase it) and never a
+ *  provider timestamp. Never subtract one from another or present a pair as a
+ *  duration. */
 export interface RelayDeliverySlot {
   status: DeliveryStatus;
   errorCode?: string;
   sentAt?: string;
   deliveredAt?: string;
   transportAggregationState?: RelayRecipientDelivery['transportAggregationState'];
+  attemptedAt?: string;
 }
 
 /** A relay leg as the RETRY-AWARE presenters see it: the wire slot, plus the
@@ -199,7 +248,8 @@ function parseWireClock(iso: string | undefined): number | undefined {
  *   | sent           | yes              | sentAt    |
  *   | sent           | no               | msg.at    |
  *   | queued         | yes              | sentAt    |
- *   | queued         | no               | NOTHING   |
+ *   | queued         | no, parseable attemptedAt | attemptedAt (SOR D20a) |
+ *   | queued         | no, no parseable attemptedAt | NOTHING |
  *   | queued_pending | either           | NOTHING   |
  *   | delivered/failed/undelivered | either | NOTHING |
  *   | any of the above | clock MORE THAN ONE BUDGET AHEAD of nowMs | NOTHING |
@@ -219,8 +269,17 @@ function parseWireClock(iso: string | undefined): number | undefined {
  * fan-out is enqueued, `msg.at` days old) and of a fan-out that never ran. Those
  * two are BYTE-IDENTICAL, so one answer must serve both, and the decided answer
  * is silence: a false red on a message that is about to send trains staff to
- * ignore the cue. The cost is that the whole "our dispatch never happened" class
- * can never escalate here; the server's own staleness alarm covers it.
+ * ignore the cue.
+ *
+ * `attemptedAt` (SOR D20a) is what separates a THIRD shape from those two: a
+ * send site stamps it when it CLAIMS the recipient, before the provider call,
+ * so a leg stranded mid-send or mid-reconcile carries it and ages from it after
+ * the same budget, while the hold and the never-ran fan-out - never claimed -
+ * still carry nothing and stay silent. It is OUR clock, best-effort: a
+ * wholesale slot write can erase it, and that leg falls back to the silent row.
+ * The class that stays silent - dispatch never happened, or its clock was
+ * erased - has NO alarm anywhere else either
+ * (docs/issues/relay-staleness-alarm-assumed-not-built.md).
  *
  * A terminal leg has settled, and a `queued_pending` hold has not been
  * dispatched, so neither can be overdue.
@@ -237,7 +296,9 @@ function stalenessClockMs(
     case 'sent':
       return legClock ?? messageAtMs;
     case 'queued':
-      return legClock;
+      // SOR D20a: the provider's clock wins; a CLAIMED leg with none ages from
+      // OUR attempt clock. Neither clock -> undefined -> never ages.
+      return legClock ?? parseWireClock(slot.attemptedAt);
     case 'queued_pending':
     case 'delivered':
     case 'undelivered':
@@ -294,7 +355,9 @@ export function isStaleLeg(
  * them here is exactly the drift the shared helper exists to prevent.
  *
  * THE FUTURITY BOUND, and why it is a BOUND rather than `clock <= nowMs`. Every
- * ageing clock here is the PROVIDER's; `nowMs` is the OPERATOR'S BROWSER clock.
+ * ageing clock here is stamped SERVER-side - the provider's `sentAt`, the
+ * message instant, OUR `attemptedAt` (SOR D20a) - while `nowMs` is the
+ * OPERATOR'S BROWSER clock.
  * A browser clock running slow - a stale VM, no NTP, a dead CMOS battery - puts
  * every freshly-sent leg in the FUTURE, and a future clock answered "eligible"
  * and "not yet stale" at the same time, so the interval stayed armed for ever
@@ -414,14 +477,18 @@ export interface RelayDeliveryOptions extends DeliveryReasonOptions {
  * the 2026-08-23 drop was lost on exactly that toss. The opted-out exclusion
  * above covers J as well as N, M and K.
  *
- * K and J are DISJOINT by construction: a hard-failed leg is terminal, and
- * `isStaleLeg` is false for every terminal status. Branch 2's label adds them,
- * so that disjointness is load-bearing and is asserted in the tests.
+ * K and J are DISJOINT: a hard-failed leg is terminal, `isStaleLeg` is false
+ * for every terminal status, and a leg carrying `send_unconfirmed` (SOR D21) -
+ * whose status may be `failed` or `undelivered` - is taken OUT of K and INTO J
+ * by its code first. Branch 2's label adds them, so that disjointness is
+ * load-bearing and is asserted in the tests.
  *
  * The staleness inputs are OPTIONAL and follow the WITHHELD-CLOCK convention:
- * with `nowMs` undefined this cannot select the not-confirmed branches at all,
- * whatever `sentAt` the slots carry, and behaves exactly as it did before. That
+ * with `nowMs` undefined no leg reaches J BY CLOCK, whatever `sentAt` or
+ * `attemptedAt` the slots carry, and behaves exactly as it did before. That
  * is what keeps every pre-existing no-clock assertion honest rather than lucky.
+ * A `send_unconfirmed` leg is the one exception, and it is not a clock: it is
+ * J by its CODE, with or without a clock (SOR D21).
  * (Note the opposite convention on `presentDeliveryStatus` - see its doc.)
  *
  * ONE OPTIONS BAG, not positional arguments. `media` (the MMS reason override)
@@ -454,6 +521,11 @@ export function presentRelayDelivery(
   // and every pre-existing assertion in deliveryStatus.test.ts still holds. That
   // is the ONLY proof available that the shared labels did not move: there is no
   // way to import a `main` build.
+  //
+  // The ONE thing this gate does not govern is `send_unconfirmed` (SOR D21): a
+  // leg carrying it moves out of K into J by its CODE, retry-aware or not - the
+  // code is a fact on the slot, not a retry state. No pre-existing slot carries
+  // it, so the collapse above still holds for every shape that existed before.
   const retryStateOf = (s: RetryAwareRelayLeg): RelayRetryState | undefined =>
     opts.retryAware === true ? s.retryState : undefined;
   const isHardFailed = (s: RetryAwareRelayLeg): boolean =>
@@ -480,14 +552,24 @@ export function presentRelayDelivery(
   // `terminal` (the cap, a refused gate, a failed enqueue) or no ladder at all.
   // `if (failed > 0)` is the FIRST branch below, so a leg left unsubtracted here
   // wins over every state D19 adds.
+  //
+  // SOR D21: a leg carrying `send_unconfirmed` is NEVER in K, whatever its
+  // status - the join leaves the original's `undelivered` beside a projected
+  // unresolved close - so the code is tested FIRST, ahead of the status.
   const failedLegs = fanned.filter((s) => {
+    if (s.errorCode === SEND_UNCONFIRMED_CODE) return false;
     if (!isHardFailed(s)) return false;
     const state = retryStateOf(s);
     return state === undefined || state === 'terminal';
   });
   const failed = failedLegs.length;
-  // R.
-  const retryingLegs = fanned.filter((s) => retryStateOf(s) === 'retrying');
+  // R. The join's live-rung step keeps the ORIGINAL's code, so a leg could in
+  // principle carry `send_unconfirmed` AND `retrying`; its row reads "Not
+  // confirmed" (the code arm precedes the retry states), so it counts in J
+  // alone, never here as well (SOR D21).
+  const retryingLegs = fanned.filter(
+    (s) => s.errorCode !== SEND_UNCONFIRMED_CODE && retryStateOf(s) === 'retrying',
+  );
   const retrying = retryingLegs.length;
   // The `on retry` SUFFIX, not a category: it qualifies the delivered count
   // rather than joining K/R/J, so it composes independently of all three.
@@ -496,7 +578,12 @@ export function presentRelayDelivery(
   // share ONE label slot, so this is a UNION and a leg that is both counts once.
   // A leg with a live or delivered ladder is excluded outright: it belongs to R
   // or to the suffix, and counting it here too would inflate the total.
+  //
+  // SOR D21: a leg carrying `send_unconfirmed` is J by its CODE ALONE - first,
+  // with no clock and no `retryAware` needed - the same precedence the row
+  // presenter gives the code.
   const notConfirmedLegs = fanned.filter((s) => {
+    if (s.errorCode === SEND_UNCONFIRMED_CODE) return true;
     const state = retryStateOf(s);
     if (state === 'unconfirmed') return true;
     if (state === 'retrying' || state === 'delivered-on-retry') return false;
@@ -508,7 +595,9 @@ export function presentRelayDelivery(
   // that disjointness is load-bearing and asserted in the tests: K requires a
   // state of `terminal`-or-none, R requires `retrying`, and J's second arm
   // excludes both live states while `isStaleLeg` is already false for every
-  // terminal status. THE ORDER IS FIXED - failed, retrying, not confirmed -
+  // terminal status. A `send_unconfirmed` leg is decided by its code before
+  // any of that: excluded from K and R, included in J (SOR D21), so it counts
+  // exactly once. THE ORDER IS FIXED - failed, retrying, not confirmed -
   // with zero-count categories omitted, so two bubbles holding the same three
   // counts always read the same way round.
   const onRetrySuffix = onRetry > 0 ? `${onRetry} on retry` : undefined;
@@ -524,13 +613,21 @@ export function presentRelayDelivery(
   if (failed > 0) {
     // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
     // relay-group bug read as a bare "0/2 - 2 failed" with no code). Distinct
-    // reasons joined; a repeated code collapses to one.
-    const reason = joinReasons(failedLegs);
+    // reasons joined; a repeated code collapses to one. SOR D20 (code review
+    // C-6): a `send_unconfirmed` leg beside them adds its sentence AFTER the
+    // failed legs' reasons - the chip carries it as its reason too. A stale
+    // leg with no code adds nothing.
+    const reason = joinReasons([
+      ...failedLegs,
+      ...notConfirmedLegs.filter((s) => s.errorCode === SEND_UNCONFIRMED_CODE),
+    ]);
     return {
       // The reason is appended INLINE after this label by the bubble, so the
-      // counts come first and the reason last: it belongs to the FAILED legs
-      // only, and putting it between the two counts would attach it to the
-      // unconfirmed ones instead.
+      // counts come first and the reason last. It leads with the FAILED legs'
+      // reasons; a send_unconfirmed leg beside them adds the D20 sentence
+      // AFTER those (code review C-6, FW2-9), and a stale leg with no code
+      // adds nothing. Putting it between the two counts would attach the
+      // failed legs' reasons to the unconfirmed count instead.
       label: composed,
       tone: 'danger',
       isFailure: true,
@@ -564,8 +661,12 @@ export function presentRelayDelivery(
     // than nearly so - and with `retryAware` off `retryStateOf` is undefined for
     // every leg, so this branch reverts to the no-reason presentation it shipped
     // with.
+    //
+    // SOR D20/D21: a `send_unconfirmed` leg speaks here too, retry-aware or
+    // not - its reason is the D20 sentence, which states no failure, and it is
+    // the one channel the chip has for it (the row carries the same sentence).
     const unconfirmedRetryLegs = notConfirmedLegs.filter(
-      (s) => retryStateOf(s) === 'unconfirmed',
+      (s) => retryStateOf(s) === 'unconfirmed' || s.errorCode === SEND_UNCONFIRMED_CODE,
     );
     const reason = joinReasons([...retryingLegs, ...unconfirmedRetryLegs]);
     return {
@@ -629,10 +730,12 @@ const STALE_QUEUED_PRESENTATION: DeliveryPresentation = {
  * Present ONE recipient's leg of a multi-party send.
  *
  * Per-leg state reuses `presentDeliveryStatus` so a leg and a 1:1 message never
- * disagree about what a status MEANS, with exactly two exceptions this function
- * owns - the stale labels and the opted-out label. They live here and NOT in
+ * disagree about what a status MEANS, with exactly three exceptions this
+ * function owns - the stale labels, the opted-out label and "Not confirmed"
+ * (SOR D20, keyed on `send_unconfirmed`). They live here and NOT in
  * `presentDeliveryStatus`, whose other callers (the EmailCard chip and the
- * broadcasts recipient badge) must not move.
+ * broadcasts recipient badge) must not move; the badge reaches "Not confirmed"
+ * through its own code-first arm (`presentRecipientStatus`).
  *
  * THE DELEGATION RULE, and the reason this function exists at all: it NEVER
  * delegates the staleness decision, on either path. It decides staleness itself
@@ -698,6 +801,14 @@ export function presentLegDelivery(
       isFailure: false,
     };
   }
+  // SOR D20: `send_unconfirmed` is presented by the CODE ALONE, exactly like the
+  // opted-out code above and for the same reason: the relay retry join projects
+  // a rung's unresolved close onto the ORIGINAL leg, whose status stays that
+  // original's (`undelivered` / `failed`), so no position may key on the status.
+  // Ahead of the retry states and of staleness, so one member reads one state
+  // on the row, in the recital and in the chip's count. It carries its own
+  // reason because `isFailure: false` hides the caller's fallback reason.
+  if (slot.errorCode === SEND_UNCONFIRMED_CODE) return { ...NOT_CONFIRMED_PRESENTATION };
   if (isRecipientExcludedFromPresentation(slot)) return null;
   // THE RETRY STATES (D19's second table), RELAY ONLY. A native group-text leg
   // is untouched by any `retryState` - the relay ladder cannot reach that
@@ -912,22 +1023,38 @@ export interface DeliveryReasonOptions {
  * with legs still deferred, or the continuation could not be scheduled at all
  * (app/src/jobs/broadcastFanOut.ts and relayFanOut.ts). They are kept DISTINCT
  * on purpose - reusing the cap's wording for a scheduling failure would tell an
- * operator retries ran when none did.
+ * operator retries ran when none did. The cap says "temporary errors", not
+ * "carrier deferrals" (SOR D23): the send classifier now routes 20429 throttles
+ * and refused connections through the same close.
  *
  * `enqueue_failed` deliberately does NOT name a cause. The same close also fires
  * from the hop-count and no-adapter guards in jobs.ts, so "the queue is down"
  * would be a guess an operator would then act on.
  *
  * Unlike `contact_opted_out`, neither gets a per-position escape hatch:
- * `presentLegDelivery` intercepts the opted-out code alone, so these two are
- * written into recipient SLOTS and one sentence has to serve a broadcast's
- * results badge, the relay rollup, the accessible-name recital and a single
- * member's row.
+ * `presentLegDelivery` intercepts only the opted-out code and
+ * `send_unconfirmed`, so these two are written into recipient SLOTS and one
+ * sentence has to serve a broadcast's results badge, the relay rollup, the
+ * accessible-name recital and a single member's row.
+ *
+ * The send-outcome-reconcile codes (SOR D20, D23; keys mirrored from the app,
+ * see SEND_UNCONFIRMED_CODE): `send_unconfirmed` reads the D20 sentence at
+ * every position that asks this map, and the row and the chip carry the same
+ * sentence on their presentations because that state is not a failure;
+ * `redrive_refused` is the close a declined re-drive writes;
+ * `sms_sending_disabled` is the adapter kill switch on a FAILED slot (a SKIPPED
+ * share row reads SHARE_SKIP_REASONS' wording for the same token first, through
+ * `shareSkipReason`). `send_retryable` is deliberately ABSENT: it is a deferral
+ * on a still-queued slot, and `deliveryReason` answers nothing for it.
  */
 const INTERNAL_CODE_REASONS: Record<string, string> = {
   contact_opted_out: 'Everyone here has opted out - nothing was sent',
-  transient_cap: 'Sending gave up after repeated carrier deferrals',
+  transient_cap: 'Sending gave up after repeated temporary errors',
   enqueue_failed: 'Sending could not be scheduled',
+  // SOR D20/D23 (see the doc above).
+  [SEND_UNCONFIRMED_CODE]: SEND_UNCONFIRMED_REASON,
+  [REDRIVE_REFUSED_CODE]: "Wasn't resent: the group closed or the member left",
+  [SMS_SENDING_DISABLED_CODE]: 'SMS sending is switched off, so nothing was sent',
   // The four RELAY RETRY gate refusals (D15). Each is re-checked immediately
   // before every attempt, 60-240s after the failure that claimed the ladder, so
   // the world can genuinely have changed underneath it. They exist as separate
@@ -1008,6 +1135,11 @@ export function deliveryReason(
   opts: DeliveryReasonOptions = {},
 ): string | undefined {
   if (errorCode === undefined || errorCode.length === 0) return undefined;
+  // SOR D10: `send_retryable` is a DEFERRAL, not a close - the slot is still
+  // `queued` and renders as one - so it has no reason at any position, and the
+  // unmapped tail below must never print "Delivery failed (error
+  // send_retryable)" about a send that is still going.
+  if (errorCode === SEND_RETRYABLE_CODE) return undefined;
   const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
   if (internal !== undefined) return internal;
   // THE ORDER IS LOAD-BEARING, and it is pinned by tests: the one-to-one

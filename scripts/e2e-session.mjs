@@ -278,8 +278,22 @@ const childEnv = {
   // above - ignored whenever JOBS_QUEUE_URL is set, ignored unless it parses to
   // a positive integer - so production keeps 60/120/240. Ten seconds for the
   // relay value's reason: it is the observation window. share-skip-fix Branch
-  // B and send-outcome-reconcile reuse it.
+  // B and send-outcome-reconcile's later retrySend adoption (its Stage 1b) are
+  // to reuse it; the reconcile checks themselves have their own seam, below.
   E2E_SEND_RETRY_BACKOFF_MS: '10000',
+  // Send-outcome reconcile checks (feat/send-outcome-reconcile, spec D13a): a
+  // send whose outcome is unknown gets at most three provider lookups, at
+  // attemptedAt + 5s / 30s / 240s in production. The lane runs them at 2s / 4s
+  // / 8s so the browser proofs (adopted, re-driven once, closed "Not
+  // confirmed") finish inside their budgets
+  // (e2e/tests/dashboard-next/send-outcome-reconcile.spec.ts). Read by
+  // app/src/jobs/sendReconcile.ts (reconcileCheckDelaysMs), which ignores it
+  // whenever JOBS_QUEUE_URL is set - every deployed environment - and
+  // otherwise ignores anything that is not three comma-separated non-negative
+  // integers. So production keeps 5/30/240 whatever its environment says.
+  // Like every value here it reaches only a FRESHLY booted lane:
+  // `npm run e2e:restart` keeps the launcher's old childEnv.
+  E2E_SEND_RECONCILE_DELAYS_MS: '2000,4000,8000',
   // Pass the lane to child processes so they can self-identify if needed.
   E2E_LANE: String(lane),
 };

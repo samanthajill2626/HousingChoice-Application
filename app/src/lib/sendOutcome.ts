@@ -1,0 +1,113 @@
+// app/src/lib/sendOutcome.ts
+// Send-outcome vocabulary (spec D1-D2, D10, D13a). Pure. Imports ONLY the
+// adapter's error leaf, so adapters/messaging.ts may import these constants
+// at module init without a cycle.
+import { SmsSendingDisabledError } from '../adapters/messagingErrors.js';
+
+export type SendFailureKind = 'rejected' | 'retryable' | 'unknown';
+export interface SendFailureClassification {
+  kind: SendFailureKind;
+  code?: string;
+  status?: number;
+}
+
+export const SEND_UNCONFIRMED_CODE = 'send_unconfirmed';
+export const SEND_RETRYABLE_CODE = 'send_retryable';
+export const REDRIVE_REFUSED_CODE = 'redrive_refused';
+export const SMS_SENDING_DISABLED_CODE = 'sms_sending_disabled';
+export const TRANSIENT_CAP_CODE = 'transient_cap';
+export const ENQUEUE_FAILED_CODE = 'enqueue_failed';
+/**
+ * The send-attempt claim TTL (spec D8a). It EQUALS the provider request
+ * timeout (adapters/messaging.ts pins TWILIO_REQUEST_TIMEOUT_MS to this value)
+ * and is measured from the attempt's LAST re-arm, which every send site
+ * performs immediately before the provider call (sendAttemptsRepo.rearm; code
+ * review ADV-1). So an attempt older than this belongs to a call that died or
+ * is overrunning - never to one still preparing, which a claim followed by
+ * unbounded database work would otherwise look like.
+ */
+export const SEND_CLAIM_TTL_MS = 30_000;
+export const RECONCILE_CHECK_DELAYS_MS: readonly number[] = [5_000, 30_000, 240_000];
+/** How long BEFORE an attempt's start its message can carry a creation time: clock skew plus the provider's 1 s resolution. */
+export const RECONCILE_WINDOW_LEAD_MS = 60_000;
+/**
+ * How long AFTER an attempt's start (its last re-arm, taken just before the
+ * provider call) its message can have been created: the request timeout plus
+ * the same skew allowance (code review C-1, fix FW1-2). The lookup's window is
+ * [attemptedAt - LEAD, attemptedAt + TRAIL], both edges inclusive, so a late
+ * check - an SQS redelivery, a backlogged worker - can never adopt a message a
+ * LATER attempt created.
+ */
+export const RECONCILE_WINDOW_TRAIL_MS = SEND_CLAIM_TTL_MS + RECONCILE_WINDOW_LEAD_MS;
+/**
+ * Two attempts' windows overlap exactly when their starts are at most this far
+ * apart (LEAD + TRAIL): the siblings a lookup must weigh - whose SIDs it
+ * excludes and whose open or adopted state withholds never_sent (D13).
+ */
+export const RECONCILE_SIBLING_SPAN_MS = 2 * RECONCILE_WINDOW_LEAD_MS + SEND_CLAIM_TTL_MS;
+export const RECONCILE_LIST_PAGE_SIZE = 1000;
+export const RECONCILE_MAX_PAGES = 5;
+export const OUTAGE_BRAKE_UNKNOWN_STREAK = 3;
+
+// Codes the send sites ALREADY recognize classify by code whatever the status
+// says or omits (D1's one precedence rule), so the existing arms keep their
+// behavior and their status-less test fixtures.
+const KNOWN_REJECTED_CODES = new Set(['30007', '30005', '30006']);
+const KNOWN_RETRYABLE_CODES = new Set(['429', '30022']);
+// Twilio's "Too Many Requests" (not processed, safe to retry): retryable
+// whatever the status - but ranked AFTER the 5xx rule, so a 5xx stays unknown.
+const RATE_LIMIT_CODE = '20429';
+// A connection that never opened: nothing reached the provider (D1).
+const NETWORK_RETRYABLE = new Set(['ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN']);
+
+/** A Twilio numeric code, safe to write into a slot's errorCode (D6). */
+export function isProviderCode(code: string | undefined): boolean {
+  return code !== undefined && /^[0-9]+$/.test(code);
+}
+
+// `0` is no code: twilio-node defaults a missing code to 0 on some paths.
+function codeOf(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === 'number' && code !== 0) return String(code);
+  if (typeof code === 'string' && code.length > 0 && code !== '0') return code;
+  return undefined;
+}
+
+function statusOf(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const status = (err as { status?: unknown }).status;
+  return typeof status === 'number' && Number.isFinite(status) ? status : undefined;
+}
+
+/**
+ * Classify one provider send failure (spec D1). Pure, no I/O. Precedence: a
+ * recognized code first (30007 / 30005 / 30006 rejected; 429 / 30022
+ * retryable); then an HTTP 5xx (unknown, whatever the code); then Twilio's
+ * rate-limit code 20429 (retryable, whatever the status says or omits - D1
+ * "HTTP 429 or code 20429"; code review C-5); then the rest of the status
+ * (429 retryable, other 4xx rejected - with or without a code); then the
+ * network code (a connection that never opened is retryable); everything
+ * else, timeouts and dropped sockets included, is unknown (D2: a wrong
+ * `unknown` costs one reconcile, a wrong `rejected` invites a manual resend).
+ */
+export function classifySendFailure(err: unknown): SendFailureClassification {
+  if (err instanceof SmsSendingDisabledError) return { kind: 'rejected', code: SMS_SENDING_DISABLED_CODE };
+  const code = codeOf(err);
+  const status = statusOf(err);
+  const withMeta = (kind: SendFailureKind): SendFailureClassification => ({
+    kind,
+    ...(code !== undefined && { code }),
+    ...(status !== undefined && { status }),
+  });
+  if (code !== undefined && KNOWN_REJECTED_CODES.has(code)) return withMeta('rejected');
+  if (code !== undefined && KNOWN_RETRYABLE_CODES.has(code)) return withMeta('retryable');
+  if (status !== undefined && status >= 500) return withMeta('unknown');
+  if (code === RATE_LIMIT_CODE) return withMeta('retryable');
+  if (status !== undefined) {
+    if (status === 429) return withMeta('retryable');
+    if (status >= 400) return withMeta('rejected');
+  }
+  if (code !== undefined && NETWORK_RETRYABLE.has(code)) return withMeta('retryable');
+  return withMeta('unknown');
+}

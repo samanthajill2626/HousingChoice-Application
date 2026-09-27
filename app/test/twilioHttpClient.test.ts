@@ -1,6 +1,7 @@
 // app/test/twilioHttpClient.test.ts
 import { describe, expect, it, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import type { Socket } from 'node:net';
 import twilio from 'twilio';
 import { createRedirectingHttpClient } from '../src/adapters/twilioHttpClient.js';
 
@@ -53,5 +54,48 @@ describe('createRedirectingHttpClient', () => {
     expect(capture.lastPath()).toContain('/2010-04-01/Accounts/ACtest/Messages.json');
     expect(capture.lastBody()).toContain('To=%2B15550100001');
     expect(capture.lastBody()).toContain('Body=hello');
+  });
+});
+
+// Spec D8a pins the Twilio request timeout to the send-claim TTL. twilio()
+// applies its `timeout` option only to the default client it builds, never to
+// a passed httpClient, so this client must take the timeout itself (SOR build
+// spike Q5: unpinned, a stalled lane request ran the SDK's full 30 s).
+describe('createRedirectingHttpClient request timeout', () => {
+  it('takes its request timeout from opts.timeout, defaulting to the SDK 30000', () => {
+    expect(createRedirectingHttpClient({ baseUrl: 'http://127.0.0.1:1', timeout: 1234 }).defaultTimeout).toBe(1234);
+    expect(createRedirectingHttpClient({ baseUrl: 'http://127.0.0.1:1' }).defaultTimeout).toBe(30000);
+  });
+
+  it('a stalled request rejects with ECONNABORTED at the passed timeout, not the SDK default', async () => {
+    const sockets = new Set<Socket>();
+    // Accepts every request and never answers it.
+    const stall = createServer(() => {});
+    stall.on('connection', (socket) => {
+      sockets.add(socket);
+    });
+    await new Promise<void>((resolve) => stall.listen(0, '127.0.0.1', resolve));
+    const addr = stall.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    try {
+      const client = twilio('SKtest', 'secrettest', {
+        accountSid: 'ACtest',
+        httpClient: createRedirectingHttpClient({ baseUrl: `http://127.0.0.1:${addr.port}`, timeout: 200 }),
+      });
+      const started = Date.now();
+      const failure = await client.messages
+        .create({ to: '+15550100001', from: '+15550009999', body: 'stall' })
+        .then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+      const elapsed = Date.now() - started;
+      // The SDK's own timeout arrives as ECONNABORTED (never ETIMEDOUT).
+      expect(failure).toMatchObject({ code: 'ECONNABORTED' });
+      expect(elapsed).toBeLessThan(2000);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => stall.close(() => resolve()));
+    }
   });
 });

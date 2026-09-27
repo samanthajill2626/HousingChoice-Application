@@ -1225,6 +1225,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
         skipped_no_consent: 2,
         skipped_other: 0,
         queued: 0,
+        unconfirmed: 0,
       },
       recipients: {
         'tenant-mx-searching-standalone-01': { status: 'delivered' },
@@ -1248,7 +1249,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
         excludeUnreachable: false,
       },
       body_template: 'Hi {firstName}! A 2BR in DeKalb is now available — text back if interested.',
-      stats: { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, skipped_other: 0, queued: 0 },
+      stats: { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, skipped_other: 0, queued: 0, unconfirmed: 0 },
       recipients: {},
     },
   ];

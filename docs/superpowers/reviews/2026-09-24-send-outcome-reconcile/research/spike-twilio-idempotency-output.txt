@@ -1,0 +1,152 @@
+env=dev to=+1617****727 from=+1404****978 service=MG8715...
+
+[A] create #1 with Idempotency-Key
+{
+  ms: 465,
+  http: 201,
+  sid: 'SMda40eff9f4adb938238bade1a17f22ff',
+  status: 'accepted',
+  code: undefined,
+  message: undefined,
+  date_created: 'Fri, 25 Sep 2026 02:50:31 +0000',
+  responseHeaders: {
+    'twilio-request-duration': '0.202',
+    'twilio-request-id': 'RQda40eff9f4adb938238bade1a17f22ff'
+  }
+}
+[B1] list To+From immediately after create #1 (no date filter)
+{
+  http: 200,
+  count: 5,
+  messages: [
+    {
+      sid: 'SM7ed1f8e15a209ac8c24a4b7b8b344cf8',
+      status: 'delivered',
+      date_created: 'Thu, 24 Sep 2026 14:00:20 +0000',
+      date_sent: 'Thu, 24 Sep 2026 14:00:20 +0000',
+      bodyPrefix: 'Hey Cameron, can you ple'
+    },
+    {
+      sid: 'SM06f8c34f9b73469fc540a703aa6a73bc',
+      status: 'delivered',
+      date_created: 'Thu, 24 Sep 2026 12:00:19 +0000',
+      date_sent: 'Thu, 24 Sep 2026 12:00:20 +0000',
+      bodyPrefix: 'Hey Cameron, looking for'
+    },
+    {
+      sid: 'SM2a75d5f9c5fa3ddab6b5d77c2e4bd009',
+      status: 'delivered',
+      date_created: 'Wed, 23 Sep 2026 23:30:16 +0000',
+      date_sent: 'Wed, 23 Sep 2026 23:30:17 +0000',
+      bodyPrefix: 'Hey Cameron, confirming '
+    },
+    {
+      sid: 'SM1c7aa669d61a61529699341bab2e788e',
+      status: 'delivered',
+      date_created: 'Thu, 20 Aug 2026 20:54:54 +0000',
+      date_sent: 'Thu, 20 Aug 2026 20:54:54 +0000',
+      bodyPrefix: 'Hey, your tour is set fo'
+    },
+    {
+      sid: 'SMb6f6410689e138c0afa03e02e4083eee',
+      status: 'delivered',
+      date_created: 'Thu, 20 Aug 2026 18:46:37 +0000',
+      date_sent: 'Thu, 20 Aug 2026 18:46:37 +0000',
+      bodyPrefix: 'Hey, your tour is set fo'
+    }
+  ]
+}
+[B2] list with DateSent>=2026-09-25
+{ http: 200, count: 0, messages: [] }
+[A] create #2, SAME Idempotency-Key + same body
+{
+  ms: 187,
+  http: 201,
+  sid: 'SM9310180e2ffb72c7b393136665d6a407',
+  status: 'accepted',
+  code: undefined,
+  message: undefined,
+  date_created: 'Fri, 25 Sep 2026 02:50:32 +0000',
+  responseHeaders: {
+    'twilio-request-duration': '0.163',
+    'twilio-request-id': 'RQ9310180e2ffb72c7b393136665d6a407'
+  }
+}
+[A] RESULT: different SIDs (SMda40eff9f4adb938238bade1a17f22ff vs SM9310180e2ffb72c7b393136665d6a407) -> header IGNORED (two messages created)
+
+[B3] +2000ms list To+From (top 3)
+[
+  {
+    sid: 'SM9310180e2ffb72c7b393136665d6a407',
+    status: 'sent',
+    date_created: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    date_sent: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    bodyPrefix: 'HC spike A d2e00a34 - ig'
+  },
+  {
+    sid: 'SMda40eff9f4adb938238bade1a17f22ff',
+    status: 'sent',
+    date_created: 'Fri, 25 Sep 2026 02:50:31 +0000',
+    date_sent: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    bodyPrefix: 'HC spike A d2e00a34 - ig'
+  },
+  {
+    sid: 'SM7ed1f8e15a209ac8c24a4b7b8b344cf8',
+    status: 'delivered',
+    date_created: 'Thu, 24 Sep 2026 14:00:20 +0000',
+    date_sent: 'Thu, 24 Sep 2026 14:00:20 +0000',
+    bodyPrefix: 'Hey Cameron, can you ple'
+  }
+]
+
+[B3] +5000ms list To+From (top 3)
+[
+  {
+    sid: 'SM9310180e2ffb72c7b393136665d6a407',
+    status: 'delivered',
+    date_created: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    date_sent: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    bodyPrefix: 'HC spike A d2e00a34 - ig'
+  },
+  {
+    sid: 'SMda40eff9f4adb938238bade1a17f22ff',
+    status: 'delivered',
+    date_created: 'Fri, 25 Sep 2026 02:50:31 +0000',
+    date_sent: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    bodyPrefix: 'HC spike A d2e00a34 - ig'
+  },
+  {
+    sid: 'SM7ed1f8e15a209ac8c24a4b7b8b344cf8',
+    status: 'delivered',
+    date_created: 'Thu, 24 Sep 2026 14:00:20 +0000',
+    date_sent: 'Thu, 24 Sep 2026 14:00:20 +0000',
+    bodyPrefix: 'Hey Cameron, can you ple'
+  }
+]
+
+[B3] +10000ms list To+From (top 3)
+[
+  {
+    sid: 'SM9310180e2ffb72c7b393136665d6a407',
+    status: 'delivered',
+    date_created: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    date_sent: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    bodyPrefix: 'HC spike A d2e00a34 - ig'
+  },
+  {
+    sid: 'SMda40eff9f4adb938238bade1a17f22ff',
+    status: 'delivered',
+    date_created: 'Fri, 25 Sep 2026 02:50:31 +0000',
+    date_sent: 'Fri, 25 Sep 2026 02:50:32 +0000',
+    bodyPrefix: 'HC spike A d2e00a34 - ig'
+  },
+  {
+    sid: 'SM7ed1f8e15a209ac8c24a4b7b8b344cf8',
+    status: 'delivered',
+    date_created: 'Thu, 24 Sep 2026 14:00:20 +0000',
+    date_sent: 'Thu, 24 Sep 2026 14:00:20 +0000',
+    bodyPrefix: 'Hey Cameron, can you ple'
+  }
+]
+
+done

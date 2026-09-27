@@ -85,6 +85,31 @@ describe('toTimelineMessage - transport facts', () => {
       delivery_recipients: message.delivery_recipients,
     });
   });
+
+  // SOR D20a: a claimed relay leg's attempt clock rides the whole-map
+  // passthrough, so the thread view can age a leg stranded mid-send from it.
+  it('passes a recipient slot attemptedAt through unchanged', () => {
+    const message = {
+      conversationId: 'c1',
+      tsMsgId: '2026-09-01T10:00:00.000Z#SM2',
+      provider_sid: 'SM2',
+      provider_ts: '2026-09-01T10:00:00.000Z',
+      created_at: '2026-09-01T10:00:00.000Z',
+      direction: 'outbound',
+      author: 'teammate',
+      type: 'sms',
+      delivery_status: 'queued',
+      delivery_recipients: {
+        'contact-1': { status: 'queued', attemptedAt: '2026-09-01T10:00:00.500Z' },
+      },
+    } as Message;
+
+    expect(toTimelineMessage(message)).toMatchObject({
+      delivery_recipients: {
+        'contact-1': { status: 'queued', attemptedAt: '2026-09-01T10:00:00.500Z' },
+      },
+    });
+  });
 });
 
 describe('toTimelineMessage - relay retry lineage', () => {

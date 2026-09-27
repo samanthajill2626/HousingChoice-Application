@@ -28,9 +28,11 @@ import twilio from 'twilio';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { MessageTransport } from '../lib/messageTransport.js';
+import { SEND_CLAIM_TTL_MS } from '../lib/sendOutcome.js';
 import type { DeliveryStatus } from '../repos/messagesRepo.js';
 import { normalizeTwilioTransportEvidence } from './twilioMessageTransport.js';
 import { createRedirectingHttpClient } from './twilioHttpClient.js';
+import { SmsSendingDisabledError } from './messagingErrors.js';
 
 export interface SendMessageParams {
   /** Recipient phone, E.164. */
@@ -105,6 +107,41 @@ export interface SendMessageResult {
   providerTs: string;
   /** Provider-normalized carrier transport, when trustworthy evidence exists. */
   actualTransport?: MessageTransport;
+}
+
+/**
+ * One provider-side message as the send-outcome reconcile reads it (spec D17).
+ * `providerStatus` is the provider's RAW status string (mapTwilioStatus maps
+ * it). `createdAt` is the provider's CREATION time, the clock the reconcile
+ * window filters on; `sentAt` is present only once the provider has sent it.
+ */
+export interface ProviderMessageSummary {
+  providerSid: string;
+  providerStatus: string;
+  /** The provider's numeric error code, when it recorded one. */
+  errorCode?: string;
+  body: string;
+  mediaCount: number;
+  createdAt: string;
+  sentAt?: string;
+}
+
+/** One page of the messages sent from `from` to `to` (spec D17). */
+export interface ListMessagesArgs {
+  to: string;
+  from: string;
+  pageSize: number;
+  /**
+   * The previous page's `nextPageToken`, verbatim. Opaque (on Twilio it is an
+   * absolute next-page URL): keep it in memory for one walk, never in a payload.
+   */
+  pageToken?: string;
+}
+
+export interface ListMessagesPage {
+  messages: ProviderMessageSummary[];
+  /** Present only when another page exists. */
+  nextPageToken?: string;
 }
 
 /**
@@ -265,6 +302,24 @@ export interface MessagingAdapter {
    * paginates to completion), mapped to text + media channel.
    */
   listViSentences(transcriptSid: string): Promise<ViSentence[]>;
+  /**
+   * Send-outcome reconcile (spec D17): ONE page of the messages sent from
+   * `from` to `to`, newest first, at the requested size, plus a token for the
+   * next page. The driver filters nothing by date - the provider's own date
+   * filter is on SEND time, the wrong clock; the caller filters `createdAt`.
+   * List order and page size are UNVERIFIED against real Twilio until the
+   * first hosted-dev run: the Twilio driver WARNs when the provider's page
+   * size differs from the requested one. PII (D18): nothing here is logged
+   * beyond sizes.
+   */
+  listMessages(args: ListMessagesArgs): Promise<ListMessagesPage>;
+  /**
+   * Send-outcome reconcile (spec D17): one message by its provider SID.
+   * Resolves undefined ONLY when the provider says the SID does not exist
+   * (404 / 20404); every other failure THROWS, so a lookup outage is never
+   * read as "never sent".
+   */
+  getMessage(providerSid: string): Promise<ProviderMessageSummary | undefined>;
 }
 
 /** Twilio media host allowlist — MediaUrl{i} values always live here. */
@@ -372,20 +427,10 @@ export class VoiceCapabilityError extends Error {
  */
 export class NumberUnavailableError extends VoiceCapabilityError {}
 
-/**
- * The outbound-SMS kill-switch (A2P) tripped (config.smsSendingEnabled false):
- * the Twilio driver REFUSES to hand a message to Twilio before A2P approval, so
- * a deployed stack can't emit unregistered-A2P traffic (30034) and damage
- * sender reputation. This is the lowest-level BACKSTOP — the send wrapper
- * (services/sendMessage.ts) refuses earlier with a SendRefusedError so the
- * common paths degrade gracefully; this guards any direct-adapter caller.
- */
-export class SmsSendingDisabledError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = new.target.name;
-  }
-}
+// The outbound-SMS kill-switch error (SmsSendingDisabledError) lives in the
+// dependency-free leaf ./messagingErrors.ts, so lib/sendOutcome.ts can name it
+// without importing this adapter; re-exported here for every existing importer.
+export { SmsSendingDisabledError } from './messagingErrors.js';
 
 /**
  * The A2P Messaging Service's phone-number sender pool is full (Twilio error
@@ -532,6 +577,63 @@ interface MessageMediaResource {
   };
 }
 
+/** One page of the SDK's Messages list: the fields listMessages reads. */
+interface MessagePageLike {
+  instances: unknown[];
+  /** An absolute URL, or undefined on the last page (the SDK maps a null next_page_uri to undefined). */
+  nextPageUrl?: string | null;
+  _payload?: { page_size?: unknown };
+}
+
+/**
+ * The Messages LIST surface of the real SDK (`messages.page` for the first
+ * page, `messages.getPage` for the next-page URL it returned). Like
+ * MessageMediaResource, asserted at the call site rather than added to
+ * TwilioClientLike, whose object-literal fakes implement only `create`.
+ */
+interface MessageListResource {
+  messages: {
+    page?: (params: { to: string; from: string; pageSize: number }) => Promise<MessagePageLike>;
+    getPage?: (targetUrl: string) => Promise<MessagePageLike>;
+  };
+}
+
+/** The per-message FETCH surface of the real SDK: the callable `messages(sid).fetch()`. */
+interface MessageFetchResource {
+  messages(messageSid: string): { fetch(): Promise<unknown> };
+}
+
+function isoOf(value: unknown): string | undefined {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
+  if (typeof value === 'string' && value.length > 0) {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
+  }
+  return undefined;
+}
+
+/**
+ * One SDK message resource -> ProviderMessageSummary. The real SDK instance is
+ * camelCase (Date objects, `numMedia` a STRING, `errorCode` a number or null);
+ * the snake_case fallbacks serve payload-shaped unit fakes. A missing creation
+ * date reads as the epoch, which no reconcile window contains.
+ */
+function summarize(raw: unknown): ProviderMessageSummary {
+  const m = raw as Record<string, unknown>;
+  const errorCode = m['errorCode'] ?? m['error_code'];
+  const numMedia = m['numMedia'] ?? m['num_media'];
+  const sentAt = isoOf(m['dateSent'] ?? m['date_sent']);
+  return {
+    providerSid: String(m['sid'] ?? ''),
+    providerStatus: String(m['status'] ?? ''),
+    ...(errorCode !== null && errorCode !== undefined && Number(errorCode) > 0 && { errorCode: String(errorCode) }),
+    body: typeof m['body'] === 'string' ? m['body'] : '',
+    mediaCount: Number.parseInt(String(numMedia ?? '0'), 10) || 0,
+    createdAt: isoOf(m['dateCreated'] ?? m['date_created']) ?? new Date(0).toISOString(),
+    ...(sentAt !== undefined && { sentAt }),
+  };
+}
+
 /**
  * Twilio transient-throttle error codes (doc §9 "Send failures"): 429 (HTTP
  * Too Many Requests) and 30022 (Twilio "Rate exceeded"). These are the codes
@@ -539,8 +641,13 @@ interface MessageMediaResource {
  * `send_throttled` marker per throttled send at this single provider-send
  * boundary so the metric counts each occurrence exactly once (no per-path
  * double-logging).
+ *
+ * 20429 is the code twilio-node attaches to a real HTTP 429 (spec D4); the
+ * bare 429 stays for status-only fixtures. A connection that never opened
+ * (ECONNREFUSED and friends) is retryable but is not a throttle: it never
+ * fires the marker.
  */
-const SEND_THROTTLE_CODES = new Set(['429', '30022']);
+const SEND_THROTTLE_CODES = new Set(['429', '20429', '30022']);
 
 /** Best-effort provider error-code extraction (Twilio attaches `code`/`status`). */
 function providerErrorCode(err: unknown): string | undefined {
@@ -572,6 +679,17 @@ export function mapTwilioStatus(status: string): DeliveryStatus {
       return 'queued';
   }
 }
+
+/**
+ * The Twilio REST request timeout, PINNED to the send-claim TTL (spec D8a).
+ * The TTL is measured from the attempt's LAST re-arm, which every send site
+ * performs immediately before this call (sendAttemptsRepo.rearm; code review
+ * ADV-1), so an attempt older than the TTL belongs to a call that died or is
+ * overrunning. One request per SDK call - never set the SDK's `autoRetry`,
+ * which re-issues a create on a 429 and would let one provider call outlive
+ * the claim.
+ */
+export const TWILIO_REQUEST_TIMEOUT_MS = SEND_CLAIM_TTL_MS;
 
 export interface TwilioMessagingDriverDeps {
   accountSid: string;
@@ -625,12 +743,19 @@ export class TwilioMessagingDriver implements MessagingAdapter, CarrierMessageSe
     // When apiBaseUrl is set (dev/test only — fake-twilio), the SDK keeps its
     // canonical request building/parsing but every REST call is redirected to
     // the fake host; with it unset, behavior is byte-identical to before.
+    // The request timeout is pinned on BOTH paths (spec D8a): twilio() applies
+    // its `timeout` option only to the default client it builds, so the
+    // redirecting client (the fake-twilio lane) is handed the value directly.
     this.client =
       deps.client ??
       twilio(deps.apiKeySid, deps.apiKeySecret, {
         accountSid: deps.accountSid,
+        timeout: TWILIO_REQUEST_TIMEOUT_MS,
         ...(deps.apiBaseUrl !== undefined && {
-          httpClient: createRedirectingHttpClient({ baseUrl: deps.apiBaseUrl }),
+          httpClient: createRedirectingHttpClient({
+            baseUrl: deps.apiBaseUrl,
+            timeout: TWILIO_REQUEST_TIMEOUT_MS,
+          }),
         }),
       });
     this.log = deps.logger ?? defaultLogger;
@@ -1003,6 +1128,54 @@ export class TwilioMessagingDriver implements MessagingAdapter, CarrierMessageSe
     return ordered.map((s) => ({ text: s.transcript, mediaChannel: s.mediaChannel }));
   }
 
+  async listMessages(args: ListMessagesArgs): Promise<ListMessagesPage> {
+    const messages = (this.client as unknown as MessageListResource).messages;
+    // A message-only fake lacks the page API. THROW: an empty page would read
+    // as "nothing was sent" to the reconcile.
+    if (typeof messages.page !== 'function' || typeof messages.getPage !== 'function') {
+      throw new Error('TwilioMessagingDriver: client lacks the messages page API');
+    }
+    const page =
+      args.pageToken !== undefined
+        ? await messages.getPage(args.pageToken)
+        : await messages.page({ to: args.to, from: args.from, pageSize: args.pageSize });
+    const providerPageSize = page._payload?.page_size;
+    if (typeof providerPageSize === 'number' && providerPageSize !== args.pageSize) {
+      // Spec D17: the page size is UNVERIFIED against real Twilio. A different
+      // size moves how many messages the reconcile's page bound covers - loud,
+      // not fatal. Sizes only (D18).
+      this.log.warn(
+        { requested: args.pageSize, provider: providerPageSize },
+        'twilio messages list: provider page size differs from the requested one',
+      );
+    }
+    return {
+      messages: page.instances.map((instance) => summarize(instance)),
+      ...(typeof page.nextPageUrl === 'string' &&
+        page.nextPageUrl.length > 0 && { nextPageToken: page.nextPageUrl }),
+    };
+  }
+
+  async getMessage(providerSid: string): Promise<ProviderMessageSummary | undefined> {
+    // A message-only fake has a plain object here, not a function. Unlike
+    // getMediaContentType this THROWS rather than degrading: undefined means
+    // "the provider has no such message", which the reconcile acts on.
+    if (typeof (this.client as { messages?: unknown }).messages !== 'function') {
+      throw new Error('TwilioMessagingDriver: client lacks per-message resources');
+    }
+    const client = this.client as unknown as MessageFetchResource;
+    try {
+      return summarize(await client.messages(providerSid).fetch());
+    } catch (err) {
+      // 404 / 20404 is the ONE "no such message" answer, the code compared
+      // string-tolerantly (see getMediaContentType). Anything else - a 5xx, a
+      // timeout - rethrows: a failed lookup is never "not found".
+      const e = err as { status?: unknown; code?: unknown };
+      if (e.status === 404 || Number(e.code) === 20404) return undefined;
+      throw err;
+    }
+  }
+
   async getMediaStream(mediaUrl: string): Promise<Readable> {
     return this.fetchTwilioMediaStream(mediaUrl, 'getMediaStream');
   }
@@ -1121,6 +1294,33 @@ export class TwilioMessagingDriver implements MessagingAdapter, CarrierMessageSe
 // Console driver — local dev: no Twilio account, no network sends.
 // ---------------------------------------------------------------------------
 
+/** One console "send" as listMessages / getMessage answer it, plus its parties. */
+type ConsoleSentMessage = ProviderMessageSummary & { to: string; from?: string };
+
+/**
+ * What console drivers in this process have "sent", oldest first (spec D17:
+ * the console driver answers from what it has sent in-process). Module-level,
+ * so every console driver instance shares it; capped at CONSOLE_SENT_CAP with
+ * the oldest dropped. Local dev only - nothing here leaves the machine.
+ */
+const CONSOLE_SENT_CAP = 1000;
+const consoleSent: ConsoleSentMessage[] = [];
+
+function withoutParties(sent: ConsoleSentMessage): ProviderMessageSummary {
+  const { to: _to, from: _from, ...summary } = sent;
+  return summary;
+}
+
+/** TEST-ONLY: a copy of what console drivers in this process have "sent", oldest first. */
+export function _consoleSentMessagesForTests(): ConsoleSentMessage[] {
+  return consoleSent.map((sent) => ({ ...sent }));
+}
+
+/** TEST-ONLY: forget every console "send" in this process. */
+export function _resetConsoleSentMessagesForTests(): void {
+  consoleSent.length = 0;
+}
+
 export class ConsoleMessagingDriver implements MessagingAdapter, CarrierMessageSender {
   private readonly log: Logger;
   /**
@@ -1166,13 +1366,42 @@ export class ConsoleMessagingDriver implements MessagingAdapter, CarrierMessageS
       },
       'console messaging driver: message "sent"',
     );
+    // Deterministic when an idempotencyKey is supplied, else random.
+    const providerSid = `SMconsole-${params.idempotencyKey ?? randomUUID()}`;
+    const providerTs = new Date().toISOString();
+    consoleSent.push({
+      providerSid,
+      providerStatus: 'sent',
+      body: params.body ?? '',
+      mediaCount: params.mediaUrls?.length ?? 0,
+      createdAt: providerTs,
+      sentAt: providerTs,
+      to: params.to,
+      ...(params.from !== undefined && { from: params.from }),
+    });
+    if (consoleSent.length > CONSOLE_SENT_CAP) consoleSent.shift();
     return {
-      // Deterministic when an idempotencyKey is supplied, else random.
-      providerSid: `SMconsole-${params.idempotencyKey ?? randomUUID()}`,
+      providerSid,
       status: 'sent',
-      providerTs: new Date().toISOString(),
+      providerTs,
       actualTransport: prepared.requestedTransport,
     };
+  }
+
+  async listMessages(args: ListMessagesArgs): Promise<ListMessagesPage> {
+    // ONE page and no token: the store is capped at CONSOLE_SENT_CAP, the
+    // reconcile's own list page size, so a single page holds every match.
+    // Nothing is dropped to honor a smaller pageSize (there is no next page).
+    const messages = consoleSent
+      .filter((sent) => sent.to === args.to && sent.from === args.from)
+      .reverse()
+      .map(withoutParties);
+    return { messages };
+  }
+
+  async getMessage(providerSid: string): Promise<ProviderMessageSummary | undefined> {
+    const sent = consoleSent.find((candidate) => candidate.providerSid === providerSid);
+    return sent === undefined ? undefined : withoutParties(sent);
   }
 
   async getMediaStream(mediaUrl: string): Promise<Readable> {

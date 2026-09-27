@@ -11,17 +11,22 @@ import {
   InProcessOutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
 import type { PreparedMessageSend } from '../src/adapters/messaging.js';
+import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messagingErrors.js';
 import {
   _resetForTests,
   configureJobsLogger,
   configureOutboundQueue,
   configureScheduler,
+  defineJobHandler,
   dispatchJob,
+  enqueue,
   enqueueImmediate,
 } from '../src/jobs/jobs.js';
 import {
   BROADCAST_SEND_JOB,
   broadcastBackoffMs,
+  finalize,
+  parseBroadcastSendPayload,
   registerBroadcastSendJobHandler,
 } from '../src/jobs/broadcastFanOut.js';
 import { loadConfig } from '../src/lib/config.js';
@@ -36,6 +41,12 @@ import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { DEV_SESSION_SECRET_DEFAULT } from '../src/lib/config.js';
+import { hashRecipientKey } from '../src/lib/sendFingerprint.js';
+import {
+  SEND_RECONCILE_JOB,
+  registerSendReconcileJobHandler,
+  type SendReconcilePayload,
+} from '../src/jobs/sendReconcile.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
@@ -135,6 +146,7 @@ function wireHandler(
     events: world.events,
   });
   registerBroadcastSendJobHandler({
+    sendAttemptsRepo: world.sendAttemptsRepo,
     config,
     broadcastsRepo: world.broadcastsRepo,
     contactsRepo: world.contactsRepo,
@@ -1088,19 +1100,19 @@ describe('broadcast.send (M1.8a)', () => {
     });
     const bucket = { acquire } as unknown as TokenBucket;
 
-    // Wrap setRecipient so the 'sent' write records its position relative to
-    // acquire (the fake still applies the write for real).
-    const realSetRecipient = world.broadcastsRepo.setRecipient.bind(world.broadcastsRepo);
-    world.broadcastsRepo.setRecipient = async (broadcastId, contactKey, recipient, allowedPriorStatuses) => {
-      if (recipient.status === 'sent') order.push('setRecipient:sent');
-      return realSetRecipient(broadcastId, contactKey, recipient, allowedPriorStatuses);
+    // Wrap the ONE conditional slot+stats write (SOR D7a) so the 'sent' write
+    // records its position relative to acquire (the fake still applies it).
+    const realRecord = world.broadcastsRepo.recordRecipientOutcome.bind(world.broadcastsRepo);
+    world.broadcastsRepo.recordRecipientOutcome = async (broadcastId, contactKey, recipient, delta, priors) => {
+      if (recipient.status === 'sent') order.push('recordRecipientOutcome:sent');
+      return realRecord(broadcastId, contactKey, recipient, delta, priors);
     };
 
     wireHandler(world, logger, bucket);
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
     await outbound.settle();
 
-    const sentIdx = order.indexOf('setRecipient:sent');
+    const sentIdx = order.indexOf('recordRecipientOutcome:sent');
     const acquireIdx = order.indexOf('acquire');
     expect(sentIdx).toBeGreaterThanOrEqual(0);
     expect(acquireIdx).toBeGreaterThanOrEqual(0);
@@ -1121,6 +1133,7 @@ describe('broadcast.send (M1.8a)', () => {
         s.sent +
         s.delivered +
         s.failed +
+        (s.unconfirmed ?? 0) +
         s.skipped_opted_out +
         s.skipped_no_consent +
         (s.skipped_other ?? 0) ===
@@ -1210,6 +1223,1523 @@ describe('broadcast.send (M1.8a)', () => {
       sending: 1,
       queued: 0,
       skipped_opted_out: 1,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // SOR (send-outcome-reconcile) Task 7: every recipient reaches a terminal
+  // state without anyone throwing out of the loop, and nobody is texted
+  // twice. At Task 7 NO send.reconcile handler exists: a test drains only the
+  // broadcast.send envelopes it needs and asserts a reconcile envelope by
+  // inspection (a delayed one) or through a recording stub (a delay-0 one).
+  // -------------------------------------------------------------------------
+  describe('unknown send errors (spec D7, D7a, D8a, D9, D13a) - the first test must fail on main', () => {
+    const MAIN = '+15550009999';
+    // The override REPLACES the adapter and records nothing: its own call
+    // count is the only honest send count.
+    const sends: string[] = [];
+    beforeEach(() => {
+      sends.length = 0;
+    });
+    function unknownOn(phones: Set<string>) {
+      world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+        sends.push(prepared.params.to);
+        if (phones.has(prepared.params.to)) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        return { providerSid: `SM-${prepared.params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+      };
+    }
+    function tenants(n: number): ContactItem[] {
+      return Array.from({ length: n }, (_, i) =>
+        seedTenant(world, { contactId: `t-${i + 1}`, phone: `+1555010000${i + 1}` }),
+      );
+    }
+    const ownerOf = (k: string) => ({ kind: 'broadcast' as const, broadcastId: 'bcast-1', contactKey: k });
+
+    it('1 an unknown error on recipient 3 of 5 leaves 4 and 5 attempted, 3 handed to reconcile, no throw', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(5));
+      const { logger: log } = capturingLogger();
+      wireHandler(world, log, undefined, { BUSINESS_PHONE_NUMBER: MAIN });
+      unknownOn(new Set(['+15550100003']));
+
+      await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+      await outbound.settle();
+
+      const b = world.broadcasts.get('bcast-1')!;
+      expect([b.recipients['t-4']!.status, b.recipients['t-5']!.status]).toEqual(['sent', 'sent']);
+      expect(b.recipients['t-3']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-3'))).toMatchObject({
+        state: 'reconciling',
+        attemptNo: 1,
+        checkNo: 0,
+        sender: MAIN,
+      });
+      const reconcile = outbound.delayed.find((d) => d.envelope.jobName === SEND_RECONCILE_JOB);
+      expect(reconcile?.envelope.payload).toMatchObject({
+        owner: { kind: 'broadcast', broadcastId: 'bcast-1', recipientKeyHash: hashRecipientKey('t-3') },
+        checkNo: 0,
+      });
+      // Check 0 runs about 5 s after the ATTEMPT (the list lag, D13a).
+      expect(reconcile!.delaySeconds).toBeGreaterThanOrEqual(4);
+      expect(reconcile!.delaySeconds).toBeLessThanOrEqual(5);
+      expect(sends).toHaveLength(5);
+      // Not finalized: the reconciling recipient is still a queued slot.
+      expect(b.status).toBe('sending');
+    });
+
+    /** Facts for a record a test seeds directly (the values are never matched here). */
+    const seedFacts = { recipientDigest: 'd'.repeat(32), sender: MAIN, bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 };
+    const agoIso = (ms: number) => new Date(Date.now() - ms).toISOString();
+    /** G4: a delay-0 reconcile hand-off never reaches outbound.delayed - record it with a stub handler. */
+    function recordReconciles(): SendReconcilePayload[] {
+      const got: SendReconcilePayload[] = [];
+      defineJobHandler(SEND_RECONCILE_JOB, async (p) => {
+        got.push(p as SendReconcilePayload);
+      });
+      return got;
+    }
+    const delayedOf = (jobName: string) => outbound.delayed.filter((d) => d.envelope.jobName === jobName);
+    const continuationKeys = () =>
+      (delayedOf(BROADCAST_SEND_JOB)[0]?.envelope.payload as { recipientKeys?: string[] } | undefined)?.recipientKeys;
+    function wire(): LogCapture {
+      const { capture, logger: log } = capturingLogger();
+      wireHandler(world, log, undefined, { BUSINESS_PHONE_NUMBER: MAIN });
+      return capture;
+    }
+    async function runFirstPass(): Promise<void> {
+      await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+      await outbound.settle();
+    }
+    async function runPayload(payload: Record<string, unknown>): Promise<void> {
+      await enqueueImmediate(BROADCAST_SEND_JOB, payload);
+      await outbound.settle();
+    }
+    const errorLabels = (capture: LogCapture) => capture.atLevel(50).map((l) => l['label']).filter((l) => l !== undefined);
+
+    it('2 a claimed recipient whose sendMessage refuses closes done/refused, slot skipped, no reconcile - Review Focus 3', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      seedBroadcast(world, [t!]);
+      const conv = await world.conversationsRepo.createOrGetByParticipantPhone(t!.phone!, 'tenant_1to1');
+      await world.conversationsRepo.setMode(conv.conversationId, 'manual');
+      wire();
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'manual_mode' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'manual_mode' });
+      expect(outbound.delayed.some((d) => d.envelope.jobName === SEND_RECONCILE_JOB)).toBe(false);
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
+
+    it('3 a prepare-phase throw defers the recipient as send_retryable with no record', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(2));
+      const capture = wire();
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(b.recipients['t-2']!.status).toBe('sent');
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toBeUndefined();
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(world.sent.map((s) => s.to)).toEqual(['+15550100002']);
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('prepare failed'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ recipientKey: 't-1', err: { message: 'dynamo blip' } });
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('3b a deferral write that itself throws is logged and the next recipient is still attempted (D7a)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(2));
+      const capture = wire();
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      vi.spyOn(world.broadcastsRepo, 'recordRecipientOutcome').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(errorLabels(capture)).toEqual(['deferSlot']);
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(b.recipients['t-2']!.status).toBe('sent');
+      expect(continuationKeys()).toEqual(['t-1']);
+    });
+
+    it('3c the deferral never reverts a skipped slot', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      // A PREPARE step makes the stored slot terminal AND throws: the unit
+      // falls into the pre-claim catch, whose deferral carries ['queued'].
+      world.conversationsRepo.createOrGetByParticipantPhone = async () => {
+        world.broadcasts.get('bcast-1')!.recipients['t-1'] = { status: 'skipped', errorCode: 'opted_out' };
+        throw new Error('boom');
+      };
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(continuationKeys()).toEqual(['t-1']);
+    });
+
+    it('4a three consecutive unknowns brake the pass; the untried remainder is deferred, not attempted (D9)', async () => {
+      seedUnit(world);
+      const item = seedBroadcast(world, tenants(7));
+      // A terminal key AFTER the brake is skipped, never carried (build finding T7-12).
+      item.recipients['t-7'] = { status: 'sent', conversationId: 'conv-x', tsMsgId: 'ts-x' };
+      const capture = wire();
+      unknownOn(new Set(['+15550100001', '+15550100002', '+15550100003']));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(['t-4', 't-5', 't-6'].map((k) => b.recipients[k])).toEqual([
+        { status: 'queued' },
+        { status: 'queued' },
+        { status: 'queued' },
+      ]);
+      expect(sends).toHaveLength(3);
+      expect(delayedOf(BROADCAST_SEND_JOB)[0]?.envelope.payload).toMatchObject({ recipientKeys: ['t-4', 't-5', 't-6'], attempt: 2 });
+      expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(3);
+      const brake = capture.atLevel(40).filter((l) => l['event'] === 'outage_brake');
+      expect(brake).toHaveLength(1);
+      expect(brake[0]).toMatchObject({ broadcastId: 'bcast-1', untried: 3 });
+    });
+
+    it('4b a sent between two unknowns resets the streak', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(6));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001', '+15550100003', '+15550100005']));
+      await runFirstPass();
+      expect(sends).toHaveLength(6);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-6']!.status).toBe('sent');
+      expect(capture.atLevel(40).some((l) => l['event'] === 'outage_brake')).toBe(false);
+    });
+
+    it('4c a fence skip between two unknowns resets the streak (D9: a skip resets)', async () => {
+      seedUnit(world);
+      const ts = tenants(6);
+      ts[1]!.sms_opt_out = true;
+      ts[3]!.sms_opt_out = true;
+      seedBroadcast(world, ts);
+      const capture = wire();
+      unknownOn(new Set(['+15550100001', '+15550100003', '+15550100005']));
+      await runFirstPass();
+      expect(sends).toEqual(['+15550100001', '+15550100003', '+15550100005', '+15550100006']);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-6']!.status).toBe('sent');
+      expect(capture.atLevel(40).some((l) => l['event'] === 'outage_brake')).toBe(false);
+    });
+
+    it('4d three rejected do not brake', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(5));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+        sends.push(prepared.params.to);
+        if (sends.length <= 3) throw Object.assign(new Error('filtered'), { code: 30007 });
+        return { providerSid: `SM-${prepared.params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+      };
+      await runFirstPass();
+      expect(sends).toHaveLength(5);
+      expect(capture.atLevel(40).some((l) => l['event'] === 'outage_brake')).toBe(false);
+    });
+
+    it('4d three retryable do not brake', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(5));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+        sends.push(prepared.params.to);
+        if (sends.length <= 3) throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+        return { providerSid: `SM-${prepared.params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+      };
+      await runFirstPass();
+      expect(sends).toHaveLength(5);
+      expect(continuationKeys()).toEqual(['t-1', 't-2', 't-3']);
+      expect(capture.atLevel(40).some((l) => l['event'] === 'outage_brake')).toBe(false);
+    });
+
+    it('4e a stranded unknown counts toward the brake', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(5));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001', '+15550100002', '+15550100003']));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockRejectedValue(new Error('dynamo down'));
+      await runFirstPass();
+      expect(sends).toHaveLength(3);
+      // The stranded three are carried (record attempting, slot untouched), then the untried two.
+      expect(continuationKeys()).toEqual(['t-1', 't-2', 't-3', 't-4', 't-5']);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting' });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(errorLabels(capture)).toEqual(['handToReconcile', 'handToReconcile', 'handToReconcile']);
+      expect(capture.atLevel(40).some((l) => l['event'] === 'outage_brake')).toBe(true);
+    });
+
+    it('5a a record-phase failure after a successful send hands the SID to reconcile and never re-sends (D7a)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      const real = world.broadcastsRepo.recordRecipientOutcome;
+      world.broadcastsRepo.recordRecipientOutcome = async () => {
+        throw new Error('dynamo hiccup');
+      };
+      await runFirstPass();
+      world.broadcastsRepo.recordRecipientOutcome = real;
+      expect(world.sent).toHaveLength(1);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling', sid: world.sentDetails[0]!.sid });
+      const line = capture.atLevel(50).find((l) => String(l['msg']).includes('sent_unrecorded'));
+      expect(line).toMatchObject({ providerSid: world.sentDetails[0]!.sid, recipientKey: 't-1' });
+      expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(1);
+      expect(delayedOf(BROADCAST_SEND_JOB)).toHaveLength(0);
+    });
+
+    it('5b a SendAcceptedNotRecordedError from sendMessage does the same', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      vi.spyOn(world.messagesRepo, 'append').mockRejectedValueOnce(new Error('TransactionInProgressException'));
+      await runFirstPass();
+      expect(world.sent).toHaveLength(1);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling', sid: world.sentDetails[0]!.sid });
+      expect(capture.atLevel(50).some((l) => String(l['msg']).includes('sent_unrecorded'))).toBe(true);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(1);
+    });
+
+    it('5c an unknown whose handToReconcile write throws strands the recipient: NO second provider call, record still attempting, deferred (R2 #1)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      expect(sends).toHaveLength(1);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(errorLabels(capture)).toEqual(['handToReconcile']);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(continuationKeys()).toEqual(['t-1']);
+      // (b) The continuation meets the record still FRESH: the claim is refused and the key carried again.
+      const idx = outbound.delayed.findIndex((d) => d.envelope.jobName === BROADCAST_SEND_JOB);
+      const [cont] = outbound.delayed.splice(idx, 1);
+      await dispatchJob(JSON.parse(JSON.stringify(cont!.envelope)));
+      await outbound.settle();
+      expect(sends).toHaveLength(1);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(delayedOf(BROADCAST_SEND_JOB)[0]?.envelope.payload).toMatchObject({ recipientKeys: ['t-1'], attempt: 3 });
+    });
+
+    it('5d a handToReconcile whose FENCE is lost (resolved false) hands off nothing and carries nothing (G5)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockResolvedValueOnce(false);
+      await runFirstPass();
+      expect(sends).toHaveLength(1);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(capture.atLevel(30).some((l) => String(l['msg']).includes('hand-off fence lost'))).toBe(true);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('6 a reconcile enqueue that throws closes the recipient unresolved on the spot', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(b.stats.unconfirmed).toBe(1);
+      expect(b.stats.queued).toBe(0);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+      expect(b.status).toBe('failed');
+      expect(b.last_error).toBe("Couldn't confirm any text went out");
+      expect(capture.atLevel(50).some((l) => String(l['msg']).includes('reconcile enqueue failed'))).toBe(true);
+    });
+
+    it('7a two passes for the same recipient produce ONE provider call (D8a)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, new Date().toISOString());
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(sends).toHaveLength(0);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(delayedOf(BROADCAST_SEND_JOB)[0]?.envelope.payload).toMatchObject({ recipientKeys: ['t-1'] });
+    });
+
+    it('7b a stale attempting record is taken over into reconcile by the next pass, and a takeover does not count toward the brake', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(4));
+      const capture = wire();
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      const stale = agoIso(31_000);
+      for (const k of ['t-1', 't-2', 't-3']) await world.sendAttemptsRepo.claim(ownerOf(k), seedFacts, stale);
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1', 't-2', 't-3', 't-4'], attempt: 2 });
+      for (const k of ['t-1', 't-2', 't-3']) {
+        expect(await world.sendAttemptsRepo.get(ownerOf(k))).toMatchObject({ state: 'reconciling', attemptedAt: stale, attemptNo: 1 });
+        expect(world.broadcasts.get('bcast-1')!.recipients[k]).toEqual({ status: 'queued' });
+      }
+      expect(reconciles).toHaveLength(3);
+      expect(reconciles[0]).toEqual({
+        owner: { kind: 'broadcast', broadcastId: 'bcast-1', recipientKeyHash: 't-1' },
+        attemptedAt: stale,
+        checkNo: 0,
+      });
+      // Three takeovers in a row are NOT an outage: t-4 still sends.
+      expect(sends).toEqual(['+15550100004']);
+      expect(capture.atLevel(40).some((l) => l['event'] === 'outage_brake')).toBe(false);
+    });
+
+    it('7c a takeover whose fence is lost hands off nothing (INFO)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, agoIso(31_000));
+      vi.spyOn(world.sendAttemptsRepo, 'takeOver').mockResolvedValueOnce(false);
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(reconciles).toHaveLength(0);
+      expect(sends).toHaveLength(0);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting' });
+      expect(capture.atLevel(30).some((l) => String(l['msg']).includes('takeover lost'))).toBe(true);
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('7e a FIRST pass does not carry a recipient a foreign fresh attempt owns (T7-11)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, new Date().toISOString());
+      await runFirstPass();
+      expect(sends).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+    });
+
+    it('7d a continuation that meets a reconciling record skips it and does not carry it', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, at);
+      await world.sendAttemptsRepo.handToReconcile(ownerOf('t-1'), { attemptNo: 1, attemptedAt: at });
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(sends).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+    });
+
+    it('10 a retryable with a network code writes send_retryable, never the network string', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      };
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'retryable', cause: 'send_retryable' });
+      expect(continuationKeys()).toEqual(['t-1']);
+    });
+
+    it('10b a SendNotAttemptedError after the claim defers send_retryable and releases the record retryable', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(2));
+      wire();
+      // The wrapper's contact read is inside sendMessage, after the job's claim.
+      vi.spyOn(world.contactsRepo, 'findByPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'retryable', cause: 'send_retryable' });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-2']!.status).toBe('sent');
+      expect(continuationKeys()).toEqual(['t-1']);
+    });
+
+    it('11 a foreign fresh attempt on a fenced recipient defers the fence instead of writing skipped (D8, R2 #12)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      unknownOn(new Set());
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, new Date().toISOString());
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(sends).toHaveLength(0);
+    });
+
+    it('11b a fenced recipient whose record is terminal is skipped: no slot write, not carried', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, at);
+      await world.sendAttemptsRepo.finishAttempt(ownerOf('t-1'), { attemptNo: 1, attemptedAt: at }, { outcome: 'sent', sid: 'SMx' });
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(b.stats.skipped_opted_out).toBe(0);
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('11c a fenced recipient whose record is stale is taken over and handed off; its slot is untouched', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      const reconciles = recordReconciles();
+      const stale = agoIso(31_000);
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, stale);
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling', attemptedAt: stale });
+      expect(reconciles).toHaveLength(1);
+    });
+
+    it('11d a fenced recipient whose record is done/retryable is fenced as today (the record is left alone)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, at);
+      await world.sendAttemptsRepo.finishAttempt(ownerOf('t-1'), { attemptNo: 1, attemptedAt: at }, { outcome: 'retryable', cause: '429' });
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'retryable' });
+    });
+
+    it('12 every log line for a phone-keyed recipient names it redacted', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-p1', phone: '+15550100081' });
+      seedTenant(world, { contactId: 'c-p2', phone: '+15550100082' });
+      const item = seedBroadcast(world, []);
+      item.recipients['phone#+15550100081'] = { status: 'queued' };
+      item.recipients['phone#+15550100082'] = { status: 'queued' };
+      item.stats.audience = 2;
+      item.stats.queued = 2;
+      const capture = wire();
+      configureJobsLogger(createLogger({ level: 'info', destination: capture.stream }));
+      unknownOn(new Set(['+15550100081', '+15550100082']));
+      // The first hand-off write fails: its ERROR line carries the recipient key.
+      vi.spyOn(world.sendAttemptsRepo, 'handToReconcile').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const text = JSON.stringify(capture.lines);
+      expect(text).toContain('phone#redacted');
+      expect(text).not.toContain('phone#+');
+      expect(text).not.toContain('+1555010008');
+      // The reconcile payload carries the HASHED key, never the phone.
+      const payloads = JSON.stringify(delayedOf(SEND_RECONCILE_JOB).map((d) => d.envelope.payload));
+      expect(payloads).toContain(hashRecipientKey('phone#+15550100082'));
+      expect(payloads).not.toContain('+1555010008');
+    });
+
+    it('13 a 4xx with no code writes failed with NO errorCode; the record cause keeps the status (R3 #13)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('bad request'), { status: 400 });
+      };
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed' });
+      expect(b.stats.failed).toBe(1);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'rejected', cause: '400' });
+      expect(b.status).toBe('failed');
+    });
+
+    it('13b a Twilio rejection with its code fails the recipient with that code and closes the record rejected; the known arms keep their writes', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(3));
+      const capture = wire();
+      const codes: Record<string, number> = { '+15550100001': 21211, '+15550100002': 30007, '+15550100003': 30005 };
+      world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+        throw Object.assign(new Error('rejected'), { status: 400, code: codes[prepared.params.to] });
+      };
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: '21211' });
+      expect(b.recipients['t-2']).toEqual({ status: 'failed', errorCode: '30007' });
+      expect(b.recipients['t-3']).toEqual({ status: 'failed', errorCode: '30005' });
+      expect(b.stats.failed).toBe(3);
+      expect(b.stats.queued).toBe(0);
+      for (const [k, code] of [['t-1', '21211'], ['t-2', '30007'], ['t-3', '30005']] as const) {
+        expect(await world.sendAttemptsRepo.get(ownerOf(k))).toMatchObject({ state: 'done', outcome: 'rejected', cause: code });
+      }
+      expect(world.flagWrites.filter((f) => f.flag === 'sms_unreachable').map((f) => f.contactId)).toEqual(['t-3']);
+      expect(b.status).toBe('failed');
+      expect(b.last_error).toBe('all recipients failed');
+      // FW4-2: with every slot write resolved, each arm logs its own outcome line once, and no carry line.
+      const msgs = [...capture.atLevel(40), ...capture.atLevel(50)].map((l) => String(l['msg']));
+      expect(msgs.filter((m) => m.includes('send rejected by the provider - recipient failed, NOT retried'))).toHaveLength(1);
+      expect(msgs.filter((m) => m.includes('carrier filtering (30007) - recipient failed, NOT retried'))).toHaveLength(1);
+      expect(msgs.filter((m) => m.includes('invalid number/landline - recipient failed, contact flagged unreachable'))).toHaveLength(1);
+      expect(msgs.filter((m) => m.includes('slot or stats write failed'))).toHaveLength(0);
+    });
+
+    it('13c the adapter kill switch fails the recipient with its prose token (D5, D23)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw new AdapterSmsSendingDisabledError('SMS sending is disabled');
+      };
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'sms_sending_disabled' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'rejected', cause: 'sms_sending_disabled' });
+    });
+
+    it('14 anything else thrown at the send is an UNKNOWN outcome (D2): handed to reconcile, never failed', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const { logger: log } = capturingLogger();
+      registerBroadcastSendJobHandler({
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        config: testConfig({ BUSINESS_PHONE_NUMBER: MAIN }),
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        unitsRepo: world.unitsRepo,
+        sendMessageService: async () => {
+          throw new Error('an untyped failure');
+        },
+        auditRepo: world.auditRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        events: world.events,
+        logger: log,
+      });
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling' });
+      expect(delayedOf(SEND_RECONCILE_JOB)).toHaveLength(1);
+    });
+
+    // --- the cap-close gate (D8) and the re-drive pass (D13a, D16) ---------
+    /** A record the reconcile ruled never_sent and re-drove: redriven, redriveCount 1. */
+    async function seedRedriven(k: string): Promise<void> {
+      const at = new Date().toISOString();
+      await world.sendAttemptsRepo.claim(ownerOf(k), seedFacts, at);
+      await world.sendAttemptsRepo.handToReconcile(ownerOf(k), { attemptNo: 1, attemptedAt: at });
+      await world.sendAttemptsRepo.markRedriven(ownerOf(k), at);
+    }
+    function refuseDelayedEnqueues(): void {
+      // DELAY-SELECTIVE: the entry enqueue (delay 0) must still pass.
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if ((opts?.delaySeconds ?? 0) > 0) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+    }
+
+    it('8 a cap-close closes only records that are absent or done/retryable, skips a terminal one, defers a live one and takes over a stale attempting one (D8)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(6));
+      const capture = wire();
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      // Close B: the ladder is already spent when this first pass begins.
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      const now = new Date().toISOString();
+      const stale = agoIso(31_000);
+      // t-1: no record.
+      await world.sendAttemptsRepo.claim(ownerOf('t-2'), seedFacts, now); // fresh attempting
+      await world.sendAttemptsRepo.claim(ownerOf('t-3'), seedFacts, stale); // stale attempting
+      await world.sendAttemptsRepo.claim(ownerOf('t-4'), seedFacts, now); // reconciling
+      await world.sendAttemptsRepo.handToReconcile(ownerOf('t-4'), { attemptNo: 1, attemptedAt: now });
+      await world.sendAttemptsRepo.claim(ownerOf('t-5'), seedFacts, now); // done/sent
+      await world.sendAttemptsRepo.finishAttempt(ownerOf('t-5'), { attemptNo: 1, attemptedAt: now }, { outcome: 'sent', sid: 'SM5' });
+      await world.sendAttemptsRepo.claim(ownerOf('t-6'), seedFacts, now); // done/retryable
+      await world.sendAttemptsRepo.finishAttempt(ownerOf('t-6'), { attemptNo: 1, attemptedAt: now }, { outcome: 'retryable', cause: '429' });
+
+      await runFirstPass();
+
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      for (const k of ['t-2', 't-3', 't-4', 't-5']) expect(b.recipients[k], k).toEqual({ status: 'queued' });
+      expect(b.recipients['t-6']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(b.stats).toMatchObject({ failed: 2, queued: 4 });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-3'))).toMatchObject({ state: 'reconciling', attemptedAt: stale });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-2'))).toMatchObject({ state: 'attempting' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-6'))).toMatchObject({ state: 'done', outcome: 'retryable' });
+      expect(reconciles).toEqual([
+        { owner: { kind: 'broadcast', broadcastId: 'bcast-1', recipientKeyHash: 't-3' }, attemptedAt: stale, checkNo: 0 },
+      ]);
+      expect(sends).toHaveLength(0);
+      expect(closeLines(capture)).toHaveLength(1);
+      // finalize ran and deferred: four recipients are still owned elsewhere.
+      expect(b.status).toBe('sending');
+    });
+
+    it('8b a cap-close takeover whose fence is lost leaves the recipient alone', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      const reconciles = recordReconciles();
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, agoIso(31_000));
+      vi.spyOn(world.sendAttemptsRepo, 'takeOver').mockResolvedValueOnce(false);
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(reconciles).toHaveLength(0);
+    });
+
+    it('8c a cap-close whose gate read throws for one recipient logs it and still closes the rest and finalizes (T7-9)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(2));
+      const capture = wire();
+      unknownOn(new Set());
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(b.recipients['t-2']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      const capClose = capture.atLevel(50).filter((l) => l['label'] === 'capClose');
+      expect(capClose).toHaveLength(1);
+      expect(capClose[0]).toMatchObject({ broadcastId: 'bcast-1', recipientKey: 't-1' });
+      expect(closeLines(capture)).toHaveLength(1);
+      expect(capture.atLevel(30).some((l) => String(l['msg']).includes('finalize deferred'))).toBe(true);
+    });
+
+    it('9a a re-drive pass claims no ladder rung up front and its fence closes the redriven record done/refused', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'opted_out' });
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(b.fanout_attempt).toBe(3);
+      expect(b.status).toBe('sent');
+    });
+
+    it('9b a re-drive attempt that comes back unknown closes unresolved with no second reconcile (D13a)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      await seedRedriven('t-1');
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(sends).toHaveLength(1);
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+      expect(b.stats.unconfirmed).toBe(1);
+      expect(b.stats.queued).toBe(0);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'unresolved',
+        cause: 'second_unknown',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(b.status).toBe('failed');
+      expect(b.last_error).toBe("Couldn't confirm any text went out");
+      expect(capture.atLevel(50).filter((l) => l['cause'] === 'second_unknown')).toHaveLength(1);
+    });
+
+    it('9c a re-drive pass that defers before its claim and hits the cap closes its OWN redriven record (R2 #11)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'transient_cap' });
+      // The rung is claimed only AFTER the loop, because the pass has a remainder - and it is capped.
+      expect(claimPass).toHaveBeenCalledTimes(1);
+      expect(sends).toHaveLength(0);
+      expect(b.status).toBe('failed');
+    });
+
+    it('9d a redriven record reached by an ORDINARY continuation (no marker) whose fence trips closes done/refused (R3 #17)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      await seedRedriven('t-1');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'opted_out' });
+    });
+
+    it('9e a re-drive pass whose continuation enqueue is refused closes its redriven record enqueue_failed (G7)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      refuseDelayedEnqueues();
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'enqueue_failed' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'enqueue_failed', cause: 'enqueue_failed' });
+      expect(b.status).toBe('failed');
+    });
+
+    it('9f a re-drive pass with a retryable remainder claims its rung AFTER the loop; the continuation carries no marker', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      const refused = vi.fn(async (): Promise<never> => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      });
+      world.adapter.sendPreparedMessage = refused;
+      await seedRedriven('t-1');
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(refused).toHaveBeenCalledTimes(1);
+      expect(claimPass).toHaveBeenCalledTimes(1);
+      // AFTER the loop: the rung is claimed only once the pass knows it has a remainder.
+      expect(claimPass.mock.invocationCallOrder[0]!).toBeGreaterThan(refused.mock.invocationCallOrder[0]!);
+      expect(delayedOf(BROADCAST_SEND_JOB).map((d) => d.envelope.payload)).toEqual([
+        { broadcastId: 'bcast-1', attempt: 2, recipientKeys: ['t-1'] },
+      ]);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'retryable', redriveCount: 1 });
+    });
+
+    it('9g a re-drive pass whose recipient sends claims no rung and finalizes', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      const claimPass = vi.spyOn(world.broadcastsRepo, 'claimFanoutPass');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(sends).toHaveLength(1);
+      expect(claimPass).not.toHaveBeenCalled();
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'sent', sid: 'SM-+15550100001' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
+
+    it('the payload parser carries redrive: true and nothing else', () => {
+      expect(parseBroadcastSendPayload({ broadcastId: 'b', redrive: true })).toEqual({ broadcastId: 'b', attempt: 1, redrive: true });
+      expect(parseBroadcastSendPayload({ broadcastId: 'b', redrive: 'yes' })).toEqual({ broadcastId: 'b', attempt: 1 });
+      expect(parseBroadcastSendPayload({ broadcastId: 'b', recipientKeys: ['k'], attempt: 2 })).toEqual({
+        broadcastId: 'b',
+        attempt: 2,
+        recipientKeys: ['k'],
+      });
+    });
+
+    it('every pass reads its snapshot strongly consistently - the first pass too (D11, D16; code review ADV-7)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      const consistent = vi.spyOn(world.broadcastsRepo, 'getByIdConsistent');
+      // First pass: a prepare throw defers t-1 (a continuation is pending, so no finalize reads either).
+      vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockRejectedValueOnce(new Error('dynamo blip'));
+      await runFirstPass();
+      expect(consistent).toHaveBeenCalledTimes(1);
+      // A continuation: a foreign fresh attempt defers t-1 again - the one consistent read is the snapshot.
+      await world.sendAttemptsRepo.claim(ownerOf('t-1'), seedFacts, new Date().toISOString());
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(consistent).toHaveBeenCalledTimes(2);
+      expect(consistent).toHaveBeenCalledWith('bcast-1');
+    });
+
+    it('ADV-7: a FIRST pass milliseconds after the route marked the share sending still sends - an eventually consistent read that shows the draft decides nothing (FW2-7)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      // The eventual read lags the route's markSending (the draft, no recipients);
+      // the consistent read sees the stored item. (The fake's consistent read
+      // delegates through getById, so it is given its own here.)
+      const draft: BroadcastItem = { ...world.broadcasts.get('bcast-1')!, status: 'draft', recipients: {} };
+      vi.spyOn(world.broadcastsRepo, 'getById').mockResolvedValue(draft);
+      vi.spyOn(world.broadcastsRepo, 'getByIdConsistent').mockImplementation(async (id) => {
+        const stored = world.broadcasts.get(id);
+        return stored === undefined ? undefined : structuredClone(stored);
+      });
+      await runFirstPass();
+      expect(world.sent.map((s) => s.to)).toEqual(['+15550100001']);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toMatchObject({ status: 'sent' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
+
+    // --- code review ADV-1 (FW2-1): the re-arm immediately before the send ---
+
+    /** A real broadcast.send envelope NOT run by the queue: dispatched by hand, a stalled pass never blocks outbound.settle(). */
+    async function detachedEnvelope(): Promise<unknown> {
+      const envelope = await enqueue(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' }, { runAt: new Date(Date.now() + 600_000) });
+      const [item] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobId === envelope.jobId),
+        1,
+      );
+      return JSON.parse(JSON.stringify(item!.envelope)) as unknown;
+    }
+    const takenOverLines = (capture: LogCapture) =>
+      capture.atLevel(30).filter((l) => String(l['msg']).includes('taken over before the send'));
+
+    it('ADV-1 (zz-adv-6): a pass stalled between its claim and the send - taken over, reconciled never_sent and re-driven meanwhile - resumes and does NOT send: its re-arm finds the attempt moved on (FW2-1)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      seedBroadcast(world, [t!]);
+      const capture = wire();
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+      // Pass A claims t-1 and stalls in the send wrapper's contact read (after
+      // the claim, before the provider call) - for 31 s: past the claim TTL.
+      const realClaim = world.sendAttemptsRepo.claim.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'claim').mockImplementationOnce((owner, facts) =>
+        realClaim(owner, facts, agoIso(31_000)),
+      );
+      const realFind = world.contactsRepo.findByPhone.bind(world.contactsRepo);
+      let resumeA!: () => void;
+      let stalledA!: () => void;
+      const aIsStalled = new Promise<void>((resolve) => {
+        stalledA = resolve;
+      });
+      vi.spyOn(world.contactsRepo, 'findByPhone').mockImplementationOnce(async (...args) => {
+        stalledA();
+        await new Promise<void>((resolve) => {
+          resumeA = resolve;
+        });
+        return realFind(...args);
+      });
+      const passA = dispatchJob(await detachedEnvelope());
+      await aIsStalled;
+      // Pass B - a second first pass under another jobId - finds the claim
+      // stale: it takes it over and hands off; checks 0 and 1 are due at once.
+      await runFirstPass();
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      // Check 2: the provider holds nothing - never_sent. The record is
+      // re-driven and the re-drive pass claims attempt 2 and sends.
+      const [check2] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB),
+        1,
+      );
+      await dispatchJob(JSON.parse(JSON.stringify(check2!.envelope)) as unknown);
+      await outbound.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([t!.phone]);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'sent',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      // Pass A resumes. The attempt it claimed is gone: it must not send.
+      resumeA();
+      await passA;
+      await outbound.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([t!.phone]);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'sent',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toMatchObject({ status: 'sent' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+      expect(takenOverLines(capture)).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('ADV-1: a re-arm that finds the attempt taken over sends nothing and writes nothing - not carried, no reconcile, one INFO (FW2-1)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
+      vi.spyOn(world.sendAttemptsRepo, 'rearm').mockResolvedValueOnce(undefined);
+      // A continuation, so a carried recipient would show as a new continuation.
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(world.sent).toHaveLength(0);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'attempting',
+        attemptNo: 1,
+        attemptedAt: claim.mock.calls[0]![2],
+      });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(takenOverLines(capture)).toHaveLength(1);
+      expect(takenOverLines(capture)[0]).toMatchObject({ broadcastId: 'bcast-1', recipientKey: 't-1' });
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('send not attempted'))).toHaveLength(0);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('ADV-1: a re-arm that throws defers the recipient send_retryable and releases the attempt retryable on its claimed ref - nothing sent (FW2-1)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(2));
+      const capture = wire();
+      vi.spyOn(world.sendAttemptsRepo, 'rearm').mockRejectedValueOnce(new Error('TransactionConflict'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'retryable',
+        cause: 'send_retryable',
+        attemptNo: 1,
+      });
+      expect(b.recipients['t-2']!.status).toBe('sent');
+      expect(world.sent.map((s) => s.to)).toEqual(['+15550100002']);
+      expect(continuationKeys()).toEqual(['t-1']);
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('send not attempted'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ recipientKey: 't-1' });
+    });
+
+    it('ADV-1: the pass re-arms inside the send wrapper as the LAST step before the provider call and fences its record write on the ref the re-arm returned (FW2-1)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      const findByPhone = vi.spyOn(world.contactsRepo, 'findByPhone');
+      const realRearm = world.sendAttemptsRepo.rearm.bind(world.sendAttemptsRepo);
+      const later = new Date(Date.now() + 1_000).toISOString();
+      const rearm = vi
+        .spyOn(world.sendAttemptsRepo, 'rearm')
+        .mockImplementationOnce((owner, ref) => realRearm(owner, ref, later));
+      const send = vi.spyOn(world.adapter, 'sendPreparedMessage');
+      await runFirstPass();
+      expect(rearm).toHaveBeenCalledTimes(1);
+      expect(findByPhone.mock.invocationCallOrder[0]!).toBeLessThan(rearm.mock.invocationCallOrder[0]!);
+      expect(rearm.mock.invocationCallOrder[0]!).toBeLessThan(send.mock.invocationCallOrder[0]!);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'sent',
+        attemptNo: 1,
+        attemptedAt: later,
+      });
+    });
+
+    // --- code review C-2 / R-e (FW2-2): a terminal arm closes the record only
+    // after its slot write RESOLVED; a slot write that threw leaves the attempt
+    // open and the recipient carried, where a later pass can still act.
+
+    it('C-2 (probe P1): a 21211 whose reject-slot write throws leaves the record attempting and the recipient carried - never done/rejected over a queued slot (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('invalid'), { status: 400, code: 21211 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'recordRecipientOutcome').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['rejectSlot']);
+      expect(b.status).toBe('sending');
+      // FW4-2: no line says the recipient failed or is never retried; ONE WARN says the rejection's slot or
+      // stats write failed (FW5-2: here the one write that holds both) and the recipient is carried with the
+      // attempt still open.
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '21211', status: 400 });
+      expect(String(carried[0]!['msg'])).toContain('the recipient is carried with the attempt still open');
+    });
+
+    it('C-2: the known arms (30007) keep the record open and carry the recipient when their slot write throws (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('filtered'), { status: 400, code: 30007 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['rejectSlot']);
+      // FW4-2: the 30007 ERROR ("recipient failed, NOT retried") is not logged over a carried recipient.
+      expect(capture.atLevel(50).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30007' });
+    });
+
+    it('C-2 / FW4-2: a 30005 whose slot write throws still flags the contact, but logs only that the recipient is carried - never "recipient failed"', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('invalid'), { status: 400, code: 30005 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(world.flagWrites.filter((f) => f.flag === 'sms_unreachable').map((f) => f.contactId)).toEqual(['t-1']);
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30005' });
+    });
+
+    it('C-2 / FW5-2 (D-2): a 30007 whose STATS bump throws after its slot write keeps the slot failed/30007 and carries the recipient - the carry WARN names the slot or stats write, never "recipient failed"', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('filtered'), { status: 400, code: 30007 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'bumpStats').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      // The known arms write the slot, then bump the stats, in ONE guardWrite: the slot already reads failed.
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'failed', errorCode: '30007' });
+      // What the carry line says: the recipient is carried, with the attempt still open (R2C-5's residue).
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['rejectSlot']);
+      const msgs = [...capture.atLevel(40), ...capture.atLevel(50)].map((l) => String(l['msg']));
+      expect(msgs.filter((m) => m.includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('slot or stats write failed'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30007' });
+      expect(String(carried[0]!['msg'])).toContain('the recipient is carried with the attempt still open');
+    });
+
+    it('C-2: a refusal whose skipped-slot write throws keeps the record open and carries the recipient; the ERROR names the refusal (FW2-2)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      seedBroadcast(world, [t!]);
+      const conv = await world.conversationsRepo.createOrGetByParticipantPhone(t!.phone!, 'tenant_1to1');
+      await world.conversationsRepo.setMode(conv.conversationId, 'manual');
+      const capture = wire();
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      const slotErrors = capture.atLevel(50).filter((l) => l['label'] === 'refusedSlot');
+      expect(slotErrors).toHaveLength(1);
+      expect(slotErrors[0]).toMatchObject({ recipientKey: 't-1', refusal: 'manual_mode' });
+    });
+
+    it('C-2: a second unknown whose unresolved slot close throws keeps the re-driven attempt open and carries the recipient (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      await seedRedriven('t-1');
+      vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued').mockRejectedValueOnce(new Error('dynamo down'));
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(sends).toHaveLength(1);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(errorLabels(capture)).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'second_unknown');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+    });
+
+    it('C-2: a reconcile enqueue that throws, whose unresolved slot close throws too, leaves the record reconciling - not carried, nothing closed (FW2-2)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set(['+15550100001']));
+      refuseDelayedEnqueues();
+      vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(errorLabels(capture)).toEqual(['closeUnconfirmed']);
+      const line = capture.atLevel(50).filter((l) => l['cause'] === 'enqueue_failed');
+      expect(line).toHaveLength(1);
+      expect(String(line[0]!['msg'])).toContain('close failed');
+      expect(b.status).toBe('sending');
+    });
+
+    // --- code review C-3 (FW2-3): a fence write is a PREPARE step ---
+
+    it('C-3 (probe P2): a fence write that throws reaches the prepare catch - the recipient is deferred send_retryable and carried, and the continuation fences it (FW2-3)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      const capture = wire();
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(capture.atLevel(50).filter((l) => l['label'] === 'fenceWrite')).toHaveLength(0);
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('prepare failed'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ recipientKey: 't-1', err: { message: 'dynamo down' } });
+      expect(b.status).toBe('sending');
+      // The continuation meets the fence again, writes it, and the share finalizes.
+      const [cont] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobName === BROADCAST_SEND_JOB),
+        1,
+      );
+      await dispatchJob(JSON.parse(JSON.stringify(cont!.envelope)) as unknown);
+      await outbound.settle();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+      expect(world.sent).toHaveLength(0);
+    });
+
+    // --- code review C-4 / R-a (FW2-4): a close of a REDRIVEN record by
+    // another writer closes the record FIRST and writes its slot only when
+    // that won - a pass that re-claimed the record in between keeps the slot.
+
+    /** The R-a race: the gate reads the record redriven, then another pass claims it before the close lands. */
+    function reclaimAfterGateRead(k: string): void {
+      const realGet = world.sendAttemptsRepo.get.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'get').mockImplementationOnce(async (owner) => {
+        const seen = await realGet(owner);
+        await world.sendAttemptsRepo.claim(ownerOf(k), seedFacts, new Date().toISOString());
+        return seen;
+      });
+    }
+    const reclaimedLines = (capture: LogCapture) =>
+      capture.atLevel(30).filter((l) => String(l['msg']).includes('re-claimed'));
+
+    it('C-4 / R-a: a cap-close of a redriven record another pass re-claims after the gate read writes no slot - the re-claimer keeps it (FW2-4)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      // Close B: the ladder is spent when this first pass begins.
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      reclaimAfterGateRead('t-1');
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 2, redriveCount: 1 });
+      expect(sends).toHaveLength(0);
+      expect(reclaimedLines(capture)).toHaveLength(1);
+      expect(reclaimedLines(capture)[0]).toMatchObject({ recipientKey: 't-1', closeCode: 'transient_cap' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+    });
+
+    it('C-4 / R-a: a cap-close of a redriven record closes the record BEFORE the slot (FW2-4)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      unknownOn(new Set());
+      await seedRedriven('t-1');
+      world.broadcasts.get('bcast-1')!.fanout_attempt = 3;
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotClose = vi.spyOn(world.broadcastsRepo, 'closeRecipientIfQueued');
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'failed', errorCode: 'transient_cap' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'transient_cap' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotClose.mock.invocationCallOrder[0]!);
+    });
+
+    it('C-4 / R-a: a fence on a redriven record another pass re-claims after the gate read writes nothing and carries nothing (FW2-4)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      const capture = wire();
+      await seedRedriven('t-1');
+      reclaimAfterGateRead('t-1');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(b.stats.skipped_opted_out).toBe(0);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 2 });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(reclaimedLines(capture)).toHaveLength(1);
+      expect(reclaimedLines(capture)[0]).toMatchObject({ recipientKey: 't-1', fence: 'opted_out' });
+    });
+
+    it('C-4 / R-a: a fence of a redriven record closes the record BEFORE its slot (FW2-4)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      wire();
+      await seedRedriven('t-1');
+      const recordClose = vi.spyOn(world.sendAttemptsRepo, 'closeRedriven');
+      const slotWrite = vi.spyOn(world.broadcastsRepo, 'setRecipient');
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 4, redrive: true });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'opted_out' });
+      expect(recordClose.mock.invocationCallOrder[0]!).toBeLessThan(slotWrite.mock.invocationCallOrder[0]!);
+    });
+
+    // --- code review ADV-6 (FW2-6) ---
+
+    it('ADV-6 (zz-adv-1): a record close that throws after the slot moved no longer loses the property rows - the milestone and the listing-send row are written before it, once (FW2-6)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+      vi.spyOn(world.sendAttemptsRepo, 'finishAttempt').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      // The record phase hands the SID to reconcile; its known-SID check adopts the message
+      // - and finds the slot already moved, so the adoption itself writes no property row.
+      const [check0] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB),
+        1,
+      );
+      await dispatchJob(JSON.parse(JSON.stringify(check0!.envelope)) as unknown);
+      await outbound.settle();
+      expect(world.sent).toHaveLength(1);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'adopted',
+        sid: world.sentDetails[0]!.sid,
+      });
+      expect(world.activityEvents.filter((e) => e.type === 'listing_sent' && e.contactId === 't-1')).toHaveLength(1);
+      expect(world.listingSends.filter((r) => r.contactId === 't-1' && r.unitId === 'unit-1')).toHaveLength(1);
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
+  });
+
+  describe('finalize (spec D16a)', () => {
+    function terminalBroadcast(slots: Record<string, BroadcastRecipient>): void {
+      const ts = Object.keys(slots).map((k, i) => seedTenant(world, { contactId: k, phone: `+1555010100${i}` }));
+      const item = seedBroadcast(world, ts);
+      for (const [k, slot] of Object.entries(slots)) item.recipients[k] = slot;
+    }
+    const run = () => finalize(world.broadcastsRepo, world.events, 'bcast-1', logger, world.auditRepo);
+
+    it('N callers produce one flip, one audit row, one terminal emit', async () => {
+      terminalBroadcast({
+        a: { status: 'sent', conversationId: 'c', tsMsgId: 'x' },
+        b: { status: 'skipped', errorCode: 'opted_out' },
+      });
+      await Promise.all([run(), run(), run(), run(), run()]);
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.status).toBe('sent');
+      expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_sent')).toHaveLength(1);
+      const emits = world.emitted.filter((e) => e.event === 'broadcast.updated');
+      expect(emits).toHaveLength(1);
+      expect((emits[0]!.payload as { status: string }).status).toBe('sent');
+    });
+
+    it('all skipped plus one unconfirmed finalizes failed with the prose - Review Focus 5', async () => {
+      terminalBroadcast({
+        a: { status: 'skipped', errorCode: 'opted_out' },
+        b: { status: 'skipped', errorCode: 'opted_out' },
+        c: { status: 'skipped', errorCode: 'opted_out' },
+        d: { status: 'failed', errorCode: 'send_unconfirmed' },
+      });
+      await run();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.status).toBe('failed');
+      expect(b.last_error).toBe("Couldn't confirm any text went out");
+    });
+
+    it('a real failure beside an unconfirmed one reads "all recipients failed"', async () => {
+      terminalBroadcast({
+        a: { status: 'failed', errorCode: '30007' },
+        b: { status: 'failed', errorCode: 'send_unconfirmed' },
+      });
+      await run();
+      expect(world.broadcasts.get('bcast-1')!).toMatchObject({ status: 'failed', last_error: 'all recipients failed' });
+    });
+
+    it('decides from the recipients map when the persisted failed counter is stale', async () => {
+      terminalBroadcast({
+        a: { status: 'delivered', conversationId: 'c', tsMsgId: 'x' },
+        b: { status: 'delivered', conversationId: 'c', tsMsgId: 'y' },
+      });
+      world.broadcasts.get('bcast-1')!.stats.failed = 99;
+      const consistent = vi.spyOn(world.broadcastsRepo, 'getByIdConsistent');
+      await run();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.status).toBe('sent');
+      expect(b.last_error).toBeUndefined();
+      // D16a: the decision rests on a strongly consistent read.
+      expect(consistent).toHaveBeenCalledWith('bcast-1');
+    });
+
+    it.each([
+      ['dispatched (sending)', { status: 'sent', conversationId: 'c', tsMsgId: 'x' }],
+      ['carrier-confirmed sent', { status: 'sent', conversationId: 'c', tsMsgId: 'x', carrierSentAt: '2026-09-27T00:00:00.000Z' }],
+      ['delivered', { status: 'delivered', conversationId: 'c', tsMsgId: 'x' }],
+    ] as const)('one %s recipient keeps the share sent, whatever else failed', async (_name, reached) => {
+      terminalBroadcast({
+        a: { ...reached },
+        b: { status: 'failed', errorCode: '30007' },
+        c: { status: 'failed', errorCode: 'send_unconfirmed' },
+      });
+      await run();
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
+
+    it('a broadcast of skips alone finalizes sent', async () => {
+      terminalBroadcast({ a: { status: 'skipped', errorCode: 'manual_mode' } });
+      await run();
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+    });
+
+    it('a still-queued recipient defers finalize: no flip, no audit row, no emit', async () => {
+      terminalBroadcast({
+        a: { status: 'sent', conversationId: 'c', tsMsgId: 'x' },
+        b: { status: 'queued' },
+      });
+      await run();
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
+      expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_sent')).toHaveLength(0);
+      expect(world.emitted.filter((e) => e.event === 'broadcast.updated')).toHaveLength(0);
+    });
+
+    // Drives the REAL send.reconcile handler (Task 10), so this test never
+    // calls the describe-local recordReconciles() stub: a second registration
+    // of SEND_RECONCILE_JOB would throw.
+    it('pass-then-verdict and verdict-then-pass both finalize exactly once', async () => {
+      const MAIN = '+15550009999';
+      seedUnit(world);
+      wireHandler(world, logger, undefined, { BUSINESS_PHONE_NUMBER: MAIN });
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger,
+      });
+      // The first recipient of each share: the provider RECORDS the message and
+      // then the socket drops (the accept-then-drop case) - an unknown outcome
+      // the reconcile finds and adopts. `duringNextSend` lets the verdict land
+      // while the pass is still sending the NEXT recipient.
+      const dropFor = new Set<string>();
+      let duringNextSend: (() => Promise<void>) | undefined;
+      const realSend = world.adapter.sendPreparedMessage.bind(world.adapter);
+      world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
+        if (dropFor.has(prepared.params.to)) {
+          world.providerMessages.push({
+            providerSid: `SMdrop-${prepared.params.to.slice(-4)}`,
+            providerStatus: 'delivered',
+            body: prepared.params.body ?? '',
+            mediaCount: 0,
+            createdAt: new Date().toISOString(),
+            to: prepared.params.to,
+            from: prepared.params.from ?? '',
+          });
+          throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        }
+        const hook = duringNextSend;
+        duringNextSend = undefined;
+        if (hook !== undefined) await hook();
+        return realSend(prepared);
+      };
+      /** Deliver the one scheduled reconcile check of a share now (its delay is not awaited). */
+      async function runVerdict(broadcastId: string): Promise<void> {
+        const index = outbound.delayed.findIndex(
+          (d) =>
+            d.envelope.jobName === SEND_RECONCILE_JOB &&
+            (d.envelope.payload as SendReconcilePayload).owner.kind === 'broadcast' &&
+            (d.envelope.payload as { owner: { broadcastId: string } }).owner.broadcastId === broadcastId,
+        );
+        expect(index).toBeGreaterThanOrEqual(0);
+        const [item] = outbound.delayed.splice(index, 1);
+        await dispatchJob(JSON.parse(JSON.stringify(item!.envelope)) as unknown);
+      }
+      const terminalEmits = (broadcastId: string) =>
+        world.emitted.filter(
+          (e) =>
+            e.event === 'broadcast.updated' &&
+            (e.payload as { broadcastId: string }).broadcastId === broadcastId &&
+            (e.payload as { status: string }).status !== 'sending',
+        );
+      const auditRows = (broadcastId: string) =>
+        world.auditEvents.filter((e) => e.event_type === 'broadcast_sent' && e.payload?.['broadcastId'] === broadcastId);
+
+      // PASS then VERDICT: the pass ends with its dropped recipient still
+      // reconciling (a queued slot - finalize defers); the verdict adopts it
+      // and is the finalize that flips.
+      const a1 = seedTenant(world, { contactId: 'a-1', phone: '+15550100011' });
+      const a2 = seedTenant(world, { contactId: 'a-2', phone: '+15550100012' });
+      seedBroadcast(world, [a1, a2], { broadcastId: 'bcast-a' });
+      dropFor.add(a1.phone!);
+      await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-a' });
+      await outbound.settle();
+      expect(world.broadcasts.get('bcast-a')!.recipients['a-1']).toEqual({ status: 'queued' });
+      expect(world.broadcasts.get('bcast-a')!.status).toBe('sending');
+      await runVerdict('bcast-a');
+      expect(world.broadcasts.get('bcast-a')!.recipients['a-1']).toMatchObject({ status: 'delivered' });
+      expect(world.broadcasts.get('bcast-a')!.status).toBe('sent');
+      expect(auditRows('bcast-a')).toHaveLength(1);
+      expect(terminalEmits('bcast-a')).toHaveLength(1);
+
+      // VERDICT then PASS: the verdict lands while the pass is still sending
+      // the second recipient - its finalize defers on that queued slot - and
+      // the pass's own finalize is the one that flips.
+      const b1 = seedTenant(world, { contactId: 'b-1', phone: '+15550100021' });
+      const b2 = seedTenant(world, { contactId: 'b-2', phone: '+15550100022' });
+      seedBroadcast(world, [b1, b2], { broadcastId: 'bcast-b' });
+      dropFor.add(b1.phone!);
+      let statusWhenVerdictRan: string | undefined;
+      duringNextSend = async () => {
+        await runVerdict('bcast-b');
+        statusWhenVerdictRan = world.broadcasts.get('bcast-b')!.status;
+      };
+      await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-b' });
+      await outbound.settle();
+      expect(statusWhenVerdictRan).toBe('sending');
+      expect(world.broadcasts.get('bcast-b')!.recipients['b-1']).toMatchObject({ status: 'delivered' });
+      expect(world.broadcasts.get('bcast-b')!.recipients['b-2']).toMatchObject({ status: 'sent' });
+      expect(world.broadcasts.get('bcast-b')!.status).toBe('sent');
+      expect(auditRows('bcast-b')).toHaveLength(1);
+      expect(terminalEmits('bcast-b')).toHaveLength(1);
     });
   });
 });

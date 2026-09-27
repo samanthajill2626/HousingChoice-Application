@@ -1,11 +1,14 @@
 // StatChips — the broadcast delivery rollup as a row of labeled count chips
-// (Recipients / Delivered / Sent / Sending / Queued / Failed / Skipped). One
-// job: present BroadcastStats as accessible text (label + count), colour as
-// reinforcement only. "Recipients" is the resolved audience (stats.audience);
-// the remaining buckets are disjoint and sum to it (Queued + Sending + Sent +
-// Delivered + Failed + Skipped == Recipients), so the row visibly balances.
+// (Recipients / Delivered / Sent / Sending / Queued / Failed / Not confirmed /
+// Skipped). One job: present BroadcastStats as accessible text (label +
+// count), colour as reinforcement only. "Recipients" is the resolved audience
+// (stats.audience); the remaining buckets are disjoint and sum to it (Queued +
+// Sending + Sent + Delivered + Failed + Not confirmed + Skipped ==
+// Recipients), so the row visibly balances.
 // "Skipped" folds all three skip buckets (opted out + no consent + other) into
-// one neutral count.
+// one neutral count. "Not confirmed" (SOR D22) is its own danger chip - the
+// recipients the platform could not confirm - and is never a skip.
+// stats.unconfirmed is optional (persisted rows predate it) -> default 0.
 //
 // The two in-flight buckets stay SEPARATE so a stuck send is diagnosable at a
 // glance (founder ask, 2026-07-16 - proving out the Twilio infrastructure):
@@ -32,6 +35,7 @@ export function StatChips({ stats }: { stats: BroadcastStats }): React.JSX.Eleme
     { label: 'Sending', value: stats.sending ?? 0 },
     { label: 'Queued', value: stats.queued },
     { label: 'Failed', value: stats.failed, tone: 'danger' },
+    { label: 'Not confirmed', value: stats.unconfirmed ?? 0, tone: 'danger' },
     { label: 'Skipped', value: skippedTotal(stats) },
   ];
   return (

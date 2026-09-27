@@ -12,6 +12,7 @@
 // auto-text with "no handler registered" while production — which dispatches in the
 // worker — was fine.)
 import type { TokenBucket } from '../lib/tokenBucket.js';
+import type { SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import { registerRetrySendJobHandler } from './retrySend.js';
 import { registerRelayFanOutJobHandler } from './relayFanOut.js';
 import { registerRelayRetryLegJobHandler } from './relayRetryLeg.js';
@@ -22,18 +23,29 @@ import { registerRelayWarmJobHandler } from './relayWarm.js';
 import { registerRelayNumberReadyJobHandler } from './relayNumberReady.js';
 import { registerGroupRailJobHandler } from './groupRail.js';
 import { registerMediaMirrorJobHandler } from './mediaMirror.js';
+import { registerSendReconcileJobHandler } from './sendReconcile.js';
 
 export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
   tokenBucket: TokenBucket;
+  /**
+   * The per-recipient send-attempt records (SOR spec D8a), passed to the three
+   * send handlers (broadcast.send, relay.fanOut, relay.retryLeg) and to the
+   * send.reconcile job. Production leaves it unset and each handler builds the
+   * DynamoDB repo lazily.
+   */
+  sendAttemptsRepo?: SendAttemptsRepo;
 }
 
 /**
  * Register every job handler. Job names produced: `messaging.retrySend`,
  * `relay.fanOut` + `relay.intro` (both from the relay registrar), `relay.retryLeg`,
- * `broadcast.send`,
+ * `broadcast.send`, `send.reconcile`,
  * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`,
  * `relay.warmNumber`, `relay.numberReady`, `groupRail.ensure`, `media.mirror`.
+ * send.reconcile (SOR spec D11) resolves an ambiguous send by LOOKING IT UP at
+ * the provider; it sends nothing itself (a re-drive is its owner's own send
+ * job, metered there), so it draws no token.
  * retrySend is a single low-volume send and is intentionally not throttled; the
  * SMS handlers share `tokenBucket` so the COMBINED outbound rate stays under the
  * registered A2P tier. The voice-transcript jobs make VI API calls (no outbound
@@ -45,7 +57,7 @@ export interface RegisterJobHandlersDeps {
  */
 export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerRetrySendJobHandler();
-  registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket });
+  registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });
   // relay.retryLeg (the 30003 ladder): one backed-off rung per failed relay leg,
   // metered by the same shared bucket - it is a real outbound SMS.
   //
@@ -57,8 +69,12 @@ export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   // enqueued by the status webhook in the APP process, which registers nothing
   // (`index.ts`, `if (!config.jobsQueueUrl)`). The hermetic lane runs both in
   // one process, which is why the seam works there either way.
-  registerRelayRetryLegJobHandler({ tokenBucket: deps.tokenBucket });
-  registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket });
+  registerRelayRetryLegJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });
+  registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });
+  // send.reconcile (SOR D11): registered WITHOUT the run-once marker - every
+  // write it makes is idempotent or fenced on the attempt record, so a
+  // redelivery is a genuine retry. Both entrypoints get it through here.
+  registerSendReconcileJobHandler({ sendAttemptsRepo: deps.sendAttemptsRepo });
   registerMissedCallAutoTextJobHandler({ tokenBucket: deps.tokenBucket });
   registerVoiceTranscriptJobHandlers();
   registerRelayWarmJobHandler();

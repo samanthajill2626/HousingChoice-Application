@@ -18,6 +18,7 @@ import {
   type CarrierMessageSender,
   type InitiateCallParams,
   type MessagingAdapter,
+  type ProviderMessageSummary,
   type SendMessageParams,
   type SendMessageResult,
 } from '../../src/adapters/messaging.js';
@@ -98,6 +99,7 @@ import {
   type MediaPointer,
   type MessageItem,
   type MessagesRepo,
+  type RelayRecipientDelivery,
   type ParkedEmailEvent,
   groupCrossCheckDueSortKey,
   GROUP_CROSSCHECK_DUE_KIND,
@@ -138,6 +140,7 @@ import {
 } from '../../src/repos/contactVocabularyRepo.js';
 import {
   type BroadcastItem,
+  type BroadcastRecipient,
   type BroadcastsRepo,
   type BroadcastStats,
   LIST_PARTITION,
@@ -189,6 +192,18 @@ import {
   createSendMessageService,
   type SendMessageService,
 } from '../../src/services/sendMessage.js';
+import { hashRecipientKey } from '../../src/lib/sendFingerprint.js';
+import { SEND_CLAIM_TTL_MS } from '../../src/lib/sendOutcome.js';
+import {
+  attemptKey,
+  ownerKey,
+  SEND_ATTEMPT_INDEX_PREFIX,
+  type ClaimResult,
+  type SendAttemptFacts,
+  type SendAttemptOwner,
+  type SendAttemptRecord,
+  type SendAttemptsRepo,
+} from '../../src/repos/sendAttemptsRepo.js';
 import {
   adminUserItem,
   makeFakeUsersRepo,
@@ -210,6 +225,13 @@ export const TENANT_PHONE = '+15550100001';
 // In-memory fakes — mirror the contractual semantics the routes rely on:
 // SID-conditional append dedupe, forward-only status machine, byPhone lookup.
 // ---------------------------------------------------------------------------
+
+/**
+ * A provider-side message a test plants in `world.providerMessages` (SOR Task
+ * 4). It carries its parties because the fake listMessages filters by them,
+ * like the provider does.
+ */
+export type FakeProviderMessage = ProviderMessageSummary & { to: string; from: string };
 
 export interface FakeWorld {
   conversations: Map<string, ConversationItem>;
@@ -264,6 +286,55 @@ export interface FakeWorld {
    */
   failNextSetUnread: number;
   sent: SendMessageParams[];
+  /**
+   * Every send's params WITH the SID and provider timestamp the fake adapter
+   * minted, in order, from BOTH send methods (SOR Task 4). `sent` keeps its
+   * exact shape (twilioStatusWebhook.test.ts pins it); the fake listMessages /
+   * getMessage answer from here as status 'queued', created at providerTs.
+   */
+  sentDetails: { params: SendMessageParams; sid: string; providerTs: string }[];
+  /**
+   * Provider-side messages a test plants for listMessages / getMessage (SOR
+   * Task 4): an orphan the app never recorded, a STOP auto-reply, or a sent
+   * message's later provider state - a planted entry REPLACES the sent message
+   * with the same SID.
+   */
+  providerMessages: FakeProviderMessage[];
+  /**
+   * The page size the fake listMessages serves, whatever the caller asks
+   * (default 1000; set 2 to force paging). Its pageToken is an integer offset.
+   */
+  listPageSize: number;
+  /**
+   * The per-recipient send-attempt records (SOR Task 5, spec D8a), keyed by
+   * `attemptKey(owner)` = `${ownerKey(owner)}|${hashRecipientKey(recipientKey)}`.
+   * `sendAttemptsRepo` reads this map LIVE on every call, so a test may seed
+   * a record here (in any state) or inspect one; the stored value is exactly
+   * what `get()` returns.
+   */
+  sendAttempts: Map<string, SendAttemptRecord>;
+  /**
+   * The recipient-index items the fake claim and re-arm write, one per claim
+   * or re-arm (one at the same instant for the same owner replaces its item,
+   * as the real Put does): partition `sendattemptix#<sender or ->#<recipientDigest>`,
+   * sort key `<attemptedAt>#<ownerKey>#<hashed recipient key>`.
+   */
+  sendAttemptIndex: Array<{ partition: string; sortKey: string; owner: SendAttemptOwner }>;
+  /**
+   * The op token each record's last fenced transition wrote (code review
+   * ADV-3; the real item's `last_op`), keyed like `sendAttempts`. The fake
+   * never retries, so nothing reads it back; the parity test holds the fake
+   * to WHEN the real repo writes one.
+   */
+  sendAttemptOps: Map<string, string>;
+  /**
+   * In-memory twin of app/src/repos/sendAttemptsRepo.ts: the same conditions,
+   * the same TTL, false exactly where the real one is false - held to it by
+   * twilioWebhookHarnessSendAttempts.integration.test.ts. To make ONE call
+   * fail, spy on the method: `vi.spyOn(world.sendAttemptsRepo, 'finishAttempt')
+   * .mockRejectedValueOnce(err)` (a caller must call through the object).
+   */
+  sendAttemptsRepo: SendAttemptsRepo;
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
@@ -452,6 +523,12 @@ export function createFakeWorld(): FakeWorld {
   // get/set so a test's `world.failNextSetUnread = 2` reaches this closure.
   let failNextSetUnread = 0;
   const sent: SendMessageParams[] = [];
+  // The provider's view for the fake listMessages / getMessage (SOR Task 4).
+  // listPageSize is exposed through get/set on the returned world, like
+  // failNextSetUnread (a number does not share a reference).
+  const sentDetails: FakeWorld['sentDetails'] = [];
+  const providerMessages: FakeProviderMessage[] = [];
+  let listPageSize = 1000;
   const initiatedCalls: InitiateCallParams[] = [];
   // Voice Intelligence (voice-transcription) fake seams: recorded create inputs,
   // an inspectable transcript store, and a settable inline-create error. The
@@ -1099,7 +1176,11 @@ export function createFakeWorld(): FakeWorld {
       // twice, even when providerTs differs across redeliveries — and the
       // dedupe result carries the PERSISTED (first write's) tsMsgId.
       const existing = findBySid(message.providerSid);
-      if (existing) return { deduped: true, tsMsgId: existing.tsMsgId };
+      // SOR build finding T6-5: a dedupe reports the STORED row's conversation
+      // (the real repo reads it off the SID pointer), never this call's input.
+      if (existing) {
+        return { deduped: true, tsMsgId: existing.tsMsgId, conversationId: existing.conversationId };
+      }
       messages.push({
         conversationId: message.conversationId,
         tsMsgId,
@@ -1225,10 +1306,17 @@ export function createFakeWorld(): FakeWorld {
         ...(message.email_new_address === true && { email_new_address: true }),
         ...(message.attachments_truncated === true && { attachments_truncated: true }),
       });
-      return { deduped: false, tsMsgId };
+      return { deduped: false, tsMsgId, conversationId: message.conversationId };
     },
     async getByProviderSid(sid) {
       return findBySid(sid);
+    },
+    // SOR Task 6: the consistent twins DELEGATE THROUGH THE OBJECT PROPERTY
+    // (build finding T8-3), so a spy on the eventual read still observes a
+    // caller that moved to the consistent one. An array has no eventual
+    // consistency to model. To fail ONLY the consistent read, spy on the twin.
+    async getByProviderSidConsistent(sid) {
+      return messagesRepo.getByProviderSid(sid);
     },
     async getByRfcMessageId(messageId) {
       // OUTBOUND: our own email_message_id; INBOUND: provider_sid IS the RFC id.
@@ -1356,6 +1444,11 @@ export function createFakeWorld(): FakeWorld {
         .filter((m) => (opts.before === undefined ? true : m.tsMsgId < opts.before))
         .sort((a, b) => (a.tsMsgId < b.tsMsgId ? 1 : -1))
         .slice(0, opts.limit ?? 50);
+    },
+    // Delegates through the object (T8-3): relayFanOut.test.ts spies
+    // `listByConversation` and must keep observing the snapshot read.
+    async listByConversationConsistent(...args) {
+      return messagesRepo.listByConversation(...args);
     },
     async getByTsMsgId(conversationId, tsMsgId) {
       return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
@@ -1610,6 +1703,62 @@ export function createFakeWorld(): FakeWorld {
       item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
       return true;
     },
+    // SOR Task 6 (spec D8): the conditional relay close, modelled on the real
+    // repo's two statements and its read-back - held to it by
+    // twilioWebhookHarnessRepoAdditions.integration.test.ts. A row with no map
+    // answers `missing` (the real guard turns that ValidationException into a
+    // refusal).
+    async closeRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, delivery) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item || item.delivery_recipients === undefined) return 'missing';
+      const slot = item.delivery_recipients[memberKey];
+      if (slot !== undefined && !(slot.status === 'queued' && slot.sid === undefined)) return 'skipped_sent';
+      const next: RelayRecipientDelivery =
+        slot === undefined
+          ? { status: delivery.status, errorCode: delivery.errorCode }
+          : { ...slot, status: delivery.status, errorCode: delivery.errorCode };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
+      return 'closed';
+    },
+    // SOR Task 6 (spec D15): the forward-only adoption. A versioned row goes
+    // through this fake's applyRecipientSendResult, called THROUGH THE OBJECT
+    // exactly as the real repo does; a legacy row seeds an absent slot (the
+    // seed persists even when the move is then refused, as the real first
+    // statement does) and moves from an allowed prior or the same status.
+    async adoptRelayRecipientIfUnsent(conversationId, tsMsgId, memberKey, patch) {
+      const outcome = await messagesRepo.applyRecipientSendResult(conversationId, tsMsgId, memberKey, patch);
+      if (outcome === 'updated') return 'adopted';
+      if (outcome === 'missing') return 'missing';
+      if (outcome !== 'legacy_noop') return 'skipped';
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item || item.delivery_recipients === undefined) return 'missing';
+      const slot: RelayRecipientDelivery = item.delivery_recipients[memberKey] ?? { status: 'queued' };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: slot };
+      if (slot.status !== patch.status && !allowedPriorStatuses(patch.status).includes(slot.status)) {
+        return 'skipped';
+      }
+      const next: RelayRecipientDelivery = {
+        ...slot,
+        status: patch.status,
+        sid: slot.sid ?? patch.sid,
+        sentAt: slot.sentAt ?? patch.sentAt,
+        ...(patch.errorCode !== undefined && { errorCode: patch.errorCode }),
+      };
+      // The real statement's REMOVE (SOR S3): a SUCCESS status with no code
+      // clears a stale one; a failure with no code keeps what the slot had.
+      if (patch.errorCode === undefined && isSuccessfulDeliveryStatus(patch.status)) delete next.errorCode;
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
+      return 'adopted';
+    },
+    // SOR Task 6 (spec D8a): best-effort attempt clock - seed an absent slot,
+    // then stamp the one child field. The real repo WARNs a missing row, map or
+    // slot; this fake has no logger and simply resolves.
+    async setRelayRecipientAttemptedAt(conversationId, tsMsgId, memberKey, attemptedAt) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item || item.delivery_recipients === undefined) return;
+      const slot: RelayRecipientDelivery = item.delivery_recipients[memberKey] ?? { status: 'queued' };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: { ...slot, attemptedAt } };
+    },
     // Group texting (S5): the sid-IF-ABSENT write that keeps a duplicate receipt
     // useful. Models the real repo's condition, absence included.
     async setRecipientDeliverySid(conversationId, tsMsgId, memberKey, sid) {
@@ -1641,8 +1790,31 @@ export function createFakeWorld(): FakeWorld {
     async putRelaySidPointer(providerSid, ref) {
       if (!relaySidPointers.has(providerSid)) relaySidPointers.set(providerSid, ref);
     },
+    // SOR Task 6 (spec D11): the reporting claim over the same map - created /
+    // mine (all three ref fields equal) / other; an existing pointer is never
+    // rewritten. It stores only the three fields, as the real item does.
+    async claimRelaySidPointer(providerSid, ref) {
+      const held = relaySidPointers.get(providerSid);
+      if (held === undefined) {
+        relaySidPointers.set(providerSid, {
+          conversationId: ref.conversationId,
+          tsMsgId: ref.tsMsgId,
+          memberKey: ref.memberKey,
+        });
+        return 'created';
+      }
+      return held.conversationId === ref.conversationId &&
+        held.tsMsgId === ref.tsMsgId &&
+        held.memberKey === ref.memberKey
+        ? 'mine'
+        : 'other';
+    },
     async getRelaySidPointer(providerSid) {
       return relaySidPointers.get(providerSid);
+    },
+    // Delegates through the object (T8-3), like every consistent twin here.
+    async getRelaySidPointerConsistent(providerSid) {
+      return messagesRepo.getRelaySidPointer(providerSid);
     },
     // System-send markers (syssid#): verify-start registers its code SMS here;
     // the /status webhook checks it before the unknown-SID ERROR backstop.
@@ -1652,6 +1824,10 @@ export function createFakeWorld(): FakeWorld {
     async getSystemSidMarker(providerSid) {
       const kind = systemSidMarkers.get(providerSid);
       return kind === undefined ? undefined : { kind };
+    },
+    // Delegates through the object (T8-3), like every consistent twin here.
+    async getSystemSidMarkerConsistent(providerSid) {
+      return messagesRepo.getSystemSidMarker(providerSid);
     },
     // Group-texting deadline partition (S5): the webhook path never writes or
     // reads a due row - throw so an accidental call is loud rather than a
@@ -2946,6 +3122,33 @@ export function createFakeWorld(): FakeWorld {
       }),
     };
   };
+  /**
+   * SOR Task 6: the fake recordRecipientOutcome, a closure so the fake's
+   * closeRecipientIfQueued reaches it WITHOUT going through the object - a spy
+   * on recordRecipientOutcome does not see a queued close, as in the real repo.
+   */
+  const recordBroadcastOutcome = async (
+    broadcastId: string,
+    contactKey: string,
+    recipient: BroadcastRecipient,
+    statsDelta: Partial<BroadcastStats>,
+    allowedPriorStatuses: ReadonlyArray<BroadcastRecipient['status']>,
+  ): Promise<{ moved: boolean; item?: BroadcastItem }> => {
+    if (allowedPriorStatuses.length === 0) {
+      throw new TypeError('recordRecipientOutcome: at least one allowed prior status is required');
+    }
+    const b = broadcasts.get(broadcastId);
+    const current = b?.recipients?.[contactKey]?.status;
+    if (!b || current === undefined || !allowedPriorStatuses.includes(current)) return { moved: false };
+    b.recipients = { ...b.recipients, [contactKey]: { ...recipient } };
+    const stats = b.stats as unknown as Record<string, number>;
+    for (const [bucket, delta] of Object.entries(statsDelta)) {
+      if (typeof delta !== 'number' || delta === 0) continue;
+      stats[bucket] = (stats[bucket] ?? 0) + delta;
+    }
+    b.updated_at = new Date().toISOString();
+    return { moved: true, item: structuredClone(b) };
+  };
   /** byCreated GSI order: every stamped item, newest-first. */
   const broadcastsNewestFirst = (): BroadcastItem[] =>
     [...broadcasts.values()]
@@ -2980,6 +3183,12 @@ export function createFakeWorld(): FakeWorld {
     async getById(broadcastId) {
       const b = broadcasts.get(broadcastId);
       return b ? { ...b } : undefined;
+    },
+    // SOR Task 6: delegates THROUGH THE OBJECT PROPERTY like the messages
+    // twins (build finding T8-3) - a spy on getById observes it. A map has no
+    // eventual consistency to model.
+    async getByIdConsistent(broadcastId) {
+      return broadcastsRepo.getById(broadcastId);
     },
     async list(opts = {}) {
       return pageBroadcasts(broadcastsNewestFirst(), opts);
@@ -3062,6 +3271,29 @@ export function createFakeWorld(): FakeWorld {
       }
       b.updated_at = new Date().toISOString();
       return { ...b };
+    },
+    // SOR Task 6 (spec D8, D8a): the one-write outcome, modelled on the real
+    // condition - the slot must hold one of the priors (a missing broadcast or
+    // slot refuses) - and returning a SNAPSHOT, as ALL_NEW does. Held to the
+    // real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    recordRecipientOutcome: recordBroadcastOutcome,
+    async closeRecipientIfQueued(broadcastId, contactKey, errorCode, statsBucket) {
+      const delta: Partial<BroadcastStats> = { queued: -1 };
+      delta[statsBucket] = 1;
+      return recordBroadcastOutcome(broadcastId, contactKey, { status: 'failed', errorCode }, delta, ['queued']);
+    },
+    // SOR Task 6 (spec D16a): the flip only ONE caller wins - from `sending`.
+    // FW1-5: the winning flip stores its op token, as the real one does (the
+    // fake never retries, so it never reads the token back).
+    async finalizeStatus(broadcastId, status, lastError) {
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw new Error(`finalizeStatus: broadcast ${broadcastId} not found`);
+      if (b.status !== 'sending') return { won: false, item: structuredClone(b) };
+      b.status = status;
+      if (lastError !== undefined) b.last_error = lastError;
+      b.finalize_op = randomUUID();
+      b.updated_at = new Date().toISOString();
+      return { won: true, item: structuredClone(b) };
     },
     async markSent(broadcastId) {
       const b = broadcasts.get(broadcastId);
@@ -3815,6 +4047,32 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // The provider's view of the fake world (SOR Task 4, spec D17): every send
+  // (status 'queued', created at its providerTs) overlaid by what a test
+  // planted - a planted entry REPLACES the send with the same SID. In send /
+  // plant order; a send without `from` never matches a list by sender.
+  type ProviderViewEntry = ProviderMessageSummary & { to: string; from?: string };
+  const providerView = (): ProviderViewEntry[] => {
+    const bySid = new Map<string, ProviderViewEntry>();
+    for (const detail of sentDetails) {
+      bySid.set(detail.sid, {
+        providerSid: detail.sid,
+        providerStatus: 'queued',
+        body: detail.params.body ?? '',
+        mediaCount: detail.params.mediaUrls?.length ?? 0,
+        createdAt: detail.providerTs,
+        to: detail.params.to,
+        ...(detail.params.from !== undefined && { from: detail.params.from }),
+      });
+    }
+    for (const planted of providerMessages) bySid.set(planted.providerSid, planted);
+    return [...bySid.values()];
+  };
+  const withoutParties = (entry: ProviderViewEntry): ProviderMessageSummary => {
+    const { to: _to, from: _from, ...summary } = entry;
+    return summary;
+  };
+
   const adapter: MessagingAdapter & CarrierMessageSender = {
     classifyMessageTransport(facts) {
       return Object.freeze({
@@ -3826,21 +4084,50 @@ export function createFakeWorld(): FakeWorld {
     },
     async sendPreparedMessage(prepared): Promise<SendMessageResult> {
       sent.push(prepared.params);
+      const sid = `SMfake-out-${++sidCounter}`;
+      const providerTs = new Date().toISOString();
+      sentDetails.push({ params: prepared.params, sid, providerTs });
       return {
-        providerSid: `SMfake-out-${++sidCounter}`,
+        providerSid: sid,
         status: 'queued',
-        providerTs: new Date().toISOString(),
+        providerTs,
         actualTransport: prepared.requestedTransport,
       };
     },
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
+      const sid = `SMfake-out-${++sidCounter}`;
+      const providerTs = new Date().toISOString();
+      sentDetails.push({ params, sid, providerTs });
       return {
-        providerSid: `SMfake-out-${++sidCounter}`,
+        providerSid: sid,
         status: 'queued',
-        providerTs: new Date().toISOString(),
+        providerTs,
         actualTransport: (params.mediaUrls?.length ?? 0) > 0 ? 'mms' : 'sms',
       };
+    },
+    async listMessages(args) {
+      // By recipient and sender, newest first (ties: the later send or plant
+      // first), paged at world.listPageSize whatever the caller asks.
+      const ordered = providerView()
+        .map((entry, index) => ({ entry, index, at: Date.parse(entry.createdAt) }))
+        .filter(({ entry }) => entry.to === args.to && entry.from === args.from)
+        .sort((a, b) => b.at - a.at || b.index - a.index)
+        .map(({ entry }) => withoutParties(entry));
+      const start = args.pageToken === undefined ? 0 : Number(args.pageToken);
+      if (!Number.isInteger(start) || start < 0) {
+        throw new Error(`fake listMessages: pageToken must be an integer offset, got ${args.pageToken}`);
+      }
+      const size = Math.max(1, Math.floor(listPageSize));
+      const next = start + size;
+      return {
+        messages: ordered.slice(start, next),
+        ...(next < ordered.length && { nextPageToken: String(next) }),
+      };
+    },
+    async getMessage(providerSid) {
+      const entry = providerView().find((candidate) => candidate.providerSid === providerSid);
+      return entry === undefined ? undefined : withoutParties(entry);
     },
     async getMediaStream(mediaUrl) {
       // The failure shape Twilio really returns for media it has not served
@@ -4104,6 +4391,224 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // The per-recipient send-attempt record and its recipient index (SOR Task
+  // 5, spec D8a) - the in-memory twin of app/src/repos/sendAttemptsRepo.ts.
+  // Each method applies the SAME condition as the real expression (quoted
+  // above it) and returns false exactly where the real one does;
+  // twilioWebhookHarnessSendAttempts.integration.test.ts runs both over one
+  // script table. Every decision is made synchronously - no await between
+  // the read and the write - so it is atomic like the conditional write it
+  // stands for. Records go in and come out as COPIES (the real repo answers
+  // with a fresh read), so a caller that edits a returned record changes
+  // nothing stored. `sender` is simply absent when unset (the real item holds
+  // null, which its read drops).
+  const sendAttempts = new Map<string, SendAttemptRecord>();
+  const sendAttemptIndex: FakeWorld['sendAttemptIndex'] = [];
+  const sendAttemptOps = new Map<string, string>();
+  const attemptSnapshot = (record: SendAttemptRecord): SendAttemptRecord => structuredClone(record);
+  const attemptRecipientKey = (owner: SendAttemptOwner): string =>
+    owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+  /** DynamoDB orders a string range key by its UTF-8 bytes. */
+  const utf8Order = (a: string, b: string): number => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+  /** The index Put of a claim or a re-arm: a same-key item is replaced, as the real Put does. */
+  const putAttemptIndex = (owner: SendAttemptOwner, facts: SendAttemptFacts, atIso: string): void => {
+    const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${facts.sender ?? '-'}#${facts.recipientDigest}`;
+    const sortKey = `${atIso}#${ownerKey(owner)}#${hashRecipientKey(attemptRecipientKey(owner))}`;
+    const entry = { partition, sortKey, owner: structuredClone(owner) };
+    const sameKey = sendAttemptIndex.findIndex((e) => e.partition === partition && e.sortKey === sortKey);
+    if (sameKey >= 0) sendAttemptIndex[sameKey] = entry;
+    else sendAttemptIndex.push(entry);
+  };
+  /** A fenced transition that won: the record, and a fresh op token (`#op = :op` - FW1-5). */
+  const writeAttempt = (key: string, record: SendAttemptRecord): true => {
+    sendAttempts.set(key, record);
+    sendAttemptOps.set(key, randomUUID());
+    return true;
+  };
+  const sendAttemptsRepo: SendAttemptsRepo = {
+    async claim(owner, facts, nowIso): Promise<ClaimResult> {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // The claim's record update plus its index Put, in one step.
+      const claimFrom = (prev: SendAttemptRecord | undefined): ClaimResult => {
+        const record: SendAttemptRecord = {
+          owner: structuredClone(owner),
+          state: 'attempting',
+          attemptNo: (prev?.attemptNo ?? 0) + 1,
+          attemptedAt: nowIso,
+          // `#rc = if_not_exists(#rc, :zero)`: a claim never touches it.
+          redriveCount: prev?.redriveCount ?? 0,
+          checkNo: 0,
+          recipientDigest: facts.recipientDigest,
+          ...(facts.sender !== undefined && { sender: facts.sender }),
+          bodyHash: facts.bodyHash,
+          bodyShort: facts.bodyShort,
+          mediaCount: facts.mediaCount,
+        };
+        sendAttempts.set(key, record);
+        putAttemptIndex(owner, facts, nowIso);
+        return { outcome: 'claimed', record: attemptSnapshot(record) };
+      };
+      // 'attribute_not_exists(tsMsgId)'
+      if (current === undefined) return claimFrom(undefined);
+      // '#st = :done AND #oc = :retryable AND #no = :prevNo'
+      if (current.state === 'done' && current.outcome === 'retryable') return claimFrom(current);
+      // '#st = :redriven AND #no = :prevNo'
+      if (current.state === 'redriven') return claimFrom(current);
+      if (current.state === 'attempting') {
+        const ageMs = Date.parse(nowIso) - Date.parse(current.attemptedAt);
+        return ageMs > SEND_CLAIM_TTL_MS
+          ? { outcome: 'takeover', record: attemptSnapshot(current) }
+          : { outcome: 'refused', record: attemptSnapshot(current), fresh: true };
+      }
+      // reconciling, or done with a terminal outcome
+      return { outcome: 'refused', record: attemptSnapshot(current), fresh: false };
+    },
+    // FW1-1: 'SET #at = :now, #exp = :exp' on '#st = :attempting AND #no = :no AND #at = :at',
+    // plus the index Put for :now under the record's own facts - one step, like the transaction.
+    async rearm(owner, ref, nowIso) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== ref.attemptNo ||
+        current.attemptedAt !== ref.attemptedAt
+      ) {
+        return undefined;
+      }
+      sendAttempts.set(key, { ...current, attemptedAt: nowIso });
+      putAttemptIndex(owner, current, nowIso);
+      return { attemptNo: current.attemptNo, attemptedAt: nowIso };
+    },
+    async finishAttempt(owner, ref, result) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :attempting AND #no = :no AND #at = :at'
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== ref.attemptNo ||
+        current.attemptedAt !== ref.attemptedAt
+      ) {
+        return false;
+      }
+      return writeAttempt(key, {
+        ...current,
+        state: 'done',
+        outcome: result.outcome,
+        ...(result.sid !== undefined && { sid: result.sid }),
+        ...(result.cause !== undefined && { cause: result.cause }),
+      });
+    },
+    async handToReconcile(owner, ref, sid) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :attempting AND #no = :no AND #at = :at'
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== ref.attemptNo ||
+        current.attemptedAt !== ref.attemptedAt
+      ) {
+        return false;
+      }
+      return writeAttempt(key, { ...current, state: 'reconciling', checkNo: 0, ...(sid !== undefined && { sid }) });
+    },
+    async takeOver(owner, record) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :attempting AND #no = :no AND #at = :at' (the record handed in)
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== record.attemptNo ||
+        current.attemptedAt !== record.attemptedAt
+      ) {
+        return false;
+      }
+      return writeAttempt(key, { ...current, state: 'reconciling', checkNo: 0 });
+    },
+    async recordCheck(owner, attemptedAt, checkNo) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :reconciling AND #at = :at AND (#ck = :prev OR #ck = :ck)', :prev = checkNo - 1
+      if (
+        current === undefined ||
+        current.state !== 'reconciling' ||
+        current.attemptedAt !== attemptedAt ||
+        (current.checkNo !== checkNo - 1 && current.checkNo !== checkNo)
+      ) {
+        return false;
+      }
+      return writeAttempt(key, { ...current, checkNo });
+    },
+    async markRedriven(owner, attemptedAt) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :reconciling AND #at = :at AND #rc = :zero'
+      if (
+        current === undefined ||
+        current.state !== 'reconciling' ||
+        current.attemptedAt !== attemptedAt ||
+        current.redriveCount !== 0
+      ) {
+        return false;
+      }
+      return writeAttempt(key, { ...current, state: 'redriven', redriveCount: 1 });
+    },
+    async closeFromReconcile(owner, attemptedAt, result) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :reconciling AND #at = :at'
+      if (current === undefined || current.state !== 'reconciling' || current.attemptedAt !== attemptedAt) {
+        return false;
+      }
+      return writeAttempt(key, {
+        ...current,
+        state: 'done',
+        outcome: result.outcome,
+        ...(result.sid !== undefined && { sid: result.sid }),
+        ...(result.cause !== undefined && { cause: result.cause }),
+      });
+    },
+    async closeRedriven(owner, result) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :redriven'
+      if (current === undefined || current.state !== 'redriven') return false;
+      return writeAttempt(key, {
+        ...current,
+        state: 'done',
+        outcome: result.outcome,
+        ...(result.cause !== undefined && { cause: result.cause }),
+      });
+    },
+    async get(owner) {
+      const current = sendAttempts.get(attemptKey(owner));
+      return current === undefined ? undefined : attemptSnapshot(current);
+    },
+    async listByRecipient(sender, recipientDigest, sinceIso) {
+      // 'conversationId = :p AND tsMsgId >= :since', newest first.
+      const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${sender ?? '-'}#${recipientDigest}`;
+      const items = sendAttemptIndex
+        .filter((entry) => entry.partition === partition && utf8Order(entry.sortKey, sinceIso) >= 0)
+        .sort((a, b) => utf8Order(b.sortKey, a.sortKey));
+      const seen = new Set<string>();
+      const out: SendAttemptRecord[] = [];
+      for (const item of items) {
+        const record = sendAttempts.get(attemptKey(item.owner));   // the record holds the live state
+        if (record === undefined) continue;
+        // One row per record (build finding T5-5), the newest index item first.
+        const identity = attemptKey(record.owner);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        out.push(attemptSnapshot(record));
+      }
+      return out;
+    },
+  };
+
   return {
     conversations,
     messages,
@@ -4129,6 +4634,20 @@ export function createFakeWorld(): FakeWorld {
       failNextSetUnread = n;
     },
     sent,
+    sentDetails,
+    providerMessages,
+    // get/set bridges a test's `world.listPageSize = N` to the local `let`
+    // the fake listMessages reads.
+    get listPageSize(): number {
+      return listPageSize;
+    },
+    set listPageSize(n: number) {
+      listPageSize = n;
+    },
+    sendAttempts,
+    sendAttemptIndex,
+    sendAttemptOps,
+    sendAttemptsRepo,
     initiatedCalls,
     mediaPuts,
     presignPosts,

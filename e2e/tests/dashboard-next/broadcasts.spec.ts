@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { listThreads } from '../../fixtures/fakeTwilio.js';
+import { statValue, statusPill } from '../../support/broadcastSelectors.js';
 import { expectTodayReady } from '../../support/today.js';
 
 // Broadcasts surface (:5174), Phase B — the rebuilt "Share a property with a
@@ -262,30 +263,8 @@ test.describe('Broadcasts — compose from a property → curate → send → re
 });
 
 test.describe('Broadcasts - live send progress + disjoint buckets + recipient identity', () => {
-  // Read one StatChips value by its label. The chips render as a
-  // <dl aria-label="Delivery stats"> of <div><dt>{label}</dt><dd>{value}</dd></div>;
-  // scope to that dl (so a recipient DeliveryBadge like "Sent"/"Delivered" can't
-  // collide) and match the label's <dt> EXACTLY, then read its sibling <dd>.
-  async function statValue(page: Page, label: string): Promise<number> {
-    const chip = page
-      .getByLabel('Delivery stats')
-      .locator('div')
-      .filter({ has: page.getByText(label, { exact: true }) });
-    const text = (await chip.locator('dd').textContent()) ?? '';
-    return Number(text.trim());
-  }
-
-  // The lifecycle pill, scoped to the results <header> (the one holding the
-  // page h1). Scoping matters: the StatChips row ALWAYS renders a "Sent" <dt>,
-  // so a bare page-level getByText('Sent') can match the chip label and pass
-  // VACUOUSLY even if the pill never flipped.
-  function statusPill(page: Page, label: string) {
-    return page
-      .locator('header')
-      .filter({ has: page.getByRole('heading', { level: 1 }) })
-      .getByText(label, { exact: true });
-  }
-
+  // The chip and pill reads (statValue, statusPill) live in
+  // support/broadcastSelectors.ts with their collision rules.
   test('curated send: land while Sending, chips tick, terminal Delivered=N with all in-flight buckets drained, rows show names + formatted phones + contact links', async ({
     page,
     request,

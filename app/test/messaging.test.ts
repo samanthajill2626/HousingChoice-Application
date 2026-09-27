@@ -9,16 +9,30 @@ import {
   NumberUnavailableError,
   PoolFullError,
   SmsSendingDisabledError,
+  TWILIO_REQUEST_TIMEOUT_MS,
   TwilioMessagingDriver,
   VoiceCapabilityError,
+  _consoleSentMessagesForTests,
+  _resetConsoleSentMessagesForTests,
   createMessagingAdapter,
   mapTwilioStatus,
   type MessagingAdapter,
   type TwilioClientLike,
 } from '../src/adapters/messaging.js';
+import { createRedirectingHttpClient } from '../src/adapters/twilioHttpClient.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
+import { SEND_CLAIM_TTL_MS } from '../src/lib/sendOutcome.js';
 import { createLogCapture } from './helpers/logCapture.js';
+
+// A PASS-THROUGH spy on the redirecting client, so a test can see the options
+// the driver hands it (spec D8a): the pinned timeout equals the SDK's own
+// 30000 default today, so the built client alone cannot show whether the
+// driver passed it. Behavior is the real function's, for every test here.
+vi.mock('../src/adapters/twilioHttpClient.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/adapters/twilioHttpClient.js')>();
+  return { ...actual, createRedirectingHttpClient: vi.fn(actual.createRedirectingHttpClient) };
+});
 
 const TWILIO_ENV = {
   NODE_ENV: 'test',
@@ -409,6 +423,45 @@ describe('TwilioMessagingDriver', () => {
 
     await expect(driver.sendMessage({ to: '+15550100001', body: 'x' })).rejects.toThrow('carrier filtered');
     expect(capture.lines.some((l) => l['event'] === 'send_throttled')).toBe(false);
+  });
+
+  it('fires send_throttled on a real 20429 and not on ECONNREFUSED (spec D4)', async () => {
+    // twilio-node attaches code 20429 to a real HTTP 429 (a RestException with
+    // both fields); a connection that never opened is retryable but is NOT a
+    // throttle, so it must never feed the SendThrottled alarm.
+    const capture = createLogCapture();
+    const driverThrowing = (err: unknown) =>
+      new TwilioMessagingDriver({
+        accountSid: 'AC1',
+        apiKeySid: 'SK1',
+        apiKeySecret: 's',
+        messagingServiceSid: 'MG1',
+        appEnv: 'test',
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+        client: {
+          messages: {
+            create: async () => {
+              throw err;
+            },
+          },
+        } as never,
+      });
+    await expect(
+      driverThrowing(Object.assign(new Error('rate'), { status: 429, code: 20429 })).sendMessage({
+        to: '+15550001111',
+        body: 'x',
+      }),
+    ).rejects.toThrow('rate');
+    await expect(
+      driverThrowing(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })).sendMessage({
+        to: '+15550001111',
+        body: 'x',
+      }),
+    ).rejects.toThrow('refused');
+    const throttled = capture.lines.filter((l) => l['event'] === 'send_throttled');
+    expect(throttled).toHaveLength(1);
+    expect(throttled[0]!['level']).toBe(40);
+    expect(throttled[0]!['errorCode']).toBe('20429');
   });
 
   it('maps every Twilio status onto the delivery-status machine', () => {
@@ -1270,5 +1323,345 @@ describe('ConsoleMessagingDriver.getMediaContentType (no-op)', () => {
     await expect(driver.getMediaContentType('MM1', 'ME1')).resolves.toBeUndefined();
     expect(fetchSpy).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+});
+
+describe('listMessages / getMessage (spec D17)', () => {
+  const twilioDate = 'Fri, 25 Sep 2026 02:50:31 +0000';
+  // A unit-fake resource in the REST payload's snake_case. The real SDK
+  // instance is camelCase with Date objects (see the "real SDK instance" case).
+  const resource = (over: Record<string, unknown>) => ({
+    sid: 'SM1',
+    status: 'sent',
+    body: 'hi',
+    num_media: '0',
+    error_code: null,
+    date_created: twilioDate,
+    date_sent: twilioDate,
+    to: '+16175550100',
+    from: '+15550009999',
+    ...over,
+  });
+  const driverWith = (messages: unknown, capture = createLogCapture()) =>
+    new TwilioMessagingDriver({
+      accountSid: 'AC1',
+      apiKeySid: 'SK1',
+      apiKeySecret: 's',
+      messagingServiceSid: 'MG1',
+      appEnv: 'test',
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      client: { messages } as never,
+    });
+  const callable = (fetchImpl: (sid: string) => Promise<unknown>) =>
+    Object.assign((sid: string) => ({ fetch: () => fetchImpl(sid) }), { create: vi.fn() });
+
+  it('lists one page by To and From at the requested size and returns the next-page token', async () => {
+    const capture = createLogCapture();
+    const pageCalls: unknown[] = [];
+    const getPageCalls: string[] = [];
+    const messages = Object.assign(
+      (_sid: string) => ({
+        fetch: async () => {
+          throw new Error('unused');
+        },
+      }),
+      {
+        create: vi.fn(),
+        page: async (params: unknown) => {
+          pageCalls.push(params);
+          return {
+            instances: [resource({ sid: 'SM1' }), resource({ sid: 'SM2', status: 'queued', date_sent: null })],
+            nextPageUrl: 'https://api.twilio.com/next?PageToken=PAabc',
+            _payload: { page_size: 1000 },
+          };
+        },
+        getPage: async (url: string) => {
+          getPageCalls.push(url);
+          return { instances: [resource({ sid: 'SM3' })], nextPageUrl: undefined, _payload: { page_size: 1000 } };
+        },
+      },
+    );
+    const driver = driverWith(messages, capture);
+    const first = await driver.listMessages({ to: '+16175550100', from: '+15550009999', pageSize: 1000 });
+    // By To and From ONLY: no date filter reaches the provider (D17).
+    expect(pageCalls).toEqual([{ to: '+16175550100', from: '+15550009999', pageSize: 1000 }]);
+    expect(first.messages.map((m) => m.providerSid)).toEqual(['SM1', 'SM2']);
+    expect(first.messages[0]).toEqual({
+      providerSid: 'SM1',
+      providerStatus: 'sent',
+      body: 'hi',
+      mediaCount: 0,
+      createdAt: '2026-09-25T02:50:31.000Z',
+      sentAt: '2026-09-25T02:50:31.000Z',
+    });
+    expect(first.messages[1]!.sentAt).toBeUndefined();
+    expect(first.nextPageToken).toBe('https://api.twilio.com/next?PageToken=PAabc');
+    const second = await driver.listMessages({
+      to: '+16175550100',
+      from: '+15550009999',
+      pageSize: 1000,
+      pageToken: first.nextPageToken,
+    });
+    expect(getPageCalls).toEqual(['https://api.twilio.com/next?PageToken=PAabc']);
+    expect(second.messages.map((m) => m.providerSid)).toEqual(['SM3']);
+    expect(second.nextPageToken).toBeUndefined();
+    // The provider served the requested size: nothing to warn about.
+    expect(capture.atLevel(40)).toEqual([]);
+  });
+
+  it('WARNs when the provider page size differs from the requested one (the D17 UNVERIFIED guard)', async () => {
+    const capture = createLogCapture();
+    const messages = Object.assign((_sid: string) => ({ fetch: async () => undefined }), {
+      create: vi.fn(),
+      page: async () => ({ instances: [], nextPageUrl: undefined, _payload: { page_size: 50 } }),
+      getPage: async () => ({ instances: [] }),
+    });
+    await driverWith(messages, capture).listMessages({ to: '+16175550100', from: '+15550009999', pageSize: 1000 });
+    const warns = capture.atLevel(40);
+    expect(warns.some((l) => typeof l['msg'] === 'string' && l['msg'].includes('page size differs'))).toBe(true);
+    expect(warns[0]).toMatchObject({ requested: 1000, provider: 50 });
+    // D18: sizes only, never a phone.
+    expect(JSON.stringify(capture.lines)).not.toContain('6175550100');
+  });
+
+  it('throws rather than answering an empty page when the client lacks the page API', async () => {
+    await expect(
+      driverWith({ create: vi.fn() }).listMessages({ to: '+16175550100', from: '+15550009999', pageSize: 1000 }),
+    ).rejects.toThrow(/page API/);
+  });
+
+  it('fetches one message by SID and maps a 404 to undefined', async () => {
+    const driver = driverWith(
+      callable(async (sid) => {
+        if (sid === 'SMgone') throw Object.assign(new Error('nf'), { status: 404, code: 20404 });
+        return resource({ sid, error_code: 30003, status: 'undelivered' });
+      }),
+    );
+    expect(await driver.getMessage('SM9')).toMatchObject({
+      providerSid: 'SM9',
+      providerStatus: 'undelivered',
+      errorCode: '30003',
+    });
+    expect(await driver.getMessage('SMgone')).toBeUndefined();
+  });
+
+  it('maps a STRING 20404 with no status to undefined as well', async () => {
+    const driver = driverWith(
+      callable(async () => {
+        throw Object.assign(new Error('nf'), { status: undefined, code: '20404' });
+      }),
+    );
+    expect(await driver.getMessage('SMgone')).toBeUndefined();
+  });
+
+  it('rethrows every other lookup failure: a 5xx or a timeout is never "not found"', async () => {
+    const failures = [
+      Object.assign(new Error('provider unavailable'), { status: 500, code: 20500 }),
+      Object.assign(new Error('timeout of 30000ms exceeded'), { code: 'ECONNABORTED' }),
+    ];
+    for (const failure of failures) {
+      const driver = driverWith(
+        callable(async () => {
+          throw failure;
+        }),
+      );
+      await expect(driver.getMessage('SM1')).rejects.toBe(failure);
+    }
+  });
+
+  it('throws rather than answering "not found" against a message-only fake', async () => {
+    await expect(driverWith({ create: vi.fn() }).getMessage('SM1')).rejects.toThrow(/per-message/);
+  });
+
+  it('maps the real SDK instance shape: camelCase keys, Date objects, numMedia as a string', async () => {
+    const instance = {
+      sid: 'MM1',
+      status: 'delivered',
+      body: '',
+      numMedia: '2',
+      errorCode: null,
+      dateCreated: new Date('2026-09-25T02:50:31Z'),
+      dateSent: new Date('2026-09-25T02:50:33Z'),
+      to: '+16175550100',
+      from: '+15550009999',
+    };
+    expect(await driverWith(callable(async () => instance)).getMessage('MM1')).toEqual({
+      providerSid: 'MM1',
+      providerStatus: 'delivered',
+      body: '',
+      mediaCount: 2,
+      createdAt: '2026-09-25T02:50:31.000Z',
+      sentAt: '2026-09-25T02:50:33.000Z',
+    });
+  });
+
+  it('pins the request timeout to SEND_CLAIM_TTL_MS', () => {
+    expect(TWILIO_REQUEST_TIMEOUT_MS).toBe(SEND_CLAIM_TTL_MS);
+  });
+
+  it('the pinned timeout reaches the SDK client on both paths (spec D8a; build spike Q5)', () => {
+    // Reading `client.httpClient` builds the RequestClient; no request is made.
+    type Wired = { client: { timeout?: number; httpClient: { defaultTimeout: number } } };
+    const base = {
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      appEnv: 'test',
+    };
+    // Production (no apiBaseUrl): twilio() builds its default client from its
+    // own `timeout` option.
+    const production = new TwilioMessagingDriver(base) as unknown as Wired;
+    expect(production.client.timeout).toBe(TWILIO_REQUEST_TIMEOUT_MS);
+    expect(production.client.httpClient.defaultTimeout).toBe(TWILIO_REQUEST_TIMEOUT_MS);
+    // The lane (apiBaseUrl): twilio() ignores `timeout` for a PASSED
+    // httpClient, so the redirecting client must be handed it directly.
+    vi.mocked(createRedirectingHttpClient).mockClear();
+    const lane = new TwilioMessagingDriver({ ...base, apiBaseUrl: 'http://127.0.0.1:1' }) as unknown as Wired;
+    expect(createRedirectingHttpClient).toHaveBeenCalledWith({
+      baseUrl: 'http://127.0.0.1:1',
+      timeout: TWILIO_REQUEST_TIMEOUT_MS,
+    });
+    expect(lane.client.httpClient.defaultTimeout).toBe(TWILIO_REQUEST_TIMEOUT_MS);
+  });
+
+  it('the console driver lists what it sent, newest first, by To and From, capped at 1000', async () => {
+    _resetConsoleSentMessagesForTests();
+    const console_ = new ConsoleMessagingDriver({
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    await console_.sendMessage({ to: '+16175550100', from: '+15550009999', body: 'a' });
+    await console_.sendMessage({
+      to: '+16175550100',
+      from: '+15550009999',
+      body: 'b',
+      mediaUrls: ['https://media.example/1'],
+    });
+    await console_.sendMessage({ to: '+16175550199', from: '+15550009999', body: 'another recipient' });
+    const page = await console_.listMessages({ to: '+16175550100', from: '+15550009999', pageSize: 10 });
+    expect(page.messages.map((m) => m.body)).toEqual(['b', 'a']);
+    expect(page.nextPageToken).toBeUndefined();
+    expect(page.messages[0]).toEqual({
+      providerSid: expect.stringMatching(/^SMconsole-/),
+      providerStatus: 'sent',
+      body: 'b',
+      mediaCount: 1,
+      createdAt: expect.any(String),
+      sentAt: expect.any(String),
+    });
+    expect(await console_.getMessage(page.messages[1]!.providerSid)).toMatchObject({ body: 'a' });
+    expect(await console_.getMessage('SMconsole-never-sent')).toBeUndefined();
+    // The in-process store is capped: the oldest sends fall off.
+    for (let i = 0; i < 1000; i += 1) {
+      await console_.sendMessage({ to: '+16175550100', from: '+15550009999', body: `n${i}` });
+    }
+    const kept = _consoleSentMessagesForTests();
+    expect(kept).toHaveLength(1000);
+    expect(kept[0]!.body).toBe('n0');
+    expect(kept[999]!.body).toBe('n999');
+    _resetConsoleSentMessagesForTests();
+    expect(_consoleSentMessagesForTests()).toEqual([]);
+  });
+});
+
+describe('harness fake adapter: the list / fetch port (SOR Task 4)', () => {
+  // WHY HERE: the reconcile's unit tests read the provider through this fake,
+  // so a fake that drops a send or mis-pages would let them pass vacuously.
+  // Imported lazily - the harness pulls in the whole app.
+  const TO = '+16175550100';
+  const FROM = '+15550009999';
+  const loadWorld = async () => (await import('./helpers/twilioWebhookHarness.js')).createFakeWorld();
+
+  it('records sentDetails from BOTH send methods and keeps world.sent unchanged', async () => {
+    const world = await loadWorld();
+    const one = await world.adapter.sendMessage({ to: TO, from: FROM, body: 'one' });
+    const prepared = world.adapter.prepareMessageSend(
+      { requestedTransport: 'sms' },
+      { to: TO, from: FROM, body: 'two' },
+    );
+    const two = await world.adapter.sendPreparedMessage(prepared);
+    expect(world.sent).toEqual([
+      { to: TO, from: FROM, body: 'one' },
+      { to: TO, from: FROM, body: 'two' },
+    ]);
+    expect(world.sentDetails).toEqual([
+      { params: world.sent[0], sid: one.providerSid, providerTs: one.providerTs },
+      { params: world.sent[1], sid: two.providerSid, providerTs: two.providerTs },
+    ]);
+  });
+
+  it('lists sent and planted messages by To and From, newest first, paged at world.listPageSize', async () => {
+    const world = await loadWorld();
+    world.providerMessages.push({
+      providerSid: 'SMplanted-old',
+      providerStatus: 'delivered',
+      body: 'planted old',
+      mediaCount: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      to: TO,
+      from: FROM,
+    });
+    await world.adapter.sendMessage({ to: TO, from: FROM, body: 's1' });
+    await world.adapter.sendMessage({ to: TO, from: FROM, body: 's2' });
+    await world.adapter.sendMessage({ to: '+16175550199', from: FROM, body: 'another recipient' });
+    await world.adapter.sendMessage({ to: TO, from: '+15550001111', body: 'another sender' });
+    world.providerMessages.push({
+      providerSid: 'SMplanted-new',
+      providerStatus: 'sent',
+      body: 'planted new',
+      mediaCount: 1,
+      createdAt: '2999-01-01T00:00:00.000Z',
+      to: TO,
+      from: FROM,
+    });
+    expect(world.listPageSize).toBe(1000);
+    const all = await world.adapter.listMessages({ to: TO, from: FROM, pageSize: 1000 });
+    expect(all.messages.map((m) => m.body)).toEqual(['planted new', 's2', 's1', 'planted old']);
+    expect(all.nextPageToken).toBeUndefined();
+    expect(all.messages[1]).toEqual({
+      providerSid: world.sentDetails[1]!.sid,
+      providerStatus: 'queued',
+      body: 's2',
+      mediaCount: 0,
+      createdAt: world.sentDetails[1]!.providerTs,
+    });
+    world.listPageSize = 2;
+    const first = await world.adapter.listMessages({ to: TO, from: FROM, pageSize: 1000 });
+    expect(first.messages.map((m) => m.body)).toEqual(['planted new', 's2']);
+    expect(first.nextPageToken).toBe('2');
+    const second = await world.adapter.listMessages({
+      to: TO,
+      from: FROM,
+      pageSize: 1000,
+      pageToken: first.nextPageToken,
+    });
+    expect(second.messages.map((m) => m.body)).toEqual(['s1', 'planted old']);
+    expect(second.nextPageToken).toBeUndefined();
+  });
+
+  it('getMessage finds a sent or a planted SID; a planted entry replaces the sent one with its SID', async () => {
+    const world = await loadWorld();
+    const sent = await world.adapter.sendMessage({ to: TO, from: FROM, body: 'hello' });
+    expect(await world.adapter.getMessage(sent.providerSid)).toEqual({
+      providerSid: sent.providerSid,
+      providerStatus: 'queued',
+      body: 'hello',
+      mediaCount: 0,
+      createdAt: sent.providerTs,
+    });
+    world.providerMessages.push({
+      providerSid: sent.providerSid,
+      providerStatus: 'delivered',
+      body: 'hello',
+      mediaCount: 0,
+      createdAt: sent.providerTs,
+      sentAt: sent.providerTs,
+      to: TO,
+      from: FROM,
+    });
+    expect(await world.adapter.getMessage(sent.providerSid)).toMatchObject({ providerStatus: 'delivered' });
+    const listed = await world.adapter.listMessages({ to: TO, from: FROM, pageSize: 1000 });
+    expect(listed.messages.map((m) => m.providerStatus)).toEqual(['delivered']);
+    expect(await world.adapter.getMessage('SMnever')).toBeUndefined();
   });
 });

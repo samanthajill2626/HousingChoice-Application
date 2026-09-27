@@ -2628,6 +2628,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       async listViSentences() {
         throw new Error('adapter spy: listViSentences not expected');
       },
+      async listMessages() {
+        return { messages: [] };
+      },
+      async getMessage() {
+        return undefined;
+      },
     };
     return { adapter, sends };
   }

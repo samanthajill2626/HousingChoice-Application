@@ -164,6 +164,7 @@ beforeEach(() => {
   // The relay fan-out runs in-process against the SAME world, exactly as
   // relayWebhook.test.ts wires it, so the relay paths behave end-to-end.
   registerRelayFanOutJobHandler({
+    sendAttemptsRepo: world.sendAttemptsRepo,
     adapter: world.adapter,
     conversationsRepo: world.conversationsRepo,
     messagesRepo: world.messagesRepo,

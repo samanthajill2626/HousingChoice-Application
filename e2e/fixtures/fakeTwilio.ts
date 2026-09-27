@@ -372,6 +372,62 @@ export async function setDeliveryOutcome(
   if (!res.ok()) throw new Error(`delivery-outcome failed: ${res.status()}`);
 }
 
+// --- Send-outcome seams (send-outcome-reconcile spec D19) --------------------
+//
+// Both arm the fake per PARTY number and are consumed per call. An arming no
+// call consumed survives until the fake's /control/reset, which runs ONCE per
+// suite (see the note at the end of this file): arm only a number this run
+// minted, never a shared seed number. A relay group's intros are sends to its
+// members too - settle them (poll getOutboundTo) BEFORE arming a member, or the
+// intro consumes the arming instead of the leg.
+
+/**
+ * Make the next `count` (default 1) Messages creates TO `partyNumber` fail:
+ * - `reject`: a Twilio 400 `{ code: code ?? 21211, ... }`, nothing recorded -
+ *   the app sees a RestException, a `rejected` send;
+ * - `drop_before_create`: the connection drops with no response and nothing
+ *   is recorded - the app sees ECONNRESET, `unknown`, and the reconcile finds
+ *   nothing (a re-drive);
+ * - `accept_then_drop`: the message IS recorded (its status callbacks fire as
+ *   normal, before the adoption), then the connection drops - `unknown`, and
+ *   the reconcile finds it and adopts it.
+ * `reject` and `drop_before_create` end the create before it is recorded, so
+ * a setDeliveryOutcome profile armed for the same number is NOT consumed: it
+ * applies to the next create that goes through (the re-drive). Do not arm
+ * setDeliveryOutcome beside them for one number unless the re-drive is meant
+ * to get it. Arming failList beside any mode is fine.
+ */
+export async function failNextSend(
+  request: APIRequestContext,
+  input: {
+    partyNumber: string;
+    mode: 'reject' | 'drop_before_create' | 'accept_then_drop';
+    /** `reject` only: the Twilio error code in the 400 body (default 21211). */
+    code?: number;
+    /** How many creates the arming covers (default 1). */
+    count?: number;
+  },
+): Promise<void> {
+  const res = await request.post(`${FAKE_BASE}/control/fail-next-send`, { data: input });
+  if (!res.ok()) throw new Error(`fail-next-send failed: ${res.status()} ${await res.text()}`);
+}
+
+/**
+ * Make the next `count` (default 1) Messages LIST calls whose To is
+ * `partyNumber`, and FETCHes of a message sent to it, answer a Twilio 500
+ * (20500) - the reconcile's "provider unreachable". A reconcile check ends at
+ * the first failed call, so `count: 3` fails all three checks of one send.
+ * A list with no To, another number's list or fetch, and a 404 fetch consume
+ * nothing.
+ */
+export async function failList(
+  request: APIRequestContext,
+  input: { partyNumber: string; count?: number },
+): Promise<void> {
+  const res = await request.post(`${FAKE_BASE}/control/fail-list`, { data: input });
+  if (!res.ok()) throw new Error(`fail-list failed: ${res.status()} ${await res.text()}`);
+}
+
 export async function listThreads(request: APIRequestContext): Promise<FakeThread[]> {
   const res = await request.get(`${FAKE_BASE}/control/threads`);
   if (!res.ok()) throw new Error(`threads failed: ${res.status()}`);

@@ -1,0 +1,5 @@
+create 201 SM2b164897588f250c139506a938555047 body-equal-in-create-response: true
+fetch 200 delivered body-equal: false
+ submitted: 48 43 20 73 70 69 6b 65 20 42 20 2019 71 75 6f 74 65 2019 20 64 61 73 68 2014 64 61 73 68 20 6d 6f 72 65 2026 20 69 67 6e 6f 72 65
+ stored   : 48 43 20 73 70 69 6b 65 20 42 20 27 71 75 6f 74 65 27 20 64 61 73 68 2d 64 61 73 68 20 6d 6f 72 65 2e 2e 2e 20 69 67 6e 6f 72 65
+list contains it: true list body-equal: false

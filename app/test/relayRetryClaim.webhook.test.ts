@@ -114,6 +114,7 @@ describe('relay 30003 retry claim (POST /webhooks/twilio/status)', () => {
     // The SAME world the webhook writes through, so a rung the claim enqueues
     // runs against the row the claim just appended.
     registerRelayRetryLegJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

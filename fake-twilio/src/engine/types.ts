@@ -48,6 +48,18 @@ export interface ThreadMessage {
   errorCode?: string;
   createdAt: string;
   updatedAt: string;
+  /** When the message FIRST left `queued` (stamped by the engine on that
+   *  transition): the Messages list/fetch resource's `date_sent`. Absent while
+   *  queued, which the resource reports as an explicit null. */
+  sentAt?: string;
+  /** REST creates only: the MessagingServiceSid the create carried (the
+   *  resource's `messaging_service_sid`). */
+  messagingServiceSid?: string;
+  /** REST creates only: true when the create carried NO `From` (the Messaging
+   *  Service picks the sender). `from` above still names the app number for
+   *  the phones UI; the list/fetch resource reports `from: null`, as the create
+   *  response does, so a list's From filter never matches the message. */
+  fromOmitted?: boolean;
 }
 
 /** A conversation thread between the app and exactly one party number. */
@@ -181,6 +193,27 @@ export interface SetDeliveryOutcomeInput {
   /** Party number whose NEXT outbound message uses this profile. */
   partyNumber: string;
   profile: DeliveryProfile;
+}
+
+/** The create outcomes `POST /control/fail-next-send` forces (send-outcome spec D19). */
+export type FailNextSendMode = 'reject' | 'drop_before_create' | 'accept_then_drop';
+
+export interface FailNextSendInput {
+  /** E.164 party number whose next `count` Messages creates (To = it) fail. */
+  partyNumber: string;
+  mode: FailNextSendMode;
+  /** `reject` only: the Twilio error code in the 400 body (default 21211). */
+  code?: number;
+  /** How many creates the arming covers (default 1). */
+  count?: number;
+}
+
+export interface FailListInput {
+  /** E.164 party number whose next `count` Messages list calls (To = it) and
+   *  fetches (resource `to` = it) answer a Twilio 500. */
+  partyNumber: string;
+  /** How many calls the arming covers (default 1). */
+  count?: number;
 }
 
 export interface AddAdHocInput {

@@ -367,6 +367,37 @@ p.vanished {
   color: var(--c-text-muted);
 }
 
+/* A Past card is about 170px narrower than the pane: its two fixed slots (the
+ * lead's 1.1rem, the action slot's 8.5rem and two gaps) sit beside it. So it
+ * must stack its identity over its meta at a WIDER pane than an Active row,
+ * whose card is the full pane and whose stacking the page-level 560px rule
+ * above was sized for. Side by side, a 561-800px pane (a 960px window beside
+ * the expanded sidebar, a tablet) cut every tenant name to a few characters
+ * (review R2-1); 800px, not 760px, because at 761-800px the name was still
+ * cut. These are that rule's four stacking declarations, scoped to the Past
+ * card; the lead and action slots stay beside it (only the 560px block below
+ * wraps the row). */
+@container (max-width: 800px) {
+  .pastRow > .row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .pastRow > .row .main {
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .pastRow > .row .property {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .pastRow > .row .meta {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+}
+
 /* Tight pane: the checkbox (its leading slot) shares the first line with the
  * link - the link's zero basis above - and only the actions wrap, onto a
  * full-width, right-aligned line under the link. An EMPTY action slot renders

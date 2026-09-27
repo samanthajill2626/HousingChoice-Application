@@ -15,8 +15,10 @@
 //   unchanged by the batch, and nothing reached the tenant or the landlord
 //   after the click; the back arrow returns to Past; no horizontal overflow
 //   at 360px, on the page or inside the Past region, both while a row still
-//   carries its checkbox (before the batch) and after it; and at 360px that
-//   checkbox sits beside its card, within the card's vertical span.
+//   carries its checkbox (before the batch) and after it; at 360px that
+//   checkbox sits beside its card, within the card's vertical span; and at a
+//   960px viewport (a ~672px pane beside the expanded sidebar) no text inside
+//   any Past row card is clipped.
 import { test, expect, type Page } from '@playwright/test';
 import { expectTodayReady } from '../../support/today.js';
 import {
@@ -33,6 +35,11 @@ const UNIT_A = 'unit-0001'; // 1450 Joseph E. Boone Blvd NW
 const UNIT_B = 'unit-0002'; // 88 Sycamore St
 const TENANT_PHONE = '+15550100001'; // Tasha Nguyen (lean seed)
 const LANDLORD_PHONE = '+15550100002'; // Marcus Bell, landlord of both units (lean seed)
+/** A 960px window: with the expanded 240px sidebar and the content's 24px
+ *  padding each side, the content pane is ~672px - inside the 561-800px band
+ *  where a Past card must stack (review R2-1). Above the 768px nav
+ *  breakpoint, so the layout is the desktop one, only narrower. */
+const MID_960 = { width: 960, height: 800 } as const;
 
 /** `daysAgo` days before today at `hour`:00 LOCAL, as an ISO instant. */
 function pastAt(daysAgo: number, hour: number): string {
@@ -123,6 +130,28 @@ test.describe('Tours page - Past tab', () => {
     await expect(rowFor(noShowId).getByText('No show', { exact: true })).toBeVisible();
     await expect(rowFor(noShowId).getByRole('button')).toHaveCount(0);
     await expect(rowFor(noShowId).getByRole('checkbox')).toHaveCount(0);
+
+    // Mid-width, BEFORE the batch (while the widest Past row exists): a Past
+    // card is ~170px narrower than the pane for its fixed lead and action
+    // slots, so in a ~672px pane it must already stack its identity over its
+    // meta. Side by side it cut every tenant name to a few characters with an
+    // ellipsis, which neither overflow check can see (the clip stays inside
+    // the card), so the pin is direct: no element inside any Past row card
+    // is clipped. Three cards, counted first, so the check is never vacuous.
+    await page.setViewportSize(MID_960);
+    await expect(region.getByRole('listitem')).toHaveCount(3);
+    const cards = region.getByRole('link', { name: /^Tour for .* on / });
+    await expect(cards).toHaveCount(3);
+    const paneWidth = Math.round((await region.boundingBox())?.width ?? 0);
+    const clipped = await cards.evaluateAll((els) =>
+      els.flatMap((card) =>
+        Array.from(card.querySelectorAll('*'))
+          .filter((el) => el.scrollWidth > el.clientWidth)
+          .map((el) => `${el.tagName.toLowerCase()}.${el.getAttribute('class') ?? ''}: ${el.textContent ?? ''}`),
+      ),
+    );
+    expect(clipped, `clipped text inside a Past row card at a 960px viewport (a ${paneWidth}px pane)`).toEqual([]);
+    await page.setViewportSize(WIDE_RESTORE);
 
     // Narrow, BEFORE the batch: the only point at which a row still carries its
     // checkbox and Mark toured button (the batch below turns that row into

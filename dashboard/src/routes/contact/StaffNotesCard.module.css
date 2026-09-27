@@ -1,0 +1,65 @@
+/* StaffNotesCard - the in-place editor for the tenant file's staff notes.
+ * Field/textarea styling mirrors ContactEditForm.module.css so the box reads
+ * like the edit dialog's Notes field; the label is visually hidden because the
+ * card heading already says "Staff notes" (it stays in the DOM for getByLabel
+ * and screen readers). Tokens only, never hard-coded values. */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+  resize: vertical;
+  min-height: 3.5rem;
+}
+
+.textarea:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.error {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.lastEdited {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+}

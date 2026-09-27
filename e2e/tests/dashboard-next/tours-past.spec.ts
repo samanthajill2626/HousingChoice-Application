@@ -15,7 +15,8 @@
 //   unchanged by the batch, and nothing reached the tenant or the landlord
 //   after the click; the back arrow returns to Past; no horizontal overflow
 //   at 360px, on the page or inside the Past region, both while a row still
-//   carries its checkbox (before the batch) and after it.
+//   carries its checkbox (before the batch) and after it; and at 360px that
+//   checkbox sits beside its card, within the card's vertical span.
 import { test, expect, type Page } from '@playwright/test';
 import { expectTodayReady } from '../../support/today.js';
 import {
@@ -131,6 +132,18 @@ test.describe('Tours page - Past tab', () => {
     await expect(rowFor(notMarkedId).getByRole('checkbox')).toBeVisible();
     await expectNoHorizontalOverflow(page, 'Past tours with a Not marked row at 360px');
     await expectNoHorizontalOverflowIn(region, 'Past tours region with a Not marked row at 360px');
+    // The checkbox stays with its row (spec 4.8): it shares the first line
+    // with the row's card, inside the card's vertical span, instead of sitting
+    // alone on a line above it.
+    const check = await rowFor(notMarkedId).getByRole('checkbox').boundingBox();
+    const card = await rowFor(notMarkedId).getByRole('link', { name: /^Tour for .* on / }).boundingBox();
+    expect(check, 'the Not marked row checkbox has a layout box at 360px').not.toBeNull();
+    expect(card, 'the Not marked row card has a layout box at 360px').not.toBeNull();
+    expect(check!.y, 'the checkbox top is not above its card top at 360px').toBeGreaterThanOrEqual(card!.y);
+    expect(
+      check!.y + check!.height,
+      'the checkbox bottom is not below its card bottom at 360px',
+    ).toBeLessThanOrEqual(card!.y + card!.height);
     await page.setViewportSize(WIDE_RESTORE);
 
     // Bulk: tick the one "Not marked" row, Mark toured (1). No text goes out.

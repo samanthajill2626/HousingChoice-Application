@@ -251,16 +251,30 @@
 /* A Past row is NOT one link: the checkbox and the actions sit BESIDE the link
  * (interactive content cannot nest inside an <a>). The link keeps .row's
  * card look and takes the room; the leading checkbox and trailing actions
- * stay out of its flow. */
+ * stay out of its flow, each in a FIXED slot that every row renders (OD-7),
+ * so every card shares one left and one right edge and the chips line up
+ * down the list. */
 .pastRow {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
 }
 
+/* A zero basis: the link's size comes from the free space, not from its
+ * content width, so on a tight pane it still fits on the first line beside
+ * the leading slot (an auto basis breaks lines on its max-content width,
+ * which pushed the link below and left the checkbox alone above its card). */
 .pastRow > .row {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+}
+
+/* The leading slot: the checkbox on a "Not marked" row, empty otherwise. */
+.lead {
+  flex: 0 0 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .check {
@@ -271,10 +285,13 @@
   accent-color: var(--c-brand);
 }
 
+/* The trailing slot: one width on every row (the widest action fits),
+ * right-aligned, empty on a row without an action. */
 .rowActions {
-  flex: 0 0 auto;
+  flex: 0 0 8.5rem;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--sp-2);
 }
 
@@ -350,8 +367,10 @@ p.vanished {
   color: var(--c-text-muted);
 }
 
-/* Tight pane: the actions wrap under the link, right-aligned; the checkbox
- * stays leading on the first line. */
+/* Tight pane: the checkbox (its leading slot) shares the first line with the
+ * link - the link's zero basis above - and only the actions wrap, onto a
+ * full-width, right-aligned line under the link. An EMPTY action slot renders
+ * nothing, so a row without an action gains no blank line. */
 @container (max-width: 560px) {
   .pastRow {
     flex-wrap: wrap;
@@ -359,5 +378,8 @@ p.vanished {
   .rowActions {
     flex: 1 1 100%;
     justify-content: flex-end;
+  }
+  .rowActions:empty {
+    display: none;
   }
 }

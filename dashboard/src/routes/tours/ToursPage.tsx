@@ -188,8 +188,9 @@ interface PastTourRowProps {
 
 /** A Past row (spec 4.3): the link carries identity + meta and the back
  *  pointer; the checkbox and the actions sit BESIDE it (interactive content
- *  cannot nest inside an <a>). Every accessible name ends with the row's
- *  date-time so two tours for one tenant at one property stay distinct. */
+ *  cannot nest inside an <a>), each in a fixed slot every row renders.
+ *  Every accessible name ends with the row's date-time so two tours for one
+ *  tenant at one property stay distinct. */
 function PastTourRow({
   tour,
   contacts,
@@ -210,16 +211,22 @@ function PastTourRow({
   return (
     <li className={styles.rowItem}>
       <div className={styles.pastRow}>
-        {notMarked ? (
-          <input
-            type="checkbox"
-            className={styles.check}
-            checked={selected}
-            disabled={busy}
-            onChange={onToggle}
-            aria-label={`Select tour for ${who}`}
-          />
-        ) : null}
+        {/* Two fixed slots on EVERY row (OD-7), each empty when the row has
+            nothing to put there: a leading one the checkbox's width and a
+            trailing one the widest action's, so every card shares one left
+            and one right edge and the chips line up down the list. */}
+        <span className={styles.lead}>
+          {notMarked ? (
+            <input
+              type="checkbox"
+              className={styles.check}
+              checked={selected}
+              disabled={busy}
+              onChange={onToggle}
+              aria-label={`Select tour for ${who}`}
+            />
+          ) : null}
+        </span>
         <Link
           to={`/tours/${tour.tourId}`}
           state={BACK_TO_PAST}
@@ -235,32 +242,30 @@ function PastTourRow({
             <span className={styles.badge}>{pastState(tour)}</span>
           </span>
         </Link>
-        {notMarked || needsOutcome ? (
-          <span className={styles.rowActions}>
-            {notMarked ? (
-              <Button
-                size="sm"
-                variant="secondary"
-                type="button"
-                disabled={busy}
-                onClick={onMarkToured}
-                aria-label={`Mark toured: ${who}`}
-              >
-                Mark toured
-              </Button>
-            ) : null}
-            {needsOutcome ? (
-              <Link
-                to={`/tours/${tour.tourId}?outcome=1`}
-                state={BACK_TO_PAST}
-                className={styles.actionLink}
-                aria-label={`Record outcome: ${who}`}
-              >
-                Record outcome
-              </Link>
-            ) : null}
-          </span>
-        ) : null}
+        <span className={styles.rowActions}>
+          {notMarked ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              type="button"
+              disabled={busy}
+              onClick={onMarkToured}
+              aria-label={`Mark toured: ${who}`}
+            >
+              Mark toured
+            </Button>
+          ) : null}
+          {needsOutcome ? (
+            <Link
+              to={`/tours/${tour.tourId}?outcome=1`}
+              state={BACK_TO_PAST}
+              className={styles.actionLink}
+              aria-label={`Record outcome: ${who}`}
+            >
+              Record outcome
+            </Link>
+          ) : null}
+        </span>
       </div>
       {result !== undefined ? (
         result.ok ? (

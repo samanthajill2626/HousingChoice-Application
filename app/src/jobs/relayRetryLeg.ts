@@ -29,6 +29,19 @@
 //     handler re-reads the row, which is where the raw body, the composed leg
 //     copy and the destination DIGEST live (spec D11/D12).
 //
+// Since send-outcome-reconcile (SOR spec D7a, D8, D16) the rung also owns a
+// per-rung SEND-ATTEMPT RECORD. The unit claims it after the bounded token
+// acquire and before the presign, so a window deadline never holds a claim
+// (RSW #5/#6). Every close this job writes that is not its own attempt's -
+// the four gate refusals, the window gate, the send deadline and the transient
+// arm's three closes - first passes the D8 gate on that record: a live or
+// reconciling attempt keeps the slot, a terminal one skips, a stale one is
+// taken over into reconcile, and a `redriven` one is closed with the decline.
+// An unknown provider outcome or a send that landed unrecorded is handed to
+// the send.reconcile job (never re-sent here); a re-driven rung arrives with
+// `redrive: true` and runs this same handler, so every job-time gate and the
+// window bound it (RSW #1).
+//
 // PII (doc S9): member keys go through `logSafeMemberKey`; no phone number and
 // no message body ever reaches a log line.
 import {
@@ -39,6 +52,7 @@ import {
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
 import { appEvents, type EventBus } from '../lib/events.js';
+import { guardWrite } from '../lib/guardWrite.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import { relayRetryBackoffMs } from '../lib/relayRetryClaim.js';
@@ -50,6 +64,8 @@ import {
   retrySendDeadlineMs,
   withinRetrySendWindow,
 } from '../lib/retrySendWindow.js';
+import { safeRecipientKey } from '../lib/sendFingerprint.js';
+import { ENQUEUE_FAILED_CODE, SEND_CLAIM_TTL_MS, SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -59,7 +75,12 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
-import type { SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
+import {
+  createSendAttemptsRepo,
+  type SendAttemptOwner,
+  type SendAttemptRecord,
+  type SendAttemptsRepo,
+} from '../repos/sendAttemptsRepo.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../services/relayAnnouncements.js';
 import {
   MAX_FANOUT_ATTEMPTS,
@@ -68,9 +89,11 @@ import {
   sendOneRelayLeg,
   setVersionedAggregationState,
   type RelayLegPayload,
+  type RelayLegSendOutcome,
   type RelayTransportMode,
 } from './relayFanOut.js';
 import { defineJobHandler, enqueue } from './jobs.js';
+import { enqueueSendReconcile, reconcileDelayMs, toOwnerRef } from './sendReconcile.js';
 
 export const RELAY_RETRY_LEG_JOB = 'relay.retryLeg';
 
@@ -84,6 +107,14 @@ export interface RelayRetryLegPayload {
   relayConversationId: string;
   /** The RETRY row's own key (NOT the root's). */
   retryTsMsgId: string;
+  /**
+   * SOR spec D16: set on the rung the send.reconcile job re-drives after a
+   * `never_sent` verdict (it marks the rung's record `redriven` first). Logged,
+   * never decided on: a `redriven` record is claimable, and closable by a
+   * pre-claim decline, on ANY pass (spec D8), so the record is the test, not
+   * this marker - and a transient re-enqueue never carries it.
+   */
+  redrive?: true;
 }
 
 /**
@@ -106,6 +137,10 @@ export interface RelayRetryLegPayload {
  * `contact_opted_out` is deliberately NOT in this set: the dashboard drops that
  * code from the relay rollup entirely, so a refusal stamped with it would
  * silently vanish from the surface this feature exists to make truthful.
+ *
+ * One more code reaches the slot outside these helpers: `send_unconfirmed`
+ * (SOR spec D7), written through the conditional relay close when the
+ * reconcile hand-off cannot be enqueued (`handOff` below).
  */
 export type RelayRetryCloseCode =
   | RelayRetryGateCode
@@ -124,9 +159,10 @@ export interface RelayRetryLegJobDeps {
   /** Shared A2P pacing bucket - one token per real outbound SMS. */
   tokenBucket?: TokenBucket;
   /**
-   * The per-recipient send-attempt records (SOR spec D8a). Accepted and not
-   * yet read (SOR Task 9 wires the claim); a test passes its fake world's so
-   * no job run ever opens a real DynamoDB connection.
+   * The per-recipient send-attempt records (SOR spec D8a): the rung's claim,
+   * its D8 gate reads and its reconcile hand-off. Lazily built on the first
+   * job run when absent; a test passes its fake world's so no job run ever
+   * opens a real DynamoDB connection.
    */
   sendAttemptsRepo?: SendAttemptsRepo;
   /**
@@ -266,7 +302,9 @@ function parseRelayRetryLegPayload(payload: unknown): RelayRetryLegPayload {
   if (typeof retryTsMsgId !== 'string' || retryTsMsgId.length === 0) {
     throw new Error('relayRetryLeg: payload.retryTsMsgId is required');
   }
-  return { relayConversationId, retryTsMsgId };
+  // Rebuilt field by field, so an unknown field never rides along; `redrive`
+  // is carried only when it is exactly `true`.
+  return { relayConversationId, retryTsMsgId, ...(raw?.redrive === true && { redrive: true as const }) };
 }
 
 /**
@@ -333,6 +371,53 @@ function readRetryLineage(row: MessageItem, retryTsMsgId: string): RetryRowLinea
   };
 }
 
+/** What the D8 gate decided for the rung (SOR spec D8, revision 11). */
+type GateResult =
+  | { kind: 'proceed'; record?: SendAttemptRecord }
+  | { kind: 'skip' }
+  | { kind: 'defer' }
+  | { kind: 'taken_over'; record: SendAttemptRecord };
+
+/**
+ * Spec D8 (revision 11): a pre-claim decline or a close by another writer
+ * touches the slot ONLY when the rung's attempt record cannot belong to a
+ * live attempt. An ALLOW-list: an ABSENT record, done/retryable and redriven
+ * PROCEED (a redriven record is claimable by ANY pass, so any pass's decline
+ * may close it - the caller then runs closeRedriven); done with any other
+ * outcome SKIPS (terminal); a STALE attempting record (older than the claim
+ * TTL) is TAKEN OVER into reconcile and returned - the CALLER hands off,
+ * exactly once: this gate never enqueues; a fresh attempting or a reconciling
+ * record DEFERS. The fan-out twin's body (relayFanOut.ts), the repo a
+ * parameter (build finding G6); the read is strongly consistent, and a read
+ * that throws throws out of the job like the close it guards (build finding
+ * T9-7, a recorded residue).
+ */
+async function gateFor(attempts: SendAttemptsRepo, owner: SendAttemptOwner, nowMs: number): Promise<GateResult> {
+  const rec = await attempts.get(owner);
+  if (rec === undefined) return { kind: 'proceed' };
+  if (rec.state === 'done') return rec.outcome === 'retryable' ? { kind: 'proceed', record: rec } : { kind: 'skip' };
+  if (rec.state === 'redriven') return { kind: 'proceed', record: rec };
+  if (rec.state === 'attempting' && nowMs - Date.parse(rec.attemptedAt) > SEND_CLAIM_TTL_MS) {
+    return (await attempts.takeOver(owner, rec)) ? { kind: 'taken_over', record: rec } : { kind: 'defer' };
+  }
+  return { kind: 'defer' };
+}
+
+/**
+ * The `retryClaim` label of a leg outcome that closed the rung at the send.
+ * The unit wrote each of these slots itself: a refusal and the (unreachable
+ * here) suppression keep `gate_refused`; a carrier filter or a provider
+ * rejection is `code_not_retryable`; a re-drive attempt whose outcome was
+ * unknown AGAIN (the unit closed it send_unconfirmed, SOR D13a) is
+ * `send_unconfirmed`.
+ */
+function terminalRetryClaim(outcome: RelayLegSendOutcome): string {
+  if (outcome.kind === 'rejected') {
+    return outcome.errorCode === SEND_UNCONFIRMED_CODE ? 'send_unconfirmed' : 'code_not_retryable';
+  }
+  return outcome.kind === 'filtered' ? 'code_not_retryable' : 'gate_refused';
+}
+
 export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {}): void {
   const log = deps.logger ?? defaultLogger;
   // Resolved ONCE, through the same chain the free enqueue uses, and stored so
@@ -355,6 +440,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
   let mediaStore = deps.mediaStore;
   let mediaStoreInit = deps.mediaStore !== undefined;
   let events = deps.events;
+  let sendAttempts = deps.sendAttemptsRepo;
 
   defineJobHandler(RELAY_RETRY_LEG_JOB, async (rawPayload) => {
     const payload = parseRelayRetryLegPayload(rawPayload);
@@ -363,6 +449,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
     contacts ??= createContactsRepo({ logger: deps.logger });
+    sendAttempts ??= createSendAttemptsRepo({ logger: deps.logger });
     if (!mediaStoreInit) {
       mediaStore = createMediaStore();
       mediaStoreInit = true;
@@ -375,6 +462,7 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     const messagingAdapter = adapter;
     const store = mediaStore;
     const eventBus = events;
+    const attempts = sendAttempts;
 
     const conversationId = payload.relayConversationId;
     const retryTsMsgId = payload.retryTsMsgId;
@@ -383,6 +471,8 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       relay: true,
       conversationId,
       retryTsMsgId,
+      // A rung the send.reconcile job re-drove (SOR D16): named on every line.
+      ...(payload.redrive === true && { redrive: true }),
     } as const;
 
     // 1. Duplicate-DELIVERY guard (spec D4). The claim's `sid#` pointer defeats
@@ -524,6 +614,120 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       announceRootClose();
     }
 
+    // SOR D8a: THIS rung's send-attempt record - one per retry row and member,
+    // which the unit claims and every close below is gated on.
+    const rungOwner: SendAttemptOwner = {
+      kind: 'relay_rung',
+      relayConversationId: conversationId,
+      retryTsMsgId,
+      memberKey,
+    };
+    /** The log context of the rung known only by its STORED key (build finding G9). */
+    const keyCtx = { ...ladder, recipientKey: safeRecipientKey(memberKey) };
+
+    /**
+     * SOR D7/D16: enqueue check 0 of the send.reconcile chain for THIS rung -
+     * the owner reference with the hashed member key and the attempt start
+     * every record condition keys on. No continuation: a `never_sent` verdict
+     * re-drives by enqueueing this same rung with `redrive: true`. The job's
+     * only reconcile enqueue - for the unit's hand-off, a send that landed
+     * unrecorded and a takeover at a gated close alike. NEVER throws: an
+     * enqueue that fails closes the rung unresolved on the spot - the slot
+     * `failed` / send_unconfirmed FIRST (conditional: never over a send that
+     * landed), then the record done / unresolved with cause enqueue_failed -
+     * logs ERROR and announces the root, so nothing waits on a chain that
+     * never started (D7, D13a).
+     */
+    async function handOff(attemptedAt: string): Promise<void> {
+      try {
+        await enqueueSendReconcile(
+          { owner: toOwnerRef(rungOwner), attemptedAt, checkNo: 0 },
+          reconcileDelayMs(attemptedAt, 0, Date.now()),
+        );
+      } catch (err) {
+        await guardWrite(log, keyCtx, 'closeUnconfirmed', () =>
+          messagesRepo.closeRelayRecipientIfUnsent(conversationId, retryTsMsgId, memberKey, {
+            status: 'failed',
+            errorCode: SEND_UNCONFIRMED_CODE,
+          }),
+        );
+        await guardWrite(log, keyCtx, 'closeFromReconcile', () =>
+          attempts.closeFromReconcile(rungOwner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE }),
+        );
+        log.error(
+          {
+            err,
+            ...keyCtx,
+            retryClaim: 'reconcile_enqueue_failed',
+            closeCode: SEND_UNCONFIRMED_CODE,
+            cause: ENQUEUE_FAILED_CODE,
+          },
+          'relayRetryLeg: reconcile enqueue failed - retry leg closed unresolved (send_unconfirmed)',
+        );
+        announceRootClose();
+      }
+    }
+
+    /**
+     * SOR D8: every close this job writes BEFORE the unit's claim (the four
+     * gate refusals, the window gate, the send deadline) or on behalf of an
+     * attempt it may not own (the transient arm's three closes, build ruling
+     * A4 - a `deferredByClaim` transient means a FOREIGN attempt owns the
+     * rung) is a close by a writer other than the rung's own attempt, so it
+     * passes the D8 gate first:
+     *   - PROCEED (no record, done/retryable, redriven): `write` as today; a
+     *     redriven record is then closed done with the close's code as cause
+     *     (spec D8: the decline would have applied to the re-drive equally) -
+     *     `enqueue_failed` for the job's own enqueue failure, else `refused`
+     *     (the cap-close rule, build finding G7).
+     *   - DEFER (a live attempt, or a reconcile, owns the rung): WARN, no write.
+     *   - SKIP (the attempt is terminal): INFO, no write.
+     *   - TAKEN_OVER (a stale attempt, now reconciling): handed to reconcile
+     *     here, exactly once; WARN, no write.
+     * Returns true only when the close was written; the caller logs its own
+     * close line only then. `extra` joins the keep lines (e.g. the `err` of a
+     * failed re-enqueue, which would otherwise go unlogged).
+     */
+    async function closeUnlessOwned(
+      code: RelayRetryCloseCode,
+      write: (code: RelayRetryCloseCode) => Promise<void>,
+      extra: Record<string, unknown> = {},
+    ): Promise<boolean> {
+      const gate = await gateFor(attempts, rungOwner, Date.now());
+      switch (gate.kind) {
+        case 'proceed':
+          await write(code);
+          if (gate.record?.state === 'redriven') {
+            await guardWrite(log, keyCtx, 'closeRedriven', () =>
+              attempts.closeRedriven(rungOwner, {
+                outcome: code === ENQUEUE_FAILED_CODE ? 'enqueue_failed' : 'refused',
+                cause: code,
+              }),
+            );
+          }
+          return true;
+        case 'defer':
+          log.warn(
+            { ...keyCtx, ...extra, gate: gate.kind, closeCode: code },
+            'relayRetryLeg: close not written - another attempt or its reconcile owns the retry leg',
+          );
+          return false;
+        case 'skip':
+          log.info(
+            { ...keyCtx, ...extra, gate: gate.kind, closeCode: code },
+            'relayRetryLeg: close not written - the retry leg attempt is already resolved',
+          );
+          return false;
+        case 'taken_over':
+          await handOff(gate.record.attemptedAt);
+          log.warn(
+            { ...keyCtx, ...extra, gate: gate.kind, closeCode: code },
+            'relayRetryLeg: close not written - a stale attempt was taken over into reconcile',
+          );
+          return false;
+      }
+    }
+
     // 4. The gates (spec D9), in order, through the ONE evaluator the status
     // webhook's claim also previews them with (retry-send-window D3), so the
     // claim and this job can never disagree about which gate refuses, or which
@@ -547,7 +751,9 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       isSuppressed: (candidate) => isMemberSuppressed(contactsRepo, conversationsRepo, candidate),
     });
     if (gate.refused) {
-      await refuseGate(gate.code);
+      // SOR D8: behind the record gate - a live attempt keeps the slot, and a
+      // redriven record is closed refused with this code.
+      if (!(await closeUnlessOwned(gate.code, refuseGate))) return;
       log.warn(
         {
           ...ladder,
@@ -597,7 +803,9 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
         'relayRetryLeg: no usable send-window origin on the retry row - window not checked (spec D5)',
       );
     } else if (!withinRetrySendWindow({ originMs, nowMs: Date.now() })) {
-      await refuseGate(RETRY_WINDOW_CLOSED_CODE);
+      // SOR D8 (RSW #6): a close by a writer other than the rung's attempt,
+      // so it follows the record gate like the four refusals above.
+      if (!(await closeUnlessOwned(RETRY_WINDOW_CLOSED_CODE, refuseGate))) return;
       // ERROR (D9): the member never got the text - a dead end like the cap,
       // not a human action like the four gates above.
       log.error(
@@ -629,7 +837,9 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
     // 5. The send. This unit presigns per attempt (spec D13), writes the
     // delivery slot AND the `relaysid#` pointer - neither is written again here
     // - and sends the STORED leg copy verbatim (spec D12), so a sender renamed
-    // between attempts cannot change the wording mid-ladder.
+    // between attempts cannot change the wording mid-ladder. It claims the
+    // rung's send-attempt record after the bounded acquire and before the
+    // presign (SOR D7a) and never throws: every failure is an outcome kind.
     const outcome = await sendOneRelayLeg({
       messages: messagesRepo,
       conversations: conversationsRepo,
@@ -658,155 +868,256 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       // not go out after origin + 15 minutes. Omitted when the row has no
       // usable origin (D5): that rung is not windowed.
       ...(originMs !== undefined && { sendDeadlineMs: retrySendDeadlineMs(originMs) }),
+      sendAttempts: attempts,
+      owner: rungOwner,
     });
 
-    // 6. The outcome.
-    if (outcome.kind === 'sent') {
-      // Spec D16: inbox ORDERING only. Never `touchLastActivity` - it sets
-      // status='open' and would resurrect a group closed during the backoff.
-      // The preview argument is `undefined` on purpose: the preview belongs to
-      // the thread's NEWEST message, which a 60-240s-old retry is not.
-      await conversationsRepo.touchLastActivityPreservingStatus(
-        conversationId,
-        undefined,
-        new Date().toISOString(),
-      );
-      log.info(
-        { ...memberLog, providerSid: outcome.providerSid },
-        'relayRetryLeg: retry leg sent',
-      );
-      return;
-    }
-
-    if (outcome.kind === 'deadline_exceeded') {
-      // retry-send-window D4: the send deadline (origin + 15 minutes) passed
-      // while this rung waited on the shared A2P meter. Nothing was sent and
-      // nothing written, so this is a PRE-send refusal - `refuseGate`, the
-      // same close as the window gate above - and NEVER the transient branch
-      // below, whose re-enqueue assumes a provider refusal and would try again
-      // past the window. ERROR (D9); refuseGate announces the root once.
-      await refuseGate(RETRY_WINDOW_CLOSED_CODE);
-      log.error(
-        {
-          ...memberLog,
-          retryClaim: 'window_closed',
-          closeCode: RETRY_WINDOW_CLOSED_CODE,
-          windowCheck: 'send_deadline',
-        },
-        'relayRetryLeg: send-window deadline passed while waiting for the A2P meter - nothing sent, retry leg closed',
-      );
-      return;
-    }
-
-    if (outcome.kind === 'transient') {
-      // Spec D10's SECOND ladder: a 429/30022 re-enqueues the SAME rung on the
-      // retry row's OWN pass budget. It consumes no retry rung - the rung is
-      // already claimed, this is that rung trying again.
-      const claim = await messagesRepo.claimFanoutPass(
-        conversationId,
-        retryTsMsgId,
-        MAX_FANOUT_ATTEMPTS,
-      );
-      if (claim.outcome !== 'claimed' || claim.attempt >= MAX_FANOUT_ATTEMPTS) {
-        // Mirrors the fan-out continuation's two cap branches, which is what
-        // keeps `fanOutBackoffMs`'s documented 5s-then-10s shape true.
-        await closeTerminally('transient_cap');
-        log.error(
-          {
-            ...memberLog,
-            retryClaim: 'cap_exhausted',
-            closeCode: 'transient_cap',
-            errorCode: outcome.errorCode,
-            ...(claim.outcome !== 'missing' && { transientPass: claim.attempt }),
-          },
-          'relayRetryLeg: transient pass budget exhausted - retry leg closed',
+    // 6. The outcome - EVERY kind the unit can return, handled explicitly
+    // (SOR spec D7a, D16). The switch is exhaustive at compile time: a kind
+    // added later cannot fall through into a terminal close it did not earn.
+    switch (outcome.kind) {
+      case 'sent': {
+        // Spec D16: inbox ORDERING only. Never `touchLastActivity` - it sets
+        // status='open' and would resurrect a group closed during the backoff.
+        // The preview argument is `undefined` on purpose: the preview belongs to
+        // the thread's NEWEST message, which a 60-240s-old retry is not.
+        // Best-effort (SOR D7a): the leg is sent and recorded, so a failed bump
+        // is logged and never fails the job.
+        try {
+          await conversationsRepo.touchLastActivityPreservingStatus(
+            conversationId,
+            undefined,
+            new Date().toISOString(),
+          );
+        } catch (err) {
+          log.error(
+            { ...memberLog, err, providerSid: outcome.providerSid },
+            'relayRetryLeg: inbox touch after a sent retry leg failed (best-effort) - the leg is sent',
+          );
+        }
+        log.info(
+          { ...memberLog, providerSid: outcome.providerSid },
+          'relayRetryLeg: retry leg sent',
         );
         return;
       }
-      // retry-send-window D4: re-enqueueing is a SCHEDULING decision, so it
-      // meets the claim's rule - the re-run must still fit the window with
-      // RETRY_JOB_GRACE_MS to spare. Past it the rung closes here instead of
-      // re-enqueueing a pass the job-time gate would only refuse. A POST-send
-      // close (this pass reached the provider), so `closeTerminally`, exactly
-      // as the cap branch above. No origin (D5): unwindowed, as before.
-      const transientDelayMs = transientBackoff(claim.attempt);
-      if (
-        originMs !== undefined &&
-        !retryFitsSendWindow({ originMs, nowMs: Date.now(), backoffMs: transientDelayMs })
-      ) {
-        await closeTerminally(RETRY_WINDOW_CLOSED_CODE);
+
+      case 'sent_unrecorded':
+      case 'handed_to_reconcile': {
+        // SOR D7 / D3a: the rung's record is `reconciling` and the reconcile
+        // decides - neither a terminal close nor a failure, so no emit.
+        // `sent_unrecorded`: the provider ACCEPTED and a record-phase write
+        // threw; the known-SID reconcile adopts it and makes the inbox touch
+        // then - so NO touch here. `handed_to_reconcile`: the outcome was
+        // unknown (`reason: 'unknown'`), or a stale attempt was taken over
+        // (`'takeover'`, whose clock `attemptRef` carries).
+        const ref = outcome.attemptRef;
+        if (ref === undefined) {
+          // Unreachable since the unit's record args are required (SOR Task
+          // 9); with no attempt to name there is nothing to hand off.
+          log.error(
+            { ...memberLog, legOutcome: outcome.kind },
+            'relayRetryLeg: a hand-off outcome came back without an attempt record - nothing handed off',
+          );
+          return;
+        }
+        if (outcome.kind === 'sent_unrecorded') {
+          log.error(
+            { ...memberLog, providerSid: outcome.providerSid, legOutcome: outcome.kind },
+            'relayRetryLeg: retry leg sent but not recorded - its SID goes to reconcile; the inbox touch waits for the adoption',
+          );
+        } else {
+          log.warn(
+            { ...memberLog, legOutcome: outcome.kind, reason: outcome.reason },
+            'relayRetryLeg: retry leg handed to reconcile - no close; the verdict decides',
+          );
+        }
+        await handOff(ref.attemptedAt);
+        return;
+      }
+
+      case 'stranded':
+        // SOR D7a: the hand-off write itself failed. The record stays
+        // `attempting` and the slot untouched; a later claim refuses any
+        // re-send while the record is live, and the rung is left for the
+        // sweeper (`send-attempt-sweeper`). ERROR only - no close, no
+        // enqueue, no emit. `afterSend`: the send is KNOWN to have happened.
+        log.error(
+          {
+            ...memberLog,
+            legOutcome: outcome.kind,
+            ...(outcome.afterSend === true && { afterSend: true }),
+          },
+          'relayRetryLeg: retry leg stranded - its hand-off to reconcile was not written; left for the sweeper',
+        );
+        return;
+
+      case 'transient': {
+        // Spec D10's SECOND ladder: a 429/30022 re-enqueues the SAME rung on the
+        // retry row's OWN pass budget. It consumes no retry rung - the rung is
+        // already claimed, this is that rung trying again.
+        //
+        // SOR: the same ladder for every transient - the provider's retryable
+        // (the unit released its attempt done/retryable), a throw before or
+        // after the claim that sent nothing, and `deferredByClaim` (a FOREIGN
+        // attempt owns the rung's record and the unit wrote NO slot). So each
+        // close below may meet an attempt this pass does not own, and passes
+        // the D8 gate first (build ruling A4).
+        const byClaim = outcome.deferredByClaim === true ? { deferredByClaim: true } : {};
+        const claim = await messagesRepo.claimFanoutPass(
+          conversationId,
+          retryTsMsgId,
+          MAX_FANOUT_ATTEMPTS,
+        );
+        if (claim.outcome !== 'claimed' || claim.attempt >= MAX_FANOUT_ATTEMPTS) {
+          // Mirrors the fan-out continuation's two cap branches, which is what
+          // keeps `fanOutBackoffMs`'s documented 5s-then-10s shape true.
+          if (!(await closeUnlessOwned('transient_cap', closeTerminally, byClaim))) return;
+          log.error(
+            {
+              ...memberLog,
+              retryClaim: 'cap_exhausted',
+              closeCode: 'transient_cap',
+              errorCode: outcome.errorCode,
+              ...(claim.outcome !== 'missing' && { transientPass: claim.attempt }),
+              ...byClaim,
+            },
+            'relayRetryLeg: transient pass budget exhausted - retry leg closed',
+          );
+          return;
+        }
+        // retry-send-window D4: re-enqueueing is a SCHEDULING decision, so it
+        // meets the claim's rule - the re-run must still fit the window with
+        // RETRY_JOB_GRACE_MS to spare. Past it the rung closes here instead of
+        // re-enqueueing a pass the job-time gate would only refuse -
+        // `closeTerminally` (no aggregation write), exactly as the cap branch
+        // above. No origin (D5): unwindowed, as before.
+        const transientDelayMs = transientBackoff(claim.attempt);
+        if (
+          originMs !== undefined &&
+          !retryFitsSendWindow({ originMs, nowMs: Date.now(), backoffMs: transientDelayMs })
+        ) {
+          if (!(await closeUnlessOwned(RETRY_WINDOW_CLOSED_CODE, closeTerminally, byClaim))) return;
+          log.error(
+            {
+              ...memberLog,
+              retryClaim: 'window_closed',
+              closeCode: RETRY_WINDOW_CLOSED_CODE,
+              windowCheck: 'transient_reschedule',
+              errorCode: outcome.errorCode,
+              transientPass: claim.attempt,
+              ...byClaim,
+            },
+            'relayRetryLeg: a transient re-run would land past the send window - retry leg closed',
+          );
+          return;
+        }
+        try {
+          // Never `redrive` (SOR D13a): the record, not the marker, tells any
+          // pass that the rung is re-driven.
+          const again: RelayRetryLegPayload = { relayConversationId: conversationId, retryTsMsgId };
+          await enqueue(RELAY_RETRY_LEG_JOB, again, {
+            runAt: new Date(Date.now() + transientDelayMs),
+          });
+        } catch (err) {
+          if (!(await closeUnlessOwned('enqueue_failed', closeTerminally, { err, ...byClaim }))) return;
+          log.error(
+            { ...memberLog, err, retryClaim: 'enqueue_failed', closeCode: 'enqueue_failed', ...byClaim },
+            'relayRetryLeg: transient re-enqueue failed - retry leg closed',
+          );
+          return;
+        }
+        log.warn(
+          { ...memberLog, errorCode: outcome.errorCode, transientPass: claim.attempt, ...byClaim },
+          'relayRetryLeg: transient send error - same rung re-enqueued',
+        );
+        return;
+      }
+
+      case 'deadline_exceeded': {
+        // retry-send-window D4: the send deadline (origin + 15 minutes) passed
+        // while this rung waited on the shared A2P meter. Nothing was sent and
+        // nothing written, so this is a PRE-send refusal - `refuseGate`, the
+        // same close as the window gate above - and NEVER the transient branch,
+        // whose re-enqueue assumes a provider refusal and would try again past
+        // the window. ERROR (D9); refuseGate announces the root once. The unit
+        // returns this BEFORE its claim, so it holds no record (RSW #5/#6);
+        // the close passes the D8 gate like the window gate, and closes a
+        // redriven record refused.
+        if (!(await closeUnlessOwned(RETRY_WINDOW_CLOSED_CODE, refuseGate))) return;
         log.error(
           {
             ...memberLog,
             retryClaim: 'window_closed',
             closeCode: RETRY_WINDOW_CLOSED_CODE,
-            windowCheck: 'transient_reschedule',
-            errorCode: outcome.errorCode,
-            transientPass: claim.attempt,
+            windowCheck: 'send_deadline',
           },
-          'relayRetryLeg: a transient re-run would land past the send window - retry leg closed',
+          'relayRetryLeg: send-window deadline passed while waiting for the A2P meter - nothing sent, retry leg closed',
         );
         return;
       }
-      try {
-        await enqueue(RELAY_RETRY_LEG_JOB, payload, {
-          runAt: new Date(Date.now() + transientDelayMs),
-        });
-      } catch (err) {
-        await closeTerminally('enqueue_failed');
+
+      case 'skipped_terminal':
+        // Nothing done: the slot was terminal, or the rung's attempt record is
+        // terminal or owned by its reconcile (a refused claim; `reason:
+        // 'unknown'` - a hand-off that lost its fence to a takeover, whose own
+        // reconcile owns the record). Whoever closed it announced it.
+        log.info(
+          { ...memberLog, ...(outcome.reason !== undefined && { reason: outcome.reason }) },
+          'relayRetryLeg: retry leg already terminal or owned by its reconcile - nothing sent',
+        );
+        return;
+
+      case 'rejected':
+      case 'refused':
+      case 'suppressed':
+      case 'filtered':
+        // `refused`, `suppressed`, `filtered` and `rejected`: the extracted unit
+        // ALREADY wrote a terminal slot carrying that arm's specific error code
+        // (adjudication S2) - a `rejected` with no provider code writes none,
+        // and the SOR D13a close of a re-drive attempt whose outcome was
+        // unknown AGAIN is `rejected` with send_unconfirmed, the slot AND the
+        // record already closed by the unit. Writing one here would replace a
+        // precise code with a vaguer one, so this job only emits D23's
+        // terminal ERROR, and NO close code - it wrote nothing.
+        //
+        // `suppressed` IS UNREACHABLE from this job (code review R2, W4). The send
+        // above passes `suppressionChecked: true`, so the unit no longer runs the
+        // suppression read at all and cannot take that arm; the D9 gate is the only
+        // place this ladder decides an opt-out, and it closes with
+        // `retry_opted_out`. The arm stays as a defensive ERROR because the outcome
+        // union still admits it and a silent fall-through would be worse than a line
+        // nobody expects to see.
+        //
+        // WHAT WAS HERE BEFORE, and why it went: fix wave 1 re-stamped this slot as
+        // `retry_opted_out` after the fact, because `contact_opted_out` is filtered
+        // out of `presentRelayDelivery`'s denominator (`deliveryStatus.ts:449`, the
+        // `fanned` filter) and a one-member relay group would lose its whole rollup.
+        // That re-stamp was INERT on the shape every relay source now takes: on a
+        // VERSIONED row `applyRecipientSendResult` preserves the FIRST terminal code
+        // (`messagesRepo.ts`, `terminalCurrent && statusSame`), so the write was
+        // refused and the log still reported a `closeCode` nothing had written.
+        // Closing the read window is what actually fixes it.
         log.error(
-          { ...memberLog, err, retryClaim: 'enqueue_failed', closeCode: 'enqueue_failed' },
-          'relayRetryLeg: transient re-enqueue failed - retry leg closed',
+          {
+            ...memberLog,
+            retryClaim: terminalRetryClaim(outcome),
+            errorCode: outcome.errorCode,
+            legOutcome: outcome.kind,
+          },
+          'relayRetryLeg: retry leg ended terminally at the send',
         );
+        // The third terminal-close site (finding P1). The slot is closed and this
+        // job wrote none of it - which is exactly why the emit cannot live in the
+        // two close helpers alone. `sendOneRelayLeg` returned only after its own
+        // durable write, so this is still after it.
+        announceRootClose();
         return;
+
+      default: {
+        const unhandled: never = outcome.kind;
+        throw new Error(`relayRetryLeg: unhandled leg outcome ${String(unhandled)}`);
       }
-      log.warn(
-        { ...memberLog, errorCode: outcome.errorCode, transientPass: claim.attempt },
-        'relayRetryLeg: transient send error - same rung re-enqueued',
-      );
-      return;
     }
-
-    if (outcome.kind === 'skipped_terminal') {
-      log.info({ ...memberLog }, 'relayRetryLeg: retry leg already terminal - nothing sent');
-      return;
-    }
-
-    // `refused`, `suppressed` and `filtered`: the extracted unit ALREADY wrote a
-    // terminal slot carrying that arm's specific error code (adjudication S2).
-    // Writing one here would replace a precise code with a vaguer one, so this
-    // job only emits D23's terminal ERROR, and NO close code - it wrote nothing.
-    //
-    // `suppressed` IS UNREACHABLE from this job (code review R2, W4). The send
-    // above passes `suppressionChecked: true`, so the unit no longer runs the
-    // suppression read at all and cannot take that arm; the D9 gate is the only
-    // place this ladder decides an opt-out, and it closes with
-    // `retry_opted_out`. The arm stays as a defensive ERROR because the outcome
-    // union still admits it and a silent fall-through would be worse than a line
-    // nobody expects to see.
-    //
-    // WHAT WAS HERE BEFORE, and why it went: fix wave 1 re-stamped this slot as
-    // `retry_opted_out` after the fact, because `contact_opted_out` is filtered
-    // out of `presentRelayDelivery`'s denominator (`deliveryStatus.ts:449`, the
-    // `fanned` filter) and a one-member relay group would lose its whole rollup.
-    // That re-stamp was INERT on the shape every relay source now takes: on a
-    // VERSIONED row `applyRecipientSendResult` preserves the FIRST terminal code
-    // (`messagesRepo.ts`, `terminalCurrent && statusSame`), so the write was
-    // refused and the log still reported a `closeCode` nothing had written.
-    // Closing the read window is what actually fixes it.
-    log.error(
-      {
-        ...memberLog,
-        retryClaim: outcome.kind === 'filtered' ? 'code_not_retryable' : 'gate_refused',
-        errorCode: outcome.errorCode,
-        legOutcome: outcome.kind,
-      },
-      'relayRetryLeg: retry leg ended terminally at the send',
-    );
-    // The third terminal-close site (finding P1). The slot is closed and this
-    // job wrote none of it - which is exactly why the emit cannot live in the
-    // two close helpers alone. `sendOneRelayLeg` returned only after its own
-    // durable write, so this is still after it.
-    announceRootClose();
   });
 }

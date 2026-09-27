@@ -2244,29 +2244,6 @@ describe('relay.fanOut (M1.7)', () => {
       expect(consistent).toHaveBeenCalled();
       expect(eventual).not.toHaveBeenCalled();
     });
-
-    it('25 without the record args (the retry rung until Task 9) an unknown returns handed_to_reconcile with NO attemptRef and nothing is written', async () => {
-      seedRelay(world, { participants: TWO });
-      const source = seedSource(world, 'hello', 'c-alice');
-      unknownOn(new Set([BOB]));
-      const outcome = await sendOneRelayLeg({
-        messages: world.messagesRepo,
-        conversations: world.conversationsRepo,
-        contacts: world.contactsRepo,
-        adapter: world.adapter,
-        log: createLogger({ level: 'info', destination: capture.stream }),
-        payload: { relayConversationId: 'conv-relay-1', sourceTsMsgId: source.tsMsgId, attempt: 1 },
-        member: TWO[1]!,
-        currentSource: source,
-        poolNumber: POOL,
-        legBody: 'Alice: hello',
-        sourceMedia: [],
-        transport: { kind: 'legacy' },
-      });
-      expect(outcome).toEqual({ kind: 'handed_to_reconcile', reason: 'unknown' });
-      expect(slotOf(source, 'c-bob')).toBeUndefined();
-      expect(world.sendAttempts.size).toBe(0);
-    });
   });
 });
 

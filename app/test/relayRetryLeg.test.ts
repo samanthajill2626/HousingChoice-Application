@@ -50,6 +50,9 @@ import { RETRY_SEND_WINDOW_MS } from '../src/lib/retrySendWindow.js';
 import { SendRefusedError } from '../src/services/sendMessage.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
+import type { SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
+import { SEND_RECONCILE_JOB } from '../src/jobs/sendReconcile.js';
+import { hashRecipientKey } from '../src/lib/sendFingerprint.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
@@ -1350,6 +1353,63 @@ describe('relay.retryLeg (30003 ladder)', () => {
     expect(terminal).toHaveLength(1);
     expect(terminal[0]!['memberKey']).toBe('phone-only-member');
     expect(JSON.stringify(capture.lines)).not.toContain(BOB);
+  });
+
+  // -------------------------------------------------------------------------
+  // SOR (send-outcome-reconcile) Task 9: the rung passes its send-attempt
+  // record to the leg unit, handles every outcome kind explicitly, hands an
+  // unknown outcome to send.reconcile, and gates every pre-claim decline and
+  // every close by a writer other than its own attempt on the record (D8). No
+  // send.reconcile handler exists yet: a delayed hand-off is observed in
+  // outbound.delayed, a delay-0 one through a recording stub (build finding G4).
+  // -------------------------------------------------------------------------
+  describe('send outcomes and the record gate (SOR D7a, D8, D16) - the first test must fail on main', () => {
+    const rungOwner = (row: MessageItem): SendAttemptOwner => ({
+      kind: 'relay_rung',
+      relayConversationId: CONV,
+      retryTsMsgId: row.tsMsgId,
+      memberKey: BOB_KEY,
+    });
+    const delayedOf = (jobName: string) => outbound.delayed.filter((d) => d.envelope.jobName === jobName);
+
+    it('handed_to_reconcile enqueues send.reconcile for the rung with the hashed key and neither closes nor emits', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world, { attempt: 1 });
+      // Fresh (build finding T9-1): check 0 runs 5 s after the attempt, so the
+      // hand-off lands in outbound.delayed instead of dispatching at once.
+      const at = new Date().toISOString();
+      legSend.override = async (): Promise<RelayLegSendOutcome> => ({
+        kind: 'handed_to_reconcile',
+        reason: 'unknown',
+        attemptRef: { attemptNo: 1, attemptedAt: at },
+      });
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(outbound.delayed.map((d) => d.envelope.jobName)).toEqual([SEND_RECONCILE_JOB]);
+      expect(delayedOf(SEND_RECONCILE_JOB)[0]!.envelope.payload).toEqual({
+        owner: {
+          kind: 'relay_rung',
+          relayConversationId: CONV,
+          retryTsMsgId: row.tsMsgId,
+          recipientKeyHash: hashRecipientKey(BOB_KEY),
+        },
+        attemptedAt: at,
+        checkNo: 0,
+      });
+      expect(delayedOf(SEND_RECONCILE_JOB)[0]!.delaySeconds).toBeGreaterThanOrEqual(4);
+      expect(delayedOf(SEND_RECONCILE_JOB)[0]!.delaySeconds).toBeLessThanOrEqual(5);
+      expect(persistedEmits()).toEqual([]);
+      expect(errorLogs()).toEqual([]);
+      // No close: only a verdict writes the slot (D7).
+      expect(slotOf(row.tsMsgId)).toEqual({
+        status: 'queued',
+        requestedTransport: 'sms',
+        transportAggregationState: 'planned',
+      });
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toBeUndefined();
+    });
   });
 });
 

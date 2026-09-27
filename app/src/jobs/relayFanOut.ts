@@ -1388,6 +1388,8 @@ async function runRelayFanOutExecution(
         case 'handed_to_reconcile':
         case 'sent_unrecorded':
           if (outcome.attemptRef === undefined) {
+            // Unreachable since the leg's record args are required (SOR Task
+            // 9): the narrowing the optional field needs, logged not thrown.
             log.error(
               { ...memberCtx(payload, member), legOutcome: outcome.kind },
               'relayFanOut: a leg outcome for the reconcile came back without an attempt record - nothing handed off',
@@ -1554,14 +1556,14 @@ export type RelayLegPayload = Pick<
  *   retry rung - never a `transient` to re-defer, whose branch assumes a
  *   provider refusal and would re-open a send past the window.
  * - `sent_unrecorded` (D3a): the provider ACCEPTED but a record-phase write
- *   threw. `providerSid`; `attemptRef` when the record moved to reconciling
- *   WITH the SID - the caller hands off (the known-SID reconcile repairs the
- *   writes). Without the record args there is no `attemptRef`.
+ *   threw. `providerSid`; `attemptRef` - the record moved to reconciling
+ *   WITH the SID and the caller hands off (the known-SID reconcile repairs
+ *   the writes).
  * - `handed_to_reconcile`: the record is reconciling and the caller must hand
  *   off, exactly once. `reason: 'unknown'` - the provider outcome was unknown
  *   (D7); `reason: 'takeover'` - a stale attempt was taken over (D8a) and
- *   `attemptRef` carries THAT attempt's clock. Without the record args an
- *   unknown returns this with NO `attemptRef`: there is no record to hand.
+ *   `attemptRef` carries THAT attempt's clock. Both hand-off kinds always
+ *   carry `attemptRef`: the record args are required (SOR Task 9).
  * - `stranded`: the hand-off write itself failed (D7a): the record stays
  *   attempting, the slot untouched; the caller carries the member with no
  *   slot write, and the claim refuses any re-send. `afterSend` - the send is
@@ -1805,17 +1807,16 @@ export async function sendOneRelayLeg(args: {
    */
   sendDeadlineMs?: number;
   /**
-   * SOR spec D8a: the send-attempt records and THIS leg's owner. With both,
-   * the leg gates its suppression close on the member's record (D8), claims
-   * the member after the token acquire and before the presign (D7a "Claim
-   * placement"), stamps the attempt clock on the slot, and fences every later
-   * record write on its own attempt. Absent (the 30003 retry rung until SOR
-   * Task 9) = the pre-claim legacy path: no gate, no claim, no attempt clock
-   * and no record write; an unknown error returns `handed_to_reconcile` with
-   * NO attemptRef.
+   * SOR spec D8a: the send-attempt records and THIS leg's owner - a
+   * `relay_leg` from the fan-out loop, a `relay_rung` from the 30003 retry
+   * rung. REQUIRED on both callers (SOR Task 9): the leg gates its
+   * suppression close on the member's record (D8), claims the member after
+   * the token acquire and before the presign (D7a "Claim placement"), stamps
+   * the attempt clock on the slot, and fences every later record write on its
+   * own attempt.
    */
-  sendAttempts?: SendAttemptsRepo;
-  owner?: SendAttemptOwner;
+  sendAttempts: SendAttemptsRepo;
+  owner: SendAttemptOwner;
 }): Promise<RelayLegSendOutcome> {
   const {
     messages,
@@ -1844,8 +1845,6 @@ export async function sendOneRelayLeg(args: {
   if (isTerminal(priorSlot?.status)) return { kind: 'skipped_terminal' };
 
   const ctx = memberCtx(payload, member);
-  // Both or neither: the tracked path gates, claims and fences on the record.
-  const tracked = sendAttempts !== undefined && owner !== undefined ? { attempts: sendAttempts, owner } : undefined;
   let phase: 'prepare' | 'sending' | 'record' = 'prepare';
   let ref: AttemptRef | undefined;
   let result: SendMessageResult | undefined;
@@ -1856,26 +1855,23 @@ export async function sendOneRelayLeg(args: {
     // the D8 gate first (a live foreign attempt defers it, a terminal record
     // skips it, a stale one is taken over - the caller hands off).
     if (!suppressionChecked && (await isMemberSuppressed(contacts, conversations, member))) {
-      let redriven = false;
-      if (tracked !== undefined) {
-        const gate = await gateFor(tracked.attempts, tracked.owner, Date.now());
-        if (gate.kind === 'skip') {
-          log.info({ ...ctx }, 'relayFanOut: suppression not written - the member attempt is terminal');
-          return { kind: 'skipped_terminal' };
-        }
-        if (gate.kind === 'defer') {
-          log.info({ ...ctx }, 'relayFanOut: suppression deferred - another attempt owns the member');
-          return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true };
-        }
-        if (gate.kind === 'taken_over') {
-          return {
-            kind: 'handed_to_reconcile',
-            reason: 'takeover',
-            attemptRef: { attemptNo: gate.record.attemptNo, attemptedAt: gate.record.attemptedAt },
-          };
-        }
-        redriven = gate.record?.state === 'redriven';
+      const gate = await gateFor(sendAttempts, owner, Date.now());
+      if (gate.kind === 'skip') {
+        log.info({ ...ctx }, 'relayFanOut: suppression not written - the member attempt is terminal');
+        return { kind: 'skipped_terminal' };
       }
+      if (gate.kind === 'defer') {
+        log.info({ ...ctx }, 'relayFanOut: suppression deferred - another attempt owns the member');
+        return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true };
+      }
+      if (gate.kind === 'taken_over') {
+        return {
+          kind: 'handed_to_reconcile',
+          reason: 'takeover',
+          attemptRef: { attemptNo: gate.record.attemptNo, attemptedAt: gate.record.attemptedAt },
+        };
+      }
+      const redriven = gate.record?.state === 'redriven';
       if (transport.kind === 'versioned') {
         await setVersionedAggregationState(messages, payload, key, 'excluded', ['excluded', 'attempted']);
       }
@@ -1883,11 +1879,11 @@ export async function sendOneRelayLeg(args: {
         status: 'failed',
         errorCode: 'contact_opted_out',
       }, transport);
-      if (redriven && tracked !== undefined) {
+      if (redriven) {
         // A redriven record belongs to whichever pass reaches it (spec D8): the
         // decline would have applied to the re-drive equally, so it closes it.
         await guardWrite(log, ctx, 'closeRedriven', () =>
-          tracked.attempts.closeRedriven(tracked.owner, { outcome: 'refused', cause: 'contact_opted_out' }),
+          sendAttempts.closeRedriven(owner, { outcome: 'refused', cause: 'contact_opted_out' }),
         );
       }
       try {
@@ -1942,58 +1938,56 @@ export async function sendOneRelayLeg(args: {
     // THIS attempt's, the ones a reconcile matches on: the pool number it
     // sends from, the member's number, the composed leg copy, the media it
     // will carry (none without a store to presign it).
-    if (tracked !== undefined) {
-      const fp = bodyFingerprint(legBody);
-      const claim = await tracked.attempts.claim(
-        tracked.owner,
-        {
-          recipientDigest: recipientDigest(poolNumber, member.phone),
-          sender: poolNumber,
-          bodyHash: fp.hash,
-          bodyShort: fp.short,
-          mediaCount: hasMedia && mediaStore !== undefined ? sourceMedia.length : 0,
-        },
-        new Date().toISOString(),
+    const fp = bodyFingerprint(legBody);
+    const claim = await sendAttempts.claim(
+      owner,
+      {
+        recipientDigest: recipientDigest(poolNumber, member.phone),
+        sender: poolNumber,
+        bodyHash: fp.hash,
+        bodyShort: fp.short,
+        mediaCount: hasMedia && mediaStore !== undefined ? sourceMedia.length : 0,
+      },
+      new Date().toISOString(),
+    );
+    if (claim.outcome === 'refused') {
+      // A live foreign attempt (fresh): defer with no slot write. Terminal
+      // or reconciling: skip - never carried, never re-sent.
+      log.info(
+        { ...ctx, state: claim.record.state, fresh: claim.fresh },
+        'relayFanOut: claim refused - another attempt owns the member or it is resolved',
       );
-      if (claim.outcome === 'refused') {
-        // A live foreign attempt (fresh): defer with no slot write. Terminal
-        // or reconciling: skip - never carried, never re-sent.
-        log.info(
-          { ...ctx, state: claim.record.state, fresh: claim.fresh },
-          'relayFanOut: claim refused - another attempt owns the member or it is resolved',
-        );
-        return claim.fresh
-          ? { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true }
-          : { kind: 'skipped_terminal' };
+      return claim.fresh
+        ? { kind: 'transient', errorCode: SEND_RETRYABLE_CODE, deferredByClaim: true }
+        : { kind: 'skipped_terminal' };
+    }
+    if (claim.outcome === 'takeover') {
+      // A stale attempt: a process died mid-send, or the call overran. The
+      // outcome is unknown - take it over into reconcile, never re-send.
+      if (!(await sendAttempts.takeOver(owner, claim.record))) {
+        log.info({ ...ctx }, 'relayFanOut: takeover lost - another writer moved the stale attempt');
+        return { kind: 'skipped_terminal' };
       }
-      if (claim.outcome === 'takeover') {
-        // A stale attempt: a process died mid-send, or the call overran. The
-        // outcome is unknown - take it over into reconcile, never re-send.
-        if (!(await tracked.attempts.takeOver(tracked.owner, claim.record))) {
-          log.info({ ...ctx }, 'relayFanOut: takeover lost - another writer moved the stale attempt');
-          return { kind: 'skipped_terminal' };
-        }
-        return {
-          kind: 'handed_to_reconcile',
-          reason: 'takeover',
-          attemptRef: { attemptNo: claim.record.attemptNo, attemptedAt: claim.record.attemptedAt },
-        };
-      }
-      ref = { attemptNo: claim.record.attemptNo, attemptedAt: claim.record.attemptedAt };
-      secondUnknownWouldClose = claim.record.redriveCount >= 1;
-      // The attempt clock on the slot (D8a, D20a): best-effort - a wholesale
-      // slot write may erase it; the record stays authoritative. An absent
-      // legacy slot is created `queued` by the same write.
-      try {
-        await messages.setRelayRecipientAttemptedAt(
-          payload.relayConversationId,
-          payload.sourceTsMsgId,
-          key,
-          ref.attemptedAt,
-        );
-      } catch (err) {
-        log.warn({ err, ...ctx }, 'relayFanOut: attempt clock write failed (best-effort) - the record decides');
-      }
+      return {
+        kind: 'handed_to_reconcile',
+        reason: 'takeover',
+        attemptRef: { attemptNo: claim.record.attemptNo, attemptedAt: claim.record.attemptedAt },
+      };
+    }
+    ref = { attemptNo: claim.record.attemptNo, attemptedAt: claim.record.attemptedAt };
+    secondUnknownWouldClose = claim.record.redriveCount >= 1;
+    // The attempt clock on the slot (D8a, D20a): best-effort - a wholesale
+    // slot write may erase it; the record stays authoritative. An absent
+    // legacy slot is created `queued` by the same write.
+    try {
+      await messages.setRelayRecipientAttemptedAt(
+        payload.relayConversationId,
+        payload.sourceTsMsgId,
+        key,
+        ref.attemptedAt,
+      );
+    } catch (err) {
+      log.warn({ err, ...ctx }, 'relayFanOut: attempt clock write failed (best-effort) - the record decides');
     }
 
     let legMediaUrls: string[] | undefined;
@@ -2057,42 +2051,42 @@ export async function sendOneRelayLeg(args: {
         'relayFanOut: the SID pointer already names another leg - this leg is recorded as sent anyway',
       );
     }
-    if (tracked !== undefined && ref !== undefined) {
-      if (!(await tracked.attempts.finishAttempt(tracked.owner, ref, { outcome: 'sent', sid: result.providerSid }))) {
-        // Plan deviation 3: the slot is not rolled back - the takeover's
-        // reconcile finds the SID through the pointer and repairs.
-        log.warn(
-          { ...ctx, providerSid: result.providerSid },
-          'relayFanOut: attempt fence lost after the slot write; the takeover reconcile repairs',
-        );
-      }
+    if (!(await sendAttempts.finishAttempt(owner, ref, { outcome: 'sent', sid: result.providerSid }))) {
+      // Plan deviation 3: the slot is not rolled back - the takeover's
+      // reconcile finds the SID through the pointer and repairs.
+      log.warn(
+        { ...ctx, providerSid: result.providerSid },
+        'relayFanOut: attempt fence lost after the slot write; the takeover reconcile repairs',
+      );
     }
     return { kind: 'sent', providerSid: result.providerSid };
   } catch (err) {
     if (phase === 'prepare') {
-      if (tracked === undefined || ref === undefined) {
+      if (ref === undefined) {
         // Before the claim (the suppression read and writes, the gate, the
-        // acquire, the claim itself - or any prepare step on the legacy path):
-        // nothing was sent and no attempt of ours exists. Deferred with NO slot
-        // write on either row kind (build ruling A3): the record's state is
-        // unknown here and a legacy row's only slot writer is wholesale.
+        // acquire, the claim itself): nothing was sent and no attempt of ours
+        // exists. Deferred with NO slot write on either row kind (build ruling
+        // A3): the record's state is unknown here and a legacy row's only slot
+        // writer is wholesale.
         log.warn({ err, ...ctx }, 'relayFanOut: prepare failed before the claim - member deferred to the continuation');
         return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE };
       }
       // After the claim, before the send (the presign, the prepare, the
       // aggregation write): nothing was sent. Release THIS attempt as
       // retryable and defer - the slot first, then the record (deviation 3).
-      const held = { ...tracked, ref };
+      const released = ref;
       log.warn({ err, ...ctx }, 'relayFanOut: prepare failed after the claim - attempt released retryable, member deferred');
       await guardWrite(log, ctx, 'deferSlot', () =>
         persistRelayRecipientResult(messages, payload, key, { status: 'queued', errorCode: SEND_RETRYABLE_CODE }, transport),
       );
       await guardWrite(log, ctx, 'finishAttempt', () =>
-        held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'retryable', cause: SEND_RETRYABLE_CODE }),
+        sendAttempts.finishAttempt(owner, released, { outcome: 'retryable', cause: SEND_RETRYABLE_CODE }),
       );
       return { kind: 'transient', errorCode: SEND_RETRYABLE_CODE };
     }
-    const held = tracked !== undefined && ref !== undefined ? { ...tracked, ref } : undefined;
+    // Past 'prepare' the claim has run: the phase advances only after it set
+    // `ref` (the same reasoning as `result!` at 'record' below).
+    const held = { attempts: sendAttempts, owner, ref: ref! };
 
     /**
      * Move this attempt to `reconciling` (with the SID when one is known).
@@ -2102,7 +2096,7 @@ export async function sendOneRelayLeg(args: {
      * itself) -> nothing to do; not written -> STRANDED.
      */
     const handToReconcile = async (
-      attempt: NonNullable<typeof held>,
+      attempt: typeof held,
       sid?: string,
     ): Promise<'handed' | 'fence_lost' | 'stranded'> => {
       let handed = false;
@@ -2126,7 +2120,6 @@ export async function sendOneRelayLeg(args: {
         { err, ...ctx, providerSid },
         'relayFanOut: sent_unrecorded - member sent but not recorded; its SID goes to reconcile',
       );
-      if (held === undefined) return { kind: 'sent_unrecorded', providerSid };
       const handed = await handToReconcile(held, providerSid);
       if (handed === 'handed') return { kind: 'sent_unrecorded', providerSid, attemptRef: held.ref };
       if (handed === 'fence_lost') return { kind: 'skipped_terminal' };
@@ -2139,11 +2132,9 @@ export async function sendOneRelayLeg(args: {
       await guardWrite(log, ctx, 'refusedSlot', () =>
         persistRelayRecipientResult(messages, payload, key, { status: 'failed', errorCode: refusal }, transport),
       );
-      if (held !== undefined) {
-        await guardWrite(log, ctx, 'finishAttempt', () =>
-          held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'refused', cause: refusal }),
-        );
-      }
+      await guardWrite(log, ctx, 'finishAttempt', () =>
+        held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'refused', cause: refusal }),
+      );
       log.warn(
         {
           conversationId: payload.relayConversationId,
@@ -2162,11 +2153,9 @@ export async function sendOneRelayLeg(args: {
         await guardWrite(log, ctx, 'rejectSlot', () =>
           persistRelayRecipientResult(messages, payload, key, { status: 'failed', errorCode: code }, transport),
         );
-        if (held !== undefined) {
-          await guardWrite(log, ctx, 'finishAttempt', () =>
-            held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'rejected', cause: code }),
-          );
-        }
+        await guardWrite(log, ctx, 'finishAttempt', () =>
+          held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'rejected', cause: code }),
+        );
         log.error(
           {
             conversationId: payload.relayConversationId,
@@ -2193,11 +2182,9 @@ export async function sendOneRelayLeg(args: {
       );
       // The record's cause keeps what the slot may not: the HTTP status of a code-less 4xx.
       const cause = code ?? (classification.status !== undefined ? String(classification.status) : undefined);
-      if (held !== undefined) {
-        await guardWrite(log, ctx, 'finishAttempt', () =>
-          held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'rejected', ...(cause !== undefined && { cause }) }),
-        );
-      }
+      await guardWrite(log, ctx, 'finishAttempt', () =>
+        held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'rejected', ...(cause !== undefined && { cause }) }),
+      );
       log.warn(
         { ...ctx, errorCode: code, status: classification.status },
         'relayFanOut: send rejected by the provider - recipient failed, NOT retried',
@@ -2212,11 +2199,9 @@ export async function sendOneRelayLeg(args: {
       await guardWrite(log, ctx, 'deferSlot', () =>
         persistRelayRecipientResult(messages, payload, key, { status: 'queued', errorCode: code }, transport),
       );
-      if (held !== undefined) {
-        await guardWrite(log, ctx, 'finishAttempt', () =>
-          held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'retryable', cause: code }),
-        );
-      }
+      await guardWrite(log, ctx, 'finishAttempt', () =>
+        held.attempts.finishAttempt(held.owner, held.ref, { outcome: 'retryable', cause: code }),
+      );
       log.warn(
         { ...ctx, errorCode: code, attempt: payload.attempt },
         'relayFanOut: transient send error - deferring recipient to the continuation',
@@ -2226,10 +2211,6 @@ export async function sendOneRelayLeg(args: {
     // UNKNOWN (D2, D7): the request may have reached the provider. Never
     // re-sent and never failed here - the reconcile decides; the slot stays
     // `queued` with no code.
-    if (held === undefined) {
-      log.warn({ err, ...ctx }, 'relayFanOut: unknown send outcome - no attempt record on this path; nothing is re-sent');
-      return { kind: 'handed_to_reconcile', reason: 'unknown' };
-    }
     if (secondUnknownWouldClose) {
       // D13a: at most ONE re-drive per member. A re-drive attempt whose
       // outcome is unknown AGAIN closes unresolved here, with no second

@@ -623,9 +623,11 @@ export function presentRelayDelivery(
     ]);
     return {
       // The reason is appended INLINE after this label by the bubble, so the
-      // counts come first and the reason last: it belongs to the FAILED legs
-      // only, and putting it between the two counts would attach it to the
-      // unconfirmed ones instead.
+      // counts come first and the reason last. It leads with the FAILED legs'
+      // reasons; a send_unconfirmed leg beside them adds the D20 sentence
+      // AFTER those (code review C-6, FW2-9), and a stale leg with no code
+      // adds nothing. Putting it between the two counts would attach the
+      // failed legs' reasons to the unconfirmed count instead.
       label: composed,
       tone: 'danger',
       isFailure: true,

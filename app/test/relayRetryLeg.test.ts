@@ -1555,6 +1555,8 @@ describe('relay.retryLeg (30003 ladder)', () => {
           legOutcome: 'stranded',
         });
         expect(errorLogs()[0]!['afterSend']).toBe(afterSend ? true : undefined);
+        // FW4-2: the line covers both causes FW2-2 routes here - the hand-off write, or a terminal close's slot write.
+        expect(String(errorLogs()[0]!['msg'])).toContain('its hand-off to reconcile, or the slot write of a terminal close');
       },
     );
 

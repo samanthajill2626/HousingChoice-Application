@@ -403,10 +403,16 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      * or redriven record is closed (a redriven one's record too, FIRST, and
      * its slot only when that close won - code review C-4 / R-a; `code` keeps
      * the caller's reason, `transient_cap` or `enqueue_failed`); a stale
-     * attempting record is taken over and handed to reconcile (so a recipient
-     * whose release write failed still reaches a verdict at the cap); a live
-     * or terminal one is left to its owner, and finalize then defers while its
-     * slot is still queued. The slot close itself is conditional on `queued`.
+     * attempting record (past the claim TTL) is taken over and handed to
+     * reconcile; a live or terminal one is left to its owner, and finalize
+     * then defers while its slot is still queued. So a recipient stranded
+     * `attempting` (a release or failure-arm write that failed) reaches a
+     * verdict here only if it is stale by the cap - in practice a pass-1
+     * strand (the ladder waits 10 s + 20 s against the 30 s TTL). One stranded
+     * in pass 2 or 3, or in any re-drive pass, is still fresh here: it is
+     * deferred, and the share stays Sending until the sweeper
+     * (`send-attempt-sweeper`; code review round 2, N-1 / F-2). The slot
+     * close itself is conditional on `queued`.
      * Each key is its own try/catch: one failure never skips the rest, the
      * operator line, or finalize (build finding T7-9).
      */
@@ -582,8 +588,12 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      * RESOLVED, not that its fence won - so the fence's own answer decides:
      * written AND won -> hand off; written but LOST (a takeover already owns
      * the record and handed it off itself) -> nothing to do; not written ->
-     * STRANDED: the record stays `attempting`, the recipient is carried with no
-     * slot write, and a later pass's claim takes the stale record over.
+     * STRANDED: the record stays `attempting` and the recipient is carried
+     * with no slot write. A later pass's claim takes the record over only once
+     * it is stale (past the claim TTL) - a pass-1 strand, by the last pass or
+     * at the cap; one stranded in pass 2 or 3, or in any re-drive pass, stays
+     * `attempting` and the share Sending until the sweeper
+     * (`send-attempt-sweeper`; code review round 2, N-1 / F-2).
      */
     async function handToReconcile(owner: BroadcastOwner, ref: AttemptRef, sid?: string): Promise<void> {
       const ctx = recipientCtx(owner.contactKey);
@@ -663,8 +673,14 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
      * A provider rejection (D5): the recipient fails with the provider code; the
      * record closes rejected - only once the slot write RESOLVED (code review
      * C-2): a slot write that threw leaves the attempt open and the recipient
-     * carried, so a later pass meets it (deferred while fresh; taken over into
-     * reconcile when stale at the cap).
+     * carried. A later pass defers it while the record is fresh; only a pass-1
+     * strand is old enough (past the claim TTL) to be taken over into
+     * reconcile, by the last pass or at the cap. One stranded in pass 2 or 3,
+     * or in any re-drive pass, stays `attempting` and the share stays Sending
+     * until the sweeper (`send-attempt-sweeper`; code review round 2, N-1 /
+     * F-2). So each arm's outcome line is logged only once its slot write
+     * resolved; the throw path logs instead that the rejection's slot write
+     * failed and the recipient is carried with the attempt still open (FW4-2).
      */
     async function onRejected(
       owner: BroadcastOwner,
@@ -686,7 +702,9 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           );
         });
         if (code === CARRIER_FILTERED_CODE) {
-          log.error({ ...ctx, errorCode: code }, 'broadcastFanOut: carrier filtering (30007) - recipient failed, NOT retried');
+          if (slotWritten) {
+            log.error({ ...ctx, errorCode: code }, 'broadcastFanOut: carrier filtering (30007) - recipient failed, NOT retried');
+          }
         } else {
           // TODO(mms-silent-drop-dish-textnow): scope BOTH codes to SMS legs if
           // broadcasts ever carry media. The status webhook's twin arm
@@ -706,7 +724,9 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           } catch (flagErr) {
             log.error({ err: flagErr, ...ctx }, 'broadcastFanOut: failed to flag contact sms_unreachable');
           }
-          log.warn({ ...ctx, errorCode: code }, 'broadcastFanOut: invalid number/landline - recipient failed, contact flagged unreachable');
+          if (slotWritten) {
+            log.warn({ ...ctx, errorCode: code }, 'broadcastFanOut: invalid number/landline - recipient failed, contact flagged unreachable');
+          }
         }
       } else {
         // An HTTP status is NEVER a slot code (D10, D23): a rejection with no
@@ -723,12 +743,20 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           );
           if (moved.moved && moved.item) emitBroadcastProgress(events, payload.broadcastId, moved.item);
         });
-        log.warn(
-          { ...ctx, errorCode: code, status: classification.status },
-          'broadcastFanOut: send rejected by the provider - recipient failed, NOT retried',
-        );
+        if (slotWritten) {
+          log.warn(
+            { ...ctx, errorCode: code, status: classification.status },
+            'broadcastFanOut: send rejected by the provider - recipient failed, NOT retried',
+          );
+        }
       }
       if (!slotWritten) {
+        // Code review round 2 (FW4-2): no outcome line above - the recipient has
+        // not failed; it is carried with the attempt still open (C-2).
+        log.warn(
+          { ...ctx, errorCode: code, status: classification.status },
+          'broadcastFanOut: provider rejection not recorded - its slot write failed; the recipient is carried with the attempt still open',
+        );
         transientRemaining.push(owner.contactKey);
         return;
       }

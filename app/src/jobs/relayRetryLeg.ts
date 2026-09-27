@@ -930,18 +930,24 @@ export function registerRelayRetryLegJobHandler(deps: RelayRetryLegJobDeps = {})
       }
 
       case 'stranded':
-        // SOR D7a: the hand-off write itself failed. The record stays
-        // `attempting` and the slot untouched; a later claim refuses any
+        // SOR D7a: a failure-arm write failed - one of the two causes the unit
+        // routes here (code review C-2, FW2-2): the hand-off write to
+        // reconcile (an unknown outcome's, or - `afterSend` - a record-phase
+        // failure's, whose send is KNOWN to have happened), or the slot write
+        // of a terminal close that threw (a refusal, a 30007, a rejection, a
+        // re-drive's second unknown), which leaves the record open rather than
+        // closed over a slot left open. Either way the record stays
+        // `attempting` and the slot as it was; a later claim refuses any
         // re-send while the record is live, and the rung is left for the
         // sweeper (`send-attempt-sweeper`). ERROR only - no close, no
-        // enqueue, no emit. `afterSend`: the send is KNOWN to have happened.
+        // enqueue, no emit (no root close either).
         log.error(
           {
             ...memberLog,
             legOutcome: outcome.kind,
             ...(outcome.afterSend === true && { afterSend: true }),
           },
-          'relayRetryLeg: retry leg stranded - its hand-off to reconcile was not written; left for the sweeper',
+          'relayRetryLeg: retry leg stranded - a failure-arm write failed (its hand-off to reconcile, or the slot write of a terminal close); the attempt stays open, left for the sweeper',
         );
         return;
 

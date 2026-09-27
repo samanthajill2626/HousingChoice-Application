@@ -1765,7 +1765,7 @@ describe('broadcast.send (M1.8a)', () => {
     it('13b a Twilio rejection with its code fails the recipient with that code and closes the record rejected; the known arms keep their writes', async () => {
       seedUnit(world);
       seedBroadcast(world, tenants(3));
-      wire();
+      const capture = wire();
       const codes: Record<string, number> = { '+15550100001': 21211, '+15550100002': 30007, '+15550100003': 30005 };
       world.adapter.sendPreparedMessage = async (prepared: PreparedMessageSend) => {
         throw Object.assign(new Error('rejected'), { status: 400, code: codes[prepared.params.to] });
@@ -1783,6 +1783,12 @@ describe('broadcast.send (M1.8a)', () => {
       expect(world.flagWrites.filter((f) => f.flag === 'sms_unreachable').map((f) => f.contactId)).toEqual(['t-3']);
       expect(b.status).toBe('failed');
       expect(b.last_error).toBe('all recipients failed');
+      // FW4-2: with every slot write resolved, each arm logs its own outcome line once, and no carry line.
+      const msgs = [...capture.atLevel(40), ...capture.atLevel(50)].map((l) => String(l['msg']));
+      expect(msgs.filter((m) => m.includes('send rejected by the provider - recipient failed, NOT retried'))).toHaveLength(1);
+      expect(msgs.filter((m) => m.includes('carrier filtering (30007) - recipient failed, NOT retried'))).toHaveLength(1);
+      expect(msgs.filter((m) => m.includes('invalid number/landline - recipient failed, contact flagged unreachable'))).toHaveLength(1);
+      expect(msgs.filter((m) => m.includes('rejection not recorded'))).toHaveLength(0);
     });
 
     it('13c the adapter kill switch fails the recipient with its prose token (D5, D23)', async () => {
@@ -2261,6 +2267,12 @@ describe('broadcast.send (M1.8a)', () => {
       expect(continuationKeys()).toEqual(['t-1']);
       expect(errorLabels(capture)).toEqual(['rejectSlot']);
       expect(b.status).toBe('sending');
+      // FW4-2: no line says the recipient failed or is never retried; ONE WARN says the rejection's slot
+      // write failed and the recipient is carried with the attempt still open.
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('rejection not recorded'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '21211', status: 400 });
     });
 
     it('C-2: the known arms (30007) keep the record open and carry the recipient when their slot write throws (FW2-2)', async () => {
@@ -2276,6 +2288,30 @@ describe('broadcast.send (M1.8a)', () => {
       expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
       expect(continuationKeys()).toEqual(['t-1']);
       expect(errorLabels(capture)).toEqual(['rejectSlot']);
+      // FW4-2: the 30007 ERROR ("recipient failed, NOT retried") is not logged over a carried recipient.
+      expect(capture.atLevel(50).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('rejection not recorded'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30007' });
+    });
+
+    it('C-2 / FW4-2: a 30005 whose slot write throws still flags the contact, but logs only that the recipient is carried - never "recipient failed"', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      world.adapter.sendPreparedMessage = async () => {
+        throw Object.assign(new Error('invalid'), { status: 400, code: 30005 });
+      };
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(world.flagWrites.filter((f) => f.flag === 'sms_unreachable').map((f) => f.contactId)).toEqual(['t-1']);
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('recipient failed'))).toHaveLength(0);
+      const carried = capture.atLevel(40).filter((l) => String(l['msg']).includes('rejection not recorded'));
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toMatchObject({ recipientKey: 't-1', errorCode: '30005' });
     });
 
     it('C-2: a refusal whose skipped-slot write throws keeps the record open and carries the recipient; the ERROR names the refusal (FW2-2)', async () => {

@@ -203,8 +203,12 @@ function PastTourRow({
 }: PastTourRowProps): React.JSX.Element {
   const tenant = tenantName(contacts, tour.tenantId);
   const property = propertyLabel(units, tour.unitId);
-  const when = whenLabel(tour.scheduledAt);
-  const who = `${tenant} at ${property} on ${when}`;
+  // An undated toured tour (spec 4.2a: "already toured" with the date left
+  // blank) reads "Undated" in the date column and ", undated" in every name,
+  // never a dangling "on ". It is never "Not marked", so it never joins a batch.
+  const dated = typeof tour.scheduledAt === 'string' && tour.scheduledAt.length > 0;
+  const when = dated ? whenLabel(tour.scheduledAt) : 'Undated';
+  const who = dated ? `${tenant} at ${property} on ${when}` : `${tenant} at ${property}, undated`;
   const state = pastState(tour);
   const notMarked = tour.status === 'scheduled';
   const needsOutcome = tour.status === 'toured' && tour.outcome === undefined;

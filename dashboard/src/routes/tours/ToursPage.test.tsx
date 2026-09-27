@@ -1143,6 +1143,26 @@ describe('ToursPage - Past view', () => {
     expect(screen.queryByRole('region', { name: 'Past tours' })).not.toBeInTheDocument();
   });
 
+  it('an UNDATED toured tour (spec 4.2a) reads "Undated", says so in every name, and offers Record outcome - never a checkbox', async () => {
+    const user = userEvent.setup();
+    const UNDATED: Tour = { tourId: 'p9', tenantId: 'c1', unitId: 'u1', tourType: 'self_guided', status: 'toured', updatedAt: daysAgoAt(1, 9) };
+    readyPast([NOT_MARKED, UNDATED]);
+    renderPage('/tours/past');
+    const items = within(screen.getByRole('region', { name: 'Past tours' })).getAllByRole('listitem');
+    const row = items[1]!;
+    expect(within(row).getByText('Undated')).toBeInTheDocument();
+    expect(within(row).getByText('Needs outcome')).toBeInTheDocument();
+    const link = within(row).getByRole('link', { name: `Tour for Alice Smith at ${U1}, undated, Needs outcome` });
+    expect(link).toHaveAttribute('href', '/tours/p9');
+    const record = within(row).getByRole('link', { name: `Record outcome: Alice Smith at ${U1}, undated` });
+    expect(record).toHaveAttribute('href', '/tours/p9?outcome=1');
+    expect(within(row).queryByRole('checkbox')).not.toBeInTheDocument();
+    // No stray "on" with an empty date anywhere in the row's names.
+    expect(within(row).queryByRole('link', { name: / on ,| on $/ })).not.toBeInTheDocument();
+    await user.click(record);
+    expect(screen.getByTestId('loc')).toHaveTextContent('/tours/p9?outcome=1|{"back":"/tours/past"}');
+  });
+
   it('a failed RELOAD keeps the rows and adds one refresh alert above the toolbar', () => {
     readyPast([NOT_MARKED], true);
     renderPage('/tours/past');

@@ -236,4 +236,46 @@ test.describe('Tours page - Past tab', () => {
     await expectNoHorizontalOverflowIn(region, 'Past tours region at 360px');
     await page.setViewportSize(WIDE_RESTORE);
   });
+
+  // Spec 4.2a: a requested tour marked "already toured" with the date left
+  // blank has NO scheduledAt, so the range read never returns it. The Past tab
+  // lists it LAST as "Undated" so it can still be found and closed out. Runs
+  // after the test above in this file (workers: 1), so the earlier dated rows
+  // are present too - which is what proves "last".
+  test('an undated "already toured" tour is listed LAST as Undated, with Record outcome', async ({ page }) => {
+    await devLogin(page);
+
+    // A requested (timeless) tour, marked toured WITHOUT a date - the same
+    // PATCH the "Mark already toured" dialog sends with the date left blank.
+    const created = await page.request.post(`${NEXT}/api/tours`, {
+      data: { tenantId: TENANT_ID, unitId: UNIT_B, tourType: 'self_guided' },
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    const undatedId = ((await created.json()) as { tour: { tourId: string; status: string } }).tour.tourId;
+    await patchStatus(page, undatedId, 'toured');
+    const wire = await page.request.get(`${NEXT}/api/tours/${undatedId}`);
+    const tour = ((await wire.json()) as { tour: { status: string; scheduledAt?: string } }).tour;
+    expect(tour.status).toBe('toured');
+    expect(tour.scheduledAt).toBeUndefined();
+
+    await page.goto(`${NEXT}/tours/past`);
+    const region = page.getByRole('region', { name: 'Past tours' });
+    const undatedLink = region.locator(`a[href="/tours/${undatedId}"]`);
+    await expect(undatedLink).toBeVisible();
+    const items = region.getByRole('listitem');
+    const last = items.last();
+    await expect(last.locator(`a[href="/tours/${undatedId}"]`)).toBeVisible();
+    // More than one row, so "last" means below the dated ones.
+    expect(await items.count()).toBeGreaterThan(1);
+    await expect(last.getByText('Undated', { exact: true })).toBeVisible();
+    await expect(last.getByText('Needs outcome', { exact: true })).toBeVisible();
+    await expect(last.getByRole('link', { name: /^Tour for .*, undated, Needs outcome$/ })).toBeVisible();
+    await expect(last.getByRole('checkbox')).toHaveCount(0);
+
+    // Its Record outcome deep link opens the dialog on the tour page, as for a
+    // dated row.
+    await last.getByRole('link', { name: /^Record outcome: .*, undated$/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/tours/${undatedId}$`));
+    await expect(page.getByRole('dialog', { name: 'Record outcome' })).toBeVisible();
+  });
 });

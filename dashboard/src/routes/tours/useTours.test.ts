@@ -23,7 +23,15 @@ vi.mock('../../api/index.js', async () => {
   return { ...actual, getTours: (...args: unknown[]) => getToursMock(...args) };
 });
 
-import { pastState, pastToursDateRange, selectPastTours, useClosedTours, usePastTours, useTours } from './useTours.js';
+import {
+  pastState,
+  pastToursDateRange,
+  selectPastTours,
+  selectUndatedTours,
+  useClosedTours,
+  usePastTours,
+  useTours,
+} from './useTours.js';
 
 // ---------------------------------------------------------------------------
 // toursDateRange
@@ -306,6 +314,44 @@ describe('pastState', () => {
   });
 });
 
+describe('selectUndatedTours (spec 4.2a)', () => {
+  /** A fixed "now": 2026-09-26 15:30 local. */
+  const NOW = new Date(2026, 8, 26, 15, 30, 0, 0);
+  const at = (y: number, m: number, d: number, h: number): string =>
+    new Date(y, m - 1, d, h, 0, 0, 0).toISOString();
+  const base = { tenantId: 'c1', unitId: 'u1', tourType: 'self_guided' } as const;
+  const ROWS = [
+    { ...base, tourId: 'u-old', status: 'toured', createdAt: at(2026, 9, 1, 9), updatedAt: at(2026, 9, 20, 9) },
+    { ...base, tourId: 'u-new', status: 'toured', createdAt: at(2026, 9, 1, 9), updatedAt: at(2026, 9, 25, 9) },
+    // Older than the 90-day window by its last touch: dropped.
+    { ...base, tourId: 'u-expired', status: 'toured', createdAt: at(2026, 5, 1, 9), updatedAt: at(2026, 5, 2, 9) },
+    // No updatedAt: its createdAt places it.
+    { ...base, tourId: 'u-created-only', status: 'toured', createdAt: at(2026, 9, 10, 9) },
+    // Decided: dropped.
+    { ...base, tourId: 'u-outcome', status: 'toured', outcome: 'not_a_fit', moveForward: false, updatedAt: at(2026, 9, 24, 9) },
+    // Move-forward never converted: kept (Needs placement).
+    { ...base, tourId: 'u-np', status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true, updatedAt: at(2026, 9, 22, 9) },
+    // Dated: the range read owns it, so this read must not add it twice.
+    { ...base, tourId: 'dated', status: 'toured', scheduledAt: at(2026, 9, 24, 10), updatedAt: at(2026, 9, 24, 12) },
+    // Not toured.
+    { ...base, tourId: 'closed', status: 'closed', updatedAt: at(2026, 9, 25, 9) },
+  ] as Tour[];
+
+  it('keeps undated toured tours still needing a decision, inside the 90 days, most recently touched first', () => {
+    expect(selectUndatedTours(ROWS, NOW).map((t) => t.tourId)).toEqual(['u-new', 'u-np', 'u-old', 'u-created-only']);
+  });
+
+  it('breaks a tie by tourId and never mutates its input', () => {
+    const same = at(2026, 9, 25, 9);
+    const input = [
+      { ...base, tourId: 'b', status: 'toured', updatedAt: same },
+      { ...base, tourId: 'a', status: 'toured', updatedAt: same },
+    ] as Tour[];
+    expect(selectUndatedTours(input, NOW).map((t) => t.tourId)).toEqual(['a', 'b']);
+    expect(input.map((t) => t.tourId)).toEqual(['b', 'a']);
+  });
+});
+
 describe('usePastTours', () => {
   beforeEach(() => {
     getToursMock.mockReset();
@@ -324,6 +370,18 @@ describe('usePastTours', () => {
     { tourId: 'sc', tenantId: 'c1', unitId: 'u1', scheduledAt: yesterdayAt(14), tourType: 'self_guided', status: 'scheduled' },
     { tourId: 'cx', tenantId: 'c1', unitId: 'u1', scheduledAt: yesterdayAt(10), tourType: 'self_guided', status: 'canceled' },
   ];
+  // The toured-status read: one undated row (listed LAST) and one dated row
+  // the range read already owns (must not be duplicated).
+  const TOURED_ROWS = [
+    { tourId: 'und', tenantId: 'c1', unitId: 'u1', tourType: 'self_guided', status: 'toured', updatedAt: yesterdayAt(9) },
+    { tourId: 'sc-t', tenantId: 'c1', unitId: 'u1', scheduledAt: yesterdayAt(8), tourType: 'self_guided', status: 'toured', updatedAt: yesterdayAt(9) },
+  ];
+  /** Answers each of the hook's two reads with its own rows. */
+  function answer(range: unknown[], toured: unknown[]): void {
+    getToursMock.mockImplementation(async (params: Record<string, string>) =>
+      params['status'] === 'toured' ? toured : range,
+    );
+  }
 
   it('stays idle and fetches NOTHING while disabled', () => {
     const { result } = renderHook(() => usePastTours(false));
@@ -331,38 +389,45 @@ describe('usePastTours', () => {
     expect(getToursMock).not.toHaveBeenCalled();
   });
 
-  it('once enabled, fetches ONE range query with the Past window (through end of today) and applies selectPastTours', async () => {
-    getToursMock.mockResolvedValue(WINDOW_ROWS);
+  it('once enabled, makes the range read (through end of today) AND the toured-status read; dated rows first, undated last', async () => {
+    answer(WINDOW_ROWS, TOURED_ROWS);
     const { result } = renderHook(() => usePastTours(true));
     // No synchronous 'loading' write (the lint preset forbids setState in an
     // effect body): the hook reads 'idle' until the first result lands.
     expect(result.current.status).toBe('idle');
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(getToursMock).toHaveBeenCalledTimes(1);
-    const [params] = getToursMock.mock.calls[0] as [Record<string, string>];
-    expect(Object.keys(params).sort()).toEqual(['from', 'to']);
+    expect(getToursMock).toHaveBeenCalledTimes(2);
+    const calls = getToursMock.mock.calls.map(([p]) => p as Record<string, string>);
+    const range = calls.find((p) => p['from'] !== undefined)!;
+    expect(Object.keys(range).sort()).toEqual(['from', 'to']);
     const n = new Date();
     const endOfToday = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, 0, 0, 0, 0).getTime() - 1;
-    expect(new Date(params['to']!).getTime()).toBe(endOfToday);
-    expect(new Date(params['from']!).getTime()).toBe(new Date(n.getFullYear(), n.getMonth(), n.getDate() - 90, 0, 0, 0, 0).getTime());
-    expect(result.current.past.map((t) => t.tourId)).toEqual(['sc']);
+    expect(new Date(range['to']!).getTime()).toBe(endOfToday);
+    expect(new Date(range['from']!).getTime()).toBe(new Date(n.getFullYear(), n.getMonth(), n.getDate() - 90, 0, 0, 0, 0).getTime());
+    expect(calls.find((p) => p['status'] !== undefined)).toEqual({ status: 'toured' });
+    // sc-t is dated, so only the range read could list it; this fixture's range
+    // read does not, so it must not appear from the status read either.
+    expect(result.current.past.map((t) => t.tourId)).toEqual(['sc', 'und']);
   });
 
-  it('reload() refetches and keeps the current rows on screen until the new page lands', async () => {
-    getToursMock.mockResolvedValue(WINDOW_ROWS);
+  it('reload() refetches BOTH reads and keeps the current rows on screen until the new page lands', async () => {
+    answer(WINDOW_ROWS, TOURED_ROWS);
     const { result } = renderHook(() => usePastTours(true));
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    getToursMock.mockResolvedValue([]);
+    answer([], []);
     act(() => result.current.reload());
     // Still ready with the old rows while the refetch is in flight.
     expect(result.current.status).toBe('ready');
-    expect(result.current.past.map((t) => t.tourId)).toEqual(['sc']);
-    await waitFor(() => expect(getToursMock).toHaveBeenCalledTimes(2));
+    expect(result.current.past.map((t) => t.tourId)).toEqual(['sc', 'und']);
+    await waitFor(() => expect(getToursMock).toHaveBeenCalledTimes(4));
     await waitFor(() => expect(result.current.past).toEqual([]));
   });
 
-  it('sets status=error when the FIRST fetch fails', async () => {
-    getToursMock.mockRejectedValue(new Error('network error'));
+  it('sets status=error when the FIRST load fails (either read)', async () => {
+    getToursMock.mockImplementation(async (params: Record<string, string>) => {
+      if (params['status'] === 'toured') throw new Error('network error');
+      return WINDOW_ROWS;
+    });
     const { result } = renderHook(() => usePastTours(true));
     await waitFor(() => expect(result.current.status).toBe('error'));
     expect(result.current.past).toEqual([]);
@@ -370,15 +435,15 @@ describe('usePastTours', () => {
   });
 
   it('a failed RELOAD keeps the rows, stays ready and sets reloadFailed; the next success clears it', async () => {
-    getToursMock.mockResolvedValue(WINDOW_ROWS);
+    answer(WINDOW_ROWS, TOURED_ROWS);
     const { result } = renderHook(() => usePastTours(true));
     await waitFor(() => expect(result.current.status).toBe('ready'));
     getToursMock.mockRejectedValueOnce(new Error('network error'));
     act(() => result.current.reload());
     await waitFor(() => expect(result.current.reloadFailed).toBe(true));
     expect(result.current.status).toBe('ready');
-    expect(result.current.past.map((t) => t.tourId)).toEqual(['sc']);
-    getToursMock.mockResolvedValue([]);
+    expect(result.current.past.map((t) => t.tourId)).toEqual(['sc', 'und']);
+    answer([], []);
     act(() => result.current.reload());
     await waitFor(() => expect(result.current.reloadFailed).toBe(false));
     expect(result.current.past).toEqual([]);

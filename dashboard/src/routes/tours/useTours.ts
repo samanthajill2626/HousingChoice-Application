@@ -11,8 +11,9 @@
 // tours (the two "not live" states staff may need to find - closed is
 // terminal, canceled is revivable from its detail page), newest first.
 // Nothing is fetched until the Closed view shows.
-// Plus usePastTours(enabled) - the Past tab's fetch (spec 4.2): ONE range
-// query over [start of the local day 90 days ago, end of today], selected
+// Plus usePastTours(enabled) - the Past tab's fetch (spec 4.2, 4.2a): a range
+// query over [start of the local day 90 days ago, end of today] AND a
+// status=toured read for the undated toured tours listed last, selected
 // on the client (the range GSI matches on scheduledAt alone, same as
 // Upcoming): scheduled / toured / no_show only, minus a still-scheduled
 // tour dated today (Active's Today group has it) and minus a toured tour
@@ -208,6 +209,37 @@ export function selectPastTours(tours: Tour[], now: Date = new Date()): Tour[] {
     });
 }
 
+/** A tour with no scheduled time (the attribute is omitted, never '' - but
+ *  treat an empty string the same, defensively). */
+function isUndated(t: Tour): boolean {
+  return typeof t.scheduledAt !== 'string' || t.scheduledAt.length === 0;
+}
+
+/** Undated toured tours (spec 4.2a). A requested tour marked "already toured"
+ *  with the date left blank has NO scheduledAt, so the range read can never
+ *  return it; the Past view reads status=toured as well and lists these LAST,
+ *  labeled "Undated". Pure; never mutates its input.
+ *  1. keep status toured with no scheduledAt (a dated one is the range read's);
+ *  2. keep only rows still needing a decision - no outcome, or a move-forward
+ *     whose placement was never created (the same rule as 4.2 step 3);
+ *  3. keep only rows last touched (updatedAt, else createdAt) inside the same
+ *     90-day window - with no tour date, the last touch is the only clock;
+ *  4. most recently touched first, ties by tourId. */
+export function selectUndatedTours(tours: Tour[], now: Date = new Date()): Tour[] {
+  const { from } = pastToursDateRange(now);
+  const touched = (t: Tour): string => t.updatedAt ?? t.createdAt ?? '';
+  return tours
+    .filter((t) => t.status === 'toured' && isUndated(t))
+    .filter((t) => t.outcome === undefined || needsPlacement(t))
+    .filter((t) => touched(t) >= from)
+    .sort((a, b) => {
+      const aAt = touched(a);
+      const bAt = touched(b);
+      if (aAt !== bAt) return aAt > bAt ? -1 : 1;
+      return a.tourId < b.tourId ? -1 : a.tourId > b.tourId ? 1 : 0;
+    });
+}
+
 /** The plain-words state chip for a Past row (spec 4.3). Any other status
  *  falls back to its label so a mis-selected row is never blank. */
 export function pastState(tour: Tour): string {
@@ -225,7 +257,8 @@ export interface PastToursState {
    *  synchronously in the effect is what react-hooks/set-state-in-effect
    *  forbids, and idle already means "nothing shown yet". */
   status: 'idle' | 'ready' | 'error';
-  /** The selected Past rows, most recent first. */
+  /** The selected Past rows: dated rows most recent first, then undated rows
+   *  (spec 4.2a) most recently touched first. */
   past: Tour[];
   /** Refetch (after a bulk action). Keeps the current rows until the new page lands. */
   reload: () => void;
@@ -234,7 +267,9 @@ export interface PastToursState {
   reloadFailed: boolean;
 }
 
-/** LAZY fetch for the Past view - one range query, client-selected. */
+/** LAZY fetch for the Past view - the range read plus the status=toured read
+ *  (for undated toured tours, spec 4.2a), in parallel, client-selected. The
+ *  two succeed or fail as one load. */
 export function usePastTours(enabled: boolean): PastToursState {
   const [state, setState] = useState<{
     status: PastToursState['status'];
@@ -258,9 +293,15 @@ export function usePastTours(enabled: boolean): PastToursState {
       try {
         const now = new Date();
         const { from, to } = pastToursDateRange(now);
-        const rows = await getTours({ from, to }, signal);
+        const [rows, toured] = await Promise.all([
+          getTours({ from, to }, signal),
+          getTours({ status: 'toured' }, signal),
+        ]);
         if (signal.aborted) return;
-        setState({ status: 'ready', past: selectPastTours(rows, now), reloadFailed: false });
+        // Dated rows first (the range read), undated after (spec 4.2a). The
+        // two sets are disjoint: a range row always carries a scheduledAt.
+        const past = [...selectPastTours(rows, now), ...selectUndatedTours(toured, now)];
+        setState({ status: 'ready', past, reloadFailed: false });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
         // A failed RELOAD must not wipe the rows and the per-row results under

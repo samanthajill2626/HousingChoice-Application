@@ -309,3 +309,13 @@ than take on new failure points or a lot of redo. Applied:
   designed fix, and the wave continues without it. The FW2 record states the
   size of the site half (files, lines) either way.
 - Everything else in the wave stands as adjudicated.
+
+## 7. Corrections from round 2 (2026-09-27)
+
+Round 2 (`r2-adjudications.md` section 4) withdrew two statements above: the
+claim in section 1 and section 4 that with the re-arm the missing DynamoDB
+request timeout "can no longer produce a second send" (the re-arm narrows the
+window to its own two DynamoDB calls - round 2's A-1, filed); and the ADV-4
+ruling's "an unordered list walks on exactly as today", which did not cover a
+list that passes the order check while sorted on another key (round 2's F-1,
+fixed in FW4-1).

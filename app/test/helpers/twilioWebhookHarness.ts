@@ -1721,6 +1721,9 @@ export function createFakeWorld(): FakeWorld {
         sentAt: slot.sentAt ?? patch.sentAt,
         ...(patch.errorCode !== undefined && { errorCode: patch.errorCode }),
       };
+      // The real statement's REMOVE (SOR S3): a SUCCESS status with no code
+      // clears a stale one; a failure with no code keeps what the slot had.
+      if (patch.errorCode === undefined && isSuccessfulDeliveryStatus(patch.status)) delete next.errorCode;
       item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
       return 'adopted';
     },

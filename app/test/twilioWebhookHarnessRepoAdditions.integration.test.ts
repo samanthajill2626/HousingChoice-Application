@@ -184,6 +184,17 @@ const stamp = (name: string, memberKey: string, at: string): MsgStep => ({
   expect: 'resolved',
 });
 
+/** Read one slot's errorCode back through the repo under test (null when the slot carries none). */
+const slotCode = (name: string, memberKey: string, expectation: string | null): MsgStep => ({
+  label: `the errorCode on ${name}/${memberKey}`,
+  run: async (repo, ctx) => {
+    const row = rowRef(ctx, name);
+    const stored = await repo.getByTsMsgIdConsistent(row.conversationId, row.tsMsgId);
+    return { errorCode: stored?.delivery_recipients?.[memberKey]?.errorCode ?? null };
+  },
+  expect: { errorCode: expectation },
+});
+
 const receipt = (name: string, memberKey: string, status: DeliveryStatus, expectation: boolean): MsgStep => ({
   label: `updateRecipientDeliveryStatus ${name}/${memberKey} ${status}`,
   run: (repo, ctx) => {
@@ -305,6 +316,39 @@ const MSG_CASES: MsgCase[] = [
       // accepts no prior but itself).
       adopt('src', 'c-pending', { status: 'queued_pending', sid: 'SMp', sentAt: T0 }, 'skipped'),
       adopt('nope', 'c-9', { status: 'sent', sid: 'SM9', sentAt: T1 }, 'missing'),
+    ],
+  },
+  {
+    // SOR S3 (carried from S1c): a legacy adoption of a SUCCESS status with no
+    // code must not leave a stale transient code (send_retryable, 30022) on a
+    // slot that is now sent - the versioned path (applyRecipientSendResult)
+    // already clears it, and so does this one now, in the same statement. A
+    // failure with no code keeps what the slot had (the versioned rule); a
+    // refused move removes nothing.
+    name: 'adoptRelayRecipientIfUnsent on a LEGACY row clears a stale errorCode when it adopts a success status with none; a failure keeps or writes its own; a refused move removes nothing',
+    steps: [
+      appendRow('src', 'legacy'),
+      setSlot('src', 'c-sent', { status: 'queued', errorCode: 'send_retryable' }),
+      adopt('src', 'c-sent', { status: 'sent', sid: 'SMs', sentAt: T0 }, 'adopted'),
+      slotCode('src', 'c-sent', null),
+      setSlot('src', 'c-queued', { status: 'queued', errorCode: '30022' }),
+      adopt('src', 'c-queued', { status: 'queued', sid: 'SMq', sentAt: T0 }, 'adopted'),
+      slotCode('src', 'c-queued', null),
+      setSlot('src', 'c-deliv', { status: 'sent', sid: 'SMd', sentAt: T0, errorCode: 'send_retryable' }),
+      adopt('src', 'c-deliv', { status: 'delivered', sid: 'SMd', sentAt: T0 }, 'adopted'),
+      slotCode('src', 'c-deliv', null),
+      setSlot('src', 'c-fail', { status: 'queued', errorCode: 'send_retryable' }),
+      adopt('src', 'c-fail', { status: 'failed', sid: 'SMf', sentAt: T0 }, 'adopted'),
+      slotCode('src', 'c-fail', 'send_retryable'),
+      setSlot('src', 'c-undeliv', { status: 'queued', errorCode: 'send_retryable' }),
+      adopt('src', 'c-undeliv', { status: 'undelivered', sid: 'SMu', sentAt: T0, errorCode: '30003' }, 'adopted'),
+      slotCode('src', 'c-undeliv', '30003'),
+      setSlot('src', 'c-raced', { status: 'delivered', sid: 'SMr', sentAt: T0, errorCode: 'kept' }),
+      adopt('src', 'c-raced', { status: 'sent', sid: 'SMr', sentAt: T0 }, 'skipped'),
+      slotCode('src', 'c-raced', 'kept'),
+      // A re-run of the same success adoption is idempotent: still no code.
+      adopt('src', 'c-sent', { status: 'sent', sid: 'SMs', sentAt: T0 }, 'adopted'),
+      slotCode('src', 'c-sent', null),
     ],
   },
   {

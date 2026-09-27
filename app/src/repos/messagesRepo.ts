@@ -4039,10 +4039,19 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         '#dr.#mk.#sid = if_not_exists(#dr.#mk.#sid, :sid)',
         '#dr.#mk.#sa = if_not_exists(#dr.#mk.#sa, :sa)',
       ];
+      // The code: written when the patch carries one; REMOVED when a SUCCESS
+      // status carries none, so a stale transient code (send_retryable, 30022)
+      // never outlives the send it described - the versioned writer's rule
+      // (applyRecipientSendResult), in the same statement. A failure with no
+      // code keeps what the slot had, as the versioned writer does.
+      let remove = '';
       if (patch.errorCode !== undefined) {
         names['#ec'] = 'errorCode';
         values[':ec'] = patch.errorCode;
         sets.push('#dr.#mk.#ec = :ec');
+      } else if (isSuccessfulDeliveryStatus(patch.status)) {
+        names['#ec'] = 'errorCode';
+        remove = ' REMOVE #dr.#mk.#ec';
       }
       const priors = [...allowedPriorStatuses(patch.status), patch.status].map((status, i) => {
         values[`:p${i}`] = status;
@@ -4053,7 +4062,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           new UpdateCommand({
             TableName: table,
             Key: { conversationId, tsMsgId },
-            UpdateExpression: `SET ${sets.join(', ')}`,
+            UpdateExpression: `SET ${sets.join(', ')}${remove}`,
             ConditionExpression: `attribute_exists(#dr.#mk) AND #dr.#mk.#st IN (${priors.join(', ')})`,
             ExpressionAttributeNames: names,
             ExpressionAttributeValues: values,

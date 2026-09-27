@@ -2312,6 +2312,36 @@ describe('broadcast.send (M1.8a)', () => {
       expect(String(line[0]!['msg'])).toContain('close failed');
       expect(b.status).toBe('sending');
     });
+
+    // --- code review C-3 (FW2-3): a fence write is a PREPARE step ---
+
+    it('C-3 (probe P2): a fence write that throws reaches the prepare catch - the recipient is deferred send_retryable and carried, and the continuation fences it (FW2-3)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      t!.sms_opt_out = true;
+      seedBroadcast(world, [t!]);
+      const capture = wire();
+      vi.spyOn(world.broadcastsRepo, 'setRecipient').mockRejectedValueOnce(new Error('dynamo down'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(continuationKeys()).toEqual(['t-1']);
+      expect(capture.atLevel(50).filter((l) => l['label'] === 'fenceWrite')).toHaveLength(0);
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('prepare failed'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ recipientKey: 't-1', err: { message: 'dynamo down' } });
+      expect(b.status).toBe('sending');
+      // The continuation meets the fence again, writes it, and the share finalizes.
+      const [cont] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobName === BROADCAST_SEND_JOB),
+        1,
+      );
+      await dispatchJob(JSON.parse(JSON.stringify(cont!.envelope)) as unknown);
+      await outbound.settle();
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'skipped', errorCode: 'opted_out' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+      expect(world.sent).toHaveLength(0);
+    });
   });
 
   describe('finalize (spec D16a)', () => {

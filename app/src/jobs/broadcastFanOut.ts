@@ -634,14 +634,14 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         await handOff(owner, gate.record.attemptedAt);
         return;
       }
-      await guardWrite(log, ctx, 'fenceWrite', async () => {
-        await recordRecipient(repo, payload.broadcastId, owner.contactKey, { status: fence.status, errorCode: fence.code });
-        emitBroadcastProgress(
-          events,
-          payload.broadcastId,
-          await repo.bumpStats(payload.broadcastId, { [fence.bucket]: 1, queued: -1 }),
-        );
-      });
+      // Code review C-3: a PREPARE write, not a failure arm - a throw reaches
+      // the unit's prepare catch, which defers the recipient and carries it.
+      await recordRecipient(repo, payload.broadcastId, owner.contactKey, { status: fence.status, errorCode: fence.code });
+      emitBroadcastProgress(
+        events,
+        payload.broadcastId,
+        await repo.bumpStats(payload.broadcastId, { [fence.bucket]: 1, queued: -1 }),
+      );
       if (gate.record?.state === 'redriven') {
         await guardWrite(log, ctx, 'closeRedriven', () =>
           attempts.closeRedriven(owner, { outcome: 'refused', cause: fence.code }),

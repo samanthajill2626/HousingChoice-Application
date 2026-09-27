@@ -223,6 +223,7 @@ describe('relay-group API (M1.7)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

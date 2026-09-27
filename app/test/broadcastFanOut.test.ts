@@ -135,6 +135,7 @@ function wireHandler(
     events: world.events,
   });
   registerBroadcastSendJobHandler({
+    sendAttemptsRepo: world.sendAttemptsRepo,
     config,
     broadcastsRepo: world.broadcastsRepo,
     contactsRepo: world.contactsRepo,

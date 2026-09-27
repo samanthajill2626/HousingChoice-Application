@@ -59,6 +59,7 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
+import type { SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../services/relayAnnouncements.js';
 import {
   MAX_FANOUT_ATTEMPTS,
@@ -122,6 +123,12 @@ export interface RelayRetryLegJobDeps {
   mediaStore?: MediaStore;
   /** Shared A2P pacing bucket - one token per real outbound SMS. */
   tokenBucket?: TokenBucket;
+  /**
+   * The per-recipient send-attempt records (SOR spec D8a). Accepted and not
+   * yet read (SOR Task 9 wires the claim); a test passes its fake world's so
+   * no job run ever opens a real DynamoDB connection.
+   */
+  sendAttemptsRepo?: SendAttemptsRepo;
   /**
    * The live-update bus (D16's SSE, extended to the job's terminal closes).
    * Injected for tests exactly as `jobs/voiceTranscript.ts` does it; the

@@ -12,6 +12,7 @@
 // auto-text with "no handler registered" while production — which dispatches in the
 // worker — was fine.)
 import type { TokenBucket } from '../lib/tokenBucket.js';
+import type { SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import { registerRetrySendJobHandler } from './retrySend.js';
 import { registerRelayFanOutJobHandler } from './relayFanOut.js';
 import { registerRelayRetryLegJobHandler } from './relayRetryLeg.js';
@@ -26,6 +27,13 @@ import { registerMediaMirrorJobHandler } from './mediaMirror.js';
 export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
   tokenBucket: TokenBucket;
+  /**
+   * The per-recipient send-attempt records (SOR spec D8a), passed to the three
+   * send handlers (broadcast.send, relay.fanOut, relay.retryLeg). Production
+   * leaves it unset and each handler builds the DynamoDB repo lazily; nothing
+   * reads it before SOR Tasks 7-9.
+   */
+  sendAttemptsRepo?: SendAttemptsRepo;
 }
 
 /**
@@ -45,7 +53,7 @@ export interface RegisterJobHandlersDeps {
  */
 export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerRetrySendJobHandler();
-  registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket });
+  registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });
   // relay.retryLeg (the 30003 ladder): one backed-off rung per failed relay leg,
   // metered by the same shared bucket - it is a real outbound SMS.
   //
@@ -57,8 +65,8 @@ export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   // enqueued by the status webhook in the APP process, which registers nothing
   // (`index.ts`, `if (!config.jobsQueueUrl)`). The hermetic lane runs both in
   // one process, which is why the seam works there either way.
-  registerRelayRetryLegJobHandler({ tokenBucket: deps.tokenBucket });
-  registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket });
+  registerRelayRetryLegJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });
+  registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });
   registerMissedCallAutoTextJobHandler({ tokenBucket: deps.tokenBucket });
   registerVoiceTranscriptJobHandlers();
   registerRelayWarmJobHandler();

@@ -189,6 +189,17 @@ import {
   createSendMessageService,
   type SendMessageService,
 } from '../../src/services/sendMessage.js';
+import { hashRecipientKey } from '../../src/lib/sendFingerprint.js';
+import { SEND_CLAIM_TTL_MS } from '../../src/lib/sendOutcome.js';
+import {
+  attemptKey,
+  ownerKey,
+  SEND_ATTEMPT_INDEX_PREFIX,
+  type ClaimResult,
+  type SendAttemptOwner,
+  type SendAttemptRecord,
+  type SendAttemptsRepo,
+} from '../../src/repos/sendAttemptsRepo.js';
 import {
   adminUserItem,
   makeFakeUsersRepo,
@@ -290,6 +301,29 @@ export interface FakeWorld {
    * (default 1000; set 2 to force paging). Its pageToken is an integer offset.
    */
   listPageSize: number;
+  /**
+   * The per-recipient send-attempt records (SOR Task 5, spec D8a), keyed by
+   * `attemptKey(owner)` = `${ownerKey(owner)}|${hashRecipientKey(recipientKey)}`.
+   * `sendAttemptsRepo` reads this map LIVE on every call, so a test may seed
+   * a record here (in any state) or inspect one; the stored value is exactly
+   * what `get()` returns.
+   */
+  sendAttempts: Map<string, SendAttemptRecord>;
+  /**
+   * The recipient-index items the fake claim writes, one per claim (a claim at
+   * the same instant for the same owner replaces its item, as the real Put
+   * does): partition `sendattemptix#<sender or ->#<recipientDigest>`, sort key
+   * `<attemptedAt>#<ownerKey>#<hashed recipient key>`.
+   */
+  sendAttemptIndex: Array<{ partition: string; sortKey: string; owner: SendAttemptOwner }>;
+  /**
+   * In-memory twin of app/src/repos/sendAttemptsRepo.ts: the same conditions,
+   * the same TTL, false exactly where the real one is false - held to it by
+   * twilioWebhookHarnessSendAttempts.integration.test.ts. To make ONE call
+   * fail, spy on the method: `vi.spyOn(world.sendAttemptsRepo, 'finishAttempt')
+   * .mockRejectedValueOnce(err)` (a caller must call through the object).
+   */
+  sendAttemptsRepo: SendAttemptsRepo;
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
@@ -4124,6 +4158,203 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // The per-recipient send-attempt record and its recipient index (SOR Task
+  // 5, spec D8a) - the in-memory twin of app/src/repos/sendAttemptsRepo.ts.
+  // Each method applies the SAME condition as the real expression (quoted
+  // above it) and returns false exactly where the real one does;
+  // twilioWebhookHarnessSendAttempts.integration.test.ts runs both over one
+  // script table. Every decision is made synchronously - no await between
+  // the read and the write - so it is atomic like the conditional write it
+  // stands for. Records go in and come out as COPIES (the real repo answers
+  // with a fresh read), so a caller that edits a returned record changes
+  // nothing stored. `sender` is simply absent when unset (the real item holds
+  // null, which its read drops).
+  const sendAttempts = new Map<string, SendAttemptRecord>();
+  const sendAttemptIndex: FakeWorld['sendAttemptIndex'] = [];
+  const attemptSnapshot = (record: SendAttemptRecord): SendAttemptRecord => structuredClone(record);
+  const attemptRecipientKey = (owner: SendAttemptOwner): string =>
+    owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+  /** DynamoDB orders a string range key by its UTF-8 bytes. */
+  const utf8Order = (a: string, b: string): number => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+  const sendAttemptsRepo: SendAttemptsRepo = {
+    async claim(owner, facts, nowIso): Promise<ClaimResult> {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // The claim's record update plus its index Put, in one step.
+      const claimFrom = (prev: SendAttemptRecord | undefined): ClaimResult => {
+        const record: SendAttemptRecord = {
+          owner: structuredClone(owner),
+          state: 'attempting',
+          attemptNo: (prev?.attemptNo ?? 0) + 1,
+          attemptedAt: nowIso,
+          // `#rc = if_not_exists(#rc, :zero)`: a claim never touches it.
+          redriveCount: prev?.redriveCount ?? 0,
+          checkNo: 0,
+          recipientDigest: facts.recipientDigest,
+          ...(facts.sender !== undefined && { sender: facts.sender }),
+          bodyHash: facts.bodyHash,
+          bodyShort: facts.bodyShort,
+          mediaCount: facts.mediaCount,
+        };
+        sendAttempts.set(key, record);
+        const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${facts.sender ?? '-'}#${facts.recipientDigest}`;
+        const sortKey = `${nowIso}#${ownerKey(owner)}#${hashRecipientKey(attemptRecipientKey(owner))}`;
+        const entry = { partition, sortKey, owner: structuredClone(owner) };
+        const sameKey = sendAttemptIndex.findIndex((e) => e.partition === partition && e.sortKey === sortKey);
+        if (sameKey >= 0) sendAttemptIndex[sameKey] = entry;
+        else sendAttemptIndex.push(entry);
+        return { outcome: 'claimed', record: attemptSnapshot(record) };
+      };
+      // 'attribute_not_exists(tsMsgId)'
+      if (current === undefined) return claimFrom(undefined);
+      // '#st = :done AND #oc = :retryable AND #no = :prevNo'
+      if (current.state === 'done' && current.outcome === 'retryable') return claimFrom(current);
+      // '#st = :redriven AND #no = :prevNo'
+      if (current.state === 'redriven') return claimFrom(current);
+      if (current.state === 'attempting') {
+        const ageMs = Date.parse(nowIso) - Date.parse(current.attemptedAt);
+        return ageMs > SEND_CLAIM_TTL_MS
+          ? { outcome: 'takeover', record: attemptSnapshot(current) }
+          : { outcome: 'refused', record: attemptSnapshot(current), fresh: true };
+      }
+      // reconciling, or done with a terminal outcome
+      return { outcome: 'refused', record: attemptSnapshot(current), fresh: false };
+    },
+    async finishAttempt(owner, ref, result) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :attempting AND #no = :no AND #at = :at'
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== ref.attemptNo ||
+        current.attemptedAt !== ref.attemptedAt
+      ) {
+        return false;
+      }
+      sendAttempts.set(key, {
+        ...current,
+        state: 'done',
+        outcome: result.outcome,
+        ...(result.sid !== undefined && { sid: result.sid }),
+        ...(result.cause !== undefined && { cause: result.cause }),
+      });
+      return true;
+    },
+    async handToReconcile(owner, ref, sid) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :attempting AND #no = :no AND #at = :at'
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== ref.attemptNo ||
+        current.attemptedAt !== ref.attemptedAt
+      ) {
+        return false;
+      }
+      sendAttempts.set(key, { ...current, state: 'reconciling', checkNo: 0, ...(sid !== undefined && { sid }) });
+      return true;
+    },
+    async takeOver(owner, record) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :attempting AND #no = :no AND #at = :at' (the record handed in)
+      if (
+        current === undefined ||
+        current.state !== 'attempting' ||
+        current.attemptNo !== record.attemptNo ||
+        current.attemptedAt !== record.attemptedAt
+      ) {
+        return false;
+      }
+      sendAttempts.set(key, { ...current, state: 'reconciling', checkNo: 0 });
+      return true;
+    },
+    async recordCheck(owner, attemptedAt, checkNo) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :reconciling AND #at = :at AND (#ck = :prev OR #ck = :ck)', :prev = checkNo - 1
+      if (
+        current === undefined ||
+        current.state !== 'reconciling' ||
+        current.attemptedAt !== attemptedAt ||
+        (current.checkNo !== checkNo - 1 && current.checkNo !== checkNo)
+      ) {
+        return false;
+      }
+      sendAttempts.set(key, { ...current, checkNo });
+      return true;
+    },
+    async markRedriven(owner, attemptedAt) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :reconciling AND #at = :at AND #rc = :zero'
+      if (
+        current === undefined ||
+        current.state !== 'reconciling' ||
+        current.attemptedAt !== attemptedAt ||
+        current.redriveCount !== 0
+      ) {
+        return false;
+      }
+      sendAttempts.set(key, { ...current, state: 'redriven', redriveCount: 1 });
+      return true;
+    },
+    async closeFromReconcile(owner, attemptedAt, result) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :reconciling AND #at = :at'
+      if (current === undefined || current.state !== 'reconciling' || current.attemptedAt !== attemptedAt) {
+        return false;
+      }
+      sendAttempts.set(key, {
+        ...current,
+        state: 'done',
+        outcome: result.outcome,
+        ...(result.sid !== undefined && { sid: result.sid }),
+        ...(result.cause !== undefined && { cause: result.cause }),
+      });
+      return true;
+    },
+    async closeRedriven(owner, result) {
+      const key = attemptKey(owner);
+      const current = sendAttempts.get(key);
+      // '#st = :redriven'
+      if (current === undefined || current.state !== 'redriven') return false;
+      sendAttempts.set(key, {
+        ...current,
+        state: 'done',
+        outcome: result.outcome,
+        ...(result.cause !== undefined && { cause: result.cause }),
+      });
+      return true;
+    },
+    async get(owner) {
+      const current = sendAttempts.get(attemptKey(owner));
+      return current === undefined ? undefined : attemptSnapshot(current);
+    },
+    async listByRecipient(sender, recipientDigest, sinceIso) {
+      // 'conversationId = :p AND tsMsgId >= :since', newest first.
+      const partition = `${SEND_ATTEMPT_INDEX_PREFIX}${sender ?? '-'}#${recipientDigest}`;
+      const items = sendAttemptIndex
+        .filter((entry) => entry.partition === partition && utf8Order(entry.sortKey, sinceIso) >= 0)
+        .sort((a, b) => utf8Order(b.sortKey, a.sortKey));
+      const seen = new Set<string>();
+      const out: SendAttemptRecord[] = [];
+      for (const item of items) {
+        const record = sendAttempts.get(attemptKey(item.owner));   // the record holds the live state
+        if (record === undefined) continue;
+        // One row per record (build finding T5-5), the newest index item first.
+        const identity = attemptKey(record.owner);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        out.push(attemptSnapshot(record));
+      }
+      return out;
+    },
+  };
+
   return {
     conversations,
     messages,
@@ -4159,6 +4390,9 @@ export function createFakeWorld(): FakeWorld {
     set listPageSize(n: number) {
       listPageSize = n;
     },
+    sendAttempts,
+    sendAttemptIndex,
+    sendAttemptsRepo,
     initiatedCalls,
     mediaPuts,
     presignPosts,

@@ -782,6 +782,7 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
     app = h.app;
     world = h.world;
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

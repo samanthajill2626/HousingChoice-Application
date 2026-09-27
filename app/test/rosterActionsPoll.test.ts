@@ -109,6 +109,7 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

@@ -2557,6 +2557,7 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -4117,6 +4118,7 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

@@ -133,6 +133,7 @@ describe('T7 - compose intercept on a CONNECTING relay group', () => {
     // In-process fan-out so an OPEN group REALLY sends and a CONNECTING group's
     // silence (no fan-out enqueued) shows up as an empty adapter outbox.
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -229,6 +230,7 @@ describe('T7 - relay.numberReady flushes queued messages AFTER the intro, in cre
     // in-process queue at this point; connecting composes enqueue NOTHING).
     configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

@@ -196,6 +196,7 @@ describe('relay.fanOut (M1.7)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -1573,6 +1574,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -2153,6 +2155,7 @@ describe('relay.intro / relay.memberAdded on an OWNED group', () => {
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -2335,6 +2338,7 @@ describe('relay.fanOut token-bucket acquire (retry-send-window D4)', () => {
     world = createFakeWorld();
     bucket = new TokenBucket({ capacity: 10, refillPerSec: 10, maxJitterMs: 0 });
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

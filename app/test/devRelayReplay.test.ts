@@ -240,6 +240,7 @@ describe('POST /__dev/relay/replay-intros — the real relay.intro job persists 
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
     registerRelayFanOutJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

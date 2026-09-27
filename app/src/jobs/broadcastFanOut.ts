@@ -69,6 +69,7 @@ import {
 } from '../repos/conversationsRepo.js';
 import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import type { SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
@@ -200,6 +201,12 @@ export interface BroadcastSendJobDeps {
   auditRepo?: AuditRepo;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
+  /**
+   * The per-recipient send-attempt records (SOR spec D8a). Accepted and not
+   * yet read (SOR Task 7 wires the claim); a test passes its fake world's so
+   * no job run ever opens a real DynamoDB connection.
+   */
+  sendAttemptsRepo?: SendAttemptsRepo;
   events?: EventBus;
   logger?: Logger;
 }

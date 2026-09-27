@@ -248,6 +248,7 @@ describe('relay.retryLeg (30003 ladder)', () => {
 
   function register(overrides: RelayRetryLegJobDeps = {}): void {
     registerRelayRetryLegJobHandler({
+      sendAttemptsRepo: world.sendAttemptsRepo,
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,

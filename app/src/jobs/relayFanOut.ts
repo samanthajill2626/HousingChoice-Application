@@ -59,6 +59,7 @@ import {
   type RelayRecipientDelivery,
   type TransportMutationOutcome,
 } from '../repos/messagesRepo.js';
+import type { SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 import type { FanoutClaimResult } from '../repos/fanoutClaim.js';
 import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
@@ -655,6 +656,12 @@ export interface RelayFanOutJobDeps {
   mediaStore?: MediaStore;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
+  /**
+   * The per-recipient send-attempt records (SOR spec D8a). Accepted and not
+   * yet read (SOR Task 8 wires the claim); a test passes its fake world's so
+   * no job run ever opens a real DynamoDB connection.
+   */
+  sendAttemptsRepo?: SendAttemptsRepo;
   /**
    * The instant the owner-routed copy's "is the tour past / is it TODAY" tests
    * are made against, forwarded to `resolveRelayComposeInputs`. Absent at

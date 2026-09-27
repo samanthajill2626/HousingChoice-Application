@@ -233,6 +233,11 @@ describe('sendAttemptsRepo claim - cancellation attribution (build finding T5-4;
       throw cancelled(['ConditionalCheckFailed', 'None']);
     }, [storedRecord, { ...storedRecord, attempted_at: R, attempt_no: 2 }]);
     expect(await other.repo.rearm(owner, ref, R)).toBeUndefined();
+    // Nor is this attempt at any other instant.
+    const elsewhen = rearmStub(() => {
+      throw cancelled(['ConditionalCheckFailed', 'None']);
+    }, [storedRecord, { ...storedRecord, attempted_at: '2026-09-26T12:00:21.000Z' }]);
+    expect(await elsewhen.repo.rearm(owner, ref, R)).toBeUndefined();
   });
 
   it('rearm of an absent record writes nothing and is refused (FW1-1)', async () => {

@@ -758,6 +758,22 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-t' });
     });
 
+    it('a page that ends EXACTLY at the window start does not stop the walk: the next page may hold a message of the same instant (FW1-6)', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      world.listPageSize = 1;
+      const at = await reconciling(bOwner(t.contactId), factsFor(t.phone!));
+      const edge = new Date(Date.parse(at) - RECONCILE_WINDOW_LEAD_MS).toISOString();
+      // Same instant; the later plant is listed first: page 1 = the stranger, page 2 = the orphan.
+      plant({ providerSid: 'SMedge-orphan', createdAt: edge });
+      plant({ providerSid: 'SMedge-other', createdAt: edge, body: 'other share' });
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(bOwner(t.contactId), at));
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMedge-orphan' });
+    });
+
     it('the early stop wins over the bound: a fifth page that reaches behind the window ends the walk without page_bound, even with a next page pending (FW1-6)', async () => {
       register();
       const t = seedTenant();
@@ -1316,6 +1332,20 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2 });
       expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
       expect(lines(50)).toHaveLength(0);
+    });
+
+    it('a record a PASS closed (refused, from redriven) is not the job\'s close: a redelivered check re-applies nothing to its slot (FW1-4)', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const owner = bOwner(t.contactId);
+      const at = await reconciling(owner, factsFor(t.phone!));
+      expect(await world.sendAttemptsRepo.markRedriven(owner, at)).toBe(true);
+      // A re-drive pass declined the recipient (a fence) and closed the record; its own slot write never landed.
+      expect(await world.sendAttemptsRepo.closeRedriven(owner, { outcome: 'refused', cause: 'opted_out' })).toBe(true);
+      await runCheck(payloadOf(owner, at, 2));
+      expect(slotOf(t.contactId)).toEqual({ status: 'queued' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sending');
     });
 
     it('an enqueue_failed close that dies at its slot write is COMPLETED by the redelivery: the superseded exit re-applies the enqueue_failed slot close and finalizes (FW1-4)', async () => {
@@ -2485,6 +2515,24 @@ describe('send.reconcile (spec D11-D16)', () => {
         );
       }
       expect(redrives).toHaveLength(2);
+    });
+
+    it('a sibling is judged by its LIVE attempt start: one re-claimed at an EARLIER instant (a skewed clock), outside the span, does not withhold never_sent although its first index item lies inside the query bound (FW1-2)', async () => {
+      register();
+      const redrives = recordJobs(RELAY_FANOUT_JOB);
+      seedRelay();
+      const t = Date.now() - 36_000_000;
+      const sib = legOwner(seedSource());
+      // The sibling's first attempt, 100 s after ours: its index item is inside our query bound.
+      const first = await world.sendAttemptsRepo.claim(sib, legFacts(), new Date(t + 100_000).toISOString());
+      expect(await world.sendAttemptsRepo.finishAttempt(sib, { attemptNo: 1, attemptedAt: first.record.attemptedAt }, { outcome: 'retryable' })).toBe(true);
+      // Re-claimed by a process whose clock runs ten minutes behind: the live start is far outside the span.
+      expect((await world.sendAttemptsRepo.claim(sib, legFacts(), new Date(t - 600_000).toISOString())).outcome).toBe('claimed');
+      const self = legOwner(seedSource());
+      const at = await reconciling(self, legFacts(), { at: new Date(t).toISOString() });
+      await runChain(legPayload(self, at));
+      expect(await recordOf(self)).toMatchObject({ state: 'redriven' });
+      expect(redrives).toHaveLength(1);
     });
 
     it('14e relay: a redrive_refused close that dies at its slot write is COMPLETED by the redelivery - the RECORD first, then the superseded exit re-applies the slot close and tells the thread (FW1-4)', async () => {

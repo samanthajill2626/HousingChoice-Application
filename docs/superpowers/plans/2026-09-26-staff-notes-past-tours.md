@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v6 - after plan reviews R1 and R2 (adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/plan-r1-adjudications.md` and `plan-r2-adjudications.md`); aligned to spec DRAFT 4; written for the overnight unattended mission of 2026-09-26
+Status: v7 - APPROVED FOR BUILD after plan reviews R1-R3 (adjudications in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/plan-r1-adjudications.md`, `plan-r2-adjudications.md`, `plan-r3-adjudications.md`); aligned to spec DRAFT 4; written for the overnight unattended mission of 2026-09-26
 
 Already on the branch before the build starts (no task needed): the GLOSSARY
 entry (spec 3.8) and all six `docs/issues/` files (spec 8) are committed.
@@ -13,7 +13,9 @@ Lint rule that shapes three tasks: the dashboard preset
 non-test dashboard files. No new code may call a `useState` setter
 synchronously inside a `useEffect` body (setters inside an awaited callback
 are fine). Tasks 6, 7 and 8 are written around it: the hook sets state only
-from its async callback, the page resets by REMOUNT (`key={view}`), and the
+from its async callback, the Past tab's batch state lives in a Past-only
+child component that UNMOUNTS on a tab switch (no reset effect, no route
+keys - the page instance itself is shared across tabs as today), and the
 tour page initializes the dialog from the URL in the state initializer.
 
 Commit trailer: every commit ends with `Co-Authored-By: <the model you are
@@ -2352,23 +2354,26 @@ function PastTourRow({
 interface PastToursViewProps {
   contacts: Map<string, Contact>;
   units: Map<string, UnitItem>;
+  /** The in-flight guard, owned by the PAGE (which survives a tab switch) so
+   *  a batch still running after Past -> Active -> Past cannot be joined by a
+   *  second one. Read and written only inside event handlers. */
+  bulkBusyRef: React.MutableRefObject<boolean>;
 }
 
 /** The Past tab's body (spec 4.2-4.5): the lazy data hook, the bulk runner
  *  and every piece of batch state. Mounted ONLY while the Past view shows. */
-function PastToursView({ contacts, units }: PastToursViewProps): React.JSX.Element {
+function PastToursView({ contacts, units, bulkBusyRef }: PastToursViewProps): React.JSX.Element {
   // Enabled for this component's whole life: it exists only on the Past view.
   const { status: pastStatus, past: pastTours, reload: reloadPast, reloadFailed } = usePastTours(true);
 
   // Bulk "Mark toured" (spec 4.5): the raw selection, the running flag, and the
   // per-row results of the LAST batch (cleared when the next one starts).
   // `snapshot` remembers what each id looked like when the batch ran, so a row
-  // the reload drops can still be named in the above-toolbar block.
+  // the reload drops can still be named in the above-toolbar block. The
+  // render-time `bulkBusy` drives the disabled controls; `bulkBusyRef` (a
+  // page-owned ref, see the prop) is the re-entry guard.
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
-  // The in-flight guard is a REF, not the render-time `bulkBusy` value: two
-  // clicks in one render would both read the stale false.
-  const bulkBusyRef = useRef(false);
   const [results, setResults] = useState<ReadonlyMap<string, MarkResult>>(new Map());
   const [snapshot, setSnapshot] = useState<ReadonlyMap<string, Tour>>(new Map());
 
@@ -2465,7 +2470,8 @@ function PastToursView({ contacts, units }: PastToursViewProps): React.JSX.Eleme
     setBulkBusy(false);
     // If the user switched tabs mid-batch this view unmounted and these
     // setters landed on the unmounted instance (a no-op in React 19); the
-    // PATCHes already sent stand, and the next Past view lists the truth.
+    // PATCHes already sent stand, the page-owned ref kept a second batch from
+    // starting meanwhile, and the next Past view lists the truth.
   };
 
   if (pastStatus === 'idle') return <Spinner center />;
@@ -2566,12 +2572,18 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
   const navigate = useNavigate();
   const closed = view === 'closed';
   const past = view === 'past';
+  // The bulk runner's in-flight guard lives HERE, on the page that survives a
+  // tab switch, and is handed to the Past child (spec 4.5).
+  const bulkBusyRef = useRef(false);
 ```
 
    Keep every existing line that reads `closed`. The page does NOT call
    `usePastTours` (the child does). Update `loading` / `error` so the Past
    view waits only for the cross-reference maps (the child owns its own
-   spinner and error):
+   spinner and error). Known and accepted: the Past query starts after the
+   contact and unit lookups land rather than alongside them - the same
+   ordering the Closed tab has today; note it in the slice report, do not
+   change it.
 
 ```tsx
   const loading = closed
@@ -2608,7 +2620,9 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
 ```tsx
       {/* --- Past view (/tours/past) - spec 4.3-4.5. The child owns every
           piece of batch state and unmounts on a tab switch. --- */}
-      {!loading && !error && past ? <PastToursView contacts={contactsMap} units={unitsMap} /> : null}
+      {!loading && !error && past ? (
+        <PastToursView contacts={contactsMap} units={unitsMap} bulkBusyRef={bulkBusyRef} />
+      ) : null}
 ```
 
 7. Update the header comment: the views list gains

@@ -2,7 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v4 - aligned to spec DRAFT 4 (approved after spec review R3); written for the overnight unattended mission of 2026-09-26; adversarial plan review pending
+Status: v5 - after plan review R1 (two reviewers, 29 findings adjudicated in `docs/superpowers/reviews/2026-09-26-staff-notes-past-tours/plan-r1-adjudications.md`); aligned to spec DRAFT 4; written for the overnight unattended mission of 2026-09-26
+
+Already on the branch before the build starts (no task needed): the GLOSSARY
+entry (spec 3.8) and all six `docs/issues/` files (spec 8) are committed.
+
+Lint rule that shapes three tasks: the dashboard preset
+(`eslint.config.mjs:50-51`, eslint-plugin-react-hooks 7.1.1
+`recommended-latest`) makes `react-hooks/set-state-in-effect` an ERROR in
+non-test dashboard files. No new code may call a `useState` setter
+synchronously inside a `useEffect` body (setters inside an awaited callback
+are fine). Tasks 6, 7 and 8 are written around it: the hook sets state only
+from its async callback, the page resets by REMOUNT (`key={view}`), and the
+tour page initializes the dialog from the URL in the state initializer.
+
+Commit trailer: every commit ends with `Co-Authored-By: <the model you are
+running as> <noreply@anthropic.com>` - a child running on Opus names Opus,
+not the planner's model. The commands below show the placeholder
+`<AUTHORING-MODEL>`.
 Date: 2026-09-26
 Branch: `feat/staff-notes-past-tours`
 Worktree: `W:\tmp\staff-notes-past-tours`
@@ -369,11 +386,12 @@ does not land, use a field the contact already carries (e.g. seed `pets:
 cd /w/tmp/staff-notes-past-tours/app && npx vitest run test/contactStaffNotes.test.ts
 ```
 
-Expected: the five PATCH tests fail (the first because `staff_notes` is not
-stored - the allowlist drops it, so the body changes no known field and the
-route 400s `no updatable fields supplied`; the non-string test fails on the
-message). The POST test and the two AI tests PASS already (they pin behavior
-that exists by construction) - that is expected; they are regression pins.
+Expected: four of the five PATCH tests fail (the first because `staff_notes`
+is not stored - the allowlist drops it, so the body changes no known field
+and the route 400s `no updatable fields supplied`; the non-string test fails
+on the message). The notes-only PATCH test, the POST test and the two AI tests
+PASS already (they pin behavior that exists by construction) - that is
+expected; they are regression pins.
 
 - [ ] **Step 3: Declare the fields on `ContactItem`**
 
@@ -458,9 +476,11 @@ cd /w/tmp/staff-notes-past-tours/app && npm run typecheck
 Expected: exit 0. Then:
 
 ```
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add app/src/repos/contactsRepo.ts app/src/routes/contacts.ts app/test/contactStaffNotes.test.ts && git commit -m "feat(contacts): staff_notes field - PATCH allowlist + server-stamped staff_notes_updated_at (item 22, spec 3.1-3.4)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add app/src/repos/contactsRepo.ts app/src/routes/contacts.ts app/test/contactStaffNotes.test.ts && git commit -m "feat(contacts): staff_notes field - PATCH allowlist + server-stamped staff_notes_updated_at (item 22, spec 3.1-3.4)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ### Task 2: Dashboard types
@@ -501,9 +521,11 @@ cd /w/tmp/staff-notes-past-tours/dashboard && npm run typecheck
 Expected: exit 0.
 
 ```
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add dashboard/src/api/types.ts && git commit -m "feat(dashboard/api): Contact.staff_notes + staff_notes_updated_at, ContactPatch.staff_notes (additive)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add dashboard/src/api/types.ts && git commit -m "feat(dashboard/api): Contact.staff_notes + staff_notes_updated_at, ContactPatch.staff_notes (additive)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ### Task 3: The StaffNotesCard component
@@ -778,7 +800,7 @@ Create `dashboard/src/routes/contact/StaffNotesCard.tsx`:
 // read-only, mirroring how the sibling cards degrade without onEdit.
 //
 // Two staff saving at once is last-write-wins, like every contact field.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { updateContact, type Contact } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Card, CardAction, EmptyRow, NotesText, responseClass } from './Card.js';
@@ -819,6 +841,7 @@ export function StaffNotesCard({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaId = useId();
 
   // Focus the box on entry to edit mode (the click that opened it was on the
   // heading affordance, which is gone once the form renders).
@@ -879,9 +902,17 @@ export function StaffNotesCard({
             void save();
           }}
         >
-          <label className={styles.field}>
-            <span className={styles.srOnly}>Staff notes</span>
+          {/* The label is a SIBLING associated by id, never a wrapper: React
+              mirrors a controlled textarea's value into its text content, and
+              a wrapping <label> would then carry the draft as part of its
+              accessible text, so getByLabel('Staff notes', { exact: true })
+              would miss a prefilled box. */}
+          <div className={styles.field}>
+            <label htmlFor={textareaId} className={styles.srOnly}>
+              Staff notes
+            </label>
             <textarea
+              id={textareaId}
               ref={textareaRef}
               className={styles.textarea}
               value={draft}
@@ -889,7 +920,7 @@ export function StaffNotesCard({
               rows={4}
               readOnly={saving}
             />
-          </label>
+          </div>
           {error !== null ? (
             <p role="alert" className={styles.error}>
               {error}
@@ -931,9 +962,11 @@ and add `autoFocus` to the textarea in addition to the effect.
 ```
 cd /w/tmp/staff-notes-past-tours && for f in dashboard/src/routes/contact/StaffNotesCard.tsx dashboard/src/routes/contact/StaffNotesCard.module.css dashboard/src/routes/contact/StaffNotesCard.test.tsx; do printf '%s ' "$f"; tr -d '\11\12\15\40-\176' < "$f" | wc -c; done
 cd /w/tmp/staff-notes-past-tours/dashboard && npm run typecheck
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add dashboard/src/routes/contact/StaffNotesCard.tsx dashboard/src/routes/contact/StaffNotesCard.module.css dashboard/src/routes/contact/StaffNotesCard.test.tsx && git commit -m "feat(dashboard/contact): StaffNotesCard - in-place editor for staff_notes with Last edited line (spec 3.6)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add dashboard/src/routes/contact/StaffNotesCard.tsx dashboard/src/routes/contact/StaffNotesCard.module.css dashboard/src/routes/contact/StaffNotesCard.test.tsx && git commit -m "feat(dashboard/contact): StaffNotesCard - in-place editor for staff_notes with Last edited line (spec 3.6)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ### Task 4: Wire the card into the tenant file (tenants only)
@@ -1086,9 +1119,11 @@ note it in the slice report.
 
 ```
 cd /w/tmp/staff-notes-past-tours/dashboard && npm run typecheck
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add dashboard/src/routes/contact/TenantFile.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/contact/TenantFile.test.tsx && git commit -m "feat(dashboard/contact): Staff notes card on the tenant file above Preferences & notes, tenants only (spec 3.6)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add dashboard/src/routes/contact/TenantFile.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/contact/TenantFile.test.tsx && git commit -m "feat(dashboard/contact): Staff notes card on the tenant file above Preferences & notes, tenants only (spec 3.6)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ### Task 5: Playwright - staff notes round-trip; scope the existing notes locators
@@ -1195,8 +1230,13 @@ test.describe('Tenant file - Staff notes card', () => {
     await expect(staffCard.getByText(/Last edited/)).toBeVisible();
     expect(await prefsCard.innerText()).toBe(prefsBefore);
 
-    // Narrow: the editor must not push the file pane sideways.
+    // Narrow: the editor must not push the file pane sideways. At phone width
+    // the contact page opens on the Comms pane and the profile pane (the
+    // file cards) is display:none until the segmented "View" toggle's
+    // "Profile" button is pressed (ContactDetail.tsx, the `pane` state).
     await page.setViewportSize(NARROW_360);
+    await page.getByRole('group', { name: 'View' }).getByRole('button', { name: 'Profile' }).click();
+    await expect(staffCard).toBeVisible();
     await staffCard.getByRole('button', { name: 'Edit staff notes', exact: true }).click();
     await expect(staffCard.getByLabel('Staff notes', { exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page, 'tenant file with the Staff notes editor open at 360px');
@@ -1216,11 +1256,9 @@ test.describe('Tenant file - Staff notes card', () => {
 });
 ```
 
-Note the tenant file lives in the DETAILS pane; on the narrow viewport the
-contact page may open on the conversation pane. If the card is not visible at
-360px, click the pane switcher the page renders (look for a button or tab named
-"Profile" / "Details" in `ContactDetail.tsx`, the `pane` state) before opening
-the editor, and record that in the slice report.
+The 360px step above presses the "Profile" toggle first because the page
+opens on Comms at that width; restoring the wide viewport shows both panes
+again, so the cleanup steps need no toggle.
 
 - [ ] **Step 3: Run both specs against a hermetic session**
 
@@ -1243,9 +1281,11 @@ Expected: 2 passed. Fix and re-run until green. Stop the session with
 ```
 cd /w/tmp/staff-notes-past-tours && tr -d '\11\12\15\40-\176' < e2e/tests/dashboard-next/tenant-staff-notes.spec.ts | wc -c
 cd /w/tmp/staff-notes-past-tours && git diff -- e2e/tests/dashboard-next/contact-detail.spec.ts | grep '^+' | grep -v '^+++' | tr -d '\11\12\15\40-\176' | wc -c
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add e2e/tests/dashboard-next/tenant-staff-notes.spec.ts e2e/tests/dashboard-next/contact-detail.spec.ts && git commit -m "test(e2e): tenant file staff notes round-trip, reload, prefs card untouched, 360px; scope contact-detail Notes locators to the dialog (spec 5)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add e2e/tests/dashboard-next/tenant-staff-notes.spec.ts e2e/tests/dashboard-next/contact-detail.spec.ts && git commit -m "test(e2e): tenant file staff notes round-trip, reload, prefs card untouched, 360px; scope contact-detail Notes locators to the dialog (spec 5)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -1265,6 +1305,19 @@ Append to `dashboard/src/routes/tours/useTours.test.ts`. Add `act` to the
 (a type-only import survives the module mock), and change the post-mock import
 to `import { pastState, pastToursDateRange, selectPastTours, useClosedTours, usePastTours, useTours } from './useTours.js';`
 (the first `toursDateRange` import stays).
+
+The file's api mock is a bare object exposing only `getTours`; the hook module
+now also value-imports `TOUR_STATUS_LABELS` from the barrel, which Vitest's
+strict mock would report as a missing export. Change the mock to spread the
+real module:
+
+```ts
+const getToursMock = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return { ...actual, getTours: (...args: unknown[]) => getToursMock(...args) };
+});
+```
 
 ```ts
 // ---------------------------------------------------------------------------
@@ -1363,6 +1416,9 @@ describe('pastState', () => {
   it('anything else -> the status label (never blank)', () => {
     expect(pastState({ ...base, status: 'canceled' } as Tour)).toBe('Canceled');
   });
+  it('precedence: a toured row with NO outcome reads Needs outcome even if it is convertible (an API-only shape)', () => {
+    expect(pastState({ ...base, status: 'toured', convertible: true } as Tour)).toBe('Needs outcome');
+  });
 });
 
 describe('usePastTours', () => {
@@ -1390,16 +1446,20 @@ describe('usePastTours', () => {
     expect(getToursMock).not.toHaveBeenCalled();
   });
 
-  it('once enabled, fetches ONE range query with the Past window and applies selectPastTours', async () => {
+  it('once enabled, fetches ONE range query with the Past window (through end of today) and applies selectPastTours', async () => {
     getToursMock.mockResolvedValue(WINDOW_ROWS);
-    const before = Date.now();
     const { result } = renderHook(() => usePastTours(true));
+    // No synchronous 'loading' write (the lint preset forbids setState in an
+    // effect body): the hook reads 'idle' until the first result lands.
+    expect(result.current.status).toBe('idle');
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(getToursMock).toHaveBeenCalledTimes(1);
     const [params] = getToursMock.mock.calls[0] as [Record<string, string>];
     expect(Object.keys(params).sort()).toEqual(['from', 'to']);
-    expect(new Date(params['to']!).getTime()).toBeGreaterThanOrEqual(before);
-    expect(new Date(params['to']!).getTime()).toBeLessThanOrEqual(Date.now());
+    const n = new Date();
+    const endOfToday = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, 0, 0, 0, 0).getTime() - 1;
+    expect(new Date(params['to']!).getTime()).toBe(endOfToday);
+    expect(new Date(params['from']!).getTime()).toBe(new Date(n.getFullYear(), n.getMonth(), n.getDate() - 90, 0, 0, 0, 0).getTime());
     expect(result.current.past.map((t) => t.tourId)).toEqual(['sc']);
   });
 
@@ -1537,9 +1597,12 @@ export function pastState(tour: Tour): string {
 }
 
 export interface PastToursState {
-  /** 'idle' until the Past view enables the fetch; 'error' ONLY when the first
-   *  load fails (a failed reload keeps the rows and sets reloadFailed). */
-  status: 'idle' | 'loading' | 'ready' | 'error';
+  /** 'idle' until the first result lands (the page shows its spinner for idle);
+   *  'error' ONLY when the first load fails (a failed reload keeps the rows
+   *  and sets reloadFailed). There is no 'loading' value: writing one
+   *  synchronously in the effect is what react-hooks/set-state-in-effect
+   *  forbids, and idle already means "nothing shown yet". */
+  status: 'idle' | 'ready' | 'error';
   /** The selected Past rows, most recent first. */
   past: Tour[];
   /** Refetch (after a bulk action). Keeps the current rows until the new page lands. */
@@ -1563,9 +1626,11 @@ export function usePastTours(enabled: boolean): PastToursState {
     if (!enabled) return;
     const controller = new AbortController();
     const { signal } = controller;
-    // A reload keeps the rows on screen (no spinner flash under a bulk result);
-    // only the first load shows loading.
-    setState((s) => (s.status === 'ready' ? s : { status: 'loading', past: [], reloadFailed: false }));
+    // NO synchronous setState here (react-hooks/set-state-in-effect is an
+    // error in this workspace): the first load leaves status 'idle', which
+    // the page renders as its spinner; a reload keeps the rows on screen (no
+    // spinner flash under a bulk result). Every write below is in the async
+    // callback.
 
     (async () => {
       try {
@@ -1608,9 +1673,11 @@ Expected: all green (the pre-existing tests plus 15 new).
 
 ```
 cd /w/tmp/staff-notes-past-tours/dashboard && npm run typecheck
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add dashboard/src/routes/tours/useTours.ts dashboard/src/routes/tours/useTours.test.ts && git commit -m "feat(dashboard/tours): Past tab data - 90-day window to now, client selection, state chip, lazy usePastTours with reload (spec 4.2, 4.3)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add dashboard/src/routes/tours/useTours.ts dashboard/src/routes/tours/useTours.test.ts && git commit -m "feat(dashboard/tours): Past tab data - 90-day window through end of today, client selection, state chip, lazy usePastTours with reload (spec 4.2, 4.3)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ### Task 7: ToursPage - the Past view, rows, actions, bulk runner; App routes
@@ -1675,15 +1742,17 @@ In `dashboard/src/routes/tours/ToursPage.test.tsx`:
      render(
        <MemoryRouter initialEntries={[initialPath]}>
          <Routes>
-           <Route path="/tours" element={<ToursPage />} />
-           <Route path="/tours/past" element={<ToursPage view="past" />} />
-           <Route path="/tours/closed" element={<ToursPage view="closed" />} />
+           <Route path="/tours" element={<ToursPage key="active" />} />
+           <Route path="/tours/past" element={<ToursPage key="past" view="past" />} />
+           <Route path="/tours/closed" element={<ToursPage key="closed" view="closed" />} />
            <Route path="/tours/:tourId" element={<LocationProbe />} />
          </Routes>
        </MemoryRouter>,
      );
    }
    ```
+   (The keys mirror App.tsx: the per-view remount is what resets the batch
+   state, so the test wiring must have them too.)
 4. In `beforeEach`, add `pastRows = { status: 'ready', past: [], reloadFailed: false }; reloadPast.mockClear(); usePastToursSpy.mockClear(); getTour.mockReset(); patchTour.mockReset();`.
 5. In the existing 'Active view: renders the view tabs ...' test, add:
    ```tsx
@@ -1718,7 +1787,13 @@ describe('ToursPage - Past view', () => {
   const NEEDS_OUTCOME: Tour = { tourId: 'p2', tenantId: 'c2', unitId: 'u2', scheduledAt: daysAgoAt(2, 10), tourType: 'landlord_led', status: 'toured' };
   const NO_SHOW: Tour = { tourId: 'p3', tenantId: 'c1', unitId: 'u2', scheduledAt: daysAgoAt(3, 9), tourType: 'pm_team', status: 'no_show' };
   const NOT_MARKED_2: Tour = { tourId: 'p4', tenantId: 'c2', unitId: 'u1', scheduledAt: daysAgoAt(4, 11), tourType: 'self_guided', status: 'scheduled' };
-  const P1_LABEL = `Alice Smith at 12 Peach St, Atlanta, GA on ${whenLabel(NOT_MARKED.scheduledAt!)}`;
+  const NEEDS_PLACEMENT: Tour = { tourId: 'p5', tenantId: 'c2', unitId: 'u2', scheduledAt: daysAgoAt(5, 12), tourType: 'self_guided', status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true };
+  // Labels use the file's real fixtures: c1 = Alice Smith, c2 = Bob Jones,
+  // u1 = "123 Peachtree St, Atlanta, GA, 30303", u2 = "456 Oak Ave, Decatur,
+  // GA, 30030" (formatAddress joins line1, city, state, zip with ", ").
+  const U1 = '123 Peachtree St, Atlanta, GA, 30303';
+  const P1_LABEL = `Alice Smith at ${U1} on ${whenLabel(NOT_MARKED.scheduledAt!)}`;
+  const P4_LABEL = `Bob Jones at ${U1} on ${whenLabel(NOT_MARKED_2.scheduledAt!)}`;
 
   function readyPast(rows: Tour[], reloadFailed = false): void {
     readyAll([], []);
@@ -1729,7 +1804,11 @@ describe('ToursPage - Past view', () => {
     readyPast([]);
     renderPage('/tours/past');
     expect(screen.getByRole('heading', { level: 1, name: 'Past tours' })).toBeInTheDocument();
-    expect(screen.getByText(/^Last 90 days:/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome or a placement, and no-shows.',
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Past' })).toHaveAttribute('aria-current', 'page');
     expect(usePastToursSpy).toHaveBeenCalledWith(true);
     expect(screen.getByText('No past tours need attention in the last 90 days.')).toBeInTheDocument();
@@ -1758,11 +1837,15 @@ describe('ToursPage - Past view', () => {
     expect(screen.getByTestId('loc')).toHaveTextContent('/tours/p1|{"back":"/tours/past"}');
   });
 
-  it('row actions: Mark toured + checkbox on Not marked; Record outcome deep link (with state.back) on Needs outcome; none on No show', async () => {
+  it('row actions: Mark toured + checkbox on Not marked; Record outcome deep link (with state.back) on Needs outcome; none on No show or Needs placement', async () => {
     const user = userEvent.setup();
-    readyPast([NOT_MARKED, NEEDS_OUTCOME, NO_SHOW]);
+    readyPast([NOT_MARKED, NEEDS_OUTCOME, NO_SHOW, NEEDS_PLACEMENT]);
     renderPage('/tours/past');
     const items = within(screen.getByRole('region', { name: 'Past tours' })).getAllByRole('listitem');
+    expect(within(items[3]!).getByText('Needs placement')).toBeInTheDocument();
+    expect(within(items[3]!).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(items[3]!).queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(within(items[3]!).queryByRole('link', { name: /Record outcome/ })).not.toBeInTheDocument();
     expect(within(items[0]!).getByRole('button', { name: `Mark toured: ${P1_LABEL}` })).toBeInTheDocument();
     expect(within(items[0]!).getByRole('checkbox', { name: `Select tour for ${P1_LABEL}` })).toBeInTheDocument();
     const record = within(items[1]!).getByRole('link', { name: /^Record outcome: .* on /, });
@@ -1823,50 +1906,53 @@ describe('ToursPage - Past view', () => {
     expect(within(items[0]!).getByRole('checkbox')).not.toBeChecked();
   });
 
-  it('a failed id the reload dropped is reported above the toolbar, and the selection follows the listed rows', async () => {
+  it('results whose rows the reload dropped are reported above the toolbar (a failure as alert, a success as status), from the snapshot', async () => {
     const user = userEvent.setup();
     readyPast([NOT_MARKED, NOT_MARKED_2]);
     getTour.mockImplementation((id: string) =>
       Promise.resolve(id === 'p4' ? { ...NOT_MARKED_2, status: 'canceled' } : NOT_MARKED),
     );
     patchTour.mockResolvedValue({ ...NOT_MARKED, status: 'toured' });
-    // The reload drops p4 (it is canceled now) and moves p1 to toured.
+    // The mocked hook is not reactive, so the "reload" swaps its rows
+    // SYNCHRONOUSLY inside reloadPast(): the runner calls reloadPast() and
+    // then setBulkBusy(false) in the same async continuation, and React
+    // batches both into ONE render that reads the new rows. Here the reload
+    // drops BOTH ids: p4 is canceled now, and p1 (marked toured) is gone
+    // because its "toured" row was, say, given an outcome meanwhile.
     reloadPast.mockImplementation(() => {
-      pastRows = { status: 'ready', past: [{ ...NOT_MARKED, status: 'toured' }] };
+      pastRows = { status: 'ready', past: [], reloadFailed: false };
     });
     renderPage('/tours/past');
     await user.click(screen.getByRole('checkbox', { name: 'Select all not marked' }));
     await user.click(screen.getByRole('button', { name: 'Mark toured (2)' }));
     await waitFor(() => expect(reloadPast).toHaveBeenCalledTimes(1));
-    // Force a re-render with the reloaded rows (the mock hook is not reactive).
-    await user.click(screen.getByRole('link', { name: 'Active' }));
-    await user.click(screen.getByRole('link', { name: 'Past' }));
-    // Switching views reset the results and the selection.
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark toured (0)' })).toBeDisabled();
+
+    const region = await screen.findByRole('region', { name: 'Past tours' });
+    // The list is empty now; both results survive above it, named from the snapshot.
+    expect(within(region).getByText('No past tours need attention in the last 90 days.')).toBeInTheDocument();
+    expect(within(region).getByRole('alert')).toHaveTextContent(`${P4_LABEL}: Changed since the list loaded`);
+    expect(within(region).getByRole('status')).toHaveTextContent(`${P1_LABEL}: Marked toured`);
+    // No per-row line is left dangling.
+    expect(screen.queryByText('Could not mark toured: Changed since the list loaded')).not.toBeInTheDocument();
+    expect(screen.queryByText('Marked toured', { exact: true })).not.toBeInTheDocument();
   });
 
-  it('a failed id the reload dropped is reported above the toolbar (results kept on the same view)', async () => {
+  it('switching tabs remounts the page: selection and results are gone when Past shows again', async () => {
     const user = userEvent.setup();
-    const P4_LABEL = `Bob Jones at 88 Sycamore St, Decatur, GA on ${whenLabel(NOT_MARKED_2.scheduledAt!)}`;
     readyPast([NOT_MARKED, NOT_MARKED_2]);
-    getTour.mockImplementation((id: string) =>
-      Promise.resolve(id === 'p4' ? { ...NOT_MARKED_2, status: 'canceled' } : NOT_MARKED),
-    );
-    patchTour.mockResolvedValue({ ...NOT_MARKED, status: 'toured' });
-    const { rerender } = render(<div />);
-    void rerender;
+    getTour.mockResolvedValue({ ...NOT_MARKED_2, status: 'canceled' });
     renderPage('/tours/past');
     await user.click(screen.getByRole('checkbox', { name: 'Select all not marked' }));
     await user.click(screen.getByRole('button', { name: 'Mark toured (2)' }));
     await waitFor(() => expect(reloadPast).toHaveBeenCalledTimes(1));
-    // Simulate the reload landing WITHOUT p4: the hook mock is swapped and the
-    // page re-renders on the next state change (the bulk-busy flag clearing).
-    pastRows = { status: 'ready', past: [{ ...NOT_MARKED, status: 'toured' }] };
-    await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent(`${P4_LABEL}: Changed since the list loaded`),
-    );
-    expect(screen.queryByText('Could not mark toured: Changed since the list loaded')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('alert').length).toBeGreaterThan(0);
+    await user.click(screen.getByRole('link', { name: 'Active' }));
+    await user.click(screen.getByRole('link', { name: 'Past' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark toured (0)' })).toBeDisabled();
+    for (const box of within(screen.getByRole('region', { name: 'Past tours' })).getAllByRole('checkbox')) {
+      expect(box).not.toBeChecked();
+    }
   });
 
   it('the row button marks that one tour (one re-read, one PATCH), and the batch never sends an outcome or closed', async () => {
@@ -1940,14 +2026,11 @@ describe('ToursPage - Past view', () => {
 });
 ```
 
-Two of the tests above drive the mock hook by swapping `pastRows` and
-relying on a later render; if the "results kept on the same view" test cannot
-observe the re-render, make `usePastToursSpy` reactive instead: keep
-`pastRows` in a `useState` inside the spy's return path via a tiny store
-(`const listeners = new Set<() => void>()` + `useSyncExternalStore`) so a
-`pastRows` swap re-renders the page. Note which form you used in the slice
-report. Delete the stray `const { rerender } = render(<div />); void rerender;`
-lines if they trip lint - they are placeholders, not required.
+The "dropped rows" test relies on React batching `reloadPast()`'s synchronous
+row swap with the `setBulkBusy(false)` that follows it into one render. If
+that render does not observe the swap, make `usePastToursSpy` reactive with a
+tiny `useSyncExternalStore` store around `pastRows` and note it in the slice
+report; do not weaken the assertions.
 
 - [ ] **Step 2: Run, expect red**
 
@@ -2081,7 +2164,7 @@ p.vanished {
 
 In `dashboard/src/routes/tours/ToursPage.tsx`:
 
-1. Imports: react becomes `import { useEffect, useMemo, useState } from 'react';`;
+1. Imports: react becomes `import { useMemo, useRef, useState } from 'react';`;
    the api import adds `getTour, patchTour`:
    ```tsx
    import {
@@ -2123,7 +2206,7 @@ const PAGE_TITLE: Record<ToursView, string> = {
 
 const PAGE_INTRO: Record<ToursView, string> = {
   active: 'Upcoming scheduled tours and unbooked tour requests.',
-  past: 'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome, and no-shows.',
+  past: 'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome or a placement, and no-shows.',
   closed: 'Tours that ended - converted into a placement, closed as not a fit, or canceled.',
 };
 
@@ -2276,16 +2359,14 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
   // the reload drops can still be named in the above-toolbar block.
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  // The in-flight guard is a REF, not the render-time `bulkBusy` value: two
+  // clicks in one render would both read the stale false.
+  const bulkBusyRef = useRef(false);
   const [results, setResults] = useState<ReadonlyMap<string, MarkResult>>(new Map());
   const [snapshot, setSnapshot] = useState<ReadonlyMap<string, Tour>>(new Map());
-
-  // The three tabs render this same component at the same tree position, so
-  // React keeps its state across a tab switch: reset the batch state per view.
-  useEffect(() => {
-    setSelectedIds(new Set());
-    setResults(new Map());
-    setSnapshot(new Map());
-  }, [view]);
+  // No per-view reset effect here: App.tsx keys each tours route's element by
+  // view, so a tab switch REMOUNTS this component and every piece of batch
+  // state starts fresh (a setState-in-effect reset would trip the lint preset).
 
   // Only "Not marked" rows can be selected; a row that left that state (marked
   // elsewhere, then reloaded) drops out of the effective selection.
@@ -2341,10 +2422,11 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
   // result deterministic. Sends ONLY { status: 'toured' } - never an outcome,
   // never closed. Ignores a call while a batch is in flight.
   const markToured = async (ids: string[]): Promise<void> => {
-    if (bulkBusy) return;
+    if (bulkBusyRef.current) return;
     const listed = new Map(pastTours.map((t) => [t.tourId, t]));
     const eligible = ids.filter((id) => notMarkedIds.includes(id));
     if (eligible.length === 0) return;
+    bulkBusyRef.current = true;
     setBulkBusy(true);
     setResults(new Map());
     setSnapshot(listed);
@@ -2375,7 +2457,11 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
       return remaining;
     });
     reloadPast();
+    bulkBusyRef.current = false;
     setBulkBusy(false);
+    // If the user switched tabs mid-batch the component remounted and these
+    // setters landed on the unmounted instance (a no-op in React 19); the
+    // PATCHes already sent stand, and the fresh Past view lists the truth.
   };
 ```
 
@@ -2385,7 +2471,7 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
   const loading = closed
     ? closedStatus === 'loading' || closedStatus === 'idle' || crossRefLoading
     : past
-      ? pastStatus === 'loading' || pastStatus === 'idle' || crossRefLoading
+      ? pastStatus === 'idle' || crossRefLoading
       : toursStatus === 'loading' || crossRefLoading;
   const error = closed
     ? closedStatus === 'error' || crossRefError
@@ -2497,17 +2583,21 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
    is the list order - that is what makes "in list order" true.
 
 6. Update the header comment: the views list gains
-   `Past (/tours/past) - the last 90 days' tours (to now) that still need a decision (spec 4): rows carry a plain-words state, a Mark toured button / Record outcome link, a checkbox, and a bulk Mark toured (N) toolbar; each mark re-reads the tour first.`
+   `Past (/tours/past) - the last 90 days' tours (through the end of today) that still need a decision (spec 4): rows carry a plain-words state, a Mark toured button / Record outcome link, a checkbox, and a bulk Mark toured (N) toolbar; each mark re-reads the tour first. The three tabs are keyed per view in App.tsx, so the page REMOUNTS on a tab switch and its batch state never leaks across views.`
 
 7. `dashboard/src/App.tsx` lines 237-240 become:
 
 ```tsx
             {/* Tours list page at /tours (+ the Past view at /tours/past and the
                 Closed view at /tours/closed). The static paths rank above the
-                dynamic tours/:tourId segment below. */}
-            <Route path="tours" element={<ToursPage />} />
-            <Route path="tours/past" element={<ToursPage view="past" />} />
-            <Route path="tours/closed" element={<ToursPage view="closed" />} />
+                dynamic tours/:tourId segment below. Each element is KEYED by
+                its view: the three routes render the same component at the
+                same tree position, and without a key React would keep one
+                instance across a tab switch, carrying the Past tab's selection
+                and bulk results into the other tabs. */}
+            <Route path="tours" element={<ToursPage key="active" />} />
+            <Route path="tours/past" element={<ToursPage key="past" view="past" />} />
+            <Route path="tours/closed" element={<ToursPage key="closed" view="closed" />} />
 ```
 
 - [ ] **Step 5: Run, expect green**
@@ -2524,9 +2614,11 @@ ref-cleanup typing, write it as `ref={(el) => { if (el) el.indeterminate = someS
 ```
 cd /w/tmp/staff-notes-past-tours && for f in dashboard/src/routes/tours/ToursPage.tsx dashboard/src/routes/tours/ToursPage.module.css dashboard/src/routes/tours/ToursPage.test.tsx dashboard/src/App.tsx; do printf '%s ' "$f"; git diff -- "$f" | grep '^+' | grep -v '^+++' | tr -d '\11\12\15\40-\176' | wc -c; done
 cd /w/tmp/staff-notes-past-tours/dashboard && npm run typecheck
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add dashboard/src/routes/tours/ToursPage.tsx dashboard/src/routes/tours/ToursPage.module.css dashboard/src/routes/tours/ToursPage.test.tsx dashboard/src/App.tsx && git commit -m "feat(dashboard/tours): Past tab - /tours/past view, state rows with date-time labels, Mark toured + Record outcome actions, sequential re-read-then-PATCH bulk Mark toured (spec 4.1, 4.3-4.5)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add dashboard/src/routes/tours/ToursPage.tsx dashboard/src/routes/tours/ToursPage.module.css dashboard/src/routes/tours/ToursPage.test.tsx dashboard/src/App.tsx && git commit -m "feat(dashboard/tours): Past tab - /tours/past view, state rows with date-time labels, Mark toured + Record outcome actions, sequential re-read-then-PATCH bulk Mark toured (spec 4.1, 4.3-4.5)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ### Task 8: TourDetail - the `?outcome=1` deep link and the back arrow
@@ -2537,11 +2629,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `dashboard/src/routes/tours/TourDetail.test.tsx` a describe block.
-Place it INSIDE the file's outer describe so it inherits the loaded-page
-`beforeEach` (the block that resolves `getTour`, `getUnit`, `getContact`,
-`getUnreadCounts`, `getTourActivity`, `getTourReminders`, `getContactTimeline`,
-`getTourRoster` and friends), or replicate that `beforeEach` verbatim:
+Append to `dashboard/src/routes/tours/TourDetail.test.tsx` a new TOP-LEVEL
+describe block (the file has several; its loaded-page `beforeEach` is
+module-level at line 222, so every top-level describe inherits it):
 
 ```tsx
 describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () => {
@@ -2660,35 +2750,46 @@ function backHref(state: unknown): string {
 }
 ```
 
-3. Inside `TourDetailLoaded`, directly after the `modal` state declaration
-   (line 237-239), add:
+3. Inside `TourDetailLoaded`, REPLACE the `modal` state declaration (lines
+   237-239, `const [modal, setModal] = useState<...>(null);`) with the block
+   below, which reads the URL FIRST and initializes the dialog from it. The
+   dialog must not be opened from an effect: `react-hooks/set-state-in-effect`
+   is an error in this workspace, and `TourDetailLoaded` mounts only after
+   the tour has loaded (and is keyed by tourId), so the initializer already
+   knows the tour's status.
 
 ```tsx
   // The back arrow returns to the tab that opened this page (spec 4.6).
   const location = useLocation();
   const backTo = backHref(location.state);
   // Deep link from the Tours page's Past tab (spec 4.6): /tours/:id?outcome=1
-  // opens the Record-outcome dialog ONCE, on a toured tour with no outcome,
-  // and strips the param (replace, not push) so a reload or the Back button
-  // never reopens it. The strip CARRIES THE LOCATION STATE FORWARD: a
-  // navigation without `state` resets it to null (react-router
-  // createLocation), which would drop the back pointer on exactly this path.
-  // Runs only while the param is present, so the plain row-link path never
-  // touches its state. The Past tab's "Record outcome" is the only producer.
+  // opens the Record-outcome dialog ONCE, on a toured tour with no outcome.
+  // The dialog is opened in the STATE INITIALIZER (this component mounts after
+  // the tour loads and remounts per tourId, so the URL and the tour are both
+  // known here) - never from an effect. The effect below only STRIPS the
+  // param (replace, not push) so a reload or the Back button never reopens
+  // it, and it CARRIES THE LOCATION STATE FORWARD: a navigation without
+  // `state` resets it to null (react-router createLocation), which would drop
+  // the back pointer on exactly this path. It runs only while the param is
+  // present, so the plain row-link path never touches its state. The Past
+  // tab's "Record outcome" is the only producer.
   const [searchParams, setSearchParams] = useSearchParams();
   const wantsOutcome = searchParams.get('outcome') === '1';
+  const [modal, setModal] = useState<
+    'book' | 'reschedule' | 'outcome' | 'cancel' | 'already-toured' | null
+  >(() => (wantsOutcome && tour.status === 'toured' && tour.outcome === undefined ? 'outcome' : null));
   useEffect(() => {
     if (!wantsOutcome) return;
-    if (tour.status === 'toured' && tour.outcome === undefined) setModal('outcome');
     const next = new URLSearchParams(searchParams);
     next.delete('outcome');
     setSearchParams(next, { replace: true, state: location.state });
-  }, [wantsOutcome, tour.status, tour.outcome, searchParams, setSearchParams, location.state]);
+  }, [wantsOutcome, searchParams, setSearchParams, location.state]);
 ```
 
-The full dependency list satisfies `react-hooks/exhaustive-deps` (the repo
-lints it, `eslint.config.mjs:47-50`); the early return makes every re-run
-after the strip a no-op, so the wider list cannot loop.
+`setSearchParams` is a navigation, not a `useState` setter, so the effect is
+clean under the preset; the full dependency list satisfies
+`react-hooks/exhaustive-deps`, and the early return makes every re-run after
+the strip a no-op.
 
 4. The back link (line 595) becomes `<Link to={backTo} className={styles.backBtn} aria-label="Back to tours">`.
 5. Update the file's header comment (the CTA-ladder paragraph, lines 17-22)
@@ -2706,9 +2807,11 @@ Expected: every pre-existing test still green plus 7 new.
 
 ```
 cd /w/tmp/staff-notes-past-tours/dashboard && npm run typecheck
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add dashboard/src/routes/tours/TourDetail.tsx dashboard/src/routes/tours/TourDetail.test.tsx && git commit -m "feat(dashboard/tours): ?outcome=1 deep link opens the Record-outcome dialog once and strips itself; back arrow honors state.back (spec 4.6)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add dashboard/src/routes/tours/TourDetail.tsx dashboard/src/routes/tours/TourDetail.test.tsx && git commit -m "feat(dashboard/tours): ?outcome=1 deep link opens the Record-outcome dialog once and strips itself; back arrow honors state.back (spec 4.6)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ### Task 9: Playwright - the Past tab end to end
@@ -2796,9 +2899,13 @@ test.describe('Tours page - Past tab', () => {
     await patchStatus(page, needsOutcomeId, 'toured');
     await patchStatus(page, noShowId, 'no_show');
 
-    // Active never shows them (their time has passed).
+    // Active never shows them (their time has passed). Wait for BOTH Active
+    // sections to have rendered before the negative count, or an unloaded
+    // list passes it vacuously.
     await page.goto(`${NEXT}/tours`);
     await expect(page.getByRole('heading', { name: 'Tours' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Upcoming tours' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Needs booking' })).toBeVisible();
     for (const id of [notMarkedId, needsOutcomeId, noShowId]) {
       await expect(page.locator(`a[href="/tours/${id}"]`)).toHaveCount(0);
     }
@@ -2841,6 +2948,9 @@ test.describe('Tours page - Past tab', () => {
     await expect(rowFor(notMarkedId).getByText('Needs outcome', { exact: true })).toBeVisible();
     await expect(rowFor(notMarkedId).getByRole('checkbox')).toHaveCount(0);
     await expect(page.getByRole('button', { name: /^Mark toured \(0\)$/ })).toBeDisabled();
+    // Give the worker a moment: a regression that ENQUEUED a send would land
+    // in the fake's thread store asynchronously, after the PATCH returned.
+    await page.waitForTimeout(2000);
     expect(await outboundCount(page)).toBe(outboundBefore);
     // Verified on the wire too: the tour is toured with no outcome, nothing closed.
     const after = await page.request.get(`${NEXT}/api/tours/${notMarkedId}`);
@@ -2855,12 +2965,17 @@ test.describe('Tours page - Past tab', () => {
     await expect(page.getByRole('dialog', { name: 'Record outcome' })).toBeVisible();
     await page.getByRole('dialog', { name: 'Record outcome' }).getByRole('button', { name: 'Cancel' }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    // A reload does not reopen it (the param is gone).
-    await page.reload();
+    // The state SURVIVED the strip: the back arrow on this very page goes to Past.
+    await page.getByRole('link', { name: 'Back to tours' }).click();
+    await expect(page).toHaveURL(/\/tours\/past$/);
+    await expect(page.getByRole('heading', { name: 'Past tours' })).toBeVisible();
+
+    // A reload of the stripped URL does not reopen the dialog (the param is gone).
+    await page.goto(`${NEXT}/tours/${notMarkedId}`);
     await expect(page.getByRole('button', { name: 'Record outcome' })).toBeVisible();
     await expect(page.getByRole('dialog')).toHaveCount(0);
 
-    // The back arrow returns to Past when a Past row opened the page.
+    // The plain row link carries the pointer too.
     await page.goto(`${NEXT}/tours/past`);
     await rowFor(needsOutcomeId).getByRole('link', { name: /^Tour for .* on / }).click();
     await expect(page).toHaveURL(new RegExp(`/tours/${needsOutcomeId}$`));
@@ -2906,9 +3021,11 @@ cd /w/tmp/staff-notes-past-tours && npm run e2e:stop
 
 ```
 cd /w/tmp/staff-notes-past-tours && tr -d '\11\12\15\40-\176' < e2e/tests/dashboard-next/tours-past.spec.ts | wc -c
-cd /w/tmp/staff-notes-past-tours && git status --porcelain && git add e2e/tests/dashboard-next/tours-past.spec.ts && git commit -m "test(e2e): Past tab - past tours listed with states, bulk Mark toured, Record outcome deep link, no send, back arrow, 360px (spec 5)
+cd /w/tmp/staff-notes-past-tours && git status --porcelain
+cd /w/tmp/staff-notes-past-tours && ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/staff-notes-past-tours/MERGE_HEAD" 2>/dev/null
+cd /w/tmp/staff-notes-past-tours && git add e2e/tests/dashboard-next/tours-past.spec.ts && git commit -m "test(e2e): Past tab - past tours listed with states, bulk Mark toured, Record outcome deep link, no send, back arrow, 360px (spec 5)
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: <AUTHORING-MODEL> <noreply@anthropic.com>"
 ```
 
 ---
@@ -2931,16 +3048,24 @@ else.) If no advance: "Already up to date."
 cd /w/tmp/staff-notes-past-tours && npm run typecheck
 cd /w/tmp/staff-notes-past-tours && npm test
 cd /w/tmp/staff-notes-past-tours && npm run smoke
-cd /w/tmp/staff-notes-past-tours && timeout 1500 npm run e2e
+cd /w/tmp/staff-notes-past-tours && timeout 2700 npm run e2e
 cd /w/tmp/staff-notes-past-tours && npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')
 ```
 
 Quote every exit code. `npm test` needs DynamoDB Local (`npm run db:start`
-from the worktree if it is not up). Another mission's e2e may be running on
-this machine tonight: expect the e2e gate to be slower, never kill a process
-that is not this worktree's. For gate 5, attribute any error by BASELINE
-COMPARISON (read the reported line at `main` for the same file): only errors
-absent at the base are yours.
+from the worktree if it is not up). The e2e cap is 2700s (45 min): the
+suite's idle baseline is ~18 min and it runs at ~2x on a shared box
+(`e2e/playwright.config.ts:105-109`), and another mission's e2e runs on this
+machine tonight. If `timeout` fires (exit 124), the stack is ORPHANED: run
+`cd /w/tmp/staff-notes-past-tours && npm run e2e:stop`, confirm no listener
+survives on this lane's ports (`e2e/support/lane.mjs` prints them), read the
+partial report for the failing FILE, isolate it
+(`npm run e2e -w @housingchoice/e2e -- --grep "<title>"`), and only then
+re-run the suite. Never kill a process that is not this worktree's. For gate
+5, attribute any error by BASELINE COMPARISON (read the reported line at
+`main` for the same file): only errors absent at the base are yours - and
+expect `react-hooks/set-state-in-effect` to be reported at `useTours.ts`'s
+pre-existing `useClosedTours` line (baseline), never at a new line.
 
 - [ ] **Step 3: Records**
 

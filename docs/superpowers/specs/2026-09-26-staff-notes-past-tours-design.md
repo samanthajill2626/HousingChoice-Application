@@ -398,9 +398,11 @@ that replaces the list.
 
 ### 4.3 The row
 
-Each Past row shows, in this order: the scheduled date and time ("Sep 24,
+Each Past row shows the tenant and the property (the identity block, left,
+as every other tours row does), then the scheduled date and time ("Sep 24,
 2026, 2:30 PM": the page's existing `formatDate` + `formatTime`, joined with
-", "), the tenant, the property, and the state in plain words:
+", ") and the state in plain words (the meta chips, right; they wrap under the
+identity on a tight pane):
 
 | tour | state chip |
 |---|---|
@@ -698,8 +700,9 @@ module CSS), `TourDetail.tsx` (+ test).
 E2E: `e2e/tests/dashboard-next/contact-detail.spec.ts` (two locators scoped),
 two new specs under `e2e/tests/dashboard-next/`.
 
-Docs: `documentation/GLOSSARY.md` (section 3.8); five files under
-`docs/issues/` (section 8).
+Docs: `documentation/GLOSSARY.md` (section 3.8); six files under
+`docs/issues/` (section 8). All of these are already committed on the branch
+from the design phase.
 
 Off limits (other missions own them tonight): `app/src/routes/webhooks/voice.ts`,
 `app/src/routes/settings.ts`, `app/src/repos/settingsRepo.ts`,

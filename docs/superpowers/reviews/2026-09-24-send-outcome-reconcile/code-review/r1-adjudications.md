@@ -282,3 +282,30 @@ read exists), D-2 (spec text drift: Sec 8 item 6, Sec 2's broadcast
 `attemptedAt`, D7a "as today"), D-4 (the hosted-dev check also covers link
 shortening and Advanced Opt-Out), D-6 (the Sec 10 checks), the S5b lane-timing
 adjudication, and the AGENTS.md log-capture observation.
+
+## 6. Human ruling on ADV-1 (Cameron, 2026-09-27, relayed by the planner)
+
+"A double text is annoying, NOT critical" - he would rather risk a double text
+than take on new failure points or a lot of redo. Applied:
+
+- ADV-1 is reclassified from CRITICAL to HIGH (the reviewer's own report in
+  `r1-adversarial.md` keeps its original grading - it is the reviewer's record).
+- FW1-1 (the repo `rearm()`, landed at 0dd5d4b7 as one fenced write mirroring
+  the claim) stays.
+- The FW2 site half is MINIMAL: one `rearm` call immediately before the
+  provider call at each send site, failing CLOSED - `undefined` means another
+  writer took the attempt over, so the site does not send and takes the
+  existing path for an attempt another writer took over (the relay unit's
+  existing "takeover lost" / G5 fence-lost outcome, `skipped_terminal` - the
+  taker already handed the attempt to reconcile, so no second chain is
+  started); a THROW takes the existing post-claim prepare-phase deferral. No new
+  machinery, no DynamoDB client timeout change (a filed residue), no extra
+  retries or states.
+- If the site half grows beyond those insertions, breaks existing pins in a way
+  that needs redesign, or introduces a new failure mode, ADV-1 STOPS: the site
+  calls are reverted, `rearm()` stays in the repo unused-but-tested (or is
+  dropped - the FW2 record states which), the double-text window under a
+  >30 s pre-send stall is filed as a docs/issues item with the re-arm as the
+  designed fix, and the wave continues without it. The FW2 record states the
+  size of the site half (files, lines) either way.
+- Everything else in the wave stands as adjudicated.

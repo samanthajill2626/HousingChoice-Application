@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-09-26).** This document describes how
+> this work was *designed/planned at the time of writing*. The work shipped to the main line and
+> its feature branch + worktree were deleted during cleanup. **This file is NOT current
+> documentation and the live code may have drifted from it - do not treat it as authoritative
+> guidance on how the system should be built or behaves today.** For current truth read the code
+> and the project's living docs. Kept only as a point-in-time record of intent.
+
 # Inbox: more rows, a time on every row, and a list that stays put - design specification
 
 Status: DRAFT 8.6 - APPROVED for build as DRAFT 8.4 (Cameron ruled 2026-09-25 that only back and history navigations restore, 5.8); build-review refinements recorded in code-review-r1-adjudications.md (5.6 cursor rule, 5.8 wording, 5.2 residual); round-2 and round-3 adjudications changed the row CSS Sam approved (5.4: the head never yields to the preview; the chip rule with its floor); DRAFT 8.6 (planner review 2026-09-26) writes back what the build shipped, no decision changed: 5.3 formatters, 5.10 cache key and overshoot, 5.11 perf command and reason, 5.8 link list, section 2 facts

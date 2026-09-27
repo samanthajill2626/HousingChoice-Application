@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: v3 - aligned to spec DRAFT 3 (after spec review R2); written for the overnight unattended mission of 2026-09-26; adversarial plan review pending
+Status: v4 - aligned to spec DRAFT 4 (approved after spec review R3); written for the overnight unattended mission of 2026-09-26; adversarial plan review pending
 Date: 2026-09-26
 Branch: `feat/staff-notes-past-tours`
 Worktree: `W:\tmp\staff-notes-past-tours`
@@ -30,7 +30,7 @@ the in-memory fake world (`app/test/helpers/twilioWebhookHarness.ts`) for the
 app; Playwright against the hermetic e2e lane.
 
 **Spec:** `docs/superpowers/specs/2026-09-26-staff-notes-past-tours-design.md`
-(DRAFT 3). Section numbers below refer to it.
+(DRAFT 4, approved). Section numbers below refer to it.
 
 ## Global Constraints (copied from the spec)
 
@@ -84,7 +84,11 @@ app; Playwright against the hermetic e2e lane.
   `<tenant> at <property> on <date-time>: <message>` (`role="alert"`). Every
   mark control is disabled while a batch runs; the runner ignores a call while
   one is in flight. Selection = raw ticked ids intersected with the listed
-  "Not marked" ids. Selection and results reset on a view change.
+  "Not marked" ids. Selection and results reset on a view change. A failed
+  RELOAD keeps the rows and results: the hook stays `ready` with
+  `reloadFailed: true` (cleared by the next success) and the page shows one
+  `role="alert"` line above the toolbar, "Could not refresh the list. Reload
+  the page to see the latest."; only a failed FIRST load is `status: 'error'`.
 - Row link and "Record outcome" link carry router `state: { back: '/tours/past' }`
   (4.3, 4.4). The tour page's back arrow uses `location.state.back` only when it
   is exactly `/tours`, `/tours/past` or `/tours/closed`, else `/tours` (4.6).
@@ -1412,10 +1416,26 @@ describe('usePastTours', () => {
     await waitFor(() => expect(result.current.past).toEqual([]));
   });
 
-  it('sets status=error when the fetch fails', async () => {
+  it('sets status=error when the FIRST fetch fails', async () => {
     getToursMock.mockRejectedValue(new Error('network error'));
     const { result } = renderHook(() => usePastTours(true));
     await waitFor(() => expect(result.current.status).toBe('error'));
+    expect(result.current.past).toEqual([]);
+    expect(result.current.reloadFailed).toBe(false);
+  });
+
+  it('a failed RELOAD keeps the rows, stays ready and sets reloadFailed; the next success clears it', async () => {
+    getToursMock.mockResolvedValue(WINDOW_ROWS);
+    const { result } = renderHook(() => usePastTours(true));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    getToursMock.mockRejectedValueOnce(new Error('network error'));
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.reloadFailed).toBe(true));
+    expect(result.current.status).toBe('ready');
+    expect(result.current.past.map((t) => t.tourId)).toEqual(['sc']);
+    getToursMock.mockResolvedValue([]);
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.reloadFailed).toBe(false));
     expect(result.current.past).toEqual([]);
   });
 });
@@ -1517,20 +1537,25 @@ export function pastState(tour: Tour): string {
 }
 
 export interface PastToursState {
-  /** 'idle' until the Past view enables the fetch. */
+  /** 'idle' until the Past view enables the fetch; 'error' ONLY when the first
+   *  load fails (a failed reload keeps the rows and sets reloadFailed). */
   status: 'idle' | 'loading' | 'ready' | 'error';
   /** The selected Past rows, most recent first. */
   past: Tour[];
   /** Refetch (after a bulk action). Keeps the current rows until the new page lands. */
   reload: () => void;
+  /** The last reload failed; the rows on screen are stale. Cleared by the next
+   *  successful load. Never true alongside status 'error'. */
+  reloadFailed: boolean;
 }
 
 /** LAZY fetch for the Past view - one range query, client-selected. */
 export function usePastTours(enabled: boolean): PastToursState {
-  const [state, setState] = useState<{ status: PastToursState['status']; past: Tour[] }>({
-    status: 'idle',
-    past: [],
-  });
+  const [state, setState] = useState<{
+    status: PastToursState['status'];
+    past: Tour[];
+    reloadFailed: boolean;
+  }>({ status: 'idle', past: [], reloadFailed: false });
   const [epoch, setEpoch] = useState(0);
   const reload = useCallback(() => setEpoch((e) => e + 1), []);
 
@@ -1540,7 +1565,7 @@ export function usePastTours(enabled: boolean): PastToursState {
     const { signal } = controller;
     // A reload keeps the rows on screen (no spinner flash under a bulk result);
     // only the first load shows loading.
-    setState((s) => (s.status === 'ready' ? s : { status: 'loading', past: [] }));
+    setState((s) => (s.status === 'ready' ? s : { status: 'loading', past: [], reloadFailed: false }));
 
     (async () => {
       try {
@@ -1548,17 +1573,21 @@ export function usePastTours(enabled: boolean): PastToursState {
         const { from, to } = pastToursDateRange(now);
         const rows = await getTours({ from, to }, signal);
         if (signal.aborted) return;
-        setState({ status: 'ready', past: selectPastTours(rows, now) });
+        setState({ status: 'ready', past: selectPastTours(rows, now), reloadFailed: false });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState({ status: 'error', past: [] });
+        // A failed RELOAD must not wipe the rows and the per-row results under
+        // them (spec 4.2): stay ready, flag it. A failed FIRST load is an error.
+        setState((s) =>
+          s.status === 'ready' ? { ...s, reloadFailed: true } : { status: 'error', past: [], reloadFailed: false },
+        );
       }
     })();
 
     return () => controller.abort();
   }, [enabled, epoch]);
 
-  return { status: state.status, past: state.past, reload };
+  return { status: state.status, past: state.past, reload, reloadFailed: state.reloadFailed };
 }
 ```
 
@@ -1573,7 +1602,7 @@ create and patch), which is why it is safe.
 cd /w/tmp/staff-notes-past-tours/dashboard && npx vitest run src/routes/tours/useTours.test.ts
 ```
 
-Expected: all green (the pre-existing tests plus 14 new).
+Expected: all green (the pre-existing tests plus 15 new).
 
 - [ ] **Step 5: Typecheck and commit**
 
@@ -1600,11 +1629,13 @@ In `dashboard/src/routes/tours/ToursPage.test.tsx`:
    `closedState`):
    ```tsx
    import type { PastToursState } from './useTours.js';
-   let pastRows: Omit<PastToursState, 'reload'> = { status: 'ready', past: [] };
+   let pastRows: Omit<PastToursState, 'reload'> = { status: 'ready', past: [], reloadFailed: false };
    const reloadPast = vi.fn();
    const usePastToursSpy = vi.fn(
      (enabled: boolean): PastToursState =>
-       enabled ? { ...pastRows, reload: reloadPast } : { status: 'idle', past: [], reload: reloadPast },
+       enabled
+         ? { ...pastRows, reload: reloadPast }
+         : { status: 'idle', past: [], reload: reloadPast, reloadFailed: false },
    );
    ```
    and convert the `vi.mock('./useTours.js', ...)` factory to the spread form
@@ -1653,7 +1684,7 @@ In `dashboard/src/routes/tours/ToursPage.test.tsx`:
      );
    }
    ```
-4. In `beforeEach`, add `pastRows = { status: 'ready', past: [] }; reloadPast.mockClear(); usePastToursSpy.mockClear(); getTour.mockReset(); patchTour.mockReset();`.
+4. In `beforeEach`, add `pastRows = { status: 'ready', past: [], reloadFailed: false }; reloadPast.mockClear(); usePastToursSpy.mockClear(); getTour.mockReset(); patchTour.mockReset();`.
 5. In the existing 'Active view: renders the view tabs ...' test, add:
    ```tsx
        const pastTab = within(tabs).getByRole('link', { name: 'Past' });
@@ -1689,9 +1720,9 @@ describe('ToursPage - Past view', () => {
   const NOT_MARKED_2: Tour = { tourId: 'p4', tenantId: 'c2', unitId: 'u1', scheduledAt: daysAgoAt(4, 11), tourType: 'self_guided', status: 'scheduled' };
   const P1_LABEL = `Alice Smith at 12 Peach St, Atlanta, GA on ${whenLabel(NOT_MARKED.scheduledAt!)}`;
 
-  function readyPast(rows: Tour[]): void {
+  function readyPast(rows: Tour[], reloadFailed = false): void {
     readyAll([], []);
-    pastRows = { status: 'ready', past: rows };
+    pastRows = { status: 'ready', past: rows, reloadFailed };
   }
 
   it('renders the heading, the 90-day intro, the Past tab current, and the empty state', () => {
@@ -1889,11 +1920,22 @@ describe('ToursPage - Past view', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Could not mark toured: Could not check the tour');
   });
 
-  it('shows the error alert when the Past fetch fails', () => {
+  it('shows the page error when the FIRST Past fetch fails', () => {
     readyAll([], []);
-    pastRows = { status: 'error', past: [] };
+    pastRows = { status: 'error', past: [], reloadFailed: false };
     renderPage('/tours/past');
-    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t load/i);
+    expect(screen.queryByRole('region', { name: 'Past tours' })).not.toBeInTheDocument();
+  });
+
+  it('a failed RELOAD keeps the rows and adds one refresh alert above the toolbar', () => {
+    readyPast([NOT_MARKED], true);
+    renderPage('/tours/past');
+    const region = screen.getByRole('region', { name: 'Past tours' });
+    expect(within(region).getAllByRole('listitem')).toHaveLength(1);
+    expect(within(region).getByRole('alert')).toHaveTextContent(
+      'Could not refresh the list. Reload the page to see the latest.',
+    );
   });
 });
 ```
@@ -1998,6 +2040,11 @@ Append to `dashboard/src/routes/tours/ToursPage.module.css`:
 .vanished p,
 .vanishedOk p {
   margin: 0;
+}
+
+/* The refresh alert reuses .vanished; as a <p> it needs its own margin reset. */
+p.vanished {
+  margin: 0 0 var(--sp-3);
 }
 
 .toolbar {
@@ -2216,7 +2263,12 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
 
 ```tsx
   // Past tours are fetched only when the Past view is showing (spec 4.2).
-  const { status: pastStatus, past: pastTours, reload: reloadPast } = usePastTours(past);
+  const {
+    status: pastStatus,
+    past: pastTours,
+    reload: reloadPast,
+    reloadFailed: pastReloadFailed,
+  } = usePastTours(past);
 
   // Bulk "Mark toured" (spec 4.5): the raw selection, the running flag, and the
   // per-row results of the LAST batch (cleared when the next one starts).
@@ -2365,6 +2417,11 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
       {/* --- Past view (/tours/past) - spec 4.3-4.5 --- */}
       {!loading && !error && past ? (
         <section className={styles.section} aria-label="Past tours">
+          {pastReloadFailed ? (
+            <p role="alert" className={styles.vanished}>
+              Could not refresh the list. Reload the page to see the latest.
+            </p>
+          ) : null}
           {vanished.ok.length > 0 ? (
             <div role="status" className={styles.vanishedOk}>
               {vanished.ok.map((v) => (

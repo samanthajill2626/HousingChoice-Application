@@ -12,6 +12,14 @@
 // fan-out loops exist yet; the throttled worker queue is a later milestone).
 // Anything scheduled/retried MUST go through jobs.enqueue() — never raw
 // scheduler calls (binding guideline 3).
+//
+// Failures (SOR spec D3): a refusal is a SendRefusedError and is never
+// wrapped. Every other throw says WHERE the send failed: before the provider
+// call (SendNotAttemptedError - nothing was sent), at the provider call
+// (ProviderSendFailedError - classified; it may have been sent), or at the
+// append after the provider accepted the text (SendAcceptedNotRecordedError -
+// it WAS sent). Steps after the append are best-effort: the text is out and
+// recorded, so they log at ERROR and the send returns its normal result.
 import { mergeContext } from '../lib/context.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
@@ -21,7 +29,10 @@ import {
   createMessagingAdapter,
   type CarrierMessageSender,
   type MessagingAdapter,
+  type SendMessageResult,
 } from '../adapters/messaging.js';
+import { bodyFingerprint, recipientDigest } from '../lib/sendFingerprint.js';
+import { classifySendFailure, type SendFailureClassification } from '../lib/sendOutcome.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   contactHoldsPhone,
@@ -33,14 +44,19 @@ import {
 import {
   createConversationsRepo,
   minuteBucket,
+  type ConversationItem,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
+  type AppendResult,
   type DeliveryStatus,
   type MediaAttachment,
   type MessagesRepo,
+  type NewMessage,
 } from '../repos/messagesRepo.js';
+// A TYPE import: this module stays a runtime leaf of the attempt-record repo.
+import type { SendAttemptFacts } from '../repos/sendAttemptsRepo.js';
 import { isKillSwitchOff, isManualMode, isOptedOut } from './scheduledSendSuppression.js';
 import { TRANSPORT_SCHEMA_VERSION } from '../lib/messageTransport.js';
 
@@ -190,6 +206,86 @@ export class GroupTextSendNotSupportedError extends SendRefusedError {
   }
 }
 
+/**
+ * SOR spec D3. The three NON-refusal failure classes of a send, typed so an
+ * adopter can act on WHERE the send failed. None extends SendRefusedError, and
+ * a refusal is never wrapped in one (every caller and the refusal parity test
+ * key on `instanceof SendRefusedError`).
+ */
+
+/** A failure BEFORE the provider call (a read, the breaker, the transport classification): nothing was sent. */
+export class SendNotAttemptedError extends Error {
+  constructor(
+    message: string,
+    readonly cause: unknown,
+  ) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+/**
+ * The provider call threw. Carries the D1 classification, the cause, the
+ * reconcile facts and the attempt start. The message carries the cause's
+ * message.
+ */
+export class ProviderSendFailedError extends Error {
+  readonly classification: SendFailureClassification;
+  readonly cause: unknown;
+  readonly facts: SendAttemptFacts;
+  readonly attemptedAt: string;
+  /** Mirrors of the cause's own `code` / `status`, so a reader of `err.code` keeps seeing the Twilio code. */
+  readonly code?: string | number;
+  readonly status?: number;
+  constructor(args: {
+    classification: SendFailureClassification;
+    cause: unknown;
+    facts: SendAttemptFacts;
+    attemptedAt: string;
+  }) {
+    const causeMessage = args.cause instanceof Error ? args.cause.message : String(args.cause);
+    super(`provider send failed (${args.classification.kind}): ${causeMessage}`);
+    this.name = new.target.name;
+    this.classification = args.classification;
+    this.cause = args.cause;
+    this.facts = args.facts;
+    this.attemptedAt = args.attemptedAt;
+    const c = args.cause as { code?: unknown; status?: unknown } | null;
+    if (c !== null && typeof c === 'object') {
+      if (typeof c.code === 'string' || typeof c.code === 'number') this.code = c.code;
+      if (typeof c.status === 'number') this.status = c.status;
+    }
+  }
+}
+
+/**
+ * The provider ACCEPTED the message and the row write (the append) failed:
+ * the text went out and is not recorded. Carries the provider SID, timestamp
+ * and status (accepted-send-lost-when-append-fails, piece 1).
+ */
+export class SendAcceptedNotRecordedError extends Error {
+  readonly providerSid: string;
+  readonly providerTs: string;
+  readonly status: DeliveryStatus;
+  readonly cause: unknown;
+  readonly facts: SendAttemptFacts;
+  constructor(args: {
+    providerSid: string;
+    providerTs: string;
+    status: DeliveryStatus;
+    cause: unknown;
+    facts: SendAttemptFacts;
+  }) {
+    super(`send accepted by the provider but not recorded (${args.providerSid})`);
+    this.name = new.target.name;
+    this.providerSid = args.providerSid;
+    this.providerTs = args.providerTs;
+    this.status = args.status;
+    this.cause = args.cause;
+    this.facts = args.facts;
+  }
+}
+
 // --- Service ----------------------------------------------------------------
 
 export interface SendMessageInput {
@@ -312,6 +408,20 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
+  /**
+   * SOR D3: a NON-refusal throw from a step before the provider call is a
+   * SendNotAttemptedError (nothing was sent). A refusal passes through
+   * untouched - never wrap one.
+   */
+  async function notAttempted<T>(run: () => Promise<T> | T, step: string): Promise<T> {
+    try {
+      return await run();
+    } catch (err) {
+      if (err instanceof SendRefusedError) throw err;
+      throw new SendNotAttemptedError(`send not attempted: ${step} failed`, err);
+    }
+  }
+
   return async function sendMessage(input) {
     const {
       conversationId,
@@ -329,7 +439,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     } = input;
     mergeContext({ conversationId });
 
-    const conversation = await conversations.getById(conversationId);
+    const conversation = await notAttempted(() => conversations.getById(conversationId), 'conversation read');
     if (!conversation) throw new ConversationNotFoundError(conversationId);
 
     // (0a) A2P kill-switch: when SMS sending is disabled (deployed pre-A2P),
@@ -358,7 +468,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // (1) Opt-out gate — suppression beats everything (doc §7.1 / 21610).
     // EITHER flag refuses: the conversation-level flag covers STOPs from
     // phones with no contact record yet (auto-capture is M1.2).
-    const phoneContact = await contacts.findByPhone(participantPhone);
+    const phoneContact = await notAttempted(() => contacts.findByPhone(participantPhone), 'contact read');
     // A named recipient (share-skip-fix I8) stands for this thread only while it
     // still HOLDS the thread's number. A retry (messaging.retrySend, the manual
     // Retry route) replays the recipient recorded at the original send, and that
@@ -428,15 +538,20 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // always allowed (even in manual mode) and never counted.
     if (automated) {
       if (isManualMode(conversation.ai_mode)) throw new ManualModeError(conversationId);
-      const count = await conversations.incrementAutomatedSendCount(conversationId, minuteBucket());
+      const count = await notAttempted(
+        () => conversations.incrementAutomatedSendCount(conversationId, minuteBucket()),
+        'breaker increment',
+      );
       if (count > config.sendBreakerMaxPerMinute) {
-        await conversations.setMode(conversationId, 'manual');
-        // §5 mandate: mode flips are audit-trail events.
-        await audit.append(`conversations#${conversationId}`, 'mode_changed', {
-          from: 'auto',
-          to: 'manual',
-          reason: 'breaker_trip',
-        });
+        await notAttempted(async () => {
+          await conversations.setMode(conversationId, 'manual');
+          // Sec 5 mandate: mode flips are audit-trail events.
+          await audit.append(`conversations#${conversationId}`, 'mode_changed', {
+            from: 'auto',
+            to: 'manual',
+            reason: 'breaker_trip',
+          });
+        }, 'breaker trip write');
         // ERROR on purpose: the hc-<env>-error-logs metric alarm (pino level
         // >= 50) is what pages on breaker trips — this line IS the alarm.
         log.error(
@@ -462,21 +577,45 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // An unconfigured BUSINESS_PHONE_NUMBER (dev/test only — prod+twilio
     // fail-fasts at boot) degrades to the previous service-picks behavior.
     const sender = from ?? config.businessPhoneNumber;
-    const transportIntent = adapter.classifyMessageTransport({
-      hasForwardableMedia:
-        (attachments?.length ?? 0) > 0 || (mediaUrls?.length ?? 0) > 0,
-    });
-    const prepared = adapter.prepareMessageSend(transportIntent, {
-      to: participantPhone,
-      ...(body !== undefined && { body }),
-      ...(mediaUrls !== undefined && { mediaUrls }),
-      ...(sender !== undefined && { from: sender }),
-    });
-    const result = await adapter.sendPreparedMessage(prepared);
+    const { transportIntent, prepared } = await notAttempted(() => {
+      const intent = adapter.classifyMessageTransport({
+        hasForwardableMedia:
+          (attachments?.length ?? 0) > 0 || (mediaUrls?.length ?? 0) > 0,
+      });
+      return {
+        transportIntent: intent,
+        prepared: adapter.prepareMessageSend(intent, {
+          to: participantPhone,
+          ...(body !== undefined && { body }),
+          ...(mediaUrls !== undefined && { mediaUrls }),
+          ...(sender !== undefined && { from: sender }),
+        }),
+      };
+    }, 'transport preparation');
 
-    // (4) Persist at send time under the provider SID/timestamp — the
-    // webhook echo of this same message dedupes against this item.
-    const appended = await messages.append({
+    // SOR D3/D13: the facts a reconcile matches this attempt on, and its start.
+    const fp = bodyFingerprint(body);
+    const facts: SendAttemptFacts = {
+      recipientDigest: recipientDigest(sender, participantPhone),
+      ...(sender !== undefined && { sender }),
+      bodyHash: fp.hash,
+      bodyShort: fp.short,
+      mediaCount: mediaUrls?.length ?? attachments?.length ?? 0,
+    };
+    const attemptedAt = new Date().toISOString();
+    let result: SendMessageResult;
+    try {
+      result = await adapter.sendPreparedMessage(prepared);
+    } catch (err) {
+      if (err instanceof SendRefusedError) throw err;
+      throw new ProviderSendFailedError({ classification: classifySendFailure(err), cause: err, facts, attemptedAt });
+    }
+
+    // (4) Persist at send time under the provider SID/timestamp - the
+    // webhook echo of this same message dedupes against this item. The
+    // provider has ACCEPTED the text: a failure here is
+    // SendAcceptedNotRecordedError, carrying the SID (SOR D3).
+    const appendInput: NewMessage = {
       conversationId,
       providerSid: result.providerSid,
       providerTs: result.providerTs,
@@ -516,27 +655,59 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       // input's default is a person's send) and the caller's recipient by id.
       automated,
       ...(heldRecipient !== undefined && { recipientContactId: heldRecipient.contactId }),
-    });
+    };
+    let appended: AppendResult;
+    try {
+      appended = await messages.append(appendInput);
+    } catch (err) {
+      throw new SendAcceptedNotRecordedError({
+        providerSid: result.providerSid,
+        providerTs: result.providerTs,
+        status: result.status,
+        cause: err,
+        facts,
+      });
+    }
 
-    // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and
-    // the §5 audit-trail entry for the send (IDs only, never the body).
-    const touched = await conversations.touchLastActivity(conversationId, body, result.providerTs);
-    await audit.append(`conversations#${conversationId}`, 'message_sent', {
-      providerSid: result.providerSid,
-      automated,
-      author,
-    });
+    // (5) Inbox touch - denormalized last-activity + preview (doc Sec 5) - and
+    // the Sec 5 audit-trail entry for the send (IDs only, never the body).
+    // BEST-EFFORT from here on (SOR D3): the text is out and its row is
+    // written, so a failure below is logged at ERROR and the send still
+    // returns its normal result - reporting it as failed was the falsehood
+    // (the staff send route now answers 201 where it answered 500).
+    let touched: ConversationItem | undefined;
+    try {
+      touched = await conversations.touchLastActivity(conversationId, body, result.providerTs);
+    } catch (err) {
+      log.error(
+        { err, conversationId, providerSid: result.providerSid, step: 'touchLastActivity' },
+        'outbound message sent but a post-append step failed (best-effort)',
+      );
+    }
+    try {
+      await audit.append(`conversations#${conversationId}`, 'message_sent', {
+        providerSid: result.providerSid,
+        automated,
+        author,
+      });
+    } catch (err) {
+      log.error(
+        { err, conversationId, providerSid: result.providerSid, step: 'audit' },
+        'outbound message sent but a post-append step failed (best-effort)',
+      );
+    }
 
     // (6) SSE live updates (M1.2): dashboards see this send (their own and
     // other operators') without polling. Outbound NEVER touches unread_count
-    // — the event just carries the current value from the touch's ALL_NEW.
+    // - the event just carries the current value from the touch's ALL_NEW,
+    // so it is skipped (never built from nothing) when the touch failed.
     events.emit('message.persisted', {
       conversationId,
       tsMsgId: appended.tsMsgId,
       direction: 'outbound',
       deliveryStatus: result.status,
     });
-    events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+    if (touched !== undefined) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
 
     log.info(
       { conversationId, providerSid: result.providerSid, status: result.status, automated },

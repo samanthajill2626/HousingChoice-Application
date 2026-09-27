@@ -26,11 +26,16 @@ import {
   ConversationNotFoundError,
   ManualModeError,
   GroupTextSendNotSupportedError,
+  ProviderSendFailedError,
   RelaySendNotSupportedError,
+  SendAcceptedNotRecordedError,
+  SendNotAttemptedError,
   SendRefusedError,
   SmsSendingDisabledError,
   createSendMessageService,
 } from '../src/services/sendMessage.js';
+import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messagingErrors.js';
+import { bodyFingerprint, recipientDigest } from '../src/lib/sendFingerprint.js';
 import { previewSendRefusal } from '../src/services/sendRefusalPreview.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import { SEND_REFUSAL_CASES, SEND_REFUSAL_PHONE } from './helpers/sendRefusalCases.js';
@@ -62,6 +67,15 @@ function makeFakes(
     env?: Record<string, string>;
     actualTransport?: MessageTransport | null;
     sendError?: Error;
+    // SOR D3 seams: each throws from the named fake step, on every call.
+    getByIdError?: unknown;
+    findByPhoneError?: unknown;
+    incrementError?: unknown;
+    setModeError?: unknown;
+    classifyError?: unknown;
+    appendError?: unknown;
+    touchError?: unknown;
+    auditError?: unknown;
   } = {},
 ): Fakes {
   const conversation: ConversationItem = {
@@ -103,7 +117,10 @@ function makeFakes(
 
   const conversationsRepo: ConversationsRepo = {
     createOrGetByParticipantPhone: async () => conversation,
-    getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
+    getById: async (id) => {
+      if (overrides.getByIdError !== undefined) throw overrides.getByIdError;
+      return id === conversation.conversationId ? conversation : undefined;
+    },
     findByParticipantPhone: async () => [conversation],
     findByParticipantEmail: async () => [],
     claimEmailForConversation: async (_email, conversationId) => ({ conversationId }),
@@ -123,6 +140,7 @@ function makeFakes(
       return conversation;
     },
     touchLastActivity: async (_id, previewText, ts) => {
+      if (overrides.touchError !== undefined) throw overrides.touchError;
       fakes.touched.push({ previewText, ts });
       conversation.last_activity_at = ts;
       if (previewText !== undefined) conversation.last_message_preview = previewText;
@@ -148,6 +166,7 @@ function makeFakes(
     listRelayGroups: async () => ({ items: [], truncated: false }),
     listRelayOptOutAttention: async () => ({ items: [] }),
     setMode: async (_id, mode) => {
+      if (overrides.setModeError !== undefined) throw overrides.setModeError;
       fakes.modeSets.push(mode);
       conversation.ai_mode = mode;
     },
@@ -155,6 +174,7 @@ function makeFakes(
       conversation.sms_opt_out = value;
     },
     incrementAutomatedSendCount: async () => {
+      if (overrides.incrementError !== undefined) throw overrides.incrementError;
       fakes.counterValue += 1;
       return fakes.counterValue;
     },
@@ -199,7 +219,10 @@ function makeFakes(
     },
   };
   const contactsRepo: ContactsRepo = {
-    findByPhone: async () => contact,
+    findByPhone: async () => {
+      if (overrides.findByPhoneError !== undefined) throw overrides.findByPhoneError;
+      return contact;
+    },
     getById: async (id) => (contact?.contactId === id ? contact : undefined),
     getDisplayById: async (id) => (contact?.contactId === id ? contact : undefined),
     getDisplaysByIds: async (ids) => new Map(
@@ -232,6 +255,7 @@ function makeFakes(
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {
+      if (overrides.appendError !== undefined) throw overrides.appendError;
       fakes.appended.push(message);
       return {
         deduped: false,
@@ -326,12 +350,14 @@ function makeFakes(
   };
   const auditRepo: AuditRepo = {
     append: async (entityKey, eventType, payload) => {
+      if (overrides.auditError !== undefined) throw overrides.auditError;
       fakes.auditEvents.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
     },
     listByEntity: async () => [],
   };
   const adapter: MessagingAdapter & CarrierMessageSender = {
     classifyMessageTransport(facts) {
+      if (overrides.classifyError !== undefined) throw overrides.classifyError;
       fakes.classified.push(facts);
       return Object.freeze({
         requestedTransport: facts.hasForwardableMedia ? 'mms' : 'sms',
@@ -1089,5 +1115,186 @@ describe('append-time retry lineage and the send flags (retry-send-window D6, D1
     expect(f.appended[0]).toMatchObject({ retryOf: '2026-06-12T09:58:00.000Z#SMorig', automated: false });
     expect(f.appended[0]).not.toHaveProperty('retryAttempt');
     expect(f.appended[0]).not.toHaveProperty('retryWindowStart');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOR spec D3: the send's NON-refusal failures are typed by WHERE they
+// happened, so an adopter can tell "nothing was sent" from "may have been
+// sent" from "sent but not recorded". A refusal is never wrapped, and a
+// failure after the row is written no longer fails the send.
+// ---------------------------------------------------------------------------
+describe('typed send errors (spec D3)', () => {
+  const base = { conversationId: 'conv-1', body: 'Hey there' };
+  const MAIN = '+15550009999';
+
+  it('a DB failure before the provider call is SendNotAttemptedError and sends nothing', async () => {
+    const cause = new Error('dynamo down');
+    const f = makeFakes({ findByPhoneError: cause });
+    const err = await f.service(base).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SendNotAttemptedError);
+    expect(err).not.toBeInstanceOf(SendRefusedError);
+    expect((err as SendNotAttemptedError).cause).toBe(cause);
+    expect((err as SendNotAttemptedError).message).toContain('contact read');
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
+  });
+
+  it('every other pre-provider step is wrapped the same way: the conversation read, the breaker increment, its trip write, the transport classification', async () => {
+    const cases: Array<{ name: string; make: () => Fakes; automated: boolean; step: string }> = [
+      { name: 'conversation read', make: () => makeFakes({ getByIdError: new Error('x') }), automated: false, step: 'conversation read' },
+      { name: 'breaker increment', make: () => makeFakes({ incrementError: new Error('x') }), automated: true, step: 'breaker' },
+      {
+        name: 'breaker trip write',
+        make: () => {
+          const f = makeFakes({ setModeError: new Error('x') });
+          f.counterValue = 3; // the next increment is over the cap of 3: the trip branch runs
+          return f;
+        },
+        automated: true,
+        step: 'breaker',
+      },
+      { name: 'transport classification', make: () => makeFakes({ classifyError: new Error('x') }), automated: false, step: 'transport' },
+    ];
+    for (const c of cases) {
+      const f = c.make();
+      const err = await f.service({ ...base, automated: c.automated }).catch((e: unknown) => e);
+      expect(err, c.name).toBeInstanceOf(SendNotAttemptedError);
+      expect((err as Error).message, c.name).toContain(c.step);
+      expect(f.sent, c.name).toHaveLength(0);
+    }
+  });
+
+  it('a refusal is NEVER wrapped', async () => {
+    const f = makeFakes({
+      contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001', sms_opt_out: true },
+    });
+    const err = await f.service(base).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ContactOptedOutError);
+    expect(err).not.toBeInstanceOf(SendNotAttemptedError);
+  });
+
+  it('a refusal thrown INSIDE a wrapped step, or by the provider call, passes through unwrapped', async () => {
+    const inStep = makeFakes({ findByPhoneError: new ContactOptedOutError('conv-1') });
+    const a = await inStep.service(base).catch((e: unknown) => e);
+    expect(a).toBeInstanceOf(ContactOptedOutError);
+    expect(a).not.toBeInstanceOf(SendNotAttemptedError);
+    const atProvider = makeFakes({ sendError: new SmsSendingDisabledError() });
+    const b = await atProvider.service(base).catch((e: unknown) => e);
+    expect(b).toBeInstanceOf(SmsSendingDisabledError);
+    expect(b).not.toBeInstanceOf(ProviderSendFailedError);
+  });
+
+  it('a provider throw becomes ProviderSendFailedError carrying the classification, the cause message, the facts, and the cause code/status as own properties', async () => {
+    const cause = Object.assign(new Error('provider unavailable'), { status: 503, code: 20500 });
+    const f = makeFakes({ env: { BUSINESS_PHONE_NUMBER: MAIN }, sendError: cause });
+    const before = Date.now();
+    const err = await f.service(base).catch((e: unknown) => e);
+    const after = Date.now();
+    expect(err).toBeInstanceOf(ProviderSendFailedError);
+    expect(err).not.toBeInstanceOf(SendRefusedError);
+    const typed = err as ProviderSendFailedError;
+    expect(typed.message).toContain('provider unavailable');
+    expect(typed.cause).toBe(cause);
+    expect(typed.classification).toEqual({ kind: 'unknown', code: '20500', status: 503 });
+    expect(typed.code).toBe(20500);
+    expect(typed.status).toBe(503);
+    expect(Object.prototype.hasOwnProperty.call(typed, 'code')).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(typed, 'status')).toBe(true);
+    expect(typed.facts).toEqual({
+      recipientDigest: recipientDigest(MAIN, '+15550100001'),
+      sender: MAIN,
+      bodyHash: bodyFingerprint('Hey there').hash,
+      bodyShort: false,
+      mediaCount: 0,
+    });
+    const at = Date.parse(typed.attemptedAt);
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(after);
+    expect(f.appended).toHaveLength(0);
+  });
+
+  it('the facts follow the send: no business number means no sender, an explicit from wins, media is counted and a media-only body is short', async () => {
+    const unpinned = makeFakes({ sendError: Object.assign(new Error('boom'), { code: 'ECONNRESET' }) });
+    const a = (await unpinned.service(base).catch((e: unknown) => e)) as ProviderSendFailedError;
+    expect(a).toBeInstanceOf(ProviderSendFailedError);
+    expect(a.facts).not.toHaveProperty('sender');
+    expect(a.facts.recipientDigest).toBe(recipientDigest(undefined, '+15550100001'));
+    expect(a.classification).toEqual({ kind: 'unknown', code: 'ECONNRESET' });
+    expect(a.code).toBe('ECONNRESET');
+    expect(a.status).toBeUndefined();
+
+    const pinned = makeFakes({ env: { BUSINESS_PHONE_NUMBER: MAIN }, sendError: new Error('boom') });
+    const b = (await pinned.service({ ...base, from: '+15550109001' }).catch((e: unknown) => e)) as ProviderSendFailedError;
+    expect(b.facts.sender).toBe('+15550109001');
+    expect(b.facts.recipientDigest).toBe(recipientDigest('+15550109001', '+15550100001'));
+    expect(b.classification).toEqual({ kind: 'unknown' });
+    expect(b.code).toBeUndefined();
+
+    const media = makeFakes({ sendError: new Error('boom') });
+    const c = (await media
+      .service({ conversationId: 'conv-1', mediaUrls: ['https://m/1', 'https://m/2'] })
+      .catch((e: unknown) => e)) as ProviderSendFailedError;
+    expect(c.facts.mediaCount).toBe(2);
+    expect(c.facts.bodyShort).toBe(true);
+    expect(c.facts.bodyHash).toBe(bodyFingerprint(undefined).hash);
+  });
+
+  it('the adapter kill switch is classified, not refused: rejected with sms_sending_disabled', async () => {
+    const f = makeFakes({ sendError: new AdapterSmsSendingDisabledError('SMS sending is disabled') });
+    const err = await f.service(base).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderSendFailedError);
+    expect((err as ProviderSendFailedError).classification).toEqual({ kind: 'rejected', code: 'sms_sending_disabled' });
+  });
+
+  it('an append failure after acceptance is SendAcceptedNotRecordedError with the SID', async () => {
+    const cause = new Error('TransactionInProgressException');
+    const f = makeFakes({ env: { BUSINESS_PHONE_NUMBER: MAIN }, appendError: cause });
+    const err = await f.service(base).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SendAcceptedNotRecordedError);
+    expect(err).not.toBeInstanceOf(ProviderSendFailedError);
+    const typed = err as SendAcceptedNotRecordedError;
+    expect(typed.providerSid).toBe('SMfake-1');
+    expect(typed.providerTs).toBe('2026-06-12T10:00:00.000Z');
+    expect(typed.status).toBe('queued');
+    expect(typed.cause).toBe(cause);
+    expect(typed.message).toContain('SMfake-1');
+    expect(typed.facts).toEqual({
+      recipientDigest: recipientDigest(MAIN, '+15550100001'),
+      sender: MAIN,
+      bodyHash: bodyFingerprint('Hey there').hash,
+      bodyShort: false,
+      mediaCount: 0,
+    });
+    // The text WAS sent; nothing after the append ran.
+    expect(f.sent).toHaveLength(1);
+    expect(f.touched).toHaveLength(0);
+    expect(f.emitted).toHaveLength(0);
+  });
+
+  it('a failure after the row is written does NOT throw: ERROR logged, conversation.updated skipped', async () => {
+    const f = makeFakes({ touchError: new Error('touch down') });
+    const outcome = await f.service(base);
+    expect(outcome).toEqual({
+      conversationId: 'conv-1',
+      providerSid: 'SMfake-1',
+      tsMsgId: '2026-06-12T10:00:00.000Z#SMfake-1',
+      status: 'queued',
+    });
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted']);
+    // The audit still ran: each post-append step is best-effort on its own.
+    expect(f.auditEvents.map((e) => e.eventType)).toEqual(['message_sent']);
+    const errors = f.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('post-append step failed'));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ conversationId: 'conv-1', providerSid: 'SMfake-1', step: 'touchLastActivity' });
+  });
+
+  it('an audit failure after the row is written does NOT throw either', async () => {
+    const f = makeFakes({ auditError: new Error('audit down') });
+    await expect(f.service(base)).resolves.toMatchObject({ conversationId: 'conv-1', providerSid: 'SMfake-1' });
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'conversation.updated']);
+    const errors = f.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('post-append step failed'));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ step: 'audit' });
   });
 });

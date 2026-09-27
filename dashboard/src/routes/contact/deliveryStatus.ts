@@ -613,8 +613,14 @@ export function presentRelayDelivery(
   if (failed > 0) {
     // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
     // relay-group bug read as a bare "0/2 - 2 failed" with no code). Distinct
-    // reasons joined; a repeated code collapses to one.
-    const reason = joinReasons(failedLegs);
+    // reasons joined; a repeated code collapses to one. SOR D20 (code review
+    // C-6): a `send_unconfirmed` leg beside them adds its sentence AFTER the
+    // failed legs' reasons - the chip carries it as its reason too. A stale
+    // leg with no code adds nothing.
+    const reason = joinReasons([
+      ...failedLegs,
+      ...notConfirmedLegs.filter((s) => s.errorCode === SEND_UNCONFIRMED_CODE),
+    ]);
     return {
       // The reason is appended INLINE after this label by the bubble, so the
       // counts come first and the reason last: it belongs to the FAILED legs

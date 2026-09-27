@@ -1915,9 +1915,11 @@ describe('send_unconfirmed - Not confirmed by code alone (SOR D20/D21)', () => {
     });
   });
 
-  // Beside a REAL failure the chip counts both, and - as every failed chip does
-  // - takes its reason from the failed legs only; the row names the other.
-  it('beside a real failure, counts both and keeps the failed legs reason', () => {
+  // Beside a REAL failure the chip counts both; its reason is the failed legs'
+  // reason FIRST and then the D20 sentence (code review C-6: D20 says the
+  // rollup chip carries it as its reason too). A stale leg with no code adds
+  // nothing - see "puts the reason LAST and takes it from the FAILED legs only".
+  it('beside a real failure, counts both and joins the D20 sentence after the failed legs reason (code review C-6)', () => {
     expect(
       presentRelayDelivery(
         [
@@ -1931,6 +1933,28 @@ describe('send_unconfirmed - Not confirmed by code alone (SOR D20/D21)', () => {
       label: 'delivered 1/3 - 1 failed, 1 not confirmed',
       tone: 'danger',
       isFailure: true,
+      reason: "Carrier filtered the message (error 30007); Couldn't confirm whether this text went out",
+    });
+    // Two unconfirmed legs add the sentence once.
+    expect(
+      presentRelayDelivery([
+        { status: 'failed', errorCode: '21211' },
+        { status: 'failed', errorCode: 'send_unconfirmed' },
+        { status: 'undelivered', errorCode: 'send_unconfirmed' },
+      ])?.reason,
+    ).toBe("Delivery failed (error 21211); Couldn't confirm whether this text went out");
+    // Only the CODE speaks: a stale leg carrying a transient code adds nothing.
+    const now = Date.parse('2026-09-27T12:00:00.000Z');
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'failed', errorCode: '30007' },
+          { status: 'queued', errorCode: '30022', sentAt: new Date(now - STALE_SENT_AFTER_MS * 4).toISOString() },
+        ],
+        { messageAtMs: now - 60_000, nowMs: now },
+      ),
+    ).toMatchObject({
+      label: 'delivered 0/2 - 1 failed, 1 not confirmed',
       reason: 'Carrier filtered the message (error 30007)',
     });
   });

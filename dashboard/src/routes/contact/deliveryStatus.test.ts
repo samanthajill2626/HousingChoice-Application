@@ -1877,6 +1877,19 @@ describe('send_unconfirmed - Not confirmed by code alone (SOR D20/D21)', () => {
     ).toEqual(NOT_CONFIRMED);
   });
 
+  // The CODE decides on every roster (S4 mutant pass): the rollup counts a
+  // send_unconfirmed leg in J whatever product it serves, so the row must say
+  // the same - never a status-keyed "Undelivered" beside a chip counting it
+  // under not confirmed. (The native group-text product never writes the code
+  // today; this pins that the rule is the code, not the product.)
+  it('reads Not confirmed on a native group-text row too, matching the rollup', () => {
+    const leg: RetryAwareRelayLeg = { status: 'undelivered', errorCode: 'send_unconfirmed' };
+    expect(presentLegDelivery(leg, 'group_text')).toEqual(NOT_CONFIRMED);
+    expect(presentRelayDelivery([{ status: 'delivered' }, leg])?.label).toBe(
+      'delivered 1/2 - 1 not confirmed',
+    );
+  });
+
   it('the rollup counts it under not confirmed, never failed, with the reason - no clock, no retryAware', () => {
     expect(
       presentRelayDelivery(

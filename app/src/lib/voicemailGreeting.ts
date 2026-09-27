@@ -128,14 +128,14 @@ export class GreetingUploadGate extends Transform {
       callback(new GreetingRejectedError('empty'));
       return;
     }
-    const head = Buffer.concat(this.held);
+    // Still unverified at the end, so fewer than VOICEMAIL_GREETING_SNIFF_BYTES
+    // arrived (_transform sniffs as soon as it holds that many). Such a body is
+    // refused WITHOUT a sniff: the MP3 sniff alone needs only 3 bytes, which
+    // let a 3-byte `ID3` body become the live greeting. Spec 4.1's "fewer bytes
+    // than the sniff needs" is read with the sniff's own 12-byte constant (fix
+    // wave R1, FW2); no playable greeting is that small.
     this.held = [];
-    if (!sniffGreetingHeader(head, this.opts.format)) {
-      callback(new GreetingRejectedError('invalid_format'));
-      return;
-    }
-    this.verified = true;
-    callback(null, head);
+    callback(new GreetingRejectedError('invalid_format'));
   }
 }
 

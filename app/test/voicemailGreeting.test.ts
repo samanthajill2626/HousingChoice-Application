@@ -111,6 +111,28 @@ describe('GreetingUploadGate', () => {
     await expect(drain(new GreetingUploadGate({ format: 'mp3', maxBytes: 10 }), [])).rejects.toMatchObject({ reason: 'empty' });
     await expect(drain(new GreetingUploadGate({ format: 'mp3', maxBytes: 10 }), [Buffer.from([0xff, 0xfb])])).rejects.toMatchObject({ reason: 'invalid_format' });
   });
+  // Fix wave R1, FW2 (spec 4.1: "on end with fewer bytes than the sniff needs
+  // it errors invalid_format", read with the sniff's own 12-byte constant). The
+  // MP3 sniff alone needs only 3 bytes, so each of these used to pass the gate
+  // and become the live greeting - an unplayable <Play> on every missed call.
+  it.each([
+    ['a 3-byte ID3 magic and nothing else', Buffer.from('ID3', 'latin1')],
+    ['a 4-byte MPEG frame header (FF FB 90 00) with no audio', Buffer.from([0xff, 0xfb, 0x90, 0x00])],
+    ['an 11-byte ID3-prefixed body, one short of the sniff window', minimalMp3().subarray(0, 11)],
+  ])('refuses %s with invalid_format, having pushed ZERO bytes', async (_label, body) => {
+    const gate = new GreetingUploadGate({ format: 'mp3', maxBytes: VOICEMAIL_GREETING_MAX_BYTES });
+    const pushed: Buffer[] = [];
+    gate.on('data', (c: Buffer) => pushed.push(c));
+    await expect(drain(gate, [body])).rejects.toMatchObject({ reason: 'invalid_format' });
+    expect(pushed).toHaveLength(0);
+  });
+  it('passes a 12-byte ID3-prefixed body byte-exact (the sniff window is exactly 12 bytes)', async () => {
+    const twelve = minimalMp3().subarray(0, 12);
+    const gate = new GreetingUploadGate({ format: 'mp3', maxBytes: VOICEMAIL_GREETING_MAX_BYTES });
+    const out = await drain(gate, [twelve]);
+    expect(out.equals(twelve)).toBe(true);
+    expect(gate.bytesSeen).toBe(12);
+  });
   it('the rejection is a GreetingRejectedError', async () => {
     const err = await drain(new GreetingUploadGate({ format: 'wav', maxBytes: 10 }), [minimalMp3()]).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GreetingRejectedError);

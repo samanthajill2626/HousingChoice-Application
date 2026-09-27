@@ -18,7 +18,9 @@
 //     the member's send-attempt record (D8a) - a fresh foreign attempt defers
 //     the member, a terminal one skips it, a stale one is taken over into
 //     reconcile; the attempt clock on the slot; the per-leg presign; the
-//     `attempted` aggregation write. A throw before the claim sent nothing
+//     `attempted` aggregation write; LAST, the re-arm of the claim (code
+//     review ADV-1 - an attempt taken over meanwhile is not sent). A throw
+//     before the claim sent nothing
 //     and defers the member with NO slot write; a throw after it releases the
 //     attempt as retryable and defers.
 //   - SEND: the provider call. A failure is classified (D1-D6): a refusal
@@ -1379,9 +1381,12 @@ async function runRelayFanOutExecution(
           break;
         case 'stranded':
           // The hand-off write failed: the record stays attempting, the slot
-          // untouched. Carried with no slot write; the relay ladder (5 s + 10 s)
-          // cannot outlast the claim TTL, so a still-fresh record is deferred
-          // at the cap and left for the sweeper (spec D8a, revision 11).
+          // untouched. Carried with no slot write. The record ages from its
+          // re-arm just before the send (code review ADV-1): a later pass that
+          // meets it past the claim TTL takes it over into reconcile; one that
+          // meets it fresh - the relay ladder's 5 s + 10 s is shorter than the
+          // TTL - defers it, and a record still fresh at the cap is left for
+          // the sweeper (spec D8a, revision 11).
           transientRemaining.push(memberKey);
           break;
         case 'handed_to_reconcile':
@@ -1535,6 +1540,8 @@ export type RelayLegPayload = Pick<
  *   its fence to another writer, which owns the record. Never carried.
  *   `reason: 'unknown'` marks the lost hand-off of an UNKNOWN send outcome:
  *   it counts toward the outage brake like any unknown (the broadcast twin).
+ *   `reason: 'takeover'` marks a re-arm that found the attempt taken over
+ *   before the send (code review ADV-1): nothing was sent.
  * - `suppressed` / `refused` / `filtered`: a TERMINAL slot with that arm's
  *   code (`contact_opted_out`, the refusal code, 30007) is written.
  * - `rejected`: the provider refused (D5): the slot is failed with the
@@ -1586,7 +1593,7 @@ export interface RelayLegSendOutcome {
   errorCode?: string;
   /** On `sent_unrecorded` / `handed_to_reconcile`: the attempt to hand off. */
   attemptRef?: AttemptRef;
-  /** On `handed_to_reconcile` (and a lost hand-off's `skipped_terminal`): why. */
+  /** On `handed_to_reconcile`, and on `skipped_terminal` (a lost hand-off or a lost re-arm): why. */
   reason?: 'unknown' | 'takeover';
   /** On `transient`: a FOREIGN attempt owns the member; no slot was written. */
   deferredByClaim?: true;
@@ -1980,6 +1987,17 @@ export async function sendOneRelayLeg(args: {
     if (transport.kind === 'versioned') {
       await setVersionedAggregationState(messages, payload, key, 'attempted', ['attempted']);
     }
+
+    // RE-ARM (code review ADV-1): the LAST step before the provider call - the
+    // claim TTL runs from here. `undefined`: another writer took the attempt
+    // over and handed it to reconcile, so do not send and write nothing. A
+    // throw is the post-claim prepare failure below.
+    const rearmed = await sendAttempts.rearm(owner, ref, new Date().toISOString());
+    if (rearmed === undefined) {
+      log.info({ ...ctx }, 'relayFanOut: attempt taken over before the send - not sent; the takeover owns it');
+      return { kind: 'skipped_terminal', reason: 'takeover' };
+    }
+    ref = rearmed;
 
     // SEND.
     phase = 'sending';

@@ -375,6 +375,15 @@ export interface SendMessageInput {
    * contact is judged, no id is recorded, and a WARN names it.
    */
   recipient?: ContactItem;
+  /**
+   * Code review ADV-1: the caller's last word before the provider call - run
+   * after every gate and pre-provider step, immediately before the send. The
+   * broadcast fan-out re-arms its send-attempt claim here. `false` means the
+   * caller's attempt was taken over: nothing is sent, and the send throws
+   * SendNotAttemptedError. A throw is a SendNotAttemptedError too (nothing was
+   * sent). Absent on every other send.
+   */
+  beforeProviderSend?: () => Promise<boolean>;
 }
 
 export interface SendMessageOutcome {
@@ -436,6 +445,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       retryAttempt,
       retryWindowStart,
       recipient,
+      beforeProviderSend,
     } = input;
     mergeContext({ conversationId });
 
@@ -602,6 +612,9 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       bodyShort: fp.short,
       mediaCount: mediaUrls?.length ?? attachments?.length ?? 0,
     };
+    if (beforeProviderSend !== undefined && !(await notAttempted(beforeProviderSend, 'pre-send hook'))) {
+      throw new SendNotAttemptedError('send not attempted: the attempt was taken over', undefined);
+    }
     const attemptedAt = new Date().toISOString();
     let result: SendMessageResult;
     try {

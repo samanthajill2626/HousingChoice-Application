@@ -1458,6 +1458,7 @@ describe('relay.retryLeg (30003 ladder)', () => {
       seedRelay(world);
       const row = seedRetryRow(world);
       unknownSend();
+      const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
       register();
 
       await runHandler(payloadFor(row));
@@ -1468,11 +1469,13 @@ describe('relay.retryLeg (30003 ladder)', () => {
         { owner: rungRef(row), attemptedAt: record!.attemptedAt, checkNo: 0 },
       ]);
       // The slot keeps `queued` with no code (D7): only the unit's attempt
-      // clock and its `attempted` aggregation write touched it.
+      // clock - the CLAIM instant; the record's attemptedAt is its later
+      // re-arm (code review ADV-1) - and its `attempted` aggregation write
+      // touched it.
       expect(slotOf(row.tsMsgId)).toEqual({
         ...SEEDED_SLOT,
         transportAggregationState: 'attempted',
-        attemptedAt: record!.attemptedAt,
+        attemptedAt: claim.mock.calls[0]![2],
       });
       expect(bumps).toHaveLength(0);
       expect(persistedEmits()).toEqual([]);
@@ -1718,6 +1721,24 @@ describe('relay.retryLeg (30003 ladder)', () => {
       expect(slotOf(row.tsMsgId)).toEqual(SEEDED_SLOT);
       expect(errorLogs()).toEqual([]);
       expect(infoLogs()).toContainEqual(expect.objectContaining({ event: 'relay_retry_leg', reason: 'unknown' }));
+    });
+
+    it('ADV-1: a re-arm that finds the rung attempt taken over sends nothing - skipped_terminal (takeover): no close, no hand-off, no emit (FW2-1)', async () => {
+      seedRelay(world);
+      const row = seedRetryRow(world);
+      vi.spyOn(world.sendAttemptsRepo, 'rearm').mockResolvedValueOnce(undefined);
+      register();
+
+      await runHandler(payloadFor(row));
+
+      expect(world.sent).toHaveLength(0);
+      expect(await world.sendAttemptsRepo.get(rungOwner(row))).toMatchObject({ state: 'attempting', attemptNo: 1 });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(persistedEmits()).toEqual([]);
+      expect(errorLogs()).toEqual([]);
+      expect(infoLogs()).toContainEqual(
+        expect.objectContaining({ event: 'relay_retry_leg', reason: 'takeover' }),
+      );
     });
 
     it('a failed inbox touch after a sent leg is logged at ERROR and never fails the job', async () => {

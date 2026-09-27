@@ -1298,3 +1298,68 @@ describe('typed send errors (spec D3)', () => {
     expect(errors[0]).toMatchObject({ step: 'audit' });
   });
 });
+
+// Code review ADV-1 (FW2-1): the caller's last word before the provider call.
+// The broadcast fan-out re-arms its send-attempt claim here, so the claim TTL
+// is measured from the moment the provider is called, not from the claim.
+describe('the pre-send hook (code review ADV-1)', () => {
+  const base = { conversationId: 'conv-1', body: 'Hey there' };
+
+  it('runs after every pre-provider step and immediately before the provider call; true lets the send proceed', async () => {
+    const f = makeFakes();
+    const seen: string[] = [];
+    const outcome = await f.service({
+      ...base,
+      beforeProviderSend: async () => {
+        seen.push(`prepared=${f.prepared.length} sent=${f.sent.length}`);
+        return true;
+      },
+    });
+    expect(seen).toEqual(['prepared=1 sent=0']);
+    expect(f.sent).toHaveLength(1);
+    expect(outcome).toMatchObject({ conversationId: 'conv-1', providerSid: 'SMfake-1' });
+  });
+
+  it('answering false is SendNotAttemptedError("the attempt was taken over") with no cause: nothing sent, nothing appended', async () => {
+    const f = makeFakes();
+    const err = await f.service({ ...base, beforeProviderSend: async () => false }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SendNotAttemptedError);
+    expect(err).not.toBeInstanceOf(SendRefusedError);
+    expect((err as SendNotAttemptedError).message).toBe('send not attempted: the attempt was taken over');
+    expect((err as SendNotAttemptedError).cause).toBeUndefined();
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
+    expect(f.emitted).toHaveLength(0);
+  });
+
+  it('a hook that throws is SendNotAttemptedError carrying the cause: nothing sent', async () => {
+    const cause = new Error('TransactionConflict');
+    const f = makeFakes();
+    const err = await f.service({
+      ...base,
+      beforeProviderSend: async () => {
+        throw cause;
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SendNotAttemptedError);
+    expect((err as SendNotAttemptedError).cause).toBe(cause);
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
+  });
+
+  it('a refused send never reaches the hook (every gate runs first)', async () => {
+    const f = makeFakes({
+      contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001', sms_opt_out: true },
+    });
+    let called = 0;
+    const err = await f.service({
+      ...base,
+      beforeProviderSend: async () => {
+        called += 1;
+        return true;
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ContactOptedOutError);
+    expect(called).toBe(0);
+  });
+});

@@ -19,6 +19,7 @@ import {
   configureScheduler,
   defineJobHandler,
   dispatchJob,
+  enqueue,
   enqueueImmediate,
 } from '../src/jobs/jobs.js';
 import {
@@ -2064,6 +2065,162 @@ describe('broadcast.send (M1.8a)', () => {
       await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
       expect(consistent).toHaveBeenCalledTimes(1);
       expect(consistent).toHaveBeenCalledWith('bcast-1');
+    });
+
+    // --- code review ADV-1 (FW2-1): the re-arm immediately before the send ---
+
+    /** A real broadcast.send envelope NOT run by the queue: dispatched by hand, a stalled pass never blocks outbound.settle(). */
+    async function detachedEnvelope(): Promise<unknown> {
+      const envelope = await enqueue(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' }, { runAt: new Date(Date.now() + 600_000) });
+      const [item] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobId === envelope.jobId),
+        1,
+      );
+      return JSON.parse(JSON.stringify(item!.envelope)) as unknown;
+    }
+    const takenOverLines = (capture: LogCapture) =>
+      capture.atLevel(30).filter((l) => String(l['msg']).includes('taken over before the send'));
+
+    it('ADV-1 (zz-adv-6): a pass stalled between its claim and the send - taken over, reconciled never_sent and re-driven meanwhile - resumes and does NOT send: its re-arm finds the attempt moved on (FW2-1)', async () => {
+      seedUnit(world);
+      const [t] = tenants(1);
+      seedBroadcast(world, [t!]);
+      const capture = wire();
+      registerSendReconcileJobHandler({
+        adapter: world.adapter,
+        messagesRepo: world.messagesRepo,
+        broadcastsRepo: world.broadcastsRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        activityEventsRepo: world.activityEventsRepo,
+        listingSendsRepo: world.listingSendsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+      // Pass A claims t-1 and stalls in the send wrapper's contact read (after
+      // the claim, before the provider call) - for 31 s: past the claim TTL.
+      const realClaim = world.sendAttemptsRepo.claim.bind(world.sendAttemptsRepo);
+      vi.spyOn(world.sendAttemptsRepo, 'claim').mockImplementationOnce((owner, facts) =>
+        realClaim(owner, facts, agoIso(31_000)),
+      );
+      const realFind = world.contactsRepo.findByPhone.bind(world.contactsRepo);
+      let resumeA!: () => void;
+      let stalledA!: () => void;
+      const aIsStalled = new Promise<void>((resolve) => {
+        stalledA = resolve;
+      });
+      vi.spyOn(world.contactsRepo, 'findByPhone').mockImplementationOnce(async (...args) => {
+        stalledA();
+        await new Promise<void>((resolve) => {
+          resumeA = resolve;
+        });
+        return realFind(...args);
+      });
+      const passA = dispatchJob(await detachedEnvelope());
+      await aIsStalled;
+      // Pass B - a second first pass under another jobId - finds the claim
+      // stale: it takes it over and hands off; checks 0 and 1 are due at once.
+      await runFirstPass();
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({ state: 'reconciling', attemptNo: 1 });
+      // Check 2: the provider holds nothing - never_sent. The record is
+      // re-driven and the re-drive pass claims attempt 2 and sends.
+      const [check2] = outbound.delayed.splice(
+        outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB),
+        1,
+      );
+      await dispatchJob(JSON.parse(JSON.stringify(check2!.envelope)) as unknown);
+      await outbound.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([t!.phone]);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'sent',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      // Pass A resumes. The attempt it claimed is gone: it must not send.
+      resumeA();
+      await passA;
+      await outbound.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([t!.phone]);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'sent',
+        attemptNo: 2,
+        redriveCount: 1,
+      });
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toMatchObject({ status: 'sent' });
+      expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
+      expect(takenOverLines(capture)).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('ADV-1: a re-arm that finds the attempt taken over sends nothing and writes nothing - not carried, no reconcile, one INFO (FW2-1)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      const capture = wire();
+      const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
+      vi.spyOn(world.sendAttemptsRepo, 'rearm').mockResolvedValueOnce(undefined);
+      // A continuation, so a carried recipient would show as a new continuation.
+      await runPayload({ broadcastId: 'bcast-1', recipientKeys: ['t-1'], attempt: 2 });
+      expect(world.sent).toHaveLength(0);
+      expect(world.broadcasts.get('bcast-1')!.recipients['t-1']).toEqual({ status: 'queued' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'attempting',
+        attemptNo: 1,
+        attemptedAt: claim.mock.calls[0]![2],
+      });
+      expect(outbound.delayed).toHaveLength(0);
+      expect(takenOverLines(capture)).toHaveLength(1);
+      expect(takenOverLines(capture)[0]).toMatchObject({ broadcastId: 'bcast-1', recipientKey: 't-1' });
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('send not attempted'))).toHaveLength(0);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('ADV-1: a re-arm that throws defers the recipient send_retryable and releases the attempt retryable on its claimed ref - nothing sent (FW2-1)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(2));
+      const capture = wire();
+      vi.spyOn(world.sendAttemptsRepo, 'rearm').mockRejectedValueOnce(new Error('TransactionConflict'));
+      await runFirstPass();
+      const b = world.broadcasts.get('bcast-1')!;
+      expect(b.recipients['t-1']).toEqual({ status: 'queued', errorCode: 'send_retryable' });
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'retryable',
+        cause: 'send_retryable',
+        attemptNo: 1,
+      });
+      expect(b.recipients['t-2']!.status).toBe('sent');
+      expect(world.sent.map((s) => s.to)).toEqual(['+15550100002']);
+      expect(continuationKeys()).toEqual(['t-1']);
+      const warn = capture.atLevel(40).filter((l) => String(l['msg']).includes('send not attempted'));
+      expect(warn).toHaveLength(1);
+      expect(warn[0]).toMatchObject({ recipientKey: 't-1' });
+    });
+
+    it('ADV-1: the pass re-arms inside the send wrapper as the LAST step before the provider call and fences its record write on the ref the re-arm returned (FW2-1)', async () => {
+      seedUnit(world);
+      seedBroadcast(world, tenants(1));
+      wire();
+      const findByPhone = vi.spyOn(world.contactsRepo, 'findByPhone');
+      const realRearm = world.sendAttemptsRepo.rearm.bind(world.sendAttemptsRepo);
+      const later = new Date(Date.now() + 1_000).toISOString();
+      const rearm = vi
+        .spyOn(world.sendAttemptsRepo, 'rearm')
+        .mockImplementationOnce((owner, ref) => realRearm(owner, ref, later));
+      const send = vi.spyOn(world.adapter, 'sendPreparedMessage');
+      await runFirstPass();
+      expect(rearm).toHaveBeenCalledTimes(1);
+      expect(findByPhone.mock.invocationCallOrder[0]!).toBeLessThan(rearm.mock.invocationCallOrder[0]!);
+      expect(rearm.mock.invocationCallOrder[0]!).toBeLessThan(send.mock.invocationCallOrder[0]!);
+      expect(await world.sendAttemptsRepo.get(ownerOf('t-1'))).toMatchObject({
+        state: 'done',
+        outcome: 'sent',
+        attemptNo: 1,
+        attemptedAt: later,
+      });
     });
   });
 

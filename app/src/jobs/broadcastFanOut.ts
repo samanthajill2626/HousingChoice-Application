@@ -17,8 +17,10 @@
 //     attempt owns; the tenant's conversation and the rendered body; then the
 //     CLAIM on the recipient's send-attempt record (D8a), immediately before
 //     the send - a fresh foreign attempt defers the recipient, a terminal one
-//     skips it, a stale one is taken over into reconcile. A throw here sent
-//     nothing: the recipient is deferred to the continuation.
+//     skips it, a stale one is taken over into reconcile. The send wrapper
+//     re-arms the claim as its last step before the provider call (code
+//     review ADV-1): an attempt taken over meanwhile is not sent. A throw here
+//     sent nothing: the recipient is deferred to the continuation.
 //   - SEND: sendMessage into the tenant's 1:1 conversation, STAMPED with
 //     broadcast_id so the delivery callback can roll delivered/failed into the
 //     broadcast stats. A share the dashboard created (created_via 'dashboard')
@@ -779,6 +781,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       let contact: ContactItem | undefined;
       let outcome: SendMessageOutcome | undefined;
       let secondUnknownWouldClose = false;
+      let takenOver = false;
       try {
         // PREPARE. Resolve the contact (the snapshot holds keys; re-read flags
         // fresh so a STOP since send-time is honored), then the fences.
@@ -846,6 +849,18 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           // cannot make the wrapper refuse (or admit) the wrong person.
           recipient: contact,
           broadcastId: payload.broadcastId,
+          // Code review ADV-1: re-arm the claim as the LAST step before the
+          // provider call. A lost re-arm - the attempt was taken over - sends
+          // nothing; a throw is a SendNotAttemptedError (deferred below).
+          beforeProviderSend: async () => {
+            const rearmed = await attempts.rearm(owner, ref!, new Date().toISOString());
+            if (rearmed === undefined) {
+              takenOver = true;
+              return false;
+            }
+            ref = rearmed;
+            return true;
+          },
         });
 
         // RECORD. The slot (conversationId+tsMsgId, status 'sent') and its
@@ -927,6 +942,12 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           return 'other';
         }
         if (err instanceof SendNotAttemptedError) {
+          if (takenOver) {
+            // ADV-1: the re-arm found the attempt taken over - its reconcile
+            // owns it. Nothing sent, nothing written, not carried.
+            log.info({ ...ctx }, 'broadcastFanOut: attempt taken over before the send - not sent; the takeover owns it');
+            return 'other';
+          }
           // The wrapper failed before its provider call: nothing was sent.
           log.warn({ err, ...ctx }, 'broadcastFanOut: send not attempted - recipient deferred to the continuation');
           await deferClaimed(owner, held, SEND_RETRYABLE_CODE);

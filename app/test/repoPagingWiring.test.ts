@@ -55,15 +55,18 @@ describe('repos follow LastEvaluatedKey (queryAll wiring)', () => {
     expect(rows.map((r) => r.conversationId)).toEqual(['c1', 'c2']);
   });
 
+  // share-sent-outcome D7: both ledger readers list only a COUNTED row, and a
+  // counted row always carries sentAt (an un-counted pair has it REMOVED), so
+  // the paged fixtures carry the sentAt every listed row has.
   it('listingSendsRepo.listByContact returns BOTH pages', async () => {
-    const { doc } = twoPages([{ unitId: 'u1' }], [{ unitId: 'u2' }]);
+    const { doc } = twoPages([{ unitId: 'u1', sentAt: 't1' }], [{ unitId: 'u2', sentAt: 't2' }]);
     const repo = createListingSendsRepo({ doc, logger });
     const rows = await repo.listByContact('contact-1');
     expect(rows.map((r) => r.unitId)).toEqual(['u1', 'u2']);
   });
 
   it('listingSendsRepo.listByUnit returns BOTH pages', async () => {
-    const { doc } = twoPages([{ contactId: 'k1' }], [{ contactId: 'k2' }]);
+    const { doc } = twoPages([{ contactId: 'k1', sentAt: 't1' }], [{ contactId: 'k2', sentAt: 't2' }]);
     const repo = createListingSendsRepo({ doc, logger });
     const rows = await repo.listByUnit('unit-1');
     expect(rows.map((r) => r.contactId)).toEqual(['k1', 'k2']);

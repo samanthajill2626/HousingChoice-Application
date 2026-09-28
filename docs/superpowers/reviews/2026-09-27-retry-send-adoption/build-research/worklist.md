@@ -144,20 +144,44 @@ by reading before editing.
 
 ## T9 and the handback (orchestrator-owned lines; no code)
 
-24. (E F1, ADJUDICATED: deploy note, NO code belt) Deploy boundary: a
-    `messaging.retrySend` job that threw within ~10 minutes BEFORE the deploy
-    (SQS 120 s visibility x 5 receives) is redelivered to the new code, which
-    no longer reads the run-once marker and finds no attempt record - it claims
-    and sends. For an unknown or accepted-not-recorded first attempt that is a
-    possible (resp. certain) second text. Ruling: the spec removed the marker
-    from this job on purpose; the optional belt (read `job#<jobId>` when the
-    gate finds no record) re-couples the job to the marker for a ten-minute
-    window and trades the double text back for the silent loss this mission
-    closes. Per Cameron's severity scale (a double text is HIGH at most; keep
-    a fix only if small and contained, else file it) this is a DEPLOY NOTE in
-    the handback and a dated line in `retry-send-lost-under-job-marker`:
-    deploy when the worker log shows no `retrySend` failure in the preceding
-    ~10 minutes. The belt is offered to the planner as a "your eye" item.
+24. (E F1) Deploy boundary: a `messaging.retrySend` job that threw within
+    ~10 minutes BEFORE the deploy (SQS 120 s visibility x 5 receives) is
+    redelivered to the new code, which no longer reads the run-once marker and
+    finds no attempt record - it claims and sends. For an unknown or
+    accepted-not-recorded first attempt that is a possible (resp. certain)
+    second text. The orchestrator first ruled "deploy note, no code belt";
+    the PLANNER OVERRULED (2026-09-28, relayed mid-build): **ACCEPT WITH THE
+    BELT, and keep the deploy note** - small and contained is Cameron's test
+    for keeping a double-text fix, and a deploy precondition is what a Friday
+    deploy forgets. BINDING for T4:
+    - ONLY on the path where step 4's `gateFor` returns `{ kind: 'proceed' }`
+      with NO record (absent - never on done/retryable, never on redriven),
+      read `messagesRepo.getJobExecutionMarker(jobId)` with
+      `jobId = getContext()?.jobId` (the `getContext` import therefore STAYS;
+      skip the read when there is no jobId). A marker present means this exact
+      jobId already ran under the pre-adoption code: INFO
+      `retrySend: pre-adoption delivery already ran this job - not re-sent`
+      with `jobId` and the owner context, return - nothing claimed, nothing
+      sent. No marker (every post-deploy job; every re-drive and deferral,
+      which carry fresh jobIds) -> proceed to 4a exactly as planned.
+    - The job NEVER writes a marker (test 6d's `putJobExecutionMarker`
+      never-called pin stands). Reading the helper is not an edit of the
+      fenced helper. `getJobExecutionMarker` (`messagesRepo.ts:3481-3486`) is
+      an EVENTUALLY consistent Get - sufficient here (the marker was written
+      at least one 120 s visibility timeout before any redelivery); the
+      helper is NOT changed (inboundEmail relies on it).
+    - Tests in `retrySendAttempt.test.ts`: (a) seed
+      `world.jobExecutionMarkers.set(<the envelope's jobId>, conversationId)`
+      and dispatch that envelope directly (build it so its jobId is known - the
+      old EXECUTION GUARD case's recipe in `twilioStatusWebhook.test.ts`) ->
+      provider calls 0, no record, ONE INFO with that msg and the jobId;
+      (b) a done/retryable record AND a marker for the envelope's jobId -> the
+      belt is NOT consulted (a `getJobExecutionMarker` spy is not called), the
+      job runs and sends.
+    - Handback: declared as DEVIATION 10 ("a read-only marker belt for
+      pre-deploy redeliveries; the marker is never written by this job"). T9
+      keeps the dated deploy note in `retry-send-lost-under-job-marker` as
+      belt-and-braces.
 25. (E F4, deploy note) Rollback hazard: pre-branch code cannot read a
     `retry_send` owner (`recipientKeyOf` -> undefined -> `hashRecipientKey`
     throws; `parseOwnerRef` throws), so a rollback while fresh `retry_send`

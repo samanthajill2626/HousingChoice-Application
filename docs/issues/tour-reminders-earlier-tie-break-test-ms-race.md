@@ -28,3 +28,11 @@ reminders route or its repository - the fixture race is on `main` as well.
 **Suggested fix.** Compute the shared dueAt once
 (`const due = isoHoursFromNow(-2);`) and pass the same string to both reminders,
 as the comment already intends.
+
+**Second sighting (2026-09-28).** `feat/retry-send-adoption` @81c51044, the
+build orchestrator's app-vitest checkpoint after slice S4 (full app workspace
+under load: 391 of 392 files passed, 7919 tests passed, this one case failed
+with the identical `[ 'rem-e-d', 'rem-e-b', ... ]` signature). The file passed
+ALONE twice right after (69/69, 69/69). That branch does not touch the test, the
+tour reminders route or its repository. Still the fixture's two clock reads; the
+suggested fix stands.

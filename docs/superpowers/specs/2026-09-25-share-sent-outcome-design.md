@@ -715,8 +715,10 @@ the build finds out of scope.
   fails 30003 and whose retry delivers ends with the results row Delivered,
   the share Sent, the tenant flagged "Already sent", "Properties sent" listing
   the property, and the results row reading "will retry" in between; (b) a
-  share whose text fails 30003 and whose retry also fails, exhausting the
-  chain, ends with the row Failed, the share "Not sent" on the results page
+  share whose text fails 30003 and whose retries also fail, exhausting the
+  chain (four failed texts at the lane's ten-second backoff; the fake
+  carrier's fail profile is single-use, so it is re-armed after each send
+  lands), ends with the row Failed, the share "Not sent" on the results page
   AND on the list (the row refetch), the tenant NOT flagged, the property gone
   from "Properties sent", the milestone reading "Property text failed", and
   "will retry" gone once the chain ends; (c) a

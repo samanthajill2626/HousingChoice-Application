@@ -2,13 +2,13 @@
 
 Date: 2026-09-25 (stub); rewritten 2026-09-27 against `main` @d9cb5c04 (Branch A,
 `feat/retry-send-window` and `feat/send-outcome-reconcile` Stage 1 merged).
-Status: DESIGN v4 - v1 (6e99330d), v2 (82bdd304) and v3 (1951d190) revised
-after adversarial review rounds 1-3 (`spec-review-r1-a.md`,
-`spec-review-r1-b.md`, `spec-review-r2.md`, `spec-review-r3.md`;
-adjudications `spec-review-r1-adjudications.md`,
-`spec-review-r2-adjudications.md`, `spec-review-r3-adjudications.md`); v4 is
-written against Stage 1b's FINAL spec (revision 5 @dad3fecb); ready for
-round 4 (the cap) and the human gate.
+Status: DESIGN v5 - v1 (6e99330d), v2 (82bdd304), v3 (1951d190) and v4
+(dc480dcc) revised after adversarial review rounds 1-4 (`spec-review-r1-a.md`,
+`spec-review-r1-b.md`, `spec-review-r2.md`, `spec-review-r3.md`,
+`spec-review-r4.md`; adjudications `spec-review-r<n>-adjudications.md`).
+Written against Stage 1b's FINAL spec (revision 5 @dad3fecb). Round 4 was
+the cap: its precision findings are folded here; its two remaining design
+calls are Cameron's, in section 9. AT THE HUMAN GATE.
 Branch `feat/share-sent-outcome`, worktree `W:\tmp\share-sent-outcome`.
 Records: `docs/superpowers/reviews/2026-09-27-share-sent-outcome/` (the three
 research findings this rewrite rests on: `research-broadcast-side-findings.md`,
@@ -82,7 +82,8 @@ sent", "Sent to N tenants" (GLOSSARY: `unit` in code, "property" to staff).
   Until this branch lands, a share retry's receipt is logged at INFO and
   touches nothing; the rollup's one 2.5-second re-read on a slot miss is paid
   for those receipts in the interim (a few a day at most: only share texts
-  that failed 30003 have retries). Once this branch lands, a miss for a row
+  that failed and were retried - automatically after a 30003, or by a staff
+  Retry after any failure - have retry rows). Once this branch lands, a miss for a row
   WITHOUT `retry_root` (an original whose slot cannot be found - the lost-
   rollup class) logs at WARN again; a miss for a retry row is a routing bug
   and logs at ERROR.
@@ -190,9 +191,11 @@ The states:
   the text never went (a pass stranded mid-attempt; a route enqueue the route
   called failed whose pass ran anyway) - the text may be out;
 - **stranded** - `queued` in a share no longer `sending` with NO send-attempt
-  record, or with a record that says the text never went (`never_sent`,
-  `refused`, `rejected`, `enqueue_failed`, `redrive_refused`): never texted -
-  a route enqueue that truly failed, a draft;
+  record, or with a record whose stored shape says the text never went (`done`
+  with `refused`, `rejected`, `enqueue_failed` or `redrive_refused`; every
+  other shape - any open state, `redriven`, or `done` with `sent`, `adopted`,
+  `unresolved` or `retryable` - reads in flight, the safe side): never texted
+  - a route enqueue that truly failed, a draft;
 - **failed** - failed with no live promise and no unresolved ruling: a
   carrier rejection; a chain that ended without a retry row - refused,
   rejected, the window closed, the deferral cap (the promise lapses) or the
@@ -219,11 +222,17 @@ sent - the sweeper's own rule). Without the record, a route send that truly
 failed would keep its whole audience flagged for good, and the share staff
 create to recover would start every tenant unchecked. One keyed record read
 per `queued` slot of a non-`sending` share - strands only, so rare; the
-in-memory test double mirrors it. Records expire after 30 days, so an older
-strand reads stranded, which is right for the flag's purpose. The price that
-remains: a `sending` share whose pass died keeps its unreached recipients
-flagged until SOR's sweeper closes it - the price Branch A already pays,
-named as the sweeper's population.
+in-memory test double mirrors it. The read is bounded by the record's own
+30-day life: a queued slot in a share older than that (the share's own
+timestamp) reads stranded without a read, which is right for the flag's
+purpose. A record read that fails reads in flight (the safe side) and is
+logged; it never empties the set. Two prices remain: a `sending` share whose
+pass died keeps its unreached recipients flagged until SOR's sweeper closes
+it - the price Branch A already pays, named as the sweeper's population; and
+a share the route marked failed whose pass is still RUNNING has recipients
+not yet claimed, so with no record yet they read stranded until the pass
+reaches them - a window the length of the pass, in the double-text hint
+class (section 8).
 
 The row reads are bounded in time: only a failed-30003 slot whose newest
 attempt is younger than the LONGEST a promise can be live, measured from that
@@ -292,10 +301,14 @@ crash after the adoption cannot lose it); and the four unresolved-end sites
 of section 0 (the slot becomes `failed` / `send_unconfirmed`, the row-less
 attempt ordered after the one it retried) - at the reconcile's close the
 write rides 1b's own re-apply; at the job's two arms, which have none, it
-goes FIRST, before 1b closes the record: `send_unconfirmed` is the safe
-state, a crash after it leaves a record the redelivery or the sweeper
-resolves, and any later real outcome (an adoption, a re-drive's own row)
-supersedes it under the order rule. A retry's mere acceptance is not
+goes FIRST, before 1b closes the record, and the ledger's `unconfirmed`
+entry (D7) goes with it: `send_unconfirmed` is the safe state, a crash after
+it leaves a record the redelivery or the sweeper resolves, and any later
+real outcome (an adoption, a re-drive's own row) supersedes it under the
+order rule. At the enqueue arm one window stays: a crash between 1b's
+hand-off (the record turns `reconciling`) and this branch's write leaves a
+`reconciling` record with no chain that no redelivery revisits; D8 reads
+those too (step 3). A retry's mere acceptance is not
 written by anyone (the retry job writes no slots); the slot learns a retry
 from the carrier's `sent` confirmation or its terminal receipt, whichever
 comes first.
@@ -354,12 +367,17 @@ caller supplies, and it is OPTIONAL in the stats shape:
   UNSET - nothing has to learn to omit anything, an optional field stays
   unset whenever no promise map is supplied;
 - a page merging a payload whose stats omit the count: when the row's last
-  known count is zero, keeps zero; when it is above zero, keeps it only until
-  a debounced refetch of THAT row's stats from the route (the true count,
-  from D1's reads) replaces it - so a chain that ends in a failure receipt
-  (exhaustion, a retry's 30007), which shrinks nothing in `failed`, still
-  turns the row from Sending to Not sent within the debounce; a payload that
-  carries the count replaces it outright.
+  known count is zero, keeps zero; when it is above zero AND the share is
+  finished (stored `sent` or `failed` - a Sending or Draft share keeps its
+  stored label and needs no count, and a pass in progress emits an event a
+  second), keeps it only until a debounced refetch of THAT share's STATS
+  replaces it - a stats-only read of the per-share route (the share and its
+  derived stats, without the recipient list and its contact reads that the
+  results page needs; section 9 puts its shape to Cameron) - so a chain that
+  ends in a failure receipt (exhaustion, a retry's 30007), which shrinks
+  nothing in `failed`, still turns the row from Sending to Not sent within
+  the debounce; a payload that carries the count replaces it outright. The
+  volume is the receipts of finished shares with retries: a few a day.
 
 Both hooks change from replacing the row's stats wholesale to this merge.
 The chips show Failed minus pending and a Retrying chip for pending, so the
@@ -499,8 +517,11 @@ re-runnable. Its census, then its apply:
    every chain back to this original).
 2. Stamps `broadcast_id` and `retry_root` on every retry row of such a chain
    that lacks them - written before Stage 1b, or written after it from an
-   unstamped ancestor. This is what lets a chain that started before the
-   deploy keep routing after it.
+   unstamped ancestor - and CORRECTS a `retry_root` that disagrees with the
+   chain it rebuilt (1b's walk stops at its hop cap or at a broken link, so a
+   post-1b row can carry a wrong root, which once stamped would route to no
+   slot). This is what lets a chain that started before the deploy keep
+   routing after it.
 3. Applies D2's transition to slots whose newest attempt differs from the
    recorded one, to slots whose recorded attempt disagrees with its own
    message row (a slot stuck `sent` after a lost failure rollup; a retry
@@ -509,9 +530,11 @@ re-runnable. Its census, then its apply:
    attempt's row (`retry_outcome`) AND from the retry-owner attempt records
    (`retry#<conversation>#<retried row>#<attempt>`, read by key while they
    live, 30 days: a `done` / `unresolved` record is the trace a dropped
-   guarded write leaves) - under D2's conditions, never touching a delivered
-   or skipped slot, never moving a slot an attempt newer than the census has
-   touched.
+   guarded write leaves, and a `reconciling` record older than the
+   reconcile's schedule with no chain row is the trace of the enqueue arm's
+   first crash window - both read as unresolved) - under D2's conditions,
+   never touching a delivered or skipped slot, never moving a slot an attempt
+   newer than the census has touched.
 4. Rebuilds each ledger row's per-share memory, `counted`, `sentAt` and
    `broadcastId` from the slots and the rows, under the row's change token,
    never erasing an entry written after the census; and fills a row the
@@ -582,9 +605,10 @@ the build finds out of scope.
   failures), the retry adoption and the four unresolved-end sites (D2 + D7),
   the repair. Readers: the composer flag (the repo query and the
   in-memory test double, which must mirror the two readings and the promise
-  reads), the results route and row, the derived stats and the
-  `retry_pending` sub-bucket, the SSE payload (the rollup's emit supplies its
-  promise), finalize (unchanged), the two "Sent to N" surfaces (D5), the
+  reads and the record reads), the results route and row, the derived stats
+  and the `retry_pending` sub-bucket, the SSE payload (the rollup's emit
+  supplies its promise), the per-share route's stats-only read (D4's
+  refetch), finalize (unchanged), the two "Sent to N" surfaces (D5), the
   fake-twilio harness.
 - The promise and the chain end: written by RSW and 1b on message rows
   (unchanged); read by the results route and the preview route (D1, D3),
@@ -619,7 +643,8 @@ the build finds out of scope.
    Cameron's go, before the next blast. Nothing infra-side.
 4. Merge points for anyone landing beside this branch: the rollup in the
    status webhook (fenced for SOR Stage 1; opened here for D2 and D7), the
-   retry adoption and the four unresolved-end sites (1b's), the ledger
+   retry adoption and the four unresolved-end sites (1b's), the per-share
+   route (its stats-only read), the ledger
    repo and its two routes, the contact timeline's milestone mapping, the
    fan-out's `recordPropertySent`, `deriveBroadcastStats` and the dashboard's
    stats types (the `retry_pending` sub-bucket and the promise map), the
@@ -711,7 +736,12 @@ the build finds out of scope.
   and leaves those slots and rows as they are. Accepted (the stub's residual).
 - **The double-text window** during a retry's backoff (a second share of the
   same property before the retry runs) stays: the tenant is flagged (pending
-  is a safe reading), but the flag is a hint, not a block. Accepted, as in v5.
+  is a safe reading), but the flag is a hint, not a block. Accepted, as in
+  the pre-split v5. The same class: a share the route marked failed whose
+  pass is still running leaves its unclaimed recipients unflagged for the
+  length of the pass (D1) - a second share in that window can double-text
+  them. Accepted (a double text is at most HIGH by the standing severity
+  rule, and the flag is a hint).
 - **A lapsed promise before the retry's first receipt** (RSW's gap): for that
   interval the results row reads a final failure and shows the hint while the
   thread shows the retry. Bounded by receipt latency; the next receipt or the
@@ -768,7 +798,23 @@ the build finds out of scope.
   1000-recipient blast already takes about 17 minutes at the pacing). Say no
   and the plan sizes the worst case instead, with the over-limit write as a
   logged failure.
-- Nothing to relay to SOR: Stage 1b's spec is final (r5) and this spec is
+- Nothing REQUIRED of SOR: Stage 1b's spec is final (r5) and this spec is
   written against it. The walk request in the earlier relay is WITHDRAWN -
   r5 already walks pre-deploy chains for `retry_root`, and the one-hop
   `broadcast_id` copy is closed by this branch's own repair.
+- Round 4's two remaining calls (the review loop is at its cap; these are
+  yours, not a round 5):
+  1. D4's list refetch reads a share's stats WITHOUT its recipient list. The
+     per-share route today returns every recipient and reads every contact,
+     so the refetch needs a stats-only shape of it: a query flag on the
+     existing route (recommended - no new endpoint, the same handler minus
+     the recipient and contact reads), or a new stats endpoint, or no
+     refetch at all (the list then reads Sending for a finished share whose
+     retry chain failed until the page is reopened - the round-3 defect).
+  2. OPTIONAL relay to SOR, one expression: when r5 walks to the root for a
+     pre-1b retried row, take `broadcast_id` from that root too (the walk
+     already reads it). It closes the deploy-to-repair window for a post-1b
+     retry of an unstamped pre-1b retry row; without it, such a retry keeps
+     TODAY's behavior (its receipt bypasses the share) until the repair runs.
+     Recommended: skip - 1b's loop is closed, the window is not a regression,
+     and D8 covers it.

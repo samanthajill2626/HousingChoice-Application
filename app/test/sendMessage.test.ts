@@ -282,6 +282,9 @@ function makeFakes(
     getByTsMsgIdConsistent: async () => undefined,
     getManyByTsMsgIds: async () => new Map(),
     annotateMessage: async () => {},
+    // retry-send-adoption (R3, R7) - unused by the send service:
+    listRetryChildrenConsistent: async () => [],
+    annotateRetryPromise: async () => true,
     putMediaPointers: async () => {},
     listMediaPointers: async () => [],
     putJobExecutionMarker: async () => true,
@@ -1094,7 +1097,7 @@ describe('append-time retry lineage and the send flags (retry-send-window D6, D1
     expect(sent.appended[0]).not.toHaveProperty('recipientContactId');
   });
 
-  it('passes retryOf, retryAttempt and retryWindowStart into the append, and none of them on a normal send', async () => {
+  it('passes retryOf, retryAttempt, retryWindowStart and retryRoot into the append, and none of them on a normal send', async () => {
     const f = makeFakes();
     await f.service({
       conversationId: 'conv-1',
@@ -1103,15 +1106,17 @@ describe('append-time retry lineage and the send flags (retry-send-window D6, D1
       retryOf: '2026-06-12T09:58:00.000Z#SMorig',
       retryAttempt: 2,
       retryWindowStart: '2026-06-12T09:58:00.000Z',
+      retryRoot: '2026-06-12T09:58:00.000Z#SMroot',
     });
     await f.service({ conversationId: 'conv-1', body: 'normal' });
     expect(f.appended[0]).toMatchObject({
       retryOf: '2026-06-12T09:58:00.000Z#SMorig',
       retryAttempt: 2,
       retryWindowStart: '2026-06-12T09:58:00.000Z',
+      retryRoot: '2026-06-12T09:58:00.000Z#SMroot',
       automated: true,
     });
-    for (const field of ['retryOf', 'retryAttempt', 'retryWindowStart']) {
+    for (const field of ['retryOf', 'retryAttempt', 'retryWindowStart', 'retryRoot']) {
       expect(f.appended[1]).not.toHaveProperty(field);
     }
   });

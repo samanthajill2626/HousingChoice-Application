@@ -16,6 +16,9 @@
 // world, and after every step requires the same answer: the call's result,
 // the watched rows' `delivery_recipients` maps, the watched relay SID
 // pointers, and (broadcast cases) the whole broadcast item minus its clocks.
+// retry-send-adoption adds each watched row's retry lineage and promise
+// (retry_of, retry_attempt, retry_root, retry_due_at, retry_outcome) and the
+// retrychild# pointers of every row the script appended a retry child for.
 // Where a step also names what the answer should BE, that is asserted on the
 // real answer, so a script cannot silently stop exercising its branch.
 //
@@ -36,10 +39,12 @@ import {
   type BroadcastsRepo,
   type BroadcastStats,
 } from '../src/repos/broadcastsRepo.js';
+import { RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_WITHDRAWN_AT, type RetryOutcome } from '../src/lib/retrySendWindow.js';
 import {
   allowedPriorStatuses,
   createMessagesRepo,
   type DeliveryStatus,
+  type MessageItem,
   type MessagesRepo,
   type NewMessage,
   type RelayRecipientDelivery,
@@ -83,6 +88,8 @@ interface MsgCtx {
   rows: Map<string, { conversationId: string; tsMsgId: string }>;
   /** Relay SID pointers the state check reads. */
   sids: Set<string>;
+  /** retry-send-adoption: rows the script appended a retry child for - the state check reads their retrychild# pointers. */
+  retryParents: Set<string>;
 }
 
 interface MsgStep {
@@ -232,6 +239,79 @@ const putPtr = (sidName: string, row: string, memberKey: string): MsgStep => ({
     await repo.putRelaySidPointer(sid, { conversationId: ref.conversationId, tsMsgId: ref.tsMsgId, memberKey });
     return 'put';
   },
+});
+
+// retry-send-adoption (R3, R7): the one-to-one retry lineage's clocks. The
+// manual child is sent BEFORE the automatic one but appended AFTER it, so the
+// pointer read's sort-key order is not the append order.
+const T_MANUAL = '2026-09-26T12:01:00.000Z';
+const T_AUTO = '2026-09-26T12:02:00.000Z';
+const T_REDELIVERY = '2026-09-26T12:03:00.000Z';
+const DUE_1 = '2026-09-26T12:04:00.000Z';
+const DUE_2 = '2026-09-26T12:05:00.000Z';
+const WITHDRAW: { retryDueAt: string; retryOutcome: RetryOutcome } = {
+  retryDueAt: RETRY_PROMISE_WITHDRAWN_AT,
+  retryOutcome: RETRY_OUTCOME_UNCONFIRMED,
+};
+
+/**
+ * One OUTBOUND one-to-one row in the case's single thread. With `retry` it is a
+ * retry row of `retry.parent` (automatic when `attempt` is set, else a manual
+ * Retry) carrying retry_root = the parent, sent at `retry.at`.
+ */
+const appendOneToOne = (
+  name: string,
+  retry?: { parent: string; attempt?: number; at: string },
+  deduped = false,
+): MsgStep => ({
+  label: `append one-to-one row ${name}${
+    retry === undefined ? '' : ` as a ${retry.attempt === undefined ? 'manual' : `rung-${retry.attempt}`} retry of ${retry.parent} at ${retry.at}`
+  }`,
+  run: async (repo, ctx) => {
+    const parent = retry === undefined ? undefined : rowRef(ctx, retry.parent);
+    if (retry !== undefined) ctx.retryParents.add(retry.parent);
+    const result = await repo.append({
+      conversationId: `conv-${ctx.id}-1to1`,
+      providerSid: `SM${ctx.id}-${name}`,
+      providerTs: retry?.at ?? T0,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'hello',
+      deliveryStatus: 'undelivered',
+      errorCode: '30003',
+      ...(parent !== undefined && { retryOf: parent.tsMsgId, retryRoot: parent.tsMsgId }),
+      ...(retry?.attempt !== undefined && { retryAttempt: retry.attempt }),
+    });
+    ctx.rows.set(name, { conversationId: result.conversationId, tsMsgId: result.tsMsgId });
+    return result;
+  },
+  expect: { deduped },
+});
+
+/** The row's retrychild# pointers; the count is scripted so an empty answer from both cannot pass vacuously. */
+const children = (name: string, count: number): MsgStep => ({
+  label: `listRetryChildrenConsistent ${name}`,
+  run: async (repo, ctx) => {
+    const row = rowRef(ctx, name);
+    const list = await repo.listRetryChildrenConsistent(row.conversationId, row.tsMsgId);
+    return { count: list.length, list };
+  },
+  expect: { count },
+});
+
+const promise = (
+  name: string,
+  patch: { retryDueAt: string; retryOutcome?: RetryOutcome },
+  expected: string | undefined,
+  won: boolean,
+): MsgStep => ({
+  label: `annotateRetryPromise ${name} ${JSON.stringify(patch)} expecting ${expected ?? 'no promise'}`,
+  run: (repo, ctx) => {
+    const row = rowRef(ctx, name);
+    return repo.annotateRetryPromise(row.conversationId, row.tsMsgId, { ...patch }, { retryDueAt: expected });
+  },
+  expect: won,
 });
 
 const STATUSES: DeliveryStatus[] = ['queued_pending', 'queued', 'sent', 'delivered', 'undelivered', 'failed'];
@@ -483,6 +563,28 @@ const MSG_CASES: MsgCase[] = [
           };
         },
       },
+    ],
+  },
+  {
+    // retry-send-adoption (R3, R5, R7). The redelivered automatic child computes
+    // ANOTHER key (another providerTs), so a pointer written outside the
+    // cancelled transaction would surface as a third child.
+    name: 'one-to-one retry lineage: retry_root at append, the retrychild# pointers (automatic, manual, a redelivered dedupe) in sort-key order, annotateRetryPromise over its four shapes',
+    steps: [
+      appendOneToOne('root'),
+      appendOneToOne('auto', { parent: 'root', attempt: 1, at: T_AUTO }),
+      appendOneToOne('manual', { parent: 'root', at: T_MANUAL }),
+      appendOneToOne('auto', { parent: 'root', attempt: 1, at: T_REDELIVERY }, true),
+      children('root', 2),
+      children('manual', 0),
+      promise('root', { retryDueAt: DUE_1 }, undefined, true),
+      promise('root', { retryDueAt: DUE_2 }, undefined, false),
+      promise('root', { retryDueAt: DUE_2 }, DUE_2, false),
+      promise('root', { retryDueAt: DUE_2 }, DUE_1, true),
+      promise('root', WITHDRAW, DUE_2, true),
+      promise('root', WITHDRAW, DUE_2, false),
+      promise('manual', WITHDRAW, undefined, true),
+      promise('nope', { retryDueAt: DUE_1 }, undefined, false),
     ],
   },
 ];
@@ -750,6 +852,18 @@ function withoutClocks(
   );
 }
 
+/** retry-send-adoption: a row's one-to-one retry lineage and promise - absent fields compare as undefined. */
+function retryState(row: MessageItem | undefined): Record<string, unknown> | undefined {
+  if (row === undefined) return undefined;
+  return {
+    retry_of: row.retry_of,
+    retry_attempt: row.retry_attempt,
+    retry_root: row.retry_root,
+    retry_due_at: row.retry_due_at,
+    retry_outcome: row.retry_outcome,
+  };
+}
+
 /** Both implementations' watched message state must agree after every step. */
 async function messagesAgree(world: FakeWorld, realCtx: MsgCtx, fakeCtx: MsgCtx, where: string): Promise<void> {
   const fake = world.messagesRepo;
@@ -764,11 +878,21 @@ async function messagesAgree(world: FakeWorld, realCtx: MsgCtx, fakeCtx: MsgCtx,
     expect(withoutClocks(fakeRow?.delivery_recipients), `${where}: row ${name} delivery_recipients`).toStrictEqual(
       withoutClocks(realRow?.delivery_recipients),
     );
+    expect(retryState(fakeRow), `${where}: row ${name} retry lineage and promise`).toStrictEqual(retryState(realRow));
   }
   for (const sid of new Set([...realCtx.sids, ...fakeCtx.sids])) {
     expect(await fake.getRelaySidPointerConsistent(sid), `${where}: pointer ${sid}`).toStrictEqual(
       await realMessages.getRelaySidPointerConsistent(sid),
     );
+  }
+  // The retrychild# partition of every row the script appended a child for,
+  // compared AS ANSWERED: the fake must hold the real Query's sort-key order.
+  for (const name of new Set([...realCtx.retryParents, ...fakeCtx.retryParents])) {
+    const ref = rowRef(realCtx, name);
+    expect(
+      await fake.listRetryChildrenConsistent(ref.conversationId, ref.tsMsgId),
+      `${where}: retry children of ${name}`,
+    ).toStrictEqual(await realMessages.listRetryChildrenConsistent(ref.conversationId, ref.tsMsgId));
   }
 }
 
@@ -826,8 +950,8 @@ describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror th
       it(c.name, async () => {
         const id = `${caseNo}-${randomUUID().slice(0, 8)}`;
         const world = createFakeWorld();
-        const realCtx: MsgCtx = { id, rows: new Map(), sids: new Set() };
-        const fakeCtx: MsgCtx = { id, rows: new Map(), sids: new Set() };
+        const realCtx: MsgCtx = { id, rows: new Map(), sids: new Set(), retryParents: new Set() };
+        const fakeCtx: MsgCtx = { id, rows: new Map(), sids: new Set(), retryParents: new Set() };
         for (const [stepNo, step] of c.steps.entries()) {
           const where = `${c.name} / step ${stepNo} ${step.label}`;
           const realAnswer = await step.run(realMessages, realCtx, { kind: 'real' });

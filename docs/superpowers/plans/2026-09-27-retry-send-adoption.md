@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 1** (before plan review). This document is self-contained: every test and every code block a task needs is IN that task. Where a code block names a helper, that helper is defined in the task the block cites.
+**Revision 2** (after plan review round 1; adjudications in `docs/superpowers/reviews/2026-09-27-retry-send-adoption/design-review/adjudications.md`, section "Plan round 1"). This document is self-contained: every test and every code block a task needs is IN that task. Where a code block names a helper, that helper is defined in the task the block cites; where a sketch names a file-local test helper, the sketch defines it.
 
 **Goal:** Move the one-to-one 30003 automatic retry (`messaging.retrySend`) onto the send-attempt record and the `send.reconcile` job, so a retry that errors after its guard is claimed is resolved (adopted, re-driven once, or closed `unresolved` with the retried row marked "retry not confirmed") instead of silently lost, and every retry row carries `retry_root` and `broadcast_id` for share-skip Branch B.
 
@@ -25,7 +25,9 @@
 4. R7's one fenced line is re-worded in ASCII as well as re-leveled: the source string carries a U+2014 (`twilio.ts:3904`), and every touched line must be ASCII. No test, doc or dashboard matches the string. The line becomes `log.info({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot - ignored')`.
 5. R4's "`slotCloseOf(outcome)` maps `unresolved` to the WITHDRAW" is delivered in `closeSlot`'s `retry_send` arm keyed on the code (`slotCloseOf` takes no owner, `sendReconcile.ts:922`); the observable rule is identical, including the superseded-exit re-apply.
 6. R3's "every `guardWrite` loss is logged at ERROR": `guardWrite` logs a THROW at ERROR and returns `true` for a write that resolved with a LOST fence (`app/src/lib/guardWrite.ts:8-10`). Every fenced write in this plan captures the fence answer inside the callback and logs the loss itself (the broadcast idiom, `broadcastFanOut.ts:598-614`).
-7. `isBroadcastRowFor` (`app/src/jobs/broadcastFanOut.ts:1296-1306`, a second reader of `broadcast_id` the spec asks the handback to describe) gains `row.retry_of === undefined`: a share-RETRY row that now carries `broadcast_id` is never the share recipient's own slot row. The rollup in `twilio.ts` does not use it (it matches slots by conversationId + tsMsgId) and stays fenced.
+7. `isBroadcastRowFor` (`app/src/jobs/broadcastFanOut.ts:1296-1306`, a second reader of `broadcast_id` the spec asks the handback to describe) gains `row.retry_of === undefined`: a share-RETRY row that now carries `broadcast_id` is never the share recipient's own slot row. This is a CODE change in a file the spec's "In" list does not name (defensive: as far as the plan can trace, unreachable today); the rollup in `twilio.ts` does not use it (it matches slots by conversationId + tsMsgId) and stays fenced.
+8. Spec section 4 item 15's "200 on a stale `attempting` (31 s)" is a leftover of the claim-TTL bound that review round 3 replaced: R6 defines "stale" as older than `RETRY_SEND_WINDOW_MS` from `attemptedAt`, for every open state. The route follows R6; a 31 s `attempting` record answers 409 `retry_pending`, and the "stale" case is tested at `RETRY_SEND_WINDOW_MS + 1 s`.
+9. R1's "one function the job, the facts and the adoption all call" for the media rule: the job's `planRetryMedia` decides the facts' `mediaCount` at claim time; the ADOPTION reads that answer back from the record (`record.mediaCount > 0` -> the retried row's `media_attachments` ride the adopted row; else none) instead of re-running the plan without the job's media store. Same rule, one source of truth (the record), no second store dependency in the reconcile.
 
 ## Global Constraints
 
@@ -41,13 +43,13 @@
 - Log lines carry `conversationId`, `retryRoot`, `retriedTsMsgId`, `attempt`, the record outcome and cause, and the SID when known; recipient keys ONLY through `safeRecipientKey`; never a phone or a body (R9, D18). Levels: refusals WARN; a rejection, a window close, a second deferral, a failed re-schedule, a second unknown and an unresolved close ONE ERROR each; unknown hand-offs and takeovers INFO.
 - Dashboard copy (exact, ASCII, plain literals - staff-facing copy is not catalog-governed, `deliveryStatus.ts:1017-1019`): reason `Phone unreachable - retry not confirmed` (the `(error 30003)` tail from the template); 409 `superseded` -> `A newer attempt already exists for this message.`; 409 `retry_unresolved` -> `This retry couldn't be confirmed - send a new message instead.`
 - E2E never uses `contact-tenant-0002` / `conv-0002`, and never arms a fail seam on a shared seed number; every recipient is a fresh consented tenant on a per-run number (uid from 90). A lane must be booted FRESH; the two seams already exist in `scripts/e2e-session.mjs:283, :296`.
-- Gates run BARE from the worktree in a BASH shell: `npm run typecheck`, `npm test`, `npm run smoke`, `timeout 1500 npm run e2e`, `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` (empty list = skip; attribute errors by baseline comparison at the merge base). `npm test` needs DynamoDB Local (`npm run db:start`). Never commit during `npm run e2e`; never edit source while it runs.
+- Gates run BARE from the worktree in a BASH shell: `npm run typecheck`, `npm test`, `npm run smoke`, `timeout 1800 npm run e2e` (SOR's green runs of the 289-spec suite took 23.2 and 23.7 minutes; this branch adds three slow specs, so 1500 s is a false red - use 1800), `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` (empty list = skip; attribute errors by baseline comparison at the merge base). `npm test` needs DynamoDB Local (`npm run db:start`). Never commit during `npm run e2e`; never edit source while it runs. If `timeout` ever fires: `npm run e2e:stop`, then prove no listener survives on the lane's ports before re-running (an orphaned same-commit stack is adopted silently by the next run). A single spec runs ONLY as `npm run e2e -- <spec path>` (the e2e workspace), never a bare `npx playwright`.
 - Commit discipline: bare `git status` first, `.git/MERGE_HEAD` absent, EXPLICIT paths, never `git add -A`; every commit ends with `Co-Authored-By: <the authoring model> <noreply@anthropic.com>`.
 - Never merge to `main`, deploy, push secrets, run terraform, or clean up the worktree. Mission records (slice reports, reviews, self-QA, handback) are COMMITTED under `docs/superpowers/reviews/2026-09-27-retry-send-adoption/` as produced.
 
 ## Review Focus
 
-1. A redelivery that arrives BEFORE the claim (a throw in steps 1-4b) re-runs the reads and sends nothing; one that arrives AFTER a claim is refused `fresh` (Task 4, tests 6a and 9).
+1. A redelivery that arrives BEFORE the claim (a throw in steps 1-4b) re-runs the reads and sends nothing (Task 4, test 9); one that arrives while the first delivery is INSIDE its provider call is deferred by the gate on a fresh `attempting` record (test 6e) or refused `fresh` by the claim when it read before the other delivery claimed (test 6f); one that arrives after the first finished is skipped by the gate on the terminal record (test 6a).
 2. The ORIGINAL message sits inside the reconcile's lookup window (same body, seconds before the retry attempt): `heldBy` must read it as `other` (its `sid#` row has no matching `retry_of`/`retry_attempt`), never `free` (which would make `unidentified_candidate`) nor `mine` (Task 2, test 10c).
 3. RSW's enqueue-failure withdrawal - the sentinel with NO `retry_outcome` - must keep offering Retry and the plain 30003 copy (Task 6, the existing `Timeline.delivery.test.tsx:660-672` pin plus a new negative case).
 4. A manual Retry row that itself fails 30003 starts a chain whose attempt-1 record keys on the MANUAL row and claims, although the root's chain already ran three attempts (Task 4, test 4b).
@@ -97,13 +99,13 @@ export interface LineageReader { getByTsMsgIdConsistent(conversationId: string, 
 export async function resolveRetryRoot(messages: LineageReader, row: MessageItem): Promise<string>;           // spec section 0
 export async function automaticAncestry(messages: LineageReader, retriedRow: MessageItem): Promise<MessageItem[]>; // R4: the walked AUTOMATIC rows, retriedRow first
 export function retryRecipientKey(row: Pick<MessageItem, 'recipient_contact_id'>, conversation: Pick<ConversationItem, 'participant_phone'> | undefined): string | undefined; // R1
-export type ConversationRetryDecline = 'conversation_missing' | 'not_one_to_one' | 'no_participant_phone';
+export type ConversationRetryDecline = 'conversation_missing' | 'group_text' | 'not_one_to_one';   // the webhook decision's own vocabulary (oneToOneRetryDecision.ts:54-60, :90-97)
 export function conversationRetryDecline(conversation: Pick<ConversationItem, 'type' | 'participant_phone'> | undefined): ConversationRetryDecline | undefined; // R2 step 3
 
 // app/src/services/retryPromiseWrites.ts  (T1)
 export interface RetryPromiseDeps { messages: Pick<MessagesRepo, 'annotateRetryPromise' | 'getByTsMsgIdConsistent'>; events: EventBus; log: Logger }
 export async function refreshRetryPromise(deps: RetryPromiseDeps, row: MessageItem, retryDueAt: string, ctx: Record<string, unknown>): Promise<boolean>;                 // R3 REFRESH: written -> emit; lost -> dropped (INFO); threw -> ERROR, false
-export async function withdrawRetryPromise(deps: RetryPromiseDeps, row: MessageItem, ctx: Record<string, unknown>): Promise<'written' | 'already' | 'lost' | 'failed'>; // R3 WITHDRAW: retried ONCE from a fresh read; 'already' when the fresh row holds the sentinel + outcome
+export async function withdrawRetryPromise(deps: RetryPromiseDeps, row: MessageItem, ctx: Record<string, unknown>): Promise<'written' | 'already' | 'lost' | 'failed'>; // R3 WITHDRAW: a NO-OP ('already', no write, no emit) when `row` or the fresh re-read already holds the sentinel + outcome; otherwise conditional, retried ONCE from a fresh read
 
 // app/src/jobs/retrySend.ts  (T1 adds; T4 uses)
 export interface RetryMediaPlan { attachments?: MediaAttachment[]; rawMediaUrls?: string[]; mediaCount: number; droppedAttachments: boolean }
@@ -146,7 +148,8 @@ New record causes this branch writes (free strings on the record's `cause`): `de
 - Modify: `app/src/repos/messagesRepo.ts` (`NewMessage.retryRoot?` beside `retryWindowStart` `:754`; `MessageItem.retry_root?`, `retry_outcome?` beside `retry_due_at` `:1046-1056`; the item gains `retry_root` beside `retry_of` `:2541`; the `retrychild#` Put in `append`'s TransactItems; `retryChildPk`, `RetryChildPointer`, `listRetryChildrenConsistent`, `annotateRetryPromise` on the interface `:1498-1506` and the object `:3210-3232`)
 - Create: `app/src/services/retryChain.ts`, `app/src/services/retryPromiseWrites.ts`
 - Modify: `app/test/helpers/twilioWebhookHarness.ts` (`FakeWorld.retryChildren`; fake `append` allowlist `:1224-1243` + the pointer; fake `listRetryChildrenConsistent`; fake `annotateRetryPromise` beside `annotateMessage` `:1469-1475`)
-- Test: `app/test/messagesRepoRetryLineage.integration.test.ts` (extend), `app/test/twilioWebhookHarnessRetryFields.test.ts` (extend), `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts` (extend `messagesAgree` `:754-773` + `MSG_CASES`), the sendMessage lineage test (find it: `grep -ln "retryWindowStart" app/test/*.test.ts`; add `retryRoot` beside it), `app/test/retrySendWindow.test.ts` (pin the two new constants), NEW `app/test/retryChain.test.ts`, NEW `app/test/retryPromiseWrites.test.ts`, NEW `app/test/retrySendMedia.test.ts`
+- Modify (typecheck): `app/test/sendMessage.test.ts:256-350` and `app/test/scheduledSendSuppression.test.ts:273-365` - each declares a FULL, uncast `const messagesRepo: MessagesRepo = { ... }` literal, and `tsconfig.test.json` includes `test/`, so both go red the moment the interface gains two required members. Each gains `async listRetryChildrenConsistent() { return []; }` and `async annotateRetryPromise() { return true; }` (the file's other unused members follow the same trivial-stub pattern; read them).
+- Test: `app/test/messagesRepoRetryLineage.integration.test.ts` (extend - it is the RELAY lineage suite; its `retryRow` builder stamps relay fields and is NOT reused; the one-to-one helpers below are added file-locally), `app/test/twilioWebhookHarnessRetryFields.test.ts` (extend), `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts` (extend `messagesAgree` `:754-773` + `MSG_CASES`), `app/test/sendMessage.test.ts:1085` ('passes retryOf, retryAttempt and retryWindowStart into the append, and none of them on a normal send' - gains `retryRoot`), `app/test/retrySendWindow.test.ts` (pin the two new constants), NEW `app/test/retryChain.test.ts`, NEW `app/test/retryPromiseWrites.test.ts`, NEW `app/test/retrySendMedia.test.ts`
 
 **Interfaces:**
 - Consumes: `buildTsMsgId` / `splitTsMsgId` (`messagesRepo.ts:201-216`); `mediaAttachmentsOf`; `RETRY_PROMISE_WITHDRAWN_AT`; `EventBus` (`lib/events.ts:331`); the `sendAppendTransaction` idiom (`messagesRepo.ts:2078-2269`); the `listByRecipient` paged consistent Query idiom (`sendAttemptsRepo.ts:585-615`).
@@ -162,7 +165,7 @@ export const RETRY_OUTCOME_UNCONFIRMED = 'unconfirmed' as const;
 export type RetryOutcome = typeof RETRY_OUTCOME_UNCONFIRMED;
 ```
 
-In `retrySend.ts` replace `export const MAX_SEND_RETRY_ATTEMPTS = 3;` (`:51`) with `export { MAX_SEND_RETRY_ATTEMPTS } from '../lib/retrySendWindow.js';` and keep every existing import of it green. Create `app/src/lib/outboundSender.ts`:
+In `retrySend.ts` delete `export const MAX_SEND_RETRY_ATTEMPTS = 3;` (`:51`), add `MAX_SEND_RETRY_ATTEMPTS` to the existing `import { ... } from '../lib/retrySendWindow.js'` (`:33-37`) - the module's own `parseRetrySendPayload` reads it at `:80-81`, and a bare `export ... from` re-export creates NO local binding - and add the line `export { MAX_SEND_RETRY_ATTEMPTS };` so every existing importer (the fenced `oneToOneRetryDecision.ts:43`, the tests) keeps resolving through `jobs/retrySend.js`. Create `app/src/lib/outboundSender.ts`:
 
 ```ts
 // The one-to-one sender pin (retry-send-adoption R1): the number a one-to-one
@@ -178,7 +181,22 @@ export function pinnedSender(config: { businessPhoneNumber?: string | undefined 
 
 `sendMessage.ts:589` becomes `const sender = pinnedSender(config, from);` (import added). Add to `retrySendWindow.test.ts`'s constants case: `expect(MAX_SEND_RETRY_ATTEMPTS).toBe(3); expect(RETRY_OUTCOME_UNCONFIRMED).toBe('unconfirmed');`.
 
-- [ ] **Step 2: Failing repo tests (DynamoDB Local) in `messagesRepoRetryLineage.integration.test.ts`** - read the file first and use its `describe.skipIf(!reachable)`, table setup and append helper. One `it` each:
+- [ ] **Step 2: Failing repo tests (DynamoDB Local) in `messagesRepoRetryLineage.integration.test.ts`** - read the file first and use its `describe.skipIf(!reachable)`, table setup and `repo` (the real `MessagesRepo` it builds). Add these FILE-LOCAL helpers in a new `describe('one-to-one retry lineage (retry-send-adoption)')`:
+
+```ts
+  const CONV = `conv-1to1-${randomUUID().slice(0, 8)}`;
+  const T0 = '2026-09-27T12:00:00.000Z';
+  const T1 = '2026-09-27T12:01:00.000Z';
+  const DUE_1 = '2026-09-27T12:02:00.000Z';
+  const DUE_2 = '2026-09-27T12:03:00.000Z';
+  /** One outbound one-to-one row; returns the stored row (consistent read). */
+  async function appendOutbound(fields: { providerSid: string; providerTs: string } & Partial<NewMessage>): Promise<MessageItem> {
+    const res = await repo.append({ conversationId: CONV, type: 'sms', direction: 'outbound', author: 'teammate', body: 'hello', deliveryStatus: 'undelivered', errorCode: '30003', ...fields });
+    return (await repo.getByTsMsgIdConsistent(CONV, res.tsMsgId))!;
+  }
+```
+
+One `it` each:
 
 ```ts
 it('append persists retry_root beside retry_of and writes the retrychild# pointer in the same transaction', async () => {
@@ -307,17 +325,17 @@ export function retryRecipientKey(row: Pick<MessageItem, 'recipient_contact_id'>
   return typeof phone === 'string' && phone.length > 0 ? `phone#${phone}` : undefined;
 }
 
-export type ConversationRetryDecline = 'conversation_missing' | 'not_one_to_one' | 'no_participant_phone';
-/** R2 step 3: a DESIGNED decline (the vocabulary of services/oneToOneRetryDecision.ts) - never a throw. */
+export type ConversationRetryDecline = 'conversation_missing' | 'group_text' | 'not_one_to_one';
+/** R2 step 3: a DESIGNED decline, in the webhook decision's own vocabulary and with its own reading (services/oneToOneRetryDecision.ts:90-97: a group text is `group_text`; a relay group or a phone-less thread is `not_one_to_one`) - never a throw. */
 export function conversationRetryDecline(conversation: Pick<ConversationItem, 'type' | 'participant_phone'> | undefined): ConversationRetryDecline | undefined {
   if (conversation === undefined) return 'conversation_missing';
-  if (!conversation.type.endsWith('_1to1')) return 'not_one_to_one';
-  if (typeof conversation.participant_phone !== 'string' || conversation.participant_phone.length === 0) return 'no_participant_phone';
+  if (conversation.type === 'group_text') return 'group_text';
+  if (conversation.type === 'relay_group' || typeof conversation.participant_phone !== 'string' || conversation.participant_phone.length === 0) return 'not_one_to_one';
   return undefined;
 }
 ```
 
-Tests: `resolveRetryRoot` - a row with `retry_root` returns it without a read (spy `getByTsMsgIdConsistent` not called); a root returns itself; a pre-deploy attempt-2 row (retry_of -> attempt-1 row -> root, no `retry_root` anywhere) returns the root's tsMsgId in two reads; a broken link (retry_of names a missing row) returns the last row read; a 4-deep chain stops after 3 hops. `automaticAncestry` - a root -> `[]`; a manual row -> `[]`; attempt-2 retried row (auto) over attempt-1 (auto) over root -> `[attempt2Row, attempt1Row]`; a chain whose parent is a MANUAL row -> `[theAutomaticRow]` only; a broken link -> the rows read so far. `retryRecipientKey` - contact id wins; phone fallback; neither -> undefined. `conversationRetryDecline` - each of the four `_1to1` types passes; `group_text` and `relay_group` decline `not_one_to_one`; missing -> `conversation_missing`; no phone -> `no_participant_phone`.
+Tests: `resolveRetryRoot` - a row with `retry_root` returns it without a read (spy `getByTsMsgIdConsistent` not called); a root returns itself; a pre-deploy attempt-2 row (retry_of -> attempt-1 row -> root, no `retry_root` anywhere) returns the root's tsMsgId in two reads; a broken link (retry_of names a missing row) returns the last row read; a 4-deep chain stops after 3 hops. `automaticAncestry` - a root -> `[]`; a manual row -> `[]`; attempt-2 retried row (auto) over attempt-1 (auto) over root -> `[attempt2Row, attempt1Row]`; a chain whose parent is a MANUAL row -> `[theAutomaticRow]` only; a broken link -> the rows read so far. `retryRecipientKey` - contact id wins; phone fallback; neither -> undefined. `conversationRetryDecline` - each of the four `_1to1` types with a phone passes; `group_text` -> `group_text`; `relay_group` -> `not_one_to_one`; a `tenant_1to1` with no `participant_phone` -> `not_one_to_one`; missing -> `conversation_missing`.
 
 - [ ] **Step 6: `retryPromiseWrites.ts` and its failing tests** (`app/test/retryPromiseWrites.test.ts` over the fake world + `createLogCapture`):
 
@@ -342,14 +360,18 @@ export async function refreshRetryPromise(deps: RetryPromiseDeps, row: MessageIt
   }
 }
 
-/** R3 WITHDRAW (the Q1 ruling): retry_due_at = the sentinel AND retry_outcome = unconfirmed in ONE write, conditioned on the value read; a lost condition is retried ONCE from a fresh consistent read; a fresh row that already holds both is 'already' (idempotent). */
+const isWithdrawn = (row: Pick<MessageItem, 'retry_due_at' | 'retry_outcome'>): boolean =>
+  row.retry_due_at === RETRY_PROMISE_WITHDRAWN_AT && row.retry_outcome === RETRY_OUTCOME_UNCONFIRMED;
+
+/** R3 WITHDRAW (the Q1 ruling): retry_due_at = the sentinel AND retry_outcome = unconfirmed in ONE write, conditioned on the value read; a lost condition is retried ONCE from a fresh consistent read. A row that already holds both (the superseded exit's re-apply, R4) is a NO-OP: 'already', no write, no emit. */
 export async function withdrawRetryPromise(deps: RetryPromiseDeps, row: MessageItem, ctx: Record<string, unknown>): Promise<'written' | 'already' | 'lost' | 'failed'> {
   const patch = { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: RETRY_OUTCOME_UNCONFIRMED };
   try {
+    if (isWithdrawn(row)) return 'already';
     if (await deps.messages.annotateRetryPromise(row.conversationId, row.tsMsgId, patch, { retryDueAt: row.retry_due_at })) { emitPersisted(deps, row); return 'written'; }
     const fresh = await deps.messages.getByTsMsgIdConsistent(row.conversationId, row.tsMsgId);
     if (fresh === undefined) { deps.log.error({ ...ctx }, 'retry promise withdrawal failed - the retried row is missing'); return 'failed'; }
-    if (fresh.retry_due_at === RETRY_PROMISE_WITHDRAWN_AT && fresh.retry_outcome === RETRY_OUTCOME_UNCONFIRMED) return 'already';
+    if (isWithdrawn(fresh)) return 'already';
     if (await deps.messages.annotateRetryPromise(row.conversationId, row.tsMsgId, patch, { retryDueAt: fresh.retry_due_at })) { emitPersisted(deps, fresh); return 'written'; }
     deps.log.error({ ...ctx }, 'retry promise withdrawal lost twice - a concurrent writer keeps moving the promise');
     return 'lost';
@@ -360,7 +382,7 @@ export async function withdrawRetryPromise(deps: RetryPromiseDeps, row: MessageI
 }
 ```
 
-Tests: refresh over a matching value writes and emits ONE `message.persisted` with the row's direction/status; refresh over a moved value returns false, writes nothing, emits nothing, one INFO; a throwing annotate returns false with one ERROR. Withdraw: `'written'` + emit; a stale read (the row moved once) -> `'written'` after the re-read, ONE emit; a row already withdrawn -> `'already'`, no write (spy `annotateRetryPromise` called once), no emit; a writer that moves the promise between both attempts -> `'lost'`, one ERROR; a missing row -> `'failed'`.
+Tests: refresh over a matching value writes and emits ONE `message.persisted` with the row's direction/status; refresh over a moved value returns false, writes nothing, emits nothing, one INFO; a throwing annotate returns false with one ERROR. Withdraw: `'written'` + emit; a STALE input row (the stored row moved once since it was read: pass a copy with the old `retry_due_at`) -> `'written'` after the re-read, ONE emit, two annotate calls; the CURRENT row already withdrawn -> `'already'`, ZERO annotate calls, no emit; a stale input row whose stored twin is already withdrawn -> `'already'` after one lost annotate, no emit; a writer that moves the promise between both attempts (the fake's `annotateRetryPromise` spied to return false twice while the stored row is not withdrawn) -> `'lost'`, one ERROR; a missing row -> `'failed'`.
 
 - [ ] **Step 7: `planRetryMedia` and `deferred`.** In `retrySend.ts` add (exported):
 
@@ -379,15 +401,15 @@ export function planRetryMedia(original: MessageItem, hasStore: boolean): RetryM
 
 `RetrySendPayload` gains `deferred?: true`; the parser returns `{ providerSid, conversationId, attempt, ...(p.deferred === true && { deferred: true as const }) }`. Tests (`app/test/retrySendMedia.test.ts`): the four plan shapes; and in `twilioStatusWebhook.test.ts`'s parse case (`:1225-1232`) add: `expect(parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: 1, deferred: true })).toEqual({ providerSid: 's', conversationId: 'c', attempt: 1, deferred: true }); expect(parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: 1, deferred: false })).toEqual({ providerSid: 's', conversationId: 'c', attempt: 1 });`. The existing `retrySendBackoff.test.ts:105` exact-payload pin stays green (the webhook path never sets it).
 
-- [ ] **Step 8: `sendMessage` passes `retryRoot`.** `SendMessageInput.retryRoot?: string` (doc: "retry-send-adoption R7: the chain root, persisted as retry_root beside retry_of; the automatic retry, the adoption and the manual Retry route all pass it"); destructure it; append input gains `...(retryRoot !== undefined && { retryRoot })`. Extend the sendMessage lineage test found in Step 0 (the one asserting `retry_window_start` on the appended row) with `retryRoot: 'root#1'` in and `retry_root: 'root#1'` out.
+- [ ] **Step 8: `sendMessage` passes `retryRoot`.** `SendMessageInput.retryRoot?: string` (doc: "retry-send-adoption R7: the chain root, persisted as retry_root beside retry_of; the automatic retry, the adoption and the manual Retry route all pass it"); destructure it; append input gains `...(retryRoot !== undefined && { retryRoot })`. Extend `app/test/sendMessage.test.ts:1085` ('passes retryOf, retryAttempt and retryWindowStart into the append, and none of them on a normal send') with `retryRoot: '2026-06-12T09:58:00.000Z#SMroot'` in and `retryRoot` on the captured append input out (the case already asserts the other three the same way), and its "none of them on a normal send" half with `retryRoot`. The two full-literal fakes (`sendMessage.test.ts:256`, `scheduledSendSuppression.test.ts:273`) gain the two stub members named in Files.
 
 - [ ] **Step 9: Run, typecheck, commit**
 
-Run: `cd app; npx vitest run test/messagesRepoRetryLineage.integration.test.ts test/twilioWebhookHarnessRetryFields.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/retryChain.test.ts test/retryPromiseWrites.test.ts test/retrySendMedia.test.ts test/retrySendWindow.test.ts test/retrySendBackoff.test.ts test/twilioStatusWebhook.test.ts <the sendMessage lineage test>` -> PASS. `npm run typecheck` -> 0. ASCII check on every new file.
+Run: `cd app; npx vitest run test/messagesRepoRetryLineage.integration.test.ts test/twilioWebhookHarnessRetryFields.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/retryChain.test.ts test/retryPromiseWrites.test.ts test/retrySendMedia.test.ts test/retrySendWindow.test.ts test/retrySendBackoff.test.ts test/twilioStatusWebhook.test.ts test/sendMessage.test.ts test/scheduledSendSuppression.test.ts` -> PASS. `npm run typecheck` -> 0 (it includes `test/`). ASCII check on every new file.
 
 ```bash
 git status
-git add app/src/lib/retrySendWindow.ts app/src/lib/outboundSender.ts app/src/jobs/retrySend.ts app/src/services/sendMessage.ts app/src/repos/messagesRepo.ts app/src/services/retryChain.ts app/src/services/retryPromiseWrites.ts app/test/helpers/twilioWebhookHarness.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/twilioWebhookHarnessRetryFields.test.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/retryChain.test.ts app/test/retryPromiseWrites.test.ts app/test/retrySendMedia.test.ts app/test/retrySendWindow.test.ts app/test/twilioStatusWebhook.test.ts <the sendMessage lineage test file>
+git add app/src/lib/retrySendWindow.ts app/src/lib/outboundSender.ts app/src/jobs/retrySend.ts app/src/services/sendMessage.ts app/src/repos/messagesRepo.ts app/src/services/retryChain.ts app/src/services/retryPromiseWrites.ts app/test/helpers/twilioWebhookHarness.ts app/test/messagesRepoRetryLineage.integration.test.ts app/test/twilioWebhookHarnessRetryFields.test.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/retryChain.test.ts app/test/retryPromiseWrites.test.ts app/test/retrySendMedia.test.ts app/test/retrySendWindow.test.ts app/test/twilioStatusWebhook.test.ts app/test/sendMessage.test.ts app/test/scheduledSendSuppression.test.ts
 git commit -m "feat(messages): retry_root and retry_outcome on the row, the retrychild# pointer family, the conditional annotateRetryPromise; the chain helpers, the promise writes and the retry media plan (retry-send-adoption T1)" -m "Co-Authored-By: <model> <noreply@anthropic.com>"
 ```
 
@@ -404,7 +426,7 @@ git commit -m "feat(messages): retry_root and retry_outcome on the row, the retr
 - Test: `app/test/sendReconcile.test.ts` (new `describe('retry_send owner')`; the parser and `toOwnerRef` tables `:3007-3041`), `app/test/sendAttemptsRepo.integration.test.ts` (key shapes `:70-91`, the `rawRecord` ternary `:278`, one DynamoDB Local case), `app/test/twilioWebhookHarnessSendAttempts.integration.test.ts` (ternaries `:237`, `:534`; the three-kind case `:399-413` gains the fourth), `app/test/broadcastFanOut.test.ts` or `sendReconcile.test.ts` (`isBroadcastRowFor`'s guard; the latter already imports it `:19`)
 
 **Interfaces:**
-- Consumes: T1's `retryRecipientKey`, `resolveRetryRoot` (not needed here - the ref carries the root), `withdrawRetryPromise`, `refreshRetryPromise`, `MessagesRepo.listRetryChildrenConsistent` (not used by the reconcile), `NewMessage.retryRoot`; `oneToOneRetryWindowOrigin`, `parseRetryWindowOrigin`, `retryFitsSendWindow`, `RETRY_JOB_GRACE_MS`, `RETRY_PROMISE_GRACE_MS`, `RETRY_WINDOW_CLOSED_CODE` (`lib/retrySendWindow.ts`); `enqueueSendRetry` (`jobs/retrySend.ts:127`, imported at module top, used inside a function); `mapTwilioStatus` (`adapters/messaging.ts:665`, already imported); `contactHoldsPhone`, `isDeleted` (`repos/contactsRepo.ts:376`, `:319`); `TRANSPORT_SCHEMA_VERSION` (as `broadcastFanOut.ts` imports it).
+- Consumes: T1's `retryRecipientKey`, `withdrawRetryPromise`, `refreshRetryPromise`, `NewMessage.retryRoot`; `oneToOneRetryWindowOrigin`, `parseRetryWindowOrigin`, `retryFitsSendWindow`, `RETRY_JOB_GRACE_MS`, `RETRY_PROMISE_GRACE_MS`, `RETRY_WINDOW_CLOSED_CODE` (`lib/retrySendWindow.ts`); `enqueueSendRetry` (`jobs/retrySend.ts:127`, imported at module top, used inside a function); `mapTwilioStatus` (`adapters/messaging.ts:665`, already imported); `contactHoldsPhone`, `isDeleted` (`repos/contactsRepo.ts:376`, `:319`). NEW imports `sendReconcile.ts` does not have yet: `TRANSPORT_SCHEMA_VERSION` from `../lib/messageTransport.js` (as `broadcastFanOut.ts:65`) and `toConversationUpdatedEvent` from `../lib/events.js` (as `broadcastFanOut.ts:62`; the file imports only `appEvents` and `EventBus` from it today, `:56`).
 - Produces: the owner union member, the ref member, `RetrySendOwner`, `parseOwnerRef`'s `retry_send` arm (`attempt` must be an integer in `1..MAX_SEND_RETRY_ATTEMPTS`), the reconcile's complete `retry_send` behavior, `isBroadcastRowFor`'s `retry_of` guard.
 
 The exhaustiveness idiom (copy `relayFanOut.ts:1432-1435`): every `switch (owner.kind)` in `sendReconcile.ts` and the repo ends with `default: { const unhandled: never = <owner>; throw new Error(\`sendReconcile: unhandled owner kind ${String(unhandled)}\`); }` - a missed arm is a typecheck error, never a silent no-op (research: five sites are silent today).
@@ -435,12 +457,24 @@ The exhaustiveness idiom (copy `relayFanOut.ts:1432-1435`): every `switch (owner
 - [ ] **Step 3: Failing reconcile tests** - a new `describe('retry_send owner (retry-send-adoption R4)')` in `sendReconcile.test.ts`, with these file-local helpers beside the relay ones (`:2014-2151`):
 
 ```ts
-  const RETRY_CONV = 'conv-retry-1';
   const TENANT_PHONE = '+15550100077';
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  /** The one-to-one thread's id - MINTED by the fake (`conv-<n>`, twilioWebhookHarness.ts:600-615), never hard-coded; set by seedOneToOne. */
+  let retryConv = '';
   /** A one-to-one thread with a consented tenant; returns the contact and the conversation. */
-  async function seedOneToOne(): Promise<{ contact: ContactItem; conversation: ConversationItem }> { /* world.contacts.push({ contactId: 'c-retry', type: 'tenant', status: 'active', phone: TENANT_PHONE, consent_method: 'inbound_text' }); const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(TENANT_PHONE, 'tenant_1to1'); return {...}; */ }
-  /** An outbound row in that thread (the ROOT by default; pass retryOf/retryAttempt/retryRoot for a retry row). */
-  async function seedRow(sid: string, fields: Partial<NewMessage> & { providerTs?: string } = {}): Promise<MessageItem> { /* world.messagesRepo.append({ conversationId, providerSid: sid, providerTs, type: 'sms', direction: 'outbound', author: 'teammate', body: BODY, deliveryStatus: 'undelivered', errorCode: '30003', automated: false, recipientContactId: 'c-retry', ...fields }); return the stored row (world.messages.find) */ }
+  async function seedOneToOne(): Promise<{ contact: ContactItem; conversation: ConversationItem }> {
+    const contact: ContactItem = { contactId: 'c-retry', type: 'tenant', status: 'active', phone: TENANT_PHONE, consent_method: 'inbound_text' };
+    world.contacts.push(contact);
+    const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(TENANT_PHONE, 'tenant_1to1');
+    retryConv = conversation.conversationId;
+    return { contact, conversation };
+  }
+  /** An outbound row in that thread (the ROOT by default; pass retryOf/retryAttempt/retryRoot for a retry row). Returns the STORED row (the live object the fake keeps), so a test may stamp retry_due_at on it. */
+  async function seedRow(sid: string, fields: Partial<NewMessage> & { providerTs?: string } = {}): Promise<MessageItem> {
+    const { providerTs = iso(Date.now() - 30_000), ...rest } = fields;
+    await world.messagesRepo.append({ conversationId: retryConv, providerSid: sid, providerTs, type: 'sms', direction: 'outbound', author: 'teammate', body: BODY, deliveryStatus: 'undelivered', errorCode: '30003', automated: false, recipientContactId: 'c-retry', ...rest });
+    return world.messages.find((m) => m.provider_sid === sid)!;
+  }
   const rOwner = (row: MessageItem, attempt: number, recipientKey = 'c-retry', retryRoot = row.retry_root ?? row.tsMsgId): SendAttemptOwner => ({ kind: 'retry_send', conversationId: row.conversationId, retriedTsMsgId: row.tsMsgId, attempt, recipientKey, retryRoot });
   const retryRow = (retriedTsMsgId: string, attempt: number) => world.messages.find((m) => m.retry_of === retriedTsMsgId && m.retry_attempt === attempt);
   const persistedFor = (tsMsgId: string) => world.emitted.filter((e) => e.event === 'message.persisted' && (e.payload as { tsMsgId: string }).tsMsgId === tsMsgId);
@@ -461,7 +495,7 @@ it('10 a listed orphan adopts as the retry row sendMessage would have appended -
   const row = retryRow(root.tsMsgId, 1)!;
   expect(row).toMatchObject({ direction: 'outbound', author: 'teammate', body: BODY, delivery_status: 'delivered', provider_ts: orphan.createdAt, retry_of: root.tsMsgId, retry_attempt: 1, retry_window_start: root.provider_ts, retry_root: root.tsMsgId, automated: false, recipient_contact_id: 'c-retry' });
   expect(row).not.toHaveProperty('broadcast_id');
-  expect(await world.messagesRepo.listRetryChildrenConsistent(RETRY_CONV, root.tsMsgId)).toEqual([{ tsMsgId: row.tsMsgId, providerSid: 'SMorphan-r', retryAttempt: 1 }]);
+  expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toEqual([{ tsMsgId: row.tsMsgId, providerSid: 'SMorphan-r', retryAttempt: 1 }]);
   expect(world.auditEvents.filter((e) => e.event_type === 'message_sent')).toHaveLength(1);
   expect(persistedFor(row.tsMsgId)).toHaveLength(1);
   expect(root.retry_due_at).toBe(iso(...the value set above...)); // untouched: no promise write on adoption
@@ -487,7 +521,7 @@ it('11 never_sent inside the window re-drives ONCE: a messaging.retrySend envelo
   await seedOneToOne(); const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 20_000) }); root.retry_due_at = iso(Date.now() + 10_000);
   const owner = rOwner(root, 1); const at = await reconciling(owner, factsFor(TENANT_PHONE));
   await runChain(payloadOf(owner, at));
-  expect(got).toEqual([{ providerSid: 'SMroot', conversationId: RETRY_CONV, attempt: 1 }]);
+  expect(got).toEqual([{ providerSid: 'SMroot', conversationId: retryConv, attempt: 1 }]);
   expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
   expect(Date.parse(root.retry_due_at!)).toBeGreaterThanOrEqual(Date.now() + RETRY_JOB_GRACE_MS + RETRY_PROMISE_GRACE_MS - 5_000);
   expect(persistedFor(root.tsMsgId)).toHaveLength(1);
@@ -512,7 +546,8 @@ it('12 unresolved (fail-list on every check): the record closes FIRST, then ONE 
   await runCheck({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 2 });
   expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
 });
-it('12a a digest mismatch (the thread\'s number changed) is unresolved digest_mismatch and withdraws; a missing participant phone is unaddressable and left for the sweeper (Review Focus 5)', /* conversation.participant_phone changed -> digest_mismatch + withdrawal; participant_phone deleted -> resolve returns undefined -> INFO "owner recipient not found", record untouched */);
+it('12a a CONTACT-keyed attempt whose thread number changed or vanished is unresolved digest_mismatch and withdraws (the key is the contact id, so resolve succeeds and the digest decides)', /* two sub-cases on the default seedRow (recipientContactId 'c-retry'): conversation.participant_phone changed -> digest_mismatch + withdrawal; participant_phone deleted -> the SAME (currentPhone undefined -> digest_mismatch), record done/unresolved, root withdrawn */);
+it('12a2 a PHONE-keyed attempt (no recorded recipient) whose thread number vanished is unaddressable: resolve returns undefined, INFO "owner recipient not found", the record stays reconciling for the sweeper', /* seedRow with recipientContactId: undefined and the owner keyed phone#TENANT_PHONE; delete conversation.participant_phone; runCheck; record still reconciling; one INFO; root untouched */);
 it('12b a retried row that no longer exists leaves the record for the sweeper (INFO)', /* delete the row from world.messages; runCheck; record still reconciling; one INFO */);
 it('12c the second unknown after one re-drive closes unresolved second_unknown and withdraws', /* record with redriveCount 1 (markRedriven then a fresh claim + handToReconcile - the file\'s case 20 recipe); runChain with an empty provider; record done/unresolved cause second_unknown; root withdrawn */);
 it('isBroadcastRowFor never claims a share-RETRY row (retry_of set) for the share recipient', () => {
@@ -591,8 +626,16 @@ async function adoptRetry(c: Ctx, r: Resolved, o: RetrySendOwner, m: ProviderMes
     try { await c.adopt.audit.append(`conversations#${o.conversationId}`, 'message_sent', { providerSid: m.providerSid, automated: row.automated ?? true, author: row.author === 'ai' ? 'ai' : 'teammate' }); }
     catch (err) { c.log.error({ err, ...ownerLog(o) }, 'send.reconcile: retry adoption audit row failed (best-effort)'); }
   }
-  // the status-preserving inbox touch (the broadcast adoption's shape), then the retry row's emit
-  ... copy adoptBroadcastRecipient's touch block (:1428-1439) with appended.conversationId / m.createdAt ...
+  // The status-preserving inbox touch with no preview (adoptBroadcastRecipient's shape, broadcastFanOut.ts:1428-1439): never moves the inbox backwards. Best-effort.
+  let touched: ConversationItem | undefined;
+  try {
+    const current = r.conversation ?? (await c.conversations.getById(appended.conversationId));
+    if (current !== undefined && (current.last_activity_at ?? '') < m.createdAt) {
+      touched = await c.conversations.touchLastActivityPreservingStatus(appended.conversationId, undefined, m.createdAt);
+    }
+  } catch (err) {
+    c.log.error({ err, ...ownerLog(o) }, 'send.reconcile: retry adoption inbox touch failed (best-effort)');
+  }
   c.events.emit('message.persisted', { conversationId: appended.conversationId, tsMsgId: appended.tsMsgId, direction: 'outbound', deliveryStatus: rowStatus });
   if (touched !== undefined) c.events.emit('conversation.updated', toConversationUpdatedEvent(touched));
   if (failed) c.log.warn({ ...ownerLog(o), sid: m.providerSid, deliveryStatus: rowStatus, errorCode }, 'send.reconcile: adopted terminal failure on a retry row - the 30003 ladder does not continue from it');
@@ -813,7 +856,7 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
       const held = ref;
       if (phase === 'record') { log.error({ err, ...octx }, 'retrySend: a record-phase step threw after the send - the attempt stays attempting for the sweeper'); return; }
       if (phase === 'prepare') { await deferOrEnd(owner, held, retried, SEND_RETRYABLE_CODE, err, octx); return; }
-      if (err instanceof SendRefusedError) { await refuse(owner, held, err.code, octx); return; }
+      if (err instanceof SendRefusedError) { await refuse(owner, held, err.code, octx); return; }   // the wrapper's kill switch (SmsSendingDisabledError extends SendRefusedError) lands here
       if (err instanceof SendNotAttemptedError) {
         if (takenOver) { log.info(octx, 'retrySend: attempt taken over before the send - not sent; the takeover owns it'); return; }
         await deferOrEnd(owner, held, retried, SEND_RETRYABLE_CODE, err, octx); return;
@@ -826,7 +869,7 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
       if (classification.kind === 'rejected') {
         if (classification.code === SMS_SENDING_DISABLED_CODE) { await refuse(owner, held, SMS_SENDING_DISABLED_CODE, octx); return; }   // deviation 2
         const cause = classification.code ?? (classification.status !== undefined ? String(classification.status) : undefined);
-        await guardWrite(log, octx, 'finishAttempt', () => attempts.finishAttempt(owner, held, { outcome: 'rejected', ...(cause !== undefined && { cause }) }));
+        await finish(owner, held, { outcome: 'rejected', ...(cause !== undefined && { cause }) }, octx);
         log.error({ ...octx, errorCode: classification.code, status: classification.status, outcome: 'rejected' }, 'retrySend: retry chain ended - provider rejected the retry');
         return;
       }
@@ -836,11 +879,22 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
   });
 ```
 
-The module-local helpers (closures over `attempts`, `messages`, `events`, `log`, `now`, `payload`, `originMs`, `secondDeferralWouldClose`):
+The module-local helpers. They are declared INSIDE the handler (after the lazy `??=` lines, so they close over the NARROWED consts `const attemptsRepo = attempts!` etc. - TypeScript does not narrow a `let` inside a nested function; bind each lazy dep to a `const` once resolved and use those), typed as `(owner: RetrySendOwner, ref: AttemptRef, ...)`; `octx` is `Record<string, unknown>`:
 
 ```ts
+    /** ONE fenced close: the write through guardWrite (a throw is logged ERROR there), the fence answer captured here (deviation 6). Returns true only when the write RESOLVED AND WON. */
+    async function finish(owner: RetrySendOwner, ref: AttemptRef, result: { outcome: SendAttemptOutcome; sid?: string; cause?: string }, octx: Record<string, unknown>): Promise<boolean> {
+      let won = false;
+      const wrote = await guardWrite(log, octx, 'finishAttempt', async () => { won = await attemptsRepo.finishAttempt(owner, ref, result); });
+      if (wrote && !won) log.info({ ...octx, outcome: result.outcome, cause: result.cause }, 'retrySend: attempt close lost its fence - the takeover owns the record');
+      return wrote && won;
+    }
+
     /** A refusal: the record done/refused with the code; the promise expires on RSW's clock. WARN, as today. */
-    async function refuse(owner, ref, code, octx) { await guardWrite(log, octx, 'finishAttempt', () => attempts.finishAttempt(owner, ref, { outcome: 'refused', cause: code })); log.warn({ ...octx, refusal: code, outcome: 'refused' }, 'retrySend: send refused - retry chain stopped'); }
+    async function refuse(owner: RetrySendOwner, ref: AttemptRef, code: string, octx: Record<string, unknown>): Promise<void> {
+      await finish(owner, ref, { outcome: 'refused', cause: code }, octx);
+      log.warn({ ...octx, refusal: code, outcome: 'refused' }, 'retrySend: send refused - retry chain stopped');
+    }
 
     /** A pre-claim decline on a redriven record closes it (SOR D8 rev 11); on done/retryable or absent nothing is written. */
     async function declineBeforeClaim(owner, redriven, cause, octx) {
@@ -850,25 +904,25 @@ The module-local helpers (closures over `attempts`, `messages`, `events`, `log`,
       if (wrote && !closed) log.info({ ...octx, cause }, 'retrySend: decline not recorded - another delivery re-claimed the re-driven attempt');
     }
 
-    /** R3 deferred: the attempt's SINGLE deferral. ENQUEUE FIRST, then release the record retryable, then REFRESH. Terminal (a second deferral, or a re-run past the window): done/refused - never claimable again. */
-    async function deferOrEnd(owner, ref, retried, cause, err, octx) {
+    /** R3 deferred: the attempt's SINGLE deferral. ENQUEUE FIRST, then release the record retryable, then REFRESH - the refresh and the "re-scheduled" line only when the release WON (a lost release means a takeover owns the record and its reconcile decides). Terminal (a second deferral, or a re-run past the window): done/refused - never claimable again. */
+    async function deferOrEnd(owner: RetrySendOwner, ref: AttemptRef, retried: MessageItem, cause: string, err: unknown, octx: Record<string, unknown>): Promise<void> {
       const backoffMs = resolveSendRetryBackoffMs(payload.attempt);
       const nowMs = now();
       if (secondDeferralWouldClose) {
-        await guardWrite(log, octx, 'finishAttempt', () => attempts.finishAttempt(owner, ref, { outcome: 'refused', cause: 'deferral_cap' }));
+        await finish(owner, ref, { outcome: 'refused', cause: 'deferral_cap' }, octx);
         log.error({ err, ...octx, cause: 'deferral_cap', outcome: 'refused' }, 'retrySend: retry deferred twice - chain ended'); return;
       }
       if (originMs !== undefined && !retryFitsSendWindow({ originMs, nowMs, backoffMs })) {
-        await guardWrite(log, octx, 'finishAttempt', () => attempts.finishAttempt(owner, ref, { outcome: 'refused', cause: RETRY_WINDOW_CLOSED_CODE }));
+        await finish(owner, ref, { outcome: 'refused', cause: RETRY_WINDOW_CLOSED_CODE }, octx);
         log.error({ err, ...octx, cause: RETRY_WINDOW_CLOSED_CODE, outcome: 'refused' }, 'retrySend: a deferred re-run would land past the window - chain ended'); return;
       }
       const runAt = new Date(nowMs + backoffMs);
       try { await enqueueSendRetry({ providerSid: payload.providerSid, conversationId: payload.conversationId, attempt: payload.attempt, deferred: true }, runAt); }
       catch (enqueueErr) {
-        await guardWrite(log, octx, 'finishAttempt', () => attempts.finishAttempt(owner, ref, { outcome: 'refused', cause: ENQUEUE_FAILED_CODE }));
+        await finish(owner, ref, { outcome: 'refused', cause: ENQUEUE_FAILED_CODE }, octx);
         log.error({ err: enqueueErr, ...octx, cause: ENQUEUE_FAILED_CODE, outcome: 'refused' }, 'retrySend: retry re-schedule failed - chain ended'); return;
       }
-      await guardWrite(log, octx, 'finishAttempt', () => attempts.finishAttempt(owner, ref, { outcome: 'retryable', cause }));
+      if (!(await finish(owner, ref, { outcome: 'retryable', cause }, octx))) return;   // lost or failed: no refresh, no re-scheduled line (finish logged it)
       await refreshRetryPromise(promise, retried, runAt.toISOString(), octx);
       log.warn({ err, ...octx, cause, runAt: runAt.toISOString(), outcome: 'retryable' }, 'retrySend: retry deferred - re-scheduled');
     }
@@ -921,8 +975,8 @@ The module-local helpers (closures over `attempts`, `messages`, `events`, `log`,
     };
   }
 ```
-(The config carries no `BUSINESS_PHONE_NUMBER`, so `world.sent`'s exact `toEqual` pins - `{ to, body }` with no `from` - stay byte-identical; the record's `sender` is simply absent in this file.) Rewrite the three marker cases:
-  - `:1435-1474` -> `'DUPLICATE GUARD: a redelivered job (same jobId) meets the record - the second claim is refused fresh, nothing is re-sent, and the delivery resolves'`: same setup; after the first dispatch `world.sent` has 1 and `world.sendAttempts.size` is 1 with `state: 'done', outcome: 'sent'`; the second dispatch resolves, `world.sent` stays 1, a `claim refused` INFO line carries `fresh: false` (the record is `done/sent` - terminal), and `world.jobExecutionMarkers.size` is 0.
+(The config carries no `BUSINESS_PHONE_NUMBER`, so `world.sent`'s exact `toEqual` pins - `{ to, body }` with no `from` - stay byte-identical; the record's `sender` is simply absent in this file.) Add `vi` to the file's vitest import (`:6`; the rewritten cases spy). Two exact `toEqual` pins on the SPY's captured `SendMessageInput` change shape and are re-pinned, not weakened: `:1706-1716` (the legacy-row case) becomes `expect(calls).toHaveLength(1); expect(calls[0]).toMatchObject({ conversationId: seeded.conversationId, body: 'outbound body', automated: true, author: 'teammate', retryOf: seeded.tsMsgId, retryAttempt: 1, retryWindowStart: seeded.provider_ts, retryRoot: seeded.tsMsgId }); expect(typeof calls[0]!.beforeProviderSend).toBe('function'); expect(calls[0]).not.toHaveProperty('broadcastId');` - and any other `toEqual` on `calls` in the file (grep `expect(calls).toEqual`) is converted the same way. Rewrite the three marker cases:
+  - `:1435-1474` -> `'DUPLICATE GUARD: a redelivered job (same jobId) meets the record - the gate skips the finished attempt, nothing is re-sent, and the delivery resolves'`: same setup; after the first dispatch `world.sent` has 1 and `world.sendAttempts.size` is 1 with `state: 'done', outcome: 'sent'`; the second dispatch resolves, `world.sent` stays 1, ONE INFO line has `msg === 'retrySend: this attempt is already resolved'` and `gate: 'skip'` (the step-4 gate answers BEFORE any claim, so no `claim refused` line exists), and `world.jobExecutionMarkers.size` is 0.
   - `:1476-1503` -> `'a throwing attempt-record read BEFORE the claim propagates as a handler failure (redelivery) - nothing sent, nothing claimed'`: `vi.spyOn(world.sendAttemptsRepo, 'get').mockRejectedValue(new Error('record read exploded'))`; `dispatchJob` rejects with it; `world.sent` is 0; `world.sendAttempts.size` is 0.
   - `:1583-1605` (window closed): replace the marker pin with `expect(world.sendAttempts.size).toBe(0)` (a decline holds no claim, RSW #6).
   - `:1748-1779` (recipient read throws): replace `jobExecutionMarkers.size` with `world.sendAttempts.size === 0`.
@@ -943,12 +997,19 @@ The module-local helpers (closures over `attempts`, `messages`, `events`, `log`,
   const run = async (row: MessageItem, attempt = 1, extra: Partial<RetrySendPayload> = {}) => { await enqueue(RETRY_SEND_JOB, { providerSid: row.provider_sid, conversationId: row.conversationId, attempt, ...extra }); await outbound.settle(); };
   const reconcileEnvelopes = () => outbound.delayed.filter((d) => d.envelope.jobName === SEND_RECONCILE_JOB);
   const retryEnvelopes = () => outbound.delayed.filter((d) => d.envelope.jobName === RETRY_SEND_JOB);
+  /** The fake's real send, captured once per test so a case can restore it after an override. */
+  let originalSend: typeof world.adapter.sendPreparedMessage;
+  beforeEach(() => { originalSend = world.adapter.sendPreparedMessage; });
+  /** Every provider call, whatever the override answers - the count `world.sent` cannot give when the override throws. */
+  const providerCalls = () => vi.spyOn(world.adapter, 'sendPreparedMessage');
   const unknownOn = () => { world.adapter.sendPreparedMessage = async () => { throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }); }; };
   const rejectWith = (code: number) => { world.adapter.sendPreparedMessage = async () => { throw Object.assign(new Error(`rejected ${code}`), { code, status: 400 }); }; };   // a 4xx status is what makes a code `rejected` (sendOutcome.ts:107-110)
   const throttle = () => { world.adapter.sendPreparedMessage = async () => { throw Object.assign(new Error('too many'), { code: 20429, status: 429 }); }; };
+  /** A plain outbound row in the retried row's thread (noise, or a child): a NewMessage the fake append accepts. */
+  const outboundRow = (sid: string, atMs: number, conversationId: string): NewMessage => ({ conversationId, providerSid: sid, providerTs: new Date(atMs).toISOString(), type: 'sms', direction: 'outbound', author: 'teammate', body: `noise ${sid}`, deliveryStatus: 'delivered' });
 ```
 
-Cases (the numbers are the spec's section 4; each is one `it`):
+Cases (the numbers are the SPEC's section 4 items; each is one `it`; the deferral family is item 4 with suffixes):
 
 ```ts
 it('1 FAILS ON MAIN: an unknown provider error (a dropped socket) no longer rethrows - the job returns, the record is reconciling, one send.reconcile envelope carries the retry_send owner with no phone, and the retried row\'s promise is refreshed and emitted', async () => {
@@ -977,19 +1038,31 @@ it('4 a 429 is deferred ONCE: the same payload re-enqueued with deferred: true a
   expect(again!.delaySeconds).toBe(Math.round(resolveSendRetryBackoffMs(1) / 1000));
   expect(await world.sendAttemptsRepo.get(ownerOf(row, 1))).toMatchObject({ state: 'done', outcome: 'retryable', cause: '20429' });
   expect(Date.parse(row.retry_due_at!)).toBeGreaterThanOrEqual(Date.now() + resolveSendRetryBackoffMs(1) - 5_000);
-  // the deferred run claims from done/retryable and sends
+  // the deferred run claims from done/retryable and sends (the fake's real send restored)
   world.adapter.sendPreparedMessage = originalSend; await outbound.deliverDelayed(dispatchJob);
   expect(world.sent).toHaveLength(1);
   expect(await world.sendAttemptsRepo.get(ownerOf(row, 1))).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2 });
 });
-it('4a a 429 on a deferred payload ends the chain: record done/refused cause deferral_cap, ERROR, no third enqueue, promise untouched; a redelivery of that job is refused by the record and sends nothing', /* run(row, 1, { deferred: true }) with throttle; then run again (still throttled) -> claim refused, world.sent 0 */);
-it('4b a deferral whose run time falls past the window ends the chain done/refused cause retry_window_closed', /* row.provider_ts = now - 14.5 min (inside the window at job time; the 60 s backoff lands past it) */);
-it('4c a re-DRIVEN run\'s first 429 still gets its deferral (the re-drive payload carries no deferred)', /* seed the record redriven (claim + handToReconcile + markRedriven, as sendReconcile.test.ts case 15b seeds it); run(row) with throttle -> record done/retryable, one deferred envelope */);
-it('4d records are per RETRIED ROW: a manual Retry row that fails 30003 starts a chain whose attempt-1 record keys on the manual row and CLAIMS, although the root\'s chain already ran three attempts (Review Focus 4)', /* three done records on the root (attempts 1-3); a manual row M (retry_of root, no retry_attempt, undelivered 30003, promise live); run(M, 1) -> record for ownerOf(M, 1) done/sent; world.sent 1 */);
-it('4e a manual retry supersedes the chain: with a MANUAL child of the retried row already appended the job declines at INFO before claiming - on a first run (no record), on a deferral re-run (done/retryable, nothing written) and on a re-drive (redriven closed refused); the check is ONE listRetryChildrenConsistent call and finds the row among 60 newer unrelated rows; an AUTOMATIC child does not trigger it', async () => {
-  wire(); const row = await seedRetried('SMroot1');
-  await world.messagesRepo.append({ ...outboundRow('SMmanual', now + 1 s), retryOf: row.tsMsgId, automated: false });
-  for (let i = 0; i < 60; i += 1) await world.messagesRepo.append(outboundRow(`SMnoise${i}`, now + 2 s + i));
+it('4-cap a 429 on a deferred payload ends the chain: record done/refused cause deferral_cap, ERROR, no third enqueue, promise untouched; a redelivery of that job is skipped by the gate and never reaches the provider', async () => {
+  wire(); throttle(); const calls = providerCalls();
+  const row = await seedRetried('SMroot1'); const before = row.retry_due_at!;
+  await run(row, 1, { deferred: true });
+  expect(await world.sendAttemptsRepo.get(ownerOf(row, 1))).toMatchObject({ state: 'done', outcome: 'refused', cause: 'deferral_cap', attemptNo: 1 });
+  expect(retryEnvelopes()).toHaveLength(0); expect(row.retry_due_at).toBe(before); expect(capture.atLevel(50)).toHaveLength(1);
+  expect(calls).toHaveBeenCalledTimes(1);
+  await run(row, 1, { deferred: true });   // the redelivery
+  expect(calls).toHaveBeenCalledTimes(1);   // the provider was NOT called again (world.sent would be 0 either way - the throttle throws before the fake records)
+  expect(await world.sendAttemptsRepo.get(ownerOf(row, 1))).toMatchObject({ attemptNo: 1 });
+  expect(capture.atLevel(30).filter((l) => l['gate'] === 'skip')).toHaveLength(1);
+});
+it('4-window a deferral whose run time falls past the window ends the chain done/refused cause retry_window_closed', /* row.provider_ts = now - 14.5 min (inside the window at job time; the 60 s backoff lands past it) */);
+it('4-redriven a re-DRIVEN run\'s first 429 still gets its deferral (the re-drive payload carries no deferred)', /* seed the record redriven (claim + handToReconcile + markRedriven, as sendReconcile.test.ts case 15b seeds it); run(row) with throttle -> record done/retryable, one deferred envelope */);
+it('4-lost a lost release after the deferral enqueue (finishAttempt(retryable) fence lost) refreshes NOTHING and logs no re-scheduled line - the takeover owns the record', /* vi.spyOn(world.sendAttemptsRepo, 'finishAttempt').mockResolvedValueOnce(false); throttle; run -> one deferred envelope (enqueued first), retry_due_at unchanged, no WARN "re-scheduled", one INFO "close lost its fence" */);
+it('4b records are per RETRIED ROW: a manual Retry row that fails 30003 starts a chain whose attempt-1 record keys on the manual row and CLAIMS, although the root\'s chain already ran three attempts (Review Focus 4)', /* three done records on the root (attempts 1-3); a manual row M (retry_of root, no retry_attempt, undelivered 30003, promise live); run(M, 1) -> record for ownerOf(M, 1) done/sent; world.sent 1 */);
+it('4c a manual retry supersedes the chain: with a MANUAL child of the retried row already appended the job declines at INFO before claiming - on a first run (no record), on a deferral re-run (done/retryable, nothing written) and on a re-drive (redriven closed refused); the check is ONE listRetryChildrenConsistent call and finds the row among 60 newer unrelated rows; an AUTOMATIC child does not trigger it', async () => {
+  wire(); const row = await seedRetried('SMroot1'); const t = Date.now();
+  await world.messagesRepo.append({ ...outboundRow('SMmanual', t + 1_000, row.conversationId), retryOf: row.tsMsgId, automated: false });
+  for (let i = 0; i < 60; i += 1) await world.messagesRepo.append(outboundRow(`SMnoise${i}`, t + 2_000 + i, row.conversationId));
   const list = vi.spyOn(world.messagesRepo, 'listRetryChildrenConsistent'); const thread = vi.spyOn(world.messagesRepo, 'listByConversationConsistent');
   await run(row); expect(world.sent).toHaveLength(0); expect(await world.sendAttemptsRepo.get(ownerOf(row, 1))).toBeUndefined();
   expect(list).toHaveBeenCalledTimes(1); expect(thread).not.toHaveBeenCalled();
@@ -1000,18 +1073,20 @@ it('4e a manual retry supersedes the chain: with a MANUAL child of the retried r
   // an automatic child alone does not decline
   ... fresh row2 with an automatic child (retryOf row2, retryAttempt 1); run(row2) sends ...
 });
-it('4f an existing attempt is resolved BEFORE the window: a stale attempting record (31 s) with the window already closed is taken over into reconcile, not logged window_closed; a deferral re-run whose run time slipped past the window declines retry window closed and sends nothing (RSW #1)', /* two sub-cases */);
-it('4g a conversation that is missing, not one-to-one, or without a participant phone is a WARN decline with no record and no throw', /* three sub-cases; conversationRetryDecline reasons in the WARN */);
+it('4d an existing attempt is resolved BEFORE the window: a stale attempting record (31 s) with the window already closed is taken over into reconcile, not logged window_closed; a deferral re-run whose run time slipped past the window declines retry window closed and sends nothing (RSW #1)', /* two sub-cases */);
+it('4e a conversation that is missing, a group text, a relay group, or a thread without a participant phone is a WARN decline with no record and no throw - in the decision\'s vocabulary', /* four sub-cases; the WARN carries reason conversation_missing / group_text / not_one_to_one / not_one_to_one */);
 it('5 accepted-not-recorded (the append throws): record reconciling WITH the SID, one envelope, one provider call, ERROR sent_unrecorded', /* vi.spyOn(world.messagesRepo, 'append').mockRejectedValueOnce(new Error('append exploded')); record.sid === world.sentDetails[0].sid */);
-it('6a the duplicate guard: the same envelope dispatched twice makes ONE provider call - the second claim is refused (Review Focus 1)', /* the wire-twice recipe from twilioStatusWebhook.test.ts; record done/sent */);
+it('6a the duplicate guard, sequential: the same envelope dispatched twice makes ONE provider call - the second delivery meets the finished record at the gate (skip) (Review Focus 1)', /* the wire-twice recipe from twilioStatusWebhook.test.ts; record done/sent; one INFO with gate 'skip'; providerCalls() 1 */);
 it('6b a stale attempting record (31 s) is taken over into reconcile by the redelivered job, with the same recipientKey derived again', /* claim ownerOf(row,1) at now - 31 s directly on world.sendAttemptsRepo; run(row) -> record reconciling, one reconcile envelope whose owner.recipientKeyHash is 'c-real', world.sent 0 */);
 it('6c a lost re-arm sends nothing and writes nothing', /* vi.spyOn(world.sendAttemptsRepo, 'rearm').mockResolvedValueOnce(undefined); run -> world.sent 0; record still attempting (the claim) - and the INFO "taken over before the send" */);
 it('6d putJobExecutionMarker is never called by this job', /* spy; run a success and an unknown; not called */);
+it('6e the duplicate guard, concurrent (the gate): a FRESH attempting record (5 s old - another delivery is inside its provider call) defers this one - nothing sent, nothing written, INFO "a concurrent delivery owns this attempt" (Review Focus 1)', /* await world.sendAttemptsRepo.claim(ownerOf(row, 1), facts, iso(Date.now() - 5_000)) directly (facts as the job computes them: sender OUR_NUMBER, the body's fingerprint, mediaCount 0); run(row) -> providerCalls() 0; the record unchanged (attemptedAt as seeded, state attempting); one INFO with gate 'defer' */);
+it('6f the duplicate guard, concurrent (the claim race): a delivery that read NO record at the gate but loses the claim to a concurrent winner is refused FRESH and sends nothing (Review Focus 1)', /* the same seeded fresh claim, plus vi.spyOn(world.sendAttemptsRepo, 'get').mockResolvedValueOnce(undefined) so the gate reads "absent" - the claim then answers refused with fresh: true; run(row) -> providerCalls() 0; one INFO "claim refused" carrying fresh: true; the seeded record untouched */);
 it('7 a successful retry: record done/sent with the SID; the retry row carries retry_of, retry_attempt, retry_window_start (the root\'s send), retry_root, automated false, recipient_contact_id and (share root) broadcast_id; the retried row\'s retry_due_at is NOT written', /* two rows: a plain root and a root with broadcast_id; assert; annotateRetryPromise spy not called */);
 it('8 attempt 2: the retried row is the attempt-1 retry row; the record keys on THAT row with attempt 2; retry_root on the new row equals the root; a pre-deploy retried row (retry_of, no retry_root) yields the root through retry_of', /* seed root + r1 (retry_of root, retry_attempt 1, NO retry_root); run(r1, 2) -> record ownerOf(r1, 2) with retryRoot root.tsMsgId; the new row retry_root === root.tsMsgId, retry_window_start === root.provider_ts */);
 it('9 reads before the claim: a closed window with no record leaves no record; a conversation read that throws leaves no record and rethrows; a no-origin row fails open with the WARN', /* three sub-cases; the throwing read uses vi.spyOn(world.conversationsRepo, 'getById').mockRejectedValueOnce and dispatches a delayed envelope directly, as twilioStatusWebhook.test.ts:1777 does */);
 it('11 (second half) the reconcile\'s never_sent re-drive runs through THIS handler: it claims from redriven (attemptNo 2) and sends once; a re-driven job whose window closed at job time closes its redriven record refused', /* register the reconcile beside the job; unknownOn for the first run; then restore the adapter and world.providerMessages empty; runChain over the reconcile envelope (the sendReconcile.test.ts idiom); world.sent 1; record done/sent attemptNo 2 redriveCount 1; second sub-case: seed redriven with provider_ts 16 min ago -> done/refused cause retry_window_closed */);
-it('R9 every line names the owner and never a phone or a body', /* after the unknown run: every captured line with conversationId has retryRoot/retriedTsMsgId/attempt; no line\'s JSON contains TENANT_PHONE or the body */);
+it('R9 every line THE JOB writes names the owner, and no line anywhere carries a phone or a body', /* after the unknown run: every captured line whose msg starts with 'retrySend:' has retryRoot, retriedTsMsgId and attempt (the jobs.ts machinery's own lines - 'job enqueued', 'job succeeded' - carry conversationId from the logger mixin and are NOT held to this); no captured line's JSON contains TENANT_PHONE or the body text */);
 ```
 
 - [ ] **Step 3: Implement the job** as written above (the marker block `:203-227` and the `getContext` import are deleted; `presignRetryMedia` is the existing media block `:267-301` reading the plan; every log string re-worded in ASCII). `registerHandlers.ts:59` -> `registerRetrySendJobHandler({ sendAttemptsRepo: deps.sendAttemptsRepo });` and the doc comment says four send handlers.
@@ -1070,7 +1145,7 @@ and in the `sendMessage` call: `retryRoot,` and `...(original.broadcast_id !== u
 ```ts
 it('R6: 409 superseded when the pressed row has ANY child - an automatic retry row, or a manual one', /* children: [{ tsMsgId: 'x', providerSid: 'SMx', retryAttempt: 1 }] -> 409 { error: 'superseded' }, calls 0; children: [{ tsMsgId: 'y', providerSid: 'SMy' }] -> the same */);
 it('R6: the superseded check is ONE consistent Query on the pointer family, never a thread scan', /* spy the stub\'s listRetryChildrenConsistent (called once) and assert the stub has no listByConversation at all (it would throw a TypeError) */);
-it('R6: 409 retry_unresolved on a done/unresolved record read by KEY - with or without retry_outcome on the row - and when that record is 45 days old', /* seed claim + handToReconcile + closeFromReconcile(unresolved) with at = 45 days ago; two originals: FAILED_ORIGINAL and { ...FAILED_ORIGINAL, retry_outcome: 'unconfirmed' } */);
+it('R6: 409 retry_unresolved on a done/unresolved record read by KEY - with or without retry_outcome on the row - and the route\'s read has no time bound of its own (a 45-day-old record still refuses here; in production the record\'s 30-day expires_at reaps it and the row\'s retry_outcome belt is the only guard after that - Task 9 records the residue)', /* seed claim + handToReconcile + closeFromReconcile(unresolved) with at = 45 days ago; two originals: FAILED_ORIGINAL and { ...FAILED_ORIGINAL, retry_outcome: 'unconfirmed' } */);
 it('R6: 409 retry_unresolved on the row belt alone (retry_outcome: unconfirmed, no record)', /* no records; original with retry_outcome */);
 it('R6: 409 retry_pending on a fresh attempting record, a pending reconciling record and an in-window redriven record', /* three worlds; attemptedAt = now - 30 s */);
 it('R6: 200/201 on a stale attempting record (RETRY_SEND_WINDOW_MS + 1 s old), a done/sent, a done/retryable, a done/refused and a done/enqueue_failed', /* five worlds; expect 201 and calls.length 1 */);
@@ -1079,7 +1154,7 @@ it('R7: the route\'s append carries retryRoot and broadcastId', /* original with
 it('R7: a pre-deploy pressed row (retry_of, no retry_root) walks retry_of for the root', /* parent = a root row; original { ...FAILED_ORIGINAL, retry_of: parent.tsMsgId } -> calls[0].retryRoot === parent.tsMsgId */);
 it('RSW\'s cases are unchanged: the time guard still answers before the record; an expired or withdrawn promise with no record passes', /* the existing D10 cases stay green through the grown factory - no new assertions */);
 ```
-The existing `re-sends the original body + carries retry_of` case (`:475`) gains `retryRoot: FAILED_ORIGINAL.tsMsgId` in its exact `toEqual`.
+TWO existing exact `toEqual` pins on `calls` gain `retryRoot: '2026-06-12T09:00:00.000Z#SMorig'`: the `re-sends the original body + carries retry_of` case (`:475-494`) and the D14 recorded-recipient case (`:614-623`, the one with `recipient: real`). Grep `expect(calls).toEqual` in the file for any third.
 
 - [ ] **Step 3: Implement** (the guards, the deps, the harness api block).
 
@@ -1246,10 +1321,10 @@ test('19 drop_before_create plus fail-list x3: the retried row reads "retry not 
   expect((await getOutboundTo(request, { to: tenant.phone, since })).filter((m) => m.body === BODY_19)).toHaveLength(1);
 });
 ```
-`pollRow(request, conversationId, pick, timeout = 30_000)` polls `GET /api/conversations/:id/messages?limit=100` (raw rows, newest first) every 500 ms with `expect.poll`. `conversationFor` POSTs `/api/contacts/:id/conversation`. `sendStaffText` POSTs the send route.
+`pollRow(api, conversationId, pick, timeout = 30_000)` polls `GET /api/conversations/:id/messages?limit=100` (raw rows, newest first) every 500 ms with `expect.poll`. `conversationFor` POSTs `/api/contacts/:id/conversation`. `sendStaffText` POSTs the send route (`POST /api/conversations/:conversationId/messages` with `{ body }`). EVERY app API call (`pollRow`, `conversationFor`, `sendStaffText`, `createConsentedTenant`, the Retry press) goes through `page.request` (the session `devLogin` established - the bare `request` fixture carries no cookie, and the routes are authed); the bare `request` fixture is for the FAKE (`setDeliveryOutcome`, `failNextSend`, `failList`, `getOutboundTo`) and the logtail only. In the sketches above read `pollRow(request, ...)` as `pollRow(page.request, ...)`.
 
 - [ ] **Step 1: Write the spec and the `selectors.md` note.**
-- [ ] **Step 2: Boot a FRESH lane and run the spec alone, then the full suite.** `npm run e2e:session` (fresh) -> drive the three tests with `cd e2e; npx playwright test tests/dashboard-next/retry-send-adoption.spec.ts` (the e2e workspace only) -> 3 passed; `npm run e2e:stop`; then `timeout 1500 npm run e2e` in bash -> 292 passed (289 + 3), no other spec regresses. If a test is timing-flaky at the lane's 10 s / 2-4-8 s, raise the poll budget, never weaken an assertion.
+- [ ] **Step 2: Boot a FRESH lane and run the spec alone, then the full suite.** Stop any running lane (`npm run e2e:stop`; prove the lane's ports are free), then run the new spec alone through the e2e workspace: `npm run e2e -- tests/dashboard-next/retry-send-adoption.spec.ts` -> 3 passed; then `timeout 1800 npm run e2e` in bash -> 292 passed (289 + 3), no other spec regresses. If `timeout` fires: `npm run e2e:stop`, prove the ports free, and re-run - never let the next run adopt an orphaned stack. If a test is timing-flaky at the lane's 10 s / 2-4-8 s, raise the poll budget, never weaken an assertion.
 - [ ] **Step 3: Commit**
 
 ```bash
@@ -1263,10 +1338,10 @@ git commit -m "test(e2e): a 30003 retry adopted, re-driven once, and closed unre
 **Files (dated sections, ASCII, code cited by file:line at HEAD, never pasted):**
 - `docs/issues/retry-send-lost-under-job-marker.md` - built on this branch (the marker out, the claim in, the reconcile's fourth owner); `status` stays `open` - the human sets it resolved at merge.
 - `docs/issues/accepted-send-lost-when-append-fails.md` - piece 2 built: the retry job hands `SendAcceptedNotRecordedError` to reconcile with its SID, which adopts it as a repair.
-- `docs/issues/manual-retry-double-send-residual-windows.md` - a dated section mapping its numbered gaps (1-5) to R6: the late job (gap 1) and the pending outcome (gap 3) are closed by the job's step 4a and the record guard; the unresolved retry (gap 4) is closed by `retry_unresolved`; the stale render (gap 2) is closed by `superseded` for a row with a child and otherwise stays; the enqueue-after-accept (gap 5) stays as ruled; the two residuals the spec names (a manual send IN FLIGHT while the job passes 4a and claims - a two-child fork - and manual-vs-manual) stay open.
-- `docs/issues/broadcast-30003-retry-never-updates-slot.md` - attribution and the root pointer landed (every retry row carries `broadcast_id` and `retry_root`; the `retrychild#` family); matching is Branch B's; the interim rollup cost: a transitioned receipt for a share-retry row misses the slot, waits 2.5 s, misses again and logs INFO - TWICE for a delivered text (the rollup runs on `sent` and `delivered`); `isBroadcastRowFor` now ignores retry rows (deviation 7).
-- `docs/issues/send-attempt-sweeper.md` - the `retry_send` owner's key shape and its strand cases (a fence write that throws leaves `attempting` with the promise refreshed until it expires; a lost `handToReconcile`); the `retrychild#` family beside the others (no `expires_at` - message rows have none).
-- `docs/issues/send-reconcile-job-residues.md` - the fourth owner inherits every listed residue; the lineage walk adds up to three consistent reads per check beside the unbounded sibling read (item 17); pre-deploy children have no pointer (step 4a and the route miss them for the 15 minutes a chain can straddle the deploy).
+- `docs/issues/manual-retry-double-send-residual-windows.md` - a dated section mapping its numbered gaps (1-5) to R6 by the spec's own reading (R6, "The two halves together"): the late job (gap 1), the pending outcome (gap 3) and the enqueue-after-SQS-accepted job (gap 5) are closed by the job's step 4a (the late job declines when a manual row exists) and the record guard; the unresolved retry (gap 4) is closed by `retry_unresolved`; the stale render (gap 2) is closed by `superseded` for a row with a child and otherwise stays; the two residuals the spec names stay open: a manual send IN FLIGHT while the job passes 4a and claims (a two-child fork whose chains then run independently), and manual-vs-manual.
+- `docs/issues/broadcast-30003-retry-never-updates-slot.md` - attribution and the root pointer landed (every retry row carries `broadcast_id` and `retry_root`; the `retrychild#` family); matching is Branch B's; the interim rollup cost: a transitioned receipt for a share-retry row misses the slot, waits 2.5 s, misses again and logs INFO - TWICE for a delivered text (the rollup runs on `sent` and `delivered`); `isBroadcastRowFor` now ignores retry rows (deviation 7 - a code change, stated).
+- `docs/issues/send-attempt-sweeper.md` - the `retry_send` owner's key shape and its strand cases: a fence write that throws leaves `attempting` with the promise refreshed until it expires; a lost `handToReconcile`; a RE-DRIVEN job that declines at step 1 or 3 (retried row missing or not outbound; conversation missing, group or phone-less - practically unreachable, the reconcile just read both) leaves its record `redriven`, which the route reads as `retry_pending` for 15 minutes; the `retrychild#` family beside the others (no `expires_at` - message rows have none). Also the TTL residue: the record's `expires_at` is set only at claim and re-arm (+30 days, `SEND_ATTEMPT_CLEANUP_MS`), so after 30 days the route's `retry_unresolved` refusal rests on the row's `retry_outcome` belt alone; a lost WITHDRAW then leaves an unresolved row manually retryable.
+- `docs/issues/send-reconcile-job-residues.md` - the fourth owner inherits every listed residue; the lineage walk adds up to three consistent reads per check beside the unbounded sibling read (item 17); pre-deploy children have no pointer: step 4a misses them for the 15 minutes a chain can straddle the deploy, and the ROUTE's `superseded` check misses a pre-deploy child for good (a stale tab on a pre-deploy superseded row behaves as it did before this branch - not a regression).
 - `docs/issues/one-to-one-retry-promise-outlives-job-decline.md` - UNTOUCHED (wontfix respected).
 
 - [ ] **Step 1: Write the sections; `npm run issues` -> exit 0. Commit.**
@@ -1287,12 +1362,12 @@ git commit -m "docs(issues): what retry-send-adoption closes and leaves - the an
 npm run typecheck
 npm test
 npm run smoke
-timeout 1500 npm run e2e
+timeout 1800 npm run e2e
 npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')
 ```
-Report every real exit code and count. If `npm test` is red on DynamoDB Local suites: re-run the failing FILE alone more than once, run the full suite at the merge base, compare failing FILES, report both. Any `[dynamoAdmin]` line is a real container fault - capture `err.$metadata.httpStatusCode` and `attempts` first. Attribute lint errors by BASELINE COMPARISON on the same paths at the merge base; only new ones block.
+Report every real exit code and count. If `timeout` fires on the e2e: `npm run e2e:stop`, prove the lane's ports are free, and re-run once on a quiet tree before calling it red. If `npm test` is red on DynamoDB Local suites: re-run the failing FILE alone more than once, run the full suite at the merge base, compare failing FILES, report both. Any `[dynamoAdmin]` line is a real container fault - capture `err.$metadata.httpStatusCode` and `attempts` first. Attribute lint errors by BASELINE COMPARISON on the same paths at the merge base; only new ones block.
 
-- [ ] **Step 5: Handback** at `.superpowers/sdd/handback.md` AND committed as `docs/superpowers/reviews/2026-09-27-retry-send-adoption/handback.md`: the work map with commits; a per-decision conformance table (R1-R12 and section 0, plus SOR D8/D8a/D13/D15/D16 as inherited); the seven declared deviations; the quoted gate exit codes and counts; the self-QA pointer; the orchestrator's own review findings and adjudications; the drift list; the residues with their issue links; what `isBroadcastRowFor` does with a retry row (deviation 7); post-merge: NONE infra; the human sets `retry-send-lost-under-job-marker` resolved at merge; share-skip Branch B starts after this merges and reads R10. State explicitly: UNMERGED (human gate).
+- [ ] **Step 5: Handback** at `.superpowers/sdd/handback.md` AND committed as `docs/superpowers/reviews/2026-09-27-retry-send-adoption/handback.md`: the work map with commits; a per-decision conformance table (R1-R12 and section 0, plus SOR D8/D8a/D13/D15/D16 as inherited); the NINE declared deviations; the quoted gate exit codes and counts; the self-QA pointer; the orchestrator's own review findings and adjudications; the drift list; the residues with their issue links; what `isBroadcastRowFor` does with a retry row (deviation 7); post-merge: NONE infra; the human sets `retry-send-lost-under-job-marker` resolved at merge; share-skip Branch B starts after this merges and reads R10. State explicitly: UNMERGED (human gate).
 
 ---
 
@@ -1306,8 +1381,8 @@ Report every real exit code and count. If `npm test` is red on DynamoDB Local su
 | Branch B's requirement (broadcast_id + retry_root on every retry row) | T4 test 7 (automatic); T2 tests 10/10a (adopted); T5 R7 cases (manual) | |
 | Wontfix respected (no early withdrawal) | T4 tests 2, 3, 4a, 7 (promise untouched / annotate spy 0); T2 tests 11a, 11c | |
 | R1 owner kind, keys, facts, ref, `deferred` | T2 Step 1 key/parser cases; T4 tests 1, 1b, 4; T1 Step 7 parser cases | |
-| R2 order, gates, claim, marker removal | T4 tests 4e, 4f, 4g, 6a-6d, 9; the rewritten marker cases | |
-| R3 arms | T4 tests 1, 2, 2a, 3, 4, 4a, 4b, 4c, 5, 6c; T1 `retryPromiseWrites` cases | |
+| R2 order, gates, claim, marker removal | T4 tests 4b, 4c, 4d, 4e, 6a-6f, 9; the rewritten marker cases | |
+| R3 arms | T4 tests 1, 2, 2a, 3, 4, 4-cap, 4-window, 4-redriven, 4-lost, 5, 6c; T1 `retryPromiseWrites` cases | |
 | R4 resolve / digest / heldBy / adopt / never_sent / unresolved / re-apply / afterClose | T2 tests 10-10e, 11-11c, 12-12c | |
 | R4 lineage exclusion | T3 tests 13-13c | |
 | R5 row field, projection, copy, hidden Retry | T6 (four files); T1 Step 3 (`annotateRetryPromise` withdraw) | |
@@ -1322,4 +1397,4 @@ Report every real exit code and count. If `npm test` is red on DynamoDB Local su
 | Sec 4 e2e 17-19 | T8 | |
 | Sec 5 issues | T9 Step 1 (six files) | |
 
-Placeholder scan: every test sketch names its expectation and its seam; none says "add tests", "similar to" or "as in Task N" without the code beside it. Type consistency: `RetrySendOwner`, `RetryChildPointer`, `RetryMediaPlan`, `RetryPromiseDeps`, `LineageReader`, `ConversationRetryDecline`, the two 409 codes and the copy strings are defined once (the shared block, T1, T2) and used by name in T2-T8. Review Focus: RF1 T4 6a/9; RF2 T2 10c; RF3 T6 the sentinel-without-outcome case; RF4 T4 4d; RF5 T4 4e/4f and T2 11.
+Placeholder scan: every test sketch names its expectation and its seam; none says "add tests", "similar to" or "as in Task N" without the code beside it; every file-local helper a sketch uses (`appendOutbound`, `seedOneToOne`, `seedRow`, `iso`, `retryDeps`, `wire`, `seedRetried`, `outboundRow`, `originalSend`, `providerCalls`, `pollRow`, `conversationFor`, `sendStaffText`) is defined in the task that uses it. Type consistency: `RetrySendOwner`, `RetryChildPointer`, `RetryMediaPlan`, `RetryPromiseDeps`, `LineageReader`, `ConversationRetryDecline`, the two 409 codes and the copy strings are defined once (the shared block, T1, T2) and used by name in T2-T8. Review Focus: RF1 T4 6a/6e/6f/9; RF2 T2 10c; RF3 T6 the sentinel-without-outcome case; RF4 T4 4b; RF5 T4 4c/4d and T2 11.

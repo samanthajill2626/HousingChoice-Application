@@ -1095,6 +1095,34 @@ async function predecessorMatchers(c: Ctx, r: Resolved): Promise<Array<(owner: S
 }
 
 /**
+ * retry-send-adoption FW2 (planner review A1): the row THIS retry attempt
+ * already appended, read through its retrychild# pointer. One retried row has
+ * exactly one automatic attempt number, so a child carrying this attempt's
+ * number can only be this attempt's own text (sendMessage's append, or an
+ * adoption's). ONE consistent Query on the retried row's pointer partition;
+ * the FIRST such child (tsMsgId order) is read consistently and answers
+ * `found` from the row itself - its SID and its delivery status, adoption
+ * `skipped` (the row exists: no provider call, no append, no second row),
+ * path `lookup`. A pointer whose row cannot be read is an anomaly (the
+ * pointer rides the row's own transaction): ONE WARN, and the lookup goes on
+ * unchanged. Undefined when there is no such child.
+ */
+async function ownRetryRow(c: Ctx, r: Resolved, o: RetrySendOwner, checkNo: number): Promise<Verdict | undefined> {
+  const children = await c.messages.listRetryChildrenConsistent(o.conversationId, o.retriedTsMsgId);
+  const child = children.find((pointer) => pointer.retryAttempt === o.attempt);
+  if (child === undefined) return undefined;
+  const row = await c.messages.getByTsMsgIdConsistent(o.conversationId, child.tsMsgId);
+  if (row === undefined) {
+    c.log.warn(
+      { event: 'send_reconcile', owner: ownerLog(o), recipientKey: safeRecipientKey(r.key), checkNo, childTsMsgId: child.tsMsgId },
+      "send.reconcile: a retrychild# pointer names this attempt's retry row but the row cannot be read - the lookup goes on",
+    );
+    return undefined;
+  }
+  return { kind: 'found', sid: row.provider_sid, adoption: 'skipped', status: row.delivery_status, path: 'lookup' };
+}
+
+/**
  * The LOOKUP path (D12, D13). List the provider's messages to the recipient's
  * CURRENT number from the attempt's sender - proven to be the number the
  * attempt went to by the digest - walking at most RECONCILE_MAX_PAGES pages,
@@ -1109,6 +1137,17 @@ async function predecessorMatchers(c: Ctx, r: Resolved): Promise<Array<(owner: S
  * never_sent. Only the job's own reads and writes throw.
  */
 async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: number): Promise<Verdict> {
+  // FIRST, for a retry attempt: its OWN row (FW2, planner review A1). The
+  // retrychild# pointer is local, strongly consistent proof that this
+  // attempt's text exists, so it wins over every verdict below - the
+  // no_sender and digest closes (which would WITHDRAW the promise beside an
+  // existing retry row) and whatever the provider list answers (a message
+  // created after the window, an unreachable provider). Other owner kinds pay
+  // no read.
+  if (r.owner.kind === 'retry_send') {
+    const own = await ownRetryRow(c, r, r.owner, checkNo);
+    if (own !== undefined) return own;
+  }
   const last = checkNo >= RECONCILE_CHECK_DELAYS_MS.length - 1;
   const sender = record.sender;
   if (sender === undefined) return { kind: 'unresolved', cause: 'no_sender' };

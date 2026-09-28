@@ -3715,6 +3715,142 @@ describe('send.reconcile (spec D11-D16)', () => {
       ]);
     });
 
+    // ---- fix wave FW2 (planner review A1): THIS attempt's own row, by its retrychild# pointer ----
+
+    /** The one-to-one world for the FW2 cases: the reconcile registered, the re-drive recorded (never run). */
+    async function ownRowWorld(): Promise<unknown[]> {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      return got;
+    }
+
+    /**
+     * A retried row (`SMroot-<n>`, its promise due in 10 s) whose attempt 1 is
+     * reconciling WITHOUT a sid - a takeover of a run whose provider call was
+     * still in flight - and a child of it appended through the fake's append,
+     * so its retrychild# pointer exists: attempt `childAttempt`'s retry row
+     * (`SMown-<n>`, sent), created 100 s after the attempt started - outside
+     * the window [at - 60 s, at + 90 s] (the adversarial review's late text).
+     * The provider lists nothing.
+     */
+    async function withChildRow(n: number, childAttempt: number, facts: SendAttemptFacts = factsFor(TENANT_PHONE)) {
+      const root = await seedRow(`SMroot-${n}`, { providerTs: iso(Date.now() - 20_000) });
+      const due = iso(Date.now() + 10_000);
+      root.retry_due_at = due;
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, facts);
+      const child = await seedRow(`SMown-${n}`, {
+        providerTs: iso(Date.parse(at) + 100_000),
+        deliveryStatus: 'sent',
+        errorCode: undefined,
+        retryOf: root.tsMsgId,
+        retryAttempt: childAttempt,
+        retryRoot: root.tsMsgId,
+      });
+      return { root, due, owner, at, child };
+    }
+
+    const ownRowMissing = "send.reconcile: a retrychild# pointer names this attempt's retry row but the row cannot be read - the lookup goes on";
+
+    it('FW2 A1: a retried row that already holds THIS attempt\'s own retry row (its retrychild# pointer) is found from that row at check 0 - done/adopted with its SID, adoption skipped, path lookup - before any provider list: no re-drive, no second row, no audit row, no promise write', async () => {
+      const got = await ownRowWorld();
+      const { root, due, owner, at, child } = await withChildRow(1, 1);
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      const count = world.messages.length;
+      await runChain(payloadOf(owner, at));
+      expect(list).not.toHaveBeenCalled();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMown-1' });
+      expect(got).toEqual([]);
+      expect(scheduledChecks()).toHaveLength(0);
+      expect(world.messages).toHaveLength(count);
+      expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toEqual([
+        { tsMsgId: child.tsMsgId, providerSid: 'SMown-1', retryAttempt: 1 },
+      ]);
+      expect(world.auditEvents).toHaveLength(0);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')).toEqual([
+        expect.objectContaining({ path: 'lookup', adoption: 'skipped', sid: 'SMown-1', deliveryStatus: 'sent', checkNo: 0 }),
+      ]);
+      // Neither refreshed nor withdrawn; afterClose re-renders the retried row once, and nothing re-announces the child.
+      expect(root.retry_due_at).toBe(due);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(persistedFor(root.tsMsgId)).toHaveLength(1);
+      expect(persistedFor(child.tsMsgId)).toHaveLength(0);
+      expect(capture.atLevel(40)).toHaveLength(0);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('FW2 A1: the own-row proof wins over every provider-side verdict (the check is the lookup\'s FIRST step) - with the list throwing on every check, with no sender on the record (no_sender) and with the thread\'s number changed (digest_mismatch), each attempt is found/adopted from its own row: never unresolved, no ERROR, the promise never withdrawn', async () => {
+      const got = await ownRowWorld();
+      const list = vi
+        .spyOn(world.adapter, 'listMessages')
+        .mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+      // (1) the provider unreachable on every check (unresolved provider_unreachable before FW2).
+      const unreachable = await withChildRow(1, 1);
+      await runChain(payloadOf(unreachable.owner, unreachable.at));
+      // (2) a record with no sender - an unpinned dev send (unresolved no_sender before FW2).
+      const unpinned = await withChildRow(2, 1, factsFor(TENANT_PHONE, { sender: null }));
+      expect(await recordOf(unpinned.owner)).not.toHaveProperty('sender');
+      await runChain(payloadOf(unpinned.owner, unpinned.at));
+      // (3) the thread's number changed after the send (unresolved digest_mismatch before FW2).
+      const renumbered = await withChildRow(3, 1);
+      world.conversations.get(retryConv)!.participant_phone = '+15558675309';
+      await runChain(payloadOf(renumbered.owner, renumbered.at));
+      for (const [n, s] of [[1, unreachable], [2, unpinned], [3, renumbered]] as const) {
+        expect(await recordOf(s.owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: `SMown-${n}` });
+        expect(s.root.retry_due_at).toBe(s.due);
+        expect(s.root).not.toHaveProperty('retry_outcome');
+      }
+      expect(lines(30).filter((l) => l['verdict'] === 'found').map((l) => [l['sid'], l['path'], l['adoption'], l['checkNo']])).toEqual([
+        ['SMown-1', 'lookup', 'skipped', 0],
+        ['SMown-2', 'lookup', 'skipped', 0],
+        ['SMown-3', 'lookup', 'skipped', 0],
+      ]);
+      expect(list).not.toHaveBeenCalled();
+      expect(capture.atLevel(50)).toHaveLength(0);
+      expect(capture.atLevel(40)).toHaveLength(0);
+      expect(got).toEqual([]);
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('FW2 A1 (control): a child of ANOTHER attempt number is not this attempt\'s row - the pointer partition is read once per check and the lookup runs as before: never_sent at the last check, ONE re-drive', async () => {
+      const got = await ownRowWorld();
+      const { owner, at } = await withChildRow(1, 2);
+      const children = vi.spyOn(world.messagesRepo, 'listRetryChildrenConsistent');
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runChain(payloadOf(owner, at));
+      expect(children).toHaveBeenCalledTimes(3);
+      expect(children).toHaveBeenCalledWith(retryConv, owner.retriedTsMsgId);
+      expect(list).toHaveBeenCalledTimes(3);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMroot-1', conversationId: retryConv, attempt: 1 }]);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')).toHaveLength(0);
+      expect(lines(40).filter((l) => l['verdict'] === 'never_sent')).toHaveLength(1);
+      expect(lines(40).filter((l) => l['msg'] === ownRowMissing)).toHaveLength(0);
+    });
+
+    it('FW2 A1 (anomaly): a pointer of THIS attempt whose row cannot be read WARNs once per check - naming the owner and the child\'s tsMsgId - and the lookup runs unchanged: here never_sent at the last check and ONE re-drive', async () => {
+      const got = await ownRowWorld();
+      const { owner, at, child } = await withChildRow(1, 1);
+      const read = world.messagesRepo.getByTsMsgIdConsistent.bind(world.messagesRepo);
+      vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent').mockImplementation(async (conversationId, tsMsgId) =>
+        tsMsgId === child.tsMsgId ? undefined : read(conversationId, tsMsgId),
+      );
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runChain(payloadOf(owner, at));
+      const missing = lines(40).filter((l) => l['msg'] === ownRowMissing);
+      expect(missing.map((l) => l['checkNo'])).toEqual([0, 1, 2]);
+      expect(missing[0]).toMatchObject({
+        childTsMsgId: child.tsMsgId,
+        recipientKey: 'c-retry',
+        owner: { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: owner.retriedTsMsgId, attempt: '1', retryRoot: owner.retryRoot },
+      });
+      expect(list).toHaveBeenCalledTimes(3);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMroot-1', conversationId: retryConv, attempt: 1 }]);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')).toHaveLength(0);
+    });
+
     // ---- the lineage exclusion in the sibling rule (spec section 4 item 13; R4, R12) ----
 
     it('13 attempt 1 adopted, then attempt 2 never_sent inside the sibling span is RE-DRIVEN - the record that produced the retried row is lineage, not a sibling', async () => {

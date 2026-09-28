@@ -652,7 +652,7 @@ describe('share-broadcast API (M1.8a)', () => {
         { contactId: 'c-2', phone: '+15550100002', has_consent: true },
         { contactId: 'c-3', phone: '+15550100003', has_consent: true },
       ],
-      count: 5_000, // > MAX_BROADCAST_RECIPIENTS (1500)
+      count: 5_000, // > MAX_BROADCAST_RECIPIENTS (1000)
       truncated: true,
     };
     const { app } = makeWebhookHarness({
@@ -1080,7 +1080,7 @@ describe('share-broadcast API (M1.8a)', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ recipientContactIds: ids });
     expect(send.status).toBe(400);
-    expect(send.body.error).toMatch(/cap/i); // "...exceeds the 1500 recipient cap"
+    expect(send.body.error).toMatch(/cap/i); // "...exceeds the 1000 recipient cap" (MAX_BROADCAST_RECIPIENTS)
     expect(world.broadcasts.get(id)!.status).toBe('draft');
     expect(world.sent).toHaveLength(0);
   });

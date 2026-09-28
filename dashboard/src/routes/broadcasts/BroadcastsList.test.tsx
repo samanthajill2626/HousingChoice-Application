@@ -287,6 +287,66 @@ describe('BroadcastsList - live broadcast.updated merge', () => {
     expect(getBroadcastStats).toHaveBeenCalledTimes(1);
   });
 
+  // code review ADV-7: the refetch decision reads the row AS PATCHED, so a
+  // handler that runs before React renders (the rollup's emit, then the
+  // withdrawal's re-emit, back to back) still sees the first event's count;
+  // and a count-CARRYING event is newer than any pending or in-flight read.
+  it('two back-to-back events with no render between - the rollup CARRYING retry_pending 1, then the re-emit with the count UNSET - schedule exactly ONE refetch', async () => {
+    listBroadcasts.mockResolvedValue(
+      pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: { ...none, audience: 1, failed: 1, retry_pending: 0 } })]),
+    );
+    getBroadcastStats.mockResolvedValue(statsView('sent', 0));
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    expect(within(list).getByText('Not sent')).toBeInTheDocument();
+    act(() => {
+      sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: PENDING });
+      sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET });
+    });
+    await waitFor(() => expect(getBroadcastStats).toHaveBeenCalledTimes(1));
+    expect(await within(list).findByText('Not sent')).toBeInTheDocument();
+    await sleep(500);
+    expect(getBroadcastStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('an event CARRYING the count while a stats refetch is in flight aborts it: the older response never replaces the newer count', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: PENDING })]));
+    let resolveStale: (view: unknown) => void = () => {};
+    let staleSignal: AbortSignal | undefined;
+    getBroadcastStats.mockImplementation((_id: string, signal?: AbortSignal) => {
+      staleSignal = signal;
+      return new Promise((resolve) => {
+        resolveStale = resolve;
+      });
+    });
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET }));
+    await waitFor(() => expect(getBroadcastStats).toHaveBeenCalledTimes(1)); // the read is out
+    // A NEW pending recipient: the rollup's own count lands while the older read is in flight.
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: PENDING }));
+    expect(staleSignal?.aborted).toBe(true);
+    await act(async () => {
+      resolveStale(statsView('sent', 0));
+      await sleep(0);
+    });
+    expect(within(list).getByText('Sending')).toBeInTheDocument();
+    expect(within(list).queryByText('Not sent')).toBeNull();
+    expect(getBroadcastStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('an event CARRYING the count inside the 400 ms debounce cancels the pending refetch - nothing is fetched', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: PENDING })]));
+    getBroadcastStats.mockResolvedValue(statsView('sent', 0));
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET }));
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: PENDING }));
+    await sleep(600);
+    expect(getBroadcastStats).not.toHaveBeenCalled();
+    expect(within(list).getByText('Sending')).toBeInTheDocument();
+  });
+
   it('a kept count of 0, and a share not on the page, never refetch', async () => {
     listBroadcasts.mockResolvedValue(
       pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: { ...none, audience: 1, failed: 1, retry_pending: 0 } })]),

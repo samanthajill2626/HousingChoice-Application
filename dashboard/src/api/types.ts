@@ -3122,7 +3122,10 @@ export interface BroadcastRecipientView {
 
 /** POST /api/broadcasts/:id/preview → one candidate row (the full annotated
  *  list, bounded by the recipient cap). `alreadySentThisProperty` is a SOFT
- *  flag (a prior sent/sending broadcast for this unit already included them). */
+ *  flag: share-sent-outcome D1's SAFE reading over EVERY share of this unit,
+ *  whatever its stored status - the text may have reached them (reached,
+ *  pending a live retry, Not confirmed, or in flight); a final failure, a skip
+ *  and a strand never flag. */
 export interface PreviewCandidate {
   contactId: string;
   firstName?: string;

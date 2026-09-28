@@ -10,7 +10,11 @@
 // stats once (GET results?view=stats, 400 ms debounced per row), so a chain
 // that ends in a failure receipt - which shrinks nothing in `failed` - turns
 // the row from Sending to Not sent. A share still `sending` never refetches: it
-// keeps its stored label and needs no count.
+// keeps its stored label and needs no count. Code review ADV-7: the decision
+// reads the row AS PATCHED (the SSE patch keeps rowsRef in step, so two events
+// handled before React renders see each other), and an event that CARRIES the
+// count cancels that row's pending refetch and aborts its in-flight read - the
+// event is newer than anything that read could return.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getBroadcastStats,
@@ -50,11 +54,20 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
 
   const abortRef = useRef<AbortController | null>(null);
   const genRef = useRef(0);
-  /** The latest rows, for the SSE handler (reads them without re-subscribing). */
+  /** The latest rows, for the SSE handler (reads them without re-subscribing).
+   *  Code review ADV-7: EVERY write to the rows goes through updateRows, which
+   *  applies the change to this ref at once AND to React's state. A ref synced
+   *  from a render lags: React may defer an updater to its next render (it
+   *  computes one eagerly only while neither fiber has pending work), so an
+   *  event handled before that render - the rollup's emit, then the
+   *  withdrawal's re-emit, back to back - must decide from this ref. */
   const rowsRef = useRef<BroadcastSummary[]>([]);
-  useEffect(() => {
-    rowsRef.current = rows;
-  }, [rows]);
+  /** Apply one change to the rows: to rowsRef now, and to React's state as a
+   *  functional update (pure, ordered with every other). */
+  const updateRows = useCallback((change: (prev: BroadcastSummary[]) => BroadcastSummary[]) => {
+    rowsRef.current = change(rowsRef.current);
+    setRows(change);
+  }, []);
   /** share-sent-outcome D4: one pending stats refetch per row - its debounce
    *  timer and its in-flight request (a newer schedule supersedes both). */
   const statsRefetchRef = useRef(
@@ -75,7 +88,7 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
         controller.signal,
       );
       if (controller.signal.aborted || gen !== genRef.current) return;
-      setRows(page.broadcasts);
+      updateRows(() => page.broadcasts);
       setCursor(page.nextCursor);
       setStatus('ready');
     } catch (err) {
@@ -84,12 +97,13 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
       }
       setStatus('error');
     }
-  }, [statusParam]);
+  }, [statusParam, updateRows]);
 
   // Initial load + full reload on a filter change.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
+    rowsRef.current = [];
     setRows([]);
     setCursor(null);
     setLoadingMore(false); // a stale in-flight loadMore now bails (gen-guarded)
@@ -102,9 +116,12 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
     void fetchFirstPage();
   }, [fetchFirstPage]);
 
-  const removeRow = useCallback((broadcastId: string) => {
-    setRows((prev) => prev.filter((r) => r.broadcastId !== broadcastId));
-  }, []);
+  const removeRow = useCallback(
+    (broadcastId: string) => {
+      updateRows((prev) => prev.filter((r) => r.broadcastId !== broadcastId));
+    },
+    [updateRows],
+  );
 
   const loadMore = useCallback(() => {
     if (cursor === null || loadingMore) return;
@@ -120,7 +137,7 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
     })
       .then((page) => {
         if (gen !== genRef.current) return; // filter changed mid-load — discard
-        setRows((prev) => [...prev, ...page.broadcasts]);
+        updateRows((prev) => [...prev, ...page.broadcasts]);
         setCursor(page.nextCursor);
       })
       .catch(() => {
@@ -130,16 +147,24 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
         if (gen !== genRef.current) return; // a newer load owns loadingMore now
         setLoadingMore(false);
       });
-  }, [statusParam, cursor, loadingMore]);
+  }, [statusParam, cursor, loadingMore, updateRows]);
 
   // --- share-sent-outcome D4: one debounced stats refetch per row. The result
   // replaces the row's status + stats; a row no longer on the page is ignored,
   // and a failed read keeps the row as it is (the next event or load corrects it).
-  const scheduleStatsRefetch = useCallback((broadcastId: string) => {
+  /** Drop a row's pending refetch: its timer cleared, its in-flight read aborted (whose result is then ignored). */
+  const cancelStatsRefetch = useCallback((broadcastId: string) => {
     const pending = statsRefetchRef.current;
     const prior = pending.get(broadcastId);
-    if (prior?.timer !== undefined) clearTimeout(prior.timer);
-    prior?.controller?.abort();
+    if (prior === undefined) return;
+    if (prior.timer !== undefined) clearTimeout(prior.timer);
+    prior.controller?.abort();
+    pending.delete(broadcastId);
+  }, []);
+
+  const scheduleStatsRefetch = useCallback((broadcastId: string) => {
+    const pending = statsRefetchRef.current;
+    cancelStatsRefetch(broadcastId);
     const entry: { timer?: ReturnType<typeof setTimeout>; controller?: AbortController } = {};
     entry.timer = setTimeout(() => {
       entry.timer = undefined;
@@ -148,7 +173,7 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
       getBroadcastStats(broadcastId, controller.signal)
         .then((view) => {
           if (controller.signal.aborted) return;
-          setRows((prev) =>
+          updateRows((prev) =>
             prev.map((r) =>
               r.broadcastId === broadcastId ? { ...r, status: view.status, stats: view.stats } : r,
             ),
@@ -162,7 +187,7 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
         });
     }, STATS_REFETCH_DEBOUNCE_MS);
     pending.set(broadcastId, entry);
-  }, []);
+  }, [cancelStatsRefetch, updateRows]);
 
   useEffect(() => {
     const pending = statsRefetchRef.current;
@@ -182,7 +207,7 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
   // a finished share with a positive kept count refetches its stats.
   const onBroadcastUpdated = useCallback(
     (e: { broadcastId: string; status: BroadcastStatus; stats: BroadcastSummary['stats'] }) => {
-      setRows((prev) =>
+      updateRows((prev) =>
         prev.map((r) => {
           if (r.broadcastId !== e.broadcastId) return r;
           const kept =
@@ -192,17 +217,20 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
           return { ...r, status: e.status, stats: { ...e.stats, ...kept } };
         }),
       );
+      if (e.stats.retry_pending !== undefined) {
+        // Code review ADV-7: the event's own count is newer than any read
+        // already scheduled or out - cancel the timer, abort the request.
+        cancelStatsRefetch(e.broadcastId);
+        return;
+      }
+      // The row AS PATCHED (rowsRef, never a render-synced copy): the count
+      // this event omitted is the one it kept.
       const row = rowsRef.current.find((r) => r.broadcastId === e.broadcastId);
-      if (
-        row !== undefined &&
-        e.stats.retry_pending === undefined &&
-        (row.stats.retry_pending ?? 0) > 0 &&
-        (e.status === 'sent' || e.status === 'failed')
-      ) {
+      if (row !== undefined && (row.stats.retry_pending ?? 0) > 0 && (e.status === 'sent' || e.status === 'failed')) {
         scheduleStatsRefetch(e.broadcastId);
       }
     },
-    [scheduleStatsRefetch],
+    [scheduleStatsRefetch, cancelStatsRefetch, updateRows],
   );
   useEventStream({ onBroadcastUpdated });
 

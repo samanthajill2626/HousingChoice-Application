@@ -85,12 +85,18 @@ function RecipientRow({
   // retry), it failed with NO live promise (a scheduled retry reads "will
   // retry" instead), and it is neither Not confirmed (SOR D22: the text may
   // have gone out, and a resend is the double text send-outcome-reconcile
-  // exists to prevent) nor a retry chain that ended unresolved. The row keeps
+  // exists to prevent) nor a retry chain that ended unresolved - nor pending
+  // on the safe side because its attempt row could not be read (`retryPending`
+  // with NO due instant: it counts in Retrying and has no promise to lapse,
+  // code review G3; a pending row WITH a due instant is judged by the clock
+  // below, and shows the hint once the promise lapses - pendingRetryCount's
+  // own rule, so no row is both Retrying and offered a retry). The row keeps
   // its failed styling and sort, and stays a link to the contact.
   const showRetryHint =
     failed &&
     row.errorCode !== SEND_UNCONFIRMED_CODE &&
     row.retryOutcome !== RETRY_OUTCOME_UNCONFIRMED &&
+    !(row.retryPending === true && row.retryDueAt === undefined) &&
     row.contactId !== undefined &&
     (row.tsMsgId !== undefined || row.latestAttempt !== undefined) &&
     !isRetryPromiseLive(row.retryDueAt, serverNow);

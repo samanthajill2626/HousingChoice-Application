@@ -223,6 +223,25 @@ describe('BroadcastResults — render', () => {
     expect(within(list).queryByRole('link', { name: /open conversation to retry/i })).toBeNull();
   });
 
+  it('no hint for a row pending by an UNREADABLE attempt row (retryPending with no retryDueAt) - it counts in Retrying, so it must not also invite a retry (code review G3)', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({
+        status: 'sent',
+        stats: { audience: 1, sent: 0, delivered: 0, failed: 1, retry_pending: 1, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+        recipients: {
+          c1: { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: TS_ROOT, retryPending: true },
+        },
+      }),
+    );
+    renderResults();
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    expect(chipCount('Retrying')).toBe(1);
+    expect(pillLabel()).toBe('Sending');
+    expect(within(list).getByRole('link')).toHaveAttribute('href', '/contacts/c1');
+    expect(within(list).queryByRole('link', { name: /open conversation to retry/i })).toBeNull();
+    expect(list.textContent ?? '').not.toContain('open conversation to retry');
+  });
+
   it('no hint when the chain ended unresolved (retryOutcome unconfirmed) - the badge reads "retry not confirmed"', async () => {
     getBroadcastResults.mockResolvedValue(
       results({

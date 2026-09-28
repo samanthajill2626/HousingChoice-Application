@@ -1011,16 +1011,18 @@ export interface DeliveryReasonOptions {
   /** retry-send-window D8: an automatic retry of THIS failed one-to-one message
    *  is scheduled - it carries a live `retry_due_at` on the server's clock
    *  (`isRetryPromiseLive`, retryPromise.ts). Read only for 30003, and only when
-   *  `relay` is not set. Set by exactly one caller, the one-to-one bubble's
-   *  message-level chip in Timeline.tsx; every other surface (legs, rollups,
-   *  the email card, the property-send results row) omits it and reads the
-   *  plain failure. */
+   *  `relay` is not set. Set by two callers: the one-to-one bubble's
+   *  message-level chip in Timeline.tsx, and the property-send results row
+   *  (share-sent-outcome D3, `shareRecipientReason` in broadcastFormat.ts, from
+   *  the newest attempt's row); every other surface (legs, rollups, the email
+   *  card) omits it and reads the plain failure. */
   retryScheduled?: boolean;
   /** retry-send-adoption R5: the automatic retry of THIS failed one-to-one
    *  message was ruled `unresolved` - it carries `retry_outcome: 'unconfirmed'`.
    *  Read only for 30003, only when `relay` is not set, and AHEAD of
-   *  `retryScheduled`. Set by the same single caller as `retryScheduled` (the
-   *  one-to-one bubble's message-level chip); every other surface omits it. */
+   *  `retryScheduled`. Set by the same two callers as `retryScheduled` (the
+   *  one-to-one bubble's message-level chip and the property-send results
+   *  row); every other surface omits it. */
   retryUnconfirmed?: boolean;
 }
 

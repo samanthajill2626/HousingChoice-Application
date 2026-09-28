@@ -44,11 +44,13 @@ import {
   reconcileDelayMs,
   registerSendReconcileJobHandler,
   toOwnerRef,
+  type RetrySendOwner,
   type SendReconcilePayload,
 } from '../src/jobs/sendReconcile.js';
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
+import { MAX_SEND_RETRY_ATTEMPTS } from '../src/lib/retrySendWindow.js';
 import { bodyFingerprint, hashRecipientKey, recipientDigest } from '../src/lib/sendFingerprint.js';
 import {
   RECONCILE_CHECK_DELAYS_MS,
@@ -60,7 +62,7 @@ import {
 import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationParticipant } from '../src/repos/conversationsRepo.js';
-import { buildTsMsgId, type MessageItem, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
+import { buildTsMsgId, type MessageItem, type NewMessage, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import type { SendAttemptFacts, SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
@@ -3004,6 +3006,79 @@ describe('send.reconcile (spec D11-D16)', () => {
     });
   });
 
+  describe('retry_send owner (retry-send-adoption R4)', () => {
+    /** The one-to-one tenant's number (file-local: T_PHONE belongs to the broadcast fixtures). */
+    const TENANT_PHONE = '+15550100077';
+    const iso = (ms: number): string => new Date(ms).toISOString();
+    /** The one-to-one thread's id - MINTED by the fake (`conv-<n>`), never hard-coded; set by seedOneToOne. */
+    let retryConv = '';
+
+    /** A one-to-one thread with a consented tenant; returns the contact and the conversation. */
+    async function seedOneToOne(): Promise<{ contact: ContactItem; conversation: ConversationItem }> {
+      const contact: ContactItem = { contactId: 'c-retry', type: 'tenant', status: 'active', phone: TENANT_PHONE, consent_method: 'inbound_text' };
+      world.contacts.push(contact);
+      const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(TENANT_PHONE, 'tenant_1to1');
+      retryConv = conversation.conversationId;
+      return { contact, conversation };
+    }
+
+    /**
+     * An outbound 30003 row in that thread (the ROOT by default; pass retryOf /
+     * retryAttempt / retryRoot for a retry row). Returns the STORED row - the
+     * live object the fake keeps - so a test may stamp retry_due_at on it.
+     */
+    async function seedRow(sid: string, fields: Partial<NewMessage> = {}): Promise<MessageItem> {
+      await world.messagesRepo.append({
+        conversationId: retryConv,
+        providerSid: sid,
+        providerTs: iso(Date.now() - 30_000),
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: BODY,
+        deliveryStatus: 'undelivered',
+        errorCode: '30003',
+        automated: false,
+        recipientContactId: 'c-retry',
+        ...fields,
+      });
+      return world.messages.find((m) => m.provider_sid === sid)!;
+    }
+
+    /** Attempt `attempt` of the automatic retry of `row` (the RETRIED row), keyed as the job keys it (R1). */
+    const rOwner = (
+      row: MessageItem,
+      attempt: number,
+      recipientKey = 'c-retry',
+      retryRoot = row.retry_root ?? row.tsMsgId,
+    ): RetrySendOwner => ({ kind: 'retry_send', conversationId: row.conversationId, retriedTsMsgId: row.tsMsgId, attempt, recipientKey, retryRoot });
+
+    it('the owner renders in every log line as strings - kind, conversationId, retriedTsMsgId, attempt, retryRoot - and never with a phone or its recipient hash (ownerLog, ownerRefLog)', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const expected = { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: root.tsMsgId, attempt: '2', retryRoot: root.tsMsgId };
+      // Resolvable, but no record: superseded - the line renders the RESOLVED owner (ownerLog).
+      await runCheck(payloadOf(rOwner(root, 2), new Date().toISOString()));
+      const superseded = lines(30).filter((l) => String(l['msg']).includes('superseded'));
+      expect(superseded).toHaveLength(1);
+      expect(superseded[0]!['owner']).toStrictEqual(expected);
+      expect(superseded[0]).toMatchObject({ recipientKey: 'c-retry', state: 'absent' });
+      // A reference whose hash matches no key the rows derive: unaddressable - the line renders the REFERENCE (ownerRefLog).
+      await runCheck(payloadOf(rOwner(root, 2, 'c-someone-else'), new Date().toISOString()));
+      const notFound = capture.atLevel(30).filter((l) => String(l['msg']).includes('owner recipient not found'));
+      expect(notFound).toHaveLength(1);
+      expect(notFound[0]!['owner']).toStrictEqual(expected);
+      // A phone-keyed attempt (the row records no recipient): redacted, never hashed or in the clear.
+      const phoneRow = await seedRow('SMroot-phone', { recipientContactId: undefined });
+      await runCheck(payloadOf(rOwner(phoneRow, 1, `phone#${TENANT_PHONE}`), new Date().toISOString()));
+      expect(lines(30).filter((l) => String(l['msg']).includes('superseded'))[1]).toMatchObject({ recipientKey: 'phone#redacted' });
+      const all = JSON.stringify(capture.lines);
+      expect(all).not.toContain(TENANT_PHONE);
+      expect(all).not.toContain('phonehash#');
+    });
+  });
+
   describe('the payload, the owner reference and the row owner test', () => {
     it('the parser refuses every other malformed field: empty or missing ids, a null payload, owner or continuation, a non-string attemptedAt, a negative check index', () => {
       const at = new Date().toISOString();
@@ -3032,11 +3107,66 @@ describe('send.reconcile (spec D11-D16)', () => {
         { kind: 'broadcast', broadcastId: 'b', contactKey: key },
         { kind: 'relay_leg', relayConversationId: 'c', sourceTsMsgId: 's', memberKey: key },
         { kind: 'relay_rung', relayConversationId: 'c', retryTsMsgId: 'r', memberKey: key },
+        { kind: 'retry_send', conversationId: 'c', retriedTsMsgId: 'r', attempt: 1, recipientKey: key, retryRoot: 'root' },
       ];
       for (const owner of owners) {
         const ref = toOwnerRef(owner);
         expect(ref.recipientKeyHash).toBe(hashRecipientKey(key));
         expect(JSON.stringify(ref)).not.toContain('phone#+');
+      }
+    });
+
+    it('retry_send (retry-send-adoption R1): the reference round-trips through the payload - the ids, the NUMERIC attempt and the root carried, the recipient key only as its hash', () => {
+      const at = new Date().toISOString();
+      for (const recipientKey of ['c-retry', 'phone#+15550100009']) {
+        const owner: RetrySendOwner = {
+          kind: 'retry_send',
+          conversationId: 'conv-1',
+          retriedTsMsgId: '2026-09-27T12:00:00.000Z#SMa',
+          attempt: 2,
+          recipientKey,
+          retryRoot: '2026-09-27T11:59:00.000Z#SMroot',
+        };
+        const ref = toOwnerRef(owner);
+        expect(ref).toStrictEqual({
+          kind: 'retry_send',
+          conversationId: 'conv-1',
+          retriedTsMsgId: '2026-09-27T12:00:00.000Z#SMa',
+          attempt: 2,
+          retryRoot: '2026-09-27T11:59:00.000Z#SMroot',
+          recipientKeyHash: hashRecipientKey(recipientKey),
+        });
+        const parsed = parseSendReconcilePayload(JSON.parse(JSON.stringify({ owner: ref, attemptedAt: at, checkNo: 1 })) as unknown);
+        expect(parsed).toStrictEqual({ owner: ref, attemptedAt: at, checkNo: 1 });
+        expect(JSON.stringify(parsed)).not.toContain('phone#+');
+      }
+    });
+
+    it('retry_send: the parser refuses an attempt outside 1..MAX_SEND_RETRY_ATTEMPTS, a fractional or string attempt, and a missing id or root', () => {
+      const at = new Date().toISOString();
+      const good = { kind: 'retry_send', conversationId: 'conv-1', retriedTsMsgId: 'T#SMa', attempt: 1, retryRoot: 'T0#SMroot', recipientKeyHash: 'c-1' };
+      expect(parseSendReconcilePayload({ owner: good, attemptedAt: at, checkNo: 0 }).owner).toStrictEqual(good);
+      expect(parseSendReconcilePayload({ owner: { ...good, attempt: MAX_SEND_RETRY_ATTEMPTS }, attemptedAt: at, checkNo: 0 }).owner).toMatchObject({
+        attempt: MAX_SEND_RETRY_ATTEMPTS,
+      });
+      const { attempt: _attempt, ...noAttempt } = good;
+      const { retryRoot: _retryRoot, ...noRoot } = good;
+      const { conversationId: _conversationId, ...noConversation } = good;
+      const { retriedTsMsgId: _retriedTsMsgId, ...noRetried } = good;
+      const bad: unknown[] = [
+        { ...good, attempt: 0 },
+        { ...good, attempt: MAX_SEND_RETRY_ATTEMPTS + 1 },
+        { ...good, attempt: '1' },
+        { ...good, attempt: 1.5 },
+        noAttempt,
+        noRoot,
+        { ...good, retryRoot: '' },
+        noConversation,
+        noRetried,
+        { ...good, recipientKeyHash: '' },
+      ];
+      for (const owner of bad) {
+        expect(() => parseSendReconcilePayload({ owner, attemptedAt: at, checkNo: 0 }), JSON.stringify(owner)).toThrow(/^sendReconcile: /);
       }
     });
 

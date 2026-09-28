@@ -55,6 +55,7 @@ import {
 import type { AppConfig } from '../lib/config.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { MAX_SEND_RETRY_ATTEMPTS } from '../lib/retrySendWindow.js';
 import { bodyFingerprint, hashRecipientKey, recipientDigest, safeRecipientKey } from '../lib/sendFingerprint.js';
 import {
   ENQUEUE_FAILED_CODE,
@@ -85,6 +86,7 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
+import { retryRecipientKey } from '../services/retryChain.js';
 import {
   attemptKey,
   createSendAttemptsRepo,
@@ -113,7 +115,33 @@ export const SEND_RECONCILE_JOB = 'send.reconcile';
 export type SendAttemptOwnerRef =
   | { kind: 'broadcast'; broadcastId: string; recipientKeyHash: string }
   | { kind: 'relay_leg'; relayConversationId: string; sourceTsMsgId: string; recipientKeyHash: string }
-  | { kind: 'relay_rung'; relayConversationId: string; retryTsMsgId: string; recipientKeyHash: string };
+  | { kind: 'relay_rung'; relayConversationId: string; retryTsMsgId: string; recipientKeyHash: string }
+  /**
+   * retry-send-adoption R1: the retried row and the attempt, the chain root as
+   * a fact. The raw recipient key is never carried: the check re-derives it
+   * from the retried row and the thread and compares its hash.
+   */
+  | {
+      kind: 'retry_send';
+      conversationId: string;
+      retriedTsMsgId: string;
+      attempt: number;
+      retryRoot: string;
+      recipientKeyHash: string;
+    };
+
+/** retry-send-adoption R1: the one-to-one 30003 retry attempt's owner - the retry job's claim and this job's fourth kind. */
+export type RetrySendOwner = Extract<SendAttemptOwner, { kind: 'retry_send' }>;
+
+/**
+ * The exhaustiveness guard every owner switch here ends with (the
+ * relayFanOut.ts idiom; retry-send-adoption R4): `never` accepts no owner, so
+ * a kind with no arm is a TYPECHECK error at every site, and one that arrives
+ * anyway throws - never a silent no-op, which five switches were before.
+ */
+function unhandledOwner(owner: never): never {
+  throw new Error(`sendReconcile: unhandled owner kind ${String((owner as { kind?: unknown }).kind)}`);
+}
 
 export interface SendReconcilePayload {
   owner: SendAttemptOwnerRef;
@@ -141,6 +169,17 @@ export function toOwnerRef(owner: SendAttemptOwner): SendAttemptOwnerRef {
         retryTsMsgId: owner.retryTsMsgId,
         recipientKeyHash: hashRecipientKey(owner.memberKey),
       };
+    case 'retry_send':
+      return {
+        kind: 'retry_send',
+        conversationId: owner.conversationId,
+        retriedTsMsgId: owner.retriedTsMsgId,
+        attempt: owner.attempt,
+        retryRoot: owner.retryRoot,
+        recipientKeyHash: hashRecipientKey(owner.recipientKey),
+      };
+    default:
+      return unhandledOwner(owner);
   }
 }
 
@@ -192,6 +231,22 @@ function parseOwnerRef(value: unknown): SendAttemptOwnerRef {
         retryTsMsgId: requiredText(o['retryTsMsgId'], 'owner.retryTsMsgId'),
         recipientKeyHash,
       };
+    case 'retry_send': {
+      // The attempt rides as a NUMBER (requiredText is string-only): a whole
+      // attempt the retry job could have run, 1..MAX_SEND_RETRY_ATTEMPTS.
+      const attempt = o['attempt'];
+      if (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1 || attempt > MAX_SEND_RETRY_ATTEMPTS) {
+        throw new Error('sendReconcile: owner.attempt must be an attempt number');
+      }
+      return {
+        kind: 'retry_send',
+        conversationId: requiredText(o['conversationId'], 'owner.conversationId'),
+        retriedTsMsgId: requiredText(o['retriedTsMsgId'], 'owner.retriedTsMsgId'),
+        attempt,
+        retryRoot: requiredText(o['retryRoot'], 'owner.retryRoot'),
+        recipientKeyHash,
+      };
+    }
     default:
       throw new Error('sendReconcile: owner.kind is not a send-attempt owner');
   }
@@ -265,19 +320,29 @@ interface Resolved {
   broadcast?: BroadcastItem;
   /** broadcast: the recipient's contact, read once per check (null = none). */
   contact?: ContactItem | null;
-  /** relay: the SOURCE row (a leg) or the RETRY row (a rung), read consistently (T10-7). */
+  /**
+   * relay: the SOURCE row (a leg) or the RETRY row (a rung), read consistently
+   * (T10-7). retry_send: the RETRIED row (retry-send-adoption R4), read
+   * consistently - always present for a resolved retry owner; its
+   * retry_due_at is the value the promise writes are conditioned on.
+   */
   row?: MessageItem;
   /**
    * relay: the group. The conversations repo has no consistent read, so the
    * roster phone behind the digest check and the re-drive pre-check are
    * eventually consistent (T10-7, accepted residue R3): the re-driven pass
    * re-reads and re-filters, and a lagged roster can only err to unresolved.
+   * retry_send: the one-to-one thread, read the same eventual way - its
+   * participant_phone derives a phone key and proves the digest.
    */
   conversation?: ConversationItem;
 }
 
+/** The two relay owner kinds: the only owners with a relay row, a relay slot and a relaysid# pointer. */
+type RelayOwner = Extract<SendAttemptOwner, { kind: 'relay_leg' | 'relay_rung' }>;
+
 /** The relay row a relay owner's slot and relaysid pointer are addressed by. */
-function relayRowKey(owner: Exclude<SendAttemptOwner, { kind: 'broadcast' }>): string {
+function relayRowKey(owner: RelayOwner): string {
   return owner.kind === 'relay_leg' ? owner.sourceTsMsgId : owner.retryTsMsgId;
 }
 
@@ -368,6 +433,17 @@ function ownerRefLog(ref: SendAttemptOwnerRef): Record<string, string> {
       return { kind: ref.kind, relayConversationId: ref.relayConversationId, sourceTsMsgId: ref.sourceTsMsgId };
     case 'relay_rung':
       return { kind: ref.kind, relayConversationId: ref.relayConversationId, retryTsMsgId: ref.retryTsMsgId };
+    case 'retry_send':
+      // retry-send-adoption R9: the thread, the retried row, the attempt and the root (strings, as the type says).
+      return {
+        kind: ref.kind,
+        conversationId: ref.conversationId,
+        retriedTsMsgId: ref.retriedTsMsgId,
+        attempt: String(ref.attempt),
+        retryRoot: ref.retryRoot,
+      };
+    default:
+      return unhandledOwner(ref);
   }
 }
 
@@ -380,6 +456,16 @@ function ownerLog(owner: SendAttemptOwner): Record<string, string> {
       return { kind: owner.kind, relayConversationId: owner.relayConversationId, sourceTsMsgId: owner.sourceTsMsgId };
     case 'relay_rung':
       return { kind: owner.kind, relayConversationId: owner.relayConversationId, retryTsMsgId: owner.retryTsMsgId };
+    case 'retry_send':
+      return {
+        kind: owner.kind,
+        conversationId: owner.conversationId,
+        retriedTsMsgId: owner.retriedTsMsgId,
+        attempt: String(owner.attempt),
+        retryRoot: owner.retryRoot,
+      };
+    default:
+      return unhandledOwner(owner);
   }
 }
 
@@ -503,6 +589,30 @@ async function resolve(c: Ctx, ref: SendAttemptOwnerRef): Promise<Resolved | und
         ...(conversation !== undefined && { conversation }),
       };
     }
+    case 'retry_send': {
+      // retry-send-adoption R4: the RETRIED row, consistently (the owner names
+      // it; the root is only a fact and is not read), and the thread
+      // (eventual, as the relay owners accept). The raw recipient key is
+      // RE-DERIVED from the same immutable data the job keyed on (R1) and must
+      // hash to the reference's: a mismatch, or no key to derive, is
+      // unaddressable - left for the sweeper, as any unresolvable owner is.
+      const row = await c.messages.getByTsMsgIdConsistent(ref.conversationId, ref.retriedTsMsgId);
+      if (row === undefined) return undefined;
+      const conversation = await c.conversations.getById(ref.conversationId);
+      const key = retryRecipientKey(row, conversation);
+      if (key === undefined || hashRecipientKey(key) !== ref.recipientKeyHash) return undefined;
+      const owner: RetrySendOwner = {
+        kind: 'retry_send',
+        conversationId: ref.conversationId,
+        retriedTsMsgId: ref.retriedTsMsgId,
+        attempt: ref.attempt,
+        recipientKey: key,
+        retryRoot: ref.retryRoot,
+      };
+      return { owner, key, row, ...(conversation !== undefined && { conversation }) };
+    }
+    default:
+      return unhandledOwner(ref);
   }
 }
 
@@ -531,6 +641,15 @@ async function currentPhone(c: Ctx, r: Resolved): Promise<string | undefined> {
       if (typeof phone === 'string' && phone.length > 0) return phone;
       return r.key.startsWith('phone#') ? r.key.slice('phone#'.length) : undefined;
     }
+    case 'retry_send': {
+      // The thread's number (what the retry went to): a one-to-one thread's
+      // participant phone never changes (R1's stated assumption), so a changed
+      // or missing one fails the digest - unresolved digest_mismatch.
+      const phone = r.conversation?.participant_phone;
+      return typeof phone === 'string' && phone.length > 0 ? phone : undefined;
+    }
+    default:
+      return unhandledOwner(r.owner);
   }
 }
 
@@ -581,7 +700,7 @@ async function heldBy(c: Ctx, r: Resolved, sid: string): Promise<Held> {
   if (pointer !== undefined) {
     const o = r.owner;
     if (
-      o.kind !== 'broadcast' &&
+      (o.kind === 'relay_leg' || o.kind === 'relay_rung') &&
       pointer.conversationId === o.relayConversationId &&
       pointer.tsMsgId === relayRowKey(o) &&
       pointer.memberKey === r.key
@@ -631,6 +750,10 @@ async function adopt(c: Ctx, r: Resolved, m: ProviderMessageSummary): Promise<Fo
     case 'relay_leg':
     case 'relay_rung':
       return adoptRelay(c, r, r.owner, m);
+    case 'retry_send':
+      throw new Error('sendReconcile: the retry_send adoption is not wired yet (retry-send-adoption T2 step 4)');
+    default:
+      return unhandledOwner(r.owner);
   }
 }
 
@@ -651,7 +774,7 @@ async function adopt(c: Ctx, r: Resolved, m: ProviderMessageSummary): Promise<Fo
 async function adoptRelay(
   c: Ctx,
   r: Resolved,
-  owner: Exclude<SendAttemptOwner, { kind: 'broadcast' }>,
+  owner: RelayOwner,
   m: ProviderMessageSummary,
 ): Promise<Found | { kind: 'other' }> {
   const conversationId = owner.relayConversationId;
@@ -951,6 +1074,10 @@ async function closeSlot(c: Ctx, r: Resolved, code: string, bucket: 'failed' | '
       if (closed === 'closed' && r.owner.kind === 'relay_leg') announceLeg(c, r, r.owner, 'failed');
       return;
     }
+    case 'retry_send':
+      throw new Error('sendReconcile: the retry_send close is not wired yet (retry-send-adoption T2 step 4)');
+    default:
+      return unhandledOwner(r.owner);
   }
 }
 
@@ -989,6 +1116,10 @@ async function afterClose(c: Ctx, r: Resolved, deliveryStatus?: DeliveryStatus):
       });
       return;
     }
+    case 'retry_send':
+      throw new Error('sendReconcile: the retry_send afterClose is not wired yet (retry-send-adoption T2 step 4)');
+    default:
+      return unhandledOwner(r.owner);
   }
 }
 
@@ -1111,6 +1242,10 @@ async function enqueueRedrive(r: Resolved, continuation: SendReconcilePayload['c
       await enqueue(RELAY_RETRY_LEG_JOB, redrive);
       return;
     }
+    case 'retry_send':
+      throw new Error('sendReconcile: the retry_send re-drive is not wired yet (retry-send-adoption T2 step 4)');
+    default:
+      return unhandledOwner(r.owner);
   }
 }
 
@@ -1121,12 +1256,21 @@ async function enqueueRedrive(r: Resolved, continuation: SendReconcilePayload['c
  * refusal cause, or undefined. A broadcast re-drive pass runs its own fences.
  */
 function redriveRefusal(r: Resolved, continuation: SendReconcilePayload['continuation']): string | undefined {
-  if (r.owner.kind === 'broadcast') return undefined;
-  if (r.owner.kind === 'relay_leg' && continuation === undefined) return 'no_continuation';
-  if (r.conversation?.status !== 'open') return 'group_not_open';
-  if (rosterMember(r) === undefined) return 'member_removed';
-  if (r.row === undefined) return r.owner.kind === 'relay_leg' ? 'source_not_found' : 'retry_row_not_found';
-  return undefined;
+  switch (r.owner.kind) {
+    case 'broadcast':
+      return undefined;
+    case 'relay_leg':
+    case 'relay_rung':
+      if (r.owner.kind === 'relay_leg' && continuation === undefined) return 'no_continuation';
+      if (r.conversation?.status !== 'open') return 'group_not_open';
+      if (rosterMember(r) === undefined) return 'member_removed';
+      if (r.row === undefined) return r.owner.kind === 'relay_leg' ? 'source_not_found' : 'retry_row_not_found';
+      return undefined;
+    case 'retry_send':
+      throw new Error('sendReconcile: the retry_send re-drive check is not wired yet (retry-send-adoption T2 step 4)');
+    default:
+      return unhandledOwner(r.owner);
+  }
 }
 
 /**

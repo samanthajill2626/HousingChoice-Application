@@ -50,7 +50,24 @@ export const SEND_ATTEMPT_CLEANUP_MS = 30 * 24 * 60 * 60 * 1000;
 export type SendAttemptOwner =
   | { kind: 'broadcast'; broadcastId: string; contactKey: string }
   | { kind: 'relay_leg'; relayConversationId: string; sourceTsMsgId: string; memberKey: string }
-  | { kind: 'relay_rung'; relayConversationId: string; retryTsMsgId: string; memberKey: string };
+  | { kind: 'relay_rung'; relayConversationId: string; retryTsMsgId: string; memberKey: string }
+  /**
+   * retry-send-adoption R1: ONE automatic one-to-one 30003 retry attempt,
+   * keyed on the RETRIED ROW (the row the job names by SID, whose promise it
+   * keeps) and the attempt number - the pair the webhook scheduled. The chain
+   * ROOT rides as a fact, never part of the key: a manual Retry row starts a
+   * new chain under the same root with records of its own. `recipientKey` is
+   * derived from immutable data - the retried row's recipient_contact_id, else
+   * `phone#<conversation.participant_phone>` (services/retryChain.ts).
+   */
+  | {
+      kind: 'retry_send';
+      conversationId: string;
+      retriedTsMsgId: string;
+      attempt: number;
+      recipientKey: string;
+      retryRoot: string;
+    };
 export type SendAttemptState = 'attempting' | 'reconciling' | 'redriven' | 'done';
 export type SendAttemptOutcome =
   | 'sent'
@@ -157,11 +174,31 @@ export function ownerKey(owner: SendAttemptOwner): string {
       return `relay#${owner.relayConversationId}#${owner.sourceTsMsgId}`;
     case 'relay_rung':
       return `rung#${owner.relayConversationId}#${owner.retryTsMsgId}`;
+    case 'retry_send':
+      // The retried row and the attempt; the root is NOT part of the key (R1).
+      return `retry#${owner.conversationId}#${owner.retriedTsMsgId}#${owner.attempt}`;
+    default: {
+      // Exhaustive: a kind with no arm is a typecheck error, never a silent miss.
+      const unhandled: never = owner;
+      throw new Error(`sendAttempts: unhandled owner kind ${String((unhandled as { kind?: unknown }).kind)}`);
+    }
   }
 }
 
 function recipientKeyOf(owner: SendAttemptOwner): string {
-  return owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+  switch (owner.kind) {
+    case 'broadcast':
+      return owner.contactKey;
+    case 'relay_leg':
+    case 'relay_rung':
+      return owner.memberKey;
+    case 'retry_send':
+      return owner.recipientKey;
+    default: {
+      const unhandled: never = owner;
+      throw new Error(`sendAttempts: unhandled owner kind ${String((unhandled as { kind?: unknown }).kind)}`);
+    }
+  }
 }
 
 /**

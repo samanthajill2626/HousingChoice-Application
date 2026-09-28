@@ -4455,8 +4455,22 @@ export function createFakeWorld(): FakeWorld {
   const sendAttemptIndex: FakeWorld['sendAttemptIndex'] = [];
   const sendAttemptOps = new Map<string, string>();
   const attemptSnapshot = (record: SendAttemptRecord): SendAttemptRecord => structuredClone(record);
-  const attemptRecipientKey = (owner: SendAttemptOwner): string =>
-    owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+  // The repo's recipientKeyOf, restated (an exhaustive switch like it).
+  const attemptRecipientKey = (owner: SendAttemptOwner): string => {
+    switch (owner.kind) {
+      case 'broadcast':
+        return owner.contactKey;
+      case 'relay_leg':
+      case 'relay_rung':
+        return owner.memberKey;
+      case 'retry_send':
+        return owner.recipientKey;
+      default: {
+        const unhandled: never = owner;
+        throw new Error(`fake sendAttempts: unhandled owner kind ${String((unhandled as { kind?: unknown }).kind)}`);
+      }
+    }
+  };
   /** DynamoDB orders a string range key by its UTF-8 bytes. */
   const utf8Order = (a: string, b: string): number => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
   /** The index Put of a claim or a re-arm: a same-key item is replaced, as the real Put does. */

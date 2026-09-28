@@ -11,6 +11,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import express, { type Express } from 'express';
 import { zeroStats, type BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
+import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
+import type { ShareLedgerEntry } from '../src/repos/listingSendsRepo.js';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, OUR_NUMBER, createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -1340,6 +1342,192 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
         (i: { kind: string; type?: string }) => i.kind === 'milestone' && i.type === 'listing_sent',
       ),
     ).toHaveLength(0);
+  });
+});
+
+// share-sent-outcome D6: the tenant's "Property sent" milestone stays written
+// at carrier acceptance but takes its WORDS from the ledger at read time - the
+// entry of ITS share, the pair for a pre-branch milestone, and for a PENDING
+// entry the attempt's own row (the promise's one source, I5) inside D1's bound.
+describe('GET /api/contacts/:id/timeline - the tenant Property sent words (share-sent-outcome D6)', () => {
+  const TENANT_D6 = 't-d6';
+  const authedGet = (app: Express, path: string) =>
+    request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+  const minutesAgo = (m: number): string => new Date(Date.now() - m * 60_000).toISOString();
+  const minutesAhead = (m: number): string => new Date(Date.now() + m * 60_000).toISOString();
+
+  function seedTenant(world: FakeWorld): void {
+    world.contacts.push({
+      contactId: TENANT_D6,
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550100031',
+      phones: [{ phone: '+15550100031', primary: true }],
+    });
+  }
+
+  /** One "Property sent" pin for `unitId`, `minutesOld` old (distinct ages keep the order stable). */
+  async function seedPin(world: FakeWorld, unitId: string, minutesOld: number, broadcastId?: string): Promise<void> {
+    await world.activityEventsRepo.record({
+      contactId: TENANT_D6,
+      type: 'listing_sent',
+      label: 'Property sent',
+      refType: 'unit',
+      refId: unitId,
+      at: minutesAgo(minutesOld),
+      ...(broadcastId !== undefined && { broadcastId }),
+    });
+  }
+
+  /** The (unit, tenant) ledger row with ONE share entry. */
+  async function seedEntry(world: FakeWorld, unitId: string, broadcastId: string, entry: ShareLedgerEntry): Promise<void> {
+    const counted = entry.state === 'counted';
+    const ok = await world.listingSendsRepo.putShareMemory(
+      unitId,
+      TENANT_D6,
+      {
+        shares: { [broadcastId]: entry },
+        counted,
+        sentAt: counted ? entry.countedAt : undefined,
+        broadcastId: counted ? broadcastId : undefined,
+      },
+      { token: undefined },
+    );
+    expect(ok).toBe(true);
+  }
+
+  /** A pending entry's attempt row (its promise and chain end). */
+  function seedAttemptRow(world: FakeWorld, conversationId: string, tsMsgId: string, extra: Partial<MessageItem>): void {
+    const hash = tsMsgId.indexOf('#');
+    world.messages.push({
+      conversationId,
+      tsMsgId,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      provider_sid: tsMsgId.slice(hash + 1),
+      provider_ts: tsMsgId.slice(0, hash),
+      delivery_status: 'failed',
+      error_code: '30003',
+      created_at: tsMsgId.slice(0, hash),
+      ...extra,
+    } as MessageItem);
+  }
+
+  function pinLabels(body: { items: Array<{ kind: string; type?: string; label?: string }> }): Array<string | undefined> {
+    return body.items.filter((i) => i.kind === 'milestone' && i.type === 'listing_sent').map((m) => m.label);
+  }
+
+  it('reads its words from the ledger entry of ITS share: counted / unconfirmed / failed / pending-live / pending-refreshed / pending-withdrawn / pending-lapsed / pending-past-the-bound', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world);
+    const attempt = (minutesOld: number, sid: string): string => buildTsMsgId(minutesAgo(minutesOld), sid);
+    const a4 = attempt(3, 'SM4');
+    const a5 = attempt(16, 'SM5'); // past the 15-minute window, inside the 24-minute bound
+    const a6 = attempt(12, 'SM6');
+    const a7 = attempt(14, 'SM7');
+    const a8 = attempt(30, 'SM8'); // past RETRY_ROW_READ_BOUND_MS
+    await seedEntry(world, 'u1', 'b1', {
+      attempt: attempt(20, 'SM1'),
+      state: 'counted',
+      by: 'delivery',
+      countedAt: minutesAgo(20),
+      conversationId: 'conv-1',
+    });
+    await seedEntry(world, 'u2', 'b2', { attempt: attempt(20, 'SM2'), state: 'unconfirmed', conversationId: 'conv-2' });
+    await seedEntry(world, 'u3', 'b3', { attempt: attempt(20, 'SM3'), state: 'failed', conversationId: 'conv-3' });
+    await seedEntry(world, 'u4', 'b4', { attempt: a4, state: 'pending', conversationId: 'conv-4' });
+    await seedEntry(world, 'u5', 'b5', { attempt: a5, state: 'pending', conversationId: 'conv-5' });
+    await seedEntry(world, 'u6', 'b6', { attempt: a6, state: 'pending', conversationId: 'conv-6' });
+    await seedEntry(world, 'u7', 'b7', { attempt: a7, state: 'pending', conversationId: 'conv-7' });
+    await seedEntry(world, 'u8', 'b8', { attempt: a8, state: 'pending', conversationId: 'conv-8' });
+    seedAttemptRow(world, 'conv-4', a4, { retry_due_at: minutesAhead(5) });
+    // 1b REFRESHED this promise past the original window: still live.
+    seedAttemptRow(world, 'conv-5', a5, { retry_due_at: minutesAhead(6) });
+    seedAttemptRow(world, 'conv-6', a6, { retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: RETRY_OUTCOME_UNCONFIRMED });
+    seedAttemptRow(world, 'conv-7', a7, { retry_due_at: minutesAgo(5) }); // due + 2 min grace < now
+    seedAttemptRow(world, 'conv-8', a8, { retry_due_at: minutesAhead(5) }); // never read: past the bound
+    for (let i = 1; i <= 8; i += 1) await seedPin(world, `u${i}`, 60 - i, `b${i}`);
+    const rowReads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
+
+    const res = await authedGet(app, `/api/contacts/${TENANT_D6}/timeline`);
+    expect(res.status).toBe(200);
+    expect(pinLabels(res.body)).toEqual([
+      'Property sent',
+      'Property sent - not confirmed',
+      'Property text failed',
+      'Property sent',
+      'Property sent',
+      'Property sent - not confirmed',
+      'Property text failed',
+      'Property text failed',
+    ]);
+    // b4, b5, b6 and b7 read their attempt's row; b8 is past the bound.
+    expect(rowReads.mock.calls.map((c) => c[1]).sort()).toEqual([a4, a5, a6, a7].sort());
+    // Only the words change: the pin still links to its property.
+    const pins = (res.body.items as Array<{ kind: string; type?: string; refType?: string; refId?: string }>).filter(
+      (i) => i.kind === 'milestone' && i.type === 'listing_sent',
+    );
+    expect(pins.map((p) => [p.refType, p.refId])).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map((i) => ['unit', `u${i}`]));
+  });
+
+  it('a pre-branch milestone (no broadcastId) reads the pair: counted false -> Property text failed; absent flag -> Property sent; no row -> the stored label', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world);
+    // A row every share of which failed: the pair no longer counts.
+    await seedEntry(world, 'u-failed', 'b-x', { attempt: buildTsMsgId(minutesAgo(90), 'SMx'), state: 'failed' });
+    // A LEGACY row written before this branch: no shares memory, no counted flag.
+    const legacyAt = minutesAgo(120);
+    world.listingSends.push({
+      unitId: 'u-legacy',
+      contactId: TENANT_D6,
+      sentAt: legacyAt,
+      via: 'broadcast',
+      created_at: legacyAt,
+      updated_at: legacyAt,
+    });
+    await seedPin(world, 'u-failed', 50);
+    await seedPin(world, 'u-legacy', 40);
+    await seedPin(world, 'u-norow', 30);
+    // The same pair rule for a pin WITH a share id whose entry was never written.
+    await seedPin(world, 'u-failed', 20, 'b-never-written');
+
+    const res = await authedGet(app, `/api/contacts/${TENANT_D6}/timeline`);
+    expect(res.status).toBe(200);
+    expect(pinLabels(res.body)).toEqual(['Property text failed', 'Property sent', 'Property sent', 'Property text failed']);
+  });
+
+  it('a ledger read failure leaves the stored labels and logs one ERROR', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedTenant(world);
+    await seedEntry(world, 'u1', 'b1', { attempt: buildTsMsgId(minutesAgo(20), 'SM1'), state: 'failed' });
+    await seedPin(world, 'u1', 10, 'b1');
+    vi.spyOn(world.listingSendsRepo, 'getByKeys').mockRejectedValue(new Error('ledger down'));
+
+    const res = await authedGet(app, `/api/contacts/${TENANT_D6}/timeline`);
+    expect(res.status).toBe(200);
+    expect(pinLabels(res.body)).toEqual(['Property sent']);
+    const errors = capture.atLevel(50);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ contactId: TENANT_D6 });
+  });
+
+  it('reads the ledger ONCE for the page, one pair per property', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world);
+    await seedEntry(world, 'u1', 'b1', { attempt: buildTsMsgId(minutesAgo(20), 'SM1'), state: 'failed' });
+    await seedPin(world, 'u1', 12, 'b1');
+    await seedPin(world, 'u1', 11, 'b1');
+    await seedPin(world, 'u2', 10, 'b2');
+    const reads = vi.spyOn(world.listingSendsRepo, 'getByKeys');
+
+    const res = await authedGet(app, `/api/contacts/${TENANT_D6}/timeline`);
+    expect(res.status).toBe(200);
+    expect(reads).toHaveBeenCalledTimes(1);
+    const pairs = (reads.mock.calls[0]?.[0] ?? []).map((p) => `${p.unitId}|${p.contactId}`).sort();
+    expect(pairs).toEqual([`u1|${TENANT_D6}`, `u2|${TENANT_D6}`]);
+    // u2 has no ledger row: its pin keeps the stored words.
+    expect(pinLabels(res.body)).toEqual(['Property text failed', 'Property text failed', 'Property sent']);
   });
 });
 

@@ -30,7 +30,8 @@ import { Router } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { RETRY_OUTCOME_UNCONFIRMED, type RetryOutcome } from '../lib/retrySendWindow.js';
+import { isRetryPromiseLive, RETRY_OUTCOME_UNCONFIRMED, type RetryOutcome } from '../lib/retrySendWindow.js';
+import { attemptKeyTimestampMs } from '../lib/shareAttemptOrder.js';
 import {
   createActivityEventsRepo,
   type ActivityEventItem,
@@ -41,7 +42,13 @@ import {
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createBroadcastsRepo, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
-import { reachedCount } from '../services/shareRecipientState.js';
+import {
+  createListingSendsRepo,
+  listingSendKey,
+  type ListingSendItem,
+  type ListingSendsRepo,
+} from '../repos/listingSendsRepo.js';
+import { reachedCount, RETRY_ROW_READ_BOUND_MS } from '../services/shareRecipientState.js';
 import type { Address } from '../lib/address.js';
 import {
   assessNamesReadFailure,
@@ -141,6 +148,9 @@ export interface ContactTimelineRouterDeps {
   /** share-sent-outcome D5: the landlord's "Sent to N tenants" pins recount
    *  from their shares at read time (one projected batch read per page). */
   broadcastsRepo?: BroadcastsRepo;
+  /** share-sent-outcome D6: a "Property sent" pin reads its words from the
+   *  listing-send ledger (one batch read of the page's pairs). */
+  listingSendsRepo?: ListingSendsRepo;
   // Scheduled-send gather (Part B) — the not-yet-sent tour reminders + placement
   // nudges surfaced in the first-page `upcoming[]` bucket. All five must be
   // present for the gather to run; when any is absent the bucket is `[]` (the
@@ -687,6 +697,51 @@ function sentToLabel(n: number): string {
 }
 
 /**
+ * share-sent-outcome D6: the words of a tenant's "Property sent" pin from the
+ * (property, tenant) ledger row. A pin that records its share reads THAT
+ * share's entry: counted -> "Property sent"; unconfirmed -> "Property sent -
+ * not confirmed"; failed -> "Property text failed"; pending is judged the way
+ * D1 judges it - inside RETRY_ROW_READ_BOUND_MS of the entry's attempt the
+ * attempt's OWN row is read (the promise's one source, I5): an unresolved
+ * chain end reads not confirmed, a live promise "Property sent", anything else
+ * (lapsed, missing, unreadable, or past the bound with no later entry write)
+ * "Property text failed". A pin with no entry for its share (the entry write
+ * was dropped) and a pre-branch pin with no share id read the PAIR: a row no
+ * share counts reads failed, any other "Property sent". Staff copy composed
+ * app-side (the dashboard renders a milestone label verbatim).
+ */
+async function propertySentWords(
+  row: ListingSendItem,
+  broadcastId: string | undefined,
+  messages: Pick<MessagesRepo, 'getByTsMsgIdConsistent'>,
+  nowMs: number,
+): Promise<string> {
+  const entry = broadcastId !== undefined ? row.shares?.[broadcastId] : undefined;
+  if (entry === undefined) return row.counted === false ? 'Property text failed' : 'Property sent';
+  switch (entry.state) {
+    case 'counted':
+      return 'Property sent';
+    case 'unconfirmed':
+      return 'Property sent - not confirmed';
+    case 'failed':
+      return 'Property text failed';
+    case 'pending': {
+      const ts = attemptKeyTimestampMs(entry.attempt);
+      if (ts === undefined || nowMs - ts > RETRY_ROW_READ_BOUND_MS || entry.conversationId === undefined) {
+        return 'Property text failed';
+      }
+      try {
+        const attemptRow = await messages.getByTsMsgIdConsistent(entry.conversationId, entry.attempt);
+        if (attemptRow?.retry_outcome === RETRY_OUTCOME_UNCONFIRMED) return 'Property sent - not confirmed';
+        return isRetryPromiseLive(attemptRow?.retry_due_at, nowMs) ? 'Property sent' : 'Property text failed';
+      } catch {
+        return 'Property text failed';
+      }
+    }
+  }
+}
+
+/**
  * Map ONE owned-unit audit row → a `TimelineMilestone` for the landlord's
  * timeline, or `null` when the row is not a surfaced lifecycle type. The milestone
  * `type` REUSES an existing `ActivityEventType` (colour/link only); the `label`
@@ -1195,6 +1250,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const manualOnlyReminderKinds = deps.manualOnlyReminderKinds ?? MANUAL_ONLY_REMINDER_KINDS;
   const manualOnlyNudgeKinds = deps.manualOnlyNudgeKinds ?? MANUAL_ONLY_NUDGE_KINDS;
@@ -1309,8 +1365,39 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
         limit: limit + 1,
         ...(boundaryKey !== undefined && { before: boundaryKey }),
       });
+      // share-sent-outcome D6: the unit-share "Property sent" pins, kept beside
+      // their wire items so the ledger can re-word them below.
+      const propertyPins: Array<{ e: ActivityEventItem; item: TimelineMilestone }> = [];
       for (const e of items) {
-        candidates.push({ globalKey: e.tsEventId, item: toTimelineMilestone(e) });
+        const item = toTimelineMilestone(e);
+        candidates.push({ globalKey: e.tsEventId, item });
+        if (e.type === 'listing_sent' && e.refType === 'unit' && typeof e.refId === 'string') {
+          propertyPins.push({ e, item });
+        }
+      }
+
+      // share-sent-outcome D6: a tenant's "Property sent" pin stays written at
+      // carrier acceptance but takes its WORDS from the ledger at read time
+      // (propertySentWords). ONE batch read over the distinct (property,
+      // tenant) pairs; a pending entry inside D1's bound reads its attempt's
+      // row. A pin whose pair has no row keeps its stored words, and a failed
+      // ledger read keeps EVERY stored label (best-effort, one ERROR).
+      if (propertyPins.length > 0) {
+        try {
+          const unitIds = [...new Set(propertyPins.map(({ e }) => e.refId as string))];
+          const rows = await listingSends.getByKeys(unitIds.map((unitId) => ({ unitId, contactId })));
+          const nowMs = Date.now();
+          for (const { e, item } of propertyPins) {
+            const row = rows.get(listingSendKey(e.refId as string, contactId));
+            if (row === undefined) continue;
+            item.label = await propertySentWords(row, e.broadcastId, messages, nowMs);
+          }
+        } catch (err) {
+          log.error(
+            { err, contactId, count: propertyPins.length },
+            'tenant listing_sent milestone words: ledger read failed (best-effort) - stored labels kept',
+          );
+        }
       }
 
       // Landlord-only: interleave each OWNED property's LIFECYCLE audit as

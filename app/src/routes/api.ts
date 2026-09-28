@@ -869,6 +869,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // share-sent-outcome D5: the landlord's "Sent to N tenants" pins recount
       // from their shares (an injected fake wins; the router default-constructs).
       ...(deps.broadcastsRepo !== undefined && { broadcastsRepo: deps.broadcastsRepo }),
+      // share-sent-outcome D6: a tenant's "Property sent" pin reads its words
+      // from the ledger - the SAME resolved instance the contacts and units
+      // routers read.
+      listingSendsRepo: listingSends,
       // Task 4 "Upcoming" gather: forward the five scheduled-send repos so the
       // timeline can project pending tour reminders + placement nudges. Forward the
       // RESOLVED locals (each `deps.X ?? create…` above), NOT `deps.X` — the router

@@ -866,6 +866,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // gather and shared by the interleave). Forward the RESOLVED `audit` local
       // (same rationale as the gather repos below) so prod/e2e read a real repo.
       auditRepo: audit,
+      // share-sent-outcome D5: the landlord's "Sent to N tenants" pins recount
+      // from their shares (an injected fake wins; the router default-constructs).
+      ...(deps.broadcastsRepo !== undefined && { broadcastsRepo: deps.broadcastsRepo }),
       // Task 4 "Upcoming" gather: forward the five scheduled-send repos so the
       // timeline can project pending tour reminders + placement nudges. Forward the
       // RESOLVED locals (each `deps.X ?? create…` above), NOT `deps.X` — the router
@@ -916,6 +919,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       toursRepo: tours,
       // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      // share-sent-outcome D5: GET /:id/activity recounts "Sent to N tenants"
+      // from the shares (an injected fake wins; the router default-constructs).
+      ...(deps.broadcastsRepo !== undefined && { broadcastsRepo: deps.broadcastsRepo }),
       // unit-photos: presign/confirm direct-upload + display resolution
       // (presign-per-read).
       ...(mediaStore !== undefined && { mediaStore }),

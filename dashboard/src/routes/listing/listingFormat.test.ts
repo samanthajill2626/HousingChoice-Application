@@ -188,7 +188,20 @@ describe('describeUnitActivity', () => {
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', tenantCount: 1 }))).toEqual({
       label: 'Sent to 1 tenant',
     });
-    expect(describeUnitActivity(evt({ type: 'broadcast_sent' }))).toEqual({ label: 'Sent to 0 tenants' });
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent', tenantCount: 2 }))).toEqual({
+      label: 'Sent to 2 tenants',
+    });
+  });
+
+  // share-sent-outcome D5: the count is the share's REACHED recipients (the app
+  // recounts at read time) - a share that reached nobody says so, and still
+  // links to the share, whose page explains why.
+  it('a share that reached nobody reads "No tenants reached" (an absent count too), linking to the share', () => {
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent', broadcastId: 'b1', tenantCount: 0 }))).toEqual({
+      label: 'No tenants reached',
+      to: '/broadcasts/b1',
+    });
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent' }))).toEqual({ label: 'No tenants reached' });
   });
 
   it('describes tour lifecycle rows with tour deep-links', () => {

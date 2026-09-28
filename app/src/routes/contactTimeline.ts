@@ -40,6 +40,8 @@ import {
 } from '../repos/activityEventsRepo.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createBroadcastsRepo, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
+import { reachedCount } from '../services/shareRecipientState.js';
 import type { Address } from '../lib/address.js';
 import {
   assessNamesReadFailure,
@@ -136,6 +138,9 @@ export interface ContactTimelineRouterDeps {
   /** Per-unit audit trail read (bounded Query per owned unit) — the landlord
    *  property-activity lifecycle source. */
   auditRepo?: AuditRepo;
+  /** share-sent-outcome D5: the landlord's "Sent to N tenants" pins recount
+   *  from their shares at read time (one projected batch read per page). */
+  broadcastsRepo?: BroadcastsRepo;
   // Scheduled-send gather (Part B) — the not-yet-sent tour reminders + placement
   // nudges surfaced in the first-page `upcoming[]` bucket. All five must be
   // present for the gather to run; when any is absent the bucket is `[]` (the
@@ -673,6 +678,15 @@ function toTimelineMilestone(e: ActivityEventItem): TimelineMilestone {
 }
 
 /**
+ * share-sent-outcome D5: the landlord pin's words for a share whose REACHED
+ * count was read at request time. Staff copy composed app-side (the dashboard
+ * renders a milestone label verbatim) - not catalog copy.
+ */
+function sentToLabel(n: number): string {
+  return n === 0 ? 'No tenants reached' : `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`;
+}
+
+/**
  * Map ONE owned-unit audit row → a `TimelineMilestone` for the landlord's
  * timeline, or `null` when the row is not a surfaced lifecycle type. The milestone
  * `type` REUSES an existing `ActivityEventType` (colour/link only); the `label`
@@ -1180,6 +1194,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const manualOnlyReminderKinds = deps.manualOnlyReminderKinds ?? MANUAL_ONLY_REMINDER_KINDS;
   const manualOnlyNudgeKinds = deps.manualOnlyNudgeKinds ?? MANUAL_ONLY_NUDGE_KINDS;
@@ -1346,6 +1361,40 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     candidates.sort((a, b) => (a.globalKey < b.globalKey ? 1 : a.globalKey > b.globalKey ? -1 : 0));
     const page = candidates.slice(0, limit);
     const hasMore = candidates.length > limit;
+
+    // share-sent-outcome D5: a landlord's "Sent to N tenants" pin (the
+    // append-only audit row finalize wrote, mapped by unitAuditToMilestone -
+    // the ONLY producer of a `listing_sent` milestone with refType `broadcast`
+    // on a landlord timeline) takes its WORDS from the share at read time: N =
+    // recipients reached. It runs AFTER the merge and slice, so it reads at most
+    // one page of shares (ONE projected batch read), never 25 units' worth. A
+    // share that no longer exists keeps its stored words; a failed read keeps
+    // EVERY stored label (best-effort, the timeline's idiom). Guarded to a
+    // LANDLORD so a tenant's own listing_sent pin is never touched here.
+    if (contact.type === 'landlord') {
+      const isSharePin = (m: TimelineItem): m is TimelineMilestone =>
+        m.kind === 'milestone' &&
+        m.type === 'listing_sent' &&
+        m.refType === 'broadcast' &&
+        m.refId !== undefined &&
+        m.label.startsWith('Sent to ');
+      const pins = page.map((c) => c.item).filter(isSharePin);
+      const shareIds = [...new Set(pins.map((m) => m.refId!))];
+      if (shareIds.length > 0) {
+        try {
+          const shares = await broadcasts.getByIds(shareIds, { projection: 'stats' });
+          for (const m of pins) {
+            const share = shares.get(m.refId!);
+            if (share !== undefined) m.label = sentToLabel(reachedCount(share));
+          }
+        } catch (err) {
+          log.error(
+            { err, contactId, count: shareIds.length },
+            'landlord timeline: share recount read failed (best-effort) - stored labels kept',
+          );
+        }
+      }
+    }
     const nextCursor =
       hasMore && page.length > 0 ? encodeCursor(page[page.length - 1]!.globalKey) : null;
 

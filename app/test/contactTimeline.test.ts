@@ -8,8 +8,9 @@
 //   - PII: a MASKED call has NO transcript/recording_s3_key; a founder-bridge
 //     call DOES; full message body is returned untruncated;
 //   - 404 unknown contact; 400 invalid cursor.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import express, { type Express } from 'express';
+import { zeroStats, type BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, OUR_NUMBER, createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -1041,6 +1042,28 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
 // field edits (unit_updated/created/deleted/restored) are NEVER surfaced. The
 // property-audit candidate keys on the RAW audit SK (`<ISO>#<rand>`) so its
 // merged cursor lives in the audit's own `before` lexical space (page-safe).
+/** share-sent-outcome D5/D6: a finished share written straight into the world. */
+function seedShare(
+  world: FakeWorld,
+  broadcastId: string,
+  unitId: string | undefined,
+  recipients: Record<string, BroadcastRecipient>,
+): void {
+  const now = new Date().toISOString();
+  world.broadcasts.set(broadcastId, {
+    broadcastId,
+    created_by: 'usr_test',
+    created_at: now,
+    updated_at: now,
+    status: 'sent',
+    ...(unitId !== undefined && { unitId }),
+    audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+    body_template: 'hi',
+    stats: zeroStats(),
+    recipients,
+  });
+}
+
 describe('GET /api/contacts/:id/timeline — landlord property interleave', () => {
   const authedGet = (app: Express, path: string) =>
     request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
@@ -1202,6 +1225,97 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
       refId: 't9',
     });
     expect(ms.some((m: { refType?: string }) => m.refType === 'broadcast')).toBe(true);
+  });
+
+  // share-sent-outcome D5: the audit row finalize wrote stays append-only; the
+  // landlord's milestone derives its WORDS from the share at read time.
+  it('a landlord\'s broadcast_sent milestone reads "Sent to N tenants" from the share\'s reached count, "No tenants reached" when none, and keeps the stored count for a missing share', async () => {
+    const h = makeWebhookHarness();
+    const { app, world } = h;
+    world.contacts.push({
+      contactId: 'll-d5',
+      type: 'landlord',
+      status: 'active',
+      phone: '+15550100021',
+      phones: [{ phone: '+15550100021', primary: true }],
+    });
+    world.units.set('u-d5a', { unitId: 'u-d5a', landlordId: 'll-d5', status: 'available' });
+    world.units.set('u-d5b', { unitId: 'u-d5b', landlordId: 'll-d5', status: 'available' });
+    seedShare(world, 's1', 'u-d5a', {
+      'c-1': { status: 'delivered' },
+      'c-2': { status: 'sent', carrierSentAt: '2026-09-28T10:00:01.000Z' },
+      'c-3': { status: 'failed', errorCode: '30007' },
+    });
+    seedShare(world, 's2', 'u-d5b', { 'c-1': { status: 'failed', errorCode: '30007' }, 'c-2': { status: 'failed', errorCode: '30003' } });
+    seedShare(world, 's4', 'u-d5b', { 'c-1': { status: 'delivered' }, 'c-2': { status: 'skipped', errorCode: 'manual_mode' } });
+    await world.auditRepo.append('units#u-d5a', 'broadcast_sent', { broadcastId: 's1', tenantCount: 3 });
+    await world.auditRepo.append('units#u-d5b', 'broadcast_sent', { broadcastId: 's2', tenantCount: 2 });
+    await world.auditRepo.append('units#u-d5a', 'broadcast_sent', { broadcastId: 's3', tenantCount: 4 }); // no share
+    await world.auditRepo.append('units#u-d5b', 'broadcast_sent', { broadcastId: 's4', tenantCount: 2 });
+    const reads = vi.spyOn(world.broadcastsRepo, 'getByIds');
+
+    const res = await authedGet(app, '/api/contacts/ll-d5/timeline');
+    expect(res.status).toBe(200);
+    const labels = (res.body.items as Array<{ kind: string; refType?: string; label?: string }>)
+      .filter((i) => i.kind === 'milestone' && i.refType === 'broadcast')
+      .map((m) => m.label);
+    expect(labels).toEqual(['Sent to 2 tenants', 'No tenants reached', 'Sent to 4 tenants', 'Sent to 1 tenant']);
+    // ONE projected batch read, after the merge and slice.
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(reads.mock.calls[0]?.[1]).toEqual({ projection: 'stats' });
+  });
+
+  it("a share read failure on the landlord relabel keeps the stored labels, answers 200 and logs one ERROR; a tenant's listing_sent milestone is never relabeled here", async () => {
+    const h = makeWebhookHarness();
+    const { app, world, capture } = h;
+    world.contacts.push({
+      contactId: 'll-d5f',
+      type: 'landlord',
+      status: 'active',
+      phone: '+15550100022',
+      phones: [{ phone: '+15550100022', primary: true }],
+    });
+    world.units.set('u-d5f', { unitId: 'u-d5f', landlordId: 'll-d5f', status: 'available' });
+    seedShare(world, 's1', 'u-d5f', { 'c-1': { status: 'delivered' } });
+    await world.auditRepo.append('units#u-d5f', 'broadcast_sent', { broadcastId: 's1', tenantCount: 4 });
+    const reads = vi.spyOn(world.broadcastsRepo, 'getByIds').mockRejectedValueOnce(new Error('batch down'));
+
+    const res = await authedGet(app, '/api/contacts/ll-d5f/timeline');
+    expect(res.status).toBe(200);
+    const bc = (res.body.items as Array<{ kind: string; refType?: string; label?: string }>).find(
+      (i) => i.kind === 'milestone' && i.refType === 'broadcast',
+    );
+    expect(bc?.label).toBe('Sent to 4 tenants');
+    const errors = capture.atLevel(50);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ contactId: 'll-d5f', count: 1 });
+
+    // A TENANT's unit-less share milestone (refType broadcast) is the tenant's
+    // own "Property sent" pin: this relabel never reads or rewrites it.
+    world.contacts.push({
+      contactId: 't-d5',
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550100023',
+      phones: [{ phone: '+15550100023', primary: true }],
+    });
+    seedShare(world, 's-unitless', undefined, { 't-d5': { status: 'delivered' } });
+    await world.activityEventsRepo.record({
+      contactId: 't-d5',
+      type: 'listing_sent',
+      label: 'Property sent',
+      refType: 'broadcast',
+      refId: 's-unitless',
+      broadcastId: 's-unitless',
+    });
+    reads.mockClear();
+    const tenant = await authedGet(app, '/api/contacts/t-d5/timeline');
+    expect(tenant.status).toBe(200);
+    const pin = (tenant.body.items as Array<{ kind: string; type?: string; label?: string }>).find(
+      (i) => i.kind === 'milestone' && i.type === 'listing_sent',
+    );
+    expect(pin?.label).toBe('Property sent');
+    expect(reads).not.toHaveBeenCalled();
   });
 
   it('does NOT interleave property activity for a tenant contact', async () => {

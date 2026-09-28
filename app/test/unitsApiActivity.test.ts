@@ -5,7 +5,8 @@
 // reads (/related, /recipients, /placements): 404 unknown unit, [] for a
 // unit with no history.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { zeroStats, type BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
@@ -39,6 +40,28 @@ function seedContact(
 
 const authedGet = (app: import('express').Express, path: string) =>
   request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+/** share-sent-outcome D5: a finished share of `unitId`, written straight into the world. */
+function seedShare(
+  world: ReturnType<typeof createFakeWorld>,
+  broadcastId: string,
+  unitId: string,
+  recipients: Record<string, BroadcastRecipient>,
+): void {
+  const now = new Date().toISOString();
+  world.broadcasts.set(broadcastId, {
+    broadcastId,
+    created_by: 'usr_test',
+    created_at: now,
+    updated_at: now,
+    status: 'sent',
+    unitId,
+    audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+    body_template: 'hi',
+    stats: zeroStats(),
+    recipients,
+  });
+}
 
 describe('GET /api/units/:id/activity (property Activity card)', () => {
   it('404s an unknown unit', async () => {
@@ -166,6 +189,67 @@ describe('GET /api/units/:id/activity (property Activity card)', () => {
     expect(b).toMatchObject({ broadcastId: 'b9', tenantCount: 3 });
     const t = (res.body.events as Array<Record<string, unknown>>).find((e) => e.type === 'tour_scheduled');
     expect(t).toMatchObject({ tourId: 't5' });
+  });
+
+  // share-sent-outcome D5: the audit row finalize wrote (every slot, whatever
+  // happened to it) is append-only; the card's count is the share's REACHED
+  // recipients at read time.
+  it("broadcast_sent tenantCount is the share's REACHED count at read time (delivered + sent), not the slots written at finalize; a share nobody reached reads 0; a missing share keeps the stored count", async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedShare(world, 'b-1', 'unit-1', {
+      'c-1': { status: 'delivered' },
+      'c-2': { status: 'sent' },
+      'c-3': { status: 'failed', errorCode: '30007' },
+      'c-4': { status: 'skipped', errorCode: 'manual_mode' },
+    });
+    seedShare(world, 'b-none', 'unit-1', { 'c-1': { status: 'failed', errorCode: '30007' } });
+    await world.auditRepo.append('units#unit-1', 'broadcast_sent', { broadcastId: 'b-1', tenantCount: 4 });
+    await world.auditRepo.append('units#unit-1', 'broadcast_sent', { broadcastId: 'b-none', tenantCount: 1 });
+    await world.auditRepo.append('units#unit-1', 'broadcast_sent', { broadcastId: 'b-gone', tenantCount: 4 });
+    const reads = vi.spyOn(world.broadcastsRepo, 'getByIds');
+
+    const res = await authedGet(app, '/api/units/unit-1/activity');
+    expect(res.status).toBe(200);
+    const byShare = new Map(
+      (res.body.events as Array<{ type: string; broadcastId?: string; tenantCount?: number }>)
+        .filter((e) => e.type === 'broadcast_sent')
+        .map((e) => [e.broadcastId, e.tenantCount]),
+    );
+    expect(byShare.get('b-1')).toBe(2);
+    expect(byShare.get('b-none')).toBe(0);
+    expect(byShare.get('b-gone')).toBe(4);
+    // ONE projected batch read for the page's shares.
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(reads.mock.calls[0]?.[1]).toEqual({ projection: 'stats' });
+    expect([...(reads.mock.calls[0]?.[0] ?? [])].sort()).toEqual(['b-1', 'b-gone', 'b-none']);
+  });
+
+  it('a page with no broadcast_sent row reads no share', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    await world.auditRepo.append('units#unit-1', 'tour_scheduled', { tourId: 't5' });
+    const reads = vi.spyOn(world.broadcastsRepo, 'getByIds');
+    const res = await authedGet(app, '/api/units/unit-1/activity');
+    expect(res.status).toBe(200);
+    expect(reads).not.toHaveBeenCalled();
+  });
+
+  it('a share read failure keeps every stored count and answers 200 with one ERROR (the route never 500s)', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedShare(world, 'b-1', 'unit-1', { 'c-1': { status: 'delivered' } });
+    await world.auditRepo.append('units#unit-1', 'broadcast_sent', { broadcastId: 'b-1', tenantCount: 3 });
+    vi.spyOn(world.broadcastsRepo, 'getByIds').mockRejectedValue(new Error('batch down'));
+
+    const res = await authedGet(app, '/api/units/unit-1/activity');
+    expect(res.status).toBe(200);
+    expect(
+      (res.body.events as Array<{ type: string; tenantCount?: number }>).find((e) => e.type === 'broadcast_sent')?.tenantCount,
+    ).toBe(3);
+    const errors = capture.atLevel(50);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ unitId: 'unit-1', count: 1 });
   });
 
   it('passes an unknown event type through honestly (open set, no payload leak)', async () => {

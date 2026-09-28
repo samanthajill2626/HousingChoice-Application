@@ -128,9 +128,12 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
   const contactLink =
     e.contactId !== undefined ? { to: `/contacts/${encodeURIComponent(e.contactId)}` } : {};
   if (e.type === 'broadcast_sent') {
+    // share-sent-outcome D5: the app recounts tenantCount as the share's
+    // REACHED recipients at read time; none reached says so (the link to the
+    // share, whose page explains why, stays either way).
     const n = typeof e.tenantCount === 'number' ? e.tenantCount : 0;
     return {
-      label: `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
+      label: n === 0 ? 'No tenants reached' : `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
       ...(e.broadcastId ? { to: `/broadcasts/${e.broadcastId}` } : {}),
     };
   }

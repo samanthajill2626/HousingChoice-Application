@@ -68,6 +68,8 @@ import {
 import { createPlacementsRepo, type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import { deriveTourSignal } from '../lib/listingSendTour.js';
+import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
+import { reachedCount } from '../services/shareRecipientState.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -79,6 +81,11 @@ export interface UnitsRouterDeps {
   listingSendsRepo?: ListingSendsRepo;
   /** FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched). */
   placementsRepo?: PlacementsRepo;
+  /**
+   * share-sent-outcome D5: GET /:id/activity recounts a `broadcast_sent` row's
+   * tenant count from its share at read time (one projected batch read).
+   */
+  broadcastsRepo?: BroadcastsRepo;
   /**
    * listing-response-tour-chip: GET /:id/recipients derives a per-row tour chip
    * from the unit's tours (byUnit GSI). Best-effort join - a query failure
@@ -288,6 +295,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const mediaStore = deps.mediaStore;
   const transcodeGate = deps.transcodeGate ?? sharedTranscodeGate;
 
@@ -1234,9 +1242,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // is resolved at read time (best-effort, mirrors /placements' tenantName).
   // Bounded-limit (1..MAX, default DEFAULT) — no cursor; a unit's trail is
   // small, and the repo's `before` bound is there when paging is ever needed.
-  // 404 unknown unit (matches the sibling reads). NOTE: "property sent to
-  // tenant" audits under broadcasts#<id>, so sends don't appear here — the
-  // "Sent to tenants" card (GET /:unitId/recipients) is that view.
+  // 404 unknown unit (matches the sibling reads). A finished share of this
+  // unit appears as ONE `broadcast_sent` row (finalize's audit), whose
+  // tenantCount is recounted from the share at read time (share-sent-outcome
+  // D5); the per-tenant view is the "Sent to tenants" card (GET
+  // /:unitId/recipients).
   router.get('/:unitId/activity', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const limit = parseLimit(req.query['limit']);
@@ -1252,6 +1262,36 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     const rows = await audit.listByEntity(`units#${unitId}`, { limit });
     const events = rows.map(toUnitActivityEvent);
+
+    // share-sent-outcome D5: a `broadcast_sent` row's tenantCount is the
+    // share's REACHED recipients at read time (delivered + sent + sending, the
+    // strict reading), never the every-slot count finalize wrote into the
+    // append-only audit row. ONE projected batch read of the page's shares; a
+    // share that no longer exists keeps its stored count, and a failed read
+    // keeps EVERY stored count - best-effort, the route NEVER 500s on it.
+    const shareIds = [
+      ...new Set(
+        events.flatMap((e) =>
+          e.type === 'broadcast_sent' && e.broadcastId !== undefined ? [e.broadcastId] : [],
+        ),
+      ),
+    ];
+    if (shareIds.length > 0) {
+      let shares = new Map<string, BroadcastItem>();
+      try {
+        shares = await broadcasts.getByIds(shareIds, { projection: 'stats' });
+      } catch (err) {
+        log.error(
+          { err, unitId, count: shareIds.length },
+          'unit activity: share recount read failed (best-effort) - stored counts kept',
+        );
+      }
+      for (const e of events) {
+        if (e.type !== 'broadcast_sent' || e.broadcastId === undefined) continue;
+        const share = shares.get(e.broadcastId);
+        if (share !== undefined) e.tenantCount = reachedCount(share);
+      }
+    }
 
     // Read-time contactName enrichment, deduped per contactId; a missing/failed
     // lookup leaves contactName absent (the client falls back to the id) and

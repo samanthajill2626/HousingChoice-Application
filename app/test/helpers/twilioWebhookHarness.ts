@@ -133,8 +133,10 @@ import {
   type ActivityEventsRepo,
 } from '../../src/repos/activityEventsRepo.js';
 import {
+  listingSendKey,
   type ListingSendItem,
   type ListingSendsRepo,
+  type ShareLedgerEntry,
 } from '../../src/repos/listingSendsRepo.js';
 import {
   type ContactVocabulary,
@@ -3122,13 +3124,60 @@ export function createFakeWorld(): FakeWorld {
       const existing = findListingSend(unitId, contactId);
       return existing ? { ...existing } : undefined;
     },
+    // share-sent-outcome T3 (spec D7): the consistent read a memory write
+    // decides from - a deep copy, so a caller's edit never reaches the store.
+    async getByKeyConsistent(unitId, contactId) {
+      const existing = findListingSend(unitId, contactId);
+      return existing ? structuredClone(existing) : undefined;
+    },
+    // share-sent-outcome T3 (spec D7): the conditional memory write, modelled
+    // on the real one - `expect.token` undefined requires NO stored token (an
+    // absent row or a seeded row), else the stored token must match; a win
+    // stamps a fresh token, sets or removes sentAt/broadcastId and stamps
+    // created_at/via only if absent. `shares` is stored as the document client
+    // writes it (undefined fields dropped). Held to the real repo by
+    // twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    async putShareMemory(unitId, contactId, next, expect) {
+      const existing = findListingSend(unitId, contactId);
+      const stored = existing?.shares_op;
+      if (expect.token === undefined ? stored !== undefined : stored !== expect.token) return false;
+      const now = new Date().toISOString();
+      const row: ListingSendItem = existing ?? { unitId, contactId, via: 'broadcast', created_at: now, updated_at: now };
+      if (existing === undefined) listingSends.push(row);
+      row.shares = JSON.parse(JSON.stringify(next.shares)) as Record<string, ShareLedgerEntry>;
+      row.counted = next.counted;
+      row.shares_op = randomUUID();
+      row.updated_at = now;
+      if (row.created_at === undefined) row.created_at = now;
+      if (row.via === undefined) row.via = 'broadcast';
+      if (next.sentAt !== undefined) row.sentAt = next.sentAt;
+      else delete row.sentAt;
+      if (next.broadcastId !== undefined) row.broadcastId = next.broadcastId;
+      else delete row.broadcastId;
+      return true;
+    },
+    // share-sent-outcome T3 (spec D6): the BatchGet by pair - found rows only,
+    // keyed `${unitId}|${contactId}`.
+    async getByKeys(pairs) {
+      const out = new Map<string, ListingSendItem>();
+      for (const p of pairs) {
+        const existing = findListingSend(p.unitId, p.contactId);
+        if (existing !== undefined) out.set(listingSendKey(p.unitId, p.contactId), structuredClone(existing));
+      }
+      return out;
+    },
+    // share-sent-outcome D7: both readers drop a row no share counts (counted
+    // === false, sentAt removed) - the real listByContact's index by absence,
+    // its listByUnit by filter.
     async listByUnit(unitId) {
-      return listingSends.filter((r) => r.unitId === unitId).map((r) => ({ ...r }));
+      return listingSends
+        .filter((r) => r.unitId === unitId && r.counted !== false && typeof r.sentAt === 'string')
+        .map((r) => ({ ...r }));
     },
     async listByContact(contactId) {
       return listingSends
-        .filter((r) => r.contactId === contactId)
-        .sort((a, b) => (a.sentAt < b.sentAt ? 1 : -1)) // newest-first by sentAt
+        .filter((r) => r.contactId === contactId && r.counted !== false && typeof r.sentAt === 'string')
+        .sort((a, b) => (a.sentAt! < b.sentAt! ? 1 : -1)) // newest-first by sentAt
         .map((r) => ({ ...r }));
     },
   };

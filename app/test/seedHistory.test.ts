@@ -606,6 +606,14 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     }
   });
 
+  it('share-sent-outcome D7: an un-counted ledger row (counted false, or no sentAt) yields no Property sent milestone', () => {
+    const base = { unitId: 'unit-1', contactId: 'contact-1', via: 'broadcast', created_at: '2026-08-01T00:00:00.000Z' };
+    expect(listingSendMilestones({ ...base, counted: false, sentAt: '2026-08-01T00:00:00.000Z' })).toEqual([]);
+    expect(listingSendMilestones({ ...base, counted: false })).toEqual([]);
+    expect(listingSendMilestones(base)).toEqual([]);
+    expect(listingSendMilestones({ ...base, counted: true, sentAt: '2026-08-02T00:00:00.000Z' })).toHaveLength(1);
+  });
+
   it('a multi-phone contact emits a number_added milestone per non-primary number', () => {
     const multi = CONTACTS.find(
       (c) => Array.isArray(c['phones']) && (c['phones'] as unknown[]).length > 1,

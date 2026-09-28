@@ -998,9 +998,13 @@ export function tourTrail(tour: Record<string, unknown>): AuditRow[] {
  * anchored at the send's `sentAt`. Faithful to broadcastFanOut.ts:308 (send).
  */
 export function listingSendMilestones(send: Record<string, unknown>): ActivityRow[] {
+  // share-sent-outcome D7: an un-counted pair (counted false; its sentAt is
+  // REMOVED) is not a property sent. No seed writes one; the guard documents
+  // the contract.
+  if (send['counted'] === false || typeof send['sentAt'] !== 'string') return [];
   const contactId = String(send['contactId'] ?? '');
   const unitId = String(send['unitId'] ?? '');
-  const at = String(send['sentAt'] ?? send['created_at'] ?? '');
+  const at = send['sentAt'];
   if (contactId === '' || at === '') return [];
   const rows: ActivityRow[] = [];
   const ref = unitId !== '' ? { refType: 'unit', refId: unitId } : undefined;

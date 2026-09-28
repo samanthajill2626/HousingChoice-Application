@@ -25,7 +25,7 @@
 // Row keys, SIDs and broadcast ids are unique per case: the tables are
 // created once per file and never reset.
 import { randomUUID } from 'node:crypto';
-import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -41,6 +41,12 @@ import {
   type BroadcastStats,
 } from '../src/repos/broadcastsRepo.js';
 import { RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_WITHDRAWN_AT, type RetryOutcome } from '../src/lib/retrySendWindow.js';
+import {
+  createListingSendsRepo,
+  type ListingSendItem,
+  type ListingSendsRepo,
+  type ShareMemoryWrite,
+} from '../src/repos/listingSendsRepo.js';
 import {
   allowedPriorStatuses,
   createMessagesRepo,
@@ -893,6 +899,133 @@ const BC_CASES: BcCase[] = [
   },
 ];
 
+// ===========================================================================
+// listingSendsRepo (share-sent-outcome T3): the per-share memory write and its
+// change token, the consistent and batch reads, the readers' counted filter
+// ===========================================================================
+
+interface LsCtx {
+  id: string;
+}
+
+interface LsStep {
+  label: string;
+  run: (repo: ListingSendsRepo, ctx: LsCtx, impl: Impl) => Promise<unknown>;
+  /** What the REAL answer must be (toBe for a primitive, toMatchObject otherwise). */
+  expect?: unknown;
+}
+
+interface LsCase {
+  name: string;
+  /** The (unit, contact) pairs the state check reads after every step, by script name. */
+  watch: Array<[string, string]>;
+  steps: LsStep[];
+}
+
+const lsUnit = (ctx: LsCtx, name: string): string => `u-${ctx.id}-${name}`;
+const lsContact = (ctx: LsCtx, name: string): string => `c-${ctx.id}-${name}`;
+
+/** A ledger row with its wall clocks and its random change token reduced to their presence, deep-copied. */
+function normalizeLedgerRow(row: ListingSendItem | undefined): Record<string, unknown> | undefined {
+  if (row === undefined) return undefined;
+  const { created_at: created, updated_at: updated, shares_op: op, ...rest } = row;
+  return structuredClone({
+    ...rest,
+    ...(created !== undefined && { created_at: '<clock>' }),
+    ...(updated !== undefined && { updated_at: '<clock>' }),
+    ...(op !== undefined && { shares_op: '<op>' }),
+  });
+}
+
+const LS_A1 = { attempt: `${T0}#SMls1`, state: 'counted' as const, by: 'acceptance' as const, countedAt: T0 };
+const LS_COUNTED: ShareMemoryWrite = { shares: { b1: LS_A1 }, counted: true, sentAt: T0, broadcastId: 'b1' };
+const LS_CLEARED: ShareMemoryWrite = { shares: { b1: { attempt: LS_A1.attempt, conversationId: 'conv-1', state: 'failed' } }, counted: false, sentAt: undefined, broadcastId: undefined };
+const LS_RECOUNTED: ShareMemoryWrite = {
+  shares: { b1: { attempt: `${T1}#SMls2`, conversationId: 'conv-1', state: 'counted', by: 'delivery', countedAt: T1 } },
+  counted: true,
+  sentAt: T1,
+  broadcastId: 'b1',
+};
+
+/** putShareMemory with the token taken as the SAME implementation holds it: none, its current one, or a stale one. */
+const shareMemory = (unit: string, contact: string, next: ShareMemoryWrite, token: 'none' | 'current' | 'stale', written: boolean): LsStep => ({
+  label: `putShareMemory ${unit}/${contact} counted=${String(next.counted)} token=${token}`,
+  run: async (repo, ctx) => {
+    const current = token === 'current' ? (await repo.getByKeyConsistent(lsUnit(ctx, unit), lsContact(ctx, contact)))?.shares_op : undefined;
+    const t = token === 'stale' ? 'not-the-token' : current;
+    return repo.putShareMemory(lsUnit(ctx, unit), lsContact(ctx, contact), structuredClone(next), { token: t });
+  },
+  expect: written,
+});
+
+/** A row written before this branch: sentAt, via, broadcastId, created_at - no memory, no token (the seeds' shape). */
+const seedLegacyRow = (unit: string, contact: string): LsStep => ({
+  label: `seed a legacy row ${unit}/${contact}`,
+  run: async (_repo, ctx, impl) => {
+    const item: ListingSendItem = {
+      unitId: lsUnit(ctx, unit),
+      contactId: lsContact(ctx, contact),
+      sentAt: T0,
+      via: 'broadcast',
+      broadcastId: 'b-old',
+      created_at: T0,
+      updated_at: T0,
+    };
+    if (impl.kind === 'fake') impl.world.listingSends.push(item);
+    else await doc.send(new PutCommand({ TableName: tableName('listing_sends', testEnv), Item: item }));
+    return 'seeded';
+  },
+});
+
+const ledgerByContact = (contact: string): LsStep => ({
+  label: `listByContact ${contact}`,
+  run: async (repo, ctx) => (await repo.listByContact(lsContact(ctx, contact))).map((r) => normalizeLedgerRow(r)),
+});
+
+const ledgerByUnit = (unit: string): LsStep => ({
+  label: `listByUnit ${unit}`,
+  run: async (repo, ctx) => (await repo.listByUnit(lsUnit(ctx, unit))).map((r) => normalizeLedgerRow(r)),
+});
+
+const ledgerByKeys = (pairs: Array<[string, string]>): LsStep => ({
+  label: `getByKeys ${pairs.map(([u, c]) => `${u}/${c}`).join(',')}`,
+  run: async (repo, ctx) => {
+    const m = await repo.getByKeys(pairs.map(([u, c]) => ({ unitId: lsUnit(ctx, u), contactId: lsContact(ctx, c) })));
+    return Object.fromEntries([...m.entries()].map(([key, row]) => [key, normalizeLedgerRow(row)]));
+  },
+});
+
+const LS_CASES: LsCase[] = [
+  {
+    name: 'putShareMemory creates the row when no token is expected and none exists; a second tokenless write loses',
+    watch: [['unit-1', 'c1']],
+    steps: [shareMemory('unit-1', 'c1', LS_COUNTED, 'none', true), shareMemory('unit-1', 'c1', LS_COUNTED, 'none', false)],
+  },
+  {
+    name: 'a SEEDED row (no memory, no token) accepts a tokenless first write and keeps its furniture',
+    watch: [['unit-mx', 'c-mx']],
+    steps: [
+      seedLegacyRow('unit-mx', 'c-mx'),
+      shareMemory('unit-mx', 'c-mx', { shares: { 'b-old': { ...LS_A1, attempt: '!legacy' } }, counted: true, sentAt: T0, broadcastId: 'b-old' }, 'none', true),
+    ],
+  },
+  {
+    name: 'the current token wins and a stale one loses; nothing counted REMOVES sentAt and broadcastId and both readers drop the row; a re-count brings it back; getByKeys finds only what exists',
+    watch: [['unit-1', 'c1']],
+    steps: [
+      shareMemory('unit-1', 'c1', LS_COUNTED, 'none', true),
+      shareMemory('unit-1', 'c1', LS_CLEARED, 'stale', false),
+      shareMemory('unit-1', 'c1', LS_CLEARED, 'current', true),
+      ledgerByContact('c1'),
+      ledgerByUnit('unit-1'),
+      shareMemory('unit-1', 'c1', LS_RECOUNTED, 'current', true),
+      ledgerByContact('c1'),
+      ledgerByUnit('unit-1'),
+      ledgerByKeys([['unit-1', 'c1'], ['unit-9', 'c9']]),
+    ],
+  },
+];
+
 // ---- the harness -----------------------------------------------------------
 
 const client = createDynamoClient({ endpoint });
@@ -901,6 +1034,18 @@ const testEnv = { TABLE_PREFIX: `hc-test-repoaddmirror-${randomUUID().slice(0, 8
 const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
 const realMessages = createMessagesRepo({ doc, env: testEnv, logger });
 const realBroadcasts = createBroadcastsRepo({ doc, env: testEnv, logger });
+const realListingSends = createListingSendsRepo({ doc, env: testEnv, logger });
+
+/** share-sent-outcome T3: both implementations' watched ledger rows must agree after every step. */
+async function ledgerAgree(world: FakeWorld, ctx: LsCtx, watch: Array<[string, string]>, where: string): Promise<void> {
+  for (const [unit, contact] of watch) {
+    const unitId = lsUnit(ctx, unit);
+    const contactId = lsContact(ctx, contact);
+    expect(normalizeLedgerRow(await world.listingSendsRepo.getByKeyConsistent(unitId, contactId)), `${where}: ledger row ${unit}/${contact}`).toStrictEqual(
+      normalizeLedgerRow(await realListingSends.getByKeyConsistent(unitId, contactId)),
+    );
+  }
+}
 
 /** Both implementations' watched broadcasts must agree after every step. */
 async function broadcastsAgree(world: FakeWorld, ctx: BcCtx, watch: string[], where: string): Promise<void> {
@@ -1008,13 +1153,13 @@ describe('the harness consistent twins delegate through the object property', ()
 
 describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror the real repos on the SOR additions (DynamoDB Local)', () => {
   beforeAll(async () => {
-    for (const base of ['messages', 'broadcasts'] as const) {
+    for (const base of ['messages', 'broadcasts', 'listing_sends'] as const) {
       await ensureTable(client, getTableSpec(base), tableName(base, testEnv));
     }
   }, 120_000);
 
   afterAll(async () => {
-    for (const base of ['messages', 'broadcasts'] as const) {
+    for (const base of ['messages', 'broadcasts', 'listing_sends'] as const) {
       await deleteTableIfExists(client, tableName(base, testEnv));
     }
     doc.destroy();
@@ -1052,6 +1197,23 @@ describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror th
           expect(fakeAnswer, `${where}: result`).toStrictEqual(realAnswer);
           expectScripted(realAnswer, step.expect, where);
           await broadcastsAgree(world, ctx, c.watch, where);
+        }
+      }, 60_000);
+    }
+  });
+
+  describe('listingSendsRepo', () => {
+    for (const [caseNo, c] of LS_CASES.entries()) {
+      it(c.name, async () => {
+        const ctx: LsCtx = { id: `${caseNo}-${randomUUID().slice(0, 8)}` };
+        const world = createFakeWorld();
+        for (const [stepNo, step] of c.steps.entries()) {
+          const where = `${c.name} / step ${stepNo} ${step.label}`;
+          const realAnswer = await step.run(realListingSends, ctx, { kind: 'real' });
+          const fakeAnswer = await step.run(world.listingSendsRepo, ctx, { kind: 'fake', world });
+          expect(fakeAnswer, `${where}: result`).toStrictEqual(realAnswer);
+          expectScripted(realAnswer, step.expect, where);
+          await ledgerAgree(world, ctx, c.watch, where);
         }
       }, 60_000);
     }

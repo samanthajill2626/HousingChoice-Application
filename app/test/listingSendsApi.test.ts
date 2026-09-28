@@ -160,6 +160,39 @@ describe('the two directions return the SAME row', () => {
   });
 });
 
+describe('share-sent-outcome D7: a pair no share counts is listed nowhere', () => {
+  it('a row written counted: false through putShareMemory is absent from both GET routes, beside a counted row that is listed', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    seedTenant(world, 'c-2');
+    const failed = { attempt: '2026-09-28T10:00:00.000Z#SM1', conversationId: 'conv-1', state: 'failed' as const };
+    expect(await world.listingSendsRepo.putShareMemory('unit-1', 'c-1', { shares: { 'b-1': failed }, counted: false, sentAt: undefined, broadcastId: undefined }, { token: undefined })).toBe(true);
+    const counted = { attempt: '2026-09-28T10:00:00.000Z#SM2', conversationId: 'conv-2', state: 'counted' as const, by: 'acceptance' as const, countedAt: '2026-09-28T10:00:00.000Z' };
+    expect(await world.listingSendsRepo.putShareMemory('unit-1', 'c-2', { shares: { 'b-1': counted }, counted: true, sentAt: counted.countedAt, broadcastId: 'b-1' }, { token: undefined })).toBe(true);
+
+    const byUnit = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(byUnit.status).toBe(200);
+    expect(byUnit.body.recipients.map((r: { contactId: string }) => r.contactId)).toEqual(['c-2']);
+
+    const uncounted = await request(app)
+      .get('/api/contacts/c-1/listings-sent')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(uncounted.status).toBe(200);
+    expect(uncounted.body.sent).toEqual([]);
+
+    const listed = await request(app)
+      .get('/api/contacts/c-2/listings-sent')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(listed.body.sent).toEqual([{ contactId: 'c-2', unitId: 'unit-1', sentAt: '2026-09-28T10:00:00.000Z', via: 'broadcast', broadcastId: 'b-1' }]);
+  });
+});
+
 describe('tour chip projection (listing-response-tour-chip section 5)', () => {
   it('recipients: a qualifying tour lights ONLY the matching (unit, tenant) row', async () => {
     const { app, world } = makeWebhookHarness();

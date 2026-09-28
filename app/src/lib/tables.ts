@@ -420,6 +420,8 @@ export const TABLES: readonly TableSpec[] = [
         indexName: 'byContact',
         hashKey: { name: 'contactId', type: 'S' },
         rangeKey: { name: 'sentAt', type: 'S' },
+        // share-sent-outcome D7: sentAt is REMOVED when no share counts.
+        sparse: true,
       },
     ],
   },

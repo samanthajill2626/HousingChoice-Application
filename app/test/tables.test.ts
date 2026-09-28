@@ -91,6 +91,9 @@ describe('tables.ts — the table contract', () => {
     const byContact = t.gsis.find((g) => g.indexName === 'byContact');
     expect(byContact?.hashKey.name).toBe('contactId');
     expect(byContact?.rangeKey?.name).toBe('sentAt');
+    // share-sent-outcome D7: sparse by ABSENCE - a pair no share counts has
+    // sentAt REMOVED and drops out of the "Properties sent" index.
+    expect(byContact?.sparse).toBe(true);
     expect(t.stream).toBeUndefined();
     expect(t.ttlAttribute).toBeUndefined();
   });

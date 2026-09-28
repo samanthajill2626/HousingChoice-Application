@@ -785,7 +785,15 @@ the build finds out of scope.
   `unresolved`, and nothing redelivers. The slot keeps its 30003 failure;
   within D1's bound the row read gives the right state, past it the slot reads
   failed until the repair is re-run and reads the record. Accepted as the
-  repair's residue.
+  repair's residue. AMENDED at the plan (2026-09-28, plan review round 2):
+  the same residue holds at the RECONCILE's sites - the slot write there is
+  retried twice on a fault and then dropped with ONE ERROR, never propagated,
+  because a permanent failure (the item-size limit named above) propagating
+  out of a check would loop it through the queue to the dead-letter queue
+  while the record never closed; at the unresolved close the promise WITHDRAW
+  runs first, so the thread and the Retry route are never wrong about an
+  unresolved text. A process crash between the adoption hook and the record
+  close is still re-applied by the redelivered check.
 - **A lost retry rollup.** The status webhook catches a rollup throw and
   still answers 200, so the carrier never redelivers; if D2's re-read bound is
   exhausted too, the retry's row exists but the slot never learns it, and past

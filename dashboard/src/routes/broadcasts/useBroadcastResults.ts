@@ -18,22 +18,28 @@
 // share-sent-outcome D4 (deviation 14): the overlay MERGES an event whose stats
 // omit `retry_pending` by keeping the last known count (only the rollup that
 // just scheduled a retry emits one), and the page's 60 s ticker may override
-// the count with a recount from its own rows (`recountRetryPending`) so the
-// pill and chips never outlive a lapsed promise. The override is cleared by a
-// REFETCH (fresh rows, the route's truth) and by an overlay that CARRIES a
-// count (a new pending recipient outranks the recount) - never by one whose
-// count is unset, which would bring back a stale count until its refetch. And
-// no recount applies between an overlay and the refetch that follows it: the
-// rows are older than the stats then, so the event's count stands.
+// the count with a recount of the rows (`recountRetryPending`) so the pill and
+// chips never outlive a lapsed promise. The override is cleared by a REFETCH
+// (fresh rows, the route's truth) and by an overlay that CARRIES a count (a
+// new pending recipient outranks the recount) - never by one whose count is
+// unset, which would bring back a stale count until its refetch. And no
+// recount applies between an overlay and the refetch that follows it: the
+// rows are older than the stats then, so the event's count stands. The
+// recount reads the hook's OWN latest results (`resultsRef`, set in the same
+// step as every write to them - code review FWF-4), never a rendered copy: a
+// tick that lands after a fetch resolved but before React rendered it would
+// otherwise recount the pre-fetch rows over the route's fresh count.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ApiError,
   getBroadcastResults,
   useEventStream,
+  type BroadcastRecipient,
   type BroadcastResults,
   type BroadcastStats,
   type BroadcastUpdatedEvent,
 } from '../../api/index.js';
+import { isRetryPromiseLive } from '../contact/retryPromise.js';
 
 export type BroadcastResultsStatus = 'loading' | 'ready' | 'error';
 
@@ -49,10 +55,23 @@ export interface BroadcastResultsState {
   /** share-sent-outcome D4: `results.stats` with the ticker's recount (when one
    *  stands) in place of `retry_pending` - what the pill and the chips read. */
   liveStats: BroadcastStats | null;
-  /** share-sent-outcome D4: the page ticker's recount of its pending rows. A
-   *  no-op while the rows are older than the stats (an overlay awaiting its
+  /** share-sent-outcome D4: the page ticker's recount of the pending rows at
+   *  `nowMs` (the SERVER clock), from the hook's own latest results. A no-op
+   *  while the rows are older than the stats (an overlay awaiting its
    *  refetch). */
-  recountRetryPending: (count: number) => void;
+  recountRetryPending: (nowMs: number) => void;
+}
+
+/** share-sent-outcome D4 (deviation 14): the rows the ticker counts as pending
+ *  a retry - the ones the route marked pending whose promise is still live, or
+ *  that carry no due instant (their row read failed: pending on the safe side). */
+function pendingRetryCount(
+  rows: ReadonlyArray<Pick<BroadcastRecipient, 'retryPending' | 'retryDueAt'>>,
+  nowMs: number,
+): number {
+  return rows.filter(
+    (r) => r.retryPending === true && (r.retryDueAt === undefined || isRetryPromiseLive(r.retryDueAt, nowMs)),
+  ).length;
 }
 
 /** Debounce for SSE-triggered refetches — coalesces a burst of broadcast.updated
@@ -67,6 +86,20 @@ const POLL_INTERVAL_MS = 2000;
 export function useBroadcastResults(broadcastId: string): BroadcastResultsState {
   const [status, setStatus] = useState<BroadcastResultsStatus>('loading');
   const [results, setResults] = useState<BroadcastResults | null>(null);
+  /** share-sent-outcome D4 (code review FWF-4): the LATEST results, written in
+   *  the same step as the state (`updateResults`) - what the ticker's recount
+   *  reads, so it never counts rows older than a fetch that already landed. */
+  const resultsRef = useRef<BroadcastResults | null>(null);
+  /** Every write to the results goes through here: the ref at once, and React's
+   *  state to the same value. */
+  const updateResults = useCallback(
+    (change: (prev: BroadcastResults | null) => BroadcastResults | null) => {
+      const next = change(resultsRef.current);
+      resultsRef.current = next;
+      setResults(next);
+    },
+    [],
+  );
   const [notFound, setNotFound] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   /** share-sent-outcome D4: the ticker's recount of retry_pending, standing
@@ -100,7 +133,7 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
         const data = await getBroadcastResults(broadcastId, controller.signal);
         if (controller.signal.aborted || gen !== genRef.current) return;
         if (terminalSeenRef.current && data.status === 'sending') return;
-        setResults(data);
+        updateResults(() => data);
         // Fresh rows from the route: its count is the truth again.
         setRecount(undefined);
         rowsBehindRef.current = false;
@@ -124,20 +157,20 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
         if (background) setRefreshing(false);
       }
     },
-    [broadcastId],
+    [broadcastId, updateResults],
   );
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
-    setResults(null);
+    updateResults(() => null);
     setNotFound(false);
     setRecount(undefined);
     terminalSeenRef.current = false;
     rowsBehindRef.current = false;
     void fetchResults(false);
     return () => abortRef.current?.abort();
-  }, [fetchResults]);
+  }, [fetchResults, updateResults]);
 
   const refresh = useCallback(() => void fetchResults(true), [fetchResults]);
   const retry = useCallback(() => {
@@ -157,7 +190,7 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
       // (1) Instant overlay of the live rollup onto whatever we have. share-
       // sent-outcome D4: an event that leaves retry_pending unset keeps the
       // last known count until the refetch below replaces it.
-      setResults((prev) =>
+      updateResults((prev) =>
         prev === null
           ? prev
           : {
@@ -181,7 +214,7 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
         void fetchResults(true);
       }, REFETCH_DEBOUNCE_MS);
     },
-    [broadcastId, fetchResults],
+    [broadcastId, fetchResults, updateResults],
   );
   useEventStream({ onBroadcastUpdated });
 
@@ -205,9 +238,11 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
   }, [liveStatus, fetchResults]);
 
   // --- share-sent-outcome D4: the ticker's recount, and the stats it shapes.
-  const recountRetryPending = useCallback((count: number) => {
+  // The rows are the hook's latest (resultsRef), never a rendered copy (FWF-4).
+  const recountRetryPending = useCallback((nowMs: number) => {
     if (rowsBehindRef.current) return; // the event's count stands until its refetch
-    setRecount(count);
+    const rows = resultsRef.current === null ? [] : Object.values(resultsRef.current.recipients);
+    setRecount(pendingRetryCount(rows, nowMs));
   }, []);
   const liveStats = useMemo(
     () =>

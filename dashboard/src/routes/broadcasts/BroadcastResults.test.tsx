@@ -606,4 +606,35 @@ describe('BroadcastResults - the server-clock ticker', () => {
     expect(pillLabel()).toBe('Sending');
     expect(chipCount('Retrying')).toBe(1);
   });
+
+  it('a tick that lands after a fetch resolved but BEFORE React rendered it recounts the FRESH rows: a chain that just ended reads Not sent, never a stale Sending (code review FWF-4)', async () => {
+    // Loaded: c1 pending, its promise live well past the tick below.
+    getBroadcastResults.mockResolvedValueOnce(pendingShare({ retryDueAt: '2026-07-01T12:05:00.000Z' }));
+    renderResults();
+    await flush();
+    expect(pillLabel()).toBe('Sending');
+    expect(chipCount('Retrying')).toBe(1);
+    // A manual Refresh whose response is held; meanwhile the chain ended with a final failure.
+    let land: (value: BroadcastResultsType) => void = () => {};
+    getBroadcastResults.mockImplementationOnce(() => new Promise<BroadcastResultsType>((resolve) => (land = resolve)));
+    act(() => screen.getByRole('button', { name: 'Refresh' }).click());
+    await act(async () => {
+      land(
+        results({
+          status: 'sent',
+          stats: { ...none, audience: 1, failed: 1, retry_pending: 0 },
+          recipients: { c1: { status: 'failed', errorCode: '30007', conversationId: 'conv-1', tsMsgId: TS_ROOT, latestAttempt: TS_RETRY } },
+        }),
+      );
+      // The fetch's continuation runs (setResults and the rows-behind clear), but
+      // React has not rendered the fresh rows yet...
+      await vi.advanceTimersByTimeAsync(0);
+      // ...when the tab regains focus: the ticker fires inside that window.
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(getBroadcastResults).toHaveBeenCalledTimes(2);
+    expect(pillLabel()).toBe('Not sent');
+    expect(chipCount('Retrying')).toBe(0);
+    expect(chipCount('Failed')).toBe(1);
+  });
 });

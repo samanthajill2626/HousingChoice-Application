@@ -14,9 +14,10 @@
 // share-sent-outcome D3/D4: a failed 30003 row carries its newest attempt's
 // promise facts, judged against a SERVER-clock snapshot re-taken on a 60 s
 // visibility-gated ticker (the conversation page's precedent, Timeline.tsx).
-// ONLY on a tick the page also recounts retry_pending from its own rows, so
-// the pill and the chips move with the row when a promise lapses with no event.
-import { useEffect, useMemo, useRef, useState } from 'react';
+// ONLY on a tick the page also has the hook recount retry_pending from its
+// latest rows, so the pill and the chips move with the row when a promise
+// lapses with no event.
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Spinner } from '../../ui/index.js';
 import { formatPhone } from '../contact/format.js';
@@ -40,15 +41,6 @@ import styles from './BroadcastResults.module.css';
 /** The ticker's period: it re-judges every promise on screen (and recounts
  *  retry_pending) once a minute. It fetches NOTHING - the cost is one render. */
 const RESULTS_TICK_MS = 60 * 1000;
-
-/** share-sent-outcome D4 (deviation 14): the rows the ticker counts as pending
- *  a retry - the ones the route marked pending whose promise is still live, or
- *  that carry no due instant (their row read failed: pending on the safe side). */
-function pendingRetryCount(rows: readonly BroadcastRecipientView[], nowMs: number): number {
-  return rows.filter(
-    (r) => r.retryPending === true && (r.retryDueAt === undefined || isRetryPromiseLive(r.retryDueAt, nowMs)),
-  ).length;
-}
 
 /** A recipient row's identity block: the tenant NAME (primary) + formatted phone
  *  (secondary), mirroring the composer's review rows. When no name resolved the
@@ -89,9 +81,10 @@ function RecipientRow({
   // on the safe side because its attempt row could not be read (`retryPending`
   // with NO due instant: it counts in Retrying and has no promise to lapse,
   // code review G3; a pending row WITH a due instant is judged by the clock
-  // below, and shows the hint once the promise lapses - pendingRetryCount's
-  // own rule, so no row is both Retrying and offered a retry). The row keeps
-  // its failed styling and sort, and stays a link to the contact.
+  // below, and shows the hint once the promise lapses - the recount's own rule
+  // (pendingRetryCount, useBroadcastResults), so no row is both Retrying and
+  // offered a retry). The row keeps its failed styling and sort, and stays a
+  // link to the contact.
   const showRetryHint =
     failed &&
     row.errorCode !== SEND_UNCONFIRMED_CODE &&
@@ -158,18 +151,15 @@ export function BroadcastResults(): React.JSX.Element {
   // page is judged against, re-taken on each tick (never the browser clock:
   // the server wrote the stamp, and the thread's Retry guard reads its clock).
   const [serverNow, setServerNow] = useState(() => serverNowMs());
-  // The interval reads the LATEST rows without re-arming on every refetch.
-  const rowsRef = useRef(recipients);
-  useEffect(() => {
-    rowsRef.current = recipients;
-  }, [recipients]);
   useEffect(() => {
     const tick = (): void => {
       const now = serverNowMs();
       setServerNow(now);
       // ONLY here (never on an SSE overlay): the recount the pill and the
-      // chips read until the next payload replaces it (useBroadcastResults).
-      recountRetryPending(pendingRetryCount(rowsRef.current, now));
+      // chips read until the next payload replaces it. The hook counts its
+      // own LATEST rows (code review FWF-4), so a tick that lands after a
+      // fetch resolved but before it rendered counts the fresh rows.
+      recountRetryPending(now);
     };
     // VISIBILITY-GATED, as the conversation page's ticker is: re-judging a
     // hidden tab only updates pixels nobody is looking at. The focus listener

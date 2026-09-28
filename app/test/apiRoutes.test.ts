@@ -4,12 +4,16 @@
 // origin-secret middleware AND (M1.3) the session requireAuth gate.
 import { Readable } from 'node:stream';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { OUTBOUND_MMS_MAX_MEDIA_PER_MESSAGE } from '../src/lib/outboundMediaLimits.js';
-import { RETRY_PROMISE_GRACE_MS, RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
+import {
+  RETRY_PROMISE_GRACE_MS,
+  RETRY_PROMISE_WITHDRAWN_AT,
+  RETRY_SEND_WINDOW_MS,
+} from '../src/lib/retrySendWindow.js';
 import {
   CircuitBreakerOpenError,
   ContactDeletedError,
@@ -19,11 +23,13 @@ import {
   createSendMessageService,
   type SendMessageInput,
 } from '../src/services/sendMessage.js';
-import type { ConversationsRepo } from '../src/repos/conversationsRepo.js';
+import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import type { ContactsRepo } from '../src/repos/contactsRepo.js';
+import type { MessageItem, MessagesRepo, RetryChildPointer } from '../src/repos/messagesRepo.js';
+import type { SendAttemptFacts, SendAttemptOutcome, SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
+import { createFakeWorld, makeWebhookHarness, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = 'test-origin-secret';
 
@@ -439,25 +445,63 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     delivery_status: 'failed' as const,
   };
 
-  function makeRetryApp(
-    original: unknown,
-    mediaStore?: import('../src/adapters/mediaStore.js').MediaStore,
-    contactsRepo?: Pick<ContactsRepo, 'getById'>,
-  ) {
+  /** What a press may read beyond the pressed row. Every field is optional. */
+  interface RetryAppOptions {
+    mediaStore?: import('../src/adapters/mediaStore.js').MediaStore;
+    /** retry-send-window D14: the recorded-recipient read (by id). */
+    contactsRepo?: Pick<ContactsRepo, 'getById'>;
+    /** retry-send-adoption R6: the pressed row's retrychild# pointers. */
+    children?: RetryChildPointer[];
+    /** R7: the one row the consistent point-get serves (the pre-deploy retry_of walk). */
+    parent?: MessageItem;
+    /** Overrides on the one-to-one thread the route reads for R1's phone key; null = no thread. */
+    conversation?: Partial<ConversationItem> | null;
+    /** R6: the world whose send-attempt fake holds the seeded records. */
+    world?: FakeWorld;
+  }
+
+  function makeRetryApp(original: unknown, opts: RetryAppOptions = {}) {
     const calls: SendMessageInput[] = [];
+    const world = opts.world ?? createFakeWorld();
+    // A HAND stub: any method the route calls that it lacks (a thread scan such
+    // as listByConversation included) is a TypeError and a 500 - never DynamoDB.
+    const messagesRepo = {
+      async getByProviderSid() {
+        return original;
+      },
+      listRetryChildrenConsistent: vi.fn(
+        async (_conversationId: string, _parentTsMsgId: string): Promise<RetryChildPointer[]> =>
+          opts.children ?? [],
+      ),
+      getByTsMsgIdConsistent: vi.fn(
+        async (_conversationId: string, tsMsgId: string): Promise<MessageItem | undefined> =>
+          opts.parent?.tsMsgId === tsMsgId ? opts.parent : undefined,
+      ),
+    };
+    const conversationsRepo = {
+      getById: vi.fn(async (_conversationId: string) =>
+        opts.conversation === null
+          ? undefined
+          : {
+              conversationId: 'conv-1',
+              type: 'tenant_1to1',
+              participant_phone: '+15550100001',
+              ...opts.conversation,
+            },
+      ),
+    };
     const app = buildApp({
       config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
       logger: createLogger({ destination: createLogCapture().stream }),
       auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
       api: {
-        messagesRepo: {
-          async getByProviderSid() {
-            return original;
-          },
-        } as unknown as import('../src/repos/messagesRepo.js').MessagesRepo,
-        ...(mediaStore !== undefined && { mediaStore }),
-        // retry-send-window D14: the recorded-recipient read (by id).
-        ...(contactsRepo !== undefined && { contactsRepo: contactsRepo as unknown as ContactsRepo }),
+        messagesRepo: messagesRepo as unknown as MessagesRepo,
+        conversationsRepo: conversationsRepo as unknown as ConversationsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        ...(opts.mediaStore !== undefined && { mediaStore: opts.mediaStore }),
+        ...(opts.contactsRepo !== undefined && {
+          contactsRepo: opts.contactsRepo as unknown as ContactsRepo,
+        }),
         sendMessageService: async (input) => {
           calls.push(input);
           return {
@@ -469,7 +513,92 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         },
       },
     });
-    return { app, calls };
+    return { app, calls, messagesRepo, conversationsRepo, world };
+  }
+
+  const press = (app: ReturnType<typeof buildApp>, providerSid = 'SMorig') =>
+    request(app)
+      .post(`/api/conversations/conv-1/messages/${providerSid}/retry`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+  // --- retry-send-adoption: the attempt records a press reads (R6) -----------
+
+  /** R1's key for FAILED_ORIGINAL's attempts: no recorded recipient, so the thread's number. */
+  const PHONE_KEY = 'phone#+15550100001';
+  const FACTS: SendAttemptFacts = {
+    recipientDigest: 'digest-test',
+    bodyHash: 'hash-test',
+    bodyShort: false,
+    mediaCount: 0,
+  };
+  type RetryOwner = Extract<SendAttemptOwner, { kind: 'retry_send' }>;
+  /** The owner the retry job keys FAILED_ORIGINAL's attempt-1 record on (retrySend.ts). */
+  function retryOwner(overrides: Partial<RetryOwner> = {}): RetryOwner {
+    return {
+      kind: 'retry_send',
+      conversationId: 'conv-1',
+      retriedTsMsgId: FAILED_ORIGINAL.tsMsgId,
+      attempt: 1,
+      recipientKey: PHONE_KEY,
+      retryRoot: FAILED_ORIGINAL.tsMsgId,
+      ...overrides,
+    };
+  }
+  type SeededState = 'attempting' | 'reconciling' | 'redriven' | Exclude<SendAttemptOutcome, 'never_sent'>;
+  /**
+   * One attempt record on `world`, walked there through the fake's OWN
+   * transitions - so every seeded shape is one the repo can reach - claimed
+   * `ageMs` before now. Each `done` outcome closes from the state its real
+   * writer closes it from: the job's finishAttempt (sent, refused, rejected,
+   * retryable), the reconcile's close (unresolved, adopted, redrive_refused)
+   * and a failed re-drive enqueue (enqueue_failed, from redriven).
+   */
+  async function seedRecord(world: FakeWorld, owner: RetryOwner, state: SeededState, ageMs: number): Promise<void> {
+    const repo = world.sendAttemptsRepo;
+    const at = new Date(Date.now() - ageMs).toISOString();
+    const claimed = await repo.claim(owner, FACTS, at);
+    expect(claimed.outcome).toBe('claimed');
+    const ref = { attemptNo: claimed.record.attemptNo, attemptedAt: at };
+    switch (state) {
+      case 'attempting':
+        return;
+      case 'sent':
+      case 'refused':
+      case 'rejected':
+      case 'retryable':
+        expect(
+          await repo.finishAttempt(owner, ref, { outcome: state, ...(state === 'sent' && { sid: 'SMsent' }) }),
+        ).toBe(true);
+        return;
+      default:
+        break;
+    }
+    expect(await repo.handToReconcile(owner, ref)).toBe(true);
+    switch (state) {
+      case 'reconciling':
+        return;
+      case 'redriven':
+      case 'enqueue_failed':
+        expect(await repo.markRedriven(owner, at)).toBe(true);
+        if (state === 'enqueue_failed') {
+          expect(await repo.closeRedriven(owner, { outcome: 'enqueue_failed', cause: 'enqueue_failed' })).toBe(true);
+        }
+        return;
+      case 'unresolved':
+      case 'adopted':
+      case 'redrive_refused':
+        expect(
+          await repo.closeFromReconcile(owner, at, {
+            outcome: state,
+            ...(state === 'adopted' && { sid: 'SMadopted' }),
+            ...(state === 'unresolved' && { cause: 'provider_unreachable' }),
+            ...(state === 'redrive_refused' && { cause: 'retry_window_closed' }),
+          }),
+        ).toBe(true);
+        return;
+    }
   }
 
   it('re-sends the original body + carries retry_of, returning 201', async () => {
@@ -489,6 +618,8 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         automated: false,
         author: 'teammate',
         retryOf: '2026-06-12T09:00:00.000Z#SMorig',
+        // retry-send-adoption R7: a root row is its own chain's root.
+        retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
       },
     ]);
   });
@@ -595,11 +726,12 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         retry_window_start: '2026-06-12T08:58:00.000Z',
         retry_attempt: 2,
       },
-      undefined,
       {
-        async getById(contactId: string) {
-          reads.push(contactId);
-          return contactId === 'c-real' ? real : undefined;
+        contactsRepo: {
+          async getById(contactId: string) {
+            reads.push(contactId);
+            return contactId === 'c-real' ? real : undefined;
+          },
         },
       },
     );
@@ -618,17 +750,23 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         automated: false,
         author: 'teammate',
         retryOf: '2026-06-12T09:00:00.000Z#SMorig',
+        retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
         recipient: real,
       },
     ]);
   });
 
   it('retry-send-window D14: a recorded recipient that no longer exists sends with NO recipient (the phone-matched contact is judged)', async () => {
-    const { app, calls } = makeRetryApp({ ...FAILED_ORIGINAL, recipient_contact_id: 'c-gone' }, undefined, {
-      async getById() {
-        return undefined;
+    const { app, calls } = makeRetryApp(
+      { ...FAILED_ORIGINAL, recipient_contact_id: 'c-gone' },
+      {
+        contactsRepo: {
+          async getById() {
+            return undefined;
+          },
+        },
       },
-    });
+    );
     const res = await request(app)
       .post('/api/conversations/conv-1/messages/SMorig/retry')
       .set('x-origin-verify', SECRET)
@@ -690,7 +828,7 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
       // The stale presigned URL from the FIRST send - must NOT be replayed.
       mediaUrls: [STALE_URL],
     };
-    const { app, calls } = makeRetryApp(original, mediaStore);
+    const { app, calls } = makeRetryApp(original, { mediaStore });
 
     const res = await request(app)
       .post('/api/conversations/conv-1/messages/SMorig/retry')
@@ -754,6 +892,394 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     expect(res.status).toBe(201);
     expect(calls[0]?.mediaUrls).toEqual(['https://fake/canned/room.png']);
     expect(calls[0]?.attachments).toBeUndefined();
+  });
+
+  // --- retry-send-adoption R6: the route reads the pointer family and the
+  // attempt RECORD after RSW's time guard; R7: its append carries the chain
+  // root and the share stamp. ------------------------------------------------
+
+  it('retry-send-adoption R6: 409 superseded when the pressed row has ANY child - an automatic retry row, or a manual one', async () => {
+    const automaticChild: RetryChildPointer = { tsMsgId: '2026-06-12T09:01:00.000Z#SMx', providerSid: 'SMx', retryAttempt: 1 };
+    const manualChild: RetryChildPointer = { tsMsgId: '2026-06-12T09:02:00.000Z#SMy', providerSid: 'SMy' };
+    for (const children of [[automaticChild], [manualChild], [automaticChild, manualChild]]) {
+      const { app, calls } = makeRetryApp(FAILED_ORIGINAL, { children });
+      const res = await press(app);
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'superseded' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("retry-send-adoption R6: the superseded check is ONE consistent Query on the pressed row's pointer family, never a thread scan", async () => {
+    const { app, calls, messagesRepo } = makeRetryApp(FAILED_ORIGINAL, {
+      children: [{ tsMsgId: '2026-06-12T09:01:00.000Z#SMx', providerSid: 'SMx', retryAttempt: 1 }],
+    });
+    const res = await press(app);
+    expect(res.status).toBe(409);
+    expect(messagesRepo.listRetryChildrenConsistent).toHaveBeenCalledTimes(1);
+    expect(messagesRepo.listRetryChildrenConsistent).toHaveBeenCalledWith('conv-1', FAILED_ORIGINAL.tsMsgId);
+    // The stub has no thread read at all: a scan would be a TypeError and a 500.
+    expect(messagesRepo).not.toHaveProperty('listByConversation');
+    expect(messagesRepo).not.toHaveProperty('listByConversationConsistent');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('retry-send-adoption R6: 409 retry_unresolved on a done/unresolved record read by KEY - with or without retry_outcome on the row - and the route adds no time bound of its own (a 45-day-old record still refuses)', async () => {
+    // In production the record's 30-day expires_at reaps it; the row's
+    // retry_outcome belt is then the only guard (a residue Task 9 records).
+    const FORTY_FIVE_DAYS_MS = 45 * 24 * 60 * 60 * 1000;
+    for (const original of [
+      FAILED_ORIGINAL,
+      { ...FAILED_ORIGINAL, retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' as const },
+    ]) {
+      for (const ageMs of [60_000, FORTY_FIVE_DAYS_MS]) {
+        const world = createFakeWorld();
+        await seedRecord(world, retryOwner(), 'unresolved', ageMs);
+        const { app, calls } = makeRetryApp(original, { world });
+        const res = await press(app);
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual({ error: 'retry_unresolved' });
+        expect(calls).toHaveLength(0);
+      }
+    }
+  });
+
+  it('retry-send-adoption R6: 409 retry_unresolved on the row belt alone (retry_outcome unconfirmed, no record)', async () => {
+    const world = createFakeWorld();
+    const get = vi.spyOn(world.sendAttemptsRepo, 'get');
+    const { app, calls } = makeRetryApp(
+      { ...FAILED_ORIGINAL, retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' },
+      { world },
+    );
+    const res = await press(app);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'retry_unresolved' });
+    expect(calls).toHaveLength(0);
+    // The record WAS looked for, and there is none: the belt answered.
+    expect(get).toHaveBeenCalledTimes(1);
+    await expect(get.mock.results[0]!.value).resolves.toBeUndefined();
+  });
+
+  it('retry-send-adoption R6: 409 retry_pending on an OPEN record younger than RETRY_SEND_WINDOW_MS - a 31 s attempting (plan deviation 8), a reconciling, an in-window redriven, an attempting 1 s inside the bound', async () => {
+    for (const [state, ageMs] of [
+      ['attempting', 31_000],
+      ['reconciling', 30_000],
+      ['redriven', 30_000],
+      ['attempting', RETRY_SEND_WINDOW_MS - 1_000],
+    ] as Array<[SeededState, number]>) {
+      const world = createFakeWorld();
+      await seedRecord(world, retryOwner(), state, ageMs);
+      const { app, calls } = makeRetryApp(FAILED_ORIGINAL, { world });
+      const res = await press(app);
+      expect(res.status, `${state} at ${ageMs} ms`).toBe(409);
+      expect(res.body).toEqual({ error: 'retry_pending' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('retry-send-adoption R6: 201 on a STALE open record (RETRY_SEND_WINDOW_MS + 1 s old) and on every done outcome but unresolved - the press reads the record and lets it through', async () => {
+    const STALE_MS = RETRY_SEND_WINDOW_MS + 1_000;
+    for (const [state, ageMs] of [
+      ['attempting', STALE_MS],
+      ['reconciling', STALE_MS],
+      ['redriven', STALE_MS],
+      ['sent', 60_000],
+      ['retryable', 60_000],
+      ['refused', 60_000],
+      ['rejected', 60_000],
+      ['adopted', 60_000],
+      ['enqueue_failed', 60_000],
+      ['redrive_refused', 60_000],
+    ] as Array<[SeededState, number]>) {
+      const world = createFakeWorld();
+      await seedRecord(world, retryOwner(), state, ageMs);
+      const get = vi.spyOn(world.sendAttemptsRepo, 'get');
+      const { app, calls } = makeRetryApp(FAILED_ORIGINAL, { world });
+      const res = await press(app);
+      expect(res.status, `${state} at ${ageMs} ms`).toBe(201);
+      expect(calls).toHaveLength(1);
+      // Not a miss: the route read THIS record and judged it.
+      expect(get).toHaveBeenCalledTimes(1);
+      const seen = (await get.mock.results[0]!.value) as Awaited<ReturnType<FakeWorld['sendAttemptsRepo']['get']>>;
+      expect(seen?.state === 'done' ? seen.outcome : seen?.state).toBe(state);
+    }
+  });
+
+  it('retry-send-adoption R6: the record is read at attempt (retry_attempt ?? 0) + 1 only - a pressed attempt-1 retry row reads attempt 2 (plan deviation 1)', async () => {
+    const pressedRetryRow = {
+      ...FAILED_ORIGINAL,
+      retry_of: '2026-06-12T08:59:00.000Z#SMroot',
+      retry_attempt: 1,
+      retry_root: '2026-06-12T08:59:00.000Z#SMroot',
+    };
+    const atAttempt2 = createFakeWorld();
+    await seedRecord(atAttempt2, retryOwner({ attempt: 2 }), 'unresolved', 60_000);
+    const refused = makeRetryApp(pressedRetryRow, { world: atAttempt2 });
+    const refusedRes = await press(refused.app);
+    expect(refusedRes.status).toBe(409);
+    expect(refusedRes.body).toEqual({ error: 'retry_unresolved' });
+
+    // The row's OWN attempt-1 record belongs to the chain above it, never to a press on this row.
+    const atAttempt1 = createFakeWorld();
+    await seedRecord(atAttempt1, retryOwner({ attempt: 1 }), 'unresolved', 60_000);
+    const get = vi.spyOn(atAttempt1.sendAttemptsRepo, 'get');
+    const passed = makeRetryApp(pressedRetryRow, { world: atAttempt1 });
+    const passedRes = await press(passed.app);
+    expect(passedRes.status).toBe(201);
+    expect(passed.calls).toHaveLength(1);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith(expect.objectContaining({ kind: 'retry_send', attempt: 2 }));
+  });
+
+  it('retry-send-adoption R6: the record key is R1\'s - the recorded recipient\'s id when the row has one, else phone#<the thread\'s number>', async () => {
+    const recorded = { ...FAILED_ORIGINAL, recipient_contact_id: 'c-real' };
+    const contactsRepo = {
+      async getById(contactId: string) {
+        return contactId === 'c-real'
+          ? { contactId: 'c-real', type: 'tenant' as const, phone: '+15550100001', consent_method: 'verbal_in_person' as const }
+          : undefined;
+      },
+    };
+    const byContact = createFakeWorld();
+    await seedRecord(byContact, retryOwner({ recipientKey: 'c-real' }), 'unresolved', 60_000);
+    const refused = await press(makeRetryApp(recorded, { world: byContact, contactsRepo }).app);
+    expect(refused.status).toBe(409);
+    expect(refused.body).toEqual({ error: 'retry_unresolved' });
+
+    // The same row's attempt under the PHONE key is another record - never this row's.
+    const byPhone = createFakeWorld();
+    await seedRecord(byPhone, retryOwner({ recipientKey: PHONE_KEY }), 'unresolved', 60_000);
+    expect((await press(makeRetryApp(recorded, { world: byPhone, contactsRepo }).app)).status).toBe(201);
+
+    // No recorded recipient: the thread's number is the key.
+    const phoneOnly = createFakeWorld();
+    await seedRecord(phoneOnly, retryOwner({ recipientKey: 'phone#+15550100077' }), 'unresolved', 60_000);
+    const onThread = await press(
+      makeRetryApp(FAILED_ORIGINAL, { world: phoneOnly, conversation: { participant_phone: '+15550100077' } }).app,
+    );
+    expect(onThread.status).toBe(409);
+    expect(onThread.body).toEqual({ error: 'retry_unresolved' });
+  });
+
+  it('retry-send-adoption R6: no record is read where none can exist - a row at the attempt cap, or no key (no thread and no recorded recipient)', async () => {
+    for (const [original, opts] of [
+      [{ ...FAILED_ORIGINAL, retry_of: '2026-06-12T08:59:00.000Z#SMr2', retry_attempt: 3, retry_root: 'T#SMroot' }, {}],
+      [FAILED_ORIGINAL, { conversation: null }],
+      [FAILED_ORIGINAL, { conversation: { participant_phone: undefined } }],
+    ] as Array<[unknown, RetryAppOptions]>) {
+      const world = createFakeWorld();
+      const get = vi.spyOn(world.sendAttemptsRepo, 'get');
+      const { app, calls } = makeRetryApp(original, { ...opts, world });
+      const res = await press(app);
+      // The send wrapper judges the thread itself (a missing one is its 404).
+      expect(res.status).toBe(201);
+      expect(calls).toHaveLength(1);
+      expect(get).not.toHaveBeenCalled();
+    }
+  });
+
+  it('retry-send-adoption R6: guard order - RSW\'s time guard, then superseded, then retry_unresolved, then the record\'s retry_pending', async () => {
+    const child: RetryChildPointer = { tsMsgId: '2026-06-12T09:01:00.000Z#SMx', providerSid: 'SMx' };
+    const unconfirmed = { ...FAILED_ORIGINAL, retry_outcome: 'unconfirmed' as const };
+    const cases: Array<[string, unknown, RetryAppOptions, SeededState, string]> = [
+      // A live promise answers first, whatever else is true (a stale tab after a success reads this - worklist item 26).
+      ['live promise', { ...unconfirmed, retry_due_at: new Date(Date.now() + 30_000).toISOString() }, { children: [child] }, 'unresolved', 'retry_pending'],
+      ['child', unconfirmed, { children: [child] }, 'unresolved', 'superseded'],
+      ['belt over an open record', unconfirmed, {}, 'attempting', 'retry_unresolved'],
+    ];
+    for (const [label, original, opts, state, error] of cases) {
+      const world = createFakeWorld();
+      await seedRecord(world, retryOwner(), state, 30_000);
+      const { app, calls } = makeRetryApp(original, { ...opts, world });
+      const res = await press(app);
+      expect(res.status, label).toBe(409);
+      expect(res.body, label).toEqual({ error });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('retry-send-adoption R6: every new read runs AFTER the existing 404 / 400 / 409 guards (rateLimit.test.ts drives the route with no original)', async () => {
+    const cases: Array<[unknown, number, string]> = [
+      [undefined, 404, 'message_not_found'],
+      [{ ...FAILED_ORIGINAL, conversationId: 'other' }, 404, 'message_not_found'],
+      [{ ...FAILED_ORIGINAL, direction: 'inbound' }, 400, 'not_outbound'],
+      [{ ...FAILED_ORIGINAL, type: 'email' }, 409, 'not_retryable'],
+      [{ ...FAILED_ORIGINAL, delivery_status: 'delivered' }, 409, 'not_failed'],
+      [{ ...FAILED_ORIGINAL, retry_due_at: new Date(Date.now() + 30_000).toISOString() }, 409, 'retry_pending'],
+    ];
+    for (const [original, status, error] of cases) {
+      const world = createFakeWorld();
+      const get = vi.spyOn(world.sendAttemptsRepo, 'get');
+      const { app, calls, messagesRepo, conversationsRepo } = makeRetryApp(original, { world });
+      const res = await press(app);
+      expect(res.status).toBe(status);
+      expect(res.body).toEqual({ error });
+      expect(messagesRepo.listRetryChildrenConsistent).not.toHaveBeenCalled();
+      expect(messagesRepo.getByTsMsgIdConsistent).not.toHaveBeenCalled();
+      expect(conversationsRepo.getById).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("retry-send-adoption R7: the route's append carries retryRoot and broadcastId from the pressed row", async () => {
+    const shareRetryRow = {
+      ...FAILED_ORIGINAL,
+      retry_of: '2026-06-12T08:59:00.000Z#SMroot',
+      retry_attempt: 1,
+      retry_root: '2026-06-12T08:59:00.000Z#SMroot',
+      broadcast_id: 'b-1',
+    };
+    const share = makeRetryApp(shareRetryRow);
+    expect((await press(share.app)).status).toBe(201);
+    expect(share.calls[0]).toMatchObject({
+      retryOf: FAILED_ORIGINAL.tsMsgId,
+      retryRoot: '2026-06-12T08:59:00.000Z#SMroot',
+      broadcastId: 'b-1',
+    });
+    // A manual row starts its own window and is no automatic attempt.
+    expect(share.calls[0]).not.toHaveProperty('retryAttempt');
+    expect(share.calls[0]).not.toHaveProperty('retryWindowStart');
+
+    const plain = makeRetryApp(FAILED_ORIGINAL);
+    expect((await press(plain.app)).status).toBe(201);
+    expect(plain.calls[0]).toMatchObject({ retryOf: FAILED_ORIGINAL.tsMsgId, retryRoot: FAILED_ORIGINAL.tsMsgId });
+    expect(plain.calls[0]).not.toHaveProperty('broadcastId');
+  });
+
+  it('retry-send-adoption R7: a pre-deploy pressed row (retry_of, no retry_root) walks retry_of for the root', async () => {
+    const root: MessageItem = {
+      ...FAILED_ORIGINAL,
+      tsMsgId: '2026-06-12T08:59:00.000Z#SMroot',
+      provider_sid: 'SMroot',
+      provider_ts: '2026-06-12T08:59:00.000Z',
+      created_at: '2026-06-12T08:59:00.000Z',
+    };
+    const { app, calls, messagesRepo } = makeRetryApp(
+      { ...FAILED_ORIGINAL, retry_of: root.tsMsgId, retry_attempt: 1 },
+      { parent: root },
+    );
+    expect((await press(app)).status).toBe(201);
+    expect(calls[0]?.retryRoot).toBe(root.tsMsgId);
+    expect(messagesRepo.getByTsMsgIdConsistent).toHaveBeenCalledWith('conv-1', root.tsMsgId);
+  });
+
+  it('retry-send-adoption R6 + R7 through the REAL send wrapper over the world fakes: the press appends a retry row with retry_of, retry_root and broadcast_id AND its retrychild# pointer; a second press on the same row - 60 newer rows in the thread - is 409 superseded by ONE pointer Query', async () => {
+    const world = createFakeWorld();
+    const conversation = await world.conversationsRepo.createOrGetByParticipantPhone('+15550100001', 'tenant_1to1');
+    const conversationId = conversation.conversationId;
+    world.contacts.push({ contactId: 'c-1', type: 'tenant', phone: '+15550100001', consent_method: 'inbound_text' });
+    const rootAt = Date.now() - 20 * 60_000;
+    const root = await world.messagesRepo.append({
+      conversationId,
+      providerSid: 'SMshare',
+      providerTs: new Date(rootAt).toISOString(),
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'a share text',
+      deliveryStatus: 'undelivered',
+      errorCode: '30003',
+      broadcastId: 'b-1',
+    });
+    const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
+    const logger = createLogger({ destination: createLogCapture().stream });
+    const app = buildApp({
+      config,
+      logger,
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        sendMessageService: createSendMessageService({
+          config,
+          logger,
+          adapter: world.adapter,
+          conversationsRepo: world.conversationsRepo,
+          messagesRepo: world.messagesRepo,
+          contactsRepo: world.contactsRepo,
+          auditRepo: world.auditRepo,
+          events: world.events,
+        }),
+      },
+    });
+    const pressRoot = () =>
+      request(app)
+        .post(`/api/conversations/${conversationId}/messages/SMshare/retry`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send();
+
+    const first = await pressRoot();
+    expect(first.status).toBe(201);
+    expect(world.sent).toHaveLength(1);
+    const retryRow = world.messages.find((m) => m.retry_of === root.tsMsgId)!;
+    expect(retryRow).toMatchObject({
+      retry_of: root.tsMsgId,
+      retry_root: root.tsMsgId,
+      broadcast_id: 'b-1',
+      automated: false,
+    });
+    expect(retryRow).not.toHaveProperty('retry_attempt');
+    expect(await world.messagesRepo.listRetryChildrenConsistent(conversationId, root.tsMsgId)).toEqual([
+      { tsMsgId: retryRow.tsMsgId, providerSid: retryRow.provider_sid },
+    ]);
+
+    // Sixty newer, unrelated rows: the second press must not read them.
+    for (let i = 0; i < 60; i += 1) {
+      await world.messagesRepo.append({
+        conversationId,
+        providerSid: `SMnewer${i}`,
+        providerTs: new Date(rootAt + 60_000 + i * 1_000).toISOString(),
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: `newer ${i}`,
+        deliveryStatus: 'delivered',
+      });
+    }
+    const pointerQuery = vi.spyOn(world.messagesRepo, 'listRetryChildrenConsistent');
+    const scan = vi.spyOn(world.messagesRepo, 'listByConversation');
+    const consistentScan = vi.spyOn(world.messagesRepo, 'listByConversationConsistent');
+    const second = await pressRoot();
+    expect(second.status).toBe(409);
+    expect(second.body).toEqual({ error: 'superseded' });
+    expect(pointerQuery).toHaveBeenCalledTimes(1);
+    expect(scan).not.toHaveBeenCalled();
+    expect(consistentScan).not.toHaveBeenCalled();
+    expect(world.sent).toHaveLength(1);
+  });
+
+  it("retry-send-adoption R6: makeWebhookHarness threads the world's send-attempt fake to the route - a seeded unresolved record refuses the press", async () => {
+    const { app, world } = makeWebhookHarness();
+    const conversation = await world.conversationsRepo.createOrGetByParticipantPhone('+15550100001', 'tenant_1to1');
+    const { tsMsgId } = await world.messagesRepo.append({
+      conversationId: conversation.conversationId,
+      providerSid: 'SMharness',
+      providerTs: new Date(Date.now() - 60_000).toISOString(),
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'harness row',
+      deliveryStatus: 'undelivered',
+      errorCode: '30003',
+    });
+    await seedRecord(
+      world,
+      retryOwner({ conversationId: conversation.conversationId, retriedTsMsgId: tsMsgId, retryRoot: tsMsgId }),
+      'unresolved',
+      60_000,
+    );
+    const res = await request(app)
+      .post(`/api/conversations/${conversation.conversationId}/messages/SMharness/retry`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'retry_unresolved' });
+    expect(world.sent).toHaveLength(0);
   });
 });
 

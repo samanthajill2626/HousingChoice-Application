@@ -4995,6 +4995,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
+      // retry-send-adoption R6: the manual Retry route reads the attempt
+      // records here - the same fake the retry job and the reconcile write.
+      sendAttemptsRepo: world.sendAttemptsRepo,
       auditRepo: world.auditRepo,
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,

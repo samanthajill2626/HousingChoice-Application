@@ -3,12 +3,63 @@ id: broadcast-30003-retry-never-updates-slot
 title: A broadcast recipient's automatic 30003 retry never updates the broadcast slot - retrySend drops the broadcast id, so the share row keeps its 30003 failure whatever the retry does
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/broadcasts
 created: 2026-09-25
 updated: 2026-09-28
+resolved: 2026-09-28
 refs: app/src/jobs/retrySend.ts:200, app/src/services/sendMessage.ts:425, app/src/routes/webhooks/twilio.ts:3312, app/src/routes/webhooks/twilio.ts:3364, app/src/routes/webhooks/twilio.ts:3544, app/src/routes/webhooks/twilio.ts:3591, dashboard/src/routes/contact/deliveryStatus.ts:778, dashboard/src/routes/broadcasts/StatChips.test.tsx:129
 ---
+
+**RESOLVED 2026-09-28 (branch `feat/share-sent-outcome`, share-skip Branch B;
+UNMERGED at this writing - the merge closes it, and the post-merge repair
+below is owed).** retry-send-adoption landed the ATTRIBUTION half; this branch
+lands the MATCHING half. Spec
+`docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md` D2 (a later
+attempt reaches its slot through ONE attempt-ordered transition: a newer
+attempt applies, the same attempt only forward, an older attempt only as a
+delivery, a lost condition re-read and re-applied) and D8 (the repair for
+history). Records: `docs/superpowers/reviews/2026-09-27-share-sent-outcome/`.
+
+- **The slot learns every later attempt.** The slot gains ONE attribute,
+  `latestAttempt` (the newest attempt's message id), and ONE conditional write
+  names the recorded attempt and carries the stats delta
+  (`applyAttemptOutcome`, T1 `ca55f3b3`), driven by `applyLaterAttempt` (T4
+  `71a57f58`). The status webhook no longer skips a retry row: it routes the
+  receipt by `broadcast_id` + `retry_root` to the ORIGINAL slot (T5
+  `7a23711e`; a thrown write is retried twice, then ONE ERROR - fix wave 1
+  `7be6ef3c`). The reconcile's retry adoption (before its record closes) and
+  the four unresolved-end sites write it too (T6 `ad45ef4a`; an own-row proof
+  at `sent` carries its carrier instant - `eee2054e`). An ORIGINAL row's miss
+  logs the give-up line at WARN, in ASCII.
+- **The row tells the truth.** The results row reads the newest attempt's own
+  promise (RSW's `retry_due_at`, 1b's `retry_outcome`) inside a 24-minute
+  bound: "will retry" while live, "retry not confirmed" for an unresolved
+  chain, the plain failure after; the hint only for a message row with no live
+  promise (T9 `cbc84296`, T10 `ab48caf0`; fix wave 1 `47a00537`). A retry that
+  delivers reads Delivered and counts: `e2e/tests/dashboard-next/share-sent-outcome.spec.ts`
+  (a) and (b) (T14 `329d136a`).
+- **History.** `app/scripts/repair-share-outcomes.ts` (T13 `5005a606`; fix
+  wave 1 `8e00e495`, `2fd4b799`) stamps `broadcast_id` / `retry_root` on the
+  retry rows written before 1b and re-applies each chain's decided attempt to
+  its slot. **Owed after the deploy, per environment, BEFORE the next property
+  blast** (RUNBOOK "Share outcomes repair (2026-09-28)", `d8e85c39`): until
+  the apply, a tenant whose retry delivered before the deploy reads as a final
+  failure and is NOT flagged "Already sent" - the deploy flips the flag's
+  historical error from over-flagging to under-flagging.
+
+**Residuals**, each filed or named: a late retry job's first receipt
+([share-retry-late-send-flag-window](./share-retry-late-send-flag-window.md));
+a slot or ledger write lost past its bound, healed only by a repair re-run
+([share-retry-rollup-lost-past-reread-bound](./share-retry-rollup-lost-past-reread-bound.md));
+1b's two-child fork and a stale-tab Retry on a pre-1b chain
+([share-slot-two-child-fork-reads-failed](./share-slot-two-child-fork-reads-failed.md));
+a unit-less share's pre-1b chain
+([share-unitless-pre1b-chain-unattributed](./share-unitless-pre1b-chain-unattributed.md));
+and a pre-RSW retry with no lineage at all (neither `retry_of` nor
+`retry_root`), which joins no chain - the repair's census cannot see it and
+the slot is judged without it (RUNBOOK, step 1). The body below keeps its
+original anchors.
 
 **Problem.** A broadcast sends each recipient through `sendMessage` with
 `broadcastId`, which stamps `broadcast_id` on the message row

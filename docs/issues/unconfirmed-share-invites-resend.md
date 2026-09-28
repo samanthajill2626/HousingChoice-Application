@@ -3,11 +3,49 @@ id: unconfirmed-share-invites-resend
 title: A share whose texts all ended "Not confirmed" finalizes Failed and drops out of the "Already sent this property" set, so the next share of the property offers those tenants pre-checked
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/broadcasts
 created: 2026-09-27
+updated: 2026-09-28
+resolved: 2026-09-28
 refs: app/src/jobs/broadcastFanOut.ts:1533, app/src/jobs/broadcastFanOut.ts:158, app/src/repos/broadcastsRepo.ts:716, app/src/routes/broadcasts.ts:521, app/test/helpers/twilioWebhookHarness.ts:3266, dashboard/src/routes/broadcasts/RecipientPreview.tsx:9, dashboard/src/routes/broadcasts/broadcastFormat.ts:78, dashboard/src/routes/broadcasts/BroadcastResults.tsx:52, app/test/broadcastFanOut.test.ts:1538
 ---
+
+**RESOLVED 2026-09-28 (branch `feat/share-sent-outcome`, share-skip Branch B;
+UNMERGED at this writing - the merge closes it).** Spec
+`docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md` D1 (ONE
+per-recipient state; the composer's "Already sent" flag takes its SAFE
+reading - reached, pending a live retry, Not confirmed, in flight - over
+EVERY share of the unit, whatever its stored status: the stored status is
+never read to decide whether a tenant got the property, I1) and D4 (a
+finished share's pill derives from its recipients: an all-unconfirmed share
+reads "Not confirmed", danger, and `last_error` shows under "Not sent" only).
+The stored status rule (SOR D16a) is unchanged; the fix is in the readers, as
+suggested below.
+
+- The recipient state service (T2 `5ea5005f`, `a9ed3ab3`); the flag through
+  `priorRecipientKeys`, with the repo's interim rule and its harness mirror
+  deleted (T8 `56681acc`); the label table and the Retrying chip (T10
+  `ab48caf0`). This issue's M-1 shape is pinned by `app/test/broadcastApi.test.ts`
+  ("is set for a Not-confirmed slot even when the share finalized failed") and
+  end to end by `e2e/tests/dashboard-next/share-sent-outcome.spec.ts` (d)
+  (T14 `329d136a`), which also rewrote `send-outcome-reconcile.spec.ts`'s pill
+  (Not confirmed) and alert (none) pins. A one-to-one share started from a
+  tenant's file reads the same flag.
+
+**Residuals**, each filed or named: a `queued` slot of a finished share with
+no send-attempt record reads stranded (never texted) and is not flagged - for
+the length of the pass that includes the unclaimed recipients of a share the
+route marked failed while its pass still runs
+([share-route-failed-pass-unclaimed-read-stranded](./share-route-failed-pass-unclaimed-read-stranded.md));
+a stranded `sending` share keeps its in-flight recipients flagged until
+[send-attempt-sweeper](./send-attempt-sweeper.md) closes them; a recipient
+known to be Not confirmed only from its attempt row can read "Not sent" on the
+list after an SSE patch
+([share-list-sse-patch-rebucket-and-refresh](./share-list-sse-patch-rebucket-and-refresh.md));
+and history reads right only after the post-deploy repair (RUNBOOK "Share
+outcomes repair (2026-09-28)" - deploy, census, apply, and only then the next
+property blast). The body below keeps its original anchors.
 
 **Found by.** The planner's post-build review of `feat/send-outcome-reconcile`
 (2026-09-27), adversarial finding M-1

@@ -562,3 +562,33 @@ prepare catch and are deferred and carried (`relayFanOut.ts:1871-1881`,
 claim as the duplicate guard, as `retrySend` now has; else this sweeper's
 orphaned-`redriven` re-drive (the suggested fix above). Nothing is sent
 either way.
+
+**share-sent-outcome (2026-09-28).** `feat/share-sent-outcome` (share-skip
+Branch B, UNMERGED at this writing; spec
+`docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md` D1, D9)
+reads this sweeper's population and writes none of it. Status and severity
+unchanged.
+
+- **The in-flight recipients D1 keeps flagging are this sweeper's
+  population.** The composer's "Already sent" flag takes D1's SAFE reading
+  (`app/src/services/shareRecipientState.ts:71-77`): a `queued` slot of a
+  share still `sending` reads in flight whatever its record says, and a
+  `queued` slot of a finished share reads in flight while its `broadcast`
+  record exists and does not say the text never went. So a pass that died
+  (the H-1 deploy strand above) keeps its unreached recipients flagged -
+  the safe side, a hint and never a block - until this sweeper closes them.
+  Nothing on the branch moves a `queued` slot: the attempt-ordered slot
+  write never moves one (spec D2), and the repair
+  (`app/scripts/repair-share-outcomes.ts`) leaves them to this sweeper.
+- **A slot the sweeper closes feeds the flag and the labels at once.** A
+  sweeper close to `send_unconfirmed` keeps the tenant flagged (Not
+  confirmed); a close that proves the text never went (`done` with
+  `refused`, `rejected`, `enqueue_failed` or `redrive_refused`) un-flags
+  them - D1 reads either from the slot and the record, with no further
+  change here.
+- **The `already_sent` note above stands** (not repeated). The repair's
+  record check reads a `retry_send` record only as unresolved - `done` /
+  `unresolved`, or `reconciling` past the reconcile's schedule with no chain
+  row - so a `done` / `refused` record with cause `already_sent` never
+  decides a slot unresolved: the retry row it names is in the chain the
+  repair walks.

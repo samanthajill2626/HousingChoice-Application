@@ -13,10 +13,12 @@
 // enqueues NOW (a stale attempt's check 0, the reconcile's re-drive) is
 // dispatched at once by the in-process queue and drained by settle(); a delayed
 // one lands in `outbound.delayed` with its delay in SECONDS.
+import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messagingErrors.js';
 import type { MediaStore } from '../src/adapters/mediaStore.js';
 import { InMemorySchedulerAdapter, InProcessOutboundQueueAdapter } from '../src/adapters/scheduler.js';
+import { buildApp } from '../src/app.js';
 import {
   _resetForTests,
   configureJobsLogger,
@@ -38,6 +40,7 @@ import { reconcileCheckDelaysMs, registerSendReconcileJobHandler, SEND_RECONCILE
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import {
+  isRetryPromiseLive,
   RETRY_PROMISE_GRACE_MS,
   RETRY_PROMISE_WITHDRAWN_AT,
   RETRY_WINDOW_CLOSED_CODE,
@@ -46,6 +49,7 @@ import { bodyFingerprint, hashRecipientKey, recipientDigest } from '../src/lib/s
 import type { MessageItem, NewMessage } from '../src/repos/messagesRepo.js';
 import type { SendAttemptFacts, SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
+import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, ORIGIN_SECRET, OUR_NUMBER, TENANT_PHONE, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -1237,5 +1241,83 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
       expect.objectContaining({ cause: 'enqueue_failed', outcome: 'unresolved', retriedTsMsgId: failed.tsMsgId }),
       expect.objectContaining({ cause: 'enqueue_failed', outcome: 'unresolved', retriedTsMsgId: lost.tsMsgId }),
     ]);
+  });
+
+  // ---- A-6: the manual Retry route reads the record KEY this job writes ----
+
+  /** The REAL manual Retry route over the SAME world - its send-attempt fake included - with the real send wrapper. */
+  function routeApp(): ReturnType<typeof buildApp> {
+    return buildApp({
+      config,
+      logger,
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        sendAttemptsRepo: world.sendAttemptsRepo,
+        sendMessageService: createSendMessageService({
+          config,
+          logger,
+          adapter: world.adapter,
+          conversationsRepo: world.conversationsRepo,
+          messagesRepo: world.messagesRepo,
+          contactsRepo: world.contactsRepo,
+          auditRepo: world.auditRepo,
+          events: world.events,
+        }),
+      },
+    });
+  }
+  const pressRetry = (row: MessageItem) =>
+    request(routeApp())
+      .post(`/api/conversations/${row.conversationId}/messages/${row.provider_sid}/retry`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+  it('FW1 A-6 (pending): the REAL job leaves a reconciling record (an unknown outcome) on a retried row with NO retry_outcome, no live promise and no child - the REAL route over the same world answers 409 retry_pending from that record alone', async () => {
+    wire();
+    unknownOn();
+    const row = await seedRetried('SMa6pending');
+    await run(row);
+    const record = await recordOf(row);
+    expect(record).toMatchObject({ state: 'reconciling' });
+    // Take away every other answer: the promise lapsed (RSW's time guard passes), no retry_outcome (no row
+    // belt), no child (the unknown send appended nothing); the fake's send restored, so a press that got
+    // through would text.
+    row.retry_due_at = iso(Date.now() - 10 * 60_000);
+    expect(isRetryPromiseLive(row.retry_due_at, Date.now())).toBe(false);
+    expect(row).not.toHaveProperty('retry_outcome');
+    expect(await world.messagesRepo.listRetryChildrenConsistent(row.conversationId, row.tsMsgId)).toEqual([]);
+    world.adapter.sendPreparedMessage = originalSend;
+    const res = await pressRetry(row);
+    expect({ status: res.status, body: res.body }).toEqual({ status: 409, body: { error: 'retry_pending' } });
+    expect(world.sent).toHaveLength(0);
+    expect(await recordOf(row)).toEqual(record);
+  });
+
+  it('FW1 A-6 (unresolved): the REAL job hands an unknown outcome to the REAL reconcile, which closes it done/unresolved (the list fails on every check); with its WITHDRAW\'s retry_outcome taken off the row, the REAL route over the same world answers 409 retry_unresolved from the record alone', async () => {
+    wire();
+    registerReconcile();
+    unknownOn();
+    const row = await seedRetried('SMa6unresolved');
+    await run(row);
+    expect(await recordOf(row)).toMatchObject({ state: 'reconciling' });
+    world.adapter.listMessages = async () => {
+      throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+    };
+    await runReconcileChain();
+    expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'provider_unreachable' });
+    expect(row).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    // Only the record may answer: the belt off (as if its write were lost), the sentinel is no live promise,
+    // no child; the fake's send restored, so a press that got through would text.
+    delete row.retry_outcome;
+    expect(isRetryPromiseLive(row.retry_due_at, Date.now())).toBe(false);
+    expect(await world.messagesRepo.listRetryChildrenConsistent(row.conversationId, row.tsMsgId)).toEqual([]);
+    world.adapter.sendPreparedMessage = originalSend;
+    const res = await pressRetry(row);
+    expect({ status: res.status, body: res.body }).toEqual({ status: 409, body: { error: 'retry_unresolved' } });
+    expect(world.sent).toHaveLength(0);
   });
 });

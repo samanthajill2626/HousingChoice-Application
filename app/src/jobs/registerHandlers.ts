@@ -29,10 +29,10 @@ export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
   tokenBucket: TokenBucket;
   /**
-   * The per-recipient send-attempt records (SOR spec D8a), passed to the three
-   * send handlers (broadcast.send, relay.fanOut, relay.retryLeg) and to the
-   * send.reconcile job. Production leaves it unset and each handler builds the
-   * DynamoDB repo lazily.
+   * The per-recipient send-attempt records (SOR spec D8a), passed to the four
+   * send handlers (messaging.retrySend, broadcast.send, relay.fanOut,
+   * relay.retryLeg) and to the send.reconcile job. Production leaves it unset
+   * and each handler builds the DynamoDB repo lazily.
    */
   sendAttemptsRepo?: SendAttemptsRepo;
 }
@@ -56,7 +56,9 @@ export interface RegisterJobHandlersDeps {
  * token either (the intro it enqueues is metered by relay.intro's own handler).
  */
 export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
-  registerRetrySendJobHandler();
+  // messaging.retrySend (retry-send-adoption R2): registered WITHOUT the run-once
+  // marker - it claims a send-attempt record before its provider call instead.
+  registerRetrySendJobHandler({ sendAttemptsRepo: deps.sendAttemptsRepo });
   registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket, sendAttemptsRepo: deps.sendAttemptsRepo });
   // relay.retryLeg (the 30003 ladder): one backed-off rung per failed relay leg,
   // metered by the same shared bucket - it is a real outbound SMS.

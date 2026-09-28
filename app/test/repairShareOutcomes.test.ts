@@ -540,8 +540,10 @@ describe.skipIf(!reachable)('repair-share-outcomes (spec D8) against DynamoDB Lo
       await appendRow(kC, 'bulk-c', { tsMsgId: kC.ROOT, status: 'sent' }, messages2);
 
       const bulk = (apply: boolean) => runRepairShareOutcomes({ doc, env: env2, apply, now: () => NOW, scanLimit: 1, logger: log });
-      expect(await bulk(false)).toMatchObject({ sharesWalked: 2, slotsWalked: 2, stampsNeeded: 1, slotsToMove: 1, rowsToCreate: 2, pairsToRecount: 2, unjudgeable: ZERO_UNJUDGEABLE });
-      expect(await bulk(true)).toMatchObject({ sharesWalked: 2, stampsWritten: 1, slotsMoved: 1, rowsCreated: 2, pairsRecounted: 2 });
+      // Two slots to move: bulk-a's delivered retry, and bulk-c's bare-sent original whose own row reads sent - it gains
+      // the row's carrier instant (found while fixing 1).
+      expect(await bulk(false)).toMatchObject({ sharesWalked: 2, slotsWalked: 2, stampsNeeded: 1, slotsToMove: 2, rowsToCreate: 2, pairsToRecount: 2, unjudgeable: ZERO_UNJUDGEABLE });
+      expect(await bulk(true)).toMatchObject({ sharesWalked: 2, stampsWritten: 1, slotsMoved: 2, rowsCreated: 2, pairsRecounted: 2 });
       expect(await bulk(false)).toMatchObject({ sharesWalked: 2, stampsNeeded: 0, slotsToMove: 0, rowsToCreate: 0, pairsToRecount: 0, pairsToUncount: 0 });
     } finally {
       for (const base of BASES) await deleteTableIfExists(client, tableName(base, env2));
@@ -644,6 +646,137 @@ describe.skipIf(!reachable)('repair-share-outcomes (spec D8) against DynamoDB Lo
     expect(ledgerLines).toHaveLength(1);
     expect(ledgerLines[0]).toMatchObject({ broadcastId: 'b-18', tsMsgId: ledger.ROOT, step: 'ledger' });
     expect(capture.lines.slice(mark).filter((l) => String(l['msg']).includes('PARTIAL'))).toHaveLength(0);
+  });
+
+  it("bulk mode: a slot write that fails with a SYSTEMIC error (a missing grant - AccessDeniedException, one of the reminder sweep's classes) is tried three times (the bounded write) and then ABORTS the run: an ERROR names the share, the PARTIAL report follows, the run rejects (the entrypoint exits 1), and the shares after it in scan order are untouched (code review R2-F2)", async () => {
+    const env4 = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+    for (const base of BASES) await ensureTable(client, getTableSpec(base), tableName(base, env4));
+    try {
+      const messages4 = createMessagesRepo({ doc, env: env4, logger: log });
+      const broadcasts4 = createBroadcastsRepo({ doc, env: env4, logger: log });
+      const listingSends4 = createListingSendsRepo({ doc, env: env4, logger: log });
+      const slotOf4 = async (id: string) => (await broadcasts4.getByIdConsistent(id))!.recipients![ids(id).contactId]!;
+      for (const id of ['deny-a', 'deny-b', 'deny-c']) {
+        const k = ids(id);
+        await putConversation(k.conversationId, PHONE, env4);
+        await putShare({ broadcastId: id, unitId: k.unitId, recipients: { [k.contactId]: { status: 'failed', errorCode: '30003', conversationId: k.conversationId, tsMsgId: k.ROOT } } }, env4);
+        await appendRow(k, id, { tsMsgId: k.ROOT, status: 'failed', errorCode: '30003' }, messages4);
+        await appendRow(k, id, { tsMsgId: k.R1, retryOf: k.ROOT, status: 'delivered', stamped: true, retryAttempt: 1 }, messages4);
+      }
+      // The table's own Scan order decides which share is walked FIRST: that one is denied, the other two come after it.
+      const table = tableName('broadcasts', env4);
+      const order = ((await doc.send(new ScanCommand({ TableName: table, ConsistentRead: true }))).Items ?? []).map((i) => String(i['broadcastId']));
+      expect([...order].sort()).toEqual(['deny-a', 'deny-b', 'deny-c']);
+      const [failing, ...after] = order as [string, ...string[]];
+      let denials = 0;
+      const denied = {
+        send: async (command: { constructor: { name: string }; input: { TableName?: string; Key?: Record<string, unknown> } }) => {
+          if (command.constructor.name === 'UpdateCommand' && command.input.TableName === table && command.input.Key?.['broadcastId'] === failing) {
+            denials += 1;
+            throw Object.assign(new Error('User is not authorized to perform: dynamodb:UpdateItem'), { name: 'AccessDeniedException' });
+          }
+          return await doc.send(command as never);
+        },
+        destroy: () => {},
+      } as unknown as DynamoDBDocumentClient;
+
+      const mark = capture.lines.length;
+      await expect(runRepairShareOutcomes({ doc: denied, env: env4, apply: true, now: () => NOW, scanLimit: 1, logger: log })).rejects.toMatchObject({ name: 'AccessDeniedException' });
+      expect(denials).toBe(3); // the first try and the bounded write's two retries
+      const errors = capture.lines.slice(mark).filter((l) => l['level'] === 50);
+      const abortAt = errors.findIndex((l) => String(l['msg']).includes('SYSTEMIC'));
+      const partialAt = errors.findIndex((l) => String(l['msg']).includes('PARTIAL'));
+      expect(errors.filter((l) => String(l['msg']).includes('SYSTEMIC'))).toHaveLength(1);
+      expect(errors[abortAt]).toMatchObject({ broadcastId: failing, recipientKey: ids(failing).contactId, conversationId: ids(failing).conversationId, tsMsgId: ids(failing).ROOT, step: 'slot' });
+      expect((errors[abortAt]!['err'] as { type?: string }).type).toBe('AccessDeniedException');
+      // The share is named first, then the PARTIAL report - counters as of the abort, the aborting slot not counted as failed.
+      expect(partialAt).toBeGreaterThan(abortAt);
+      expect(errors[partialAt]).toMatchObject({ apply: true, sharesWalked: 1, slotsWalked: 1, slotsToMove: 1, slotsMoved: 0, slotsFailed: 0 });
+      expect(errors.filter((l) => String(l['msg']).includes('write failed for this slot'))).toHaveLength(0);
+      // Nothing written: the denied share and every share after it keep their slot and have no ledger row.
+      for (const id of [failing, ...after]) {
+        expect(await slotOf4(id)).toStrictEqual({ status: 'failed', errorCode: '30003', conversationId: ids(id).conversationId, tsMsgId: ids(id).ROOT });
+        expect(await listingSends4.getByKeyConsistent(ids(id).unitId, ids(id).contactId)).toBeUndefined();
+      }
+    } finally {
+      for (const base of BASES) await deleteTableIfExists(client, tableName(base, env4));
+    }
+  });
+
+  it('a ledger write that fails with a SYSTEMIC error (sustained throttling) aborts the run too: an ERROR names the share at step ledger and the PARTIAL report carries the slot move that landed before it (code review R2-F2)', async () => {
+    const k = ids('b-21');
+    await seedShareWithChain({ broadcastId: 'b-21', slotStatus: 'failed', rows: [{ tsMsgId: k.ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: k.R1, retryOf: k.ROOT, status: 'delivered', stamped: true, retryAttempt: 1 }] });
+    const ledgerTable = tableName('listing_sends', testEnv);
+    const throttled = {
+      send: async (command: { constructor: { name: string }; input: { TableName?: string; Key?: Record<string, unknown> } }) => {
+        if (command.constructor.name === 'UpdateCommand' && command.input.TableName === ledgerTable && command.input.Key?.['unitId'] === k.unitId) {
+          throw Object.assign(new Error('The level of configured provisioned throughput for the table was exceeded'), { name: 'ProvisionedThroughputExceededException' });
+        }
+        return await doc.send(command as never);
+      },
+      destroy: () => {},
+    } as unknown as DynamoDBDocumentClient;
+
+    const mark = capture.lines.length;
+    await expect(run('b-21', true, { doc: throttled })).rejects.toMatchObject({ name: 'ProvisionedThroughputExceededException' });
+    const errors = capture.lines.slice(mark).filter((l) => l['level'] === 50);
+    const abort = errors.filter((l) => String(l['msg']).includes('SYSTEMIC'));
+    expect(abort).toHaveLength(1);
+    expect(abort[0]).toMatchObject({ broadcastId: 'b-21', tsMsgId: k.ROOT, step: 'ledger' });
+    expect(errors.filter((l) => String(l['msg']).includes('PARTIAL'))[0]).toMatchObject({ apply: true, slotsMoved: 1, rowsCreated: 0, slotsFailed: 0 });
+    expect(errors.filter((l) => String(l['msg']).includes('write failed for this slot'))).toHaveLength(0);
+    expect(await slotOf('b-21')).toMatchObject({ status: 'delivered', latestAttempt: k.R1 });
+    expect(await ledgerOf('b-21')).toBeUndefined();
+  });
+
+  it("a slot the ORIGINAL row's own rollup moved to the decided outcome between the census read and the apply is NOT counted in slotsMoved - INFO 'already recorded by a live writer' - and the stats moved once (code review R2-F3)", async () => {
+    const k = ids('b-19');
+    await seedShareWithChain({ broadcastId: 'b-19', slotStatus: 'sent', rows: [{ tsMsgId: k.ROOT, status: 'failed', errorCode: '30007' }] });
+    const table = tableName('broadcasts', testEnv);
+    let moved = false;
+    const racing = {
+      send: async (command: { constructor: { name: string }; input: { TableName?: string; Key?: Record<string, unknown>; ConsistentRead?: boolean } }) => {
+        const out = await doc.send(command as never);
+        // The FIRST consistent read of the share (the census read, one-share mode) returns the slot as it was; the
+        // webhook's rollup of the ORIGINAL row lands right after it, in its own shape (no pointer on the original's key).
+        if (!moved && command.constructor.name === 'GetCommand' && command.input.TableName === table && command.input.ConsistentRead === true && command.input.Key?.['broadcastId'] === 'b-19') {
+          moved = true;
+          const rollup = await broadcasts.applyAttemptOutcome(
+            'b-19',
+            k.contactId,
+            { status: 'sent', latestAttempt: undefined },
+            { status: 'failed', errorCode: '30007', conversationId: k.conversationId, tsMsgId: k.ROOT },
+            { sent: -1, failed: 1 },
+          );
+          expect(rollup.applied).toBe(true);
+        }
+        return out;
+      },
+      destroy: () => {},
+    } as unknown as DynamoDBDocumentClient;
+
+    const mark = capture.lines.length;
+    expect(await run('b-19', true, { doc: racing })).toMatchObject({ slotsToMove: 1, slotsMoved: 0, slotsFailed: 0 });
+    expect(moved).toBe(true);
+    expect(await slotOf('b-19')).toStrictEqual({ status: 'failed', errorCode: '30007', conversationId: k.conversationId, tsMsgId: k.ROOT });
+    // ONE move and ONE delta - the live writer's; the repair wrote nothing to the slot.
+    expect((await broadcasts.getByIdConsistent('b-19'))!.stats).toMatchObject({ sent: 0, failed: 1 });
+    const recorded = capture.lines.slice(mark).filter((l) => String(l['msg']).includes('already recorded by a live writer'));
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ level: 30, broadcastId: 'b-19', tsMsgId: k.ROOT });
+  });
+
+  it("a bare-sent original (no carrierSentAt) whose own row reads sent is to move: the slot gains the row's carrier instant with no stats delta (the persisted buckets do not split sending), so the share derives sent 1, sending 0; its ledger entry stays counted by acceptance (found while fixing 1)", async () => {
+    const k = ids('b-20');
+    await seedShareWithChain({ broadcastId: 'b-20', slotStatus: 'sent', rows: [{ tsMsgId: k.ROOT, status: 'sent' }] });
+    expect(await run('b-20', false)).toMatchObject({ slotsToMove: 1, slotsMoved: 0 });
+    expect(await run('b-20', true)).toMatchObject({ slotsToMove: 1, slotsMoved: 1, slotsFailed: 0 });
+    expect(await slotOf('b-20')).toStrictEqual({ status: 'sent', carrierSentAt: T_ROOT, conversationId: k.conversationId, tsMsgId: k.ROOT });
+    const share = (await broadcasts.getByIdConsistent('b-20'))!;
+    expect(share.stats).toMatchObject({ sent: 1, failed: 0 });
+    expect(deriveBroadcastStats(share)).toMatchObject({ sending: 0, sent: 1 });
+    expect((await ledgerOf('b-20'))?.shares?.['b-20']).toMatchObject({ attempt: k.ROOT, state: 'counted', by: 'acceptance' });
+    expect(await run('b-20', false)).toMatchObject({ slotsToMove: 0 });
   });
 
   it('the CLI contract: --env local|dev|prod, --lane with local only, --broadcast <id>, --apply; anything else is a usage error', () => {

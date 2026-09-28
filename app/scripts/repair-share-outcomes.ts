@@ -44,10 +44,12 @@
 //      recipient key that cannot be derived skips ONLY the record read
 //      (noRecipientKey); the decision stands on the rows.
 //   4. THE SLOT is "to move" when the D2 rule admits the decided attempt
-//      (wouldApply) and the slot does not already record it. The apply moves
-//      it through applyLaterAttempt - the D2 rule again, on a consistent read -
-//      so the repair never regresses a slot: never a delivered or skipped
-//      slot, never a slot an attempt newer than the census has touched.
+//      (wouldApply) and the slot does not already record it (its carrier
+//      instant included, when the decision carries one). The apply moves it
+//      through applyLaterAttemptBounded (applyLaterAttempt, a thrown write
+//      retried twice) - the D2 rule again, on a consistent read - so the
+//      repair never regresses a slot: never a delivered or skipped slot, never
+//      a slot an attempt newer than the census has touched.
 //   5. THE LEDGER FOLLOWS THE SLOT, never the decision: the entry the slot's
 //      own state implies (ledgerEntryForSlot - the projected slot on a census,
 //      the re-read slot on an apply; a delivered slot that refused the move
@@ -66,21 +68,32 @@
 // apply wrote (always 0 on a dry run). On an apply, a past-tense counter below
 // its forecast means a live writer changed that slot or pair during the run
 // (the rule refused, correctly), or the slot's write failed (slotsFailed): a
-// second run reports what is still left.
+// second run reports what is still left. slotsMoved counts only a slot the
+// run's OWN write changed (code review R2-F3): a slot a live writer moved to
+// the decided outcome after the census read it is logged at INFO (already
+// recorded by a live writer) and not counted.
 //
-// A FAILED WRITE IS PER SLOT (code review ADV-4): a slot or ledger write that
-// throws (a permanent per-item cause - DynamoDB's 400 KB item limit on a share
-// stored under the old 1500 cap - fails on every re-run) or answers 'lost' is
-// ONE ERROR naming the share and slot, counted in slotsFailed, and the walk
-// goes on to the next slot: one bad share never blocks every share after it.
-// A READ that fails still aborts the run (there is nothing to continue from).
+// A FAILED WRITE IS PER SLOT (code review ADV-4) - UNLESS IT IS SYSTEMIC
+// (R2-F2). A slot or ledger write that still throws (the slot write after its
+// two retries - a permanent per-item cause, DynamoDB's 400 KB item limit on a
+// share stored under the old 1500 cap, fails on every re-run) or answers
+// 'lost' is ONE ERROR naming the share and slot, counted in slotsFailed, and
+// the walk goes on to the next slot: one bad share never blocks every share
+// after it. The next run re-checks that slot (a write that landed before its
+// error surfaced reads as recorded there). A write that fails with a SYSTEMIC
+// error class (SYSTEMIC_WRITE_ERRORS: credentials, a missing grant, a wrong
+// table prefix, sustained throttling) is not a property of one slot and no
+// later write would land either: it ABORTS the run - ONE ERROR naming the
+// share, then the PARTIAL report - as a READ that fails does, and a retry-row
+// stamp that fails (there is nothing to continue from).
 //
 // EXIT: 0 = the run completed clean (a dry run or an apply); 1 = the run
 // completed with slotsFailed > 0 (the full report is logged first, COMPLETED
-// WITH FAILURES), or a read failed (the PARTIAL report is logged first; every
-// write is conditional and idempotent, so re-running after the fix is safe),
-// or the target could not be resolved (no table read); 2 = usage (an unknown or
-// repeated argument, --lane off local, an unknown --broadcast id).
+// WITH FAILURES), or a read, a retry-row stamp or a SYSTEMIC write failed (the
+// PARTIAL report is logged first; every write is conditional and idempotent,
+// so re-running after the fix is safe), or the target could not be resolved
+// (no table read); 2 = usage (an unknown or repeated argument, --lane off
+// local, an unknown --broadcast id).
 //
 // TARGET: `--env local|dev|prod` through scripts/lib/stageClient.ts; dev/prod
 // run the account guard on the housingchoice profile FIRST, before any table
@@ -111,11 +124,10 @@ import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../src/
 import { createSendAttemptsRepo, type SendAttemptRecord, type SendAttemptsRepo } from '../src/repos/sendAttemptsRepo.js';
 import { retryRecipientKey } from '../src/services/retryChain.js';
 import {
-  applyLaterAttempt,
+  applyLaterAttemptBounded,
   pairContactId,
   projectSlot,
   wouldApply,
-  type ApplyResult,
   type AttemptOutcome,
   type ShareAttemptOutcomeDeps,
 } from '../src/services/shareAttemptOutcome.js';
@@ -150,6 +162,38 @@ export const CHAIN_PAGE_LIMIT = 100;
  */
 export const STALE_RECONCILING_MS = RECONCILE_CHECK_DELAYS_MS[2]! + RETRY_PROMISE_GRACE_MS;
 
+/**
+ * The error classes a failed slot or ledger WRITE aborts the run on (code
+ * review R2-F2), matched by name: the systemic classes the reminder sweep
+ * names (retire-paused-tour-reminders.ts, its WRITE side; RUNBOOK "retire tour
+ * reminders" step 2) - rotated or expired credentials, a missing grant, a
+ * wrong TABLE_PREFIX, sustained throttling. None is a property of one slot,
+ * and no later write would land either. The sweep aborts on EVERY write
+ * failure but a lost condition (its writes have no per-item cause); the
+ * repair's do - DynamoDB's 400 KB item limit (a ValidationException) on one
+ * legacy share - so here only these names abort, and every other write
+ * failure stays per slot.
+ */
+const SYSTEMIC_WRITE_ERRORS: ReadonlySet<string> = new Set([
+  // rotated or expired credentials
+  'UnrecognizedClientException',
+  'InvalidSignatureException',
+  'ExpiredTokenException',
+  'CredentialsProviderError',
+  // a missing grant
+  'AccessDeniedException',
+  // a wrong TABLE_PREFIX: no such table
+  'ResourceNotFoundException',
+  // sustained throttling - past the SDK's own retries and the bounded write's two
+  'ProvisionedThroughputExceededException',
+  'ThrottlingException',
+  'RequestLimitExceeded',
+]);
+
+function isSystemicWriteError(err: unknown): boolean {
+  return err instanceof Error && SYSTEMIC_WRITE_ERRORS.has(err.name);
+}
+
 /** A refusal of the operator's INPUT (an unknown --broadcast id): exit 2, no partial-run banner - nothing ran. */
 export class UsageError extends Error {}
 
@@ -179,9 +223,11 @@ export interface RepairReport {
   /** Apply: pairs that stopped counting. */
   pairsUncounted: number;
   /**
-   * Apply: slots whose slot or ledger write failed - it threw, or its
-   * condition kept losing past the re-read bound. Each is named on ONE ERROR
-   * line and left as it is; the walk went on; the run exits 1.
+   * Apply: slots whose slot or ledger write failed with a per-slot cause - it
+   * threw (the slot write after its two retries), or its condition kept
+   * losing past the re-read bound. Each is named on ONE ERROR line and
+   * re-checked by the next run; the walk went on; the run exits 1. A SYSTEMIC
+   * write failure is never counted here: it aborts the run.
    */
   slotsFailed: number;
   /** Slots (or their ledger step) the repair could not judge and left as they are. */
@@ -235,10 +281,58 @@ interface Repos {
   conversations: ConversationsRepo;
 }
 
+/**
+ * What ONE slot write saw, from outside the service (the walk is sequential,
+ * so one probe serves the run; repairSlot resets it before each write).
+ * applyLaterAttemptBounded retries a throw twice, logs the last one and
+ * answers 'threw': `err` keeps that error, so the repair can tell a SYSTEMIC
+ * fault (abort) from a per-slot one (code review R2-F2). `found` is the share
+ * as the write's FIRST successful read found it - after any live write since
+ * the census read it - so slotsMoved counts a slot only when the write changed
+ * it (R2-F3): a live rollup can leave exactly the slot the repair decided,
+ * which the service then answers as applied (plan deviation 15's replay check).
+ */
+interface SlotWriteProbe {
+  err: unknown;
+  found: { item: BroadcastItem | undefined } | undefined;
+}
+
+/** Before each slot write: nothing seen yet. */
+function resetProbe(probe: SlotWriteProbe): void {
+  probe.err = undefined;
+  probe.found = undefined;
+}
+
+/** The share repo the slot write goes through: the real one, feeding the probe. */
+function probedBroadcasts(repo: BroadcastsRepo, probe: SlotWriteProbe): ShareAttemptOutcomeDeps['broadcasts'] {
+  return {
+    async getByIdConsistent(broadcastId) {
+      try {
+        const item = await repo.getByIdConsistent(broadcastId);
+        if (probe.found === undefined) probe.found = { item };
+        return item;
+      } catch (err) {
+        probe.err = err;
+        throw err;
+      }
+    },
+    async applyAttemptOutcome(broadcastId, contactKey, expect, next, statsDelta) {
+      try {
+        return await repo.applyAttemptOutcome(broadcastId, contactKey, expect, next, statsDelta);
+      } catch (err) {
+        probe.err = err;
+        throw err;
+      }
+    },
+  };
+}
+
 /** Everything one slot's repair reads from and counts into. */
 interface SlotRun {
   repos: Repos;
   slotDeps: ShareAttemptOutcomeDeps;
+  /** Fed by slotDeps.broadcasts: what the slot write threw, and the share as it first read it. */
+  probe: SlotWriteProbe;
   ledger: ShareLedgerDeps;
   log: Logger;
   report: RepairReport;
@@ -283,9 +377,10 @@ function isUnitShare(item: BroadcastItem): item is UnitShare {
 /**
  * The census (apply = false) or the repair (apply = true) - see the header.
  * Never throws for a slot it cannot judge (it counts it) nor for a slot whose
- * slot or ledger WRITE fails (ONE ERROR, slotsFailed, the walk goes on); a
- * READ failure ABORTS the run: the PARTIAL report is logged at ERROR, then the
- * error propagates. An unknown --broadcast id is a UsageError (nothing ran).
+ * slot or ledger WRITE fails with a per-slot cause (ONE ERROR, slotsFailed,
+ * the walk goes on); a READ failure, a retry-row stamp failure or a SYSTEMIC
+ * write failure ABORTS the run: the PARTIAL report is logged at ERROR, then
+ * the error propagates. An unknown --broadcast id is a UsageError (nothing ran).
  */
 export async function runRepairShareOutcomes(opts: RepairOptions): Promise<RepairReport> {
   const log = opts.logger ?? defaultLogger;
@@ -316,9 +411,10 @@ async function walk(opts: RepairOptions, report: RepairReport, log: Logger): Pro
   const ledger: ShareLedgerDeps = { listingSends: repos.listingSends, log };
   // applyLaterAttempt's broadcast.updated emit goes to a bus of its own with
   // no listener: a script reaches no dashboard (they read the rows on their
-  // next fetch).
+  // next fetch). The slot write's share reads and writes feed ONE probe.
+  const probe: SlotWriteProbe = { err: undefined, found: undefined };
   const slotDeps: ShareAttemptOutcomeDeps = {
-    broadcasts: repos.broadcasts,
+    broadcasts: probedBroadcasts(repos.broadcasts, probe),
     ledger,
     events: createEventBus({ logger: log }),
     log,
@@ -337,6 +433,7 @@ async function walk(opts: RepairOptions, report: RepairReport, log: Logger): Pro
       await repairSlot({
         repos,
         slotDeps,
+        probe,
         ledger,
         log,
         report,
@@ -518,20 +615,40 @@ async function decideAttempt(r: SlotRun, chain: ChainRows, newest: MessageItem, 
   return fromRow;
 }
 
-/** The slot already records the decided attempt with its status and code (a second run finds every moved slot here). */
+/**
+ * The slot already records the decided attempt with its status, its code and
+ * - when the decision carries one - a carrier instant (a second run finds
+ * every moved slot here). A carrier-confirmed decision over a slot with NO
+ * instant is the same-attempt gain wouldApply admits (a bare `sent` original
+ * whose own row reads sent): it is to move, with no stats delta (the
+ * persisted buckets do not split sending) and the same ledger entry (found
+ * while fixing 1).
+ */
 function slotRecords(slot: BroadcastRecipient, decided: Decided): boolean {
   const o = decided.outcome;
   const status = o.kind === 'unresolved' ? 'failed' : o.kind;
   const code = o.kind === 'failed' ? o.errorCode : o.kind === 'unresolved' ? SEND_UNCONFIRMED_CODE : undefined;
-  return (slot.latestAttempt ?? slot.tsMsgId) === decided.attemptKey && slot.status === status && slot.errorCode === code;
+  const carrier = o.kind === 'sent' || o.kind === 'delivered' ? o.carrierSentAt : undefined;
+  return (
+    (slot.latestAttempt ?? slot.tsMsgId) === decided.attemptKey &&
+    slot.status === status &&
+    slot.errorCode === code &&
+    (carrier === undefined || slot.carrierSentAt !== undefined)
+  );
+}
+
+/** What a slot write changes (status, code, carrier instant, pointer): equal means the slot is as the write found it. */
+function sameSlot(a: BroadcastRecipient, b: BroadcastRecipient): boolean {
+  return a.status === b.status && a.errorCode === b.errorCode && a.carrierSentAt === b.carrierSentAt && a.latestAttempt === b.latestAttempt;
 }
 
 /**
- * A slot or ledger WRITE failed for one slot (code review ADV-4): ONE ERROR
- * with the ids (the slot key redacted) and the error - or `result: 'lost'`
- * for a condition that kept losing past the re-read bound - counted in
- * slotsFailed; the caller leaves the slot as it is and the walk goes on.
- * Returns true (the caller's failed flag).
+ * A slot or ledger WRITE failed for one slot with a per-slot cause (code
+ * review ADV-4): ONE ERROR with the ids (the slot key redacted) and the error
+ * - or `result: 'lost'` for a condition that kept losing past the re-read
+ * bound - counted in slotsFailed; the walk goes on. The next run re-checks
+ * the slot: a write that landed before its error surfaced reads as recorded
+ * there (R2-F2). Returns true (the caller's failed flag).
  */
 function failSlot(
   r: Pick<SlotRun, 'log' | 'report'>,
@@ -542,9 +659,27 @@ function failSlot(
   r.report.slotsFailed += 1;
   r.log.error(
     { ...ids, step, ...cause },
-    `${SCRIPT_NAME} - the ${step} write failed for this slot: counted in slotsFailed and left as it is, the walk goes on (fix the cause and re-run)`,
+    `${SCRIPT_NAME} - the ${step} write failed for this slot: counted in slotsFailed and re-checked by the next run (a write that landed before its error surfaced reads as recorded there); the walk goes on (fix the cause and re-run)`,
   );
   return true;
+}
+
+/**
+ * A slot or ledger write THREW (the slot write after its two retries). A
+ * SYSTEMIC class (SYSTEMIC_WRITE_ERRORS) ABORTS the run (code review R2-F2):
+ * ONE ERROR naming the share, then the error propagates - runRepairShareOutcomes
+ * logs the PARTIAL report and the entrypoint exits 1. Anything else is per
+ * slot (failSlot).
+ */
+function failSlotOrAbort(r: Pick<SlotRun, 'log' | 'report'>, ids: Record<string, unknown>, step: 'slot' | 'ledger', err: unknown): true {
+  if (isSystemicWriteError(err)) {
+    r.log.error(
+      { ...ids, step, err },
+      `${SCRIPT_NAME} - the ${step} write failed with a SYSTEMIC error (credentials, a missing grant, a wrong table prefix, sustained throttling): ABORTING the run - no later write would land either. Fix the cause and re-run (idempotent).`,
+    );
+    throw err;
+  }
+  return failSlot(r, ids, step, { err });
 }
 
 /** One slot: chain, stamps, decision, slot step, ledger step (header steps 1-5). */
@@ -605,25 +740,37 @@ async function repairSlot(r: SlotRun): Promise<void> {
       log.info(move, `${SCRIPT_NAME} - DRY RUN: would move the slot to its decided attempt`);
     } else {
       const recipientContactId = nonEmpty(newest.recipient_contact_id);
-      let result: ApplyResult | undefined;
-      try {
-        result = await applyLaterAttempt(r.slotDeps, {
-          broadcastId: share.broadcastId,
-          conversationId,
-          retryRoot: originalKey,
-          attemptKey: decided.attemptKey,
-          outcome: decided.outcome,
-          ...(recipientContactId !== undefined && { recipientContactId }),
-        });
-      } catch (err) {
-        slotWriteFailed = failSlot(r, ids, 'slot', { err });
-      }
-      if (result === 'lost') slotWriteFailed = failSlot(r, ids, 'slot', { result: 'lost' });
-      else if (result === 'applied') report.slotsMoved += 1;
-      else if (result !== undefined) {
+      resetProbe(r.probe);
+      // Bounded (code review R2-F2): a throw is retried twice, as at every live
+      // site, then answered 'threw' - its error kept by the probe.
+      const result = await applyLaterAttemptBounded(r.slotDeps, {
+        broadcastId: share.broadcastId,
+        conversationId,
+        retryRoot: originalKey,
+        attemptKey: decided.attemptKey,
+        outcome: decided.outcome,
+        ...(recipientContactId !== undefined && { recipientContactId }),
+      });
+      if (result === 'threw') slotWriteFailed = failSlotOrAbort(r, ids, 'slot', r.probe.err);
+      else if (result === 'lost') slotWriteFailed = failSlot(r, ids, 'slot', { result: 'lost' });
+      else if (result !== 'applied') {
         log.info({ ...move, result }, `${SCRIPT_NAME} - slot not moved: refused on a fresh read (a newer attempt landed after the census), or the share or the slot is gone`);
       }
-      if (!slotWriteFailed) current = (await repos.broadcasts.getByIdConsistent(share.broadcastId))?.recipients?.[contactKey];
+      if (!slotWriteFailed) {
+        current = (await repos.broadcasts.getByIdConsistent(share.broadcastId))?.recipients?.[contactKey];
+        // slotsMoved counts only a slot THIS write changed (code review
+        // R2-F3): 'applied' also answers a slot that already recorded the
+        // decided outcome when the write first read it - a live rollup since
+        // the census read it (plan deviation 15's replay check).
+        if (result === 'applied' && current !== undefined) {
+          const found = r.probe.found?.item?.recipients?.[contactKey];
+          if (found !== undefined && sameSlot(found, current)) {
+            log.info(move, `${SCRIPT_NAME} - slot not moved by this run: already recorded by a live writer (the decided outcome was on the slot when the write read it) - not counted`);
+          } else {
+            report.slotsMoved += 1;
+          }
+        }
+      }
     }
   }
 
@@ -661,7 +808,7 @@ async function repairSlot(r: SlotRun): Promise<void> {
     try {
       written = await applyShareLedgerEntry(r.ledger, { unitId: share.unitId, contactId, broadcastId: share.broadcastId, entry });
     } catch (err) {
-      failSlot(r, ids, 'ledger', { err });
+      failSlotOrAbort(r, ids, 'ledger', err);
       return;
     }
     if (written === 'lost') {
@@ -682,8 +829,9 @@ async function repairSlot(r: SlotRun): Promise<void> {
 /**
  * The end-of-run report and the exit code it earns: 1 when a slot's write
  * failed (slotsFailed > 0 - the run completed and the FULL report is logged
- * first, each failed slot on its own ERROR line), else 0. A read failure
- * never gets here: it throws first and exits 1 from the entrypoint.
+ * first, each failed slot on its own ERROR line), else 0. A read, stamp or
+ * SYSTEMIC write failure never gets here: it throws first and exits 1 from
+ * the entrypoint.
  */
 export function reportRepair(report: RepairReport, apply: boolean, log: Logger = defaultLogger): number {
   const suffix = apply
@@ -692,7 +840,7 @@ export function reportRepair(report: RepairReport, apply: boolean, log: Logger =
   if (report.slotsFailed > 0) {
     log.warn(
       { ...report, apply },
-      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${report.slotsFailed} slot(s) could not be written and were left as they are (see the ERROR lines naming them). Fix the cause, then re-run (idempotent).`,
+      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${report.slotsFailed} slot(s) failed a write (see the ERROR lines naming them); the next run re-checks each. Fix the cause, then re-run (idempotent).`,
     );
     return 1;
   }

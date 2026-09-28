@@ -3,7 +3,14 @@ import { describe, expect, it } from 'vitest';
 import type { ListingSendItem, ShareMemoryWrite } from '../src/repos/listingSendsRepo.js';
 import { SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
 import { LEGACY_ATTEMPT_KEY, rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
-import { applyShareLedgerEntry, ledgerEntryFor, ledgerEntryForSlot } from '../src/services/shareLedger.js';
+import {
+  applyShareLedgerEntry,
+  ledgerEntryCounts,
+  ledgerEntryFor,
+  ledgerEntryForSlot,
+  ledgerRowCounted,
+  ledgerWouldChange,
+} from '../src/services/shareLedger.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -128,5 +135,71 @@ describe('ledgerEntryForSlot (the entry a slot OWN state implies)', () => {
     expect(ledgerEntryForSlot({ ...base, status: 'queued' }, 'conv-1', false)).toBeUndefined();
     expect(ledgerEntryForSlot({ ...base, status: 'skipped', errorCode: 'opted_out' }, 'conv-1', false)).toBeUndefined();
     expect(ledgerEntryForSlot({ status: 'failed', errorCode: 'no_contact' }, 'conv-1', false)).toBeUndefined();
+  });
+});
+
+describe('ledgerWouldChange (spec D8: the repair census asks the service rule, no write)', () => {
+  const row = (seed: Partial<ListingSendItem>): ListingSendItem =>
+    ({ unitId: 'u', contactId: 'c', via: 'broadcast', created_at: 't0', updated_at: 't0', ...seed }) as ListingSendItem;
+  const failedA1 = ledgerEntryFor(A1, 'conv', { kind: 'failed' });
+  const acceptedA2 = ledgerEntryFor(A2, 'conv', { kind: 'accepted' });
+  const deliveredA1 = ledgerEntryFor(A1, 'conv', { kind: 'delivered' });
+  const pendingA1 = ledgerEntryFor(A1, 'conv', { kind: 'pending' });
+
+  it('an absent row is create for any entry; an entry the rule refuses is none', () => {
+    expect(ledgerWouldChange(undefined, 'b1', failedA1)).toBe('create');
+    expect(ledgerWouldChange(undefined, 'b1', acceptedA2)).toBe('create');
+    const terminal = row({ shares: { b1: deliveredA1 }, counted: true, sentAt: '2026-09-28T10:00:00.000Z', broadcastId: 'b1', shares_op: 't' });
+    expect(ledgerWouldChange(terminal, 'b1', ledgerEntryFor(A2, 'conv', { kind: 'failed' }))).toBe('none'); // a delivery is never erased
+    const failed = row({ shares: { b1: failedA1 }, counted: false, shares_op: 't' });
+    expect(ledgerWouldChange(failed, 'b1', failedA1)).toBe('none'); // the same entry again
+    expect(ledgerWouldChange(failed, 'b1', pendingA1)).toBe('none'); // nothing moves back
+  });
+
+  it("recount / uncount say whether the row's counted flag flips; update when the entry changes and the flag does not", () => {
+    const failed = row({ shares: { b1: failedA1 }, counted: false, shares_op: 't' });
+    expect(ledgerWouldChange(failed, 'b1', acceptedA2)).toBe('recount');
+    const legacy = row({ sentAt: '2026-09-01T00:00:00.000Z', broadcastId: 'b-old' });
+    expect(ledgerWouldChange(legacy, 'b-old', failedA1)).toBe('uncount'); // the seeded entry is older than every real attempt
+    expect(ledgerWouldChange(legacy, 'b-new', failedA1)).toBe('update'); // b-old still counts
+    const accepted = row({ shares: { b1: ledgerEntryFor(A1, 'conv', { kind: 'accepted' }) }, counted: true, sentAt: '2026-09-28T10:00:00.000Z', broadcastId: 'b1', shares_op: 't' });
+    expect(ledgerWouldChange(accepted, 'b1', deliveredA1)).toBe('update');
+    expect(ledgerWouldChange(accepted, 'b1', pendingA1)).toBe('uncount');
+    expect(ledgerWouldChange(row({ sentAt: '2026-07-01T00:00:00.000Z' }), 'b1', failedA1)).toBe('update'); // an individual-only legacy row keeps counting
+  });
+
+  it('agrees with applyShareLedgerEntry case by case: none exactly when the write is refused, and the flag flips as forecast', async () => {
+    const cases: Array<{ seed: Partial<ListingSendItem> | undefined; broadcastId: string; entry: ReturnType<typeof ledgerEntryFor> }> = [
+      { seed: undefined, broadcastId: 'b1', entry: acceptedA2 },
+      { seed: undefined, broadcastId: 'b1', entry: failedA1 },
+      { seed: { shares: { b1: failedA1 }, counted: false, shares_op: 't' }, broadcastId: 'b1', entry: acceptedA2 },
+      { seed: { shares: { b1: failedA1 }, counted: false, shares_op: 't' }, broadcastId: 'b1', entry: failedA1 },
+      { seed: { sentAt: '2026-09-01T00:00:00.000Z', broadcastId: 'b-old' }, broadcastId: 'b-old', entry: failedA1 },
+      { seed: { sentAt: '2026-09-01T00:00:00.000Z', broadcastId: 'b-old' }, broadcastId: 'b-new', entry: failedA1 },
+      { seed: { shares: { b1: deliveredA1 }, counted: true, sentAt: '2026-09-28T10:00:00.000Z', broadcastId: 'b1', shares_op: 't' }, broadcastId: 'b1', entry: acceptedA2 },
+    ];
+    for (const c of cases) {
+      const f = fakeLedger(c.seed);
+      const before = f.row === undefined ? undefined : { ...f.row };
+      const forecast = ledgerWouldChange(before, c.broadcastId, c.entry);
+      const result = await applyShareLedgerEntry(deps(f), { unitId: 'u', contactId: 'c', broadcastId: c.broadcastId, entry: c.entry });
+      expect(result === 'refused').toBe(forecast === 'none');
+      if (forecast === 'create') expect(before === undefined && f.row !== undefined).toBe(true);
+      const flipped = ledgerRowCounted(before) !== ledgerRowCounted(f.row);
+      if (forecast === 'recount') expect([ledgerRowCounted(before), ledgerRowCounted(f.row)]).toStrictEqual([false, true]);
+      if (forecast === 'uncount') expect([ledgerRowCounted(before), ledgerRowCounted(f.row)]).toStrictEqual([true, false]);
+      if (forecast === 'update' || forecast === 'none') expect(flipped).toBe(false);
+      if (forecast === 'create') expect(ledgerRowCounted(f.row)).toBe(ledgerEntryCounts(c.entry));
+    }
+  });
+
+  it('ledgerRowCounted is the readers\' rule (an absent row does not count; a legacy row with sentAt does); ledgerEntryCounts is the summary\'s', () => {
+    expect(ledgerRowCounted(undefined)).toBe(false);
+    expect(ledgerRowCounted(row({ sentAt: '2026-09-01T00:00:00.000Z' }))).toBe(true);
+    expect(ledgerRowCounted(row({ counted: false }))).toBe(false);
+    expect(ledgerRowCounted(row({ counted: true }))).toBe(false); // no sentAt: never listed
+    expect(ledgerEntryCounts(acceptedA2)).toBe(true);
+    expect(ledgerEntryCounts(failedA1)).toBe(false);
+    expect(ledgerEntryCounts({ attempt: LEGACY_ATTEMPT_KEY, state: 'counted', by: 'acceptance' })).toBe(false); // no instant: counts nowhere
   });
 });

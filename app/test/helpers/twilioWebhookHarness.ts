@@ -1524,6 +1524,16 @@ export function createFakeWorld(): FakeWorld {
       if (patch.retryOutcome !== undefined) item.retry_outcome = patch.retryOutcome;
       return true;
     },
+    async stampRetryAttribution(conversationId, tsMsgId, patch) {
+      // share-sent-outcome D8, the real condition 'attribute_exists(tsMsgId)':
+      // a missing row answers false and is never created; an existing row
+      // takes both fields in one step, a wrong root overwritten.
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (item === undefined) return false;
+      item.broadcast_id = patch.broadcastId;
+      item.retry_root = patch.retryRoot;
+      return true;
+    },
     async putMediaPointers() {
       // The fake DERIVES the media index from the stored messages (below), so
       // there is nothing to write - the real repo keeps two structures in step,

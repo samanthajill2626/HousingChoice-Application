@@ -90,6 +90,20 @@ function mayReplace(existing: ShareLedgerEntry | undefined, next: ShareLedgerEnt
   return false;
 }
 
+/** Whether one entry counts the pair: a `counted` entry carrying its attempt's instant (the summary's rule - an entry without an instant counts nowhere). */
+export function ledgerEntryCounts(entry: ShareLedgerEntry): entry is ShareLedgerEntry & { countedAt: string } {
+  return entry.state === 'counted' && entry.countedAt !== undefined;
+}
+
+/**
+ * Whether a STORED row counts the pair as the readers see it
+ * (listingSendsRepo's listed rule): `counted` not false - absent on a legacy
+ * row, which reads as counted - and a `sentAt`. An absent row counts nothing.
+ */
+export function ledgerRowCounted(row: ListingSendItem | undefined): boolean {
+  return row !== undefined && row.counted !== false && typeof row.sentAt === 'string';
+}
+
 /**
  * The pair-level fields the entries imply: `counted` while a counted entry
  * (with its instant) exists; `sentAt` = the latest such instant and
@@ -99,11 +113,36 @@ function mayReplace(existing: ShareLedgerEntry | undefined, next: ShareLedgerEnt
 function summarize(shares: Record<string, ShareLedgerEntry>): Pick<ShareMemoryWrite, 'counted' | 'sentAt' | 'broadcastId'> {
   let latest: { key: string; at: string } | undefined;
   for (const [key, e] of Object.entries(shares)) {
-    if (e.state !== 'counted' || e.countedAt === undefined) continue;
+    if (!ledgerEntryCounts(e)) continue;
     if (latest === undefined || e.countedAt > latest.at) latest = { key, at: e.countedAt };
   }
   if (latest === undefined) return { counted: false, sentAt: undefined, broadcastId: undefined };
   return { counted: true, sentAt: latest.at, broadcastId: latest.key === INDIVIDUAL_KEY ? undefined : latest.key };
+}
+
+/**
+ * spec D8 (the repair's census): what writing `entry` for `broadcastId` would
+ * do to the pair's row, decided by the SAME rule applyShareLedgerEntry applies
+ * (the legacy seed, then mayReplace) - and nothing is written. `'none'` = the
+ * rule keeps the stored entry (the write would be refused); `'create'` = no
+ * row yet (the entry becomes the row's first memory - whether that row counts
+ * is ledgerEntryCounts(entry)); `'recount'` / `'uncount'` = the row's counted
+ * flag, as the readers see it (ledgerRowCounted), flips on / off; `'update'` =
+ * the entry changes and the flag does not.
+ */
+export function ledgerWouldChange(
+  row: ListingSendItem | undefined,
+  broadcastId: string,
+  entry: ShareLedgerEntry,
+): 'create' | 'recount' | 'uncount' | 'update' | 'none' {
+  const shares = seeded(row);
+  if (!mayReplace(shares[broadcastId], entry)) return 'none';
+  if (row === undefined) return 'create';
+  shares[broadcastId] = entry;
+  const before = ledgerRowCounted(row);
+  const after = summarize(shares).counted;
+  if (before === after) return 'update';
+  return after ? 'recount' : 'uncount';
 }
 
 /**

@@ -365,6 +365,36 @@ Decide whether the burst was legitimate (a reminder ladder plus a property send 
 
 **No agent runs either script against dev or prod.** An agent may run them only against a hermetic e2e lane it started (`--env local --lane <L>`), never a bare `--env local`. The visible per-conversation control and the breaker's own resume action are Work Package 2 (`docs/issues/ai-mode-switch-gates-all-automation.md`); until then this script is the only way back.
 
+### Share outcomes repair (2026-09-28): census first, then `--apply` - dev then prod, once after `feat/share-sent-outcome` deploys and before the next blast
+
+**NOT YET RUN - owed on dev AND prod once this branch has deployed there.** No Terraform, no secrets, no schema or index change. Run it AFTER the deploy (the live writers must already route new retry receipts to their slots) and before the next property blast. It is re-runnable at any time; take dev all the way through before prod.
+
+What it repairs (spec D8, `docs/superpowers/specs/2026-09-25-share-sent-outcome-design.md`): before this branch a retry of a property text never reached the share's recipient slot, so a tenant whose retry delivered could still read "Failed" on the share's results, be flagged wrongly in the composer, and count (or not) wrongly in "Properties sent" and "Sent to tenants". The deployed code fixes new sends; `app/scripts/repair-share-outcomes.ts` fixes the history. For every unit-targeted share (one Scan of the broadcasts table) and every recipient slot that is not skipped, it rebuilds that recipient's retry chain from the conversation's rows; stamps `broadcast_id` and `retry_root` on every retry row of the chain that lacks them or carries a wrong root (rows sent before retry-send-adoption, or past its walk cap), so their receipts route from now on; re-applies the chain's decided attempt to the slot under the same attempt-order rule the live webhook uses (a delivery anywhere in the chain wins; otherwise the newest attempt's own status, or "not confirmed" when its retry record or its row says the retry ended unresolved); and then rebuilds the pair's listing-send ledger entry FROM THE SLOT. It never moves a delivered or skipped slot, never moves a slot that a newer attempt touched after the census read it, and never erases a delivery-counted ledger entry. Every write is conditional: slots and ledger rows go through the same services the live paths use, and a row stamp is one conditional update of an existing row.
+
+Target handling is the automation scripts' (above): `--env local|dev|prod` resolves the tables AND the credentials itself (`app/scripts/lib/stageClient.ts`); `dev`/`prod` run the account guard on the `housingchoice` profile BEFORE any table is read, pin the regional endpoint and refuse to start while an `AWS_ENDPOINT_URL*` variable is set. Unknown or repeated arguments, `--lane` with `dev`/`prod`, and an unknown `--broadcast` id are usage errors (exit 2, nothing run).
+
+1. **Census (the DEFAULT; writes nothing):** `npx tsx app/scripts/repair-share-outcomes.ts --env dev`. Add `--broadcast <id>` to look at one share. Each would-be write is logged at INFO with its ids (`DRY RUN: would ...`; a slot key that is a phone number is redacted), and the last line is the report:
+   - `sharesWalked` - unit-targeted shares read (a share with no property is never walked: it has no ledger row, and its milestone keeps its words).
+   - `slotsWalked` - recipient slots that are not skipped and carry a message id.
+   - `stampsNeeded` / `stampsWritten` - retry rows whose `broadcast_id` or `retry_root` is missing or wrong / stamped.
+   - `slotsToMove` / `slotsMoved` - slots whose history decides a different attempt or outcome than the slot records / moved.
+   - `rowsToCreate` / `rowsCreated` - property-tenant pairs with no ledger row that get one. A created row does not always count: a failed, pending or not-confirmed entry is memory too (the tenant timeline's milestone words read it).
+   - `pairsToRecount` / `pairsRecounted` - pairs that start counting (they appear in the tenant's "Properties sent" and the property's "Sent to tenants"), a created counted row included.
+   - `pairsToUncount` / `pairsUncounted` - pairs that stop counting (they leave both lists; the milestone keeps the history).
+   - `unjudgeable.originalMissing` - the slot's own message is gone (a deleted conversation): the slot and its ledger row are left exactly as they are.
+   - `unjudgeable.brokenLineage` - a retry row names this send as its root but its `retry_of` links do not lead back to it (a missing link, or a pre-RSW retry whose lineage was never written): left as they are.
+   - `unjudgeable.noContact` - a phone-keyed slot whose rows name no contact: the slot step ran, the ledger was left.
+   - `unjudgeable.noRecipientKey` - the newest attempt's retry record could not be addressed (no recorded contact, no thread number): the record check was skipped and the slot was judged on its rows alone.
+
+   The `*To*` counters are the census's FORECAST (an apply prints them too); the past-tense counters are what an apply WROTE (always 0 on a census). Read the logged unjudgeable ids before applying.
+2. **Apply:** the same command with `--apply`, at a quiet moment (no property send in flight). A past-tense counter below its forecast means a live writer changed that slot or pair during the run and the rule kept the newer outcome - not an error; the next census reports what is still left. Any read or write failure, or a conditional write that keeps losing to a live writer, ABORTS the run: it logs a **PARTIAL** report at ERROR, then `FAILED`, and exits 1. Fix the cause and re-run (idempotent).
+3. **Re-run the census:** it must report zero on every `*To*` counter (`stampsNeeded`, `slotsToMove`, `rowsToCreate`, `pairsToRecount`, `pairsToUncount`). The `unjudgeable` counts stay: those slots are left alone by design.
+4. **Then prod**, the same three steps.
+
+Cost: one consistent Scan of the broadcasts table, then per slot a handful of keyed reads - the original message, the conversation's newer rows (a Query paged 100 at a time), at most one conversation read and one retry-record read, one ledger read - plus the conditional writes on an apply. On prod expect minutes, not seconds. Exit codes: 0 the run completed, 1 it failed (the PARTIAL report is logged first; or the target could not be resolved, and then nothing was read), 2 usage.
+
+**No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`.** Never a bare `--env local` - that is the live local stack.
+
 ### Tour reminder supersession (2026-09-01): NOTHING is owed - no backfill, no Terraform, no sweep
 
 **Feature branch `feat/tour-reminder-supersession`. Deploy the app image and you are done.** Recorded here because the branch changes what a retired reminder rung LOOKS like, and the natural question on reading that is "what has to be migrated?" - the answer is nothing.

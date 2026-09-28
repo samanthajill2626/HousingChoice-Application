@@ -272,6 +272,26 @@ describe('twilioWebhookHarness fake - retry-send-adoption fields', () => {
     );
   });
 
+  it('stampRetryAttribution mirrors the real write (share-sent-outcome D8): both fields on an existing row, a wrong root corrected in place, false and nothing created for a missing row', async () => {
+    const world = createFakeWorld();
+    const parent = await world.messagesRepo.append(outbound('SMrsa0071', T0));
+    const child = await world.messagesRepo.append({ ...outbound('SMrsa0072', T1), retryOf: parent.tsMsgId, retryAttempt: 1 });
+    expect(await world.messagesRepo.stampRetryAttribution(CONV, child.tsMsgId, { broadcastId: 'b-stamp', retryRoot: 'a-wrong-root' })).toBe(true);
+    expect(await world.messagesRepo.stampRetryAttribution(CONV, child.tsMsgId, { broadcastId: 'b-stamp', retryRoot: parent.tsMsgId })).toBe(true);
+    expect(await world.messagesRepo.getByTsMsgId(CONV, child.tsMsgId)).toMatchObject({
+      broadcast_id: 'b-stamp',
+      retry_root: parent.tsMsgId,
+      retry_of: parent.tsMsgId,
+      retry_attempt: 1,
+    });
+    const count = world.messages.length;
+    expect(
+      await world.messagesRepo.stampRetryAttribution(CONV, buildTsMsgId(T2, 'SMrsa0073'), { broadcastId: 'b-stamp', retryRoot: parent.tsMsgId }),
+    ).toBe(false);
+    expect(world.messages).toHaveLength(count);
+    expect(await world.messagesRepo.getByTsMsgId(CONV, buildTsMsgId(T2, 'SMrsa0073'))).toBeUndefined();
+  });
+
   it('annotateRetryPromise withdraws a row that never held a promise; a stale withdraw writes neither field', async () => {
     const world = createFakeWorld();
     const row = await world.messagesRepo.append(outbound('SMrsa0061', T0));

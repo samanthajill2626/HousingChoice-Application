@@ -7,7 +7,7 @@
 // the per-file DynamoDB access key automatically and must NOT carry the shared
 // lane marker.
 import { randomUUID } from 'node:crypto';
-import { GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -533,6 +533,42 @@ describe.skipIf(!reachable)('relay retry lineage against DynamoDB Local', () => 
         retry_due_at: RETRY_PROMISE_WITHDRAWN_AT,
         retry_outcome: 'unconfirmed',
       });
+    });
+
+    it('stampRetryAttribution (share-sent-outcome D8, the repair only) SETs broadcast_id and retry_root on an EXISTING row in ONE conditional write naming exactly its aliases, corrects a wrong root in place, and answers false for a missing row without creating it', async () => {
+      const parent = await appendOutbound({ providerSid: 'SMstamp0', providerTs: T0 });
+      const child = await appendOutbound({ providerSid: 'SMstamp1', providerTs: T1, retryOf: parent.tsMsgId, retryAttempt: 1 });
+      expect(child).not.toHaveProperty('broadcast_id');
+      expect(child).not.toHaveProperty('retry_root');
+      const send = vi.spyOn(doc, 'send');
+      try {
+        expect(await messages.stampRetryAttribution(ONE_CONV, child.tsMsgId, { broadcastId: 'b-stamp', retryRoot: 'a-wrong-root' })).toBe(true);
+        expect(send).toHaveBeenCalledTimes(1);
+        const command: unknown = send.mock.calls[0]?.[0];
+        expect(command).toBeInstanceOf(UpdateCommand);
+        expect((command as UpdateCommand).input).toMatchObject({
+          TableName: table,
+          Key: { conversationId: ONE_CONV, tsMsgId: child.tsMsgId },
+          UpdateExpression: 'SET #b = :b, #r = :r',
+          ConditionExpression: 'attribute_exists(tsMsgId)',
+          ExpressionAttributeNames: { '#b': 'broadcast_id', '#r': 'retry_root' },
+          ExpressionAttributeValues: { ':b': 'b-stamp', ':r': 'a-wrong-root' },
+        });
+      } finally {
+        send.mockRestore();
+      }
+      expect(await messages.stampRetryAttribution(ONE_CONV, child.tsMsgId, { broadcastId: 'b-stamp', retryRoot: parent.tsMsgId })).toBe(true);
+      // The two fields, and nothing else of the row's lineage moved.
+      expect(await messages.getByTsMsgIdConsistent(ONE_CONV, child.tsMsgId)).toMatchObject({
+        broadcast_id: 'b-stamp',
+        retry_root: parent.tsMsgId,
+        retry_of: parent.tsMsgId,
+        retry_attempt: 1,
+        delivery_status: 'undelivered',
+      });
+      const missing = buildTsMsgId(T2, 'SMstamp-missing');
+      expect(await messages.stampRetryAttribution(ONE_CONV, missing, { broadcastId: 'b-stamp', retryRoot: parent.tsMsgId })).toBe(false);
+      expect(await messages.getByTsMsgIdConsistent(ONE_CONV, missing)).toBeUndefined();
     });
   });
 });

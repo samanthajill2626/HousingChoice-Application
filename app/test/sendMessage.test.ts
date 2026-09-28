@@ -285,6 +285,8 @@ function makeFakes(
     // retry-send-adoption (R3, R7) - unused by the send service:
     listRetryChildrenConsistent: async () => [],
     annotateRetryPromise: async () => true,
+    // share-sent-outcome D8 - the repair's write; unused by the send service.
+    stampRetryAttribution: async () => true,
     putMediaPointers: async () => {},
     listMediaPointers: async () => [],
     putJobExecutionMarker: async () => true,

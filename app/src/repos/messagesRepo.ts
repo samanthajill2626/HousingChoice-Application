@@ -1558,6 +1558,20 @@ export interface MessagesRepo {
     expect: { retryDueAt: string | undefined },
   ): Promise<boolean>;
   /**
+   * share-sent-outcome D8 - the REPAIR's one row write
+   * (scripts/repair-share-outcomes.ts), and nothing else's: stamp a share
+   * retry row's attribution, `broadcast_id` and `retry_root`, in ONE
+   * conditional write on an EXISTING row (`attribute_exists(tsMsgId)` - a
+   * missing row is never created). The one exception to "retry lineage is
+   * append-only": a row appended before retry-send-adoption carries neither
+   * field, and a row appended after it from an unstamped ancestor, or past the
+   * legacy root walk's hop cap, can carry a WRONG root - which routes its
+   * receipt to no slot. The repair's chain rebuild decides both values; this
+   * writes them. true = written; false = no such row; anything else throws.
+   * Emits nothing (neither field is on the thread's wire).
+   */
+  stampRetryAttribution(conversationId: string, tsMsgId: string, patch: { broadcastId: string; retryRoot: string }): Promise<boolean>;
+  /**
    * Newest-first page of ONE conversation's media pointers (2026-08-18) - the
    * gallery's index, see the MEDIA POINTERS block above. `before` is a pointer
    * `sortKey` from a previous page (exclusive), so the caller pages a thread's
@@ -3421,6 +3435,32 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           ...(withdraw && { retryOutcome: patch.retryOutcome }),
         },
         'retry promise annotated',
+      );
+      return true;
+    },
+
+    async stampRetryAttribution(conversationId, tsMsgId, patch) {
+      // share-sent-outcome D8: ONE conditional write naming exactly the two
+      // aliases and two values it uses; the condition keeps a vanished row
+      // vanished (an UpdateItem would otherwise create it).
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET #b = :b, #r = :r',
+            ConditionExpression: 'attribute_exists(tsMsgId)',
+            ExpressionAttributeNames: { '#b': 'broadcast_id', '#r': 'retry_root' },
+            ExpressionAttributeValues: { ':b': patch.broadcastId, ':r': patch.retryRoot },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+      log.info(
+        { conversationId, tsMsgId, broadcastId: patch.broadcastId, retryRoot: patch.retryRoot },
+        'retry attribution stamped (share outcomes repair)',
       );
       return true;
     },

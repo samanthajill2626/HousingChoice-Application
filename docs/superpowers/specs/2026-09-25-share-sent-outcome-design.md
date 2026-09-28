@@ -222,8 +222,12 @@ The states:
 
 The SAFE reading ("Already sent" on the review list): reached, pending,
 unconfirmed, in flight. The STRICT reading (the labels, the counts, the
-ledger, the milestone): reached only. Failed, skipped and stranded count for
-neither.
+ledger): reached only. Failed, skipped and stranded count for neither. The
+milestone's WORDS are D6's, read from the ledger entry: a live `pending`
+entry reads "Property sent" (a timeline fact being retried), which is neither
+reading - the build followed D6, and this sentence, corrected 2026-09-28
+after the build's handback, removes the contradiction D1's earlier wording
+carried.
 
 The share's stored lifecycle status is never read to decide whether a tenant
 got the property. This replaces Branch A's interim rule ("failed keeps

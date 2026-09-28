@@ -67,7 +67,7 @@ import {
   SEND_UNCONFIRMED_CODE,
 } from '../src/lib/sendOutcome.js';
 import { rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
-import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
+import { deriveBroadcastStats, type BroadcastItem, type BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import { buildTsMsgId, type MessageItem, type NewMessage, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
@@ -4134,6 +4134,35 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(slotWrites).not.toHaveBeenCalled();   // the slot already records it: no second write
       expect(world.broadcasts.get('b-9')!.stats).toMatchObject({ failed: 0, delivered: 1 });
       expect(world.messages.filter((m) => m.provider_sid === 'SMorphan-share')).toHaveLength(1);
+    });
+
+    it("share-sent-outcome (code review ADV-5): an own-row proof whose retry row reads sent - carrier-confirmed: only the carrier's sent callback moves a row there - moves the share's original slot to sent WITH the row's own provider instant as carrierSentAt, so the share reads it Sent, not Sending", async () => {
+      register();
+      recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      // THIS attempt's own retry row (its retrychild# pointer exists), carrier-confirmed, outside the lookup's window.
+      const child = await seedRow('SMown-share', {
+        providerTs: iso(Date.parse(at) + 100_000),
+        deliveryStatus: 'sent',
+        errorCode: undefined,
+        retryOf: root.tsMsgId,
+        retryAttempt: 1,
+        retryRoot: root.tsMsgId,
+        broadcastId: 'b-9',
+      });
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(owner, at));
+      expect(list).not.toHaveBeenCalled();
+      expect(lines(30).filter((l) => l['verdict'] === 'found')).toEqual([
+        expect.objectContaining({ path: 'lookup', adoption: 'skipped', sid: 'SMown-share', deliveryStatus: 'sent' }),
+      ]);
+      expect(shareSlot()).toEqual({ status: 'sent', conversationId: retryConv, tsMsgId: root.tsMsgId, latestAttempt: child.tsMsgId, carrierSentAt: child.provider_ts });
+      expect(deriveBroadcastStats(world.broadcasts.get('b-9')!)).toMatchObject({ sent: 1, sending: 0, failed: 0 });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMown-share' });
+      expect(capture.atLevel(50)).toHaveLength(0);
     });
 
     it('share-sent-outcome 10a: adopting a share retry whose broadcast item is missing logs WARN and still closes adopted', async () => {

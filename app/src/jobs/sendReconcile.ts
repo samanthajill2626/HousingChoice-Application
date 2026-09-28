@@ -112,7 +112,7 @@ import {
   type AttemptOutcome,
   type ShareAttemptOutcomeDeps,
 } from '../services/shareAttemptOutcome.js';
-import { rowlessAttemptKey } from '../lib/shareAttemptOrder.js';
+import { attemptKeyTimestampMs, rowlessAttemptKey } from '../lib/shareAttemptOrder.js';
 import {
   attemptKey,
   createSendAttemptsRepo,
@@ -407,9 +407,10 @@ type UnresolvedCause =
 /**
  * A found verdict. share-sent-outcome D2: a RETRY adoption (adoptRetry, and
  * ownRetryRow's own-row proof) also names the attempt it found - its row's
- * tsMsgId, the failure code, the provider's carrier instant (date_sent; a
- * stored row keeps none) and the row's send-time recipient contact - so the
- * found arm can move a share's ORIGINAL slot before the record closes.
+ * tsMsgId, the failure code, the carrier instant (the provider's date_sent;
+ * for a stored row at `sent`, its own provider instant) and the row's
+ * send-time recipient contact - so the found arm can move a share's ORIGINAL
+ * slot before the record closes.
  */
 type Found = {
   kind: 'found';
@@ -1183,11 +1184,22 @@ async function ownRetryRow(c: Ctx, r: Resolved, o: RetrySendOwner, checkNo: numb
     adoption: 'skipped',
     status: row.delivery_status,
     path: 'lookup',
-    // share-sent-outcome D2: the row itself is the attempt (a stored row keeps no carrier instant).
+    // share-sent-outcome D2: the row itself is the attempt. A stored row keeps
+    // no carrier instant, but a row reaches `sent` only through the carrier's
+    // sent callback: a `sent` row is carrier-confirmed at no earlier than its
+    // own provider instant (code review ADV-5), so mapAdopted records a Sent
+    // slot, never a Sending one.
     tsMsgId: row.tsMsgId,
     ...(row.error_code !== undefined && { errorCode: row.error_code }),
+    ...(row.delivery_status === 'sent' && ownRowCarrierInstant(row.tsMsgId)),
     ...(row.recipient_contact_id !== undefined && { recipientContactId: row.recipient_contact_id }),
   };
+}
+
+/** The carrier instant a `sent` row's own key carries (the provider ISO before the first `#`), or nothing. */
+function ownRowCarrierInstant(tsMsgId: string): { carrierSentAt?: string } {
+  const at = attemptKeyTimestampMs(tsMsgId);
+  return at === undefined ? {} : { carrierSentAt: new Date(at).toISOString() };
 }
 
 /**

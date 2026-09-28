@@ -793,7 +793,12 @@ the build finds out of scope.
   while the record never closed; at the unresolved close the promise WITHDRAW
   runs first, so the thread and the Retry route are never wrong about an
   unresolved text. A process crash between the adoption hook and the record
-  close is still re-applied by the redelivered check.
+  close is still re-applied by the redelivered check. One more path of the
+  same residue: a WITHDRAW that keeps losing sends its check to the
+  dead-letter queue after the queue's retries, and the slot write behind it
+  never runs; the record is `done` / `unresolved`, which the repair's record
+  check reads. The record bound D1 measures "the share's own timestamp" from
+  the share's last write (`updated_at`), never the draft's creation.
 - **A lost retry rollup.** The status webhook catches a rollup throw and
   still answers 200, so the carrier never redelivers; if D2's re-read bound is
   exhausted too, the retry's row exists but the slot never learns it, and past

@@ -33,8 +33,10 @@
 //   3. THE DECIDED ATTEMPT (D2's rule applied to history): the LATEST
 //      delivered row of [O, chain] - a delivery is never erased (I2). Else the
 //      newest row N (O when the chain is empty) by its status (failed /
-//      undelivered: failed with its code and its promise; sent / queued: an
-//      acceptance - a row keeps no carrier instant), and then ONE check of N's
+//      undelivered: failed with its code and its promise; sent: carrier-
+//      CONFIRMED - only the carrier's sent callback moves a row there - at the
+//      row's own provider instant, a sound lower bound; queued: a bare
+//      acceptance), and then ONE check of N's
 //      NEXT attempt: N's retry_outcome 'unconfirmed', or its retry_send record
 //      (retry#<conversation>#<N>#<attempt>, keyed by retryRecipientKey)
 //      done/unresolved, or reconciling past the reconcile's schedule with no
@@ -63,14 +65,22 @@
 // counted on a dry run AND on an apply; the past-tense counters are what the
 // apply wrote (always 0 on a dry run). On an apply, a past-tense counter below
 // its forecast means a live writer changed that slot or pair during the run
-// (the rule refused, correctly): a second run reports what is still left.
+// (the rule refused, correctly), or the slot's write failed (slotsFailed): a
+// second run reports what is still left.
 //
-// EXIT: 0 = the run completed (a dry run or an apply); 1 = a read or a write
-// failed, or a conditional write lost past its re-read bound (the PARTIAL
-// report is logged first; every write is conditional and idempotent, so
-// re-running after the fix is safe), or the target could not be resolved (no
-// table read); 2 = usage (an unknown or repeated argument, --lane off local, an
-// unknown --broadcast id).
+// A FAILED WRITE IS PER SLOT (code review ADV-4): a slot or ledger write that
+// throws (a permanent per-item cause - DynamoDB's 400 KB item limit on a share
+// stored under the old 1500 cap - fails on every re-run) or answers 'lost' is
+// ONE ERROR naming the share and slot, counted in slotsFailed, and the walk
+// goes on to the next slot: one bad share never blocks every share after it.
+// A READ that fails still aborts the run (there is nothing to continue from).
+//
+// EXIT: 0 = the run completed clean (a dry run or an apply); 1 = the run
+// completed with slotsFailed > 0 (the full report is logged first, COMPLETED
+// WITH FAILURES), or a read failed (the PARTIAL report is logged first; every
+// write is conditional and idempotent, so re-running after the fix is safe),
+// or the target could not be resolved (no table read); 2 = usage (an unknown or
+// repeated argument, --lane off local, an unknown --broadcast id).
 //
 // TARGET: `--env local|dev|prod` through scripts/lib/stageClient.ts; dev/prod
 // run the account guard on the housingchoice profile FIRST, before any table
@@ -93,14 +103,21 @@ import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
 import { isRetryPromiseLive, RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_GRACE_MS } from '../src/lib/retrySendWindow.js';
 import { safeRecipientKey } from '../src/lib/sendFingerprint.js';
 import { RECONCILE_CHECK_DELAYS_MS, SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
-import { compareAttemptKeys, rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
+import { attemptKeyTimestampMs, compareAttemptKeys, rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastRecipient, type BroadcastsRepo } from '../src/repos/broadcastsRepo.js';
 import { createConversationsRepo, type ConversationItem, type ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../src/repos/listingSendsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../src/repos/messagesRepo.js';
 import { createSendAttemptsRepo, type SendAttemptRecord, type SendAttemptsRepo } from '../src/repos/sendAttemptsRepo.js';
 import { retryRecipientKey } from '../src/services/retryChain.js';
-import { applyLaterAttempt, projectSlot, wouldApply, type AttemptOutcome, type ShareAttemptOutcomeDeps } from '../src/services/shareAttemptOutcome.js';
+import {
+  applyLaterAttempt,
+  projectSlot,
+  wouldApply,
+  type ApplyResult,
+  type AttemptOutcome,
+  type ShareAttemptOutcomeDeps,
+} from '../src/services/shareAttemptOutcome.js';
 import {
   applyShareLedgerEntry,
   ledgerEntryCounts,
@@ -160,6 +177,12 @@ export interface RepairReport {
   pairsToUncount: number;
   /** Apply: pairs that stopped counting. */
   pairsUncounted: number;
+  /**
+   * Apply: slots whose slot or ledger write failed - it threw, or its
+   * condition kept losing past the re-read bound. Each is named on ONE ERROR
+   * line and left as it is; the walk went on; the run exits 1.
+   */
+  slotsFailed: number;
   /** Slots (or their ledger step) the repair could not judge and left as they are. */
   unjudgeable: {
     /** The slot's original message row is missing (a deleted conversation): slot and ledger row untouched. */
@@ -243,6 +266,7 @@ function emptyReport(): RepairReport {
     pairsRecounted: 0,
     pairsToUncount: 0,
     pairsUncounted: 0,
+    slotsFailed: 0,
     unjudgeable: { originalMissing: 0, brokenLineage: 0, noContact: 0, noRecipientKey: 0 },
   };
 }
@@ -257,8 +281,9 @@ function isUnitShare(item: BroadcastItem): item is UnitShare {
 
 /**
  * The census (apply = false) or the repair (apply = true) - see the header.
- * Never throws for a slot it cannot judge (it counts it); any read or write
- * failure ABORTS the run: the PARTIAL report is logged at ERROR, then the
+ * Never throws for a slot it cannot judge (it counts it) nor for a slot whose
+ * slot or ledger WRITE fails (ONE ERROR, slotsFailed, the walk goes on); a
+ * READ failure ABORTS the run: the PARTIAL report is logged at ERROR, then the
  * error propagates. An unknown --broadcast id is a UsageError (nothing ran).
  */
 export async function runRepairShareOutcomes(opts: RepairOptions): Promise<RepairReport> {
@@ -413,7 +438,14 @@ async function rebuildChain(messages: MessagesRepo, conversationId: string, orig
   return { original, rows };
 }
 
-/** What a row's own status says about its attempt (a message row keeps no carrier instant, so a `sent` is a bare acceptance). */
+/**
+ * What a row's own status says about its attempt. A row reaches `sent` only
+ * through the carrier's sent callback, so a `sent` row is carrier-CONFIRMED:
+ * the outcome carries the row's own provider instant (the ISO in its key - a
+ * sound lower bound; a message row stores no carrier instant of its own), and
+ * the slot reads Sent, not Sending (code review ADV-5). `queued` (the
+ * provider's acceptance) and `queued_pending` stay a bare acceptance.
+ */
 function rowOutcome(row: MessageItem): AttemptOutcome {
   switch (row.delivery_status) {
     case 'delivered':
@@ -425,8 +457,12 @@ function rowOutcome(row: MessageItem): AttemptOutcome {
         errorCode: row.error_code ?? 'unknown',
         ...(typeof row.retry_due_at === 'string' && { retryDueAt: row.retry_due_at }),
       };
+    case 'sent': {
+      const at = attemptKeyTimestampMs(row.tsMsgId);
+      return { kind: 'sent', ...(at !== undefined && { carrierSentAt: new Date(at).toISOString() }) };
+    }
     default:
-      // sent, queued (the provider's acceptance), queued_pending
+      // queued (the provider's acceptance), queued_pending
       return { kind: 'sent' };
   }
 }
@@ -489,6 +525,27 @@ function slotRecords(slot: BroadcastRecipient, decided: Decided): boolean {
   return (slot.latestAttempt ?? slot.tsMsgId) === decided.attemptKey && slot.status === status && slot.errorCode === code;
 }
 
+/**
+ * A slot or ledger WRITE failed for one slot (code review ADV-4): ONE ERROR
+ * with the ids (the slot key redacted) and the error - or `result: 'lost'`
+ * for a condition that kept losing past the re-read bound - counted in
+ * slotsFailed; the caller leaves the slot as it is and the walk goes on.
+ * Returns true (the caller's failed flag).
+ */
+function failSlot(
+  r: Pick<SlotRun, 'log' | 'report'>,
+  ids: Record<string, unknown>,
+  step: 'slot' | 'ledger',
+  cause: { err: unknown } | { result: 'lost' },
+): true {
+  r.report.slotsFailed += 1;
+  r.log.error(
+    { ...ids, step, ...cause },
+    `${SCRIPT_NAME} - the ${step} write failed for this slot: counted in slotsFailed and left as it is, the walk goes on (fix the cause and re-run)`,
+  );
+  return true;
+}
+
 /** One slot: chain, stamps, decision, slot step, ledger step (header steps 1-5). */
 async function repairSlot(r: SlotRun): Promise<void> {
   const { repos, log, report, apply, share, contactKey, slot, conversationId, originalKey } = r;
@@ -538,6 +595,7 @@ async function repairSlot(r: SlotRun): Promise<void> {
   const moves = wouldApply(slot, decided) && !slotRecords(slot, decided);
   const projected = moves ? projectSlot(slot, decided) : slot;
   let current: BroadcastRecipient | undefined = slot;
+  let slotWriteFailed = false;
   if (moves) {
     report.slotsToMove += 1;
     const move = { ...ids, attempt: decided.attemptKey, outcome: decided.outcome.kind, from: slot.status, to: projected.status };
@@ -545,22 +603,25 @@ async function repairSlot(r: SlotRun): Promise<void> {
       log.info(move, `${SCRIPT_NAME} - DRY RUN: would move the slot to its decided attempt`);
     } else {
       const recipientContactId = nonEmpty(newest.recipient_contact_id);
-      const result = await applyLaterAttempt(r.slotDeps, {
-        broadcastId: share.broadcastId,
-        conversationId,
-        retryRoot: originalKey,
-        attemptKey: decided.attemptKey,
-        outcome: decided.outcome,
-        ...(recipientContactId !== undefined && { recipientContactId }),
-      });
-      if (result === 'lost') {
-        throw new Error(
-          `${SCRIPT_NAME}: the slot write for broadcast ${share.broadcastId}, conversation ${conversationId}, original ${originalKey} lost its condition past the re-read bound - a live writer is racing it; re-run at a quieter moment`,
-        );
+      let result: ApplyResult | undefined;
+      try {
+        result = await applyLaterAttempt(r.slotDeps, {
+          broadcastId: share.broadcastId,
+          conversationId,
+          retryRoot: originalKey,
+          attemptKey: decided.attemptKey,
+          outcome: decided.outcome,
+          ...(recipientContactId !== undefined && { recipientContactId }),
+        });
+      } catch (err) {
+        slotWriteFailed = failSlot(r, ids, 'slot', { err });
       }
-      if (result === 'applied') report.slotsMoved += 1;
-      else log.info({ ...move, result }, `${SCRIPT_NAME} - slot not moved: refused on a fresh read (a newer attempt landed after the census), or the share or the slot is gone`);
-      current = (await repos.broadcasts.getByIdConsistent(share.broadcastId))?.recipients?.[contactKey];
+      if (result === 'lost') slotWriteFailed = failSlot(r, ids, 'slot', { result: 'lost' });
+      else if (result === 'applied') report.slotsMoved += 1;
+      else if (result !== undefined) {
+        log.info({ ...move, result }, `${SCRIPT_NAME} - slot not moved: refused on a fresh read (a newer attempt landed after the census), or the share or the slot is gone`);
+      }
+      if (!slotWriteFailed) current = (await repos.broadcasts.getByIdConsistent(share.broadcastId))?.recipients?.[contactKey];
     }
   }
 
@@ -585,17 +646,25 @@ async function repairSlot(r: SlotRun): Promise<void> {
     }
   }
   if (!apply) return;
+  // The slot's write failed: its ERROR line names it, and its ledger row is
+  // left for the re-run that moves the slot (the ledger follows the SLOT).
+  if (slotWriteFailed) return;
   if (current === undefined) {
     log.warn(ids, `${SCRIPT_NAME} - the share or its slot is gone since the census: its ledger row is left as it is`);
     return;
   }
   const entry = ledgerEntryForSlot(current, conversationId, promiseLive);
   if (entry !== undefined) {
-    const written = await applyShareLedgerEntry(r.ledger, { unitId: share.unitId, contactId, broadcastId: share.broadcastId, entry });
+    let written: 'written' | 'refused' | 'lost';
+    try {
+      written = await applyShareLedgerEntry(r.ledger, { unitId: share.unitId, contactId, broadcastId: share.broadcastId, entry });
+    } catch (err) {
+      failSlot(r, ids, 'ledger', { err });
+      return;
+    }
     if (written === 'lost') {
-      throw new Error(
-        `${SCRIPT_NAME}: the ledger write for unit ${share.unitId}, contact ${contactId}, broadcast ${share.broadcastId} lost its condition past the re-read bound - a live writer is racing it; re-run at a quieter moment`,
-      );
+      failSlot(r, ids, 'ledger', { result: 'lost' });
+      return;
     }
   } else if (!moves) {
     return; // nothing wrote this pair
@@ -608,11 +677,23 @@ async function repairSlot(r: SlotRun): Promise<void> {
   if (was && !is) report.pairsUncounted += 1;
 }
 
-/** The end-of-run report. A completed run is clean (exit 0): every failure path throws first and exits 1 from the entrypoint. */
+/**
+ * The end-of-run report and the exit code it earns: 1 when a slot's write
+ * failed (slotsFailed > 0 - the run completed and the FULL report is logged
+ * first, each failed slot on its own ERROR line), else 0. A read failure
+ * never gets here: it throws first and exits 1 from the entrypoint.
+ */
 export function reportRepair(report: RepairReport, apply: boolean, log: Logger = defaultLogger): number {
   const suffix = apply
     ? ' (APPLY - the *To* counters are the census forecast, the past-tense ones what was written)'
     : ' (DRY RUN - nothing written; the *To* counters forecast an apply)';
+  if (report.slotsFailed > 0) {
+    log.warn(
+      { ...report, apply },
+      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${report.slotsFailed} slot(s) could not be written and were left as they are (see the ERROR lines naming them). Fix the cause, then re-run (idempotent).`,
+    );
+    return 1;
+  }
   log.info({ ...report, apply }, `${SCRIPT_NAME} - done${suffix}`);
   return 0;
 }

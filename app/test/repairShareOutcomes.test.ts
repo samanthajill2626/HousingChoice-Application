@@ -19,8 +19,8 @@
 // Self-skipping like the other DynamoDB Local suites; the per-file access key
 // (test/setup/dynamoAccessKey.ts) gives this file its own database.
 import { randomUUID } from 'node:crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -31,7 +31,14 @@ import { bodyFingerprint, recipientDigest } from '../src/lib/sendFingerprint.js'
 import { SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
 import { rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
 import { getTableSpec } from '../src/lib/tables.js';
-import { createBroadcastsRepo, zeroStats, type BroadcastItem, type BroadcastRecipient, type BroadcastStats } from '../src/repos/broadcastsRepo.js';
+import {
+  createBroadcastsRepo,
+  deriveBroadcastStats,
+  zeroStats,
+  type BroadcastItem,
+  type BroadcastRecipient,
+  type BroadcastStats,
+} from '../src/repos/broadcastsRepo.js';
 import { createListingSendsRepo } from '../src/repos/listingSendsRepo.js';
 import { buildTsMsgId, createMessagesRepo, splitTsMsgId, type DeliveryStatus } from '../src/repos/messagesRepo.js';
 import { createSendAttemptsRepo, type SendAttemptFacts, type SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
@@ -333,6 +340,36 @@ describe.skipIf(!reachable)('repair-share-outcomes (spec D8) against DynamoDB Lo
     expect((await ledgerOf('b-3'))?.shares?.['b-3']).toMatchObject({ state: 'counted', by: 'delivery' });
   });
 
+  it("a retry whose row reads sent (only the carrier's sent callback moves a row there) moves the slot carrier-CONFIRMED - carrierSentAt is the row's own provider instant - so the share derives it into sent, not sending; a queued row stays a bare acceptance", async () => {
+    const k = ids('b-16');
+    await seedShareWithChain({
+      broadcastId: 'b-16',
+      slotStatus: 'failed',
+      rows: [
+        { tsMsgId: k.ROOT, status: 'failed', errorCode: '30003' },
+        { tsMsgId: k.R1, retryOf: k.ROOT, status: 'sent', stamped: true, retryAttempt: 1 },
+      ],
+    });
+    expect(await run('b-16', true)).toMatchObject({ slotsMoved: 1 });
+    expect(await slotOf('b-16')).toMatchObject({ status: 'sent', latestAttempt: k.R1, carrierSentAt: T_R1 });
+    expect(deriveBroadcastStats((await broadcasts.getByIdConsistent('b-16'))!)).toMatchObject({ sent: 1, sending: 0, failed: 0 });
+    expect((await ledgerOf('b-16'))?.shares?.['b-16']).toMatchObject({ attempt: k.R1, state: 'counted', by: 'acceptance' });
+
+    const q = ids('b-16q');
+    await seedShareWithChain({
+      broadcastId: 'b-16q',
+      slotStatus: 'failed',
+      rows: [
+        { tsMsgId: q.ROOT, status: 'failed', errorCode: '30003' },
+        { tsMsgId: q.R1, retryOf: q.ROOT, status: 'queued', stamped: true, retryAttempt: 1 },
+      ],
+    });
+    expect(await run('b-16q', true)).toMatchObject({ slotsMoved: 1 });
+    expect(await slotOf('b-16q')).toMatchObject({ status: 'sent', latestAttempt: q.R1 });
+    expect(await slotOf('b-16q')).not.toHaveProperty('carrierSentAt');
+    expect(deriveBroadcastStats((await broadcasts.getByIdConsistent('b-16q'))!)).toMatchObject({ sent: 0, sending: 1 });
+  });
+
   it('a slot stuck sent whose own row failed moves to failed and un-counts the pair (pairsUncounted 1); a delivered slot whose newest row lies is never to-move and keeps its counted entry; a skipped slot is never walked', async () => {
     const k4 = ids('b-4');
     await seedShareWithChain({ broadcastId: 'b-4', slotStatus: 'sent', rows: [{ tsMsgId: k4.ROOT, status: 'failed', errorCode: '30007' }] });
@@ -509,6 +546,104 @@ describe.skipIf(!reachable)('repair-share-outcomes (spec D8) against DynamoDB Lo
     } finally {
       for (const base of BASES) await deleteTableIfExists(client, tableName(base, env2));
     }
+  });
+
+  it("bulk mode: ONE share whose slot write fails permanently (DynamoDB's item-size limit) is named on ONE ERROR line and counted in slotsFailed; the walk goes on and repairs the shares after it in scan order; the full report is logged and the run exits 1; a re-run reports the same one failure and nothing else to do", async () => {
+    const env3 = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+    for (const base of BASES) await ensureTable(client, getTableSpec(base), tableName(base, env3));
+    try {
+      const messages3 = createMessagesRepo({ doc, env: env3, logger: log });
+      const broadcasts3 = createBroadcastsRepo({ doc, env: env3, logger: log });
+      const slotOf3 = async (id: string) => (await broadcasts3.getByIdConsistent(id))!.recipients![ids(id).contactId]!;
+      for (const id of ['big-a', 'big-b', 'big-c']) {
+        const k = ids(id);
+        await putConversation(k.conversationId, PHONE, env3);
+        await putShare({ broadcastId: id, unitId: k.unitId, recipients: { [k.contactId]: { status: 'failed', errorCode: '30003', conversationId: k.conversationId, tsMsgId: k.ROOT } } }, env3);
+        await appendRow(k, id, { tsMsgId: k.ROOT, status: 'failed', errorCode: '30003' }, messages3);
+        await appendRow(k, id, { tsMsgId: k.R1, retryOf: k.ROOT, status: 'delivered', stamped: true, retryAttempt: 1 }, messages3);
+      }
+      // The table's own Scan order decides which share is walked FIRST: that one fails, so the other two come after it.
+      const table = tableName('broadcasts', env3);
+      const order = ((await doc.send(new ScanCommand({ TableName: table, ConsistentRead: true }))).Items ?? []).map((i) => String(i['broadcastId']));
+      expect([...order].sort()).toEqual(['big-a', 'big-b', 'big-c']);
+      const [failing, ...after] = order as [string, ...string[]];
+      const tooBig = {
+        send: async (command: { constructor: { name: string }; input: { TableName?: string; Key?: Record<string, unknown> } }) => {
+          if (command.constructor.name === 'UpdateCommand' && command.input.TableName === table && command.input.Key?.['broadcastId'] === failing) {
+            throw Object.assign(new Error('Item size to update has exceeded the maximum allowed size'), { name: 'ValidationException' });
+          }
+          return await doc.send(command as never);
+        },
+        destroy: () => {},
+      } as unknown as DynamoDBDocumentClient;
+      const bulk = () => runRepairShareOutcomes({ doc: tooBig, env: env3, apply: true, now: () => NOW, scanLimit: 1, logger: log });
+
+      const mark = capture.lines.length;
+      const first = await bulk();
+      // The forecast counts every slot; the apply wrote every slot but the failing one.
+      expect(first).toMatchObject({ sharesWalked: 3, slotsWalked: 3, slotsToMove: 3, slotsMoved: 2, rowsToCreate: 3, rowsCreated: 2, pairsToRecount: 3, pairsRecounted: 2, slotsFailed: 1 });
+      for (const id of after) expect(await slotOf3(id)).toMatchObject({ status: 'delivered', latestAttempt: ids(id).R1 });
+      expect(await slotOf3(failing)).toMatchObject({ status: 'failed', errorCode: '30003' });
+      const runLines = capture.lines.slice(mark);
+      const failed = runLines.filter((l) => l['level'] === 50 && String(l['msg']).includes('write failed for this slot'));
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toMatchObject({ broadcastId: failing, recipientKey: ids(failing).contactId, conversationId: ids(failing).conversationId, tsMsgId: ids(failing).ROOT, step: 'slot' });
+      expect(String((failed[0]!['err'] as { message?: string }).message)).toContain('Item size');
+      // The run did not abort.
+      expect(runLines.filter((l) => String(l['msg']).includes('PARTIAL'))).toHaveLength(0);
+      // The full report, then exit 1.
+      const reportMark = capture.lines.length;
+      expect(reportRepair(first, true, log)).toBe(1);
+      const done = capture.lines.slice(reportMark);
+      expect(done).toHaveLength(1);
+      expect(done[0]).toMatchObject({ level: 40, apply: true, slotsFailed: 1, slotsMoved: 2 });
+      expect(String(done[0]!['msg'])).toContain('COMPLETED WITH FAILURES');
+
+      const againMark = capture.lines.length;
+      const second = await bulk();
+      expect(second).toMatchObject({ sharesWalked: 3, stampsNeeded: 0, slotsToMove: 1, slotsMoved: 0, rowsToCreate: 1, rowsCreated: 0, pairsToRecount: 1, pairsRecounted: 0, pairsToUncount: 0, slotsFailed: 1 });
+      const again = capture.lines.slice(againMark).filter((l) => l['level'] === 50 && String(l['msg']).includes('write failed for this slot'));
+      expect(again.map((l) => l['broadcastId'])).toEqual([failing]);
+    } finally {
+      for (const base of BASES) await deleteTableIfExists(client, tableName(base, env3));
+    }
+  });
+
+  it("a slot write whose condition keeps losing past the re-read bound, and a ledger write that throws, are each counted in slotsFailed with ONE ERROR naming the share - never an abort", async () => {
+    const slotTable = tableName('broadcasts', testEnv);
+    const ledgerTable = tableName('listing_sends', testEnv);
+    const lost = ids('b-17');
+    await seedShareWithChain({ broadcastId: 'b-17', slotStatus: 'failed', rows: [{ tsMsgId: lost.ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: lost.R1, retryOf: lost.ROOT, status: 'delivered', stamped: true, retryAttempt: 1 }] });
+    const ledger = ids('b-18');
+    await seedShareWithChain({ broadcastId: 'b-18', slotStatus: 'failed', rows: [{ tsMsgId: ledger.ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: ledger.R1, retryOf: ledger.ROOT, status: 'delivered', stamped: true, retryAttempt: 1 }] });
+    const faulty = {
+      send: async (command: { constructor: { name: string }; input: { TableName?: string; Key?: Record<string, unknown> } }) => {
+        if (command.constructor.name === 'UpdateCommand' && command.input.TableName === slotTable && command.input.Key?.['broadcastId'] === 'b-17') {
+          throw new ConditionalCheckFailedException({ message: 'The conditional request failed', $metadata: {} });
+        }
+        if (command.constructor.name === 'UpdateCommand' && command.input.TableName === ledgerTable && command.input.Key?.['unitId'] === ledger.unitId) {
+          throw new Error('injected ledger write failure');
+        }
+        return await doc.send(command as never);
+      },
+      destroy: () => {},
+    } as unknown as DynamoDBDocumentClient;
+
+    const mark = capture.lines.length;
+    expect(await run('b-17', true, { doc: faulty })).toMatchObject({ slotsToMove: 1, slotsMoved: 0, rowsCreated: 0, slotsFailed: 1 });
+    expect(await slotOf('b-17')).toMatchObject({ status: 'failed', errorCode: '30003' });
+    expect(await ledgerOf('b-17')).toBeUndefined();
+    const lostLines = capture.lines.slice(mark).filter((l) => l['level'] === 50 && String(l['msg']).includes('write failed for this slot'));
+    expect(lostLines).toHaveLength(1);
+    expect(lostLines[0]).toMatchObject({ broadcastId: 'b-17', tsMsgId: lost.ROOT, step: 'slot', result: 'lost' });
+
+    const ledgerMark = capture.lines.length;
+    expect(await run('b-18', true, { doc: faulty })).toMatchObject({ slotsMoved: 1, rowsCreated: 0, slotsFailed: 1 });
+    expect(await slotOf('b-18')).toMatchObject({ status: 'delivered', latestAttempt: ledger.R1 });
+    const ledgerLines = capture.lines.slice(ledgerMark).filter((l) => l['level'] === 50 && String(l['msg']).includes('write failed for this slot'));
+    expect(ledgerLines).toHaveLength(1);
+    expect(ledgerLines[0]).toMatchObject({ broadcastId: 'b-18', tsMsgId: ledger.ROOT, step: 'ledger' });
+    expect(capture.lines.slice(mark).filter((l) => String(l['msg']).includes('PARTIAL'))).toHaveLength(0);
   });
 
   it('the CLI contract: --env local|dev|prod, --lane with local only, --broadcast <id>, --apply; anything else is a usage error', () => {

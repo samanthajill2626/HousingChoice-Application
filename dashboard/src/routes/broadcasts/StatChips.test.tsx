@@ -10,6 +10,7 @@ import { DeliveryBadge } from './DeliveryBadge.js';
 import { BroadcastStatusPill } from './BroadcastStatusPill.js';
 import styles from './StatChips.module.css';
 import badgeStyles from './DeliveryBadge.module.css';
+import pillStyles from './BroadcastStatusPill.module.css';
 
 function stats(over: Partial<BroadcastStats> = {}): BroadcastStats {
   return {
@@ -74,7 +75,7 @@ describe('StatChips', () => {
     expect(chipValue(list, 'Skipped')).toContain('0');
   });
 
-  it('orders chips Recipients, Delivered, Sent, Sending, Queued, Failed, Not confirmed, Skipped', () => {
+  it('orders chips Recipients, Delivered, Sent, Sending, Queued, Failed, Retrying, Not confirmed, Skipped', () => {
     render(<StatChips stats={stats()} />);
     const list = screen.getByLabelText('Delivery stats');
     const labels = within(list)
@@ -84,8 +85,10 @@ describe('StatChips', () => {
     // "Queued" = still on our box (paced fan-out / deferred retry);
     // "Sending" = with the carrier (dispatched, awaiting its sent callback);
     // "Sent" = carrier-confirmed only.
-    // "Not confirmed" (SOR D22) sits right after "Failed": the recipients the
-    // platform could not confirm, which are neither failed nor skipped.
+    // "Retrying" (share-sent-outcome D4) sits right after "Failed": the failed
+    // recipients holding a live retry promise, split out of Failed.
+    // "Not confirmed" (SOR D22) follows: the recipients the platform could not
+    // confirm, which are neither failed nor skipped.
     expect(labels).toEqual([
       'Recipients',
       'Delivered',
@@ -93,9 +96,42 @@ describe('StatChips', () => {
       'Sending',
       'Queued',
       'Failed',
+      'Retrying',
       'Not confirmed',
       'Skipped',
     ]);
+  });
+
+  // share-sent-outcome D4: retry_pending is a SUB-bucket of failed - Failed
+  // shows the failures with no live promise, Retrying the ones with one, and
+  // the two together are `failed`, so the row still balances.
+  it('splits Failed into Failed + Retrying: retry_pending 1 of failed 1 renders Failed 0 and Retrying 1 (progress), and the row balances', () => {
+    render(<StatChips stats={stats({ audience: 3, delivered: 1, sent: 0, queued: 0, failed: 2, retry_pending: 1 })} />);
+    const list = screen.getByLabelText('Delivery stats');
+    expect(chipValue(list, 'Failed')).toBe('Failed1');
+    expect(chipValue(list, 'Retrying')).toBe('Retrying1');
+    expect(within(list).getByText('Retrying').closest('div')).toHaveClass(styles.progress!);
+    const values = within(list)
+      .getAllByRole('definition')
+      .map((dd) => Number(dd.textContent));
+    const [recipients, ...buckets] = values;
+    expect(recipients).toBe(3);
+    expect(buckets.reduce((sum, v) => sum + v, 0)).toBe(3);
+  });
+
+  it('Retrying reads 0 with no progress class when nothing is pending (and for stats without the count)', () => {
+    render(<StatChips stats={stats({ failed: 1 })} />);
+    const list = screen.getByLabelText('Delivery stats');
+    expect(chipValue(list, 'Failed')).toBe('Failed1');
+    expect(chipValue(list, 'Retrying')).toBe('Retrying0');
+    expect(within(list).getByText('Retrying').closest('div')).not.toHaveClass(styles.progress!);
+  });
+
+  it('a kept retry_pending above failed clamps Failed at 0 (never negative)', () => {
+    render(<StatChips stats={stats({ failed: 1, retry_pending: 2 })} />);
+    const list = screen.getByLabelText('Delivery stats');
+    expect(chipValue(list, 'Failed')).toBe('Failed0');
+    expect(chipValue(list, 'Retrying')).toBe('Retrying2');
   });
 
   // SOR D22: the unresolved recipients get their OWN chip in the audience sum -
@@ -168,18 +204,8 @@ describe('DeliveryBadge', () => {
     expect(screen.getByText(/Phone unreachable/i)).toBeInTheDocument();
   });
 
-  // retry-send-window D8. The badge renders a failed property-send row through
-  // shareRecipientReason, which calls the shared deliveryReason with NO options:
-  // the recipient slot carries no `retry_due_at`, so the row cannot know whether
-  // a retry is scheduled and promises none - under-promising, never false.
-  // Reading the failed message's live stamp is share-skip-fix Branch B's, under
-  // the same rule. (This test pinned "will retry" here until the retry send
-  // window: the promise was keyed on the code alone.)
-  it('reads a property-send recipient 30003 as the plain failure - the row promises no retry', () => {
-    const { container } = render(<DeliveryBadge status="failed" errorCode="30003" />);
-    expect(container.textContent ?? '').toContain('Phone unreachable (error 30003)');
-    expect(container.textContent ?? '').not.toContain('will retry');
-  });
+  // (The 30003 promise cases - a row with no promise facts reads the plain
+  // failure - moved to DeliveryBadge.test.tsx with share-sent-outcome D3.)
 
   // POSITION 4 of the four surfaces the fan-out close codes reach
   // (DeliveryBadge.tsx:31). This badge calls the shared deliveryReason with NO
@@ -254,5 +280,18 @@ describe('BroadcastStatusPill', () => {
     expect(screen.getByText('Not sent')).toBeInTheDocument();
     rerender(<BroadcastStatusPill status="sent" stats={stats({ audience: 2, sent: 0, delivered: 1, queued: 0, skipped_other: 1 })} />);
     expect(screen.getByText('Sent')).toBeInTheDocument();
+  });
+
+  it('share-sent-outcome D4: a finished share pending a retry reads Sending (progress); Not confirmed and a failure read danger; Failed is never produced with stats', () => {
+    const none = { sent: 0, delivered: 0, queued: 0 };
+    const { rerender } = render(
+      <BroadcastStatusPill status="failed" stats={stats({ ...none, audience: 1, failed: 1, retry_pending: 1 })} />,
+    );
+    expect(screen.getByText('Sending')).toHaveClass(pillStyles.progress!);
+    rerender(<BroadcastStatusPill status="failed" stats={stats({ ...none, audience: 1, unconfirmed: 1 })} />);
+    expect(screen.getByText('Not confirmed')).toHaveClass(pillStyles.danger!);
+    rerender(<BroadcastStatusPill status="failed" stats={stats({ ...none, audience: 1, failed: 1 })} />);
+    expect(screen.getByText('Not sent')).toHaveClass(pillStyles.danger!);
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 });

@@ -156,6 +156,45 @@ describe('useBroadcastResults - live polling while sending', () => {
     expect(getBroadcastResults).toHaveBeenCalledTimes(3);
   });
 
+  // share-sent-outcome D4: only the rollup that scheduled a retry emits a
+  // count; every other emit leaves it unset. The overlay keeps the last known
+  // count (no "Not sent" flash between an event and its refetch) and the
+  // debounced refetch replaces it with the route's truth.
+  it('an event without retry_pending keeps the previous value until the refetch replaces it; one carrying it replaces it at once', async () => {
+    const withCount = (n: number): BroadcastResultsType => ({
+      ...results('sent'),
+      stats: { ...results('sent').stats, failed: 1, retry_pending: n },
+    });
+    getBroadcastResults.mockResolvedValueOnce(withCount(1));
+    const { result } = renderHook(() => useBroadcastResults('bcast_1'));
+    await tick(0);
+    expect(result.current.results?.stats.retry_pending).toBe(1);
+
+    getBroadcastResults.mockResolvedValueOnce(withCount(0));
+    act(() => {
+      sse.onBroadcastUpdated?.({
+        broadcastId: 'bcast_1',
+        status: 'sent',
+        stats: { ...results('sent').stats, failed: 1, delivered: 2 },
+      });
+    });
+    // The overlay took the event's buckets but kept the count.
+    expect(result.current.results?.stats).toMatchObject({ delivered: 2, retry_pending: 1 });
+    // The debounced refetch (+400 ms) replaces it with the route's truth.
+    await tick(400);
+    expect(getBroadcastResults).toHaveBeenCalledTimes(2);
+    expect(result.current.results?.stats.retry_pending).toBe(0);
+
+    act(() => {
+      sse.onBroadcastUpdated?.({
+        broadcastId: 'bcast_1',
+        status: 'sent',
+        stats: { ...results('sent').stats, failed: 1, retry_pending: 1 },
+      });
+    });
+    expect(result.current.results?.stats.retry_pending).toBe(1);
+  });
+
   it('clears the polling interval on unmount', async () => {
     getBroadcastResults.mockResolvedValue(results('sending'));
     const { unmount } = renderHook(() => useBroadcastResults('bcast_1'));

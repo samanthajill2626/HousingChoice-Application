@@ -44,3 +44,12 @@
 .danger .chipValue {
   color: var(--c-danger);
 }
+/* share-sent-outcome D4: the Retrying chip above zero - the in-progress tone
+ * the lifecycle pill uses for Sending (BroadcastStatusPill.module.css). */
+.progress {
+  border-color: var(--c-brand-soft);
+  background: var(--c-brand-soft);
+}
+.progress .chipValue {
+  color: var(--c-brand-hover);
+}

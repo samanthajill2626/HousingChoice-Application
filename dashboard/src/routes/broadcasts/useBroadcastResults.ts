@@ -14,12 +14,24 @@
 // moment status goes terminal (sent/failed) or draft, and clears on unmount.
 // Poll + SSE both funnel through the same abort-/generation-guarded fetchResults,
 // so concurrent triggers stay safe.
-import { useCallback, useEffect, useRef, useState } from 'react';
+//
+// share-sent-outcome D4 (deviation 14): the overlay MERGES an event whose stats
+// omit `retry_pending` by keeping the last known count (only the rollup that
+// just scheduled a retry emits one), and the page's 60 s ticker may override
+// the count with a recount from its own rows (`recountRetryPending`) so the
+// pill and chips never outlive a lapsed promise. The override is cleared by a
+// REFETCH (fresh rows, the route's truth) and by an overlay that CARRIES a
+// count (a new pending recipient outranks the recount) - never by one whose
+// count is unset, which would bring back a stale count until its refetch. And
+// no recount applies between an overlay and the refetch that follows it: the
+// rows are older than the stats then, so the event's count stands.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ApiError,
   getBroadcastResults,
   useEventStream,
   type BroadcastResults,
+  type BroadcastStats,
   type BroadcastUpdatedEvent,
 } from '../../api/index.js';
 
@@ -34,6 +46,13 @@ export interface BroadcastResultsState {
   retry: () => void;
   /** True while a background (SSE-triggered or manual) refetch is in flight. */
   refreshing: boolean;
+  /** share-sent-outcome D4: `results.stats` with the ticker's recount (when one
+   *  stands) in place of `retry_pending` - what the pill and the chips read. */
+  liveStats: BroadcastStats | null;
+  /** share-sent-outcome D4: the page ticker's recount of its pending rows. A
+   *  no-op while the rows are older than the stats (an overlay awaiting its
+   *  refetch). */
+  recountRetryPending: (count: number) => void;
 }
 
 /** Debounce for SSE-triggered refetches — coalesces a burst of broadcast.updated
@@ -50,6 +69,12 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
   const [results, setResults] = useState<BroadcastResults | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  /** share-sent-outcome D4: the ticker's recount of retry_pending, standing
+   *  until a refetch or a count-carrying overlay replaces it. */
+  const [recount, setRecount] = useState<number | undefined>(undefined);
+  /** True from an SSE overlay until the next fetch lands: the rows then are
+   *  older than the stats, so the ticker must not recount from them. */
+  const rowsBehindRef = useRef(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const genRef = useRef(0);
@@ -76,6 +101,9 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
         if (controller.signal.aborted || gen !== genRef.current) return;
         if (terminalSeenRef.current && data.status === 'sending') return;
         setResults(data);
+        // Fresh rows from the route: its count is the truth again.
+        setRecount(undefined);
+        rowsBehindRef.current = false;
         setStatus('ready');
         setNotFound(false);
       } catch (err) {
@@ -104,7 +132,9 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
     setStatus('loading');
     setResults(null);
     setNotFound(false);
+    setRecount(undefined);
     terminalSeenRef.current = false;
+    rowsBehindRef.current = false;
     void fetchResults(false);
     return () => abortRef.current?.abort();
   }, [fetchResults]);
@@ -124,8 +154,26 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
       // Latch a terminal status BEFORE overlaying: any in-flight fetch that
       // still says 'sending' is now stale and must not regress the pill.
       if (e.status === 'sent' || e.status === 'failed') terminalSeenRef.current = true;
-      // (1) Instant overlay of the live rollup onto whatever we have.
-      setResults((prev) => (prev === null ? prev : { ...prev, status: e.status, stats: e.stats }));
+      // (1) Instant overlay of the live rollup onto whatever we have. share-
+      // sent-outcome D4: an event that leaves retry_pending unset keeps the
+      // last known count until the refetch below replaces it.
+      setResults((prev) =>
+        prev === null
+          ? prev
+          : {
+              ...prev,
+              status: e.status,
+              stats: {
+                ...e.stats,
+                ...(e.stats.retry_pending === undefined &&
+                  prev.stats.retry_pending !== undefined && { retry_pending: prev.stats.retry_pending }),
+              },
+            },
+      );
+      // The rows now lag the stats until the refetch lands; a count-carrying
+      // event (the rollup's own lower bound) outranks the ticker's recount.
+      rowsBehindRef.current = true;
+      if (e.stats.retry_pending !== undefined) setRecount(undefined);
       // (2) Debounced refetch to pick up the per-recipient changes.
       if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => {
@@ -156,5 +204,20 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
     return () => clearInterval(id);
   }, [liveStatus, fetchResults]);
 
-  return { status, results, notFound, refresh, retry, refreshing };
+  // --- share-sent-outcome D4: the ticker's recount, and the stats it shapes.
+  const recountRetryPending = useCallback((count: number) => {
+    if (rowsBehindRef.current) return; // the event's count stands until its refetch
+    setRecount(count);
+  }, []);
+  const liveStats = useMemo(
+    () =>
+      results === null
+        ? null
+        : recount === undefined
+          ? results.stats
+          : { ...results.stats, retry_pending: recount },
+    [results, recount],
+  );
+
+  return { status, results, notFound, refresh, retry, refreshing, liveStats, recountRetryPending };
 }

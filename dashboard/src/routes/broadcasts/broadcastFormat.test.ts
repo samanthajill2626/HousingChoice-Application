@@ -179,11 +179,42 @@ describe('shareRecipientReason (share-skip-fix D7)', () => {
     expect(shareRecipientReason('failed', 'transient_cap')).toBe('Sending gave up after repeated temporary errors');
     expect(shareRecipientReason('failed', 'enqueue_failed')).toBe('Sending could not be scheduled');
     expect(shareRecipientReason('failed', undefined)).toBe('Delivery failed');
-    // retry-send-window D8: a failed share row reads the PLAIN 30003. The slot
-    // carries no retry_due_at, so the row cannot know a retry is scheduled and
-    // promises none (under-promising, never false); reading the failed message's
-    // live stamp is share-skip-fix Branch B's, under the same rule.
+    // share-sent-outcome D3: with NO promise facts at hand the row promises
+    // nothing and reads the PLAIN 30003 (under-promising, never false).
     expect(shareRecipientReason('failed', '30003')).toBe('Phone unreachable (error 30003)');
+  });
+
+  // share-sent-outcome D3: the row carries its newest attempt's promise facts
+  // (retryDueAt / retryOutcome, from that attempt's own message row) and judges
+  // liveness on the SERVER clock it is handed - RSW's copy, same rule as the
+  // one-to-one bubble.
+  it('a failed 30003 row reads "will retry" while its promise is live, "retry not confirmed" when its chain ended unresolved, and the plain copy once the promise lapsed', () => {
+    const now = Date.parse('2026-07-01T12:00:00.000Z');
+    expect(shareRecipientReason('failed', '30003', { retryDueAt: '2026-07-01T12:03:00.000Z', serverNowMs: now })).toBe(
+      'Phone unreachable - will retry (error 30003)',
+    );
+    // Still live inside the 2-minute grace past the due instant.
+    expect(shareRecipientReason('failed', '30003', { retryDueAt: '2026-07-01T11:58:30.000Z', serverNowMs: now })).toBe(
+      'Phone unreachable - will retry (error 30003)',
+    );
+    expect(
+      shareRecipientReason('failed', '30003', {
+        retryDueAt: '1970-01-01T00:00:00.000Z',
+        retryOutcome: 'unconfirmed',
+        serverNowMs: now,
+      }),
+    ).toBe('Phone unreachable - retry not confirmed (error 30003)');
+    // Lapsed (due + grace behind the server clock) and withdrawn read plain.
+    expect(shareRecipientReason('failed', '30003', { retryDueAt: '2026-07-01T11:57:00.000Z', serverNowMs: now })).toBe(
+      'Phone unreachable (error 30003)',
+    );
+    expect(shareRecipientReason('failed', '30003', { retryDueAt: '1970-01-01T00:00:00.000Z', serverNowMs: now })).toBe(
+      'Phone unreachable (error 30003)',
+    );
+    // A non-30003 failure never promises, whatever the facts say.
+    expect(shareRecipientReason('failed', '30007', { retryDueAt: '2026-07-01T12:03:00.000Z', serverNowMs: now })).toBe(
+      'Carrier filtered the message (error 30007)',
+    );
   });
 
   it('no reason for the in-flight and success states', () => {
@@ -219,14 +250,44 @@ describe('presentShareLabel (share-skip-fix D6)', () => {
     expect(presentShareLabel('sent', stats({ audience: 2, skipped_opted_out: 2 }))).toEqual({ label: 'Not sent', tone: 'neutral' });
   });
 
-  it('anything else keeps the status label and tone', () => {
+  it('share-sent-outcome D4: a finished share derives its label from the buckets; draft, sending and no-stats keep the stored label', () => {
     expect(presentShareLabel('sent', stats({ audience: 2, skipped_other: 1, delivered: 1 }))).toEqual({ label: 'Sent', tone: 'positive' });
-    expect(presentShareLabel('sent', stats({ audience: 2, skipped_other: 1, failed: 1 }))).toEqual({ label: 'Sent', tone: 'positive' });
+    // Nothing reached, one failure, one skip: Not sent, danger (was "Sent").
+    expect(presentShareLabel('sent', stats({ audience: 2, skipped_other: 1, failed: 1 }))).toEqual({ label: 'Not sent', tone: 'danger' });
     expect(presentShareLabel('sending', stats({ audience: 1, skipped_other: 1 }))).toEqual({ label: 'Sending', tone: 'progress' });
-    expect(presentShareLabel('failed', stats({ audience: 1, failed: 1 }))).toEqual({ label: 'Failed', tone: 'danger' });
+    // "Failed" retires as a pill for a finished share: Not sent, danger.
+    expect(presentShareLabel('failed', stats({ audience: 1, failed: 1 }))).toEqual({ label: 'Not sent', tone: 'danger' });
     expect(presentShareLabel('draft', stats({ audience: 5 }))).toEqual({ label: 'Draft', tone: 'neutral' });
-    expect(presentShareLabel('sent', stats())).toEqual({ label: 'Sent', tone: 'positive' }); // audience 0 is not "all skipped"
+    // Audience 0 is not "all skipped", and nothing reached: Not sent, danger.
+    expect(presentShareLabel('sent', stats())).toEqual({ label: 'Not sent', tone: 'danger' });
     expect(presentShareLabel('sent')).toEqual({ label: 'Sent', tone: 'positive' }); // no stats at hand
+  });
+
+  it('share-sent-outcome D4: first match wins - Sent (any reached, sending included), Sending (none reached, one pending), Not confirmed, Not sent', () => {
+    // A stored-failed share that reached someone reads Sent.
+    expect(presentShareLabel('failed', stats({ audience: 2, delivered: 1, failed: 1 }))).toEqual({ label: 'Sent', tone: 'positive' });
+    // Accepted by the carrier but not yet confirmed counts as reached.
+    expect(presentShareLabel('sent', stats({ audience: 2, sending: 1, failed: 1 }))).toEqual({ label: 'Sent', tone: 'positive' });
+    // None reached, a retry pending: Sending, progress - it outranks Not confirmed.
+    expect(presentShareLabel('sent', stats({ audience: 1, failed: 1, retry_pending: 1 }))).toEqual({ label: 'Sending', tone: 'progress' });
+    expect(presentShareLabel('failed', stats({ audience: 2, failed: 1, retry_pending: 1, unconfirmed: 1 }))).toEqual({
+      label: 'Sending',
+      tone: 'progress',
+    });
+    // A reached recipient outranks a pending one.
+    expect(presentShareLabel('sent', stats({ audience: 2, delivered: 1, failed: 1, retry_pending: 1 }))).toEqual({
+      label: 'Sent',
+      tone: 'positive',
+    });
+    // None reached or pending, one unconfirmed: Not confirmed, danger (deviation 4).
+    expect(presentShareLabel('failed', stats({ audience: 2, failed: 1, unconfirmed: 1 }))).toEqual({
+      label: 'Not confirmed',
+      tone: 'danger',
+    });
+    // A share the route marked failed with EVERY slot still queued: Not sent, danger.
+    expect(presentShareLabel('failed', stats({ audience: 3, queued: 3 }))).toEqual({ label: 'Not sent', tone: 'danger' });
+    // A lapsed count of 0 reads as no pending at all.
+    expect(presentShareLabel('sent', stats({ audience: 1, failed: 1, retry_pending: 0 }))).toEqual({ label: 'Not sent', tone: 'danger' });
   });
 });
 
@@ -238,10 +299,39 @@ describe('the unconfirmed bucket (SOR D22)', () => {
     expect(skippedTotal(stats({ skipped_other: 1, unconfirmed: 5 }))).toBe(1);
   });
 
-  it('a sent share whose other recipients were all skipped still reads Sent', () => {
+  it('share-sent-outcome D4: a sent share whose other recipients were all skipped reads Not confirmed (danger), never Not sent', () => {
     expect(presentShareLabel('sent', stats({ audience: 2, skipped_other: 1, unconfirmed: 1 }))).toEqual({
-      label: 'Sent',
-      tone: 'positive',
+      label: 'Not confirmed',
+      tone: 'danger',
     });
+  });
+});
+
+describe('toRecipientViews - share-sent-outcome D3 facts', () => {
+  it('keeps the message id, the newest attempt and the promise facts the row judges', () => {
+    const views = toRecipientViews({
+      c1: {
+        status: 'failed',
+        errorCode: '30003',
+        conversationId: 'conv-1',
+        tsMsgId: '2026-07-01T11:55:00.000Z#SM1',
+        latestAttempt: '2026-07-01T11:57:00.000Z#SM2',
+        retryDueAt: '2026-07-01T12:03:00.000Z',
+        retryPending: true,
+      },
+      c2: { status: 'failed', errorCode: '30003', retryOutcome: 'unconfirmed' },
+      c3: { status: 'delivered' },
+    });
+    const byKey = new Map(views.map((v) => [v.contactKey, v]));
+    expect(byKey.get('c1')).toMatchObject({
+      tsMsgId: '2026-07-01T11:55:00.000Z#SM1',
+      latestAttempt: '2026-07-01T11:57:00.000Z#SM2',
+      retryDueAt: '2026-07-01T12:03:00.000Z',
+      retryPending: true,
+    });
+    expect(byKey.get('c2')).toMatchObject({ retryOutcome: 'unconfirmed' });
+    expect(byKey.get('c2')).not.toHaveProperty('retryPending');
+    expect(byKey.get('c3')).not.toHaveProperty('tsMsgId');
+    expect(byKey.get('c3')).not.toHaveProperty('retryDueAt');
   });
 });

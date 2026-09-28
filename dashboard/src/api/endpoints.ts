@@ -11,6 +11,7 @@ import type {
   AudienceFilter,
   BroadcastResults,
   BroadcastsPage,
+  BroadcastStatsView,
   BroadcastStatus,
   PreviewResponse,
   SettingsPatch,
@@ -1880,6 +1881,21 @@ export function getBroadcastResults(
   return request<BroadcastResults>(
     `/api/broadcasts/${encodeURIComponent(broadcastId)}/results`,
     { ...(signal !== undefined && { signal }) },
+  );
+}
+
+/** share-sent-outcome D4: GET /api/broadcasts/:id/results?view=stats - one
+ *  share's status and derived stats (with the true retry_pending) WITHOUT the
+ *  recipient list or its contact reads. The list page's refetch of a finished
+ *  share whose event left the count unset (Cameron's ruling of 2026-09-27: a
+ *  query flag on the existing route, no new endpoint). */
+export function getBroadcastStats(
+  broadcastId: string,
+  signal?: AbortSignal,
+): Promise<BroadcastStatsView> {
+  return request<BroadcastStatsView>(
+    `/api/broadcasts/${encodeURIComponent(broadcastId)}/results`,
+    { query: { view: 'stats' }, ...(signal !== undefined && { signal }) },
   );
 }
 

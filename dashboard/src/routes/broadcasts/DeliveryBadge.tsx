@@ -29,12 +29,33 @@ export interface DeliveryBadgeProps {
    *  unreachable". Queued / sent / delivered rows show no reason. It also picks
    *  the LABEL for `send_unconfirmed`: "Not confirmed" (SOR D22). */
   errorCode?: string;
+  /** share-sent-outcome D3: the newest attempt's retry promise as its message
+   *  row holds it (the results route passes it through). */
+  retryDueAt?: string;
+  /** share-sent-outcome D3: 'unconfirmed' when that attempt's chain ended unresolved. */
+  retryOutcome?: string;
+  /** share-sent-outcome D3: the page's SERVER-clock snapshot the promise is
+   *  judged against (re-taken on the page's 60 s ticker). Without it the badge
+   *  judges no promise and reads the plain failure. */
+  serverNowMs?: number;
 }
 
-export function DeliveryBadge({ status, carrierSentAt, errorCode }: DeliveryBadgeProps): React.JSX.Element {
+export function DeliveryBadge({
+  status,
+  carrierSentAt,
+  errorCode,
+  retryDueAt,
+  retryOutcome,
+  serverNowMs,
+}: DeliveryBadgeProps): React.JSX.Element {
   const pres = presentRecipientStatus(status, carrierSentAt, errorCode);
-  // share-skip-fix D7: every skipped and failed row carries its reason.
-  const reason = shareRecipientReason(status, errorCode);
+  // share-skip-fix D7: every skipped and failed row carries its reason;
+  // share-sent-outcome D3: a failed 30003 row's reason reads its promise.
+  const reason = shareRecipientReason(
+    status,
+    errorCode,
+    serverNowMs !== undefined ? { retryDueAt, retryOutcome, serverNowMs } : undefined,
+  );
   return (
     <span className={`${styles.badge} ${TONE_CLASS[pres.tone]}`} {...(reason && { title: reason })}>
       {pres.label}

@@ -3,7 +3,7 @@
 // re-query; "New broadcast" → composer; a row → Results; a draft row → composer
 // resume (?draftId=); cursor "Load more"; draft delete (confirm modal → row
 // removed; Cancel keeps it; a raced 409 explains + refetches).
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
@@ -12,6 +12,8 @@ import type { BroadcastStatus, BroadcastSummary, BroadcastsPage, EventStreamHand
 
 const listBroadcasts = vi.fn();
 const deleteBroadcast = vi.fn();
+const getBroadcastStats = vi.fn();
+let sse: EventStreamHandlers = {};
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -19,7 +21,10 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     listBroadcasts: (...a: unknown[]) => listBroadcasts(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
-    useEventStream: (_h: EventStreamHandlers) => {},
+    getBroadcastStats: (...a: unknown[]) => getBroadcastStats(...a),
+    useEventStream: (h: EventStreamHandlers) => {
+      sse = h;
+    },
   };
 });
 
@@ -62,6 +67,8 @@ function renderList(): void {
 beforeEach(() => {
   listBroadcasts.mockReset();
   deleteBroadcast.mockReset().mockResolvedValue({ deleted: true });
+  getBroadcastStats.mockReset();
+  sse = {};
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -200,5 +207,97 @@ describe('BroadcastsList — load more', () => {
     expect((listBroadcasts.mock.calls.at(-1)?.[0] as { cursor?: string }).cursor).toBe('CUR');
     // Cursor exhausted → Load more gone.
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+  });
+});
+
+// share-sent-outcome D4: a broadcast.updated patch MERGES an omitted
+// retry_pending by keeping the row's last value (only the rollup that just
+// scheduled a retry emits one); a FINISHED share whose kept count is positive
+// refetches its stats once (GET results?view=stats, 400 ms debounced per row),
+// so a chain that ends in a failure receipt turns Sending into Not sent.
+describe('BroadcastsList - live broadcast.updated merge', () => {
+  const none = { sent: 0, delivered: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 };
+  /** Nothing reached, one failure holding a live promise: the pill reads Sending. */
+  const PENDING = { ...none, audience: 1, failed: 1, retry_pending: 1 };
+  /** The same buckets from an emit that leaves the count UNSET. */
+  const UNSET = { ...none, audience: 1, failed: 1 };
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  function statsView(status: BroadcastStatus, retryPending: number) {
+    return {
+      broadcastId: 'b1',
+      status,
+      unitId: 'unit-0001',
+      stats: { ...none, audience: 1, failed: 1, retry_pending: retryPending },
+      created_at: '2026-06-30T14:00:00.000Z',
+    };
+  }
+
+  it('an event without retry_pending on a FINISHED row whose count is 1 keeps it (no flash), then refetches that share once and takes its status + stats', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: PENDING })]));
+    getBroadcastStats.mockResolvedValue(statsView('sent', 0));
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    expect(within(list).getByText('Sending')).toBeInTheDocument();
+
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET }));
+    // The kept count holds until the refetch lands.
+    expect(within(list).getByText('Sending')).toBeInTheDocument();
+    await waitFor(() => expect(getBroadcastStats).toHaveBeenCalledTimes(1));
+    expect(getBroadcastStats.mock.calls[0]?.[0]).toBe('b1');
+    expect(await within(list).findByText('Not sent')).toBeInTheDocument();
+    await sleep(500);
+    expect(getBroadcastStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('the same event on a row stored SENDING never refetches (a Sending share needs no count) - the count is kept for when it finishes', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'b1', status: 'sending', stats: PENDING })]));
+    getBroadcastStats.mockResolvedValue(statsView('sent', 0));
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sending', stats: UNSET }));
+    await sleep(600);
+    expect(getBroadcastStats).not.toHaveBeenCalled();
+    expect(within(list).getByText('Sending')).toBeInTheDocument();
+    // Finalize's emit (count unset) finds the KEPT 1 on a now-finished share.
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET }));
+    await waitFor(() => expect(getBroadcastStats).toHaveBeenCalledTimes(1));
+    expect(await within(list).findByText('Not sent')).toBeInTheDocument();
+  });
+
+  it('an event CARRYING retry_pending replaces the count outright, with no fetch', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: PENDING })]));
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: { ...UNSET, retry_pending: 0 } }));
+    expect(within(list).getByText('Not sent')).toBeInTheDocument();
+    await sleep(600);
+    expect(getBroadcastStats).not.toHaveBeenCalled();
+  });
+
+  it('two events inside 400 ms trigger ONE fetch', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: PENDING })]));
+    getBroadcastStats.mockResolvedValue(statsView('sent', 0));
+    renderList();
+    await screen.findByRole('list', { name: 'Property sends' });
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET }));
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET }));
+    await waitFor(() => expect(getBroadcastStats).toHaveBeenCalledTimes(1));
+    await sleep(600);
+    expect(getBroadcastStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('a kept count of 0, and a share not on the page, never refetch', async () => {
+    listBroadcasts.mockResolvedValue(
+      pageOf([summary({ broadcastId: 'b1', status: 'sent', stats: { ...none, audience: 1, failed: 1, retry_pending: 0 } })]),
+    );
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b1', status: 'sent', stats: UNSET }));
+    act(() => sse.onBroadcastUpdated?.({ broadcastId: 'b-elsewhere', status: 'sent', stats: PENDING }));
+    await sleep(600);
+    expect(getBroadcastStats).not.toHaveBeenCalled();
+    expect(within(list).getByText('Not sent')).toBeInTheDocument();
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1);
   });
 });

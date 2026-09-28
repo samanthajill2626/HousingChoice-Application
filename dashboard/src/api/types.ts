@@ -2960,7 +2960,8 @@ export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
 /** The delivery rollup carried on a summary / results row. Disjoint buckets:
  *  queued + sending + sent + delivered + failed + unconfirmed +
  *  skipped_opted_out + skipped_no_consent + skipped_other == audience (the
- *  server derives these from the recipients map). MIRRORS
+ *  server derives these from the recipients map). `retry_pending` is a
+ *  SUB-bucket of `failed` and never joins that sum. MIRRORS
  *  app/src/repos/broadcastsRepo.ts BroadcastStats - keep in sync. */
 export interface BroadcastStats {
   /** The resolved audience size at send time. */
@@ -2984,6 +2985,12 @@ export interface BroadcastStats {
   /** Dispatched to Twilio, carrier not yet confirmed (no carrierSentAt).
    *  Optional: legacy persisted stats predate the field - default to 0. */
   sending?: number;
+  /** share-sent-outcome D4: how many of the `failed` recipients hold a LIVE
+   *  retry promise (a SUB-bucket of `failed`, never in the bucket sum). The
+   *  results and list routes always carry the true count; the rollup's
+   *  broadcast.updated emit carries a LOWER BOUND (its own recipient); every
+   *  other emit leaves it unset, and the pages keep their last value. */
+  retry_pending?: number;
 }
 
 /** GET /api/broadcasts → one list-row summary (no recipients map). */
@@ -3039,6 +3046,32 @@ export interface BroadcastRecipient {
   lastName?: string;
   /** E.164 phone: from the resolved contact, else the `phone#<E164>` key. */
   phone?: string;
+  /** share-sent-outcome D2: the NEWEST attempt's message id when a retry is
+   *  newer than the original (`tsMsgId`); absent while the original is newest. */
+  latestAttempt?: string;
+  /** share-sent-outcome D3: the newest attempt's retry promise as ITS message
+   *  row holds it (the one source) - present only for a young failed-30003
+   *  row. The page judges liveness on the server clock (isRetryPromiseLive);
+   *  a withdrawn promise carries the epoch stamp, which is never live. */
+  retryDueAt?: string;
+  /** share-sent-outcome D3: 'unconfirmed' when the newest attempt's row says
+   *  its retry chain ended unresolved (retry-send-adoption R5). */
+  retryOutcome?: RetryOutcome;
+  /** share-sent-outcome D4 (deviation 14): true when the server read this
+   *  recipient as PENDING a retry - a live promise, or a row read that failed
+   *  (then no `retryDueAt`). The page's ticker recount counts these. */
+  retryPending?: boolean;
+}
+
+/** share-sent-outcome D4: GET /api/broadcasts/:id/results?view=stats - the
+ *  share and its derived stats alone (no recipients, no contact reads): the
+ *  list page's refetch of one finished share. */
+export interface BroadcastStatsView {
+  broadcastId: string;
+  status: BroadcastStatus;
+  unitId: string | null;
+  stats: BroadcastStats;
+  created_at: string;
 }
 
 /** GET /api/broadcasts/:id/results — stats + the per-recipient delivery map. */
@@ -3077,6 +3110,14 @@ export interface BroadcastRecipientView {
   carrierSentAt?: string;
   errorCode?: string;
   conversationId?: string;
+  /** share-sent-outcome D3: the original send's message id - with
+   *  `latestAttempt`, whether the recipient's newest attempt has a message row
+   *  at all (a row the conversation could offer Retry on). */
+  tsMsgId?: string;
+  latestAttempt?: string;
+  retryDueAt?: string;
+  retryOutcome?: RetryOutcome;
+  retryPending?: boolean;
 }
 
 /** POST /api/broadcasts/:id/preview → one candidate row (the full annotated
@@ -3119,7 +3160,11 @@ export interface PreviewResponse {
 /** GET /api/events 'broadcast.updated' payload. The send job + delivery rollup
  *  emit this with the live status + stats (NO per-recipient detail — the
  *  Results view refetches getBroadcastResults to pick up recipient changes).
- *  NO PII — never logged. */
+ *  NO PII - never logged.
+ *  share-sent-outcome D4: only the rollup that just wrote a 30003 failure with
+ *  a live promise sets `stats.retry_pending` (a lower bound); every other emit
+ *  leaves it unset, and the pages merge an unset count by keeping their last
+ *  value. */
 export interface BroadcastUpdatedEvent {
   broadcastId: string;
   status: BroadcastStatus;

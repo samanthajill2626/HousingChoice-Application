@@ -20,6 +20,7 @@ import {
   type DeliveryPresentation,
 } from '../contact/deliveryStatus.js';
 import { contactDisplayName } from '../contact/format.js';
+import { isRetryPromiseLive, RETRY_OUTCOME_UNCONFIRMED } from '../contact/retryPromise.js';
 
 /** The voucher-size chip choices (bedroomSize 0..4; "4+" means 4-or-more). */
 export interface VoucherSizeChoice {
@@ -88,18 +89,32 @@ export const BROADCAST_STATUS_TONE: Readonly<Record<BroadcastStatus, BroadcastSt
   failed: 'danger',
 };
 
-/** share-skip-fix D6: the share's label for the list row and the results
- *  header. A finished share (`sent`) whose EVERY recipient was skipped reached
- *  nobody, and "Sent" would be a lie (Sam's #5: one-to-one shares that read
- *  Sent with a Skipped row). Presentation ONLY: the stored status, the list's
- *  status filter and the tab it lists under are unchanged. A share with any
- *  sent / delivered / failed / queued slot keeps its status label. */
+/** share-sent-outcome D4: the share's label for the list row and the results
+ *  header. A FINISHED share (stored `sent` or `failed`) derives its label from
+ *  its recipients' buckets, first match wins:
+ *  - `Sent` (positive) - at least one recipient reached (delivered, sent, or
+ *    sending: accepted by the carrier);
+ *  - `Sending` (progress) - none reached, at least one pending a live retry
+ *    (`retry_pending`, a sub-bucket of failed);
+ *  - `Not confirmed` (danger, deviation 4) - none reached or pending, at least
+ *    one the platform could not confirm;
+ *  - `Not sent` - everything else: neutral when every recipient was skipped
+ *    (share-skip-fix D6), danger otherwise (a failure, or a share the route
+ *    marked failed with every slot still queued).
+ *  Draft and Sending shares, and a finished share with no stats at hand, keep
+ *  the stored label. Presentation ONLY: the stored status, the list's status
+ *  filter and the tab it lists under are unchanged; "Failed" is no longer
+ *  produced for a finished share. */
 export function presentShareLabel(
   status: BroadcastStatus,
   stats?: BroadcastStats,
 ): { label: string; tone: BroadcastStatusTone } {
-  if (status === 'sent' && stats !== undefined && stats.audience > 0) {
-    if (skippedTotal(stats) >= stats.audience) return { label: 'Not sent', tone: 'neutral' };
+  if ((status === 'sent' || status === 'failed') && stats !== undefined) {
+    if (stats.delivered + stats.sent + (stats.sending ?? 0) > 0) return { label: 'Sent', tone: 'positive' };
+    if ((stats.retry_pending ?? 0) > 0) return { label: 'Sending', tone: 'progress' };
+    if ((stats.unconfirmed ?? 0) > 0) return { label: 'Not confirmed', tone: 'danger' };
+    const allSkipped = stats.audience > 0 && skippedTotal(stats) >= stats.audience;
+    return { label: 'Not sent', tone: allSkipped ? 'neutral' : 'danger' };
   }
   return { label: BROADCAST_STATUS_LABELS[status], tone: BROADCAST_STATUS_TONE[status] };
 }
@@ -158,15 +173,32 @@ export function presentRecipientStatus(
  *  deliveryReason (carrier codes, the fan-out's transient_cap / enqueue_failed,
  *  and the 30003 wording, which is owned elsewhere), with `no_contact` - the
  *  fan-out's own "nothing to send to" - as the one share-specific failure line.
- *  Undefined for queued / sent / delivered. */
+ *  Undefined for queued / sent / delivered.
+ *
+ *  share-sent-outcome D3: `opts` carries the newest attempt's promise facts
+ *  (from that attempt's own message row, via the results route) and the page's
+ *  SERVER-clock snapshot: a live promise reads RSW's "will retry", a chain that
+ *  ended unresolved reads "retry not confirmed", and a lapsed or absent promise
+ *  the plain failure. Without `opts` the row promises nothing. */
+export interface RecipientReasonOptions {
+  retryDueAt?: string;
+  retryOutcome?: string;
+  serverNowMs: number;
+}
 export function shareRecipientReason(
   status: BroadcastRecipient['status'],
   errorCode: string | undefined,
+  opts?: RecipientReasonOptions,
 ): string | undefined {
   if (status === 'skipped') return shareSkipReason(errorCode);
   if (status === 'failed') {
     if (errorCode === 'no_contact') return 'No contact or phone on file';
-    return deliveryReason(errorCode) ?? 'Delivery failed';
+    return (
+      deliveryReason(errorCode, {
+        retryScheduled: opts !== undefined && isRetryPromiseLive(opts.retryDueAt, opts.serverNowMs),
+        retryUnconfirmed: opts?.retryOutcome === RETRY_OUTCOME_UNCONFIRMED,
+      }) ?? 'Delivery failed'
+    );
   }
   return undefined;
 }
@@ -189,7 +221,8 @@ export function splitContactKey(key: string): { contactId?: string; phone?: stri
  *  name (the SAME helper the composer's review rows use); the phone prefers the
  *  server projection and falls back to the `phone#<E164>` key. A row with neither
  *  a name nor a phone carries neither field (the view renders the "Tenant"
- *  fallback). */
+ *  fallback). share-sent-outcome D3: the message ids and the promise facts ride
+ *  through (only when present) - the row's hint and badge judge them. */
 export function toRecipientViews(
   recipients: Record<string, BroadcastRecipient>,
 ): BroadcastRecipientView[] {
@@ -211,6 +244,11 @@ export function toRecipientViews(
       ...(slot.carrierSentAt !== undefined && { carrierSentAt: slot.carrierSentAt }),
       ...(slot.errorCode !== undefined && { errorCode: slot.errorCode }),
       ...(slot.conversationId !== undefined && { conversationId: slot.conversationId }),
+      ...(slot.tsMsgId !== undefined && { tsMsgId: slot.tsMsgId }),
+      ...(slot.latestAttempt !== undefined && { latestAttempt: slot.latestAttempt }),
+      ...(slot.retryDueAt !== undefined && { retryDueAt: slot.retryDueAt }),
+      ...(slot.retryOutcome !== undefined && { retryOutcome: slot.retryOutcome }),
+      ...(slot.retryPending === true && { retryPending: true }),
     };
   });
   // Failures first (action items), then the rest in their natural order.

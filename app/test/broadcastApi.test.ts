@@ -4,7 +4,7 @@
 // stats + emitting broadcast.updated. Runs on the shared in-memory world with
 // the jobs machinery wired so the broadcast.send enqueue resolves in-process.
 // Authed via the real sealed session cookie next to the origin secret.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import request from 'supertest';
 import {
@@ -22,7 +22,16 @@ import { registerBroadcastSendJobHandler } from '../src/jobs/broadcastFanOut.js'
 import { loadConfig, DEV_SESSION_SECRET_DEFAULT } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import { MAX_BROADCAST_RECIPIENTS, type BroadcastStats } from '../src/repos/broadcastsRepo.js';
+import {
+  LIST_PARTITION,
+  MAX_BROADCAST_RECIPIENTS,
+  type BroadcastItem,
+  type BroadcastRecipient,
+  type BroadcastStats,
+} from '../src/repos/broadcastsRepo.js';
+import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
+import { SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
+import { RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -69,6 +78,73 @@ function seedUnit(world: FakeWorld): UnitItem {
   world.units.set(u.unitId, u);
   return u;
 }
+
+/** share-sent-outcome: an attempt key (the message id) whose provider instant is `agoMs` in the past. */
+function attemptKeyAgo(agoMs: number, sid: string): string {
+  return buildTsMsgId(new Date(Date.now() - agoMs).toISOString(), sid);
+}
+
+/** An ISO instant `offsetMs` from now (negative = the past). */
+function isoFromNow(offsetMs: number): string {
+  return new Date(Date.now() + offsetMs).toISOString();
+}
+
+/**
+ * share-sent-outcome D1: a slot's newest attempt row in the world's message
+ * store - the row the state service reads (its retry promise and chain end)
+ * for a young failed-30003 slot.
+ */
+function seedAttemptRow(
+  world: FakeWorld,
+  conversationId: string,
+  tsMsgId: string,
+  extra: Partial<MessageItem> = {},
+): void {
+  const [providerTs, providerSid] = [tsMsgId.slice(0, tsMsgId.indexOf('#')), tsMsgId.slice(tsMsgId.indexOf('#') + 1)];
+  world.messages.push({
+    conversationId,
+    tsMsgId,
+    type: 'sms',
+    direction: 'outbound',
+    author: 'teammate',
+    provider_sid: providerSid,
+    provider_ts: providerTs,
+    delivery_status: 'failed',
+    error_code: '30003',
+    created_at: providerTs,
+    ...extra,
+  } as MessageItem);
+}
+
+/** A finished (or drafted) share of unit-1 written straight into the world - no fan-out; listed like create()'s. */
+function seedShare(
+  world: FakeWorld,
+  broadcastId: string,
+  status: BroadcastItem['status'],
+  recipients: Record<string, BroadcastRecipient>,
+  extra: Partial<BroadcastItem> = {},
+): BroadcastItem {
+  const now = new Date().toISOString();
+  const item: BroadcastItem = {
+    broadcastId,
+    created_by: 'usr_test',
+    created_at: now,
+    updated_at: now,
+    _listPartition: LIST_PARTITION,
+    status,
+    unitId: 'unit-1',
+    audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+    body_template: 'hi',
+    stats: { audience: Object.keys(recipients).length, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+    recipients,
+    ...extra,
+  };
+  world.broadcasts.set(broadcastId, item);
+  return item;
+}
+
+/** The send-attempt facts a seeded record carries (the values are opaque here). */
+const SEED_ATTEMPT_FACTS = { recipientDigest: 'd'.repeat(32), bodyHash: 'h'.repeat(64), bodyShort: false, mediaCount: 0 };
 
 /** Wire the broadcast.send handler against the world (real sendMessage). */
 function wireBroadcastHandler(world: FakeWorld) {
@@ -1085,9 +1161,11 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(bare).not.toHaveProperty('housingAuthority');
   });
 
-  it('alreadySentThisProperty + priorRecipientContactIds reflect a PRIOR sent broadcast of this unit', async () => {
+  it('alreadySentThisProperty + priorRecipientContactIds reflect a PRIOR sent broadcast of this unit: set by a recipient who REACHED (sent, delivered) and by one still in flight in a sending share', async () => {
     seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001' });
     seedTenant(world, { contactId: 'c-2', firstName: 'Bo', phone: '+15550100002' });
+    seedTenant(world, { contactId: 'c-3', firstName: 'Cy', phone: '+15550100003' });
+    seedTenant(world, { contactId: 'c-4', firstName: 'Di', phone: '+15550100004' });
     seedUnit(world);
     const { app } = makeWebhookHarness({ world });
     // Prior broadcast for unit-1: send to ONLY c-1 (so c-1 is already-sent).
@@ -1099,8 +1177,12 @@ describe('share-broadcast API (M1.8a)', () => {
       .send({ recipientContactIds: ['c-1'] });
     await queueAdapter.settle(); // drain the prior broadcast's deferred fan-out
     expect(world.broadcasts.get(prior)!.status).toBe('sent');
+    // share-sent-outcome D1: a DELIVERED recipient of another share reached;
+    // a queued slot of a share still SENDING is in flight - both may have the text.
+    seedShare(world, 'bcast-delivered', 'sent', { 'c-3': { status: 'delivered' } });
+    seedShare(world, 'bcast-running', 'sending', { 'c-4': { status: 'queued' } });
 
-    // A NEW draft for the same unit previews both — c-1 flagged, c-2 not.
+    // A NEW draft for the same unit previews all four - c-1, c-3, c-4 flagged, c-2 not.
     const next = await createDraft(app);
     const res = await request(app)
       .post(`/api/broadcasts/${next}/preview`)
@@ -1108,11 +1190,15 @@ describe('share-broadcast API (M1.8a)', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({});
     expect(res.status).toBe(200);
-    expect(res.body.priorRecipientContactIds.sort()).toEqual(['c-1']);
+    expect(res.body.priorRecipientContactIds.sort()).toEqual(['c-1', 'c-3', 'c-4']);
     const c1 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-1');
     const c2 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-2');
+    const c3 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-3');
+    const c4 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-4');
     expect(c1.alreadySentThisProperty).toBe(true);
     expect(c2.alreadySentThisProperty).toBe(false);
+    expect(c3.alreadySentThisProperty).toBe(true);
+    expect(c4.alreadySentThisProperty).toBe(true);
   });
 
   it('alreadySentThisProperty is true for a prior recipient keyed phone#… matched by the candidate phone', async () => {
@@ -1181,6 +1267,8 @@ describe('share-broadcast API (M1.8a)', () => {
   });
 
   it('alreadySentThisProperty is NOT set by a prior DRAFT/FAILED broadcast (only sent/sending)', async () => {
+    // share-sent-outcome D1: holds as the STRANDED case - a queued slot of a
+    // share no longer sending with NO send-attempt record was never texted.
     seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
     seedUnit(world);
     const { app } = makeWebhookHarness({ world });
@@ -1204,41 +1292,120 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(c1.alreadySentThisProperty).toBe(false);
   });
 
-  it('share-skip-fix D5: a tenant whose only earlier slot was SKIPPED is NOT "already sent"; a failed one still is', async () => {
-    const skipped = seedTenant(world, { contactId: 'c-skipped', firstName: 'Skip', phone: '+15550100001' });
-    const failed = seedTenant(world, { contactId: 'c-failed', firstName: 'Fail', phone: '+15550100002' });
-    seedUnit(world);
-    const now = new Date().toISOString();
-    world.broadcasts.set('bcast-prior', {
-      broadcastId: 'bcast-prior',
-      created_by: 'usr_test',
-      created_at: now,
-      updated_at: now,
-      status: 'sent',
-      unitId: 'unit-1',
-      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
-      body_template: 'hi',
-      stats: { audience: 2, sent: 0, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0, skipped_other: 1, queued: 0 },
-      recipients: {
-        'c-skipped': { status: 'skipped', errorCode: 'manual_mode' },
-        'c-failed': { status: 'failed', errorCode: '30007' },
-      },
-    });
-    const { app } = makeWebhookHarness({ world });
+  // --- share-sent-outcome D1: the flag takes the SAFE reading of the state ----
+  /** Preview a fresh unit-1 draft: each candidate's flag, and the prior set the hand-add annotation reads. */
+  async function previewFlags(app: import('express').Express): Promise<{ flags: Map<string, boolean>; prior: string[] }> {
     const id = await createDraft(app);
-    const preview = await request(app)
+    const res = await request(app)
       .post(`/api/broadcasts/${id}/preview`)
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({});
-    expect(preview.status).toBe(200);
-    const byId = new Map(
-      (preview.body.candidates as Array<{ contactId: string; alreadySentThisProperty: boolean }>).map((c) => [c.contactId, c]),
+    expect(res.status).toBe(200);
+    const candidates = res.body.candidates as Array<{ contactId: string; alreadySentThisProperty: boolean }>;
+    return {
+      flags: new Map(candidates.map((c) => [c.contactId, c.alreadySentThisProperty])),
+      prior: [...(res.body.priorRecipientContactIds as string[])].sort(),
+    };
+  }
+
+  it("is set for a tenant whose failed 30003 text carries a live retry promise (the safe reading), whatever the share's stored status", async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const root = attemptKeyAgo(2 * 60_000, 'SMroot1');
+    seedAttemptRow(world, 'conv-c1', root, { retry_due_at: isoFromNow(5 * 60_000) });
+    seedShare(world, 'bcast-prior', 'failed', {
+      'c-1': { status: 'failed', errorCode: '30003', conversationId: 'conv-c1', tsMsgId: root },
+    });
+    const { app } = makeWebhookHarness({ world });
+    const { flags, prior } = await previewFlags(app);
+    expect(flags.get('c-1')).toBe(true);
+    expect(prior).toEqual(['c-1']);
+  });
+
+  it('is set for a Not-confirmed slot even when the share finalized failed (closes unconfirmed-share-invites-resend)', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    seedShare(world, 'bcast-prior', 'failed', { 'c-1': { status: 'failed', errorCode: SEND_UNCONFIRMED_CODE } });
+    const { app } = makeWebhookHarness({ world });
+    const { flags, prior } = await previewFlags(app);
+    expect(flags.get('c-1')).toBe(true);
+    expect(prior).toEqual(['c-1']);
+  });
+
+  it('is NOT set for a final failure: a 30007 failure, a 30003 whose promise lapsed, a 30003 whose chain ended unresolved-then-lapsed is Not confirmed instead; a skipped slot never counts (share-skip-fix D5)', async () => {
+    seedTenant(world, { contactId: 'c-skipped', phone: '+15550100001' });
+    seedTenant(world, { contactId: 'c-final', phone: '+15550100002' });
+    seedTenant(world, { contactId: 'c-lapsed', phone: '+15550100003' });
+    seedTenant(world, { contactId: 'c-unresolved', phone: '+15550100004' });
+    seedUnit(world);
+    // Both 30003 rows are young enough to be READ (inside the 24-minute bound),
+    // so the verdicts below come from the rows, not from the slot alone.
+    const lapsedRoot = attemptKeyAgo(14 * 60_000, 'SMlapsed1');
+    seedAttemptRow(world, 'conv-lapsed', lapsedRoot, { retry_due_at: isoFromNow(-10 * 60_000) });
+    const unresolvedRoot = attemptKeyAgo(12 * 60_000, 'SMunres1');
+    seedAttemptRow(world, 'conv-unresolved', unresolvedRoot, {
+      retry_due_at: RETRY_PROMISE_WITHDRAWN_AT,
+      retry_outcome: RETRY_OUTCOME_UNCONFIRMED,
+    });
+    seedShare(world, 'bcast-prior', 'sent', {
+      'c-skipped': { status: 'skipped', errorCode: 'manual_mode' },
+      'c-final': { status: 'failed', errorCode: '30007', conversationId: 'conv-final', tsMsgId: attemptKeyAgo(5 * 60_000, 'SMfinal1') },
+      'c-lapsed': { status: 'failed', errorCode: '30003', conversationId: 'conv-lapsed', tsMsgId: lapsedRoot },
+      'c-unresolved': { status: 'failed', errorCode: '30003', conversationId: 'conv-unresolved', tsMsgId: unresolvedRoot },
+    });
+    const { app } = makeWebhookHarness({ world });
+    const { flags, prior } = await previewFlags(app);
+    expect(flags.get('c-skipped')).toBe(false);
+    expect(flags.get('c-final')).toBe(false);
+    expect(flags.get('c-lapsed')).toBe(false);
+    expect(flags.get('c-unresolved')).toBe(true);
+    // The hand-add annotation reads the SAME set (one rule, one reader).
+    expect(prior).toEqual(['c-unresolved']);
+  });
+
+  it("is NOT set by a prior DRAFT (queued slots, no record) nor by a FAILED share whose queued slots have no record (stranded); IS set for a failed share's queued slot that has a live record", async () => {
+    seedTenant(world, { contactId: 'c-draft', phone: '+15550100001' });
+    seedTenant(world, { contactId: 'c-strand', phone: '+15550100002' });
+    seedTenant(world, { contactId: 'c-live', phone: '+15550100003' });
+    seedUnit(world);
+    seedShare(world, 'bcast-draft', 'draft', { 'c-draft': { status: 'queued' } });
+    // The route marked this share failed on an enqueue throw, but its pass ran
+    // anyway for c-live (a record exists): the text may be out.
+    seedShare(world, 'bcast-failed', 'failed', { 'c-strand': { status: 'queued' }, 'c-live': { status: 'queued' } }, { last_error: 'enqueue failed' });
+    await world.sendAttemptsRepo.claim(
+      { kind: 'broadcast', broadcastId: 'bcast-failed', contactKey: 'c-live' },
+      SEED_ATTEMPT_FACTS,
+      new Date().toISOString(),
     );
-    expect(byId.get(skipped.contactId)?.alreadySentThisProperty).toBe(false);
-    expect(byId.get(failed.contactId)?.alreadySentThisProperty).toBe(true);
-    // The hand-add annotation reads the SAME set (spec D5: one rule, one reader).
-    expect(preview.body.priorRecipientContactIds).toEqual([failed.contactId]);
+    const { app } = makeWebhookHarness({ world });
+    const { flags, prior } = await previewFlags(app);
+    expect(flags.get('c-draft')).toBe(false);
+    expect(flags.get('c-strand')).toBe(false);
+    expect(flags.get('c-live')).toBe(true);
+    expect(prior).toEqual(['c-live']);
+  });
+
+  it('a failed row read never empties the set (the safe direction)', async () => {
+    seedTenant(world, { contactId: 'c-pending', phone: '+15550100001' });
+    seedTenant(world, { contactId: 'c-reached', phone: '+15550100002' });
+    seedUnit(world);
+    // Read successfully, this LAPSED row would drop c-pending: only the safe
+    // direction of a failed read keeps the tenant flagged.
+    const root = attemptKeyAgo(14 * 60_000, 'SMpend1');
+    seedAttemptRow(world, 'conv-pending', root, { retry_due_at: isoFromNow(-10 * 60_000) });
+    seedShare(world, 'bcast-prior', 'sent', {
+      'c-pending': { status: 'failed', errorCode: '30003', conversationId: 'conv-pending', tsMsgId: root },
+      'c-reached': { status: 'sent' },
+    });
+    const { app, capture } = makeWebhookHarness({ world });
+    const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent').mockRejectedValue(new Error('boom'));
+    const { flags, prior } = await previewFlags(app);
+    expect(reads).toHaveBeenCalled();
+    expect(flags.get('c-pending')).toBe(true);
+    expect(flags.get('c-reached')).toBe(true);
+    expect(prior).toEqual(['c-pending', 'c-reached']);
+    expect(capture.atLevel(40).some((l) => String(l['msg']).includes('attempt row read failed'))).toBe(true);
   });
 
   // --- S4: GET results/list return DERIVED disjoint stats -------------------

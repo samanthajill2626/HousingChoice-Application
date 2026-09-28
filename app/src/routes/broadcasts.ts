@@ -46,11 +46,14 @@ import {
   type ContactDisplayItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
+import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createSendAttemptsRepo, type SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import {
   createAudienceResolutionService,
   type AudienceResolutionService,
   type ResolvedContact,
 } from '../services/audienceResolution.js';
+import { priorRecipientKeys } from '../services/shareRecipientState.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 
 /** The lifecycle statuses ?status= may filter on (byStatus GSI partition). */
@@ -72,6 +75,16 @@ export interface BroadcastsRouterDeps {
   broadcastsRepo?: BroadcastsRepo;
   unitsRepo?: UnitsRepo;
   contactsRepo?: ContactsRepo;
+  /**
+   * share-sent-outcome D1: the recipient state reads a young failed-30003
+   * slot's newest attempt row (its retry promise and chain end).
+   */
+  messagesRepo?: MessagesRepo;
+  /**
+   * share-sent-outcome D1: the composer flag ALONE reads a queued slot's
+   * send-attempt record (in flight vs stranded); no other route reads it.
+   */
+  sendAttemptsRepo?: SendAttemptsRepo;
   auditRepo?: AuditRepo;
   audienceResolutionService?: AudienceResolutionService;
   events?: EventBus;
@@ -320,6 +333,8 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+  const attempts = deps.sendAttemptsRepo ?? createSendAttemptsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const resolveAudience =
     deps.audienceResolutionService ?? createAudienceResolutionService({ logger: deps.logger });
@@ -480,13 +495,14 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     });
   });
 
-  // POST /api/broadcasts/:id/preview — re-resolve the audience + return the FULL
+  // POST /api/broadcasts/:id/preview - re-resolve the audience + return the FULL
   // annotated candidate list (bounded by the recipient cap, NOT the old 25-row
   // sample) so the composer can render an editable curated recipient list. Each
   // candidate carries voucherSize/housingAuthority for the row, plus
-  // `alreadySentThisProperty` (SOFT — a prior sent/sending broadcast for this
-  // unit already included the tenant). `priorRecipientContactIds` lets the
-  // composer annotate MANUALLY-added tenants locally too.
+  // `alreadySentThisProperty` (SOFT - an earlier share of this unit MAY have
+  // reached the tenant: the SAFE reading of share-sent-outcome D1's recipient
+  // state, whatever that share's stored status). `priorRecipientContactIds`
+  // lets the composer annotate MANUALLY-added tenants locally too.
   router.post('/broadcasts/:broadcastId/preview', async (req, res) => {
     const { broadcastId } = req.params;
     mergeContext({});
@@ -514,13 +530,19 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       ...seeds.contacts,
     ];
     // Prior-recipients for this unit (already-sent annotation). Only meaningful
-    // with a unitId; degrades safely to an empty set otherwise (or when the
-    // byUnit GSI is absent on an un-applied env). The set is contactKeys — which
-    // are contactId OR `phone#<E164>` (a phone-only recipient at the prior
-    // broadcast's send time), so a candidate must be matched on EITHER key.
+    // with a unitId. share-sent-outcome D1: the set is every slot of every
+    // share of the unit whose state MAY have reached the tenant - reached,
+    // pending a live retry, Not confirmed, or in flight (the send-attempt
+    // record tells a queued slot of a finished share in flight from stranded;
+    // this is the ONLY route that reads it). A final failure, a skip and a
+    // strand never flag. The service owns the rule (priorRecipientKeys) and
+    // never throws: a failed read keeps the recipient on the safe side, a
+    // failed byUnit page keeps what was resolved. The set is contactKeys -
+    // contactId OR `phone#<E164>` (a phone-only recipient at the prior
+    // share's send time), so a candidate must be matched on EITHER key.
     const priorRecipients =
       broadcast.unitId !== undefined
-        ? await broadcasts.priorRecipientContactIds(broadcast.unitId)
+        ? await priorRecipientKeys({ broadcasts, messages, attempts, log }, broadcast.unitId)
         : new Set<string>();
     // The candidate list carries phones — authed/internal response only; the
     // log line below stays IDs/counts only (NEVER phones/names/bodies).

@@ -3427,23 +3427,11 @@ export function createFakeWorld(): FakeWorld {
       return { ...b };
     },
     async listByUnit(unitId, opts = {}) {
-      // Sparse byUnit GSI: only broadcasts WITH a unitId index.
+      // Sparse byUnit GSI: only broadcasts WITH a unitId index. The composer
+      // flag's rule lives in services/shareRecipientState.ts (priorRecipientKeys),
+      // which pages this read - the double mirrors reads only (share-sent-outcome T8).
       const all = [...broadcasts.values()].filter((b) => b.unitId === unitId);
       return pageBroadcasts(all, opts);
-    },
-    async priorRecipientContactIds(unitId) {
-      // Union of every sent/sending broadcast's NON-SKIPPED recipient keys for
-      // the unit (share-skip-fix D5) - mirrors the real repo exactly.
-      const prior = new Set<string>();
-      for (const b of broadcasts.values()) {
-        if (b.unitId !== unitId) continue;
-        if (b.status !== 'sent' && b.status !== 'sending') continue;
-        for (const [key, slot] of Object.entries(b.recipients ?? {})) {
-          if (slot.status === 'skipped') continue;
-          prior.add(key);
-        }
-      }
-      return prior;
     },
     async delete(broadcastId) {
       // Conditional delete — only a draft. Mirror the real repo's discriminated

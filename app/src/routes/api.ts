@@ -1034,6 +1034,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // Send-by-explicit-selection re-fences each contactId (opt-out/unreachable
       // /type) — inject the same contactsRepo tests use; default kicks in here.
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      // share-sent-outcome D1: the recipient state's row reads (the promise and
+      // chain end) and the composer flag's record reads - forwarded like
+      // contactsRepo (an injected fake wins; the router default-constructs).
+      ...(deps.messagesRepo !== undefined && { messagesRepo: deps.messagesRepo }),
+      ...(deps.sendAttemptsRepo !== undefined && { sendAttemptsRepo: deps.sendAttemptsRepo }),
       ...(deps.audienceResolutionService !== undefined && {
         audienceResolutionService: deps.audienceResolutionService,
       }),

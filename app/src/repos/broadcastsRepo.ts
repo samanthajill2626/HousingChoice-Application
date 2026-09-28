@@ -421,21 +421,11 @@ export interface BroadcastsRepo {
   listByStatus(status: BroadcastStatus, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
   /**
    * List the broadcasts targeting a unit via the sparse byUnit GSI (only
-   * broadcasts WITH a unitId index here). One page per call; the route's
-   * prior-recipients lookup walks them.
+   * broadcasts WITH a unitId index here). One page per call; the composer
+   * flag's prior-recipients walk (services/shareRecipientState.ts
+   * priorRecipientKeys, which owns the "Already sent" rule) pages them.
    */
   listByUnit(unitId: string, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
-  /**
-   * The set of contactKeys already sent a broadcast for this unit: the recipient
-   * keys with a NON-SKIPPED slot, unioned across every sent/sending broadcast
-   * for the unit (share-skip-fix D5 - a `skipped` slot means no text was
-   * attempted, so it never counts; `failed` still does). The composer flags
-   * these (soft, opt-in resend; never a server-side exclusion).
-   * Degrades SAFELY: if the byUnit GSI is absent (an un-applied env) or the
-   * query throws/returns nothing, returns an EMPTY set (nothing flagged) — the
-   * already-sent protection is best-effort until the operator applies the GSI.
-   */
-  priorRecipientContactIds(unitId: string): Promise<Set<string>>;
   /**
    * Persist the resolved recipients map + audience count, then flip to
    * `sending` — one conditional write, gated on the broadcast still being a
@@ -772,51 +762,6 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
     async listByUnit(unitId, opts = {}) {
       // Sparse byUnit GSI (unit-less broadcasts never index here).
       return queryIndex('byUnit', 'unitId', unitId, opts);
-    },
-
-    async priorRecipientContactIds(unitId) {
-      // Best-effort union of every sent/sending broadcast's recipients KEYS for
-      // this unit, skipped slots excluded (share-skip-fix D5, below). The byUnit
-      // GSI keeps this O(matches) not a Scan. Degrade SAFELY: a missing GSI
-      // (un-applied env) or any query error -> empty set (nothing flagged); log
-      // IDs/counts only (NEVER recipient phones/keys).
-      const prior = new Set<string>();
-      try {
-        let exclusiveStartKey: Record<string, unknown> | undefined;
-        do {
-          const page = await queryIndex('byUnit', 'unitId', unitId, {
-            ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
-          });
-          for (const b of page.items) {
-            if (b.status !== 'sent' && b.status !== 'sending') continue;
-            for (const [key, slot] of Object.entries(b.recipients ?? {})) {
-              // share-skip-fix D5 (interim rule): a SKIPPED slot means no text was
-              // attempted for that tenant, so it must not flag them "Already sent"
-              // (Sam's #5: the skipped tenant then started unchecked on the next
-              // share). queued / sent / delivered still count; FAILED still counts
-              // on purpose, as an INTERIM over-approximation: a 30003 failure may
-              // have been delivered by the automatic retry this share never hears
-              // about (30003 is the only retried code; no_contact, transient_cap,
-              // enqueue_failed and the carrier rejections were never delivered and
-              // count anyway - spec section 8 records the tradeoff, and Branch B's
-              // attempts rule replaces it). This is the ONE runtime place the rule
-              // lives - the route's per-candidate flag and the hand-add annotation
-              // both read this set - and app/test/helpers/twilioWebhookHarness.ts
-              // mirrors it for the in-memory world, so the two change together.
-              if (slot.status === 'skipped') continue;
-              prior.add(key);
-            }
-          }
-          exclusiveStartKey = page.lastEvaluatedKey;
-        } while (exclusiveStartKey !== undefined);
-      } catch (err) {
-        // Index missing on an un-applied env (or a transient query error): the
-        // already-sent annotation degrades to "nothing flagged" per the spec.
-        log.warn({ unitId, err }, 'priorRecipientContactIds: byUnit query failed — degrading to empty');
-        return new Set<string>();
-      }
-      log.info({ unitId, priorCount: prior.size }, 'broadcast prior-recipients resolved');
-      return prior;
     },
 
     async markSending(broadcastId, recipients) {

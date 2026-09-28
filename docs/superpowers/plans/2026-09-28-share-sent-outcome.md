@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 4** (2026-09-28, after adversarial plan review rounds 1-3 - round 1: two independent reviewers, 16 + 21 findings; round 2: 13; round 3: 10; all accepted; adjudications in `docs/superpowers/reviews/2026-09-27-share-sent-outcome/plan-review-r<n>-adjudications.md`). This document is self-contained: every test and every code block a task needs is IN that task. Where a code block names a helper, that helper is defined in the task the block cites.
+**Revision 5** (2026-09-28, after adversarial plan review rounds 1-4 - round 1: two independent reviewers, 16 + 21 findings; round 2: 13; round 3: 10; round 4: 5, precision only - the terminal round; all accepted; adjudications in `docs/superpowers/reviews/2026-09-27-share-sent-outcome/plan-review-r<n>-adjudications.md`). FINAL for the build. This document is self-contained: every test and every code block a task needs is IN that task. Where a code block names a helper, that helper is defined in the task the block cites.
 
 **Stage 1b's four interface facts are VERIFIED as built** (spec section 0's "first task"): `research-1b-as-built-findings.md`, headline and sections A-E - every retry append site stamps `retry_root` (hop cap 16) and a one-hop `broadcast_id`; `retry_outcome: 'unconfirmed'` is written at every WITHDRAW; the job's arms close the record first with no re-apply; the `retrychild#` family and the any-child-supersedes refusal exist. No correction task is needed; Task 1 is the first build task.
 
@@ -36,8 +36,8 @@
 11. At the reconcile's two sites this branch's slot write is BOUNDED, not propagated and not silently swallowed: a thrown write is retried twice (a transient DynamoDB fault survives), then logged at ERROR and the site continues - at the unresolved-close arm the WITHDRAW runs FIRST (the promise withdrawal is the fact the thread and the route depend on) and the slot write second; at the adoption hook the slot write runs before the record close. A permanent failure (the 400 KB item-size error spec section 8 names) therefore never loops a check into the queue or the DLQ; the dropped write is the repair's residue at every site, not only the job's arms (spec section 8 is amended in this revision). The job's two arms keep `guardWrite`.
 12. D1's send-attempt RECORD reads run only for the composer flag (`priorRecipientKeys`); the results, list and stats-only routes resolve states without them (the record only tells in flight from stranded, which those surfaces do not distinguish). A record NOT READ has two meanings the classifier tells apart: "the caller did not ask" (`facts.record` absent -> `in_flight`, the safe side) and "the share is past the 30-day record life" (`facts.record === 'expired'` -> `stranded`, spec D1's "reads stranded without a read"). Row and record reads run with bounded concurrency (8 at a time).
 13. The webhook's enqueue-failure withdrawal (RSW's arm, `twilio.ts:3632-3656`) emits a `broadcast.updated` for a share row with the count UNSET (spec D4: only the rollup emits a count), so a list that turned Sending on the rollup's emit refetches the share's stats and turns back when the retry never got queued - and stays Sending when ANOTHER recipient is still pending.
-15. A slot write whose condition is refused on the re-read because the slot ALREADY equals the write's own `next` (a committed write whose response was lost and replayed - by the SDK's retries or by `applyLaterAttemptBounded`) is treated as APPLIED: its side effects (the ledger entry, the emit) are idempotent and run. This is `finalize_op`'s lesson (`broadcastsRepo.ts:937-983`) applied to the slot primitive without a token.
-16. D1's 30-day record bound is measured from the share's `updated_at` (the send start stamps no field of its own; `markSending`, `markFailed` and every later write stamp `updated_at`), falling back to `created_at`; a draft created long before its send is not read as past the bound.
+15. A slot that ALREADY records the write's own `next` (a committed write whose response was lost and replayed - by the SDK's retries, by `applyLaterAttemptBounded`, or by any caller's fresh call) is treated as APPLIED: the check runs at the TOP of `applyLaterAttempt`'s loop, before the order rule can refuse it, and again after a refused condition; its side effects (the ledger entry, the emit) are idempotent and run - except that a replayed `failed` 30003 outcome carrying NO promise skips the ledger write (the winner's entry may be `pending`, and a replay must not downgrade it). This is `finalize_op`'s lesson (`broadcastsRepo.ts:937-983`) applied to the slot primitive without a token.
+16. D1's 30-day record bound is measured from the share's `updated_at` (the send start stamps no field of its own; `markSending` and `markFailed` stamp `updated_at` at the send, and the writes this branch adds do too - `setRecipient` :797-843 does not, and is not changed), falling back to `created_at`; a draft created long before its send is not read as past the bound.
 14. The results route marks each recipient `retryPending: true` when its D1 state is `pending` (so a recipient whose row read failed, pending on the safe side, is counted); the results page recounts pending ONLY on its ticker (never on an SSE overlay or before its refetch), from rows that are `retryPending` and whose `retryDueAt` is absent or still live.
 
 ## Global Constraints
@@ -1434,11 +1434,19 @@ describe('applyLaterAttempt', () => {
       return res;
     } };
     expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } }).catch(() => 'threw')).toBe('threw');
-    // the caller's bounded retry replays the same input:
+    // the caller's bounded retry replays the same input as a FRESH call: the slot already records it, the order rule
+    // would refuse it, and the top-of-loop check answers applied and runs the side effects instead
     expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
     expect(x.share().stats).toMatchObject({ failed: 0, delivered: 1 });   // not double-counted
     expect((await x.ledger())?.shares?.['b1']?.state).toBe('counted');
     expect(x.emitted.length).toBe(1);
+  });
+  it('a replayed failed-30003 outcome WITHOUT a promise never downgrades the winner''s pending ledger entry', async () => {
+    const x = world({});
+    await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'failed', errorCode: '30003', retryDueAt: '2026-09-28T12:05:00.000Z' } });
+    expect((await x.ledger())?.shares?.['b1']?.state).toBe('pending');
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'failed', errorCode: '30003' } })).toBe('applied');   // the same slot state, replayed without the promise
+    expect((await x.ledger())?.shares?.['b1']?.state).toBe('pending');
   });
   it('no slot and no broadcast are reported, never thrown', async () => {
     const x = world({});
@@ -1536,6 +1544,15 @@ function ledgerOutcome(o: AttemptOutcome, nowMs: number): ShareLedgerOutcome {
 function slotEquals(a: BroadcastRecipient, b: BroadcastRecipient): boolean {
   return a.status === b.status && a.errorCode === b.errorCode && a.carrierSentAt === b.carrierSentAt && a.latestAttempt === b.latestAttempt;
 }
+/** The idempotent side effects of an applied outcome: the ledger entry and the emit. A REPLAYED `failed` 30003 with no promise skips the ledger (the winner's entry may be pending; a replay must not downgrade it). */
+async function sideEffects(deps: ShareAttemptOutcomeDeps, item: BroadcastItem, contactKey: string, input: LaterAttempt, ids: Record<string, unknown>, replayed: boolean): Promise<void> {
+  const nowMs = (deps.now ?? Date.now)();
+  const skipLedger = replayed && input.outcome.kind === 'failed' && input.outcome.errorCode === '30003' && input.outcome.retryDueAt === undefined;
+  if (skipLedger) deps.log.info({ ...ids, contactKey }, 'share attempt outcome: replayed failure without a promise - ledger left to the winner');
+  else await writeLedger(deps, item, pairContact(contactKey, input.recipientContactId), input.attemptKey, input.conversationId, input.outcome);
+  const pending = input.outcome.kind === 'failed' && isRetryPromiseLive(input.outcome.retryDueAt, nowMs);
+  deps.events.emit('broadcast.updated', { broadcastId: item.broadcastId, status: item.status, stats: deriveBroadcastStats(item, pending ? { retryPending: 1 } : undefined) });
+}
 /** spec D7: the slot key when it is a contact id; else the row's send-time holder; else none. */
 function pairContact(contactKey: string, recipientContactId: string | undefined): string | undefined {
   return contactKey.startsWith('phone#') ? recipientContactId : contactKey;
@@ -1556,26 +1573,29 @@ export async function applyLaterAttempt(deps: ShareAttemptOutcomeDeps, input: La
     const found = Object.entries(share.recipients ?? {}).find(([, s]) => s.conversationId === input.conversationId && s.tsMsgId === input.retryRoot);
     if (found === undefined) return 'no_slot';
     const [contactKey, slot] = found;
+    // deviation 15, first check: a replayed call (a throw after a committed write, retried by the caller) finds the slot
+    // already recording THIS outcome - the order rule would refuse it, so decide before the rule.
+    if (slotEquals(slot, nextSlot(slot, input, true)) || slotEquals(slot, nextSlot(slot, input, false))) {
+      deps.log.info({ ...ids, contactKey }, 'share attempt outcome: already applied (a replayed call) - running its side effects');
+      await sideEffects(deps, share, contactKey, input, ids, true);
+      return 'applied';
+    }
     const ok = allowed(slot, input);
     if (ok === undefined) return 'refused';
     const next = nextSlot(slot, input, ok.cmp === 0);
     const from = bucketOf(slot); const to = bucketOf(next);
     const delta: Partial<BroadcastStats> = from !== to ? { ...(from !== undefined && { [from]: -1 }), ...(to !== undefined && { [to]: 1 }) } : {};
     const res = await deps.broadcasts.applyAttemptOutcome(input.broadcastId, contactKey, { status: slot.status, latestAttempt: slot.latestAttempt }, next, delta);
-    let item: BroadcastItem;
-    if (res.applied) {
-      item = res.item ?? share;
-    } else {
-      // deviation 15: a committed write whose response was lost and replayed refuses its own condition; the re-read tells.
+    if (!res.applied) {
+      // deviation 15, second check: the SDK's own replay of a committed write refuses its condition; the re-read tells.
       const again = await deps.broadcasts.getByIdConsistent(input.broadcastId);
       const now = again?.recipients?.[contactKey];
       if (again === undefined || now === undefined || !slotEquals(now, next)) continue;
       deps.log.info({ ...ids, contactKey }, 'share attempt outcome: already applied (a replayed write) - running its side effects');
-      item = again;
+      await sideEffects(deps, again, contactKey, input, ids, true);
+      return 'applied';
     }
-    await writeLedger(deps, item, pairContact(contactKey, input.recipientContactId), input.attemptKey, input.conversationId, input.outcome);
-    const pending = input.outcome.kind === 'failed' && isRetryPromiseLive(input.outcome.retryDueAt, (deps.now ?? Date.now)());
-    deps.events.emit('broadcast.updated', { broadcastId: item.broadcastId, status: item.status, stats: deriveBroadcastStats(item, pending ? { retryPending: 1 } : undefined) });
+    await sideEffects(deps, res.item ?? share, contactKey, input, ids, false);
     deps.log.info({ ...ids, contactKey, from: slot.status, to: next.status }, 'share attempt outcome applied');
     return 'applied';
   }
@@ -1953,7 +1973,7 @@ Built SECOND in Slice 2 (after Task 4, before Task 5).
 - Modify: `app/src/repos/activityEventsRepo.ts` (`RecordActivityEventInput` :86-94, `ActivityEventItem` :65-82, `record` :125-148)
 - Modify: `app/src/jobs/broadcastFanOut.ts` (`recordPropertySent` :1202-1252; its callers `afterSend` :817-832 and the adoption :1456-1468)
 - Modify: `app/src/repos/listingSendsRepo.ts` (DELETE `recordSend` :136-178 and its interface entry - Task 3 deprecated it; no runtime caller remains), `app/test/helpers/twilioWebhookHarness.ts` (the activity-events double :3056-3073 passes `broadcastId` through; the ledger double drops `recordSend`)
-- Test: `app/test/broadcastFanOut.test.ts` (the ledger pins :979-1054 and :2510), `app/test/listingSendsRepo.integration.test.ts` (:56-150 - the `recordSend` cases are REWRITTEN as `putShareMemory` cases or dropped where Task 3's new file already covers them), `app/test/listingSendsApi.test.ts` (20 `recordSend` calls) and `app/test/contactsBatchReads.test.ts:151` - both seed through a new test helper `seedListingSend(repo, { unitId, contactId, sentAt, broadcastId? })` in `app/test/helpers/listingSendSeed.ts` that calls `putShareMemory` with one counted entry
+- Test: `app/test/broadcastFanOut.test.ts` (the ledger pins :979-1054 and :2510), `app/test/listingSendsRepo.integration.test.ts` (:56-150 - the `recordSend` cases are REWRITTEN as `putShareMemory` cases or dropped where Task 3's new file already covers them), `app/test/listingSendsApi.test.ts` (20 `recordSend` calls) and `app/test/contactsBatchReads.test.ts:151` - both seed through a new test helper `seedListingSend(repo, { unitId, contactId, sentAt, broadcastId? })` in `app/test/helpers/listingSendSeed.ts` that calls `putShareMemory` with ONE counted entry keyed `broadcastId ?? 'individual'` whose `attempt` is `LEGACY_ATTEMPT_KEY` (or `INDIVIDUAL_ATTEMPT_KEY`) and `countedAt = sentAt` - a seeded entry sorts BEFORE every real attempt, which Task 13's un-count case relies on
 
 **Interfaces:**
 - Consumes: `applyShareLedgerEntry`, `ledgerEntryFor` (Task 3); the pass's recorded slot (`record phase` :931-959 writes `conversationId` + `tsMsgId` on the slot BEFORE `afterSend` runs at :949 - read it and take the appended row's `tsMsgId` from that scope); the adoption's row (`adoptBroadcastRecipient` has the adopted message: its `tsMsgId`, `delivery_status`).
@@ -2228,7 +2248,7 @@ git commit -m "feat(broadcasts): results carry each recipient's promise facts an
 
 `broadcastFormat.test.ts` - the `presentShareLabel` block at :214-231 and the D22 block at :241-247. Three pins FLIP under the new rule and are rewritten: `:224` (`sent`, audience 2, skipped_other 1, failed 1 - nothing reached) -> `Not sent` / `danger`; `:228` (`sent`, `stats()` - audience 0, nothing reached) -> `Not sent` / `danger`; `:242` (`sent`, skipped 1 + unconfirmed 1) -> `Not confirmed` / `danger`. `:223` (delivered 1) keeps `Sent`; `:226` (`failed`, failed 1) -> `Not sent` / `danger`; `:225`/`:227`/`:229` (`sending`, `draft`, no stats) keep. Add: none reached + `retry_pending` 1 -> `Sending` / `progress`; all queued in a stored-failed share -> `Not sent` / `danger`; `shareRecipientReason` with a live promise reads RSW's "will retry" copy, with `retryOutcome` unconfirmed reads the unconfirmed copy, with a lapsed promise the plain 30003 copy (:185 is the pin that flips).
 `StatChips.test.tsx`: the order pin :77 gains `Retrying` after `Failed`; the sum pin balances (`Failed + Retrying = failed`); add: `retry_pending` 1 with `failed` 1 renders Failed 0 + Retrying 1; a kept `retry_pending` above `failed` clamps Failed at 0. The DeliveryBadge render test at :177-181 (a 30003 row promises nothing) MOVES to `DeliveryBadge.test.tsx` and gains: with `retryDueAt` live it reads the "will retry" copy; with `retryOutcome` unconfirmed the unconfirmed copy; lapsed the plain copy.
-`BroadcastResults.test.tsx`: :139 (hint on a keyless failed row) flips to NO hint; add: hint on a failed row with a message id and no promise; no hint with a live promise (fake `serverNowMs`); no hint on `retryOutcome` unconfirmed; the ticker: advance 60 s past the promise and the hint appears AND the pill moves from `Sending` to `Not sent` with the Retrying chip at 0 (the recount); an SSE overlay with `retry_pending: 1` arriving before the refetch keeps `Sending` (no recount until a tick); after a tick recounted to 0, an SSE overlay does NOT bring the stale count back (the override clears only on a refetch); a row with `retryPending: true` and no `retryDueAt` is still counted on a tick; `last_error` shown only under `Not sent`; :160, :227 keep.
+`BroadcastResults.test.tsx`: :139 (hint on a keyless failed row) flips to NO hint; add: hint on a failed row with a message id and no promise; no hint with a live promise (fake `serverNowMs`); no hint on `retryOutcome` unconfirmed; the ticker: advance 60 s past the promise and the hint appears AND the pill moves from `Sending` to `Not sent` with the Retrying chip at 0 (the recount); an SSE overlay with `retry_pending: 1` arriving before the refetch keeps `Sending` (no recount until a tick); after a tick recounted to 0, an SSE overlay with the count UNSET does NOT bring the stale count back, and one CARRYING `retry_pending: 1` (a new pending recipient) does replace it; a row with `retryPending: true` and no `retryDueAt` is still counted on a tick; `last_error` shown only under `Not sent`; :160, :227 keep.
 `useBroadcastResults.test.tsx`: an event without `retry_pending` keeps the previous value until the refetch replaces it.
 `BroadcastsList.test.tsx`: an event without `retry_pending` on a `sent` row with `retry_pending` 1 triggers one `getBroadcastStats` call (mock the endpoint) and the row takes its result; the same event on a `sending` row triggers none; an event WITH `retry_pending` replaces without a fetch; two events inside 400 ms trigger one fetch.
 
@@ -2268,7 +2288,7 @@ export function shareRecipientReason(status: BroadcastRecipient['status'], error
 // BroadcastResults.tsx: const [serverNow, setServerNow] = useState(() => serverNowMs()); const [tickCount, setTickCount] = useState<number | undefined>(undefined);
 //   const rowsRef = useRef(rows); useEffect(() => { rowsRef.current = rows; }, [rows]);   // the interval reads the LATEST rows without re-arming
 //   a visibility-gated 60 s interval: const now = serverNowMs(); setServerNow(now); setTickCount(rowsRef.current.filter((r) => r.retryPending === true && (r.retryDueAt === undefined || isRetryPromiseLive(r.retryDueAt, now))).length);
-//   the override clears ONLY on a REFETCH (fresh rows from the route: in fetchResults' success path, setTickCount(undefined)) - never on an SSE overlay, which carries no rows and would bring back a stale count until its refetch lands;
+//   the override clears on a REFETCH (fresh rows from the route: in fetchResults' success path, setTickCount(undefined)) and on an SSE overlay that CARRIES a count (the rollup's own lower bound: a new pending recipient outranks the tick's recount) - never on an overlay whose count is unset, which would bring back a stale count until its refetch lands;
 //   const liveStats = results === null ? null : tickCount === undefined ? results.stats : { ...results.stats, retry_pending: tickCount };
 //   the pill (:146) and <StatChips stats={liveStats} /> read liveStats; RecipientRow gets serverNow. BroadcastRecipientView gains retryPending?: boolean (from the wire).
 // useBroadcastsList.ts onBroadcastUpdated:
@@ -2725,7 +2745,9 @@ git commit -m "docs(share-sent-outcome): three issues closed, the sweeper amende
 
 ---
 
-## Self-review (planner, revision 4)
+## Self-review (planner, revision 5 - final)
+
+- Round-4 findings folded (precision only; the terminal round): B-r4 1 (the already-applied check moved to the top of the loop, before the order rule, with the post-refusal check kept; `sideEffects` shared; the test's premise now holds), B-r4 2 (the seed helper's entry keyed `LEGACY_ATTEMPT_KEY`), B-r4 3 (the tick override also clears on an overlay that carries a count), B-r4 4 (a replayed failed-30003 without a promise skips the ledger write), B-r4 5 (deviation 16's sentence names `setRecipient` as the exception). One behavior the reviewer named and the spec already implies: during a retry chain the list row passes through `Sent` between a retry's carrier `sent` confirmation and its failure (D1: a carrier-accepted slot counts as reached); the e2e asserts the end state.
 
 - Round-3 findings folded: B-r3 1 (a replayed committed write reads as applied - deviation 15, `slotEquals`, a test), B-r3 2 (the withdrawal emit leaves the count unset; `rolled` hoisted; a retry row re-reads the share), B-r3 3 (e2e (b) opens the list after the share exists), B-r3 4 (per-fixture units and contacts; `seedTwoSlotShare` defined), B-r3 5 (the census projects only a move `wouldApply` admits; dry-run forecasts pinned), B-r3 6 (`no_slot` at ERROR at the reconcile sites), B-r3 7 (the record bound from `updated_at` - deviation 16), B-r3 8 (the tick override clears only on a refetch; rows through a ref), B-r3 9 (`outcomeOf` exported and unit-pinned), B-r3 10 (the spec's section 8 names the repeatedly-lost WITHDRAW path).
 

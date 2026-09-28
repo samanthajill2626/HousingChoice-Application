@@ -10,7 +10,10 @@ Written against Stage 1b's FINAL spec (revision 5 @dad3fecb). Round 4 was
 the cap: its precision findings are folded here; its two remaining design
 calls were RULED by Cameron on 2026-09-27 (section 9): the list refetch reads
 a stats-only query flag on the existing per-share route; no relay to SOR.
-GATE PASSED 2026-09-27. The plan is written once Stage 1b has merged.
+GATE PASSED 2026-09-27. Stage 1b MERGED 2026-09-28 (main @3f38bcc2, synced
+into this branch at cebc7d23, no dependency change); section 0 restated
+against the code and 1b's section 8 errata as built (21 items). PLAN IN
+PROGRESS.
 Branch `feat/share-sent-outcome`, worktree `W:\tmp\share-sent-outcome`.
 Records: `docs/superpowers/reviews/2026-09-27-share-sent-outcome/` (the three
 research findings this rewrite rests on: `research-broadcast-side-findings.md`,
@@ -45,14 +48,17 @@ sent", "Sent to N tenants" (GLOSSARY: `unit` in code, "property" to staff).
 - **SOR Stage 1b (the `retrySend` adoption) is being built now and must merge
   before this branch is PLANNED or BUILT.** Its spec is FINAL: revision 5
   @dad3fecb on `feat/retry-send-adoption`
-  (`docs/superpowers/specs/2026-09-27-retry-send-adoption-design.md`). This
-  spec takes r5's interface AS WRITTEN and asks nothing more of 1b; the plan's
-  first task verifies 1b as built against these four facts:
+  (`docs/superpowers/specs/2026-09-27-retry-send-adoption-design.md`, whose
+  section 8 "Errata as built", 21 items, is part of the interface). 1b
+  MERGED on 2026-09-28 (main @3f38bcc2). This spec takes 1b's interface AS
+  BUILT and asks nothing more of it; the plan's first task verifies the code
+  against these four facts:
   1. Every retry row 1b appends - automatic, adopted, and the staff Retry
-     route's row - carries `retry_root` (r5's rule: the retried row's own
-     root if it has one; else, for a pre-deploy retry row, the row reached by
-     following `retry_of` up to the attempt cap, a broken link stopping at the
-     last row read; else the retried row itself) and `broadcast_id` COPIED
+     route's row - carries `retry_root` (the retried row's own root if it has
+     one; else, for a pre-deploy retry row, the row reached by following
+     `retry_of` up to a HOP cap - `RETRY_ROOT_WALK_MAX_HOPS`, 16 as built, not
+     the attempt cap - a broken link stopping at the last row read; else the
+     retried row itself) and `broadcast_id` COPIED
      ONE HOP from the retried row. The one-hop copy has a hole this branch
      closes itself: a post-1b retry of an unstamped pre-1b retry row carries
      no `broadcast_id`, so its receipt never enters the rollup. The repair
@@ -66,8 +72,13 @@ sent", "Sent to N tenants" (GLOSSARY: `unit` in code, "property" to staff).
      and its redelivery re-apply, the job's second-unknown arm and its
      enqueue-failed-after-handoff arm - it writes `retry_outcome:
      'unconfirmed'` on that row together with the withdrawn sentinel in
-     `retry_due_at`. This branch reads that field (D1) and, after 1b merges,
-     calls its own slot writer at those sites (D2). A chain end that leaves
+     `retry_due_at` - and that row CAN be a share's own root row (1b erratum
+     13: a one-tenant share text whose attempt-1 retry went unresolved), which
+     is exactly the row D1 reads as the newest attempt. This branch reads that
+     field (D1) and calls its own slot writer at those sites (D2). A WITHDRAW
+     that is lost or throws at the job's arms is re-applied by nothing (1b
+     erratum 9) - the case D1's bound and D8's record read cover. A chain end
+     that leaves
      the promise to EXPIRE (refused, rejected, the window closed at job time,
      the deferral cap) needs nothing more: the lapse is the signal, on RSW's
      own clock.
@@ -81,14 +92,17 @@ sent", "Sent to N tenants" (GLOSSARY: `unit` in code, "property" to staff).
      Retry pressed on a row that already has a child, from a stale view or a
      direct call, is refused) confine the overlapping-attempt case to 1b's
      named two-child fork and to pre-1b chains, which carry no pointers.
-  Until this branch lands, a share retry's receipt is logged at INFO and
-  touches nothing; the rollup's one 2.5-second re-read on a slot miss is paid
-  for those receipts in the interim (a few a day at most: only share texts
-  that failed and were retried - automatically after a 30003, or by a staff
-  Retry after any failure - have retry rows). Once this branch lands, a miss for a row
-  WITHOUT `retry_root` (an original whose slot cannot be found - the lost-
-  rollup class) logs at WARN again; a miss for a retry row is a routing bug
-  and logs at ERROR.
+  Until this branch lands, the status webhook SKIPS the broadcast rollup for
+  a row that carries `retry_of` (1b's one fenced line, main @3f38bcc2, on
+  Cameron's 2026-09-28 decision: no wait, no share reads for a share-retry
+  receipt) and the give-up line stays at WARN. This branch opens the fence,
+  removes that skip and routes retry rows itself (D2); after it, a miss for a
+  row WITHOUT `retry_root` (an original whose slot cannot be found - the
+  lost-rollup class) stays WARN, and a miss for a retry row is a routing bug
+  and logs at ERROR. 1b also made `isBroadcastRowFor` (the fan-out's and the
+  reconcile's "is this the recipient's own row" check) ignore rows with
+  `retry_of` at both of its callers (erratum 15), which is the "not a retry
+  row" clause section 8 asked for.
 - This branch then adds, after 1b, the slot and ledger writes for a later
   attempt at every place a later attempt's outcome becomes known: the status
   webhook's rollup (a retry row's receipt), the reconcile's adoption of a
@@ -636,10 +650,11 @@ the build finds out of scope.
 
 ## 6. Sequencing and rollout
 
-1. This spec: adversarial review, then Cameron's gate. In parallel: SOR Stage
-   1b builds its final spec (r5); nothing is relayed to it - the plan's first
-   task verifies 1b as built against section 0's four facts.
-2. After 1b merges: the plan (against the record and the retry job as built),
+1. This spec: adversarial review (four rounds, closed), then Cameron's gate
+   (passed 2026-09-27). Stage 1b merged 2026-09-28 with its errata as built;
+   nothing was relayed to it - the plan's first task verifies the code
+   against section 0's four facts.
+2. After 1b merged: the plan (against the record and the retry job as built),
    plan review, the mission block, the build in this worktree with one main
    sync at the end, the planner's review, Cameron's merge.
 3. After deploy: the D8 census, then the apply, dev then prod, each on
@@ -729,12 +744,10 @@ the build finds out of scope.
 - **Read cost.** D3's promise reads (only young 30003 rows), D5 and D6's
   relabels (bounded by the page, batched, on the hottest route only after the
   slice). Accepted.
-- **A retry row stamped with the share id** looks, to SOR's reconcile
-  ownership check, like the recipient's own message. It matters only when a
-  share attempt is in the reconcile's lookup while its original row exists and
-  the retry falls in that window; candidates are tried oldest-first, so the
-  original is adopted first. Named as a watch item for the plan; the reconcile
-  check gains a "not a retry row" clause if the plan finds a real path.
+- **A retry row stamped with the share id** looked, to SOR's reconcile
+  ownership check, like the recipient's own message. RESOLVED by 1b as built:
+  `isBroadcastRowFor` ignores rows with `retry_of` at both callers (1b
+  erratum 15). The plan's first task verifies it; no clause is added here.
 - **Pre-RSW rows** may lack lineage; the repair reports what it cannot judge
   and leaves those slots and rows as they are. Accepted (the stub's residual).
 - **The double-text window** during a retry's backoff (a second share of the

@@ -86,12 +86,19 @@ function bucketOf(slot: Pick<BroadcastRecipient, 'status' | 'errorCode'>): Bucke
   return slot.status;
 }
 
-/** The slot a write leaves: the original pointer kept, the newest-attempt pointer set, the carrier instant the OUTCOME's (the same attempt keeps the slot's when the outcome has none). */
+/**
+ * The slot a write leaves: the original pointer kept, the newest-attempt
+ * pointer set - OMITTED when the attempt IS the original (its own key: the
+ * type's contract, the pointer is absent while the original is the attempt the
+ * slot records; code review G2) - and the carrier instant the OUTCOME's (the
+ * same attempt keeps the slot's when the outcome has none). Every reader takes
+ * `latestAttempt ?? tsMsgId`, so both shapes name the same attempt.
+ */
 function nextSlot(slot: BroadcastRecipient, input: Pick<LaterAttempt, 'attemptKey' | 'outcome'>, sameAttempt: boolean): BroadcastRecipient {
   const keep = {
     ...(slot.conversationId !== undefined && { conversationId: slot.conversationId }),
     ...(slot.tsMsgId !== undefined && { tsMsgId: slot.tsMsgId }),
-    latestAttempt: input.attemptKey,
+    ...(input.attemptKey !== slot.tsMsgId && { latestAttempt: input.attemptKey }),
   };
   const o = input.outcome;
   const carrier = o.kind === 'sent' || o.kind === 'delivered' ? (o.carrierSentAt ?? (sameAttempt ? slot.carrierSentAt : undefined)) : undefined;
@@ -150,8 +157,8 @@ function ledgerOutcome(o: AttemptOutcome, nowMs: number): ShareLedgerOutcome {
   }
 }
 
-/** spec D7: the pair's contact - the slot key when it is a contact id; else the row's send-time holder; else none. */
-function pairContact(contactKey: string, recipientContactId: string | undefined): string | undefined {
+/** spec D7: the pair's contact - the slot key when it is a contact id; else the row's send-time holder; else none. The ONE copy (the repair reads it too). */
+export function pairContactId(contactKey: string, recipientContactId: string | undefined): string | undefined {
   return contactKey.startsWith('phone#') ? recipientContactId : contactKey;
 }
 
@@ -193,7 +200,7 @@ async function sideEffects(
   if (skipLedger) {
     deps.log.info({ ...ids, recipientKey: safeRecipientKey(contactKey) }, 'share attempt outcome: replayed failure without a promise - ledger left to the winner');
   } else {
-    await writeLedger(deps, item, pairContact(contactKey, input.recipientContactId), input.attemptKey, input.conversationId, o);
+    await writeLedger(deps, item, pairContactId(contactKey, input.recipientContactId), input.attemptKey, input.conversationId, o);
   }
   const pending = o.kind === 'failed' && isRetryPromiseLive(o.retryDueAt, nowMs);
   deps.events.emit('broadcast.updated', {
@@ -291,5 +298,5 @@ export async function originalRowLedgerWrite(
   deps: Pick<ShareAttemptOutcomeDeps, 'ledger' | 'log' | 'now'>,
   args: { share: BroadcastItem; contactKey: string; row: Pick<MessageItem, 'tsMsgId' | 'conversationId' | 'recipient_contact_id'>; outcome: AttemptOutcome },
 ): Promise<void> {
-  await writeLedger(deps, args.share, pairContact(args.contactKey, args.row.recipient_contact_id), args.row.tsMsgId, args.row.conversationId, args.outcome);
+  await writeLedger(deps, args.share, pairContactId(args.contactKey, args.row.recipient_contact_id), args.row.tsMsgId, args.row.conversationId, args.outcome);
 }

@@ -112,6 +112,7 @@ import { createSendAttemptsRepo, type SendAttemptRecord, type SendAttemptsRepo }
 import { retryRecipientKey } from '../src/services/retryChain.js';
 import {
   applyLaterAttempt,
+  pairContactId,
   projectSlot,
   wouldApply,
   type ApplyResult,
@@ -587,8 +588,9 @@ async function repairSlot(r: SlotRun): Promise<void> {
 
   // The pair's ledger row is read BEFORE this slot's writes: applyLaterAttempt
   // writes it too when the slot moves, and the apply's counters compare the
-  // row before with the row after - never a service's return.
-  const contactId = contactKey.startsWith('phone#') ? nonEmpty(newest.recipient_contact_id) : contactKey;
+  // row before with the row after - never a service's return. The pair's
+  // contact is the live writers' own rule (pairContactId).
+  const contactId = pairContactId(contactKey, nonEmpty(newest.recipient_contact_id));
   const before = contactId === undefined ? undefined : await repos.listingSends.getByKeyConsistent(share.unitId, contactId);
 
   // 4. THE SLOT.

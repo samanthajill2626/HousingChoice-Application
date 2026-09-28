@@ -9,6 +9,7 @@ import {
   applyLaterAttempt,
   applyLaterAttemptBounded,
   originalRowLedgerWrite,
+  pairContactId,
   projectSlot,
   wouldApply,
 } from '../src/services/shareAttemptOutcome.js';
@@ -111,6 +112,31 @@ describe('applyLaterAttempt', () => {
     const x = world({ latestAttempt: LATER, errorCode: '30007' });
     expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
     expect(x.slot()).toMatchObject({ status: 'delivered', latestAttempt: RETRY });
+  });
+  it("a move on the ORIGINAL's own key leaves NO latestAttempt - the pointer is absent while the original is the attempt the slot records (code review G2 / ADV-11) - the condition still names the recorded attempt, and a re-apply reads as already applied", async () => {
+    const x = world({ status: 'sent', errorCode: undefined });
+    const writes = vi.spyOn(x.deps.broadcasts, 'applyAttemptOutcome');
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: ROOT, outcome: { kind: 'delivered' } })).toBe('applied');
+    expect(x.slot()).toEqual({ status: 'delivered', conversationId: 'conv-1', tsMsgId: ROOT });
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(writes.mock.calls[0]![2]).toEqual({ status: 'sent', latestAttempt: undefined });
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: ROOT, outcome: { kind: 'delivered' } })).toBe('applied');
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(x.capture.atLevel(30).some((l) => String(l.msg).includes('already applied'))).toBe(true);
+    expect(x.share().stats).toMatchObject({ delivered: 1 });
+    // The original's delivery over a NEWER failed retry: the slot records the original again - no pointer - and the
+    // condition names the retry it replaced.
+    const y = world({ latestAttempt: RETRY, errorCode: '30007' });
+    const yWrites = vi.spyOn(y.deps.broadcasts, 'applyAttemptOutcome');
+    expect(await applyLaterAttempt(y.deps, { ...base, attemptKey: ROOT, outcome: { kind: 'delivered' } })).toBe('applied');
+    expect(y.slot()).toEqual({ status: 'delivered', conversationId: 'conv-1', tsMsgId: ROOT });
+    expect(yWrites.mock.calls[0]![2]).toEqual({ status: 'failed', latestAttempt: RETRY });
+    expect(projectSlot({ status: 'sent', conversationId: 'conv-1', tsMsgId: ROOT }, { attemptKey: ROOT, outcome: { kind: 'delivered' } })).not.toHaveProperty('latestAttempt');
+  });
+  it("pairContactId: the slot key when it is a contact id; the row's send-time holder for a phone-keyed slot; else none", () => {
+    expect(pairContactId('c1', 'c-other')).toBe('c1');
+    expect(pairContactId('phone#+15550002222', 'c-held')).toBe('c-held');
+    expect(pairContactId('phone#+15550002222', undefined)).toBeUndefined();
   });
   it('from sent (a lost original rollup): a newer attempt applies, and the same attempt moves sent -> sent-with-carrier -> delivered keeping its carrier instant', async () => {
     const x = world({ status: 'sent', errorCode: undefined });

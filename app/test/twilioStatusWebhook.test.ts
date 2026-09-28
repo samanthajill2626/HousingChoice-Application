@@ -371,6 +371,65 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     expect(world.emitted.filter((e) => e.event === 'broadcast.updated').length).toBe(emitsAfterFirst);
   });
 
+  it('broadcast rollup: a receipt for a share-RETRY row (broadcast_id, no slot of its own) gives up at INFO after the one re-load - never a WARN (retry-send-adoption R7, the one fenced line)', async () => {
+    // Since retry-send-adoption every retry of a share text carries the share's
+    // broadcast_id (R7), while the recipient slot still names the share's OWN
+    // row until share-skip Branch B teaches the rollup to follow retry_root. The
+    // miss is expected, so its give-up is not a prod warning line.
+    const { app, world, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 5 });
+    const shareRow = await seedOutbound(world, 'SMbcastroot', { broadcast_id: 'bcast-retry' });
+    const retryRow = await seedOutbound(world, 'SMbcastretry', {
+      broadcast_id: 'bcast-retry',
+      retry_of: shareRow.tsMsgId,
+      retry_root: shareRow.tsMsgId,
+    });
+    const now = new Date().toISOString();
+    world.broadcasts.set('bcast-retry', {
+      broadcastId: 'bcast-retry',
+      created_by: 'usr_test',
+      created_at: now,
+      status: 'sent',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'hi',
+      stats: { audience: 1, sent: 1, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      recipients: {
+        'c-1': { status: 'failed', conversationId: shareRow.conversationId, tsMsgId: shareRow.tsMsgId },
+      },
+      updated_at: now,
+    } satisfies BroadcastItem);
+    let reads = 0;
+    const realGetById = world.broadcastsRepo.getById.bind(world.broadcastsRepo);
+    world.broadcastsRepo.getById = async (id: string) => {
+      reads += 1;
+      return realGetById(id);
+    };
+
+    const res = await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: 'SMbcastretry', MessageStatus: 'delivered' }),
+    );
+    expect(res.status).toBe(200);
+    // The retry row's own status is recorded; the rollup looked twice and gave up.
+    expect((await world.messagesRepo.getByProviderSid('SMbcastretry'))?.delivery_status).toBe('delivered');
+    expect(reads).toBe(2);
+    const giveUps = capture.lines.filter((l) => String(l['msg']).includes('no matching recipient slot'));
+    expect(giveUps).toHaveLength(1);
+    expect(giveUps[0]).toMatchObject({
+      level: 30,
+      msg: 'broadcast delivery rollup: no matching recipient slot - ignored',
+      broadcastId: 'bcast-retry',
+      conversationId: retryRow.conversationId,
+    });
+    expect(String(giveUps[0]!['msg'])).toMatch(/^[ -~]+$/);
+    expect(capture.atLevel(WARN).filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+    // Nothing moved on the share: the slot, the stats and the live surfaces.
+    const bcast = world.broadcasts.get('bcast-retry')!;
+    expect(bcast.recipients['c-1']?.status).toBe('failed');
+    expect(bcast.stats.delivered).toBe(0);
+    expect(world.emitted.filter((e) => e.event === 'broadcast.updated')).toHaveLength(0);
+  });
+
   it('PERSISTENT unknown SID → one retried lookup, then ERROR (level 50, alarmed) + 200 ack, never a 500', async () => {
     const { app, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 10 });
     const res = await signedTwilioPost(

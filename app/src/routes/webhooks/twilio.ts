@@ -3901,7 +3901,7 @@ async function rollIntoBroadcast(
       ? Object.entries(reloaded.recipients ?? {}).find(([, r]) => matchesSlot(r))
       : undefined;
     if (!entry) {
-      log.warn({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot — ignored');
+      log.info({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot - ignored');
       return;
     }
   }

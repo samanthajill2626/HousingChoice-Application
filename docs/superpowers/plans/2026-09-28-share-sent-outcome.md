@@ -2,7 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 1** (2026-09-28, before adversarial plan review). This document is self-contained: every test and every code block a task needs is IN that task. Where a code block names a helper, that helper is defined in the task the block cites.
+**Revision 2** (2026-09-28, after adversarial plan review round 1 - two independent reviewers, 16 + 21 findings, all accepted; adjudications in `docs/superpowers/reviews/2026-09-27-share-sent-outcome/plan-review-r1-adjudications.md`). This document is self-contained: every test and every code block a task needs is IN that task. Where a code block names a helper, that helper is defined in the task the block cites.
+
+**Stage 1b's four interface facts are VERIFIED as built** (spec section 0's "first task"): `research-1b-as-built-findings.md`, headline and sections A-E - every retry append site stamps `retry_root` (hop cap 16) and a one-hop `broadcast_id`; `retry_outcome: 'unconfirmed'` is written at every WITHDRAW; the job's arms close the record first with no re-apply; the `retrychild#` family and the any-child-supersedes refusal exist. No correction task is needed; Task 1 is the first build task.
+
+**Test-helper facts every sketch below relies on** (read once; the sketches use them as written): `createLogCapture()` returns `{ stream, lines, atLevel }` and a logger is built with `createLogger({ level: 'info', destination: capture.stream })` (`app/test/helpers/logCapture.ts:14-38`, the idiom at `broadcastFanOut.test.ts:181`); `atLevel(n)` is an EXACT pino level match (error 50, warn 40, info 30). The in-memory world is `createFakeWorld()` and the webhook harness `makeWebhookHarness()` (`app/test/helpers/twilioWebhookHarness.ts:504`, `:4932`); the bus is `world.events`. `zeroStats()` takes no argument (`broadcastsRepo.ts:328`). A `BroadcastItem` literal needs `created_by`, `audience_filter` and `body_template` (`:168-214`) - the sketches write `{ ...baseShare, ... }` with a file-local `baseShare` that carries them. `broadcastsRepo.integration.test.ts` seeds through the repo's own `create` (`:53-70`); the sketches call it `putShare(item)`, a file-local helper the task defines as one `PutCommand` on the table. Call order is asserted with `mock.invocationCallOrder` (`broadcastFanOut.test.ts:2500-2503`).
 
 **Goal:** A property send (a `broadcast` row) tells one true story about whether each tenant got the property: a retry's outcome reaches the share slot by every path it can arrive, the composer's "Already sent" flag and every label, count, ledger row and milestone derive from one per-recipient state, and a Cameron-run repair brings existing rows in line.
 
@@ -25,7 +29,12 @@
 4. The "Not confirmed" pill takes the danger tone (the chip's tone, `StatChips.tsx`); the spec names the label only.
 5. A ledger entry stores `conversationId` beside its attempt key: D6 reads the attempt's row for a `pending` entry and a row is keyed by conversation + tsMsgId.
 6. D7's writer at an ORIGINAL row's rollup names the pair's contact from the row's own `recipient_contact_id` (RSW stamps it while the contact holds the number); a row without it (pre-RSW, or a number nobody held) writes no ledger entry and logs INFO. Same derivation as the pass, without a contact read.
-7. `retry_pending` is emitted by the rollup as a LOWER BOUND (its own recipient) and by nothing else; the results and list routes compute the true count. The pages merge an omitted count by keeping the last value and, for a finished share with a positive value, refetching that share's stats through `GET /api/broadcasts/:id/results?view=stats` (Cameron's ruling, spec section 9).
+7. `retry_pending` is emitted by the rollup as a LOWER BOUND (its own recipient) and by nothing else; the results and list routes compute the true count. The pages merge an omitted count by keeping the last value and, for a finished share with a positive value, refetching that share's stats through `GET /api/broadcasts/:id/results?view=stats` (Cameron's ruling, spec section 9). The RESULTS page additionally recounts `retry_pending` from its own rows' `retryDueAt` on its one-minute ticker, so its pill and chips never outlive a lapsed promise (the spec's "the results page ticks").
+8. The ledger row's change token is a random `shares_op` stamped by every `putShareMemory`, never `updated_at` (a millisecond ISO can collide; a seeded row has none). A row without the token - absent, or seeded - takes the condition `attribute_not_exists(shares_op)`.
+9. A counted ledger entry's `countedAt` is the ATTEMPT's own provider instant (the ISO in its key), never the write instant, so a delivery receipt does not move `sentAt` and the repair rewrites no dates; a seeded legacy entry keeps the row's own `sentAt`.
+10. `recordSend` is RETIRED (its only runtime caller was the fan-out; seeds write raw items): one ledger writer, `putShareMemory`, through `applyShareLedgerEntry`. An individual-only pair keeps `broadcastId` ABSENT (its seeded entry is keyed `individual`; the key never rides the wire).
+11. At the reconcile's two sites (the adoption hook, the unresolved-close arm) this branch's slot write is NOT swallowed: a throw is logged and propagates, so the check fails and its redelivery re-applies both writes (the re-apply the spec's D2 and section 0 depend on). Only the job's two arms use `guardWrite` (the job's contract).
+12. D1's send-attempt RECORD reads run only for the composer flag (`priorRecipientKeys`); the results, list and stats-only routes resolve states without them (the record only tells in flight from stranded, which those surfaces do not distinguish). Row and record reads run with bounded concurrency (8 at a time).
 
 ## Global Constraints
 
@@ -91,8 +100,8 @@ Modified files (one responsibility each):
 
 ## Work map (task ORDER = numbering; slices are review checkpoints)
 
-- **Slice 1 - foundations (no behavior change on any surface):** T1 order key + slot pointer + `applyAttemptOutcome` + `deriveBroadcastStats` opts + `getByIds` + cap; T2 D1 state service; T3 D7 ledger memory (repo, doubles, parity, readers filter, sparse note).
-- **Slice 2 - writers:** T4 `applyLaterAttempt` + `applyShareLedgerEntry` composition; T5 the webhook (retry rows routed, original-row ledger write, emit with promise); T6 the five 1b sites + deps wiring; T7 `recordPropertySent` (entry + milestone share id) and the adoption.
+- **Slice 1 - foundations (no surface changes its words; the one visible change is the cap, 1500 to 1000):** T1 order key + slot pointer + `applyAttemptOutcome` + `deriveBroadcastStats` opts + `getByIds` + cap; T2 D1 state service; T3 D7 ledger memory (repo, doubles, parity, readers filter, sparse note, `recordSend` retired).
+- **Slice 2 - writers, built in the order T4, T7, T5, T6:** T4 `applyLaterAttempt` + `applyShareLedgerEntry` composition; T7 `recordPropertySent` (entry + milestone share id) and the adoption - BEFORE the webhook, so no window exists in which the pass writes the old ledger shape beside the webhook's new one; T5 the webhook (retry rows routed, original-row ledger write, emit with promise); T6 the five 1b sites.
 - **Slice 3 - readers:** T8 the composer flag; T9 results + list routes (promise fields, `retry_pending`, `?view=stats`); T10 dashboard (types, labels, chips, hint, ticker, hook merges); T11 D5 recount; T12 D6 milestone words.
 - **Slice 4 - repair, e2e, close-out:** T13 the D8 script + RUNBOOK; T14 the e2e spec + rewritten pins + `selectors.md`; T15 issues, self-QA, drift report, gates, handback.
 
@@ -122,9 +131,10 @@ export const MAX_BROADCAST_RECIPIENTS = 1000;
 export interface AttemptOutcomeExpect { status: BroadcastRecipient['status']; latestAttempt: string | undefined }
 applyAttemptOutcome(broadcastId: string, contactKey: string, expect: AttemptOutcomeExpect,
   next: BroadcastRecipient, statsDelta: Partial<BroadcastStats>): Promise<{ applied: boolean; item?: BroadcastItem }>;
-getByIds(broadcastIds: string[]): Promise<Map<string, BroadcastItem>>;    // BatchGet, chunks of 100, missing ids absent
-export function deriveBroadcastStats(b: Pick<BroadcastItem, 'recipients' | 'stats'>, opts?: { retryPending?: number }): BroadcastStats;
+getByIds(broadcastIds: string[], opts?: { projection?: 'stats' }): Promise<Map<string, BroadcastItem>>;  // BatchGet, chunks of 100, unprocessed keys retried once then WARNed and absent; 'stats' projects broadcastId, status, unitId, recipients, stats only
+export function deriveBroadcastStats(b: Pick<BroadcastItem, 'recipients' | 'stats'>, opts?: { retryPending?: number; unconfirmedKeys?: ReadonlySet<string> }): BroadcastStats;
 // BroadcastStats gains: retry_pending?: number;  // a SUB-bucket of failed; present only when a caller supplied it
+// unconfirmedKeys: contactKeys whose D1 state is `unconfirmed` although the slot's code is not send_unconfirmed (the row says the chain ended unresolved): counted in `unconfirmed`, not `failed`. With no opts the function returns b.stats ITSELF for an empty map (the identity pin).
 
 // app/src/services/shareRecipientState.ts  (T2)
 export type RecipientState = 'reached' | 'pending' | 'unconfirmed' | 'in_flight' | 'stranded' | 'failed' | 'skipped';
@@ -145,33 +155,36 @@ export interface RecipientStateDeps {
   attempts: Pick<SendAttemptsRepo, 'get'>;
   now?: () => number; log: Logger;
 }
-export async function resolveRecipientStates(deps: RecipientStateDeps, share: BroadcastItem): Promise<Map<string, ClassifiedRecipient>>;  // keyed by contactKey
+export async function resolveRecipientStates(deps: RecipientStateDeps, share: BroadcastItem, opts?: { recordReads?: boolean }): Promise<Map<string, ClassifiedRecipient>>;  // keyed by contactKey; recordReads defaults FALSE (a queued slot of a finished share then reads `in_flight`, the safe side); reads run 8 at a time
 export function retryPendingCount(states: Map<string, ClassifiedRecipient>): number;
+export function unconfirmedByRow(states: Map<string, ClassifiedRecipient>, share: BroadcastItem): Set<string>;  // keys whose state is unconfirmed while the slot's code is not send_unconfirmed
+export function reachedCount(share: Pick<BroadcastItem, 'recipients' | 'stats'>): number;  // delivered + sent + sending, no reads
 export async function priorRecipientKeys(deps: RecipientStateDeps & { broadcasts: Pick<BroadcastsRepo, 'listByUnit'> }, unitId: string): Promise<Set<string>>;  // SAFE reading, every share of the unit; never throws (WARN + what it has)
 
 // app/src/repos/listingSendsRepo.ts  (T3)
 export type ShareLedgerState = 'counted' | 'pending' | 'unconfirmed' | 'failed';
-export interface ShareLedgerEntry { attempt: string; conversationId?: string; state: ShareLedgerState; by?: 'acceptance' | 'delivery'; countedAt?: string }
-// ListingSendItem gains:  counted?: boolean;  shares?: Record<string /* broadcastId */, ShareLedgerEntry>;
+export interface ShareLedgerEntry { attempt: string; conversationId?: string; state: ShareLedgerState; by?: 'acceptance' | 'delivery'; countedAt?: string /* the ATTEMPT's provider instant */ }
+// ListingSendItem: sentAt becomes OPTIONAL (removed while nothing counts); gains  counted?: boolean;  shares?: Record<string /* broadcastId | 'individual' */, ShareLedgerEntry>;  shares_op?: string (the change token)
 export interface ShareMemoryWrite { shares: Record<string, ShareLedgerEntry>; counted: boolean; sentAt: string | undefined; broadcastId: string | undefined }
 getByKeyConsistent(unitId: string, contactId: string): Promise<ListingSendItem | undefined>;
-putShareMemory(unitId: string, contactId: string, next: ShareMemoryWrite, expect: { updatedAt: string | undefined }): Promise<boolean>;  // false = condition failed
+putShareMemory(unitId: string, contactId: string, next: ShareMemoryWrite, expect: { token: string | undefined }): Promise<boolean>;  // false = condition failed; token undefined = attribute_not_exists(shares_op) (absent OR seeded row)
 getByKeys(pairs: Array<{ unitId: string; contactId: string }>): Promise<Map<string, ListingSendItem>>;  // key `${unitId}|${contactId}`
-// listByUnit / listByContact: rows with counted === false are FILTERED OUT
+// listByUnit / listByContact: rows with counted === false are FILTERED OUT; recordSend is REMOVED
 
 // app/src/services/shareLedger.ts  (T3)
 export type ShareLedgerOutcome = { kind: 'accepted' } | { kind: 'delivered' } | { kind: 'pending' } | { kind: 'failed' } | { kind: 'unconfirmed' };
-export function ledgerEntryFor(attempt: string, conversationId: string | undefined, outcome: ShareLedgerOutcome, nowIso: string): ShareLedgerEntry;
+export function ledgerEntryFor(attempt: string, conversationId: string | undefined, outcome: ShareLedgerOutcome): ShareLedgerEntry;  // countedAt = attemptKeyTimestampMs(attempt) as ISO for a counted entry
 export interface ShareLedgerDeps { listingSends: Pick<ListingSendsRepo, 'getByKeyConsistent' | 'putShareMemory'>; log: Logger; now?: () => Date }
 export async function applyShareLedgerEntry(deps: ShareLedgerDeps, args: { unitId: string; contactId: string; broadcastId: string; entry: ShareLedgerEntry }): Promise<'written' | 'refused' | 'lost'>;
 
 // app/src/services/shareAttemptOutcome.ts  (T4)
 export type AttemptOutcome =
-  | { kind: 'sent'; carrierSentAt?: string }
-  | { kind: 'delivered' }
+  | { kind: 'sent'; carrierSentAt?: string }        // carrier-confirmed when carrierSentAt is present; a bare accept otherwise
+  | { kind: 'delivered'; carrierSentAt?: string }
   | { kind: 'failed'; errorCode: string; retryDueAt?: string }
   | { kind: 'unresolved' };
 export interface LaterAttempt { broadcastId: string; conversationId: string; retryRoot: string; attemptKey: string; outcome: AttemptOutcome; recipientContactId?: string }
+// The pair's contact for the ledger: the slot key when it is a contact id; else recipientContactId (the send-time holder); else none (INFO, no entry).
 export interface ShareAttemptOutcomeDeps {
   broadcasts: Pick<BroadcastsRepo, 'getByIdConsistent' | 'applyAttemptOutcome'>;
   ledger: ShareLedgerDeps; events: EventBus; log: Logger; now?: () => number;
@@ -183,6 +196,7 @@ export async function originalRowLedgerWrite(deps: Pick<ShareAttemptOutcomeDeps,
 // app/src/repos/activityEventsRepo.ts  (T7)
 // RecordActivityEventInput gains: broadcastId?: string;   ActivityEventItem gains: broadcastId?: string
 ```
+
 
 ---
 
@@ -302,22 +316,22 @@ Expected: PASS (5 tests).
 
 - [ ] **Step 5: Write the failing repo integration test**
 
-`app/test/broadcastsRepoAttemptOutcome.integration.test.ts` (per-file DynamoDB Local database; copy the fixture and table setup of `app/test/broadcastsRepo.integration.test.ts:1-60` - read it first and use ITS helper names):
+`app/test/broadcastsRepoAttemptOutcome.integration.test.ts` (per-file DynamoDB Local database; copy the table setup of `app/test/broadcastsRepo.integration.test.ts:1-70` - it builds the repo with `createBroadcastsRepo` over the file's `doc`/`env`; the sketch's `putShare(item)` is a file-local helper: one `PutCommand` of `{ ...baseShare, ...item }` on `tableName('broadcasts', env)`, where `baseShare` carries the required `created_by`, `audience_filter`, `body_template`, `created_at`):
 
 ```ts
 // spec D2 / I3 / I4: the ONE slot write that may leave `failed` - conditioned
 // on the recorded attempt AND the status, carrying its stats delta.
 import { describe, expect, it } from 'vitest';
-// ...the file's own setup: createBroadcastsRepo over the per-file DynamoDB Local
-// database, a `seedBroadcast(item)` helper (read broadcastsRepo.integration.test.ts).
+import { zeroStats } from '../src/repos/broadcastsRepo.js';
 
 const ROOT = '2026-09-28T10:00:00.000Z#SM1';
 const RETRY = '2026-09-28T10:01:00.000Z#SM2';
+const stats1 = { ...zeroStats(), audience: 1 };
 
 describe('applyAttemptOutcome', () => {
   it('applies when the slot records no attempt (the original) and the status matches, and ADDs the delta in the same write', async () => {
-    await seedBroadcast({ broadcastId: 'b1', status: 'sent', recipients: { c1: { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: ROOT } },
-      stats: { ...zeroStats(1), failed: 1 } });
+    await putShare({ broadcastId: 'b1', status: 'sent', recipients: { c1: { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: ROOT } },
+      stats: { ...stats1, failed: 1 } });
     const res = await repo.applyAttemptOutcome('b1', 'c1', { status: 'failed', latestAttempt: undefined },
       { status: 'delivered', conversationId: 'conv-1', tsMsgId: ROOT, latestAttempt: RETRY }, { failed: -1, delivered: 1 });
     expect(res.applied).toBe(true);
@@ -325,15 +339,15 @@ describe('applyAttemptOutcome', () => {
     expect(res.item?.stats).toMatchObject({ failed: 0, delivered: 1 });
   });
   it('refuses when the recorded attempt moved (another writer won) - no stats change', async () => {
-    await seedBroadcast({ broadcastId: 'b2', status: 'sent', recipients: { c1: { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: ROOT, latestAttempt: RETRY } },
-      stats: { ...zeroStats(1), failed: 1 } });
+    await putShare({ broadcastId: 'b2', status: 'sent', recipients: { c1: { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: ROOT, latestAttempt: RETRY } },
+      stats: { ...stats1, failed: 1 } });
     const res = await repo.applyAttemptOutcome('b2', 'c1', { status: 'failed', latestAttempt: undefined },
       { status: 'delivered', conversationId: 'conv-1', tsMsgId: ROOT, latestAttempt: RETRY }, { failed: -1, delivered: 1 });
     expect(res.applied).toBe(false);
     expect((await repo.getByIdConsistent('b2'))?.stats.failed).toBe(1);
   });
   it('refuses when the status moved under it', async () => {
-    await seedBroadcast({ broadcastId: 'b3', status: 'sent', recipients: { c1: { status: 'delivered', conversationId: 'conv-1', tsMsgId: ROOT } }, stats: { ...zeroStats(1), delivered: 1 } });
+    await putShare({ broadcastId: 'b3', status: 'sent', recipients: { c1: { status: 'delivered', conversationId: 'conv-1', tsMsgId: ROOT } }, stats: { ...stats1, delivered: 1 } });
     const res = await repo.applyAttemptOutcome('b3', 'c1', { status: 'sent', latestAttempt: undefined },
       { status: 'failed', errorCode: '30007', conversationId: 'conv-1', tsMsgId: ROOT, latestAttempt: RETRY }, { sent: -1, failed: 1 });
     expect(res.applied).toBe(false);
@@ -347,9 +361,14 @@ describe('applyAttemptOutcome', () => {
 
 describe('getByIds', () => {
   it('returns the found items keyed by id and omits the missing ones', async () => {
-    await seedBroadcast({ broadcastId: 'g1', status: 'sent', recipients: {}, stats: zeroStats(0) });
+    await putShare({ broadcastId: 'g1', status: 'sent', recipients: {}, stats: zeroStats() });
     const m = await repo.getByIds(['g1', 'missing']);
     expect([...m.keys()]).toEqual(['g1']);
+  });
+  it('the stats projection carries recipients, stats, status and unitId but not the template', async () => {
+    const m = await repo.getByIds(['g1'], { projection: 'stats' });
+    expect(m.get('g1')).toMatchObject({ broadcastId: 'g1', status: 'sent' });
+    expect(m.get('g1')?.body_template).toBeUndefined();
   });
   it('an empty list reads nothing', async () => {
     expect((await repo.getByIds([])).size).toBe(0);
@@ -397,16 +416,17 @@ export const MAX_BROADCAST_RECIPIENTS = 1000;
 // deriveBroadcastStats (:270-325) signature and return:
 export function deriveBroadcastStats(
   b: Pick<BroadcastItem, 'recipients' | 'stats'>,
-  opts?: { retryPending?: number },
+  opts?: { retryPending?: number; unconfirmedKeys?: ReadonlySet<string> },
 ): BroadcastStats {
-  const pending = opts?.retryPending !== undefined ? { retry_pending: opts.retryPending } : {};
   const recipients = b.recipients ?? {};
   const keys = Object.keys(recipients);
-  if (keys.length === 0) return { ...b.stats, ...pending };
-  // ...the counting loop, unchanged...
+  if (keys.length === 0) return opts?.retryPending === undefined ? b.stats : { ...b.stats, retry_pending: opts.retryPending };  // the identity pin (deriveBroadcastStats.test.ts:26) holds without opts
+  // ...the counting loop, with ONE change in the `failed` arm:
+  //   if (slot.errorCode === SEND_UNCONFIRMED_CODE || opts?.unconfirmedKeys?.has(key)) unconfirmed += 1; else failed += 1;
   return {
     audience: keys.length, queued, sending, sent, delivered, failed, unconfirmed,
-    skipped_opted_out, skipped_no_consent, skipped_other, ...pending,
+    skipped_opted_out, skipped_no_consent, skipped_other,
+    ...(opts?.retryPending !== undefined && { retry_pending: opts.retryPending }),
   };
 }
 
@@ -425,8 +445,14 @@ export function deriveBroadcastStats(
     broadcastId: string, contactKey: string, expect: AttemptOutcomeExpect,
     next: BroadcastRecipient, statsDelta: Partial<BroadcastStats>,
   ): Promise<{ applied: boolean; item?: BroadcastItem }>;
-  /** share-sent-outcome D5: BatchGet by id (chunks of 100, unprocessed keys retried once); missing ids are absent. */
-  getByIds(broadcastIds: string[]): Promise<Map<string, BroadcastItem>>;
+  /**
+   * share-sent-outcome D5: BatchGet by id (chunks of 100; unprocessed keys are
+   * retried once, then WARNed with their ids and left absent). `projection:
+   * 'stats'` reads broadcastId, status, unitId, recipients, stats only (a
+   * share item can run to 300 KB; a page of them must stay under BatchGet's
+   * 16 MB response). Missing ids are absent.
+   */
+  getByIds(broadcastIds: string[], opts?: { projection?: 'stats' }): Promise<Map<string, BroadcastItem>>;
 
 export interface AttemptOutcomeExpect { status: BroadcastRecipient['status']; latestAttempt: string | undefined }
 
@@ -461,16 +487,20 @@ export interface AttemptOutcomeExpect { status: BroadcastRecipient['status']; la
       }
     },
 
-    async getByIds(broadcastIds) {
+    async getByIds(broadcastIds, opts) {
       const out = new Map<string, BroadcastItem>();
       const ids = [...new Set(broadcastIds)];
+      const projection = opts?.projection === 'stats'
+        ? { ProjectionExpression: 'broadcastId, #s, unitId, recipients, stats', ExpressionAttributeNames: { '#s': 'status' } }
+        : {};
       for (let i = 0; i < ids.length; i += 100) {
         let keys = ids.slice(i, i + 100).map((broadcastId) => ({ broadcastId }));
         for (let round = 0; round < 2 && keys.length > 0; round += 1) {
-          const res = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys } } }));
+          const res = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys, ...projection } } }));
           for (const item of (res.Responses?.[table] ?? []) as BroadcastItem[]) out.set(item.broadcastId, item);
           keys = (res.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ broadcastId: string }>;
         }
+        if (keys.length > 0) log.warn({ count: keys.length, broadcastIds: keys.map((k) => k.broadcastId) }, 'broadcasts getByIds: keys still unprocessed after one retry - left absent');
       }
       return out;
     },
@@ -488,11 +518,20 @@ In `app/test/deriveBroadcastStats.test.ts` (sum invariant at :118) add:
 
 ```ts
   it('retry_pending is absent unless supplied, and never joins the bucket sum', () => {
-    const b = { recipients: { c1: { status: 'failed' as const, errorCode: '30003' } }, stats: zeroStats(1) };
+    const b = { recipients: { c1: { status: 'failed' as const, errorCode: '30003' } }, stats: { ...zeroStats(), audience: 1 } };
     expect(deriveBroadcastStats(b).retry_pending).toBeUndefined();
     const withPending = deriveBroadcastStats(b, { retryPending: 1 });
     expect(withPending.retry_pending).toBe(1);
     expect(withPending.failed).toBe(1); // the sub-bucket does not shrink failed
+  });
+  it('an unconfirmedKeys entry moves a failed slot into unconfirmed (the row said its chain ended unresolved)', () => {
+    const b = { recipients: { c1: { status: 'failed' as const, errorCode: '30003' } }, stats: { ...zeroStats(), audience: 1 } };
+    expect(deriveBroadcastStats(b, { unconfirmedKeys: new Set(['c1']) })).toMatchObject({ failed: 0, unconfirmed: 1 });
+  });
+  it('the empty-map passthrough returns the persisted object itself when no option is supplied (the :26 pin), and a copy with retry_pending when one is', () => {
+    const persisted = zeroStats();
+    expect(deriveBroadcastStats({ recipients: {}, stats: persisted })).toBe(persisted);
+    expect(deriveBroadcastStats({ recipients: {}, stats: persisted }, { retryPending: 0 })).toEqual({ ...persisted, retry_pending: 0 });
   });
 ```
 
@@ -521,13 +560,14 @@ git commit -m "feat(broadcasts): the attempt order key, the slot's latestAttempt
 - Consumes: `BroadcastRecipient`, `BroadcastItem`, `BroadcastsRepo.listByUnit` (`broadcastsRepo.ts:388`, paged via `ListBroadcastsOpts.exclusiveStartKey`), `MessagesRepo.getByTsMsgIdConsistent` (`messagesRepo.ts:1526`), `SendAttemptsRepo.get` + `SendAttemptRecord` (`sendAttemptsRepo.ts:90-100`, `:360-363`), `SEND_ATTEMPT_CLEANUP_MS` (`:48`), `RETRY_SEND_WINDOW_MS`, `RETRY_PROMISE_GRACE_MS`, `RETRY_OUTCOME_UNCONFIRMED`, `isRetryPromiseLive` (`app/src/lib/retrySendWindow.ts:15`, `:29`, `:37`, `:99`), `RECONCILE_CHECK_DELAYS_MS` (`app/src/lib/sendOutcome.ts:30`), `SEND_UNCONFIRMED_CODE` (`:14`), `attemptKeyTimestampMs`, `isRowlessAttemptKey`, `retriedOfRowless` (Task 1).
 - Produces: the T2 block of the shared interfaces. State rules, verbatim from spec D1:
   - `skipped` -> `skipped`; `delivered` -> `reached`; `sent` -> `reached` (confirmed or not);
-  - `queued`: share `sending` -> `in_flight`; else the record: absent, `'unreadable'`-> see below, or `done` with `refused` | `rejected` | `enqueue_failed` | `redrive_refused` -> `stranded`; any other shape -> `in_flight`; a record read that failed (`'unreadable'`) -> `in_flight` (safe);
+  - `queued`: share `sending` -> `in_flight`; else the record fact: NOT READ (`facts.record === undefined`) -> `in_flight` (the safe side; only the composer flag reads records); read and absent (`null`) or `done` with `refused` | `rejected` | `enqueue_failed` | `redrive_refused` -> `stranded`; any other shape -> `in_flight`; a record read that failed (`'unreadable'`) -> `in_flight` (safe);
   - `failed` with `errorCode === SEND_UNCONFIRMED_CODE` -> `unconfirmed`;
   - `failed` with `errorCode === '30003'` and a row fact: `retryOutcome === 'unconfirmed'` -> `unconfirmed`; else `isRetryPromiseLive(retryDueAt, nowMs)` -> `pending`; else `failed`; a row read that failed (`'unreadable'`) -> `pending` (safe); no row fact supplied (outside the bound) -> `failed`;
   - any other `failed` -> `failed`.
   - `needsRowRead`: status `failed`, errorCode `30003`, and `attemptKeyTimestampMs(slot.latestAttempt ?? slot.tsMsgId)` within `RETRY_ROW_READ_BOUND_MS` of `nowMs` (a slot with no timestamp reads nothing). The row read is on `retriedOfRowless(key)` (a row-less marker reads the RETRIED row, which carries the outcome).
   - `needsRecordRead`: status `queued`, share not `sending`, and `Date.parse(share.created_at)` within `RECORD_READ_BOUND_MS`; the record is the BROADCAST owner's: `{ kind: 'broadcast', broadcastId, contactKey }`.
-  - `retryPendingCount` = the number of `pending` states. `priorRecipientKeys` = the union of contactKeys whose state satisfies `mayHaveReached`, over every page of `listByUnit(unitId)` (every stored status); a `listByUnit` failure logs WARN and returns what it has.
+  - `retryPendingCount` = the number of `pending` states. `unconfirmedByRow(states, share)` = the keys whose state is `unconfirmed` while the slot's `errorCode !== SEND_UNCONFIRMED_CODE` (the row said unresolved; the slot never learned it). `reachedCount(share)` = `delivered + sent + (sending ?? 0)` of `deriveBroadcastStats(share)` (no reads). `priorRecipientKeys` = the union of contactKeys whose state satisfies `mayHaveReached`, over every page of `listByUnit(unitId)` (every stored status), resolved WITH record reads; a `listByUnit` failure logs WARN and returns what it has.
+  - `resolveRecipientStates(deps, share, opts)`: record reads run ONLY with `opts.recordReads === true` (the composer flag); without them a queued slot of a finished share reads `in_flight` (the safe side - no record fact, and `classifyRecipient` maps `facts.record === undefined` for a non-sending share to `in_flight`... see the table: `record` absent means NOT READ, `null` means read and absent). Reads run with bounded concurrency (8 at a time) through a small `mapLimit` helper in the same file; each read's failure is caught per slot.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -543,9 +583,11 @@ import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 import { rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
 import {
   RECORD_READ_BOUND_MS, RETRY_ROW_READ_BOUND_MS, classifyRecipient, hasReached, mayHaveReached,
-  needsRecordRead, needsRowRead, priorRecipientKeys, resolveRecipientStates, retryPendingCount,
+  needsRecordRead, needsRowRead, priorRecipientKeys, reachedCount, resolveRecipientStates, retryPendingCount, unconfirmedByRow,
 } from '../src/services/shareRecipientState.js';
-import { createLogCapture } from './helpers/logCapture.js'; // the repo's capture helper - read its real path first
+import { createLogger } from '../src/lib/logger.js';            // read the real path of the app's pino factory (broadcastFanOut.test.ts:181 imports it)
+import { createLogCapture } from './helpers/logCapture.js';   // { stream, lines, atLevel }
+const captured = () => { const capture = createLogCapture(); return { capture, log: createLogger({ level: 'info', destination: capture.stream }) }; };
 
 const NOW = Date.parse('2026-09-28T12:00:00.000Z');
 const ROOT = '2026-09-28T11:50:00.000Z#SM1'; // 10 min old
@@ -562,8 +604,9 @@ describe('classifyRecipient - the state table', () => {
   it('queued in a sending share is in flight, whatever the record says', () => {
     expect(classifyRecipient(share('sending'), slot({ status: 'queued' }), {}, NOW)).toBe('in_flight');
   });
-  it('queued in a finished share: no record or a never-went record is stranded; any other record is in flight; an unreadable record is in flight', () => {
+  it('queued in a finished share: a record NOT READ is in flight (safe); read-and-absent or a never-went record is stranded; any other record is in flight; an unreadable record is in flight', () => {
     const q = slot({ status: 'queued' });
+    expect(classifyRecipient(share('failed'), q, {}, NOW)).toBe('in_flight');
     expect(classifyRecipient(share('failed'), q, { record: null }, NOW)).toBe('stranded');
     for (const outcome of ['refused', 'rejected', 'enqueue_failed', 'redrive_refused'] as const) {
       expect(classifyRecipient(share('failed'), q, { record: { state: 'done', outcome } as never }, NOW)).toBe('stranded');
@@ -621,39 +664,54 @@ describe('the read bounds', () => {
 describe('resolveRecipientStates and priorRecipientKeys', () => {
   const rows = new Map<string, { retry_due_at?: string; retry_outcome?: string }>();
   const records = new Map<string, { state: string; outcome?: string } | undefined>();
+  let recordReadCount = 0;
   const deps = (opts?: { rowThrows?: boolean; recordThrows?: boolean }) => {
-    const capture = createLogCapture();
+    const { capture, log } = captured();
     return {
       capture,
       deps: {
         messages: { async getByTsMsgIdConsistent(_c: string, ts: string) { if (opts?.rowThrows) throw new Error('boom'); const r = rows.get(ts); return r === undefined ? undefined : ({ tsMsgId: ts, ...r } as never); } },
-        attempts: { async get(owner: { contactKey: string }) { if (opts?.recordThrows) throw new Error('boom'); return records.get(owner.contactKey) as never; } },
-        now: () => NOW, log: capture.logger,
+        attempts: { async get(owner: { contactKey: string }) { recordReadCount += 1; if (opts?.recordThrows) throw new Error('boom'); return records.get(owner.contactKey) as never; } },
+        now: () => NOW, log,
       },
     };
   };
   const item = (status: BroadcastItem['status'], recipients: Record<string, BroadcastRecipient>): BroadcastItem =>
-    ({ broadcastId: 'b1', unitId: 'unit-1', status, created_at: '2026-09-28T11:49:00.000Z', recipients, stats: {} } as never);
+    ({ broadcastId: 'b1', unitId: 'unit-1', status, created_at: '2026-09-28T11:49:00.000Z', recipients, stats: {}, created_by: 'u', audience_filter: {}, body_template: 't' } as never);
 
-  it('reads a row only for young failed-30003 slots and a record only for queued slots of a finished share; the map carries the facts', async () => {
+  it('reads a row only for young failed-30003 slots; reads a record only when asked (recordReads) and only for queued slots of a finished share; the map carries the facts', async () => {
     rows.set(ROOT, { retry_due_at: '2026-09-28T12:05:00.000Z' });
     records.set('c3', undefined);
     const { deps: d } = deps();
-    const states = await resolveRecipientStates(d, item('failed', {
+    const share1 = item('failed', {
       c1: slot({ status: 'failed', errorCode: '30003' }),
       c2: slot({ status: 'failed', errorCode: '30007' }),
       c3: slot({ status: 'queued' }),
       c4: slot({ status: 'delivered' }),
-    }));
+    });
+    recordReadCount = 0;
+    const noRecords = await resolveRecipientStates(d, share1);
+    expect(recordReadCount).toBe(0);
+    expect(noRecords.get('c3')?.state).toBe('in_flight');
+    const states = await resolveRecipientStates(d, share1, { recordReads: true });
+    expect(recordReadCount).toBe(1);
     expect(states.get('c1')).toMatchObject({ state: 'pending', retryDueAt: '2026-09-28T12:05:00.000Z' });
     expect(states.get('c2')?.state).toBe('failed');
     expect(states.get('c3')?.state).toBe('stranded');
     expect(states.get('c4')?.state).toBe('reached');
     expect(retryPendingCount(states)).toBe(1);
+    expect(reachedCount(share1)).toBe(1);
+  });
+  it('unconfirmedByRow names a failed-30003 slot whose row says unresolved, never a send_unconfirmed slot', async () => {
+    rows.set(ROOT, { retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    const { deps: d } = deps();
+    const share1 = item('sent', { c1: slot({ status: 'failed', errorCode: '30003' }), c2: slot({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE }) });
+    const states = await resolveRecipientStates(d, share1);
+    expect([...unconfirmedByRow(states, share1)]).toEqual(['c1']);
   });
   it('a failed row read reads pending and is logged; a failed record read reads in flight', async () => {
     const { deps: d, capture } = deps({ rowThrows: true, recordThrows: true });
-    const states = await resolveRecipientStates(d, item('failed', { c1: slot({ status: 'failed', errorCode: '30003' }), c3: slot({ status: 'queued' }) }));
+    const states = await resolveRecipientStates(d, item('failed', { c1: slot({ status: 'failed', errorCode: '30003' }), c3: slot({ status: 'queued' }) }), { recordReads: true });
     expect(states.get('c1')?.state).toBe('pending');
     expect(states.get('c3')?.state).toBe('in_flight');
     expect(capture.atLevel(40).length).toBe(2);
@@ -699,6 +757,7 @@ Expected: FAIL - cannot resolve `../src/services/shareRecipientState.js`.
  */
 import type { Logger } from 'pino';
 import type { BroadcastItem, BroadcastRecipient, BroadcastsRepo } from '../repos/broadcastsRepo.js';
+import { deriveBroadcastStats } from '../repos/broadcastsRepo.js';
 import type { MessagesRepo } from '../repos/messagesRepo.js';
 import type { SendAttemptRecord, SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import { SEND_ATTEMPT_CLEANUP_MS } from '../repos/sendAttemptsRepo.js';
@@ -774,10 +833,20 @@ export interface RecipientStateDeps {
   log: Logger;
 }
 
-export async function resolveRecipientStates(deps: RecipientStateDeps, share: BroadcastItem): Promise<Map<string, ClassifiedRecipient>> {
+const READ_CONCURRENCY = 8;
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i]!); }
+  }));
+  return out;
+}
+
+export async function resolveRecipientStates(deps: RecipientStateDeps, share: BroadcastItem, opts?: { recordReads?: boolean }): Promise<Map<string, ClassifiedRecipient>> {
   const nowMs = (deps.now ?? Date.now)();
-  const out = new Map<string, ClassifiedRecipient>();
-  for (const [contactKey, slot] of Object.entries(share.recipients ?? {})) {
+  const entries = Object.entries(share.recipients ?? {});
+  const classified = await mapLimit(entries, READ_CONCURRENCY, async ([contactKey, slot]): Promise<[string, ClassifiedRecipient]> => {
     const facts: RecipientFacts = {};
     if (needsRowRead(slot, nowMs) && slot.conversationId !== undefined) {
       const key = retriedOfRowless(newestKey(slot)!);
@@ -789,7 +858,7 @@ export async function resolveRecipientStates(deps: RecipientStateDeps, share: Br
         facts.row = 'unreadable';
       }
     }
-    if (needsRecordRead(share, slot, nowMs)) {
+    if (opts?.recordReads === true && needsRecordRead(share, slot, nowMs)) {
       try {
         const rec = await deps.attempts.get({ kind: 'broadcast', broadcastId: share.broadcastId, contactKey });
         facts.record = rec ?? null;
@@ -800,20 +869,35 @@ export async function resolveRecipientStates(deps: RecipientStateDeps, share: Br
     }
     const state = classifyRecipient(share, slot, facts, nowMs);
     const row = facts.row !== undefined && facts.row !== 'unreadable' ? facts.row : undefined;
-    out.set(contactKey, {
+    return [contactKey, {
       state,
       ...(row?.retryDueAt !== undefined && { retryDueAt: row.retryDueAt }),
       ...(row?.retryOutcome !== undefined && { retryOutcome: row.retryOutcome }),
       ...(slot.latestAttempt !== undefined && { latestAttempt: slot.latestAttempt }),
-    });
-  }
-  return out;
+    }];
+  });
+  return new Map(classified);
 }
 
 export function retryPendingCount(states: Map<string, ClassifiedRecipient>): number {
   let n = 0;
   for (const s of states.values()) if (s.state === 'pending') n += 1;
   return n;
+}
+
+/** Keys whose D1 state is unconfirmed although the slot's own code is not send_unconfirmed (the row said the chain ended unresolved). */
+export function unconfirmedByRow(states: Map<string, ClassifiedRecipient>, share: Pick<BroadcastItem, 'recipients'>): Set<string> {
+  const keys = new Set<string>();
+  for (const [key, s] of states) {
+    if (s.state === 'unconfirmed' && share.recipients?.[key]?.errorCode !== SEND_UNCONFIRMED_CODE) keys.add(key);
+  }
+  return keys;
+}
+
+/** The STRICT reading over the slots, no reads: recipients the carrier accepted or delivered. */
+export function reachedCount(share: Pick<BroadcastItem, 'recipients' | 'stats'>): number {
+  const s = deriveBroadcastStats(share);
+  return s.delivered + s.sent + (s.sending ?? 0);
 }
 
 /** The composer flag's set (D1 SAFE reading) over every share of the unit. Never throws. */
@@ -824,7 +908,7 @@ export async function priorRecipientKeys(deps: RecipientStateDeps & { broadcasts
     do {
       const page = await deps.broadcasts.listByUnit(unitId, { ...(exclusiveStartKey !== undefined && { exclusiveStartKey }) });
       for (const share of page.items) {
-        const states = await resolveRecipientStates(deps, share);
+        const states = await resolveRecipientStates(deps, share, { recordReads: true });
         for (const [contactKey, s] of states) if (mayHaveReached(s.state)) keys.add(contactKey);
       }
       exclusiveStartKey = page.lastEvaluatedKey;
@@ -856,44 +940,61 @@ git commit -m "feat(broadcasts): the recipient state service - D1's state table,
 ### Task 3: The ledger's per-share memory (D7) - repo, service, doubles, parity, readers filter, the sparse note
 
 **Files:**
-- Modify: `app/src/repos/listingSendsRepo.ts` (`ListingSendItem` :36-51, `RecordSendInput` :74-81, the interface :83-96, `recordSend` :136-178, `listByUnit` :182-190, `listByContact` :192-202)
+- Modify: `app/src/repos/listingSendsRepo.ts` (`ListingSendItem` :36-51, the interface :83-96, `recordSend` :136-178 - kept, DEPRECATED, retired in Task 7 -, `listByUnit` :182-190, `listByContact` :192-202)
 - Create: `app/src/services/shareLedger.ts`
 - Modify: `app/test/helpers/twilioWebhookHarness.ts` (the ledger double :3085-3134)
 - Modify: `app/src/lib/tables.ts` (:418-424 `byContact`), `README.md:25` (the deviations table), `app/src/lib/seed/history.ts:995-1008` (skip `counted === false`)
 - Test: `app/test/listingSendsRepoShares.integration.test.ts`, `app/test/shareLedger.test.ts`, `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts` (parity), `app/test/tables.test.ts:86-96` (the sparse pin), `app/test/listingSendsApi.test.ts` (a `counted: false` row is absent from both GET routes)
 
 **Interfaces:**
-- Consumes: `queryAll`, `UpdateCommand`, `GetCommand`, `BatchGetCommand`, `ConditionalCheckFailedException`; `LEGACY_ATTEMPT_KEY`, `INDIVIDUAL_ATTEMPT_KEY`, `compareAttemptKeys` (Task 1).
-- Produces: the T3 block of the shared interfaces. `putShareMemory` SETs `shares`, `counted`, `updated_at = :now`, `created_at = if_not_exists(created_at, :now)`, `via = if_not_exists(via, :via)` (`'broadcast'`), and either SETs `sentAt` + `broadcastId` or REMOVEs them; condition `attribute_not_exists(unitId)` when `expect.updatedAt` is undefined (create), else `updated_at = :tok`. `applyShareLedgerEntry` rule (spec D7, verbatim): read consistently; a row with no `shares` seeds one entry from itself (`broadcastId` -> key `LEGACY_ATTEMPT_KEY`, state `counted` by `acceptance`, `countedAt = sentAt`; no `broadcastId` -> key `individual` with `INDIVIDUAL_ATTEMPT_KEY`); the existing entry for `broadcastId` is `counted` by `delivery` -> `refused` (terminal); else `compareAttemptKeys(entry.attempt, existing.attempt)`: `1` -> apply; `0` -> forward only (`counted`/acceptance -> `counted`/delivery | `pending` | `failed`; `pending` -> `failed`; anything else refused); `-1` -> apply only when the incoming entry is `counted` by `delivery`; no entry -> apply. Then `counted` = any entry `counted`; `sentAt`/`broadcastId` = the latest `countedAt` among counted entries (or absent); write; a lost condition re-reads and re-applies up to 3 times, then `'lost'` with ONE ERROR (ids only).
+- Consumes: `queryAll`, `UpdateCommand`, `GetCommand`, `BatchGetCommand`, `ConditionalCheckFailedException`, `randomUUID`; `LEGACY_ATTEMPT_KEY`, `INDIVIDUAL_ATTEMPT_KEY`, `compareAttemptKeys`, `attemptKeyTimestampMs` (Task 1).
+- Produces: the T3 block of the shared interfaces. `ListingSendItem.sentAt` becomes OPTIONAL (`sentAt?: string`; the readers and `toListingSendRow` treat an absent one as "not listed" - the projections only ever see counted rows). `putShareMemory` SETs `shares`, `counted`, `shares_op = :op` (a fresh `randomUUID()`), `updated_at = :now`, `created_at = if_not_exists(created_at, :now)`, `via = if_not_exists(via, :via)` (`'broadcast'`), and either SETs `sentAt` + `broadcastId` (both supplied) or SETs `sentAt` and REMOVEs `broadcastId` (an individual-only counted pair) or REMOVEs both (nothing counts); condition `attribute_not_exists(shares_op)` when `expect.token` is undefined (an absent row OR a seeded/legacy row with no token - both are "nobody has written memory here yet"; a concurrent first write loses the condition and re-reads), else `shares_op = :tok`. `applyShareLedgerEntry` rule (spec D7, verbatim): read consistently; a row with no `shares` seeds one entry from itself (`broadcastId` -> key = that id, attempt `LEGACY_ATTEMPT_KEY`, state `counted` by `acceptance`, `countedAt = row.sentAt`; no `broadcastId` -> key `individual`, attempt `INDIVIDUAL_ATTEMPT_KEY`); the existing entry for the share is `counted` by `delivery` -> `refused` (terminal); else `compareAttemptKeys(entry.attempt, existing.attempt)`: `1` -> apply; `0` -> forward only (`counted`/acceptance -> `counted`/delivery | `pending` | `failed`; `pending` -> `failed`; anything else refused); `-1` -> apply only when the incoming entry is `counted` by `delivery`; no entry -> apply. Then `counted` = any entry `counted`; `sentAt` = the latest `countedAt` among counted entries and `broadcastId` = that entry's key unless it is `individual`; write; a lost condition re-reads and re-applies up to 3 times, then `'lost'` with ONE ERROR (ids only). `ledgerEntryFor(attempt, conversationId, outcome)`: a counted entry's `countedAt` is `new Date(attemptKeyTimestampMs(attempt)).toISOString()` - the attempt's own provider instant; a synthetic key has none and is never passed here.
 
 - [ ] **Step 1: Write the failing repo test**
 
 `app/test/listingSendsRepoShares.integration.test.ts` (per-file database; copy the setup of `app/test/listingSendsRepo.integration.test.ts:1-55`):
 
 ```ts
-// spec D7: the ledger row's per-share memory, the counted flag, the sparse GSI by ABSENCE.
+// spec D7: the ledger row's per-share memory, the counted flag, the sparse GSI by ABSENCE, the change token.
 import { describe, expect, it } from 'vitest';
-// ...setup: createListingSendsRepo over the per-file database (read listingSendsRepo.integration.test.ts).
+import { PutCommand } from '@aws-sdk/lib-dynamodb';
+// ...setup: createListingSendsRepo over the per-file database (read listingSendsRepo.integration.test.ts); `doc`, `env`, `tableName`.
+
+const A1 = { attempt: '2026-09-28T10:00:00.000Z#SM1', state: 'counted' as const, by: 'acceptance' as const, countedAt: '2026-09-28T10:00:00.000Z' };
 
 describe('putShareMemory', () => {
-  it('creates the row when expect.updatedAt is undefined and the row is absent; a second create is refused', async () => {
-    const next = { shares: { b1: { attempt: '2026-09-28T10:00:00.000Z#SM1', state: 'counted' as const, by: 'acceptance' as const, countedAt: '2026-09-28T10:00:00.000Z' } }, counted: true, sentAt: '2026-09-28T10:00:00.000Z', broadcastId: 'b1' };
-    expect(await repo.putShareMemory('unit-1', 'c1', next, { updatedAt: undefined })).toBe(true);
-    expect(await repo.putShareMemory('unit-1', 'c1', next, { updatedAt: undefined })).toBe(false);
+  it('creates the row when no token is expected and none exists; a second tokenless write loses (the first write stamped the token)', async () => {
+    const next = { shares: { b1: A1 }, counted: true, sentAt: A1.countedAt, broadcastId: 'b1' };
+    expect(await repo.putShareMemory('unit-1', 'c1', next, { token: undefined })).toBe(true);
+    expect(await repo.putShareMemory('unit-1', 'c1', next, { token: undefined })).toBe(false);
     const row = await repo.getByKeyConsistent('unit-1', 'c1');
-    expect(row).toMatchObject({ counted: true, sentAt: '2026-09-28T10:00:00.000Z', broadcastId: 'b1', via: 'broadcast' });
+    expect(row).toMatchObject({ counted: true, sentAt: A1.countedAt, broadcastId: 'b1', via: 'broadcast' });
+    expect(typeof row?.shares_op).toBe('string');
   });
-  it('a token that matches wins; a stale token loses; nothing-counted REMOVES sentAt and broadcastId and the byContact index drops the row', async () => {
+  it('a SEEDED row (created_at, sentAt, no token - the full-world matrix shape) accepts a tokenless first write', async () => {
+    await doc.send(new PutCommand({ TableName: tableName('listing_sends', env), Item: { unitId: 'unit-mx', contactId: 'c-mx', sentAt: '2026-08-01T00:00:00.000Z', via: 'broadcast', broadcastId: 'b-old', created_at: '2026-08-01T00:00:00.000Z' } }));
+    expect(await repo.putShareMemory('unit-mx', 'c-mx', { shares: { 'b-old': { ...A1, attempt: '!legacy', countedAt: '2026-08-01T00:00:00.000Z' } }, counted: true, sentAt: '2026-08-01T00:00:00.000Z', broadcastId: 'b-old' }, { token: undefined })).toBe(true);
+  });
+  it('the current token wins; a stale token loses; nothing-counted REMOVES sentAt and broadcastId, the byContact index drops the row and the base reader filters it; a re-count brings it back', async () => {
     const first = await repo.getByKeyConsistent('unit-1', 'c1');
-    const cleared = { shares: { b1: { attempt: '2026-09-28T10:00:00.000Z#SM1', state: 'failed' as const } }, counted: false, sentAt: undefined, broadcastId: undefined };
-    expect(await repo.putShareMemory('unit-1', 'c1', cleared, { updatedAt: 'not-the-token' })).toBe(false);
-    expect(await repo.putShareMemory('unit-1', 'c1', cleared, { updatedAt: first!.updated_at })).toBe(true);
+    const cleared = { shares: { b1: { attempt: A1.attempt, state: 'failed' as const } }, counted: false, sentAt: undefined, broadcastId: undefined };
+    expect(await repo.putShareMemory('unit-1', 'c1', cleared, { token: 'not-the-token' })).toBe(false);
+    expect(await repo.putShareMemory('unit-1', 'c1', cleared, { token: first!.shares_op })).toBe(true);
     const row = await repo.getByKeyConsistent('unit-1', 'c1');
     expect(row?.counted).toBe(false);
     expect(row?.sentAt).toBeUndefined();
     expect(row?.broadcastId).toBeUndefined();
     expect(await repo.listByContact('c1')).toEqual([]);   // the GSI is sparse by absence
     expect(await repo.listByUnit('unit-1')).toEqual([]);  // the base-table reader filters counted === false
+    const recounted = { shares: { b1: { attempt: '2026-09-28T10:05:00.000Z#SM2', state: 'counted' as const, by: 'delivery' as const, countedAt: '2026-09-28T10:05:00.000Z' } }, counted: true, sentAt: '2026-09-28T10:05:00.000Z', broadcastId: 'b1' };
+    expect(await repo.putShareMemory('unit-1', 'c1', recounted, { token: row!.shares_op })).toBe(true);
+    expect((await repo.listByContact('c1')).map((r) => r.sentAt)).toEqual(['2026-09-28T10:05:00.000Z']);  // back in the index
+  });
+  it('an individual-only counted pair keeps sentAt and no broadcastId', async () => {
+    expect(await repo.putShareMemory('unit-2', 'c1', { shares: { individual: { attempt: '!individual', state: 'counted', by: 'acceptance', countedAt: '2026-07-01T00:00:00.000Z' } }, counted: true, sentAt: '2026-07-01T00:00:00.000Z', broadcastId: undefined }, { token: undefined })).toBe(true);
+    const row = await repo.getByKeyConsistent('unit-2', 'c1');
+    expect(row).toMatchObject({ counted: true, sentAt: '2026-07-01T00:00:00.000Z' });
+    expect(row?.broadcastId).toBeUndefined();
   });
   it('getByKeys returns the found pairs keyed unitId|contactId', async () => {
     const m = await repo.getByKeys([{ unitId: 'unit-1', contactId: 'c1' }, { unitId: 'unit-9', contactId: 'c9' }]);
@@ -902,64 +1003,47 @@ describe('putShareMemory', () => {
 });
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cd app; npx vitest run test/listingSendsRepoShares.integration.test.ts` - FAIL (`putShareMemory` is not a function).
+- [ ] **Step 2: Run it to verify it fails** - `cd app; npx vitest run test/listingSendsRepoShares.integration.test.ts` (`putShareMemory` is not a function).
 
 - [ ] **Step 3: Extend the repo**
-
-In `app/src/repos/listingSendsRepo.ts`:
 
 ```ts
 export type ShareLedgerState = 'counted' | 'pending' | 'unconfirmed' | 'failed';
 export interface ShareLedgerEntry {
-  /** The attempt this entry records (shareAttemptOrder key). */
+  /** The attempt this entry records (shareAttemptOrder key; `!legacy` / `!individual` for a seeded entry). */
   attempt: string;
   /** The attempt row's conversation (D6 reads the row for a pending entry). Absent on a seeded entry. */
   conversationId?: string;
   state: ShareLedgerState;
   /** For `counted`: what counted it. A DELIVERY-counted entry is terminal (I2). */
   by?: 'acceptance' | 'delivery';
-  /** ISO - the instant the entry last counted. */
+  /** ISO - the ATTEMPT's own provider instant (never a write instant): the row's sentAt follows the latest counted one. */
   countedAt?: string;
 }
-// ListingSendItem gains:
-  /** share-sent-outcome D7: true when any share entry counts. ABSENT on a legacy row = counted. */
-  counted?: boolean;
-  /** share-sent-outcome D7: per-share memory keyed by broadcastId (or `individual`). */
-  shares?: Record<string, ShareLedgerEntry>;
+// ListingSendItem: `sentAt?: string` (REMOVED while nothing counts); gains
+  counted?: boolean;                                  // ABSENT on a legacy row = counted
+  shares?: Record<string, ShareLedgerEntry>;          // keyed by broadcastId, or `individual`
+  shares_op?: string;                                 // the change token every putShareMemory stamps
 export interface ShareMemoryWrite { shares: Record<string, ShareLedgerEntry>; counted: boolean; sentAt: string | undefined; broadcastId: string | undefined }
 // interface gains:
   getByKeyConsistent(unitId: string, contactId: string): Promise<ListingSendItem | undefined>;
-  putShareMemory(unitId: string, contactId: string, next: ShareMemoryWrite, expect: { updatedAt: string | undefined }): Promise<boolean>;
+  putShareMemory(unitId: string, contactId: string, next: ShareMemoryWrite, expect: { token: string | undefined }): Promise<boolean>;
   getByKeys(pairs: Array<{ unitId: string; contactId: string }>): Promise<Map<string, ListingSendItem>>;
+// recordSend: kept this task with a `@deprecated share-sent-outcome T7 retires it` doc line; Task 7 deletes it.
 
-// implementation:
-    async getByKeyConsistent(unitId, contactId) {
-      const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { unitId, contactId }, ConsistentRead: true }));
-      return Item as ListingSendItem | undefined;
-    },
     async putShareMemory(unitId, contactId, next, expect) {
       const now = new Date().toISOString();
-      const sets = ['shares = :shares', 'counted = :counted', 'updated_at = :now', 'created_at = if_not_exists(created_at, :now)', 'via = if_not_exists(via, :via)'];
+      const sets = ['shares = :shares', 'counted = :counted', 'shares_op = :op', 'updated_at = :now', 'created_at = if_not_exists(created_at, :now)', 'via = if_not_exists(via, :via)'];
       const removes: string[] = [];
-      const values: Record<string, unknown> = { ':shares': next.shares, ':counted': next.counted, ':now': now, ':via': 'broadcast' };
-      if (next.sentAt !== undefined && next.broadcastId !== undefined) {
-        sets.push('sentAt = :sentAt', 'broadcastId = :bid');
-        values[':sentAt'] = next.sentAt;
-        values[':bid'] = next.broadcastId;
-      } else {
-        removes.push('sentAt', 'broadcastId');
-      }
-      let condition = 'attribute_not_exists(unitId)';
-      if (expect.updatedAt !== undefined) {
-        condition = 'updated_at = :tok';
-        values[':tok'] = expect.updatedAt;
-      }
+      const values: Record<string, unknown> = { ':shares': next.shares, ':counted': next.counted, ':op': randomUUID(), ':now': now, ':via': 'broadcast' };
+      if (next.sentAt !== undefined) { sets.push('sentAt = :sentAt'); values[':sentAt'] = next.sentAt; } else removes.push('sentAt');
+      if (next.broadcastId !== undefined) { sets.push('broadcastId = :bid'); values[':bid'] = next.broadcastId; } else removes.push('broadcastId');
+      let condition = 'attribute_not_exists(shares_op)';
+      if (expect.token !== undefined) { condition = 'shares_op = :tok'; values[':tok'] = expect.token; }
       try {
         await doc.send(new UpdateCommand({
           TableName: table, Key: { unitId, contactId },
-          UpdateExpression: `SET ${sets.join(', ')}` + (removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : ''),
+          UpdateExpression: `SET ${sets.join(', ')} REMOVE ${removes.join(', ')}`.replace(/ REMOVE $/, ''),
           ConditionExpression: condition, ExpressionAttributeValues: values,
         }));
         return true;
@@ -968,101 +1052,104 @@ export interface ShareMemoryWrite { shares: Record<string, ShareLedgerEntry>; co
         throw err;
       }
     },
-    async getByKeys(pairs) {
-      const out = new Map<string, ListingSendItem>();
-      for (let i = 0; i < pairs.length; i += 100) {
-        let keys = pairs.slice(i, i + 100).map((p) => ({ unitId: p.unitId, contactId: p.contactId }));
-        for (let round = 0; round < 2 && keys.length > 0; round += 1) {
-          const res = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys } } }));
-          for (const item of (res.Responses?.[table] ?? []) as ListingSendItem[]) out.set(`${item.unitId}|${item.contactId}`, item);
-          keys = (res.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ unitId: string; contactId: string }>;
-        }
-      }
-      return out;
-    },
-// listByUnit and listByContact: `.filter((r) => r.counted !== false)` on the queryAll result (the GSI already drops a row without sentAt; the base table needs the filter).
 ```
 
-A `counted: false` row keeps `via` and `created_at` (audit furniture); `sentAt` and `broadcastId` are what the readers and the index key on. `recordSend` (`:136-178`) is untouched: seeds and individual sends still use it, and a row it writes has no `shares` (a legacy row, seeded on first entry write).
+`getByKeyConsistent` (a `GetCommand` with `ConsistentRead: true`) and `getByKeys` (the Task 1 BatchGet idiom on `{ unitId, contactId }` keys, WARN on leftover unprocessed keys) as in revision 1; `listByUnit` and `listByContact` filter `r.counted !== false` on the `queryAll` result. `toListingSendRow` (:104-118) throws if `sentAt` is absent (it is only ever called on counted rows; the guard documents it).
 
 - [ ] **Step 4: Write the failing service test**
 
 `app/test/shareLedger.test.ts` (an in-memory fake of `getByKeyConsistent` / `putShareMemory` with a token; no DynamoDB):
 
 ```ts
-// spec D7: order-independence, legacy seeding, the delivery-terminal rule, the bounded re-read.
+// spec D7: order-independence, legacy seeding, the delivery-terminal rule, the attempt-instant clock, the bounded re-read.
 import { describe, expect, it } from 'vitest';
 import type { ListingSendItem, ShareMemoryWrite } from '../src/repos/listingSendsRepo.js';
 import { LEGACY_ATTEMPT_KEY } from '../src/lib/shareAttemptOrder.js';
 import { applyShareLedgerEntry, ledgerEntryFor } from '../src/services/shareLedger.js';
+import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const A1 = '2026-09-28T10:00:00.000Z#SM1';
 const A2 = '2026-09-28T10:01:00.000Z#SM2';
 function fakeLedger(seed?: Partial<ListingSendItem>, opts?: { loseFirst?: number }) {
-  let row: ListingSendItem | undefined = seed === undefined ? undefined : ({ unitId: 'u', contactId: 'c', via: 'broadcast', created_at: 't0', updated_at: 'tok0', ...seed } as ListingSendItem);
+  let row: ListingSendItem | undefined = seed === undefined ? undefined : ({ unitId: 'u', contactId: 'c', via: 'broadcast', created_at: 't0', updated_at: 't0', ...seed } as ListingSendItem);
   let losses = opts?.loseFirst ?? 0;
   let tick = 0;
   return {
     get row() { return row; },
     listingSends: {
       async getByKeyConsistent() { return row === undefined ? undefined : { ...row }; },
-      async putShareMemory(_u: string, _c: string, next: ShareMemoryWrite, expect: { updatedAt: string | undefined }) {
-        if (losses > 0) { losses -= 1; row = { ...(row as ListingSendItem), updated_at: `bump${tick++}` }; return false; }
-        if (expect.updatedAt === undefined ? row !== undefined : row?.updated_at !== expect.updatedAt) return false;
-        row = { ...(row ?? { unitId: 'u', contactId: 'c', via: 'broadcast', created_at: 'now' } as ListingSendItem), shares: next.shares, counted: next.counted, updated_at: `tok${tick++}`,
-          ...(next.sentAt !== undefined ? { sentAt: next.sentAt, broadcastId: next.broadcastId } : {}) };
-        if (next.sentAt === undefined) { delete row.sentAt; delete row.broadcastId; }
+      async putShareMemory(_u: string, _c: string, next: ShareMemoryWrite, expect: { token: string | undefined }) {
+        if (losses > 0) { losses -= 1; row = { ...(row ?? { unitId: 'u', contactId: 'c', via: 'broadcast', created_at: 'now', updated_at: 'now' } as ListingSendItem), shares_op: `bump${tick++}` }; return false; }
+        if (row?.shares_op !== expect.token) return false;
+        const base: ListingSendItem = row ?? ({ unitId: 'u', contactId: 'c', via: 'broadcast', created_at: 'now', updated_at: 'now' } as ListingSendItem);
+        row = { ...base, shares: next.shares, counted: next.counted, shares_op: `tok${tick++}` };
+        if (next.sentAt !== undefined) row.sentAt = next.sentAt; else delete row.sentAt;
+        if (next.broadcastId !== undefined) row.broadcastId = next.broadcastId; else delete row.broadcastId;
         return true;
       },
     },
   };
 }
-const deps = (f: ReturnType<typeof fakeLedger>) => ({ listingSends: f.listingSends, log: createLogCapture().logger });
+const captured = () => { const capture = createLogCapture(); return { capture, log: createLogger({ level: 'info', destination: capture.stream }) }; };
+const deps = (f: ReturnType<typeof fakeLedger>) => ({ listingSends: f.listingSends, log: captured().log });
+const write = (f: ReturnType<typeof fakeLedger>, broadcastId: string, attempt: string, kind: 'accepted' | 'delivered' | 'pending' | 'failed' | 'unconfirmed') =>
+  applyShareLedgerEntry(deps(f), { unitId: 'u', contactId: 'c', broadcastId, entry: ledgerEntryFor(attempt, 'conv', { kind }) });
 
 describe('applyShareLedgerEntry', () => {
   it('creates the row on the first write (callback before the pass) and refuses the pass''s later acceptance for the same attempt', async () => {
     const f = fakeLedger();
-    expect(await applyShareLedgerEntry(deps(f), { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'failed' }, 't1') })).toBe('written');
+    expect(await write(f, 'b1', A1, 'failed')).toBe('written');
     expect(f.row?.counted).toBe(false);
-    expect(await applyShareLedgerEntry(deps(f), { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'accepted' }, 't1') })).toBe('refused');
+    expect(await write(f, 'b1', A1, 'accepted')).toBe('refused');
   });
-  it('the same attempt moves forward: accepted -> delivered counts by delivery and is terminal; pending -> failed; never back', async () => {
+  it('a counted entry''s sentAt is the ATTEMPT''s provider instant, and a delivery of the same attempt does not move it', async () => {
     const f = fakeLedger();
-    const d = deps(f);
-    await applyShareLedgerEntry(d, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'accepted' }, 't1') });
-    expect(f.row).toMatchObject({ counted: true, sentAt: 't1', broadcastId: 'b1' });
-    expect(await applyShareLedgerEntry(d, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'delivered' }, 't2') })).toBe('written');
-    expect(f.row?.shares?.['b1']).toMatchObject({ state: 'counted', by: 'delivery' });
-    expect(await applyShareLedgerEntry(d, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A2, 'conv', { kind: 'failed' }, 't3') })).toBe('refused'); // terminal
+    await write(f, 'b1', A1, 'accepted');
+    expect(f.row).toMatchObject({ counted: true, sentAt: '2026-09-28T10:00:00.000Z', broadcastId: 'b1' });
+    expect(await write(f, 'b1', A1, 'delivered')).toBe('written');
+    expect(f.row?.shares?.['b1']).toMatchObject({ state: 'counted', by: 'delivery', countedAt: '2026-09-28T10:00:00.000Z' });
+    expect(f.row?.sentAt).toBe('2026-09-28T10:00:00.000Z');
+    expect(await write(f, 'b1', A2, 'failed')).toBe('refused'); // delivery is terminal
+  });
+  it('pending -> failed moves forward; pending -> pending again is refused; nothing moves back', async () => {
     const g = fakeLedger();
-    await applyShareLedgerEntry(deps(g), { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'pending' }, 't1') });
+    await write(g, 'b1', A1, 'pending');
     expect(g.row?.counted).toBe(false);
-    expect(await applyShareLedgerEntry(deps(g), { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'failed' }, 't2') })).toBe('written');
-    expect(await applyShareLedgerEntry(deps(g), { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'pending' }, 't3') })).toBe('refused');
+    expect(await write(g, 'b1', A1, 'failed')).toBe('written');
+    expect(await write(g, 'b1', A1, 'pending')).toBe('refused');
   });
-  it('a newer attempt replaces a failed entry and the pair counts again; an older attempt is refused unless it is a delivery', async () => {
+  it('a newer attempt replaces a failed entry and the pair counts again at the newer attempt''s instant; an older attempt is refused unless it is a delivery', async () => {
     const f = fakeLedger();
-    const d = deps(f);
-    await applyShareLedgerEntry(d, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'failed' }, 't1') });
-    expect(await applyShareLedgerEntry(d, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A2, 'conv', { kind: 'accepted' }, 't2') })).toBe('written');
-    expect(f.row).toMatchObject({ counted: true, sentAt: 't2' });
-    expect(await applyShareLedgerEntry(d, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'failed' }, 't3') })).toBe('refused');
-    expect(await applyShareLedgerEntry(d, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'delivered' }, 't4') })).toBe('written');
-    expect(f.row?.shares?.['b1']).toMatchObject({ attempt: A1, by: 'delivery' });
+    await write(f, 'b1', A1, 'failed');
+    expect(await write(f, 'b1', A2, 'accepted')).toBe('written');
+    expect(f.row).toMatchObject({ counted: true, sentAt: '2026-09-28T10:01:00.000Z' });
+    expect(await write(f, 'b1', A1, 'failed')).toBe('refused');
+    expect(await write(f, 'b1', A1, 'delivered')).toBe('written');
+    expect(f.row?.shares?.['b1']).toMatchObject({ attempt: A1, by: 'delivery', countedAt: '2026-09-28T10:00:00.000Z' });
   });
-  it('a legacy row seeds its own share as a counted entry that survives a newer share''s failure', async () => {
+  it('a legacy row seeds its own share as a counted entry at the row''s own sentAt, which survives a newer share''s failure', async () => {
     const f = fakeLedger({ sentAt: '2026-09-01T00:00:00.000Z', broadcastId: 'b-old' });
-    await applyShareLedgerEntry(deps(f), { unitId: 'u', contactId: 'c', broadcastId: 'b-new', entry: ledgerEntryFor(A1, 'conv', { kind: 'failed' }, 't1') });
-    expect(f.row?.shares?.['b-old']).toMatchObject({ attempt: LEGACY_ATTEMPT_KEY, state: 'counted' });
+    await write(f, 'b-new', A1, 'failed');
+    expect(f.row?.shares?.['b-old']).toMatchObject({ attempt: LEGACY_ATTEMPT_KEY, state: 'counted', countedAt: '2026-09-01T00:00:00.000Z' });
     expect(f.row).toMatchObject({ counted: true, sentAt: '2026-09-01T00:00:00.000Z', broadcastId: 'b-old' });
   });
+  it('an individual-only legacy row seeds an `individual` entry; when a share also counts, sentAt and broadcastId follow the latest counted entry', async () => {
+    const f = fakeLedger({ sentAt: '2026-07-01T00:00:00.000Z' });
+    await write(f, 'b1', A1, 'accepted');
+    expect(f.row?.shares?.['individual']).toMatchObject({ state: 'counted', countedAt: '2026-07-01T00:00:00.000Z' });
+    expect(f.row).toMatchObject({ sentAt: '2026-09-28T10:00:00.000Z', broadcastId: 'b1' });
+    await write(f, 'b1', A1, 'failed');
+    expect(await write(f, 'b1', A2, 'failed')).toBe('written');
+    expect(f.row).toMatchObject({ counted: true, sentAt: '2026-07-01T00:00:00.000Z' });
+    expect(f.row?.broadcastId).toBeUndefined();
+  });
   it('a lost condition re-reads and re-applies; past the bound it reports lost with one ERROR', async () => {
-    const f = fakeLedger({ shares: {}, counted: false }, { loseFirst: 2 });
-    expect(await applyShareLedgerEntry(deps(f), { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'accepted' }, 't1') })).toBe('written');
-    const g = fakeLedger({ shares: {}, counted: false }, { loseFirst: 10 });
-    const capture = createLogCapture();
-    expect(await applyShareLedgerEntry({ listingSends: g.listingSends, log: capture.logger }, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'accepted' }, 't1') })).toBe('lost');
+    const f = fakeLedger({ shares: {}, counted: false, shares_op: 't' }, { loseFirst: 2 });
+    expect(await write(f, 'b1', A1, 'accepted')).toBe('written');
+    const g = fakeLedger({ shares: {}, counted: false, shares_op: 't' }, { loseFirst: 10 });
+    const { capture, log } = captured();
+    expect(await applyShareLedgerEntry({ listingSends: g.listingSends, log }, { unitId: 'u', contactId: 'c', broadcastId: 'b1', entry: ledgerEntryFor(A1, 'conv', { kind: 'accepted' }) })).toBe('lost');
     expect(capture.atLevel(50).length).toBe(1);
   });
 });
@@ -1076,17 +1163,20 @@ describe('applyShareLedgerEntry', () => {
 /** share-sent-outcome D7: the listing-send ledger follows the rule - only reached attempts count; every write is a conditional read-modify-write on the row's change token. */
 import type { Logger } from 'pino';
 import type { ListingSendItem, ListingSendsRepo, ShareLedgerEntry, ShareMemoryWrite } from '../repos/listingSendsRepo.js';
-import { INDIVIDUAL_ATTEMPT_KEY, LEGACY_ATTEMPT_KEY, compareAttemptKeys } from '../lib/shareAttemptOrder.js';
+import { INDIVIDUAL_ATTEMPT_KEY, LEGACY_ATTEMPT_KEY, attemptKeyTimestampMs, compareAttemptKeys } from '../lib/shareAttemptOrder.js';
 
 export type ShareLedgerOutcome = { kind: 'accepted' } | { kind: 'delivered' } | { kind: 'pending' } | { kind: 'failed' } | { kind: 'unconfirmed' };
-export interface ShareLedgerDeps { listingSends: Pick<ListingSendsRepo, 'getByKeyConsistent' | 'putShareMemory'>; log: Logger; now?: () => Date }
+export interface ShareLedgerDeps { listingSends: Pick<ListingSendsRepo, 'getByKeyConsistent' | 'putShareMemory'>; log: Logger }
 const MAX_REAPPLY = 3;
+const INDIVIDUAL_KEY = 'individual';
 
-export function ledgerEntryFor(attempt: string, conversationId: string | undefined, outcome: ShareLedgerOutcome, nowIso: string): ShareLedgerEntry {
+export function ledgerEntryFor(attempt: string, conversationId: string | undefined, outcome: ShareLedgerOutcome): ShareLedgerEntry {
   const base = { attempt, ...(conversationId !== undefined && { conversationId }) };
+  const at = attemptKeyTimestampMs(attempt);
+  const countedAt = at === undefined ? undefined : new Date(at).toISOString();
   switch (outcome.kind) {
-    case 'accepted': return { ...base, state: 'counted', by: 'acceptance', countedAt: nowIso };
-    case 'delivered': return { ...base, state: 'counted', by: 'delivery', countedAt: nowIso };
+    case 'accepted': return { ...base, state: 'counted', by: 'acceptance', ...(countedAt !== undefined && { countedAt }) };
+    case 'delivered': return { ...base, state: 'counted', by: 'delivery', ...(countedAt !== undefined && { countedAt }) };
     case 'pending': return { ...base, state: 'pending' };
     case 'failed': return { ...base, state: 'failed' };
     case 'unconfirmed': return { ...base, state: 'unconfirmed' };
@@ -1097,8 +1187,9 @@ function seeded(row: ListingSendItem | undefined): Record<string, ShareLedgerEnt
   if (row === undefined) return {};
   if (row.shares !== undefined) return { ...row.shares };
   if (row.sentAt === undefined) return {};
-  const key = row.broadcastId ?? 'individual';
-  return { [key]: { attempt: row.broadcastId !== undefined ? LEGACY_ATTEMPT_KEY : INDIVIDUAL_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: row.sentAt } };
+  return row.broadcastId !== undefined
+    ? { [row.broadcastId]: { attempt: LEGACY_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: row.sentAt } }
+    : { [INDIVIDUAL_KEY]: { attempt: INDIVIDUAL_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: row.sentAt } };
 }
 
 /** Whether `next` may replace `existing` for the same share (spec D7 order rule). */
@@ -1119,8 +1210,8 @@ function summarize(shares: Record<string, ShareLedgerEntry>): Pick<ShareMemoryWr
     if (e.state !== 'counted' || e.countedAt === undefined) continue;
     if (latest === undefined || e.countedAt > latest.at) latest = { key, at: e.countedAt };
   }
-  return latest === undefined ? { counted: false, sentAt: undefined, broadcastId: undefined }
-    : { counted: true, sentAt: latest.at, broadcastId: latest.key === 'individual' ? undefined : latest.key };
+  if (latest === undefined) return { counted: false, sentAt: undefined, broadcastId: undefined };
+  return { counted: true, sentAt: latest.at, broadcastId: latest.key === INDIVIDUAL_KEY ? undefined : latest.key };
 }
 
 export async function applyShareLedgerEntry(deps: ShareLedgerDeps, args: { unitId: string; contactId: string; broadcastId: string; entry: ShareLedgerEntry }): Promise<'written' | 'refused' | 'lost'> {
@@ -1130,32 +1221,26 @@ export async function applyShareLedgerEntry(deps: ShareLedgerDeps, args: { unitI
     const shares = seeded(row);
     if (!mayReplace(shares[args.broadcastId], args.entry)) return 'refused';
     shares[args.broadcastId] = args.entry;
-    const summary = summarize(shares);
-    // An individual-only pair keeps its broadcastId absent but its sentAt counted.
-    const next: ShareMemoryWrite = { shares, ...summary, broadcastId: summary.counted && summary.broadcastId === undefined && row?.broadcastId === undefined ? undefined : summary.broadcastId };
-    if (summary.counted && next.broadcastId === undefined) next.broadcastId = 'individual';
-    const written = await deps.listingSends.putShareMemory(args.unitId, args.contactId, next, { updatedAt: row?.updated_at });
-    if (written) return 'written';
+    const next: ShareMemoryWrite = { shares, ...summarize(shares) };
+    if (await deps.listingSends.putShareMemory(args.unitId, args.contactId, next, { token: row?.shares_op })) return 'written';
   }
   deps.log.error(ids, 'share ledger: the entry write lost its condition past the re-read bound - the repair heals it');
   return 'lost';
 }
 ```
 
-The `individual` special case above is awkward; the builder simplifies it: `summarize` returns `broadcastId: latest.key` and the repo's `putShareMemory` writes whatever string it gets (the seeded individual entry's key is `individual`, and `listByContact`'s readers already tolerate a `broadcastId` that names no share). Keep the tests as the contract.
-
 - [ ] **Step 6: Run both, the parity, the pins; typecheck**
 
-Mirror `getByKeyConsistent`, `putShareMemory` (with an `updated_at` token), `getByKeys`, `counted`/`shares` and the readers' filter in the harness double (:3085-3134); add a parity case beside `twilioWebhookHarnessRepoAdditions.integration.test.ts:735-814` running Step 1's three cases through both. In `app/src/lib/tables.ts:418-424` add `sparse: true` to `byContact` with a one-line comment (`share-sent-outcome D7: sentAt is REMOVED when no share counts`); extend `app/test/tables.test.ts:86-96` to pin it; add the row to the README deviations table (`README.md:25`, the `tables.ts:17-19` convention). In `app/src/lib/seed/history.ts:995-1008` skip a row with `counted === false` (no seed has one; the guard documents the contract). In `app/test/listingSendsApi.test.ts` add: a row written `counted: false` through `putShareMemory` is absent from `GET /api/contacts/:id/listings-sent` and `GET /api/units/:id/recipients`.
+Mirror `getByKeyConsistent`, `putShareMemory` (with the `shares_op` token), `getByKeys`, the optional `sentAt`, `counted`/`shares` and the readers' filter in the harness double (:3085-3134); add a parity case beside `twilioWebhookHarnessRepoAdditions.integration.test.ts:735-814` running Step 1's first three cases through both. In `app/src/lib/tables.ts:418-424` add `sparse: true` to `byContact` with a one-line comment (`share-sent-outcome D7: sentAt is REMOVED when no share counts`); extend `app/test/tables.test.ts:86-96` to pin it; add the row to the README deviations table (`README.md:25`, the `tables.ts:17-19` convention). In `app/src/lib/seed/history.ts:995-1008` skip a row with `counted === false` or no `sentAt` (no seed has one; the guard documents the contract). In `app/test/listingSendsApi.test.ts` add: a row written `counted: false` through `putShareMemory` is absent from `GET /api/contacts/:id/listings-sent` and `GET /api/units/:id/recipients`.
 
-Run: `cd app; npx vitest run test/listingSendsRepoShares.integration.test.ts test/shareLedger.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/tables.test.ts test/listingSendsApi.test.ts test/seedHistory.test.ts test/genTables.test.ts` - PASS. `npm run typecheck` - exit 0.
+Run: `cd app; npx vitest run test/listingSendsRepoShares.integration.test.ts test/shareLedger.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/tables.test.ts test/listingSendsApi.test.ts test/seedHistory.test.ts test/genTables.test.ts test/listingSendsRepo.integration.test.ts` - PASS (the last file's `recordSend` cases still pass: the method is only deprecated here). `npm run typecheck` - exit 0 (the optional `sentAt` may surface readers that assumed a string: `toListingSendRow` and the seed history are the two; fix them in this task).
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git status
 git add app/src/repos/listingSendsRepo.ts app/src/services/shareLedger.ts app/test/helpers/twilioWebhookHarness.ts app/src/lib/tables.ts README.md app/src/lib/seed/history.ts app/test/listingSendsRepoShares.integration.test.ts app/test/shareLedger.test.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/tables.test.ts app/test/listingSendsApi.test.ts
-git commit -m "feat(ledger): per-share memory, the counted flag and the sparse byContact index; applyShareLedgerEntry - the order rule, legacy seeding, delivery-terminal, the bounded re-read (share-sent-outcome T3)"
+git commit -m "feat(ledger): per-share memory, the counted flag, a change token and the sparse byContact index; applyShareLedgerEntry - the order rule, legacy seeding, delivery-terminal, the attempt-instant clock, the bounded re-read (share-sent-outcome T3)"
 ```
 
 ---
@@ -1164,19 +1249,19 @@ git commit -m "feat(ledger): per-share memory, the counted flag and the sparse b
 
 **Files:**
 - Create: `app/src/services/shareAttemptOutcome.ts`
-- Test: `app/test/shareAttemptOutcome.test.ts` (the harness double from Task 1 as the broadcasts repo; the Task 3 ledger fake)
+- Test: `app/test/shareAttemptOutcome.test.ts` (the in-memory world `createFakeWorld()` from `app/test/helpers/twilioWebhookHarness.ts:504` as the broadcasts and ledger repos - its doubles from Tasks 1 and 3; `world.events` is the bus, :302)
 
 **Interfaces:**
-- Consumes: `applyAttemptOutcome`, `getByIdConsistent` (Task 1); `applyShareLedgerEntry`, `ledgerEntryFor` (Task 3); `deriveBroadcastStats`; `compareAttemptKeys`, `isRowlessAttemptKey` (Task 1); `SEND_UNCONFIRMED_CODE`; `isRetryPromiseLive`; `EventBus` (`app/src/lib/events.ts`) and the `broadcast.updated` payload shape `{ broadcastId, status, stats }` (`:146-150`).
+- Consumes: `applyAttemptOutcome`, `getByIdConsistent` (Task 1); `applyShareLedgerEntry`, `ledgerEntryFor` (Task 3); `deriveBroadcastStats`; `compareAttemptKeys` (Task 1); `SEND_UNCONFIRMED_CODE`; `isRetryPromiseLive`; `EventBus` (`app/src/lib/events.ts`) and the `broadcast.updated` payload shape `{ broadcastId, status, stats }` (`:146-150`).
 - Produces: the T4 block of the shared interfaces. The D2 rule, verbatim:
   1. read the share consistently; none -> `'no_broadcast'` (WARN). Find the slot whose `conversationId === input.conversationId && tsMsgId === input.retryRoot`; none -> `'no_slot'` (the CALLER picks the level: ERROR for a retry row, WARN otherwise).
   2. `current = slot.latestAttempt ?? slot.tsMsgId`; `cmp = compareAttemptKeys(input.attemptKey, current)`.
-  3. refuse when `slot.status` is `delivered` or `skipped`; refuse an older attempt (`cmp === -1`) unless `outcome.kind === 'delivered'`; for the same attempt (`cmp === 0`) allow only forward moves: from `sent` to `delivered` or `failed`, or `sent` -> `sent` gaining `carrierSentAt`; everything else refused (a row-less marker re-applied is a no-op refusal).
-  4. `next`: `sent` -> `{ status: 'sent', carrierSentAt? }`; `delivered` -> `{ status: 'delivered' }`; `failed` -> `{ status: 'failed', errorCode }`; `unresolved` -> `{ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE }`; always `conversationId`, `tsMsgId` (the ORIGINAL's), and `latestAttempt = input.attemptKey` (for the delivered-older exception too: a delivered slot is terminal, so the pointer's ordering role ends there).
+  3. refuse unless `slot.status` is `failed` or `sent` (never from `queued`, `delivered`, `skipped` - spec D2/I3); refuse an older attempt (`cmp === -1`) unless `outcome.kind === 'delivered'`; for the same attempt (`cmp === 0`) allow only forward moves from `sent`: to `delivered`, to `failed`, or `sent` -> `sent` gaining `carrierSentAt`; everything else refused (a row-less marker re-applied is a no-op refusal; a same-attempt move from `failed` is refused - failed is terminal in the message machine).
+  4. `next`: `sent` -> `{ status: 'sent', carrierSentAt? }`; `delivered` -> `{ status: 'delivered', carrierSentAt? }` (the OUTCOME's instant; for the same attempt the slot's existing `carrierSentAt` is kept when the outcome carries none); `failed` -> `{ status: 'failed', errorCode }`; `unresolved` -> `{ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE }`; always `conversationId`, `tsMsgId` (the ORIGINAL's), and `latestAttempt = input.attemptKey`. A NEWER attempt replaces the carrier instant (spec D2): it never inherits the previous attempt's `carrierSentAt`.
   5. the delta: persisted buckets are `queued | sent | delivered | failed | unconfirmed` (`bucketOf(slot)`: `failed` with `SEND_UNCONFIRMED_CODE` is `unconfirmed`); `{ [from]: -1, [to]: +1 }` when they differ.
   6. write with `expect = { status: slot.status, latestAttempt: slot.latestAttempt }`; a refused condition re-reads and re-decides up to 3 times (the loser re-applies: a retry's `failed` that lost to its own `sent` wins on the second pass), then `'lost'` with ONE WARN carrying the ids.
-  7. on `applied`: the ledger entry for the pair (`recipientContactId` = `input.recipientContactId ?? (contactKey when it is not a phone# key)`; none -> INFO, no write): `delivered` -> `delivered`; `sent` -> `accepted`; `failed` with a live `retryDueAt` -> `pending`; `failed` -> `failed`; `unresolved` -> `unconfirmed`; the entry's `attempt` = `input.attemptKey`, `conversationId` = `input.conversationId`; only when the share has a `unitId`. Then emit `broadcast.updated` with `deriveBroadcastStats(item, { retryPending: 1 })` when the outcome is a `failed` with a live promise, else `deriveBroadcastStats(item)` (the count stays UNSET).
-- `originalRowLedgerWrite`: the same entry mapping for an ORIGINAL row's receipt (`attempt` = `row.tsMsgId`), contact = `row.recipient_contact_id`; absent -> INFO `share ledger: original row carries no recipient contact - no ledger entry` and return; no `unitId` -> return.
+  7. on `applied`: the ledger entry for the pair. The pair's contact (spec D7): the slot key when it is a contact id (not `phone#...`); else `input.recipientContactId` (the send-time holder the row recorded); else INFO and no write. `delivered` -> `delivered`; `sent` -> `accepted`; `failed` with a live `retryDueAt` -> `pending`; `failed` -> `failed`; `unresolved` -> `unconfirmed`; the entry's `attempt` = `input.attemptKey`, `conversationId` = `input.conversationId`; only when the share has a `unitId`. Then emit `broadcast.updated` with `deriveBroadcastStats(item, { retryPending: 1 })` when the outcome is a `failed` with a live promise, else `deriveBroadcastStats(item)` (the count stays UNSET).
+- `originalRowLedgerWrite`: the same entry mapping for an ORIGINAL row's receipt (`attempt` = `row.tsMsgId`), contact = the slot key when a contact id, else `row.recipient_contact_id`; none -> INFO `share ledger: no contact for the pair - no ledger entry` and return; no `unitId` -> return. It takes the slot key (the caller found the slot).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1185,57 +1270,72 @@ git commit -m "feat(ledger): per-share memory, the counted flag and the sparse b
 ```ts
 // spec D2: one attempt-ordered transition, every refusal, every allowed move,
 // the lost-condition re-apply, the delivered-at-any-age exception, the stats
-// delta, the ledger call and the emit - through all three outcome kinds.
+// delta, the ledger call and the emit - through all outcome kinds.
 import { describe, expect, it } from 'vitest';
-import { createTwilioWebhookHarness } from './helpers/twilioWebhookHarness.js'; // read the helper's real export name and world shape
+import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
 import { rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
 import { applyLaterAttempt, originalRowLedgerWrite } from '../src/services/shareAttemptOutcome.js';
+import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 
 const NOW = Date.parse('2026-09-28T12:00:00.000Z');
 const ROOT = '2026-09-28T11:50:00.000Z#SM1';
 const RETRY = '2026-09-28T11:51:00.000Z#SM2';
 const LATER = '2026-09-28T11:52:00.000Z#SM3';
+const baseShare = { broadcastId: 'b1', unitId: 'unit-1', status: 'sent', created_at: '2026-09-28T11:49:00.000Z', created_by: 'user-1', audience_filter: {}, body_template: 'hi',
+  stats: { audience: 1, queued: 0, sent: 0, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0 } } as unknown as BroadcastItem;
 
-function world(slot: Record<string, unknown>, share: Record<string, unknown> = {}) {
-  const h = createTwilioWebhookHarness();            // the in-memory world: h.world.broadcastsRepo, h.world.listingSendsRepo, h.events (read the helper)
-  h.world.broadcasts.set('b1', { broadcastId: 'b1', unitId: 'unit-1', status: 'sent', created_at: '2026-09-28T11:49:00.000Z',
-    recipients: { c1: { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: ROOT, ...slot } },
-    stats: { audience: 1, queued: 0, sent: 0, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0 }, ...share });
+function world(slot: Partial<BroadcastRecipient>, contactKey = 'c1', share: Partial<BroadcastItem> = {}) {
+  const w = createFakeWorld();
+  w.broadcasts.set('b1', { ...baseShare, ...share, recipients: { [contactKey]: { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: ROOT, ...slot } } });
   const capture = createLogCapture();
-  const emitted: unknown[] = [];
-  h.events.on('broadcast.updated', (e: unknown) => emitted.push(e));
-  const deps = { broadcasts: h.world.broadcastsRepo, ledger: { listingSends: h.world.listingSendsRepo, log: capture.logger }, events: h.events, log: capture.logger, now: () => NOW };
-  return { h, deps, capture, emitted, slot: () => h.world.broadcasts.get('b1')!.recipients.c1, ledger: () => h.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c1') };
+  const log = createLogger({ level: 'info', destination: capture.stream });
+  const emitted: Array<{ broadcastId: string; stats: { retry_pending?: number } }> = [];
+  w.events.on('broadcast.updated', (e) => emitted.push(e as never));
+  const deps = { broadcasts: w.broadcastsRepo, ledger: { listingSends: w.listingSendsRepo, log }, events: w.events, log, now: () => NOW };
+  return { w, deps, capture, emitted, slot: () => w.broadcasts.get('b1')!.recipients![contactKey]!, share: () => w.broadcasts.get('b1')!, ledger: (c = 'c1') => w.listingSendsRepo.getByKeyConsistent('unit-1', c) };
 }
 const base = { broadcastId: 'b1', conversationId: 'conv-1', retryRoot: ROOT };
 
 describe('applyLaterAttempt', () => {
-  it('a newer attempt delivered: the slot leaves failed, stats move failed -> delivered in one write, the ledger counts by delivery, the emit carries no retry_pending', async () => {
-    const w = world({});
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
-    expect(w.slot()).toMatchObject({ status: 'delivered', latestAttempt: RETRY, tsMsgId: ROOT });
-    expect(w.h.world.broadcasts.get('b1')!.stats).toMatchObject({ failed: 0, delivered: 1 });
-    expect((await w.ledger())?.shares?.['b1']).toMatchObject({ attempt: RETRY, state: 'counted', by: 'delivery', conversationId: 'conv-1' });
-    expect((w.emitted[0] as { stats: { retry_pending?: number } }).stats.retry_pending).toBeUndefined();
+  it('a newer attempt delivered: the slot leaves failed with the NEW carrier instant, stats move failed -> delivered in one write, the ledger counts by delivery at the attempt''s instant, the emit carries no retry_pending', async () => {
+    const x = world({ carrierSentAt: '2026-09-28T11:50:01.000Z' });
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered', carrierSentAt: '2026-09-28T11:51:01.000Z' } })).toBe('applied');
+    expect(x.slot()).toMatchObject({ status: 'delivered', latestAttempt: RETRY, tsMsgId: ROOT, carrierSentAt: '2026-09-28T11:51:01.000Z' });
+    expect(x.share().stats).toMatchObject({ failed: 0, delivered: 1 });
+    expect((await x.ledger())?.shares?.['b1']).toMatchObject({ attempt: RETRY, state: 'counted', by: 'delivery', conversationId: 'conv-1', countedAt: '2026-09-28T11:51:00.000Z' });
+    expect(x.emitted[0]?.stats.retry_pending).toBeUndefined();
+  });
+  it('a newer attempt delivered WITHOUT a carrier instant drops the old attempt''s', async () => {
+    const x = world({ carrierSentAt: '2026-09-28T11:50:01.000Z' });
+    await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } });
+    expect(x.slot().carrierSentAt).toBeUndefined();
   });
   it('a newer attempt failed 30003 with a live promise: failed stays failed, the ledger entry is pending, the emit carries retry_pending 1', async () => {
-    const w = world({});
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'failed', errorCode: '30003', retryDueAt: '2026-09-28T12:05:00.000Z' } })).toBe('applied');
-    expect(w.slot()).toMatchObject({ status: 'failed', errorCode: '30003', latestAttempt: RETRY });
-    expect((await w.ledger())?.shares?.['b1']?.state).toBe('pending');
-    expect((w.emitted[0] as { stats: { retry_pending?: number } }).stats.retry_pending).toBe(1);
+    const x = world({});
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'failed', errorCode: '30003', retryDueAt: '2026-09-28T12:05:00.000Z' } })).toBe('applied');
+    expect(x.slot()).toMatchObject({ status: 'failed', errorCode: '30003', latestAttempt: RETRY });
+    expect((await x.ledger())?.shares?.['b1']?.state).toBe('pending');
+    expect(x.emitted[0]?.stats.retry_pending).toBe(1);
   });
-  it('a row-less unresolved end: send_unconfirmed, the unconfirmed bucket, the ledger entry unconfirmed', async () => {
-    const w = world({});
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: rowlessAttemptKey(ROOT), outcome: { kind: 'unresolved' } })).toBe('applied');
-    expect(w.slot()).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, latestAttempt: rowlessAttemptKey(ROOT) });
-    expect(w.h.world.broadcasts.get('b1')!.stats).toMatchObject({ failed: 0, unconfirmed: 1 });
-    expect((await w.ledger())?.shares?.['b1']?.state).toBe('unconfirmed');
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: rowlessAttemptKey(ROOT), outcome: { kind: 'unresolved' } })).toBe('refused'); // idempotent
+  it('a row-less unresolved end: send_unconfirmed, the unconfirmed bucket, the ledger entry unconfirmed; re-applied it is a refused no-op; a LATER real attempt (an adoption) supersedes it', async () => {
+    const x = world({});
+    const marker = rowlessAttemptKey(ROOT);
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: marker, outcome: { kind: 'unresolved' } })).toBe('applied');
+    expect(x.slot()).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, latestAttempt: marker });
+    expect(x.share().stats).toMatchObject({ failed: 0, unconfirmed: 1 });
+    expect((await x.ledger())?.shares?.['b1']?.state).toBe('unconfirmed');
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: marker, outcome: { kind: 'unresolved' } })).toBe('refused');
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'sent', carrierSentAt: '2026-09-28T11:51:01.000Z' } })).toBe('applied');
+    expect(x.slot()).toMatchObject({ status: 'sent', latestAttempt: RETRY });
+    expect(x.share().stats).toMatchObject({ unconfirmed: 0, sent: 1 });
+    expect((await x.ledger())?.shares?.['b1']).toMatchObject({ state: 'counted', by: 'acceptance' });
   });
-  it('refusals: delivered and skipped never move; an older attempt never applies; a same-attempt late sent after failed is refused', async () => {
+  it('refusals: queued, delivered and skipped never move; an older attempt never applies; a same-attempt late sent after failed is refused', async () => {
+    const q = world({ status: 'queued', errorCode: undefined });
+    expect(await applyLaterAttempt(q.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('refused');
     const d = world({ status: 'delivered', errorCode: undefined, latestAttempt: RETRY });
     expect(await applyLaterAttempt(d.deps, { ...base, attemptKey: LATER, outcome: { kind: 'failed', errorCode: '30007' } })).toBe('refused');
     const s = world({ status: 'skipped', errorCode: 'manual_mode' });
@@ -1246,66 +1346,67 @@ describe('applyLaterAttempt', () => {
     expect(await applyLaterAttempt(f.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'sent' } })).toBe('refused');
   });
   it('the delivered-at-any-age exception: an older attempt''s delivery applies over a newer failure and the slot records the delivered attempt', async () => {
-    const w = world({ latestAttempt: LATER, errorCode: '30007' });
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
-    expect(w.slot()).toMatchObject({ status: 'delivered', latestAttempt: RETRY });
+    const x = world({ latestAttempt: LATER, errorCode: '30007' });
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
+    expect(x.slot()).toMatchObject({ status: 'delivered', latestAttempt: RETRY });
   });
-  it('from sent (a lost original rollup): a newer attempt applies, and the same attempt moves sent -> delivered but never sent -> queued', async () => {
-    const w = world({ status: 'sent', errorCode: undefined });
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'sent', carrierSentAt: '2026-09-28T11:51:05.000Z' } })).toBe('applied');
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
-    expect(w.slot().status).toBe('delivered');
+  it('from sent (a lost original rollup): a newer attempt applies, and the same attempt moves sent -> sent-with-carrier -> delivered keeping its carrier instant', async () => {
+    const x = world({ status: 'sent', errorCode: undefined });
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'sent' } })).toBe('applied');
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'sent', carrierSentAt: '2026-09-28T11:51:05.000Z' } })).toBe('applied');
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
+    expect(x.slot()).toMatchObject({ status: 'delivered', carrierSentAt: '2026-09-28T11:51:05.000Z' });
   });
   it('a phone-keyed slot moves by conversation + root; its ledger entry lands on the row''s recipient contact, and none is written without one', async () => {
-    const h = createTwilioWebhookHarness();
-    h.world.broadcasts.set('b1', { broadcastId: 'b1', unitId: 'unit-1', status: 'sent', created_at: '2026-09-28T11:49:00.000Z',
-      recipients: { 'phone#+15550002222': { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: ROOT } },
-      stats: { audience: 1, queued: 0, sent: 0, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0 } });
-    const capture = createLogCapture();
-    const deps = { broadcasts: h.world.broadcastsRepo, ledger: { listingSends: h.world.listingSendsRepo, log: capture.logger }, events: h.events, log: capture.logger, now: () => NOW };
-    expect(await applyLaterAttempt(deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('applied');
-    expect(await h.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-held')).toBeUndefined();
-    expect(capture.atLevel(30).some((l) => String(l.msg).includes('no ledger entry'))).toBe(true);
-    expect(await applyLaterAttempt(deps, { ...base, attemptKey: LATER, outcome: { kind: 'delivered' }, recipientContactId: 'c-held' })).toBe('refused'); // delivered is terminal - the slot; the ledger is not reached
+    const x = world({}, 'phone#+15550002222');
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'sent', carrierSentAt: '2026-09-28T11:51:01.000Z' } })).toBe('applied');
+    expect(await x.ledger('c-held')).toBeUndefined();
+    expect(x.capture.atLevel(30).some((l) => String(l.msg).includes('no ledger entry'))).toBe(true);
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' }, recipientContactId: 'c-held' })).toBe('applied');
+    expect((await x.ledger('c-held'))?.shares?.['b1']).toMatchObject({ state: 'counted', by: 'delivery' });
+  });
+  it('a contact-keyed slot ignores a differing row recipient (the send-time contact is the slot key)', async () => {
+    const x = world({});
+    await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' }, recipientContactId: 'c-other' });
+    expect(await x.ledger('c1')).toBeDefined();
+    expect(await x.ledger('c-other')).toBeUndefined();
   });
   it('a lost condition re-reads and re-applies: the retry''s failed that loses to its own sent wins on the second pass', async () => {
-    const w = world({});
+    const x = world({});
     let raced = false;
-    const real = w.deps.broadcasts.applyAttemptOutcome.bind(w.deps.broadcasts);
-    w.deps.broadcasts = { ...w.deps.broadcasts, async applyAttemptOutcome(id, key, expect, next, delta) {
+    const real = x.deps.broadcasts.applyAttemptOutcome.bind(x.deps.broadcasts);
+    x.deps.broadcasts = { ...x.deps.broadcasts, async applyAttemptOutcome(id, key, expect, next, delta) {
       if (!raced) { raced = true; await real(id, key, expect, { status: 'sent', conversationId: 'conv-1', tsMsgId: ROOT, latestAttempt: RETRY }, { failed: -1, sent: 1 }); }
       return real(id, key, expect, next, delta);
     } };
-    expect(await applyLaterAttempt(w.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'failed', errorCode: '30007' } })).toBe('applied');
-    expect(w.slot()).toMatchObject({ status: 'failed', errorCode: '30007', latestAttempt: RETRY });
-    expect(w.h.world.broadcasts.get('b1')!.stats).toMatchObject({ failed: 1, sent: 0 });
+    expect(await applyLaterAttempt(x.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'failed', errorCode: '30007' } })).toBe('applied');
+    expect(x.slot()).toMatchObject({ status: 'failed', errorCode: '30007', latestAttempt: RETRY });
+    expect(x.share().stats).toMatchObject({ failed: 1, sent: 0 });
   });
   it('no slot and no broadcast are reported, never thrown', async () => {
-    const w = world({});
-    expect(await applyLaterAttempt(w.deps, { ...base, retryRoot: 'other', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_slot');
-    expect(await applyLaterAttempt(w.deps, { ...base, broadcastId: 'nope', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_broadcast');
+    const x = world({});
+    expect(await applyLaterAttempt(x.deps, { ...base, retryRoot: 'other', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_slot');
+    expect(await applyLaterAttempt(x.deps, { ...base, broadcastId: 'nope', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_broadcast');
   });
 });
 
 describe('originalRowLedgerWrite', () => {
-  it('delivered counts by delivery; a failed 30003 with a live promise is pending; a failed 30007 is failed; no recipient contact writes nothing', async () => {
-    const w = world({});
-    const share = w.h.world.broadcasts.get('b1')!;
-    const row = { tsMsgId: ROOT, conversationId: 'conv-1', recipient_contact_id: 'c1' };
-    await originalRowLedgerWrite(w.deps, { share, row: { ...row, retry_due_at: '2026-09-28T12:05:00.000Z' }, outcome: { kind: 'failed', errorCode: '30003', retryDueAt: '2026-09-28T12:05:00.000Z' } });
-    expect((await w.ledger())?.shares?.['b1']).toMatchObject({ attempt: ROOT, state: 'pending' });
-    await originalRowLedgerWrite(w.deps, { share, row, outcome: { kind: 'delivered' } });
-    expect((await w.ledger())?.shares?.['b1']).toMatchObject({ state: 'counted', by: 'delivery' });
+  it('a failed 30003 with a live promise is pending; a delivered row (a different share) counts by delivery at its instant; a failed 30007 is failed; no contact writes nothing', async () => {
     const x = world({});
-    await originalRowLedgerWrite(x.deps, { share: x.h.world.broadcasts.get('b1')!, row: { tsMsgId: ROOT, conversationId: 'conv-1' }, outcome: { kind: 'delivered' } });
-    expect(await x.ledger()).toBeUndefined();
+    const row = { tsMsgId: ROOT, conversationId: 'conv-1', recipient_contact_id: 'c1' };
+    await originalRowLedgerWrite(x.deps, { share: x.share(), contactKey: 'c1', row, outcome: { kind: 'failed', errorCode: '30003', retryDueAt: '2026-09-28T12:05:00.000Z' } });
+    expect((await x.ledger())?.shares?.['b1']).toMatchObject({ attempt: ROOT, state: 'pending' });
+    const y = world({ status: 'sent', errorCode: undefined });
+    await originalRowLedgerWrite(y.deps, { share: y.share(), contactKey: 'c1', row, outcome: { kind: 'delivered' } });
+    expect((await y.ledger())?.shares?.['b1']).toMatchObject({ state: 'counted', by: 'delivery', countedAt: '2026-09-28T11:50:00.000Z' });
+    const z = world({}, 'phone#+15550003333');
+    await originalRowLedgerWrite(z.deps, { share: z.share(), contactKey: 'phone#+15550003333', row: { tsMsgId: ROOT, conversationId: 'conv-1' }, outcome: { kind: 'failed', errorCode: '30007' } });
+    expect(await z.ledger('c1')).toBeUndefined();
   });
 });
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cd app; npx vitest run test/shareAttemptOutcome.test.ts` - FAIL (module missing).
+- [ ] **Step 2: Run it to verify it fails** - `cd app; npx vitest run test/shareAttemptOutcome.test.ts` (module missing).
 
 - [ ] **Step 3: Write the service**
 
@@ -1325,7 +1426,7 @@ import { applyShareLedgerEntry, ledgerEntryFor, type ShareLedgerDeps, type Share
 
 export type AttemptOutcome =
   | { kind: 'sent'; carrierSentAt?: string }
-  | { kind: 'delivered' }
+  | { kind: 'delivered'; carrierSentAt?: string }
   | { kind: 'failed'; errorCode: string; retryDueAt?: string }
   | { kind: 'unresolved' };
 export interface LaterAttempt { broadcastId: string; conversationId: string; retryRoot: string; attemptKey: string; outcome: AttemptOutcome; recipientContactId?: string }
@@ -1342,24 +1443,26 @@ function bucketOf(slot: Pick<BroadcastRecipient, 'status' | 'errorCode'>): Bucke
   if (slot.status === 'failed') return slot.errorCode === SEND_UNCONFIRMED_CODE ? 'unconfirmed' : 'failed';
   return slot.status;
 }
-function nextSlot(slot: BroadcastRecipient, input: LaterAttempt): BroadcastRecipient {
+function nextSlot(slot: BroadcastRecipient, input: LaterAttempt, sameAttempt: boolean): BroadcastRecipient {
   const keep = { ...(slot.conversationId !== undefined && { conversationId: slot.conversationId }), ...(slot.tsMsgId !== undefined && { tsMsgId: slot.tsMsgId }), latestAttempt: input.attemptKey };
-  switch (input.outcome.kind) {
-    case 'sent': return { ...keep, status: 'sent', ...(input.outcome.carrierSentAt !== undefined && { carrierSentAt: input.outcome.carrierSentAt }) };
-    case 'delivered': return { ...keep, status: 'delivered', ...(slot.carrierSentAt !== undefined && { carrierSentAt: slot.carrierSentAt }) };
-    case 'failed': return { ...keep, status: 'failed', errorCode: input.outcome.errorCode };
+  const o = input.outcome;
+  const carrier = o.kind === 'sent' || o.kind === 'delivered' ? (o.carrierSentAt ?? (sameAttempt ? slot.carrierSentAt : undefined)) : undefined;
+  switch (o.kind) {
+    case 'sent': return { ...keep, status: 'sent', ...(carrier !== undefined && { carrierSentAt: carrier }) };
+    case 'delivered': return { ...keep, status: 'delivered', ...(carrier !== undefined && { carrierSentAt: carrier }) };
+    case 'failed': return { ...keep, status: 'failed', errorCode: o.errorCode };
     case 'unresolved': return { ...keep, status: 'failed', errorCode: SEND_UNCONFIRMED_CODE };
   }
 }
-/** The D2 order rule: may `input` move `slot`? */
-function allowed(slot: BroadcastRecipient, input: LaterAttempt): boolean {
-  if (slot.status === 'delivered' || slot.status === 'skipped') return false;
+/** The D2 order rule: may `input` move `slot`? Returns the comparison when allowed. */
+function allowed(slot: BroadcastRecipient, input: LaterAttempt): { cmp: -1 | 0 | 1 } | undefined {
+  if (slot.status !== 'failed' && slot.status !== 'sent') return undefined;
   const cmp = compareAttemptKeys(input.attemptKey, slot.latestAttempt ?? slot.tsMsgId ?? '');
-  if (cmp === 1) return true;
-  if (cmp === -1) return input.outcome.kind === 'delivered';
-  if (slot.status !== 'sent') return false;                                   // same attempt: failed is terminal in the message machine
-  if (input.outcome.kind === 'delivered' || input.outcome.kind === 'failed') return true;
-  return input.outcome.kind === 'sent' && slot.carrierSentAt === undefined && input.outcome.carrierSentAt !== undefined;
+  if (cmp === 1) return { cmp };
+  if (cmp === -1) return input.outcome.kind === 'delivered' ? { cmp } : undefined;
+  if (slot.status !== 'sent') return undefined;                                   // same attempt: failed is terminal
+  if (input.outcome.kind === 'delivered' || input.outcome.kind === 'failed') return { cmp };
+  return input.outcome.kind === 'sent' && slot.carrierSentAt === undefined && input.outcome.carrierSentAt !== undefined ? { cmp } : undefined;
 }
 function ledgerOutcome(o: AttemptOutcome, nowMs: number): ShareLedgerOutcome {
   switch (o.kind) {
@@ -1369,11 +1472,14 @@ function ledgerOutcome(o: AttemptOutcome, nowMs: number): ShareLedgerOutcome {
     case 'failed': return isRetryPromiseLive(o.retryDueAt, nowMs) ? { kind: 'pending' } : { kind: 'failed' };
   }
 }
+/** spec D7: the slot key when it is a contact id; else the row's send-time holder; else none. */
+function pairContact(contactKey: string, recipientContactId: string | undefined): string | undefined {
+  return contactKey.startsWith('phone#') ? recipientContactId : contactKey;
+}
 async function writeLedger(deps: Pick<ShareAttemptOutcomeDeps, 'ledger' | 'log' | 'now'>, share: BroadcastItem, contactId: string | undefined, attempt: string, conversationId: string, outcome: AttemptOutcome): Promise<void> {
   if (typeof share.unitId !== 'string' || share.unitId.length === 0) return;
-  if (contactId === undefined) { deps.log.info({ broadcastId: share.broadcastId, conversationId, attempt }, 'share ledger: the row carries no recipient contact - no ledger entry'); return; }
-  const nowMs = (deps.now ?? Date.now)();
-  const entry = ledgerEntryFor(attempt, conversationId, ledgerOutcome(outcome, nowMs), new Date(nowMs).toISOString());
+  if (contactId === undefined) { deps.log.info({ broadcastId: share.broadcastId, conversationId, attempt }, 'share ledger: no contact for the pair - no ledger entry'); return; }
+  const entry = ledgerEntryFor(attempt, conversationId, ledgerOutcome(outcome, (deps.now ?? Date.now)()));
   try { await applyShareLedgerEntry(deps.ledger, { unitId: share.unitId, contactId, broadcastId: share.broadcastId, entry }); }
   catch (err) { deps.log.error({ err, broadcastId: share.broadcastId, contactId, attempt }, 'share ledger: entry write failed (best-effort)'); }
 }
@@ -1386,15 +1492,15 @@ export async function applyLaterAttempt(deps: ShareAttemptOutcomeDeps, input: La
     const found = Object.entries(share.recipients ?? {}).find(([, s]) => s.conversationId === input.conversationId && s.tsMsgId === input.retryRoot);
     if (found === undefined) return 'no_slot';
     const [contactKey, slot] = found;
-    if (!allowed(slot, input)) return 'refused';
-    const next = nextSlot(slot, input);
+    const ok = allowed(slot, input);
+    if (ok === undefined) return 'refused';
+    const next = nextSlot(slot, input, ok.cmp === 0);
     const from = bucketOf(slot); const to = bucketOf(next);
     const delta: Partial<BroadcastStats> = from !== to ? { ...(from !== undefined && { [from]: -1 }), ...(to !== undefined && { [to]: 1 }) } : {};
     const res = await deps.broadcasts.applyAttemptOutcome(input.broadcastId, contactKey, { status: slot.status, latestAttempt: slot.latestAttempt }, next, delta);
     if (!res.applied) continue;
     const item = res.item ?? share;
-    const contactId = input.recipientContactId ?? (contactKey.startsWith('phone#') ? undefined : contactKey);
-    await writeLedger(deps, item, contactId, input.attemptKey, input.conversationId, input.outcome);
+    await writeLedger(deps, item, pairContact(contactKey, input.recipientContactId), input.attemptKey, input.conversationId, input.outcome);
     const pending = input.outcome.kind === 'failed' && isRetryPromiseLive(input.outcome.retryDueAt, (deps.now ?? Date.now)());
     deps.events.emit('broadcast.updated', { broadcastId: item.broadcastId, status: item.status, stats: deriveBroadcastStats(item, pending ? { retryPending: 1 } : undefined) });
     deps.log.info({ ...ids, contactKey, from: slot.status, to: next.status }, 'share attempt outcome applied');
@@ -1406,17 +1512,15 @@ export async function applyLaterAttempt(deps: ShareAttemptOutcomeDeps, input: La
 
 export async function originalRowLedgerWrite(
   deps: Pick<ShareAttemptOutcomeDeps, 'ledger' | 'log' | 'now'>,
-  args: { share: BroadcastItem; row: Pick<MessageItem, 'tsMsgId' | 'conversationId' | 'recipient_contact_id' | 'retry_due_at'>; outcome: AttemptOutcome },
+  args: { share: BroadcastItem; contactKey: string; row: Pick<MessageItem, 'tsMsgId' | 'conversationId' | 'recipient_contact_id'>; outcome: AttemptOutcome },
 ): Promise<void> {
-  await writeLedger(deps, args.share, args.row.recipient_contact_id, args.row.tsMsgId, args.row.conversationId, args.outcome);
+  await writeLedger(deps, args.share, pairContact(args.contactKey, args.row.recipient_contact_id), args.row.tsMsgId, args.row.conversationId, args.outcome);
 }
 ```
 
 Check the `EventBus.emit` signature and the typed event map (`app/src/lib/events.ts:297`) before writing the emit; `deriveBroadcastStats` on `item` (ALL_NEW) is the same zero-extra-read idiom the rollup uses (`twilio.ts:3978-3982`).
 
-- [ ] **Step 4: Run and typecheck**
-
-Run: `cd app; npx vitest run test/shareAttemptOutcome.test.ts` - PASS. `npm run typecheck` - exit 0.
+- [ ] **Step 4: Run and typecheck** - `cd app; npx vitest run test/shareAttemptOutcome.test.ts` PASS; `npm run typecheck` exit 0.
 
 - [ ] **Step 5: Commit**
 
@@ -1430,83 +1534,94 @@ git commit -m "feat(broadcasts): applyLaterAttempt - the attempt-ordered slot tr
 
 ### Task 5: The status webhook - retry rows routed, the original row's ledger write, the promise on the emit
 
+Built AFTER Task 7 (Slice 2 order T4, T7, T5, T6), so the pass already writes the new ledger shape when the webhook starts writing entries.
+
 **Files:**
-- Modify: `app/src/routes/webhooks/twilio.ts` (deps :248-266 and the resolve at :568; the rollup gate :3520-3545; `rollIntoBroadcast` :3853-3984; the give-up line :3904)
+- Modify: `app/src/routes/webhooks/twilio.ts` (deps :248-266 and the repo construction at :562-570 - `createXRepo({ logger: deps.logger })`, no `doc` in scope; the 30003 decision :3452-3467; the rollup gate :3520-3545; `rollIntoBroadcast` :3853-3984; the give-up line :3904)
+- Modify: `app/test/helpers/twilioWebhookHarness.ts` (`makeWebhookHarness`'s `webhooks` block :5110-5140: pass `listingSendsRepo: world.listingSendsRepo`)
 - Test: `app/test/twilioStatusWebhook.test.ts` (the rollup block :245-373; the skip pin :374-424 REWRITTEN)
 
 **Interfaces:**
-- Consumes: `applyLaterAttempt`, `originalRowLedgerWrite` (Task 4); the harness world's `listingSendsRepo` (Task 3's double); `message.retry_of`, `message.retry_root`, `message.broadcast_id`, `message.recipient_contact_id`, `message.retry_due_at` (the row the webhook read at :3346-3370 and re-reads after `updateDeliveryStatus` - use the post-write row so `retry_due_at` is the value the 30003 arm just wrote, :3462-3467).
-- Produces: `TwilioWebhookDeps` gains `listingSendsRepo?: ListingSendsRepo` (resolved like the others, `:568`). The gate at :3529 becomes: `if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0)`; inside: `if (message.retry_of !== undefined)` -> the RETRY path: `retry_root` missing -> ONE ERROR `broadcast delivery rollup: retry row without retry_root - unrouted` and return; else `applyLaterAttempt(...)` with `attemptKey = message.tsMsgId`, `retryRoot = message.retry_root`, `outcome` mapped from the transitioned status (`sent` -> `{ kind: 'sent', carrierSentAt: now }`; `delivered` -> `{ kind: 'delivered' }`; `failed`/`undelivered` -> `{ kind: 'failed', errorCode: ErrorCode, retryDueAt: message.retry_due_at }`), `recipientContactId = message.recipient_contact_id`; `'no_slot'` -> ONE ERROR (a routing bug); else the ORIGINAL path: `rollIntoBroadcast` as today, then `originalRowLedgerWrite` for a `delivered` or `failed` transition (the share read for it: `rollIntoBroadcast` already holds the item - return it from `rollIntoBroadcast`, or re-read by id; a missing share skips the write). The 30003 arm's promise is on the row BEFORE the rollup runs only if the status write (:3462-3467) precedes the rollup; it does (:3520 is inside `if (transitioned)` after the write), so `message.retry_due_at` on the re-read row is right. The give-up line :3904 keeps WARN and is re-worded in ASCII: `broadcast delivery rollup: no matching recipient slot - ignored` (the string changes; grep the tests for the old one).
-- The rollup's own emit for an ORIGINAL row's 30003 failure with a promise carries `retry_pending: 1` (spec D4): in the terminal branch (:3975-3982) pass `{ retryPending: 1 }` to `deriveBroadcastStats` when `next === 'failed' && errorCode === '30003' && isRetryPromiseLive(message.retry_due_at, Date.now())` - thread the row's `retry_due_at` into `rollIntoBroadcast` as a new optional parameter.
+- Consumes: `applyLaterAttempt`, `originalRowLedgerWrite` (Task 4); `message.retry_of`, `message.retry_root`, `message.broadcast_id`, `message.recipient_contact_id` (the row read at :3346-3370 - it is the PRE-write image and stays so; nothing re-reads it); the retry decision `oneToOneRetry` (:3452-3460) whose `runAt` is exactly what the status write stamped as `retry_due_at` (:3462-3467).
+- Produces: `TwilioWebhookDeps` gains `listingSendsRepo?: ListingSendsRepo` (constructed like the others: `deps.listingSendsRepo ?? createListingSendsRepo({ logger: log })`). THE PROMISE VALUE: `const promisedAt = oneToOneRetry?.kind === 'retry' ? oneToOneRetry.runAt.toISOString() : undefined;` - never `message.retry_due_at` (the pre-write image; a first 30003 failure holds none). The gate at :3529 becomes `if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0)`; inside: `if (message.retry_of !== undefined)` -> the RETRY path: `retry_root` missing -> ONE ERROR `broadcast delivery rollup: retry row without retry_root - unrouted (the repair stamps it)` and return; else `applyLaterAttempt(...)` with `attemptKey = message.tsMsgId`, `retryRoot = message.retry_root`, `outcome = outcomeOf(mappedStatus, ErrorCode, promisedAt, now)`, `recipientContactId = message.recipient_contact_id`; `'no_slot'` -> ONE ERROR (a routing bug); else the ORIGINAL path: `rollIntoBroadcast(..., promisedAt)` as today (it returns the updated item), then `originalRowLedgerWrite` for a `delivered` or `failed` transition with the slot key `rollIntoBroadcast` matched (return `{ item, contactKey }`). `outcomeOf` maps ONLY `sent` (-> `{ kind: 'sent', carrierSentAt: now }`), `delivered` (-> `{ kind: 'delivered', carrierSentAt: slot's or now? - the rollup today stamps nothing on delivered; pass none }`), `failed` / `undelivered` (-> `{ kind: 'failed', errorCode: ErrorCode ?? 'unknown', retryDueAt: promisedAt }`); any other status (`queued`, `accepted`, `sending`) returns undefined and the retry path does nothing (spec D2 names confirmed-sent, delivered and failed). The give-up line :3904 keeps WARN and is re-worded in ASCII: `broadcast delivery rollup: no matching recipient slot - ignored` (grep the tests for the old string). The terminal-branch emit (:3975-3982) passes `{ retryPending: 1 }` when `next === 'failed' && errorCode === '30003' && isRetryPromiseLive(promisedAt, Date.now())`.
 
-- [ ] **Step 1: Rewrite the skip pin and add the new cases**
+- [ ] **Step 1: Rewrite the skip pin, add the new cases, and one case that would catch a stale-image read**
 
-In `app/test/twilioStatusWebhook.test.ts`, replace the block at :374-424 (`... SKIPS the rollup ...`) with:
+In `app/test/twilioStatusWebhook.test.ts`, replace the block at :374-424 with (fixtures: read the file's share and row builders around :200-244 and reuse them; `ROOT_SID` / `RETRY_SID` name the SIDs of a share's original row and its retry row - the retry row carries `broadcast_id`, `retry_of` ROOT, `retry_root` ROOT, `recipient_contact_id: 'c-1'`):
 
 ```ts
-  it('a receipt for a share-RETRY row (broadcast_id + retry_of + retry_root) reaches the ORIGINAL slot through the attempt-ordered transition: delivered leaves failed, stats move, broadcast.updated fires', async () => {
-    // Read the file's fixtures: a share `b-1` with slot c-1 failed 30003 on the
-    // original row ROOT; a retry row RETRY carrying broadcast_id 'b-1',
-    // retry_of ROOT, retry_root ROOT, recipient_contact_id 'c-1'.
+  it('a receipt for a share-RETRY row reaches the ORIGINAL slot through the attempt-ordered transition: delivered leaves failed, stats move, broadcast.updated fires, the ledger counts by delivery', async () => {
     const res = await postStatus({ MessageSid: RETRY_SID, MessageStatus: 'delivered' });
     expect(res.status).toBe(200);
-    const slot = h.world.broadcasts.get('b-1')!.recipients['c-1'];
-    expect(slot).toMatchObject({ status: 'delivered', tsMsgId: ROOT, latestAttempt: RETRY });
-    expect(h.world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, delivered: 1 });
+    expect(world.broadcasts.get('b-1')!.recipients!['c-1']).toMatchObject({ status: 'delivered', tsMsgId: ROOT, latestAttempt: RETRY });
+    expect(world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, delivered: 1 });
     expect(updatedEvents.at(-1)).toMatchObject({ broadcastId: 'b-1' });
-    expect((await h.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ state: 'counted', by: 'delivery' });
+    expect((await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ state: 'counted', by: 'delivery' });
   });
   it('a retry row WITHOUT retry_root logs one ERROR and touches nothing', async () => {
-    // fixture: a retry row with broadcast_id and retry_of but no retry_root
     const res = await postStatus({ MessageSid: ORPHAN_RETRY_SID, MessageStatus: 'delivered' });
     expect(res.status).toBe(200);
     expect(capture.atLevel(50).filter((l) => String(l.msg).includes('unrouted')).length).toBe(1);
-    expect(h.world.broadcasts.get('b-1')!.recipients['c-1'].status).toBe('failed');
+    expect(world.broadcasts.get('b-1')!.recipients!['c-1']!.status).toBe('failed');
   });
-  it('a retry row whose root matches no slot logs one ERROR (a routing bug), never a WARN', async () => {
-    // fixture: retry_root pointing at a tsMsgId no slot records
+  it('a retry row whose root matches no slot logs one ERROR (a routing bug)', async () => {
     await postStatus({ MessageSid: STRAY_RETRY_SID, MessageStatus: 'delivered' });
     expect(capture.atLevel(50).filter((l) => String(l.msg).includes('no matching recipient slot')).length).toBe(1);
   });
-  it('an ORIGINAL row''s 30003 failure with a promise: the slot fails as today, the emit carries retry_pending 1, and the ledger entry is pending', async () => {
+  it('a retry row''s own 30003 failure with a new promise: the slot stays failed on the newer attempt, the emit carries retry_pending 1, the ledger entry is pending', async () => {
+    await postStatus({ MessageSid: RETRY_SID, MessageStatus: 'undelivered', ErrorCode: '30003' });
+    expect(world.broadcasts.get('b-1')!.recipients!['c-1']).toMatchObject({ status: 'failed', errorCode: '30003', latestAttempt: RETRY });
+    expect(updatedEvents.at(-1)).toMatchObject({ stats: { retry_pending: 1 } });
+    expect((await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']?.state).toBe('pending');
+  });
+  it('an ORIGINAL row''s 30003 failure with a promise: the slot fails as today, the emit carries retry_pending 1, the ledger entry is pending - and the promise comes from the decision, not from the row image the webhook read before writing', async () => {
+    // Pin the source of the value: make the world's read return a COPY (the
+    // double returns the live element, which would hide a stale-image read).
+    const real = world.messagesRepo.getByProviderSid.bind(world.messagesRepo);
+    world.messagesRepo.getByProviderSid = async (sid) => { const r = await real(sid); return r === undefined ? undefined : { ...r }; };
     const res = await postStatus({ MessageSid: ROOT_SID, MessageStatus: 'undelivered', ErrorCode: '30003' });
     expect(res.status).toBe(200);
     expect(updatedEvents.at(-1)).toMatchObject({ broadcastId: 'b-1', stats: { failed: 1, retry_pending: 1 } });
-    expect((await h.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']?.state).toBe('pending');
+    expect((await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']?.state).toBe('pending');
   });
-  it('an ORIGINAL row''s delivered receipt counts the ledger entry by delivery; a 30007 failure writes failed; a row without recipient_contact_id writes nothing', async () => {
+  it('an ORIGINAL row''s delivered receipt counts the ledger entry by delivery at the row''s instant; a 30007 failure writes failed; a phone-keyed slot whose row has no recipient contact writes nothing', async () => {
     await postStatus({ MessageSid: ROOT_SID, MessageStatus: 'delivered' });
-    expect((await h.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ state: 'counted', by: 'delivery' });
-    // a second fixture share b-2 / c-2 whose original row has no recipient_contact_id
-    await postStatus({ MessageSid: ROOT2_SID, MessageStatus: 'undelivered', ErrorCode: '30007' });
-    expect(await h.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-2')).toBeUndefined();
+    expect((await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ state: 'counted', by: 'delivery', countedAt: ROOT.slice(0, ROOT.indexOf('#')) });
+    await postStatus({ MessageSid: ROOT2_SID, MessageStatus: 'undelivered', ErrorCode: '30007' });   // share b-2, slot phone#..., row without recipient_contact_id
+    expect(await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-2')).toBeUndefined();
   });
+  it('a queued / accepted status on a retry row transitions the row but touches no slot', async () => { /* postStatus accepted on RETRY_SID; the slot is unchanged; no emit */ });
 ```
 
-Keep the pins at :245 (original-row miss re-read), :296 and :344 (carrierSentAt) green; update the give-up-line assertion at :245's block to the ASCII text.
+Keep the pins at :245 (original-row miss re-read), :296 and :344 (carrierSentAt) green; the give-up-line assertion in :245's block matches the ASCII text.
 
-- [ ] **Step 2: Run to see the reds**
+- [ ] **Step 2: Run to see the reds** - `cd app; npx vitest run test/twilioStatusWebhook.test.ts`.
 
-Run: `cd app; npx vitest run test/twilioStatusWebhook.test.ts` - the five new cases FAIL; the rewritten skip pin fails on `latestAttempt`.
+- [ ] **Step 3: Wire the harness, edit the webhook**
 
-- [ ] **Step 3: Edit the webhook**
+Harness: in `makeWebhookHarness`'s `webhooks` block (:5110-5140) add `listingSendsRepo: world.listingSendsRepo` beside `broadcastsRepo`.
+
+`twilio.ts`:
 
 ```ts
-// deps (:248-266): + listingSendsRepo?: ListingSendsRepo;  resolved at :568 beside the others:
-const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ doc, env: process.env, logger: log });
-// (read how the file builds its other repos - the same factory/arg shape)
-const shareOutcomeDeps = { broadcasts, ledger: { listingSends, log }, events, log };
+// deps: + listingSendsRepo?: ListingSendsRepo;   at :562-570:
+const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: log });
+const shareOutcomeDeps: ShareAttemptOutcomeDeps = { broadcasts, ledger: { listingSends, log }, events, log };
+
+// after the 30003 decision (:3452-3467), in scope for the rollup:
+const promisedAt = oneToOneRetry?.kind === 'retry' ? oneToOneRetry.runAt.toISOString() : undefined;
 
 // :3520-3545 becomes:
 if (transitioned) {
   if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0) {
     try {
       if (message.retry_of !== undefined) {
-        await rollRetryIntoBroadcast(shareOutcomeDeps, message, mappedStatus, ErrorCode);
+        await rollRetryIntoBroadcast(shareOutcomeDeps, message, mappedStatus, ErrorCode, promisedAt);
       } else {
-        const item = await rollIntoBroadcast(broadcasts, events, log, message.broadcast_id, message.conversationId, message.tsMsgId, mappedStatus, ErrorCode, statusRetryDelayMs, message.retry_due_at);
-        if (item !== undefined && (mappedStatus === 'delivered' || mappedStatus === 'failed' || mappedStatus === 'undelivered')) {
-          await originalRowLedgerWrite(shareOutcomeDeps, { share: item, row: message, outcome: outcomeOf(mappedStatus, ErrorCode, message.retry_due_at) });
+        const rolled = await rollIntoBroadcast(broadcasts, events, log, message.broadcast_id, message.conversationId, message.tsMsgId, mappedStatus, ErrorCode, statusRetryDelayMs, promisedAt);
+        const outcome = outcomeOf(mappedStatus, ErrorCode, promisedAt);
+        if (rolled !== undefined && outcome !== undefined && outcome.kind !== 'sent') {
+          await originalRowLedgerWrite(shareOutcomeDeps, { share: rolled.item, contactKey: rolled.contactKey, row: message, outcome });
         }
       }
     } catch (err) {
@@ -1516,87 +1631,103 @@ if (transitioned) {
   ...
 }
 
-function outcomeOf(status: DeliveryStatus, errorCode: string | undefined, retryDueAt: string | undefined): AttemptOutcome {
+function outcomeOf(status: DeliveryStatus, errorCode: string | undefined, promisedAt: string | undefined): AttemptOutcome | undefined {
   if (status === 'delivered') return { kind: 'delivered' };
-  if (status === 'failed' || status === 'undelivered') return { kind: 'failed', errorCode: errorCode ?? 'unknown', ...(retryDueAt !== undefined && { retryDueAt }) };
-  return { kind: 'sent', carrierSentAt: new Date().toISOString() };
+  if (status === 'failed' || status === 'undelivered') return { kind: 'failed', errorCode: errorCode ?? 'unknown', ...(promisedAt !== undefined && { retryDueAt: promisedAt }) };
+  if (status === 'sent') return { kind: 'sent', carrierSentAt: new Date().toISOString() };
+  return undefined;
 }
 
-async function rollRetryIntoBroadcast(deps: ShareAttemptOutcomeDeps, message: MessageItem, status: DeliveryStatus, errorCode: string | undefined): Promise<void> {
+async function rollRetryIntoBroadcast(deps: ShareAttemptOutcomeDeps, message: MessageItem, status: DeliveryStatus, errorCode: string | undefined, promisedAt: string | undefined): Promise<void> {
+  const outcome = outcomeOf(status, errorCode, promisedAt);
+  if (outcome === undefined) return;
   const ids = { broadcastId: message.broadcast_id, conversationId: message.conversationId, tsMsgId: message.tsMsgId };
   if (typeof message.retry_root !== 'string' || message.retry_root.length === 0) {
     deps.log.error(ids, 'broadcast delivery rollup: retry row without retry_root - unrouted (the repair stamps it)');
     return;
   }
   const result = await applyLaterAttempt(deps, {
-    broadcastId: message.broadcast_id!, conversationId: message.conversationId, retryRoot: message.retry_root,
-    attemptKey: message.tsMsgId, outcome: outcomeOf(status, errorCode, message.retry_due_at),
+    broadcastId: message.broadcast_id!, conversationId: message.conversationId, retryRoot: message.retry_root, attemptKey: message.tsMsgId, outcome,
     ...(message.recipient_contact_id !== undefined && { recipientContactId: message.recipient_contact_id }),
   });
   if (result === 'no_slot') deps.log.error({ ...ids, retryRoot: message.retry_root }, 'broadcast delivery rollup: no matching recipient slot for a retry row - a routing bug');
 }
 ```
 
-`rollIntoBroadcast` returns the ALL_NEW item it already has (`updated` at :3975, or the re-read at :3933) and takes `retryDueAt?: string` as its last parameter, passing `{ retryPending: 1 }` to the terminal-branch emit when `next === 'failed' && errorCode === '30003' && isRetryPromiseLive(retryDueAt, Date.now())`. The rollup's existing `sent` branch (:3915-3940) is unchanged: a retry row's `sent` confirmation goes through `applyLaterAttempt` (`{ kind: 'sent', carrierSentAt }`), which the D2 same-attempt rule admits from `sent` without `carrierSentAt`.
+`rollIntoBroadcast` returns `{ item, contactKey } | undefined` (the ALL_NEW item it already has at :3975 or the re-read at :3933, and the matched key) and takes `promisedAt?: string` last, passing `{ retryPending: 1 }` to the terminal-branch emit when `next === 'failed' && errorCode === '30003' && isRetryPromiseLive(promisedAt, Date.now())`. The rollup's `sent` branch (:3915-3940) is unchanged for original rows.
 
-- [ ] **Step 4: Run the webhook suite, the harness suites, typecheck**
-
-Run: `cd app; npx vitest run test/twilioStatusWebhook.test.ts test/twilioWebhookHarnessRetryFields.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts` - PASS. `npm run typecheck` - exit 0. Verify the touched lines are ASCII: `git diff -U0 -- app/src/routes/webhooks/twilio.ts | grep '^+' | LC_ALL=C tr -d '\11\12\15\40-\176' | wc -c` prints 0.
+- [ ] **Step 4: Run the webhook suite, the harness suites, typecheck** - `cd app; npx vitest run test/twilioStatusWebhook.test.ts test/twilioWebhookHarnessRetryFields.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts` PASS; `npm run typecheck` exit 0; the touched lines are ASCII (`git diff -U0 -- app/src/routes/webhooks/twilio.ts | grep '^+' | LC_ALL=C tr -d '\11\12\15\40-\176' | wc -c` prints 0).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git status
-git add app/src/routes/webhooks/twilio.ts app/test/twilioStatusWebhook.test.ts
-git commit -m "feat(webhook): a share-retry row's receipt reaches its slot (retry_of skip removed; routed by broadcast_id + retry_root through applyLaterAttempt); the original row's ledger entry; retry_pending 1 on a 30003-with-promise emit; give-up line ASCII (share-sent-outcome T5)"
+git add app/src/routes/webhooks/twilio.ts app/test/helpers/twilioWebhookHarness.ts app/test/twilioStatusWebhook.test.ts
+git commit -m "feat(webhook): a share-retry row's receipt reaches its slot (routed by broadcast_id + retry_root through applyLaterAttempt); the original row's ledger entry; the promise taken from the retry decision; retry_pending 1 on a 30003-with-promise emit; give-up line ASCII (share-sent-outcome T5)"
 ```
 
 ---
 
-### Task 6: The five 1b sites - the retry adoption, the reconcile's unresolved close, the job's two arms; deps wiring
+### Task 6: The five 1b sites - the retry adoption, the reconcile's unresolved close, the job's two arms
 
 **Files:**
-- Modify: `app/src/jobs/sendReconcile.ts` (`Ctx` :325-335 and the deps :308-322; `runCheck`'s found arm :541-558; `closeSlot`'s `retry_send` arm :1347-1372)
+- Modify: `app/src/jobs/sendReconcile.ts` (`Ctx` :325-335 and the lazy repo construction in the handler; `runCheck`'s found arm :541-558; `closeSlot`'s `retry_send` arm :1347-1372; the `Found` verdict type)
 - Modify: `app/src/jobs/retrySend.ts` (deps :281-312; `onUnknown` :851-880; `handOff`'s catch :798-819)
-- Modify: `app/src/jobs/registerHandlers.ts` (both registrations get the ledger repo; the reconcile already takes `broadcastsRepo` and `listingSendsRepo`)
-- Test: `app/test/sendReconcile.test.ts` (the `retry_send owner` block :3015-4048), `app/test/retrySendAttempt.test.ts` (beside :1289 and :1336)
+- Test: `app/test/sendReconcile.test.ts` (the `retry_send owner` block :3015-4048), `app/test/retrySendAttempt.test.ts` (`wire()` :96-118 gains the two repos; cases beside :1289 and :1336)
+
+`registerHandlers.ts` is NOT edited: it passes only `sendAttemptsRepo` (`:59-72`) and every job builds its other repos lazily; the two new deps default the same way.
 
 **Interfaces:**
-- Consumes: `applyLaterAttempt` (Task 4); `rowlessAttemptKey` (Task 1); `guardWrite` (`app/src/lib/guardWrite.ts:16-29`); in the reconcile: `r.owner` (`RetrySendOwner`: `conversationId`, `retriedTsMsgId`, `attempt`, `recipientKey`, `retryRoot`), `r.row` (the RETRIED row, consistent, carries `broadcast_id` and `recipient_contact_id`), `c.broadcasts`, `c.events`, `c.log`; in the job: `owner`, `retried`, `octx`, `log` (in scope at both arms, reference section 6).
+- Consumes: `applyLaterAttempt` (Task 4); `rowlessAttemptKey` (Task 1); `guardWrite` (`app/src/lib/guardWrite.ts:16-29`); in the reconcile: `r.owner` (`RetrySendOwner`), `r.row` (the RETRIED row, consistent), `c.broadcasts`, `c.events`, `c.log`; in the job: `owner`, `retried`, `octx`, `log` (reference section 6).
 - Produces:
-  - Site 5 (adoption), `runCheck` found arm, BEFORE `closeFromReconcile(adopted)` at :542: when `r.owner.kind === 'retry_send'` and `r.row?.broadcast_id` is a string: `applyLaterAttempt(shareDeps(c), { broadcastId: r.row.broadcast_id, conversationId: r.owner.conversationId, retryRoot: r.owner.retryRoot, attemptKey: <the adopted row's tsMsgId>, outcome: mapStatus(verdict.status), recipientContactId: <the adopted row's recipient_contact_id> })`. The adopted row's tsMsgId: `adoptRetry` appends it (`:882-903`) - return it in the `Found` verdict (add `tsMsgId?: string` to `Found`, set by `adoptRetry` and by `ownRetryRow` from the pointer's `tsMsgId`). `mapStatus`: `delivered` -> `{ kind: 'delivered' }`; `failed`/`undelivered` -> `{ kind: 'failed', errorCode: <the adopted row's errorCode ?? 'adopted_failed'> }`; else `{ kind: 'sent' }`. A missing broadcast (test 10a seeds none) is `'no_broadcast'`: WARN, continue. Wrapped in try/catch: ONE ERROR, the close proceeds (the record must close whatever the slot did).
-  - Sites 1 and 2, `closeSlot`'s `retry_send` arm (:1366), BEFORE the WITHDRAW: when `code === SEND_UNCONFIRMED_CODE && r.row !== undefined && typeof r.row.broadcast_id === 'string'`: `applyLaterAttempt(shareDeps(c), { broadcastId: r.row.broadcast_id, conversationId: r.owner.conversationId, retryRoot: r.owner.retryRoot, attemptKey: rowlessAttemptKey(r.owner.retriedTsMsgId), outcome: { kind: 'unresolved' }, recipientContactId: r.row.recipient_contact_id })` in a try/catch that logs ONE ERROR and continues to the WITHDRAW (a slot failure must not block the promise withdrawal, and the arm's throw-on-lost-WITHDRAW contract stays: a redelivered check re-runs this arm, and the re-applied slot write is a refused no-op).
-  - Sites 3 and 4, the job: a new dep `shareOutcome?: ShareAttemptOutcomeDeps` (built lazily like the others from `broadcastsRepo` + `listingSendsRepo` + `events`); at `onUnknown` immediately before `finish(...)` (:860) and at `handOff`'s catch immediately before `guardWrite(closeFromReconcile)` (:800): `await guardWrite(log, octx, 'shareSlotUnconfirmed', () => applyLaterAttempt(shareOutcome, { broadcastId: retried.broadcast_id, conversationId: owner.conversationId, retryRoot: owner.retryRoot, attemptKey: rowlessAttemptKey(owner.retriedTsMsgId), outcome: { kind: 'unresolved' }, recipientContactId: retried.recipient_contact_id }))`, only when `typeof retried.broadcast_id === 'string'`. Nothing throws (guardWrite); the record close follows as built.
+  - Site 5 (adoption), `runCheck` found arm, BEFORE `closeFromReconcile(adopted)` at :542, when `r.owner.kind === 'retry_send'` and `r.row?.broadcast_id` is a string: `applyLaterAttempt(shareDeps(c), { broadcastId, conversationId: r.owner.conversationId, retryRoot: r.owner.retryRoot, attemptKey: verdict.tsMsgId, outcome: mapAdopted(verdict), recipientContactId: verdict.recipientContactId })`. `Found` gains `tsMsgId`, `errorCode?`, `carrierSentAt?` and `recipientContactId?` - set by `adoptRetry` from the appended row and the provider message (`carrierSentAt` from the provider's `date_sent` exactly as the share adoption does, `broadcastFanOut.ts:1415`), and by `ownRetryRow` from the pointer's row read. `mapAdopted`: `delivered` -> `{ kind: 'delivered', carrierSentAt }`; `failed`/`undelivered` -> `{ kind: 'failed', errorCode: verdict.errorCode ?? 'unknown' }`; `sent` (carrier-confirmed) -> `{ kind: 'sent', carrierSentAt }`; anything else -> `{ kind: 'sent' }` (accepted, not yet confirmed). A missing broadcast (test 10a seeds none) is `'no_broadcast'`: WARN, continue. NOT wrapped: a throw is logged at ERROR and PROPAGATES, so the check fails, the record stays `reconciling`, and the redelivered check re-finds the row through its own child pointer and re-runs the hook (spec D2's crash window; deviation 11).
+  - Sites 1 and 2, `closeSlot`'s `retry_send` arm (:1366), BEFORE the WITHDRAW, when `code === SEND_UNCONFIRMED_CODE && r.row !== undefined && typeof r.row.broadcast_id === 'string'`: `applyLaterAttempt(shareDeps(c), { ..., attemptKey: rowlessAttemptKey(r.owner.retriedTsMsgId), outcome: { kind: 'unresolved' }, recipientContactId: r.row.recipient_contact_id })`. NOT wrapped: a throw propagates (the arm already throws on a lost WITHDRAW so its redelivery re-applies; the record is `done/unresolved`, so the redelivered check takes the superseded exit and re-runs this arm through `slotCloseOf(unresolved)`; a re-applied slot write is a refused no-op).
+  - Sites 3 and 4, the job: deps `broadcastsRepo?` and `listingSendsRepo?` (built lazily like `contactsRepo`, :390-401's idiom); a `markShareUnconfirmed()` helper in scope of both arms; at `onUnknown` immediately before `finish(...)` (:860) and at `handOff`'s catch immediately before `guardWrite(closeFromReconcile)` (:800): `await guardWrite(log, octx, 'shareSlotUnconfirmed', () => applyLaterAttempt(shareOutcome, { broadcastId: retried.broadcast_id, conversationId: owner.conversationId, retryRoot: owner.retryRoot, attemptKey: rowlessAttemptKey(owner.retriedTsMsgId), outcome: { kind: 'unresolved' }, recipientContactId: retried.recipient_contact_id }))`, only when `typeof retried.broadcast_id === 'string'`. Nothing throws (guardWrite); the record close follows as built.
 
 - [ ] **Step 1: Add the reconcile tests**
 
-In `app/test/sendReconcile.test.ts`, inside the `retry_send owner` block (read its fixtures: the share-root cases at :3885 seed a share row; 10a at :3154 seeds a share row with NO broadcast item):
+In `app/test/sendReconcile.test.ts`, inside the `retry_send owner` block (fixtures: the share-root cases at :3885 seed a share row; 10a at :3154 seeds a share row with NO broadcast item; read how the block builds `world`, `owner`, `runCheck` and `capture`):
 
 ```ts
-    it('adopting a share retry (found, adopted) moves the original slot as a newer attempt BEFORE the record closes, and a deduped re-adoption re-runs the hook as a refused no-op', async () => {
+    it('adopting a share retry (found, adopted) moves the original slot as a newer attempt BEFORE the record closes - the slot write precedes closeFromReconcile in call order', async () => {
       // fixture: broadcast 'b-9' with slot c-1 failed 30003 on ROOT; retried row ROOT carries broadcast_id 'b-9'; the provider list returns the retry text as delivered
+      const slotSpy = vi.spyOn(world.broadcastsRepo, 'applyAttemptOutcome');
+      const closeSpy = vi.spyOn(world.sendAttemptsRepo, 'closeFromReconcile');
       await runCheck(/* the retry_send owner ref for ROOT attempt 1 */);
-      expect(world.broadcasts.get('b-9')!.recipients['c-1']).toMatchObject({ status: 'delivered', latestAttempt: expect.stringContaining('#') });
-      const record = await world.sendAttemptsRepo.get(owner);
-      expect(record).toMatchObject({ state: 'done', outcome: 'adopted' });
-      await runCheck(/* the same ref redelivered */);         // superseded exit; nothing re-applied, nothing thrown
-      expect(world.broadcasts.get('b-9')!.stats.delivered).toBe(1);
+      expect(slotSpy.mock.invocationCallOrder[0]).toBeLessThan(closeSpy.mock.invocationCallOrder[0]!);
+      expect(world.broadcasts.get('b-9')!.recipients!['c-1']).toMatchObject({ status: 'delivered', latestAttempt: expect.stringContaining('#') });
+      expect(await world.sendAttemptsRepo.get(owner)).toMatchObject({ state: 'done', outcome: 'adopted' });
+    });
+    it('a crash BEFORE the record close (the slot hook throws once) fails the check; the redelivered check re-finds the adopted row through its child pointer and re-runs the hook to a green slot', async () => {
+      let thrown = false;
+      const real = world.broadcastsRepo.applyAttemptOutcome.bind(world.broadcastsRepo);
+      world.broadcastsRepo.applyAttemptOutcome = async (...a) => { if (!thrown) { thrown = true; throw new Error('dynamo down'); } return real(...a); };
+      await expect(runCheck(/* ref */)).rejects.toThrow('dynamo down');
+      expect((await world.sendAttemptsRepo.get(owner))?.state).toBe('reconciling');
+      await runCheck(/* the same ref redelivered */);
+      expect(world.broadcasts.get('b-9')!.recipients!['c-1']!.status).toBe('delivered');
+      expect((await world.sendAttemptsRepo.get(owner))?.outcome).toBe('adopted');
+      expect(world.broadcasts.get('b-9')!.stats.delivered).toBe(1);   // the re-run was a de-duplicated re-adoption
     });
     it('10a: adopting a share retry whose broadcast item is missing logs WARN and still closes adopted', async () => {
-      // the existing 10a fixture (share row, no broadcast item)
-      await runCheck(/* 10a ref */);
+      await runCheck(/* the 10a ref */);
       expect(capture.atLevel(40).some((l) => String(l.msg).includes('broadcast not found'))).toBe(true);
       expect((await world.sendAttemptsRepo.get(owner10a))?.outcome).toBe('adopted');
     });
-    it('an unresolved close of a share retry writes send_unconfirmed on the original slot as a row-less attempt, then withdraws the promise; the redelivered check re-applies both as no-ops', async () => {
+    it('an unresolved close of a share retry writes send_unconfirmed on the original slot as a row-less attempt, then withdraws the promise; the redelivered check re-applies both as no-ops; ONE unresolved ERROR in total', async () => {
       await runCheck(/* a ref whose lookup ends unresolved */);
-      const slot = world.broadcasts.get('b-9')!.recipients['c-1'];
+      const slot = world.broadcasts.get('b-9')!.recipients!['c-1'];
       expect(slot).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, latestAttempt: rowlessAttemptKey(ROOT) });
       expect(world.broadcasts.get('b-9')!.stats).toMatchObject({ failed: 0, unconfirmed: 1 });
       expect((await world.messagesRepo.getByTsMsgIdConsistent('conv-1', ROOT))?.retry_outcome).toBe('unconfirmed');
-      expect(capture.atLevel(50).length).toBe(1);   // C-2: ONE unresolved ERROR in total (the pins at :3698 / :3708 stay green)
+      expect(capture.atLevel(50).length).toBe(1);
       await runCheck(/* redelivered */);
       expect(capture.atLevel(50).length).toBe(1);
+    });
+    it('a slot write that throws at the unresolved close propagates (the check fails so its redelivery re-applies), after the record closed', async () => {
+      world.broadcastsRepo.applyAttemptOutcome = async () => { throw new Error('dynamo down'); };
+      await expect(runCheck(/* unresolved ref */)).rejects.toThrow('dynamo down');
+      expect((await world.sendAttemptsRepo.get(owner))).toMatchObject({ state: 'done', outcome: 'unresolved' });
     });
 ```
 
@@ -1604,72 +1735,77 @@ Keep every existing pin in the block green (`:3505` "one ERROR", `:3698` / `:370
 
 - [ ] **Step 2: Add the job tests**
 
-In `app/test/retrySendAttempt.test.ts` beside the FW1 C-5 cases (:1289 second unknown; :1336 hand-off enqueue failure):
+In `app/test/retrySendAttempt.test.ts`: extend `wire()` (:96-118) with `broadcastsRepo: world.broadcastsRepo, listingSendsRepo: world.listingSendsRepo`; beside the FW1 C-5 cases (:1289 second unknown; :1336 hand-off enqueue failure):
 
 ```ts
-  it('second unknown on a share retry: the original slot reads send_unconfirmed BEFORE the record closes; still ONE close ERROR', async () => {
+  it('second unknown on a share retry: the original slot reads send_unconfirmed and the slot write PRECEDES the record close in call order; still ONE close ERROR', async () => {
     // fixture: the retried row carries broadcast_id 'b-1'; the share exists in world.broadcasts with slot c-1 failed 30003 on ROOT; redriveCount 1; the adapter throws unknown
+    const slotSpy = vi.spyOn(world.broadcastsRepo, 'applyAttemptOutcome');
+    const finishSpy = vi.spyOn(world.sendAttemptsRepo, 'finishAttempt');
     await runJob(payload);
-    expect(world.broadcasts.get('b-1')!.recipients['c-1']).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE });
+    expect(slotSpy.mock.invocationCallOrder[0]).toBeLessThan(finishSpy.mock.invocationCallOrder[0]!);
+    expect(world.broadcasts.get('b-1')!.recipients!['c-1']).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE });
     expect(capture.atLevel(50).length).toBe(1);
   });
   it('a hand-off enqueue failure on a share retry: the slot write goes first and is guarded - a slot write that throws is ONE guard ERROR and the close still runs', async () => {
     world.broadcastsRepo.applyAttemptOutcome = async () => { throw new Error('dynamo down'); };
     await runJob(payload);
     expect(capture.atLevel(50).filter((l) => String(l.msg).includes('failure-arm write failed')).length).toBe(1);
-    expect((await world.sendAttemptsRepo.get(owner))).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+    expect(await world.sendAttemptsRepo.get(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+  });
+  it('a later adoption supersedes the unconfirmed slot the job wrote', async () => {
+    await runJob(payload);   // the second-unknown arm above
+    // then the reconcile adopts the re-driven text (the Task 6 reconcile fixture): the slot leaves send_unconfirmed for the adopted row's status
+    await runReconcileCheck(/* the same owner ref, provider returns delivered */);
+    expect(world.broadcasts.get('b-1')!.recipients!['c-1']!.status).toBe('delivered');
   });
   it('a retry of a one-to-one text that is NOT a share (no broadcast_id) writes no slot and reads no broadcast', async () => {
+    const reads = vi.spyOn(world.broadcastsRepo, 'getByIdConsistent');
     await runJob(payloadForPlainRow);
-    expect(broadcastReads).toBe(0);
+    expect(reads).not.toHaveBeenCalled();
   });
 ```
 
-- [ ] **Step 3: Run to see the reds**
+(`runReconcileCheck` is the reconcile-side runner from `sendReconcile.test.ts`; if the two suites cannot share it, put the "later adoption supersedes" case in `sendReconcile.test.ts` with the slot pre-set to `send_unconfirmed` + the row-less marker, which Task 4's unit test already covers at the service level.)
 
-Run: `cd app; npx vitest run test/sendReconcile.test.ts test/retrySendAttempt.test.ts` - the six new cases FAIL.
+- [ ] **Step 3: Run to see the reds** - `cd app; npx vitest run test/sendReconcile.test.ts test/retrySendAttempt.test.ts`.
 
-- [ ] **Step 4: Insert the calls and wire the deps**
+- [ ] **Step 4: Insert the calls**
 
 `sendReconcile.ts`:
 
 ```ts
-// Ctx (:325-335) gains: listingSends: ListingSendsRepo (the deps already carry listingSendsRepo, :318)
+// Ctx (:325-335) gains: listingSends: ListingSendsRepo (built lazily beside the others in the handler from deps.listingSendsRepo)
 function shareDeps(c: Ctx): ShareAttemptOutcomeDeps {
   return { broadcasts: c.broadcasts, ledger: { listingSends: c.listingSends, log: c.log }, events: c.events, log: c.log };
 }
-// found arm (:541-558), before :542:
+// found arm (:541-558), before :542 - NOT wrapped:
       if (r.owner.kind === 'retry_send' && r.row !== undefined && typeof r.row.broadcast_id === 'string' && verdict.tsMsgId !== undefined) {
-        try {
-          await applyLaterAttempt(shareDeps(c), {
-            broadcastId: r.row.broadcast_id, conversationId: r.owner.conversationId, retryRoot: r.owner.retryRoot,
-            attemptKey: verdict.tsMsgId, outcome: shareOutcomeOf(verdict.status, verdict.errorCode),
-            ...(verdict.recipientContactId !== undefined && { recipientContactId: verdict.recipientContactId }),
-          });
-        } catch (err) {
-          c.log.error({ ...base, err }, 'send.reconcile: the share slot write for an adopted retry failed (best-effort; the record closes adopted)');
-        }
+        const applied = await applyLaterAttempt(shareDeps(c), {
+          broadcastId: r.row.broadcast_id, conversationId: r.owner.conversationId, retryRoot: r.owner.retryRoot,
+          attemptKey: verdict.tsMsgId, outcome: mapAdopted(verdict),
+          ...(verdict.recipientContactId !== undefined && { recipientContactId: verdict.recipientContactId }),
+        });
+        if (applied === 'no_broadcast') c.log.warn({ ...base, broadcastId: r.row.broadcast_id }, 'send.reconcile: broadcast not found for an adopted share retry - slot not written');
       }
-// Found gains: tsMsgId?: string; errorCode?: string; recipientContactId?: string - set by adoptRetry from the appended/deduped row and by ownRetryRow from the pointer's row read.
-// closeSlot retry_send arm (:1366), before the WITHDRAW:
+// (a throw from applyLaterAttempt is logged by the check's own error path and fails the check: the redelivery re-runs the found arm)
+// Found gains: tsMsgId?: string; errorCode?: string; carrierSentAt?: string; recipientContactId?: string
+//   - adoptRetry sets them from the appended (or deduped, re-read) row and the provider message (carrierSentAt = m.dateSent as the share adoption maps it);
+//   - ownRetryRow sets tsMsgId from the pointer, errorCode / recipientContactId / carrierSentAt from the pointer's row read.
+// closeSlot retry_send arm (:1366), before the WITHDRAW - NOT wrapped:
       if (code === SEND_UNCONFIRMED_CODE && r.row !== undefined && typeof r.row.broadcast_id === 'string') {
-        try {
-          await applyLaterAttempt(shareDeps(c), {
-            broadcastId: r.row.broadcast_id, conversationId: r.owner.conversationId, retryRoot: r.owner.retryRoot,
-            attemptKey: rowlessAttemptKey(r.owner.retriedTsMsgId), outcome: { kind: 'unresolved' },
-            ...(r.row.recipient_contact_id !== undefined && { recipientContactId: r.row.recipient_contact_id }),
-          });
-        } catch (err) {
-          c.log.error({ ...ownerLog(r.owner), err }, 'send.reconcile: the share slot write for an unresolved retry failed (best-effort; the promise is still withdrawn)');
-        }
+        await applyLaterAttempt(shareDeps(c), {
+          broadcastId: r.row.broadcast_id, conversationId: r.owner.conversationId, retryRoot: r.owner.retryRoot,
+          attemptKey: rowlessAttemptKey(r.owner.retriedTsMsgId), outcome: { kind: 'unresolved' },
+          ...(r.row.recipient_contact_id !== undefined && { recipientContactId: r.row.recipient_contact_id }),
+        });
       }
 ```
 
 `retrySend.ts`:
 
 ```ts
-// deps: + broadcastsRepo?: BroadcastsRepo; listingSendsRepo?: ListingSendsRepo;   (built lazily in the handler like contactsRepo, :390-401's idiom)
-// a helper in scope of both arms:
+// deps: + broadcastsRepo?: BroadcastsRepo; listingSendsRepo?: ListingSendsRepo;  (built lazily in the handler like contactsRepo, :390-401's idiom; shareOutcome = { broadcasts, ledger: { listingSends, log }, events, log })
 async function markShareUnconfirmed(): Promise<void> {
   if (typeof retried.broadcast_id !== 'string') return;
   await guardWrite(log, octx, 'shareSlotUnconfirmed', () =>
@@ -1683,32 +1819,33 @@ async function markShareUnconfirmed(): Promise<void> {
 // handOff catch (:798): `await markShareUnconfirmed();` as the FIRST statement of the catch, before guardWrite(closeFromReconcile)
 ```
 
-`registerHandlers.ts`: pass `listingSendsRepo` (and `broadcastsRepo`) to `registerRetrySendJobHandler`; the reconcile registration already passes both (`:59` region - read it). The import cycle note (`sendReconcile.ts:43-47`) is respected: `shareAttemptOutcome.ts` imports no job module.
+The import cycle note (`sendReconcile.ts:43-47`) is respected: `shareAttemptOutcome.ts` imports no job module.
 
-- [ ] **Step 5: Run the suites, the smoke, typecheck**
-
-Run: `cd app; npx vitest run test/sendReconcile.test.ts test/retrySendAttempt.test.ts test/retryChain.test.ts test/registerHandlers.test.ts` (if the last exists) - PASS. From the root: `npm run typecheck` (exit 0) and `npm run smoke` (exit 0 - the compiled import graph with the new services).
+- [ ] **Step 5: Run the suites, the smoke, typecheck** - `cd app; npx vitest run test/sendReconcile.test.ts test/retrySendAttempt.test.ts test/retryChain.test.ts` PASS; from the root `npm run typecheck` (exit 0) and `npm run smoke` (exit 0).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git status
-git add app/src/jobs/sendReconcile.ts app/src/jobs/retrySend.ts app/src/jobs/registerHandlers.ts app/test/sendReconcile.test.ts app/test/retrySendAttempt.test.ts
-git commit -m "feat(retry): a share retry's outcome reaches its slot from the adoption (before the record close) and from all four unresolved-end sites (slot first at the job's arms, guarded) (share-sent-outcome T6)"
+git add app/src/jobs/sendReconcile.ts app/src/jobs/retrySend.ts app/test/sendReconcile.test.ts app/test/retrySendAttempt.test.ts
+git commit -m "feat(retry): a share retry's outcome reaches its slot from the adoption (before the record close, re-applied by a redelivery) and from all four unresolved-end sites (slot first, guarded at the job's arms, propagating at the reconcile's) (share-sent-outcome T6)"
 ```
 
 ---
 
 ### Task 7: `recordPropertySent` writes a ledger ENTRY and a milestone with its share id; the share adoption follows
 
+Built SECOND in Slice 2 (after Task 4, before Task 5).
+
 **Files:**
 - Modify: `app/src/repos/activityEventsRepo.ts` (`RecordActivityEventInput` :86-94, `ActivityEventItem` :65-82, `record` :125-148)
-- Modify: `app/src/jobs/broadcastFanOut.ts` (`recordPropertySent` :1202-1252; its callers `afterSend` :817-832 and the adoption :1456-1468; `adoptBroadcastRecipient`'s slot write :1399-1420 for the delivered case)
-- Test: `app/test/broadcastFanOut.test.ts` (the ledger pins :979-1054, :2510), `app/test/activityEventsRepo.integration.test.ts` (if present; else the fan-out test asserts the stored `broadcastId`)
+- Modify: `app/src/jobs/broadcastFanOut.ts` (`recordPropertySent` :1202-1252; its callers `afterSend` :817-832 and the adoption :1456-1468)
+- Modify: `app/src/repos/listingSendsRepo.ts` (DELETE `recordSend` :136-178 and its interface entry - Task 3 deprecated it; no runtime caller remains), `app/test/helpers/twilioWebhookHarness.ts` (the activity-events double :3056-3073 passes `broadcastId` through; the ledger double drops `recordSend`)
+- Test: `app/test/broadcastFanOut.test.ts` (the ledger pins :979-1054 and :2510), `app/test/listingSendsRepo.integration.test.ts` (:56-150 - the `recordSend` cases are REWRITTEN as `putShareMemory` cases or dropped where Task 3's new file already covers them)
 
 **Interfaces:**
 - Consumes: `applyShareLedgerEntry`, `ledgerEntryFor` (Task 3); the pass's recorded slot (`record phase` :931-959 writes `conversationId` + `tsMsgId` on the slot BEFORE `afterSend` runs at :949 - read it and take the appended row's `tsMsgId` from that scope); the adoption's row (`adoptBroadcastRecipient` has the adopted message: its `tsMsgId`, `delivery_status`).
-- Produces: `RecordActivityEventInput.broadcastId?: string`, stored as `broadcastId` on the item (a plain attribute; the SK and the projection are unchanged). `recordPropertySent(repos, log, ctx, args)` gains `args.attempt: { tsMsgId: string; conversationId: string; outcome: 'accepted' | 'delivered' }`: the milestone is recorded with `broadcastId: args.broadcastId` (timing unchanged: at acceptance); the ledger write becomes `applyShareLedgerEntry(...)` with `ledgerEntryFor(attempt.tsMsgId, attempt.conversationId, { kind: attempt.outcome }, nowIso)` - `accepted` for the pass, `delivered` for an adoption of a delivered row, `accepted` for an adopted sent row; `recordSend` is no longer called from the fan-out (seeds keep it). Best-effort as today (ERROR, never fails the send).
+- Produces: `RecordActivityEventInput.broadcastId?: string`, stored as `broadcastId` on the item (a plain attribute; the SK and the projection are unchanged); the harness double stores it too. `recordPropertySent(repos, log, ctx, args)` gains `args.attempt: { tsMsgId: string; conversationId: string; outcome: 'accepted' | 'delivered' }`: the milestone is recorded with `broadcastId: args.broadcastId` (timing unchanged: at acceptance); the ledger write becomes `applyShareLedgerEntry(...)` with `ledgerEntryFor(attempt.tsMsgId, attempt.conversationId, { kind: attempt.outcome })` - `accepted` for the pass, `delivered` for an adoption of a delivered row, `accepted` for an adopted sent row. Best-effort as today (ERROR, never fails the send). `recordSend` is deleted: the ONE ledger writer is `putShareMemory` through `applyShareLedgerEntry`.
 
 - [ ] **Step 1: Adjust the fan-out pins and add cases**
 
@@ -1733,7 +1870,7 @@ In `app/test/broadcastFanOut.test.ts` (read :979-1054 first):
   });
 ```
 
-The pins at :996, :1009, :1028, :1042, :1054 (a swallowed ledger failure) and :2510 (rows before the record close) keep their assertions but read `shares`/`counted` where they read `sentAt`/`broadcastId` - update them to the new row shape (`sentAt` is still set on a counted row).
+The pins at :996, :1009, :1028, :1042 and :2510 (rows before the record close) keep their assertions but read `shares`/`counted` where they read `sentAt`/`broadcastId` (`sentAt` is still set on a counted row, at the attempt's provider instant). The swallowed-ledger pin at :1054-1083 stubs `recordSend` to throw and matches "listing-send row failed": REWRITE it to stub `world.listingSendsRepo.putShareMemory` (throw) and match `recording listing-send entry failed` - the swallow is still the contract.
 
 - [ ] **Step 2: Run to see the reds** - `cd app; npx vitest run test/broadcastFanOut.test.ts`.
 
@@ -1763,11 +1900,11 @@ async function recordPropertySent(
   if (hasUnit) {
     try {
       // share-sent-outcome D7: an ENTRY for this attempt, not a blind upsert - a
-      // failure callback that landed first is not overwritten (the order rule).
-      const nowIso = new Date().toISOString();
+      // failure callback that landed first is not overwritten (the order rule),
+      // and the pair's sentAt is the attempt's own provider instant.
       await applyShareLedgerEntry({ listingSends: repos.listingSends, log }, {
         unitId, contactId: args.contactId, broadcastId: args.broadcastId,
-        entry: ledgerEntryFor(args.attempt.tsMsgId, args.attempt.conversationId, { kind: args.attempt.outcome }, nowIso),
+        entry: ledgerEntryFor(args.attempt.tsMsgId, args.attempt.conversationId, { kind: args.attempt.outcome }),
       });
     } catch (sendErr) {
       log.error({ err: sendErr, ...ctx }, 'broadcastFanOut: recording listing-send entry failed (best-effort)');
@@ -1776,16 +1913,16 @@ async function recordPropertySent(
 }
 ```
 
-Callers: `afterSend` (:817-832) passes `attempt: { tsMsgId: <the appended row's tsMsgId>, conversationId, outcome: 'accepted' }`; the adoption (:1456-1468) passes the adopted row's `tsMsgId` and `outcome: rowStatus === 'delivered' ? 'delivered' : 'accepted'`. The fan-out's deps type for `listingSends` narrows to the two methods (the harness double has them from Task 3).
+Callers: `afterSend` (:817-832) passes `attempt: { tsMsgId: <the appended row's tsMsgId>, conversationId, outcome: 'accepted' }`; the adoption (:1456-1468) passes the adopted row's `tsMsgId` and `outcome: rowStatus === 'delivered' ? 'delivered' : 'accepted'`. The fan-out's deps type for `listingSends` narrows to the two methods (the harness double has them from Task 3). Delete `recordSend` from the repo interface, the implementation and the harness double; rewrite `listingSendsRepo.integration.test.ts:56-150` (its upsert cases become `putShareMemory` create/refresh cases; the `listByUnit` / `listByContact` ordering cases seed through `putShareMemory`). The activity-events double (:3056-3073) stores `broadcastId` when present.
 
-- [ ] **Step 4: Run and typecheck** - `cd app; npx vitest run test/broadcastFanOut.test.ts test/sendReconcile.test.ts test/listingSendsApi.test.ts` PASS; `npm run typecheck` exit 0. (`sendReconcile.test.ts`'s property-row pins at :385-387, :429-430, :456-457, :1826-1827, :1844-1854, :1898-1899 read the row's `sentAt`/`broadcastId`: still set on a counted row; a pin that reads `via` still sees `broadcast`.)
+- [ ] **Step 4: Run and typecheck** - `cd app; npx vitest run test/broadcastFanOut.test.ts test/sendReconcile.test.ts test/listingSendsApi.test.ts test/listingSendsRepo.integration.test.ts test/seedHistory.test.ts` PASS; `npm run typecheck` exit 0 (`grep -rn recordSend app dashboard e2e` shows nothing). (`sendReconcile.test.ts`'s property-row pins at :385-387, :429-430, :456-457, :1826-1827, :1844-1854, :1898-1899 read the row's `sentAt`/`broadcastId`: still set on a counted row, now at the attempt's instant - update an assertion that pinned "now".)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git status
-git add app/src/repos/activityEventsRepo.ts app/src/jobs/broadcastFanOut.ts app/test/broadcastFanOut.test.ts
-git commit -m "feat(broadcasts): the pass and the adoption write a ledger ENTRY (counted by acceptance or delivery) and a milestone carrying its share id (share-sent-outcome T7)"
+git add app/src/repos/activityEventsRepo.ts app/src/jobs/broadcastFanOut.ts app/src/repos/listingSendsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/broadcastFanOut.test.ts app/test/listingSendsRepo.integration.test.ts
+git commit -m "feat(broadcasts): the pass and the adoption write a ledger ENTRY (counted by acceptance or delivery) and a milestone carrying its share id; recordSend retired (share-sent-outcome T7)"
 ```
 
 ---
@@ -1825,7 +1962,7 @@ In `app/test/broadcastApi.test.ts` (read the fixtures around :1080-1220 first):
   });
 ```
 
-The :1118 (phone# key) and :1154 (no unitId) cases keep; :1207 ("a failed one still is") is REPLACED by the final-failure case above. In `app/test/broadcastsRepo.integration.test.ts` delete the `priorRecipientContactIds` block (:298-370; the method is gone) - its "unions sent/sending only" premise no longer exists.
+The :1118 (phone# key) and :1154 (no unitId) cases keep; :1207 ("a failed one still is") is REPLACED by the final-failure case above. In `app/test/broadcastsRepo.integration.test.ts` delete the whole `priorRecipientContactIds` describe block (it starts at :298 and its third case at :359 runs past :370 - delete to the block's closing brace, not to a line number); its "unions sent/sending only" premise no longer exists.
 
 - [ ] **Step 2: Run to see the reds** - `cd app; npx vitest run test/broadcastApi.test.ts`.
 
@@ -1865,8 +2002,8 @@ git commit -m "feat(broadcasts): the review list's Already sent flag reads the S
 **Interfaces:**
 - Consumes: `resolveRecipientStates`, `retryPendingCount` (Task 2); `deriveBroadcastStats(b, { retryPending })` (Task 1); the router deps from Task 8.
 - Produces:
-  - Results: for each recipient, the wire slot gains `retryDueAt?`, `retryOutcome?`, `latestAttempt?` from the state map (only when present); `stats` = `deriveBroadcastStats(broadcast, { retryPending: retryPendingCount(states) })` (the count is ALWAYS present on the results and list payloads - the routes are the truth). Query `?view=stats` (the only accepted value; anything else is 400 `invalid_view`) returns `{ broadcastId, status, unitId, stats, created_at }` with NO `recipients` and NO contact reads (the `enrichRecipients` BatchGet at :231 is skipped); the state reads (D1's bounded row/record reads) still run because the count needs them.
-  - List: each summary's `stats` carries `retry_pending` (one `resolveRecipientStates` per row; the reads are bounded by D1, so a page of finished shares with no young 30003 slots costs no extra read).
+  - Results: for each recipient, the wire slot gains `retryDueAt?`, `retryOutcome?`, `latestAttempt?` from the state map (only when present); `stats` = `deriveBroadcastStats(broadcast, { retryPending: retryPendingCount(states), unconfirmedKeys: unconfirmedByRow(states, broadcast) })` (the count is ALWAYS present on the results and list payloads - the routes are the truth; a slot whose row says its chain ended unresolved counts as Not confirmed, not Failed). Query `?view=stats` (the only accepted value; anything else is 400 `invalid_view`) returns `{ broadcastId, status, unitId, stats, created_at }` with NO `recipients` and NO contact reads (the `enrichRecipients` BatchGet at :231 is skipped); the state resolution runs WITHOUT record reads (`resolveRecipientStates(deps, b)` - the default; only young failed-30003 slots read a row, 8 at a time).
+  - List: each summary's `stats` carries `retry_pending` (one `resolveRecipientStates` per row, no record reads; a page of finished shares with no young 30003 slots costs no extra read). The pin `broadcastApi.test.ts:1271-1282` (`toEqual` on the results stats) is REWRITTEN to include `retry_pending: 0`.
 
 - [ ] **Step 1: Write the failing route tests**
 
@@ -1880,7 +2017,20 @@ In `app/test/broadcastApi.test.ts`:
     expect(res.body.recipients['c-1']).toMatchObject({ status: 'failed', errorCode: '30003', retryDueAt: expect.any(String), latestAttempt: RETRY });
     expect(res.body.stats).toMatchObject({ failed: 1, retry_pending: 1 });
   });
-  it('results: a recipient whose chain ended unresolved carries retryOutcome unconfirmed and no live promise; an old 30003 failure carries neither (no read)', async () => { /* two slots */ });
+  it('results: a recipient whose chain ended unresolved carries retryOutcome unconfirmed, is counted in stats.unconfirmed (not failed), and has no live promise; an old 30003 failure carries neither (no read)', async () => {
+    // fixture: slot c-1 failed 30003 on ROOT whose row carries retry_outcome unconfirmed + the withdrawn sentinel; slot c-2 failed 30003 on a 40-minute-old row
+    const res = await request(app).get('/api/broadcasts/b-2/results');
+    expect(res.body.recipients['c-1']).toMatchObject({ retryOutcome: 'unconfirmed' });
+    expect(res.body.recipients['c-1'].retryDueAt).toBeUndefined();
+    expect(res.body.recipients['c-2'].retryOutcome).toBeUndefined();
+    expect(res.body.stats).toMatchObject({ failed: 1, unconfirmed: 1, retry_pending: 0 });
+  });
+  it('results and list read NO send-attempt records (the composer flag alone reads them)', async () => {
+    const reads = vi.spyOn(world.sendAttemptsRepo, 'get');
+    await request(app).get('/api/broadcasts/b-1/results');
+    await request(app).get('/api/broadcasts');
+    expect(reads).not.toHaveBeenCalled();
+  });
   it('results ?view=stats returns the share and its stats with retry_pending, no recipients, and reads no contacts', async () => {
     const res = await request(app).get('/api/broadcasts/b-1/results?view=stats');
     expect(res.status).toBe(200);
@@ -1907,8 +2057,8 @@ In `app/test/broadcastApi.test.ts`:
     if (view !== undefined && view !== 'stats') { res.status(400).json({ error: 'invalid_view' }); return; }
     const broadcast = await broadcasts.getById(broadcastId);
     if (!broadcast) { res.status(404).json({ error: 'broadcast_not_found' }); return; }
-    const states = await resolveRecipientStates({ messages, attempts, log }, broadcast);
-    const stats = deriveBroadcastStats(broadcast, { retryPending: retryPendingCount(states) });
+    const states = await resolveRecipientStates({ messages, attempts, log }, broadcast);   // no record reads here (deviation 12)
+    const stats = deriveBroadcastStats(broadcast, { retryPending: retryPendingCount(states), unconfirmedKeys: unconfirmedByRow(states, broadcast) });
     if (view === 'stats') { res.json(toBroadcastStatsView(broadcast, stats)); return; }
     const recipients = await enrichRecipients(contacts, broadcast.recipients ?? {}, states);
     res.json(toBroadcastResults(broadcast, recipients, stats));
@@ -1940,32 +2090,33 @@ git commit -m "feat(broadcasts): results carry each recipient's promise facts an
 
 ---
 
-### Task 10: The dashboard - types, the label table (D4), the chips, the hint and the promise (D3), the ticker, the hook merges
+### Task 10: The dashboard - types, the label table (D4), the chips, the badge's reason and the hint (D3), the ticker, the hook merges
 
 **Files:**
 - Modify: `dashboard/src/api/types.ts` (`BroadcastStats` :2965-2987, `BroadcastRecipient` :3020-3042, `BroadcastRecipientView` :3064-3080, `BroadcastUpdatedEvent` :3119-3127), `dashboard/src/api/endpoints.ts` (`getBroadcastResults` :1876-1885; new `getBroadcastStats`)
-- Modify: `dashboard/src/routes/broadcasts/broadcastFormat.ts` (`presentShareLabel` :97-105; `shareRecipientReason` :162-172; `toRecipientViews` :193-222), `StatChips.tsx` (:30-40), `BroadcastResults.tsx` (:48-76 the row; :146 the pill; the `last_error` alert), `BroadcastsList.tsx` (:144), `useBroadcastResults.ts` (:118-138), `useBroadcastsList.ts` (:111-124)
-- Test: `broadcastFormat.test.ts` (:185, :214-231, :241-247), `StatChips.test.tsx` (:33-147, :175, :178, :250), `BroadcastResults.test.tsx` (:139, :160, :227), `useBroadcastResults.test.tsx` (:70-160), `BroadcastsList.test.tsx` (:69; new SSE cases)
+- Modify: `dashboard/src/routes/broadcasts/broadcastFormat.ts` (`presentShareLabel` :97-105; `shareRecipientReason` :162-172; `toRecipientViews` :193-222), `DeliveryBadge.tsx` (props :20-31, the call at :34-37 - the ONLY caller of `shareRecipientReason`), `StatChips.tsx` (:24-28 the `Chip.tone` type, :30-40 the chips, plus its CSS module for a `progress` tone), `BroadcastResults.tsx` (:48-76 the row; :146 the pill; the `last_error` alert), `BroadcastsList.tsx` (:144), `useBroadcastResults.ts` (:118-138), `useBroadcastsList.ts` (:111-124)
+- Test: `broadcastFormat.test.ts` (:185, :214-231, :241-247), `StatChips.test.tsx` (:33-147 chips, :250 pill; :177-181 is a DeliveryBadge render test - it moves with the badge), `DeliveryBadge.test.tsx` (create if absent; else extend), `BroadcastResults.test.tsx` (:139, :160, :227), `useBroadcastResults.test.tsx` (:70-160), `BroadcastsList.test.tsx` (:69; new SSE cases)
 
 **Interfaces:**
 - Consumes: `deliveryReason(errorCode, { retryScheduled, retryUnconfirmed })` (`deliveryStatus.ts:1157-1205`), `isRetryPromiseLive` + `RETRY_OUTCOME_UNCONFIRMED` (`retryPromise.ts:33`, `:43-48`), `serverNowMs` (`api/serverClock.ts:47`), the Timeline ticker precedent (`Timeline.tsx:756`, `:2218-2248`), `skippedTotal` (:113-115).
 - Produces:
-  - Types: `BroadcastStats.retry_pending?: number` (comment: a SUB-bucket of failed, never in the sum - extend the bucket-sum comment :2960-2964); `BroadcastRecipient` and `BroadcastRecipientView` gain `tsMsgId?` (the view drops it today - keep it), `retryDueAt?`, `retryOutcome?`, `latestAttempt?`; `getBroadcastStats(id)` = GET `/api/broadcasts/:id/results?view=stats` returning `{ broadcastId, status, unitId, stats, created_at }`.
-  - `presentShareLabel(status, stats)`: `draft` and `sending` keep the stored label/tone; for `sent` or `failed` with `stats`: `delivered + sent + (sending ?? 0) > 0` -> `{ 'Sent', 'positive' }`; else `(retry_pending ?? 0) > 0` -> `{ 'Sending', 'progress' }`; else `(unconfirmed ?? 0) > 0` -> `{ 'Not confirmed', 'danger' }`; else `{ 'Not sent', skippedTotal(stats) >= audience && audience > 0 ? 'neutral' : 'danger' }`; no stats -> the stored label. `Failed` is no longer produced for a finished share.
-  - `StatChips`: `Failed` = `failed - (retry_pending ?? 0)`; a `Retrying` chip (`retry_pending ?? 0`, tone `progress`) after Failed; the balance note (:1-11) names the sub-bucket.
-  - `shareRecipientReason(status, errorCode, opts?: { retryDueAt?, retryOutcome?, serverNowMs })`: a failed row calls `deliveryReason(errorCode, { retryScheduled: isRetryPromiseLive(retryDueAt, serverNowMs), retryUnconfirmed: retryOutcome === RETRY_OUTCOME_UNCONFIRMED })`.
-  - The row's hint: `failed && errorCode !== SEND_UNCONFIRMED_CODE && retryOutcome !== 'unconfirmed' && contactId !== undefined && (tsMsgId !== undefined || latestAttempt !== undefined) && !isRetryPromiseLive(retryDueAt, serverNowMs)`; the copy line `:74` is re-worded ASCII-safe (drop the glyph or keep it as the only untouched character - the line is touched, so the glyph goes: `open conversation to retry`).
-  - `BroadcastResults` snapshots `serverNowMs()` and re-judges every 60 s while visible (the Timeline's `STALE_TICK_MS` pattern, :2218-2248); the `last_error` alert renders only when the pill reads `Not sent`.
+  - Types: `BroadcastStats.retry_pending?: number` (the bucket-sum comment :2960-2964 says it is a SUB-bucket of failed, never in the sum); `BroadcastRecipient` and `BroadcastRecipientView` gain `tsMsgId?` (the view drops it today - keep it), `retryDueAt?`, `retryOutcome?`, `latestAttempt?`; `getBroadcastStats(id)` = GET `/api/broadcasts/:id/results?view=stats` returning `{ broadcastId, status, unitId, stats, created_at }`.
+  - `presentShareLabel(status, stats)`: `draft` and `sending` keep the stored label/tone; for `sent` or `failed` with `stats`: `delivered + sent + (sending ?? 0) > 0` -> `{ 'Sent', 'positive' }`; else `(retry_pending ?? 0) > 0` -> `{ 'Sending', 'progress' }`; else `(unconfirmed ?? 0) > 0` -> `{ 'Not confirmed', 'danger' }`; else `{ 'Not sent', audience > 0 && skippedTotal(stats) >= audience ? 'neutral' : 'danger' }`; no stats -> the stored label. `Failed` is no longer produced for a finished share.
+  - `StatChips`: `Chip.tone` gains `'progress'` with a CSS class; `Failed` = `Math.max(0, failed - (retry_pending ?? 0))`; a `Retrying` chip (`retry_pending ?? 0`, tone `progress`) after Failed; the balance note (:1-11) names the sub-bucket.
+  - `shareRecipientReason(status, errorCode, opts?: { retryDueAt?, retryOutcome?, serverNowMs })`: a failed row calls `deliveryReason(errorCode, { retryScheduled: opts !== undefined && isRetryPromiseLive(opts.retryDueAt, opts.serverNowMs), retryUnconfirmed: opts?.retryOutcome === RETRY_OUTCOME_UNCONFIRMED })`.
+  - `DeliveryBadge` props gain `retryDueAt?`, `retryOutcome?`, `serverNowMs?` and pass them to `shareRecipientReason`; `RecipientRow` passes them from the view plus the page's clock snapshot.
+  - The row's hint: `failed && errorCode !== SEND_UNCONFIRMED_CODE && retryOutcome !== 'unconfirmed' && contactId !== undefined && (tsMsgId !== undefined || latestAttempt !== undefined) && !isRetryPromiseLive(retryDueAt, serverNowMs)`; the copy line :74 is re-worded ASCII-safe (`open conversation to retry`, no glyph).
+  - `BroadcastResults` snapshots `serverNowMs()` in state and re-judges every 60 s while visible (the Timeline's `STALE_TICK_MS` pattern, :2218-2248). On EVERY tick the page recounts `retry_pending` from its rows (`rows.filter(r => r.status === 'failed' && r.errorCode !== SEND_UNCONFIRMED_CODE && isRetryPromiseLive(r.retryDueAt, serverNowMs)).length`) and uses THAT count for the pill and the chips (`{ ...stats, retry_pending: recount }`) - the route's count is the initial value, the ticker's recount is the live one, so a promise that lapses with no event moves the header at the next tick as it moves the row. The `last_error` alert renders only when the pill reads `Not sent`.
   - `useBroadcastResults`: the overlay merges `stats: { ...e.stats, ...(e.stats.retry_pending === undefined && prev.stats.retry_pending !== undefined && { retry_pending: prev.stats.retry_pending }) }`; the debounced refetch (already there) replaces it with the route's truth.
   - `useBroadcastsList`: the patch merges the same way; and when `e.stats.retry_pending === undefined && (row.stats.retry_pending ?? 0) > 0 && (e.status === 'sent' || e.status === 'failed')`, schedules ONE debounced (400 ms, per row) `getBroadcastStats(e.broadcastId)` whose result replaces the row's `status` + `stats`; a row not on the page is ignored; a share stored `sending` never refetches.
 
 - [ ] **Step 1: Rewrite the pins and add the cases** (dashboard workspace; read each file's fixtures first)
 
-`broadcastFormat.test.ts`: :224 (sent + skipped + failed = "Sent") stays TRUE under the new rule (sent > 0) - keep; :226 (stored failed = "Failed") flips to `Not sent` danger; add: none reached + retry_pending 1 -> `Sending`/progress; none reached + unconfirmed 1 -> `Not confirmed`/danger; all skipped -> `Not sent`/neutral; all queued in a stored-failed share -> `Not sent`/danger; `draft`/`sending` keep stored labels; `shareRecipientReason` with a live promise reads RSW's "will retry" copy, with `retryOutcome` unconfirmed reads the unconfirmed copy, with a lapsed promise reads the plain 30003 copy (:185 is the pin that flips).
-`StatChips.test.tsx`: :178 (a 30003 row promises nothing) flips: Failed 0 + Retrying 1 when `retry_pending` 1; the order pin :77 gains `Retrying` after `Failed`; the sum pin still balances (Failed + Retrying = failed).
-`BroadcastResults.test.tsx`: :139 (hint on a keyless failed row) flips to NO hint; add: hint on a failed row with a message id and no promise; no hint with a live promise (fake `serverNowMs`); no hint on `retryOutcome` unconfirmed; the ticker: advance 60 s past the promise and the hint appears; `last_error` shown only under `Not sent`; :160, :227 keep.
+`broadcastFormat.test.ts` - the `presentShareLabel` block at :214-231 and the D22 block at :241-247. Three pins FLIP under the new rule and are rewritten: `:224` (`sent`, audience 2, skipped_other 1, failed 1 - nothing reached) -> `Not sent` / `danger`; `:228` (`sent`, `stats()` - audience 0, nothing reached) -> `Not sent` / `danger`; `:242` (`sent`, skipped 1 + unconfirmed 1) -> `Not confirmed` / `danger`. `:223` (delivered 1) keeps `Sent`; `:226` (`failed`, failed 1) -> `Not sent` / `danger`; `:225`/`:227`/`:229` (`sending`, `draft`, no stats) keep. Add: none reached + `retry_pending` 1 -> `Sending` / `progress`; all queued in a stored-failed share -> `Not sent` / `danger`; `shareRecipientReason` with a live promise reads RSW's "will retry" copy, with `retryOutcome` unconfirmed reads the unconfirmed copy, with a lapsed promise the plain 30003 copy (:185 is the pin that flips).
+`StatChips.test.tsx`: the order pin :77 gains `Retrying` after `Failed`; the sum pin balances (`Failed + Retrying = failed`); add: `retry_pending` 1 with `failed` 1 renders Failed 0 + Retrying 1; a kept `retry_pending` above `failed` clamps Failed at 0. The DeliveryBadge render test at :177-181 (a 30003 row promises nothing) MOVES to `DeliveryBadge.test.tsx` and gains: with `retryDueAt` live it reads the "will retry" copy; with `retryOutcome` unconfirmed the unconfirmed copy; lapsed the plain copy.
+`BroadcastResults.test.tsx`: :139 (hint on a keyless failed row) flips to NO hint; add: hint on a failed row with a message id and no promise; no hint with a live promise (fake `serverNowMs`); no hint on `retryOutcome` unconfirmed; the ticker: advance 60 s past the promise and the hint appears AND the pill moves from `Sending` to `Not sent` with the Retrying chip at 0 (the recount); `last_error` shown only under `Not sent`; :160, :227 keep.
 `useBroadcastResults.test.tsx`: an event without `retry_pending` keeps the previous value until the refetch replaces it.
-`BroadcastsList.test.tsx`: an event without `retry_pending` on a `sent` row with `retry_pending` 1 triggers one `getBroadcastStats` call (mock the endpoint) and the row takes its result; the same event on a `sending` row triggers none; an event WITH `retry_pending` replaces without a fetch.
+`BroadcastsList.test.tsx`: an event without `retry_pending` on a `sent` row with `retry_pending` 1 triggers one `getBroadcastStats` call (mock the endpoint) and the row takes its result; the same event on a `sending` row triggers none; an event WITH `retry_pending` replaces without a fetch; two events inside 400 ms trigger one fetch.
 
 - [ ] **Step 2: Run to see the reds** - `cd dashboard; npx vitest run src/routes/broadcasts`.
 
@@ -1995,8 +2146,14 @@ export function shareRecipientReason(status: BroadcastRecipient['status'], error
   }
   return undefined;
 }
-// StatChips.tsx chips: { label: 'Failed', value: stats.failed - (stats.retry_pending ?? 0), tone: 'danger' }, { label: 'Retrying', value: stats.retry_pending ?? 0, tone: 'progress' }
-// BroadcastResults.tsx RecipientRow: takes serverNowMs from the page's snapshot state; hint per the rule above.
+// DeliveryBadge.tsx: props + { retryDueAt?: string; retryOutcome?: string; serverNowMs?: number };
+//   const reason = shareRecipientReason(status, errorCode, serverNowMs !== undefined ? { retryDueAt, retryOutcome, serverNowMs } : undefined);
+// StatChips.tsx: type Chip = { label: string; value: number; tone?: 'success' | 'danger' | 'progress' };  chips:
+//   { label: 'Failed', value: Math.max(0, stats.failed - (stats.retry_pending ?? 0)), tone: 'danger' },
+//   { label: 'Retrying', value: stats.retry_pending ?? 0, tone: 'progress' },
+// BroadcastResults.tsx: const [serverNow, setServerNow] = useState(() => serverNowMs()); a visibility-gated 60 s interval calling setServerNow(serverNowMs());
+//   const liveStats = useMemo(() => results === null ? null : { ...results.stats, retry_pending: rows.filter((r) => r.status === 'failed' && r.errorCode !== SEND_UNCONFIRMED_CODE && isRetryPromiseLive(r.retryDueAt, serverNow)).length }, [results, rows, serverNow]);
+//   the pill (:146) and <StatChips stats={liveStats} /> read liveStats; RecipientRow gets serverNow.
 // useBroadcastsList.ts onBroadcastUpdated:
     (e) => {
       setRows((prev) => prev.map((r) => {
@@ -2019,9 +2176,11 @@ export function shareRecipientReason(status: BroadcastRecipient['status'], error
 
 ```bash
 git status
-git add dashboard/src/api/types.ts dashboard/src/api/endpoints.ts dashboard/src/routes/broadcasts/broadcastFormat.ts dashboard/src/routes/broadcasts/StatChips.tsx dashboard/src/routes/broadcasts/BroadcastResults.tsx dashboard/src/routes/broadcasts/BroadcastsList.tsx dashboard/src/routes/broadcasts/useBroadcastResults.ts dashboard/src/routes/broadcasts/useBroadcastsList.ts dashboard/src/routes/broadcasts/broadcastFormat.test.ts dashboard/src/routes/broadcasts/StatChips.test.tsx dashboard/src/routes/broadcasts/BroadcastResults.test.tsx dashboard/src/routes/broadcasts/useBroadcastResults.test.tsx dashboard/src/routes/broadcasts/BroadcastsList.test.tsx
-git commit -m "feat(dashboard): share labels derive from recipients (Sent / Sending / Not confirmed / Not sent), the Retrying chip, the results row's promise and hint on a server-clock ticker, the hooks merge an omitted retry_pending and refetch a finished share's stats (share-sent-outcome T10)"
+git add dashboard/src/api/types.ts dashboard/src/api/endpoints.ts dashboard/src/routes/broadcasts/broadcastFormat.ts dashboard/src/routes/broadcasts/DeliveryBadge.tsx dashboard/src/routes/broadcasts/StatChips.tsx dashboard/src/routes/broadcasts/StatChips.module.css dashboard/src/routes/broadcasts/BroadcastResults.tsx dashboard/src/routes/broadcasts/BroadcastsList.tsx dashboard/src/routes/broadcasts/useBroadcastResults.ts dashboard/src/routes/broadcasts/useBroadcastsList.ts dashboard/src/routes/broadcasts/broadcastFormat.test.ts dashboard/src/routes/broadcasts/DeliveryBadge.test.tsx dashboard/src/routes/broadcasts/StatChips.test.tsx dashboard/src/routes/broadcasts/BroadcastResults.test.tsx dashboard/src/routes/broadcasts/useBroadcastResults.test.tsx dashboard/src/routes/broadcasts/BroadcastsList.test.tsx
+git commit -m "feat(dashboard): share labels derive from recipients (Sent / Sending / Not confirmed / Not sent), the Retrying chip, the badge's reason and the row's hint on a server-clock ticker that recounts pending, the hooks merge an omitted retry_pending and refetch a finished share's stats (share-sent-outcome T10)"
 ```
+
+(The CSS module's real name: read `StatChips.tsx`'s import; adjust the `git add` path.)
 
 ---
 
@@ -2035,8 +2194,8 @@ git commit -m "feat(dashboard): share labels derive from recipients (Sent / Send
 - Test: `app/test/unitsApiActivity.test.ts` (:158), `app/test/contactTimeline.test.ts` (:1048, :1089-1096), `dashboard/src/routes/listing/listingFormat.test.ts` (:180-192)
 
 **Interfaces:**
-- Consumes: `getByIds` (Task 1), `deriveBroadcastStats`.
-- Produces: a helper in `app/src/services/shareRecipientState.ts`: `export function reachedCount(share: Pick<BroadcastItem, 'recipients' | 'stats'>): number` = `delivered + sent + (sending ?? 0)` of `deriveBroadcastStats(share)` (STRICT reading over the slots; no reads). Units activity: after `listByEntity`, collect the `broadcastId`s of `broadcast_sent` rows, ONE `getByIds`, and for each found share replace the projected `tenantCount` with `reachedCount(share)`; a missing share keeps the stored count. The dashboard's `describeUnitActivity` reads `n === 0 ? 'No tenants reached' : 'Sent to N tenant(s)'`. Landlord timeline: `unitAuditToMilestone` takes an optional `reached?: number`; the gather collects the `broadcast_sent` candidates' ids, and AFTER the merge and slice (:1346-1347) the page's `broadcast_sent` milestones are re-labeled from ONE `getByIds` over at most `limit` ids (`Sent to N tenants` / `No tenants reached`); a missing share keeps `Sent to <stored> tenants`. Both routers gain `broadcastsRepo?: BroadcastsRepo` (defaults like their other repos); `api.ts` forwards it.
+- Consumes: `getByIds(ids, { projection: 'stats' })` (Task 1), `reachedCount` (Task 2).
+- Produces: Units activity: after `listByEntity`, collect the `broadcastId`s of `broadcast_sent` rows, ONE `getByIds(ids, { projection: 'stats' })` inside a try/catch (a throw logs ERROR and keeps every stored count - the route's "NEVER 500s" posture, `units.ts:1255-1266`), and for each found share replace the projected `tenantCount` with `reachedCount(share)`; a missing share keeps the stored count. The dashboard's `describeUnitActivity` reads `n === 0 ? 'No tenants reached' : 'Sent to N tenant(s)'`. Landlord timeline: `unitAuditToMilestone` takes an optional `reached?: number`; the gather collects the `broadcast_sent` candidates' ids, and AFTER the merge and slice (:1346-1347) the page's `broadcast_sent` milestones are re-labeled from ONE `getByIds` over at most `limit` ids (`Sent to N tenants` / `No tenants reached`); a missing share keeps `Sent to <stored> tenants`. Both routers gain `broadcastsRepo?: BroadcastsRepo` (defaults like their other repos); `api.ts` forwards it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2047,6 +2206,13 @@ git commit -m "feat(dashboard): share labels derive from recipients (Sent / Send
     const res = await request(app).get('/api/units/unit-1/activity');
     expect(res.body.events.find((e) => e.type === 'broadcast_sent')).toMatchObject({ broadcastId: 'b-1', tenantCount: 1 });
     // audit row { broadcastId: 'b-gone', tenantCount: 4 } with no share -> tenantCount 4
+  });
+  it('a share read failure keeps every stored count and answers 200 with one ERROR', async () => {
+    world.broadcastsRepo.getByIds = async () => { throw new Error('batch down'); };
+    const res = await request(app).get('/api/units/unit-1/activity');
+    expect(res.status).toBe(200);
+    expect(res.body.events.find((e) => e.type === 'broadcast_sent').tenantCount).toBe(3);
+    expect(capture.atLevel(50).length).toBe(1);
   });
 // app/test/contactTimeline.test.ts - beside :1048 (share b1 absent from the world -> the label keeps its stored "4")
   it('a landlord''s broadcast_sent milestone reads "Sent to N tenants" from the share''s reached count, "No tenants reached" when none, and keeps the stored count for a missing share', async () => { /* three audit rows across owned units */ });
@@ -2060,12 +2226,16 @@ git commit -m "feat(dashboard): share labels derive from recipients (Sent / Send
 ```ts
 // units.ts activity route, after the audit read (:1253):
     const shareIds = rows.filter((r) => r.event_type === 'broadcast_sent').map((r) => (r.payload as { broadcastId?: unknown })?.broadcastId).filter((id): id is string => typeof id === 'string');
-    const shares = shareIds.length > 0 ? await broadcasts.getByIds(shareIds) : new Map();
+    let shares = new Map<string, BroadcastItem>();
+    if (shareIds.length > 0) {
+      try { shares = await broadcasts.getByIds(shareIds, { projection: 'stats' }); }
+      catch (err) { log.error({ err, unitId, count: shareIds.length }, 'unit activity: share recount read failed (best-effort) - stored counts kept'); }
+    }
     // in toUnitActivityEvent(e, shares): for broadcast_sent, tenantCount = shares.get(broadcastId) ? reachedCount(share) : stored
 // contactTimeline.ts, after `const page = candidates.slice(0, limit)` (:1347):
     const shareIds = page.map((c) => c.item).filter((m): m is TimelineMilestone => m.kind === 'milestone' && m.type === 'listing_sent' && m.refType === 'broadcast' && m.refId !== undefined && m.label.startsWith('Sent to ')).map((m) => m.refId!);
     if (shareIds.length > 0) {
-      const shares = await broadcasts.getByIds(shareIds);   // best-effort: a throw logs ERROR and leaves the stored labels
+      const shares = await broadcasts.getByIds(shareIds, { projection: 'stats' });   // inside the landlord branch's existing try/catch: a throw logs ERROR and leaves the stored labels
       for (const c of page) {
         const m = c.item;
         if (m.kind !== 'milestone' || m.refType !== 'broadcast' || m.refId === undefined) continue;
@@ -2086,7 +2256,7 @@ The landlord relabel identifies its own milestones by `refType === 'broadcast'` 
 
 ```bash
 git status
-git add app/src/routes/units.ts app/src/routes/contactTimeline.ts app/src/routes/api.ts app/src/services/shareRecipientState.ts dashboard/src/routes/listing/listingFormat.ts app/test/unitsApiActivity.test.ts app/test/contactTimeline.test.ts dashboard/src/routes/listing/listingFormat.test.ts
+git add app/src/routes/units.ts app/src/routes/contactTimeline.ts app/src/routes/api.ts dashboard/src/routes/listing/listingFormat.ts app/test/unitsApiActivity.test.ts app/test/contactTimeline.test.ts dashboard/src/routes/listing/listingFormat.test.ts
 git commit -m "feat(activity): Sent to N tenants recounts the share's reached recipients at read time on the property card and the landlord timeline; No tenants reached (share-sent-outcome T11)"
 ```
 
@@ -2112,11 +2282,14 @@ git commit -m "feat(activity): Sent to N tenants recounts the share's reached re
 In `app/test/contactTimeline.test.ts` (read the tenant milestone fixtures first):
 
 ```ts
-  it('a tenant''s Property sent milestone reads its words from the ledger entry of ITS share: counted / unconfirmed / failed / pending-live / pending-lapsed', async () => {
-    // five milestones for five units, each with broadcastId b1..b5; ledger rows seeded through putShareMemory with the five entry states;
-    // b4's pending entry names a row whose retry_due_at is now + 5 min; b5's names a lapsed one
+  it('a tenant''s Property sent milestone reads its words from the ledger entry of ITS share: counted / unconfirmed / failed / pending-live / pending-refreshed / pending-withdrawn / pending-lapsed / pending-past-the-bound', async () => {
+    // eight milestones for eight units, each with broadcastId b1..b8; ledger rows seeded through putShareMemory with the entry states;
+    // b4's pending entry names a row whose retry_due_at is now + 5 min; b5's names a row 1b REFRESHED (retry_due_at moved to now + 6 min - still live);
+    // b6's names a row whose promise is WITHDRAWN with retry_outcome unconfirmed; b7's names a lapsed one (due + 2 min < now);
+    // b8's pending entry's attempt key is 30 minutes old (past RETRY_ROW_READ_BOUND_MS) - no row read
     const labels = body.items.filter((i) => i.kind === 'milestone' && i.type === 'listing_sent').map((m) => m.label);
-    expect(labels).toEqual(['Property sent', 'Property sent - not confirmed', 'Property text failed', 'Property sent', 'Property text failed']);
+    expect(labels).toEqual(['Property sent', 'Property sent - not confirmed', 'Property text failed', 'Property sent', 'Property sent', 'Property sent - not confirmed', 'Property text failed', 'Property text failed']);
+    expect(rowReads).toBe(4);   // instrument world.messagesRepo.getByTsMsgIdConsistent: b4, b5, b6, b7 read; b8 does not
   });
   it('a pre-branch milestone (no broadcastId) reads the pair: counted false -> Property text failed; absent flag -> Property sent; no row -> the stored label', async () => { /* three milestones */ });
   it('a ledger read failure leaves the stored labels and logs one ERROR', async () => { /* world.listingSendsRepo.getByKeys throws */ });
@@ -2183,46 +2356,97 @@ git commit -m "feat(timeline): the tenant's Property sent milestone reads its wo
 
 **Files:**
 - Create: `app/scripts/repair-share-outcomes.ts`
+- Modify: `app/src/repos/messagesRepo.ts` (a new `stampRetryAttribution(conversationId, tsMsgId, patch: { broadcastId: string; retryRoot: string })`: one conditional `UpdateCommand`, `SET broadcast_id = :b, retry_root = :r` with `attribute_exists(tsMsgId)`; mirrored in the harness double)
 - Modify: `RUNBOOK.md` (a new section beside "One-to-one conversation automation switch (2026-09-25)", :337-366)
 - Test: `app/test/repairShareOutcomes.test.ts` (per-file DynamoDB Local database; the script's core takes `{ doc, env, apply, now }` like `enableConversationAutomation`)
 
 **Interfaces:**
-- Consumes: `resolveStageClient`, `parseStageArgs` (`app/scripts/lib/stageClient.ts:112-177`, `:186-212`); the entrypoint shape (`enable-conversation-automation.ts:364-417`); `ScanCommand` (the census precedent, `conversation-automation-census.ts:227`); `tableName`; repos built over the stage's `doc` + `env`: broadcasts (`getByIdConsistent`, `applyAttemptOutcome`), messages (`getByTsMsgIdConsistent`, `listByConversation` paged newest-first with `before`, `annotateMessage` or the append-time fields writer - read `messagesRepo.ts` for the method that SETs arbitrary row attributes conditionally; if none fits, add `stampRetryAttribution(conversationId, tsMsgId, { broadcastId, retryRoot })` with a condition `attribute_exists(tsMsgId)`), attempts (`get`), listing sends (`getByKeyConsistent`, `putShareMemory`), conversations (`getById` for `participant_phone`); `applyLaterAttempt` (Task 4), `applyShareLedgerEntry` (Task 3), `retryRecipientKey` (`retryChain.ts:59-66`), `rowlessAttemptKey` (Task 1), `RECONCILE_CHECK_DELAYS_MS`.
-- Produces: `runRepairShareOutcomes(opts: { doc; env; apply: boolean; now?: () => number; scanLimit?: number; broadcastId?: string }): Promise<RepairReport>` and `reportRepair(report, apply): number` (the exit code). The census (always) then the apply (only with `--apply`):
-  1. ONE Scan of the broadcasts table with `FilterExpression: attribute_exists(unitId)` (or `--broadcast <id>` for one share); for each share and each non-skipped slot with `conversationId` + `tsMsgId`: read the original row consistently (missing -> `unjudgeable.originalMissing`, skip); page the conversation's rows newest-first (`listByConversation` with `before`, stopping once `tsMsgId <= original.tsMsgId`), keep rows whose `retry_of` chain leads to the original (walk `retry_of` through the collected rows; a break -> `unjudgeable.brokenLineage`, skip the slot), ordered by `tsMsgId`.
-  2. Stamps: every chain row whose `broadcast_id !== share.broadcastId` or `retry_root !== original.tsMsgId` is counted (`stampsNeeded`) and, on apply, written (`stampsWritten`).
-  3. The slot: the newest chain row decides - `delivered` -> `{ kind: 'delivered' }`; `failed`/`undelivered` -> `{ kind: 'failed', errorCode, retryDueAt }`; `sent` -> `{ kind: 'sent', carrierSentAt: row.carrier_sent_at ?? undefined }` (read the row's field name); then the retry-owner records for the newest row's chain: for the retried row R (each row that has a `retry_of` child or none), `attempts.get({ kind: 'retry_send', conversationId, retriedTsMsgId: R.tsMsgId, attempt: (R.retry_attempt ?? 0) + 1, recipientKey: retryRecipientKey(R, conversation)!, retryRoot: original.tsMsgId })` - a `done/unresolved` record, a `reconciling` record older than `RECONCILE_CHECK_DELAYS_MS[2] + 120 s` with no chain row after R, or a `retry_outcome` unconfirmed on the newest row -> the outcome becomes `{ kind: 'unresolved' }` with the row-less key `rowlessAttemptKey(R.tsMsgId)`; compare with the slot (`status`, `errorCode`, `latestAttempt`): a difference is `slotsToMove` and, on apply, `applyLaterAttempt(...)` (its D2 rule refuses a delivered or skipped slot, and an attempt older than the recorded one, so the repair never regresses a slot).
-  4. The ledger: for a slot with a contact (`recipient_contact_id` on the newest row, else the slot key when not `phone#`), the entry for the newest attempt through `applyShareLedgerEntry` (`pairsRecounted`; `rowsCreated` when the row was absent and the outcome counts). Order-safe by construction (the D7 rule refuses older writes).
-  5. The report: `{ sharesWalked, slotsWalked, stampsNeeded, stampsWritten, slotsToMove, slotsMoved, pairsRecounted, rowsCreated, unjudgeable: { originalMissing, brokenLineage, noContact } }`, ids only in the log; exit 0 on a clean run, 1 on any read/write error (the partial report printed first), 2 on usage.
-  The script header (target, DRY RUN default, `--apply`, agents only on a lane, ids only, re-runnable) copies `enable-conversation-automation.ts:1-72`'s shape; `--env local --lane <L>` for an agent; `--env dev|prod` is Cameron's.
+- Consumes: `resolveStageClient`, `parseStageArgs` (`app/scripts/lib/stageClient.ts:112-177`, `:186-212`); the entrypoint shape (`enable-conversation-automation.ts:364-417`); `ScanCommand` (the census precedent, `conversation-automation-census.ts:227`); `tableName`; repos built over the stage's `doc` + `env`: broadcasts (`getByIdConsistent`, `applyAttemptOutcome`), messages (`getByTsMsgIdConsistent`, `listByConversation` paged newest-first with `before`, `stampRetryAttribution`), attempts (`get`), listing sends (`getByKeyConsistent`, `putShareMemory`), conversations (`getById` for `participant_phone`); `applyLaterAttempt` (Task 4), `applyShareLedgerEntry` + `ledgerEntryFor` (Task 3), `retryRecipientKey` (`retryChain.ts:59-66`), `rowlessAttemptKey` (Task 1), `RECONCILE_CHECK_DELAYS_MS`, `RETRY_PROMISE_GRACE_MS`.
+- Produces: `runRepairShareOutcomes(opts: { doc; env; apply: boolean; now?: () => number; scanLimit?: number; broadcastId?: string }): Promise<RepairReport>` and `reportRepair(report, apply): number` (the exit code). Definitions the builder must not invent:
+  - THE CHAIN of a slot: starting from the original row O (the slot's `conversationId` + `tsMsgId`), the set of rows R in the same conversation with `tsMsgId > O.tsMsgId` for which following `retry_of` from R reaches O (walk within the collected rows; every hop must land on a collected row or on O). A row that walks to a row outside the collection, or to a non-collected row, is ANOTHER chain (another share's text, an unrelated retry) and is simply ignored. A BROKEN link is a collected row whose `retry_root === O.tsMsgId` OR whose `broadcast_id === share.broadcastId` (it CLAIMS this chain) but whose `retry_of` walk does not reach O: the slot is `unjudgeable.brokenLineage` and left alone. Rows are collected by paging `listByConversation(conversationId, { before, limit: 100 })` newest-first until a page's oldest `tsMsgId <= O.tsMsgId`.
+  - THE NEWEST ATTEMPT of a slot: the chain row N with the greatest `tsMsgId` (O itself when the chain is empty). Its outcome: `delivery_status` `delivered` -> `{ kind: 'delivered', carrierSentAt: N.carrier_sent_at? }`; `failed`/`undelivered` -> `{ kind: 'failed', errorCode: N.error_code, retryDueAt: N.retry_due_at }`; `sent` -> `{ kind: 'sent', carrierSentAt: N.carrier_sent_at? }`; `queued`/`accepted` -> `{ kind: 'sent' }` (read the row's real field names for the carrier instant and the error code). THEN one record check, for N only: `attempts.get({ kind: 'retry_send', conversationId, retriedTsMsgId: N.tsMsgId, attempt: (N.retry_attempt ?? 0) + 1, recipientKey: retryRecipientKey(N, conversation), retryRoot: O.tsMsgId })` (the conversation read once per slot; a recipient key that cannot be derived skips the record check with `unjudgeable.noRecipientKey`); a record `done/unresolved`, or `reconciling` with `attemptedAt` older than `RECONCILE_CHECK_DELAYS_MS[2] + RETRY_PROMISE_GRACE_MS`, or `N.retry_outcome === 'unconfirmed'` -> the decided attempt becomes `{ attemptKey: rowlessAttemptKey(N.tsMsgId), outcome: { kind: 'unresolved' } }`; otherwise `{ attemptKey: N.tsMsgId, outcome }`. Re-runs converge: a slot already at the decided key and status is not "to move".
+  - STAMPS: every chain row whose `broadcast_id !== share.broadcastId` or `retry_root !== O.tsMsgId` (missing OR wrong).
+  - SLOT DISAGREES: `slot.status !== statusOf(decided)` or `slot.errorCode !== codeOf(decided)` or `(slot.latestAttempt ?? slot.tsMsgId) !== decided.attemptKey`, where for `decided.attemptKey === O.tsMsgId` the recorded key is `slot.tsMsgId` (no pointer). A `delivered` or `skipped` slot is never walked past the census (`applyLaterAttempt` refuses it anyway).
+  - THE LEDGER: for a slot with a pair contact (the slot key when a contact id; else N's `recipient_contact_id`; else `unjudgeable.noContact`), `applyShareLedgerEntry` with `ledgerEntryFor(decided.attemptKey, conversationId, <the D7 mapping of decided.outcome, pending when retryDueAt is live>)`; count `pairsRecounted` when the entry was written and the row's `counted` changed from false to true or the row was created (`rowsCreated`), `pairsUncounted` when it changed from true/absent to false.
+  - THE REPORT: `{ sharesWalked, slotsWalked, stampsNeeded, stampsWritten, slotsToMove, slotsMoved, pairsUncounted, pairsRecounted, rowsCreated, unjudgeable: { originalMissing, brokenLineage, noContact, noRecipientKey } }`, ids only in the log; exit 0 on a clean run, 1 on any read/write error (the partial report printed first), 2 on usage. The census runs every read and prints the report; `--apply` performs the writes in the same walk. `--broadcast <id>` limits the walk to one share; `--env local --lane <L>` for an agent; `--env dev|prod` is Cameron's, and the account guard (`resolveStageClient`) refuses any other account BEFORE a table is read.
 
 - [ ] **Step 1: Write the failing test**
 
-`app/test/repairShareOutcomes.test.ts` (seed through the REAL repos over the per-file database; the retry rows are appended with `messagesRepo.append` so the `retrychild#` pointers exist too):
+`app/test/repairShareOutcomes.test.ts` (seed through the REAL repos over the per-file database; the retry rows are appended with `messagesRepo.append` so the `retrychild#` pointers exist too; `putShare` as in Task 1; `world`-free - this is an integration test):
 
 ```ts
+// spec D8: census then apply - stamps, slot moves, ledger rebuild; idempotent; never a regression; the account guard.
+import { describe, expect, it } from 'vitest';
+// setup: doc/env for the per-file database; createBroadcastsRepo, createMessagesRepo, createSendAttemptsRepo, createListingSendsRepo, createConversationsRepo; runRepairShareOutcomes from '../scripts/repair-share-outcomes.js'
+
+const NOW = Date.parse('2026-09-28T12:00:00.000Z');
+const ROOT = '2026-09-28T11:00:00.000Z#SMROOT';
+const R1 = '2026-09-28T11:01:00.000Z#SMR1';
+async function seedShareWithChain(opts: { broadcastId: string; slotStatus: 'failed' | 'sent' | 'delivered' | 'skipped'; rows: Array<{ tsMsgId: string; retryOf?: string; status: string; errorCode?: string; stamped?: boolean; wrongRoot?: string }> }) {
+  // a conversation conv-<id> with participant_phone; a share (unitId u-1, slot c-1 { status, errorCode '30003' for failed, conversationId, tsMsgId: ROOT });
+  // rows appended in order: the original (broadcast_id set, no retry_of) and the retries (retry_of as given; broadcast_id/retry_root only when stamped; a wrongRoot overrides retry_root)
+}
+
 describe('repair-share-outcomes', () => {
-  it('census: a share whose retry delivered (pre-1b rows: no broadcast_id, no retry_root) reports 2 stamps needed and 1 slot to move; dry run writes nothing', async () => {
-    // seed: share b-1 (unitId u-1) slot c-1 failed 30003 on ROOT; rows ROOT (failed 30003), R1 (retry_of ROOT, delivered) without broadcast_id/retry_root
+  it('census: a share whose retry delivered (pre-1b rows: no broadcast_id, no retry_root) reports 1 stamp needed and 1 slot to move; dry run writes nothing', async () => {
+    await seedShareWithChain({ broadcastId: 'b-1', slotStatus: 'failed', rows: [{ tsMsgId: ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: R1, retryOf: ROOT, status: 'delivered' }] });
     const report = await runRepairShareOutcomes({ doc, env, apply: false, now: () => NOW });
-    expect(report).toMatchObject({ sharesWalked: 1, slotsWalked: 1, stampsNeeded: 1, stampsWritten: 0, slotsToMove: 1, slotsMoved: 0 });
-    expect((await broadcasts.getByIdConsistent('b-1'))!.recipients['c-1'].status).toBe('failed');
+    expect(report).toMatchObject({ sharesWalked: 1, slotsWalked: 1, stampsNeeded: 1, stampsWritten: 0, slotsToMove: 1, slotsMoved: 0, pairsRecounted: 0 });
+    expect((await broadcasts.getByIdConsistent('b-1'))!.recipients!['c-1']!.status).toBe('failed');
+    expect(await listingSends.getByKeyConsistent('u-1', 'c-1')).toBeUndefined();
   });
-  it('apply: stamps the chain, moves the slot to delivered as the newer attempt, counts the ledger pair by delivery, and is idempotent on a second run', async () => {
+  it('apply: stamps the chain, moves the slot to delivered as the newer attempt, counts the ledger pair by delivery at the retry''s instant, and is idempotent on a second run', async () => {
     const first = await runRepairShareOutcomes({ doc, env, apply: true, now: () => NOW });
-    expect(first).toMatchObject({ stampsWritten: 1, slotsMoved: 1, pairsRecounted: 1 });
-    const row = await messages.getByTsMsgIdConsistent('conv-1', R1);
-    expect(row).toMatchObject({ broadcast_id: 'b-1', retry_root: ROOT });
-    expect((await broadcasts.getByIdConsistent('b-1'))!.recipients['c-1']).toMatchObject({ status: 'delivered', latestAttempt: R1 });
-    expect((await listingSends.getByKeyConsistent('u-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ state: 'counted', by: 'delivery' });
+    expect(first).toMatchObject({ stampsWritten: 1, slotsMoved: 1, pairsRecounted: 1, rowsCreated: 1 });
+    expect(await messages.getByTsMsgIdConsistent('conv-b-1', R1)).toMatchObject({ broadcast_id: 'b-1', retry_root: ROOT });
+    expect((await broadcasts.getByIdConsistent('b-1'))!.recipients!['c-1']).toMatchObject({ status: 'delivered', latestAttempt: R1 });
+    expect((await listingSends.getByKeyConsistent('u-1', 'c-1'))).toMatchObject({ counted: true, sentAt: '2026-09-28T11:01:00.000Z', broadcastId: 'b-1' });
     const second = await runRepairShareOutcomes({ doc, env, apply: true, now: () => NOW });
-    expect(second).toMatchObject({ stampsNeeded: 0, slotsToMove: 0 });
+    expect(second).toMatchObject({ stampsNeeded: 0, slotsToMove: 0, pairsRecounted: 0, rowsCreated: 0 });
   });
-  it('a post-1b row whose retry_root is WRONG (the hop cap) is corrected', async () => { /* seed R2 with retry_root = R1 instead of ROOT */ });
-  it('a slot stuck sent whose own row failed moves to failed; a delivered slot is never touched; a skipped slot is never walked', async () => { /* three shares */ });
-  it('a chain whose newest retry record is done/unresolved marks the slot send_unconfirmed and the ledger entry unconfirmed', async () => { /* seed the record through sendAttemptsRepo */ });
-  it('an original row that is missing is reported unjudgeable and untouched; a chain with a broken link likewise', async () => { /* ... */ });
-  it('a share with no unitId is not walked', async () => { /* ... */ });
+  it('a post-1b row whose retry_root is WRONG (the hop cap) is corrected, and a chain with an unstamped ancestor is stamped end to end', async () => {
+    const R2 = '2026-09-28T11:02:00.000Z#SMR2';
+    await seedShareWithChain({ broadcastId: 'b-2', slotStatus: 'failed', rows: [{ tsMsgId: ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: R1, retryOf: ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: R2, retryOf: R1, status: 'delivered', stamped: true, wrongRoot: R1 }] });
+    const report = await runRepairShareOutcomes({ doc, env, apply: true, now: () => NOW, broadcastId: 'b-2' });
+    expect(report.stampsWritten).toBe(2);
+    expect((await messages.getByTsMsgIdConsistent('conv-b-2', R2))?.retry_root).toBe(ROOT);
+    expect((await messages.getByTsMsgIdConsistent('conv-b-2', R1))).toMatchObject({ broadcast_id: 'b-2', retry_root: ROOT });
+  });
+  it('a slot stuck sent whose own row failed moves to failed and un-counts the pair; a delivered slot is never touched; a skipped slot is never walked', async () => {
+    await seedShareWithChain({ broadcastId: 'b-3', slotStatus: 'sent', rows: [{ tsMsgId: ROOT, status: 'failed', errorCode: '30007' }] });
+    await seedShareWithChain({ broadcastId: 'b-4', slotStatus: 'delivered', rows: [{ tsMsgId: ROOT, status: 'failed', errorCode: '30007' }] });   // a lying row: the slot wins
+    await seedShareWithChain({ broadcastId: 'b-5', slotStatus: 'skipped', rows: [] });
+    const report = await runRepairShareOutcomes({ doc, env, apply: true, now: () => NOW });
+    expect((await broadcasts.getByIdConsistent('b-3'))!.recipients!['c-1']).toMatchObject({ status: 'failed', errorCode: '30007' });
+    expect((await broadcasts.getByIdConsistent('b-4'))!.recipients!['c-1']!.status).toBe('delivered');
+    expect(report.slotsWalked).toBe(2);   // b-5's skipped slot is not walked
+  });
+  it('a chain whose newest attempt''s next-attempt record is done/unresolved marks the slot send_unconfirmed as a row-less attempt and the ledger entry unconfirmed', async () => {
+    await seedShareWithChain({ broadcastId: 'b-6', slotStatus: 'failed', rows: [{ tsMsgId: ROOT, status: 'failed', errorCode: '30003' }] });
+    await attempts.claim(/* the retry_send owner for ROOT attempt 1 with the recipient key of c-1 */, /* facts */);   // then closeFromReconcile(unresolved) - read sendAttemptsRepo for the exact claim + close sequence used by sendReconcile.test.ts
+    const report = await runRepairShareOutcomes({ doc, env, apply: true, now: () => NOW, broadcastId: 'b-6' });
+    expect(report.slotsMoved).toBe(1);
+    expect((await broadcasts.getByIdConsistent('b-6'))!.recipients!['c-1']).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, latestAttempt: rowlessAttemptKey(ROOT) });
+    expect((await listingSends.getByKeyConsistent('u-1', 'c-1'))?.shares?.['b-6']?.state).toBe('unconfirmed');
+  });
+  it('an original row that is missing is unjudgeable and untouched; a row that claims this chain but does not walk to the original is a broken lineage; an unrelated retry chain in the same thread is ignored', async () => {
+    await seedShareWithChain({ broadcastId: 'b-7', slotStatus: 'failed', rows: [] });                       // slot points at ROOT but no row exists
+    await seedShareWithChain({ broadcastId: 'b-8', slotStatus: 'failed', rows: [{ tsMsgId: ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: R1, retryOf: 'gone', status: 'delivered', stamped: true }] });   // claims b-8 (stamped) but retry_of walks nowhere
+    await seedShareWithChain({ broadcastId: 'b-9', slotStatus: 'failed', rows: [{ tsMsgId: ROOT, status: 'failed', errorCode: '30003' }, { tsMsgId: R1, retryOf: 'some-other-original', status: 'delivered' }] });   // another chain
+    const report = await runRepairShareOutcomes({ doc, env, apply: true, now: () => NOW });
+    expect(report.unjudgeable).toMatchObject({ originalMissing: 1, brokenLineage: 1 });
+    expect((await broadcasts.getByIdConsistent('b-9'))!.recipients!['c-1']!.status).toBe('failed');   // the unrelated chain moved nothing
+    expect(report.slotsToMove).toBe(0);
+  });
+  it('a share with no unitId is not walked', async () => {
+    await putShare({ ...baseShare, broadcastId: 'b-10', unitId: undefined, recipients: { 'c-1': { status: 'failed', errorCode: '30003', conversationId: 'conv-x', tsMsgId: ROOT } } });
+    const report = await runRepairShareOutcomes({ doc, env, apply: false, now: () => NOW, broadcastId: 'b-10' });
+    expect(report.sharesWalked).toBe(0);
+  });
+  it('the account guard: a dev/prod target whose identity is not the housingchoice account refuses BEFORE any read (stageClient.test.ts pins the resolver; this pins the script''s use of it)', async () => {
+    // resolveStageClient('dev', { assertAccount: async () => ({ Account: '000000000000' }) }) rejects; the script's entrypoint exits 1 without reading a table -
+    // exercised through the exported `resolveTargetForRepair(target, deps)` wrapper the script uses, with a spy on doc.send asserting zero calls
+  });
 });
 ```
 
@@ -2230,52 +2454,60 @@ describe('repair-share-outcomes', () => {
 
 - [ ] **Step 3: Write the script**
 
-The structure, with the census/apply split and the report (the bodies follow the rules in Interfaces; every write is one of `stampRetryAttribution`, `applyLaterAttempt`, `applyShareLedgerEntry`):
-
 ```ts
-export interface RepairReport { sharesWalked: number; slotsWalked: number; stampsNeeded: number; stampsWritten: number; slotsToMove: number; slotsMoved: number; pairsRecounted: number; rowsCreated: number; unjudgeable: { originalMissing: number; brokenLineage: number; noContact: number } }
+export interface RepairReport { sharesWalked: number; slotsWalked: number; stampsNeeded: number; stampsWritten: number; slotsToMove: number; slotsMoved: number; pairsUncounted: number; pairsRecounted: number; rowsCreated: number; unjudgeable: { originalMissing: number; brokenLineage: number; noContact: number; noRecipientKey: number } }
 
 export async function runRepairShareOutcomes(opts: RepairOptions): Promise<RepairReport> {
-  const repos = buildRepos(opts.doc, opts.env, log);   // broadcasts, messages, attempts, listingSends, conversations
+  const repos = buildRepos(opts.doc, opts.env, log);   // broadcasts, messages, attempts, listingSends, conversations - the createXRepo({ doc, env, logger }) shape stageClient users follow
   const report = emptyReport();
-  for await (const share of scanUnitShares(opts)) {     // ScanCommand paged, FilterExpression attribute_exists(unitId); or one getByIdConsistent for --broadcast
+  const nowMs = (opts.now ?? Date.now)();
+  for await (const share of unitShares(repos, opts)) {   // one getByIdConsistent for --broadcast; else a ScanCommand paged with FilterExpression 'attribute_exists(unitId)'
     report.sharesWalked += 1;
+    const conversationCache = new Map<string, ConversationItem | undefined>();
     for (const [contactKey, slot] of Object.entries(share.recipients ?? {})) {
       if (slot.status === 'skipped' || slot.conversationId === undefined || slot.tsMsgId === undefined) continue;
       report.slotsWalked += 1;
-      const chain = await rebuildChain(repos.messages, slot.conversationId, slot.tsMsgId);   // { original, rows: MessageItem[] } | { unjudgeable: 'originalMissing' | 'brokenLineage' }
+      const chain = await rebuildChain(repos.messages, share.broadcastId, slot.conversationId, slot.tsMsgId);
       if ('unjudgeable' in chain) { report.unjudgeable[chain.unjudgeable] += 1; continue; }
       for (const row of chain.rows) {
         if (row.broadcast_id === share.broadcastId && row.retry_root === chain.original.tsMsgId) continue;
         report.stampsNeeded += 1;
         if (opts.apply) { await repos.messages.stampRetryAttribution(row.conversationId, row.tsMsgId, { broadcastId: share.broadcastId, retryRoot: chain.original.tsMsgId }); report.stampsWritten += 1; }
       }
-      const decided = await decideNewest(repos, chain, share);   // { attemptKey, outcome, recipientContactId? }
-      if (slotDisagrees(slot, decided)) {
+      const newest = chain.rows.at(-1) ?? chain.original;
+      const conversation = await cachedConversation(repos.conversations, conversationCache, slot.conversationId);
+      const decided = await decideNewest(repos.attempts, newest, chain.original, conversation, nowMs, report);   // { attemptKey, outcome } | undefined (noRecipientKey counted inside)
+      if (decided === undefined) continue;
+      if (slotDisagrees(slot, decided, chain.original.tsMsgId)) {
         report.slotsToMove += 1;
-        if (opts.apply && (await applyLaterAttempt(shareDeps(repos, log), { broadcastId: share.broadcastId, conversationId: slot.conversationId, retryRoot: chain.original.tsMsgId, ...decided })) === 'applied') report.slotsMoved += 1;
+        if (opts.apply) {
+          const result = await applyLaterAttempt(shareDeps(repos, log), { broadcastId: share.broadcastId, conversationId: slot.conversationId, retryRoot: chain.original.tsMsgId, ...decided, ...(newest.recipient_contact_id !== undefined && { recipientContactId: newest.recipient_contact_id }) });
+          if (result === 'applied') report.slotsMoved += 1;
+        }
       }
-      // the ledger entry for the newest attempt (counted / pending / failed / unconfirmed), created when absent
+      const contactId = contactKey.startsWith('phone#') ? newest.recipient_contact_id : contactKey;
+      if (contactId === undefined) { report.unjudgeable.noContact += 1; continue; }
+      await recountPair(repos.listingSends, log, share, contactId, decided, slot.conversationId, nowMs, opts.apply, report);   // applyShareLedgerEntry; counts pairsUncounted / pairsRecounted / rowsCreated from the before/after row
     }
   }
   return report;
 }
 ```
 
-`decideNewest`: the newest row's delivery status maps as in Interfaces step 3; then the record check for the retried rows; `slotDisagrees`: `slot.status !== nextStatusOf(decided) || slot.errorCode !== nextCodeOf(decided) || (slot.latestAttempt ?? slot.tsMsgId) !== decided.attemptKey`. `applyLaterAttempt`'s own rule guards regressions, so the repair never needs to reason about `delivered` itself.
+`rebuildChain` collects the thread's rows newer than O (paged `listByConversation` with `before`, stopping at O), keeps the rows whose `retry_of` walk reaches O within the collection, and returns `{ unjudgeable: 'brokenLineage' }` when a row that CLAIMS the chain (`retry_root === O.tsMsgId` or `broadcast_id === share.broadcastId`) does not reach O; `{ unjudgeable: 'originalMissing' }` when O is not readable. `decideNewest` maps the newest row's status as in Interfaces, then checks the ONE next-attempt record of the newest row. `slotDisagrees` compares status, code and the recorded key. Note that `applyLaterAttempt` runs the D2 rule, so the repair never regresses a slot (a decided attempt older than the recorded one, or a delivered slot, is refused and counted in the log, not in `slotsMoved`).
 
 - [ ] **Step 4: RUNBOOK section**
 
-Add "Share outcomes repair (2026-09-28)" beside :337-366: what it repairs (spec D8), the census first (`npx tsx app/scripts/repair-share-outcomes.ts --env dev`), the dry-run report fields, then `--apply`, dev then prod, once after this branch deploys and before the next blast, re-runnable; "No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`".
+Add "Share outcomes repair (2026-09-28)" beside :337-366: what it repairs (spec D8), the census first (`npx tsx app/scripts/repair-share-outcomes.ts --env dev`), the report fields and what each means, then `--apply`, dev then prod, once after this branch deploys and before the next blast, re-runnable (a second run reports zeros); "No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`". The census reads every share slot's chain (keyed reads) and one Scan of the broadcasts table; on prod expect minutes, not seconds.
 
-- [ ] **Step 5: Run, typecheck** - `cd app; npx vitest run test/repairShareOutcomes.test.ts test/stageClient.test.ts` PASS; `npm run typecheck` exit 0; the script's `--env local --lane 15` census against a booted lane prints a report and exit 0 (the orchestrator's self-QA lane; never bare `--env local`).
+- [ ] **Step 5: Run, typecheck** - `cd app; npx vitest run test/repairShareOutcomes.test.ts test/stageClient.test.ts test/messagesRepoRetryLineage.integration.test.ts` PASS; `npm run typecheck` exit 0; the script's `--env local --lane 15` census against a booted lane prints a report and exit 0 (the orchestrator's self-QA lane; never bare `--env local`).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git status
-git add app/scripts/repair-share-outcomes.ts app/src/repos/messagesRepo.ts app/test/repairShareOutcomes.test.ts RUNBOOK.md
-git commit -m "feat(ops): repair-share-outcomes - census then apply: stamps retry chains, re-applies the newest attempt to each slot, rebuilds the ledger (share-sent-outcome T13, D8)"
+git add app/scripts/repair-share-outcomes.ts app/src/repos/messagesRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/repairShareOutcomes.test.ts RUNBOOK.md
+git commit -m "feat(ops): repair-share-outcomes - census then apply: stamps and corrects retry chains, re-applies the newest attempt to each slot, rebuilds the ledger (share-sent-outcome T13, D8)"
 ```
 
 ---
@@ -2288,15 +2520,15 @@ git commit -m "feat(ops): repair-share-outcomes - census then apply: stamps retr
 - Test: the spec itself; run as `npm run e2e -- e2e/tests/dashboard-next/share-sent-outcome.spec.ts`
 
 **Interfaces:**
-- Consumes: the helpers of `share-skip-fix.spec.ts` (`createUnitViaApi` :50, `createTenant` :80, `shareViaApi` :104, `slotConversationId` :131, `openReviewRow` :144) and `send-outcome-reconcile.spec.ts` (`createAvailableUnit` :137, `createConsentedTenant` :168, `openResults` :204, `recipientRow` :212); `setDeliveryOutcome` (`e2e/fixtures/fakeTwilio.ts:354-372`) with `{ kind: 'fail', failState: 'undelivered', errorCode: '30003' }`; the timing helpers `pollRow` / `expectCreateLanded` / `expectFailureStamped` (`retry-send-adoption.spec.ts:192`, `:215`, `:233`); `statValue` / `statusPill` (`e2e/support/broadcastSelectors.ts:26-33`); the lane's 10 s backoff and 2/4/8 s reconcile delays; `afterAll` reseed (`share-skip-fix.spec.ts:38-40`).
+- Consumes: the helpers of `share-skip-fix.spec.ts` (`createUnitViaApi` :50, `createTenant` :80, `shareViaApi` :104, `slotConversationId` :131, `openReviewRow` :144) and `send-outcome-reconcile.spec.ts` (`createAvailableUnit` :137, `createConsentedTenant` :168, `openResults` :204, `recipientRow` :212), and the timing helpers `pollRow` / `expectCreateLanded` / `expectFailureStamped` (`retry-send-adoption.spec.ts:192`, `:215`, `:233`) - ALL FILE-LOCAL, not exported: COPY them into the new spec (importing a spec file would register its tests); `setDeliveryOutcome` (`e2e/fixtures/fakeTwilio.ts:354-372`) with `{ kind: 'fail', failState: 'undelivered', errorCode: '30003' }`; `statValue` / `statusPill` (`e2e/support/broadcastSelectors.ts:26-33`); the lane's 10 s backoff and 2/4/8 s reconcile delays; `afterAll` reseed (`share-skip-fix.spec.ts:38-40`).
 - Produces the four scenarios of spec section 7, each on a fresh available unit and a fresh consented tenant on a per-run number (uid from 90):
-  (a) arm 30003 for the tenant's number; share; expect the results row to read the failed badge with RSW's "will retry" copy and the pill `Sending` within 10 s; the retry lands (the fake's next create to that number is normal); expect the row `Delivered`, the pill `Sent`, the Retrying chip 0; open the composer for the same unit: the tenant is flagged "Already sent"; open the tenant's file: "Properties sent" lists the unit.
-  (b) arm 30003, share, then re-arm 30003 after EACH send lands (`expectCreateLanded` then `setDeliveryOutcome` again) until the fourth failure; expect the row `Failed` with the plain 30003 copy (no "will retry"), the pill `Not sent` (danger) on the results page AND on the list (navigate to the list; the row's pill), the tenant NOT flagged on a new composer, the unit absent from "Properties sent", the tenant timeline milestone reading `Property text failed`, no `open conversation to retry` hint while a promise is live and the hint present at the end.
+  (a) arm 30003 for the tenant's number; share via the API; `expectFailureStamped` on the original row, then IMMEDIATELY poll `GET /api/broadcasts/:id/results` (the API, not the page - the pending state lasts about 10 s) until `stats.retry_pending === 1` and the recipient's `retryDueAt` is set (an ordering guard: the poll starts after the failure is stamped, and the retry cannot land before the 10 s backoff); the "will retry" COPY on the row is pinned by Task 10's `DeliveryBadge` unit test, not here; then the retry lands (the fake's next create to that number is normal); open the results page and expect the row `Delivered`, the pill `Sent`, the Retrying chip 0; open the composer for the same unit: the tenant is flagged "Already sent"; open the tenant's file: "Properties sent" lists the unit.
+  (b) OPEN THE SHARE LIST FIRST (so the SSE events reach a mounted list); arm 30003, share, then re-arm 30003 after EACH send lands (`expectCreateLanded` then `setDeliveryOutcome` again) until the fourth failure; expect on the STILL-OPEN list that the row's pill reads `Not sent` (danger) within 15 s of the fourth failure WITHOUT a reload (this exercises the SSE merge + the stats refetch); then open the results page: the row `Failed` with the plain 30003 copy (no "will retry"), the pill `Not sent`, the hint `open conversation to retry` present; the tenant NOT flagged on a new composer; the unit absent from "Properties sent"; the tenant timeline milestone reading `Property text failed`.
   (c) arm `30007`, share; expect the row `Failed` with the hint (a text with a row and no promise), the pill `Not sent`, the tenant NOT flagged, the property Activity entry reading `No tenants reached`.
   (d) SOR's unconfirmed path (copy `send-outcome-reconcile.spec.ts:491`'s arming): expect the pill `Not confirmed`, the tenant flagged on a new composer, the unit absent from "Properties sent", no `last_error` alert.
 - The rewritten pins: `share-skip-fix.spec.ts:250` asserts the tenant is NOT flagged after a final (30007) failure and the header :16-22 says so; `send-outcome-reconcile.spec.ts:464` asserts NO hint on a 21211 row; `:534` expects `Not confirmed`; `:535-537` expects the alert absent. `selectors.md:116` documents the `Retrying` chip and "a failed row's link carries open conversation to retry ONLY when the text has a message row and no live retry promise".
 
-- [ ] **Step 1: Write the spec** (the four `test()`s above; accessibility-first selectors; `test.describe.configure({ mode: 'serial' })` is NOT needed - each test owns its unit and tenant; budget each `expect.poll` at 30 s; scenario (b) runs about 45 s).
+- [ ] **Step 1: Write the spec** (the four `test()`s above; accessibility-first selectors; `test.describe.configure({ mode: 'serial' })` is NOT needed - each test owns its unit and tenant; budget each `expect.poll` at 30 s and the list-pill wait in (b) at 15 s; scenario (b) runs about 60 s - set `test.setTimeout(120_000)` on it).
 
 - [ ] **Step 2: Rewrite the three pins and `selectors.md`.**
 
@@ -2342,10 +2574,11 @@ git commit -m "docs(share-sent-outcome): three issues closed, the sweeper amende
 
 ---
 
-## Self-review (planner, revision 1)
+## Self-review (planner, revision 2)
 
-- Spec coverage: D1 -> T2, T8, T9; D2 -> T1, T4, T5, T6; D3 -> T9, T10; D4 -> T1, T5, T9, T10; D5 -> T1, T11; D6 -> T7, T12; D7 -> T3, T4, T5, T7; D8 -> T13; D9 -> T15; I1-I9 -> the Global Constraints and T1/T4/T6; section 5's surfaces each name a task; section 7's pins are listed in T8, T10, T14 and the harness parity in T1 and T3.
-- Placeholders: none; every code block names real files, functions and fixtures or says to read the file for the fixture name.
-- Type consistency: `applyAttemptOutcome(broadcastId, contactKey, expect, next, statsDelta)` (T1) is what T4 calls; `applyLaterAttempt(deps, input)` (T4) is what T5, T6 and T13 call with the same `LaterAttempt` shape; `applyShareLedgerEntry(deps, { unitId, contactId, broadcastId, entry })` (T3) is what T4, T7 and T13 call; `resolveRecipientStates` / `retryPendingCount` / `priorRecipientKeys` (T2) are what T8, T9 call; `deriveBroadcastStats(b, { retryPending })` (T1) is what T5, T9 use; `getByIds` (T1) is what T11 uses; `getByKeys` (T3) is what T12 uses.
-- Review Focus: the five lines each have an owning task and a test named in it.
-- Known soft spots for the reviewers: T3's `individual` special case in `applyShareLedgerEntry` (simplify as noted); T6's `Found.tsMsgId` addition touches 1b's verdict shape (a read-only widening); T13's `stampRetryAttribution` may need a new repo method; T10's list-hook refetch is the one piece of new client machinery.
+- Spec coverage: D1 -> T2, T8, T9; D2 -> T1, T4, T5, T6; D3 -> T9, T10; D4 -> T1, T5, T9, T10; D5 -> T1, T2, T11; D6 -> T7, T12; D7 -> T3, T4, T5, T7; D8 -> T13; D9 -> T15; I1-I9 -> the Global Constraints and T1/T4/T6; section 5's surfaces each name a task; section 7's pins are listed in T1 (the identity pin), T7, T8, T9, T10, T14 and the harness parity in T1 and T3; section 0's "first task verifies 1b" is satisfied by the research record cited in the header.
+- Placeholders: none; every test body is written out except where a task says which existing fixture to reuse by name.
+- Type consistency: `applyAttemptOutcome(broadcastId, contactKey, expect, next, statsDelta)` (T1) is what T4 calls; `applyLaterAttempt(deps, input)` (T4) is what T5, T6 and T13 call with the same `LaterAttempt` shape (outcomes `sent` / `delivered` carry an optional `carrierSentAt`); `applyShareLedgerEntry(deps, { unitId, contactId, broadcastId, entry })` and `ledgerEntryFor(attempt, conversationId, outcome)` (T3) are what T4, T7 and T13 call; `putShareMemory(..., { token })` (T3) is what the doubles and T13 use; `resolveRecipientStates(deps, share, opts?)` / `retryPendingCount` / `unconfirmedByRow` / `reachedCount` / `priorRecipientKeys` (T2) are what T8, T9, T11 call; `deriveBroadcastStats(b, { retryPending, unconfirmedKeys })` (T1) is what T5, T9 use; `getByIds(ids, { projection })` (T1) is what T11 uses; `getByKeys` (T3) is what T12 uses; `stampRetryAttribution` (T13) lives in the messages repo and its double.
+- Review Focus: the five lines each have an owning task and a test named in it (RF1's ledger half: T4's phone-keyed test now applies a `sent` outcome first and a `delivered` with `recipientContactId` second, so the entry lands).
+- Round-1 findings folded: A1/B1 (the promise from the retry decision, with a test that copies the row image), A2 (the attempt-instant clock), A3/B5 (DeliveryBadge), A4/B4 (harness wiring), A5/B12 (the `shares_op` token), A6/B15 (no record reads outside the flag; bounded parallel reads), A7/B8 (D8's definitions and tests), A8/B9/B18 (tests written out; call-order pins; the crash-before-close re-run), A9/B10/B6/B14 (the pins named), A10/B11 (API facts in the header), A11/B16/B21 (the D2 rule's `queued` refusal, the carrier instant, the outcome mapping), A12 (the tone type and the clamp), A13/B20 (`individual` and `recordSend`), A14 (helpers copied; the ordering guard), A15/B19 (the 1b verification statement), A16/B21 (the guarded, projected batch read), B2 (the reconcile sites propagate), B3 (the same-attempt test), B7 (the results ticker recount), B13 (`registerHandlers` untouched), B17 (the pair contact's precedence), B21 (Slice 1's wording; T7 before T5).
+- Known soft spots for round 2: T13 is still the least-specified task (the walk's paging and the record check are defined but the script body is a skeleton); T10's list-hook refetch is the one piece of new client machinery; T6's `Found` widening rides 1b's verdict type.

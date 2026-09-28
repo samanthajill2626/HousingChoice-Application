@@ -105,7 +105,7 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
-import { retryRecipientKey } from '../services/retryChain.js';
+import { automaticAncestry, retryRecipientKey } from '../services/retryChain.js';
 import { refreshRetryPromise, withdrawRetryPromise } from '../services/retryPromiseWrites.js';
 import {
   attemptKey,
@@ -1061,6 +1061,40 @@ async function adoptKnown(c: Ctx, r: Resolved, facts: SendAttemptFacts, sid: str
 }
 
 /**
+ * retry-send-adoption R4 (the lineage exclusion in the sibling rule): a retry
+ * attempt's PREDECESSORS can never hold its message - their outcome is what
+ * scheduled it - so they are never its siblings; without this every
+ * multi-rung chain would read same_fingerprint_sibling. They are, matched by
+ * owner FIELDS (never attemptKey - the predecessor's recipient key is not
+ * known here and can differ):
+ * - the retry_send record that PRODUCED each automatic row on the retried
+ *   row's retry_of path (automaticAncestry: the walk stops at the root, at a
+ *   manual row and at a broken link) - its retried row is the walked row's
+ *   retry_of and its attempt that row's retry_attempt;
+ * - when the chain's root was a share text, that share's own record for this
+ *   recipient (the retried row's broadcast_id, this recipient key).
+ * The SAME ROOT is not lineage: a manual retry's chain and the original chain
+ * keep SOR's protection against each other. Every other owner has none (no
+ * reads). At most MAX_SEND_RETRY_ATTEMPTS consistent reads.
+ */
+async function predecessorMatchers(c: Ctx, r: Resolved): Promise<Array<(owner: SendAttemptOwner) => boolean>> {
+  if (r.owner.kind !== 'retry_send' || r.row === undefined) return [];
+  const o = r.owner;
+  const matchers = (await automaticAncestry(c.messages, r.row)).map(
+    (walked) => (owner: SendAttemptOwner) =>
+      owner.kind === 'retry_send' &&
+      owner.conversationId === o.conversationId &&
+      owner.retriedTsMsgId === walked.retry_of &&
+      owner.attempt === walked.retry_attempt,
+  );
+  const broadcastId = r.row.broadcast_id;
+  if (broadcastId !== undefined) {
+    matchers.push((owner) => owner.kind === 'broadcast' && owner.broadcastId === broadcastId && owner.contactKey === r.key);
+  }
+  return matchers;
+}
+
+/**
  * The LOOKUP path (D12, D13). List the provider's messages to the recipient's
  * CURRENT number from the attempt's sender - proven to be the number the
  * attempt went to by the digest - walking at most RECONCILE_MAX_PAGES pages,
@@ -1095,14 +1129,22 @@ async function lookup(c: Ctx, r: Resolved, record: SendAttemptRecord, checkNo: n
   // window, or we one in theirs (S3b F-1). Compared by RECORD identity
   // (attemptKey), never ownerKey: two contacts on one phone in one share are
   // two records (R3 #5). The index is sorted by attempt start; the records
-  // are LIVE. Read once.
+  // are LIVE. Read once. This attempt's PREDECESSORS are never siblings
+  // (retry-send-adoption R4, the lineage exclusion): that applies to both
+  // uses below - the SID skip and the same-fingerprint rule.
   const self = attemptKey(r.owner);
+  const predecessors = await predecessorMatchers(c, r);
   const siblingFromMs = attemptMs - RECONCILE_SIBLING_SPAN_MS;
   const siblingToMs = attemptMs + RECONCILE_SIBLING_SPAN_MS;
   const siblings = (await c.attempts.listByRecipient(sender, record.recipientDigest, new Date(siblingFromMs).toISOString())).filter(
     (s) => {
       const startMs = Date.parse(s.attemptedAt);
-      return attemptKey(s.owner) !== self && startMs >= siblingFromMs && startMs <= siblingToMs;
+      return (
+        attemptKey(s.owner) !== self &&
+        !predecessors.some((isPredecessor) => isPredecessor(s.owner)) &&
+        startMs >= siblingFromMs &&
+        startMs <= siblingToMs
+      );
     },
   );
   const siblingSids = new Set(siblings.flatMap((s) => (s.sid !== undefined ? [s.sid] : [])));

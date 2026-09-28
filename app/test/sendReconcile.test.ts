@@ -3636,6 +3636,157 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(lines(50)[0]).toMatchObject({ verdict: 'unresolved', cause: 'second_unknown' });
     });
 
+    // ---- the lineage exclusion in the sibling rule (spec section 4 item 13; R4, R12) ----
+
+    it('13 attempt 1 adopted, then attempt 2 never_sent inside the sibling span is RE-DRIVEN - the record that produced the retried row is lineage, not a sibling', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 30_000) });
+      // Attempt 1: its record done/adopted with the retry row it adopted.
+      const a1 = rOwner(root, 1);
+      const at1 = await reconciling(a1, factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      const r1 = await seedRow('SMretry1', { providerTs: iso(Date.now() - 19_000), retryOf: root.tsMsgId, retryAttempt: 1, retryRoot: root.tsMsgId });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(a1, at1, { outcome: 'adopted', sid: 'SMretry1' })).toBe(true);
+      // Attempt 2 retries r1 and finds nothing.
+      const a2 = rOwner(r1, 2);
+      expect(a2.retryRoot).toBe(root.tsMsgId);
+      const at2 = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at2));
+      expect(await recordOf(a2)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMretry1', conversationId: retryConv, attempt: 2 }]);
+      expect(lines(50)).toHaveLength(0);
+    });
+
+    /** A share's record for a recipient of this number (`contactKey`, c-retry by default) claimed at `atMs`; closed adopted when asked, else left reconciling (open). */
+    async function shareRecord(broadcastId: string, atMs: number, adopted: boolean, contactKey = 'c-retry'): Promise<void> {
+      const owner: SendAttemptOwner = { kind: 'broadcast', broadcastId, contactKey };
+      const at = await reconciling(owner, factsFor(TENANT_PHONE), { at: iso(atMs) });
+      if (adopted) {
+        expect(await world.sendAttemptsRepo.closeFromReconcile(owner, at, { outcome: 'adopted', sid: `SM${broadcastId}` })).toBe(true);
+      }
+    }
+
+    it('13a a share root\'s OWN broadcast record, adopted inside the span, is lineage too: attempt 1 on the share root is re-driven', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 25_000), broadcastId: 'bcast-1' });
+      await shareRecord('bcast-1', Date.now() - 20_000, true);
+      const a1 = rOwner(root, 1);
+      const at = await reconciling(a1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a1, at));
+      expect(await recordOf(a1)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toHaveLength(1);
+    });
+
+    it('13a2 an UNRELATED share to the same tenant, still open inside the span, keeps SOR\'s protection: the attempt is unresolved same_fingerprint_sibling although its own share\'s record is excluded', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 25_000), broadcastId: 'bcast-1' });
+      await shareRecord('bcast-1', Date.now() - 20_000, true);
+      await shareRecord('bcast-2', Date.now() - 10_000, false);
+      const a1 = rOwner(root, 1);
+      const at = await reconciling(a1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a1, at));
+      expect(await recordOf(a1)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+    });
+
+    it('13a3 the SAME share\'s record for ANOTHER contact on this number is not lineage either (R2 #18): it still withholds never_sent', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 25_000), broadcastId: 'bcast-1' });
+      await shareRecord('bcast-1', Date.now() - 20_000, true);
+      await shareRecord('bcast-1', Date.now() - 15_000, false, 'c-housemate');
+      const a1 = rOwner(root, 1);
+      const at = await reconciling(a1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a1, at));
+      expect(await recordOf(a1)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+    });
+
+    it('13b a MANUAL-retry chain under the same root still blocks (the same root is not lineage): the original chain\'s attempt against the manual row\'s PARENT is not the manual row\'s producer', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 60_000) });
+      // The original chain's attempt 1 against the root, still reconciling.
+      await reconciling(rOwner(root, 1), factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      // A staff Retry of the root (a manual row: retry_of, no retry_attempt) that itself failed 30003.
+      const manual = await seedRow('SMmanual', { providerTs: iso(Date.now() - 15_000), retryOf: root.tsMsgId, retryRoot: root.tsMsgId });
+      const m1 = rOwner(manual, 1);
+      expect(m1.retryRoot).toBe(root.tsMsgId);
+      const at = await reconciling(m1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(m1, at));
+      expect(await recordOf(m1)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+      expect(manual).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    });
+
+    it('13c the ancestry walk stops at a BROKEN retry_of - the rows read so far are still lineage: the producer of the retried row is excluded and attempt 2 is re-driven', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      // r1's retry_of names a row that is gone; attempt 1 against that missing row produced r1.
+      const missing = '2026-09-27T09:00:00.000Z#SMgone';
+      const r1 = await seedRow('SMretry1', { providerTs: iso(Date.now() - 19_000), retryOf: missing, retryAttempt: 1, retryRoot: missing });
+      const producer: RetrySendOwner = { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: missing, attempt: 1, recipientKey: 'c-retry', retryRoot: missing };
+      const atP = await reconciling(producer, factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(producer, atP, { outcome: 'adopted', sid: 'SMretry1' })).toBe(true);
+      const a2 = rOwner(r1, 2);
+      const at2 = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at2));
+      expect(await recordOf(a2)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toHaveLength(1);
+    });
+
+    /** A staff Retry of `root` (a manual row) whose OWN chain's attempt 1 was adopted inside the span as m1; returns m1. */
+    async function manualChainAdopted(root: MessageItem): Promise<MessageItem> {
+      const manual = await seedRow('SMmanual', { providerTs: iso(Date.now() - 25_000), retryOf: root.tsMsgId, retryRoot: root.tsMsgId });
+      const producer = rOwner(manual, 1);
+      const at = await reconciling(producer, factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      const m1 = await seedRow('SMmanual-r1', {
+        providerTs: iso(Date.now() - 19_000),
+        retryOf: manual.tsMsgId,
+        retryAttempt: 1,
+        retryRoot: root.tsMsgId,
+      });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(producer, at, { outcome: 'adopted', sid: 'SMmanual-r1' })).toBe(true);
+      return m1;
+    }
+
+    it('13d under a manual retry\'s own chain the walk reaches the automatic row: its producer (attempt 1 against the MANUAL row) is lineage - attempt 2 is re-driven', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 60_000) });
+      const m1 = await manualChainAdopted(root);
+      const a2 = rOwner(m1, 2);
+      const at = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at));
+      expect(await recordOf(a2)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMmanual-r1', conversationId: retryConv, attempt: 2 }]);
+    });
+
+    it('13e the ancestry walk STOPS at the manual row: the original chain\'s attempt beyond it, adopted inside the span, still withholds never_sent', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 60_000) });
+      const a1 = rOwner(root, 1);
+      const at1 = await reconciling(a1, factsFor(TENANT_PHONE), { at: iso(Date.now() - 30_000) });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(a1, at1, { outcome: 'adopted', sid: 'SMorig-r1' })).toBe(true);
+      const m1 = await manualChainAdopted(root);
+      const a2 = rOwner(m1, 2);
+      const at = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at));
+      expect(await recordOf(a2)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+    });
+
     // ---- deviation 7 and worklist item 10: a share-RETRY row is never the share's own row ----
 
     it('isBroadcastRowFor never claims a share-RETRY row (retry_of set) for the share recipient - not even the row its slot carries (deviation 7)', () => {

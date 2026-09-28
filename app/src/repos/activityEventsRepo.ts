@@ -77,6 +77,12 @@ export interface ActivityEventItem {
   /** Deep-link target type (link-out only; never inline content). */
   refType?: ActivityEventRefType;
   refId?: string;
+  /**
+   * share-sent-outcome D6: the share a `listing_sent` milestone records (a
+   * plain attribute; the SK and the projection are unchanged). Absent on
+   * every other milestone and on a milestone written before the field.
+   */
+  broadcastId?: string;
   /** ISO 8601 — when the row was written (audit furniture). */
   created_at: string;
   [key: string]: unknown;
@@ -89,6 +95,8 @@ export interface RecordActivityEventInput {
   label: string;
   refType?: ActivityEventRefType;
   refId?: string;
+  /** share-sent-outcome D6: the share a `listing_sent` milestone records (stored as `broadcastId`). */
+  broadcastId?: string;
   /** ISO 8601 override (defaults to now). */
   at?: string;
 }
@@ -136,6 +144,7 @@ export function createActivityEventsRepo(deps: RepoDeps = {}): ActivityEventsRep
         created_at: new Date().toISOString(),
         ...(input.refType !== undefined && { refType: input.refType }),
         ...(input.refId !== undefined && { refId: input.refId }),
+        ...(input.broadcastId !== undefined && { broadcastId: input.broadcastId }),
       };
       // Fresh random eventId → the SK is unique; no conditional needed.
       await doc.send(new PutCommand({ TableName: table, Item: item }));

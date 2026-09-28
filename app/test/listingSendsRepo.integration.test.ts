@@ -1,8 +1,10 @@
-// BE4/C4 integration tests against DynamoDB Local — the listing-sends repo:
-// recordSend creates a row; a re-send refreshes sentAt/via/broadcastId but
-// PRESERVES created_at (the idempotent upsert / no first-write reset invariant);
-// listByUnit + listByContact both return the row (two query directions); rows are
-// isolated per unit/contact.
+// BE4/C4 integration tests against DynamoDB Local - the listing-sends repo:
+// putShareMemory (the one writer since share-sent-outcome T7 retired the blind upsert)
+// creates a row; a later counted share refreshes sentAt/broadcastId but
+// PRESERVES created_at (the no first-write reset invariant); listByUnit +
+// listByContact both return the row (two query directions); rows are isolated
+// per unit/contact. The memory itself (tokens, sparse removal, BatchGet) is
+// listingSendsRepoShares.integration.test.ts.
 //
 // Self-skipping like the other integration suites: when nothing answers at
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
@@ -15,7 +17,9 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createListingSendsRepo } from '../src/repos/listingSendsRepo.js';
+import { LEGACY_ATTEMPT_KEY } from '../src/lib/shareAttemptOrder.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { seedListingSend } from './helpers/listingSendSeed.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -53,53 +57,48 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     client.destroy();
   }, 120_000);
 
-  it('recordSend creates a row and stamps audit furniture', async () => {
+  it('putShareMemory creates a counted row and stamps audit furniture', async () => {
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
-    const row = await repo.recordSend({
-      contactId,
-      unitId,
-      via: 'broadcast',
-      broadcastId: 'bcast-1',
-      sentAt: '2026-06-16T10:00:00.000Z',
-    });
-    expect(row.sentAt).toBe('2026-06-16T10:00:00.000Z');
-    expect(row.via).toBe('broadcast');
-    expect(row.broadcastId).toBe('bcast-1');
-    expect(row.created_at).toBeDefined();
-    expect(row.updated_at).toBeDefined();
+    await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+    const row = await repo.getByKeyConsistent(unitId, contactId);
+    expect(row?.sentAt).toBe('2026-06-16T10:00:00.000Z');
+    expect(row?.via).toBe('broadcast');
+    expect(row?.broadcastId).toBe('bcast-1');
+    expect(row?.counted).toBe(true);
+    expect(row?.shares?.['bcast-1']).toEqual({ attempt: LEGACY_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: '2026-06-16T10:00:00.000Z' });
+    expect(typeof row?.shares_op).toBe('string');
+    expect(row?.created_at).toBeDefined();
+    expect(row?.updated_at).toBeDefined();
     // The removed `response` label is never written.
     expect(row).not.toHaveProperty('response');
   });
 
-  it('re-send updates sentAt/via but PRESERVES created_at (idempotent upsert, no first-write reset)', async () => {
+  it('a later counted share updates sentAt/broadcastId but PRESERVES created_at (no first-write reset); an individual share counted later clears the share attribution', async () => {
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
-    const first = await repo.recordSend({
-      contactId,
-      unitId,
-      via: 'broadcast',
-      broadcastId: 'bcast-1',
-      sentAt: '2026-06-16T10:00:00.000Z',
-    });
+    await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+    const first = await repo.getByKeyConsistent(unitId, contactId);
 
-    const resent = await repo.recordSend({
-      contactId,
-      unitId,
-      via: 'individual',
-      sentAt: '2026-06-17T10:00:00.000Z',
-    });
-    expect(resent.created_at).toBe(first.created_at); // first-write furniture preserved
-    expect(resent.sentAt).toBe('2026-06-17T10:00:00.000Z');
-    expect(resent.via).toBe('individual');
-    // An individual re-send with no broadcastId clears the prior attribution.
-    expect(resent.broadcastId).toBeUndefined();
+    await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-17T10:00:00.000Z', broadcastId: 'bcast-2' });
+    const resent = await repo.getByKeyConsistent(unitId, contactId);
+    expect(resent?.created_at).toBe(first?.created_at); // first-write furniture preserved
+    expect(resent?.sentAt).toBe('2026-06-17T10:00:00.000Z');
+    expect(resent?.broadcastId).toBe('bcast-2');
+    expect(resent?.shares_op).not.toBe(first?.shares_op); // a fresh change token per write
+
+    await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-18T10:00:00.000Z' });
+    const individual = await repo.getByKeyConsistent(unitId, contactId);
+    expect(individual?.sentAt).toBe('2026-06-18T10:00:00.000Z');
+    // The latest counted entry is an individual send (no share id): the attribution clears.
+    expect(individual?.broadcastId).toBeUndefined();
+    expect(individual?.created_at).toBe(first?.created_at);
   });
 
   it('both query directions return the row', async () => {
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
-    await repo.recordSend({ contactId, unitId, via: 'broadcast' });
+    await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
 
     const byUnit = await repo.listByUnit(unitId);
     const byContact = await repo.listByContact(contactId);
@@ -113,7 +112,7 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
     expect(await repo.getByKey(unitId, contactId)).toBeUndefined();
-    await repo.recordSend({ contactId, unitId, via: 'individual' });
+    await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z' });
     const row = await repo.getByKey(unitId, contactId);
     expect(row?.unitId).toBe(unitId);
     expect(row?.contactId).toBe(contactId);
@@ -124,9 +123,9 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     const u1 = `unit-${randomUUID().slice(0, 8)}`;
     const u2 = `unit-${randomUUID().slice(0, 8)}`;
     const u3 = `unit-${randomUUID().slice(0, 8)}`;
-    await repo.recordSend({ contactId, unitId: u1, via: 'broadcast', sentAt: '2026-06-16T10:00:00.000Z' });
-    await repo.recordSend({ contactId, unitId: u2, via: 'broadcast', sentAt: '2026-06-16T12:00:00.000Z' });
-    await repo.recordSend({ contactId, unitId: u3, via: 'individual', sentAt: '2026-06-16T11:00:00.000Z' });
+    await seedListingSend(repo, { unitId: u1, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+    await seedListingSend(repo, { unitId: u2, contactId, sentAt: '2026-06-16T12:00:00.000Z', broadcastId: 'bcast-2' });
+    await seedListingSend(repo, { unitId: u3, contactId, sentAt: '2026-06-16T11:00:00.000Z' });
 
     const sends = await repo.listByContact(contactId);
     expect(sends.map((s) => s.unitId)).toEqual([u2, u3, u1]); // newest-first
@@ -137,9 +136,9 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     const unitB = `unit-${randomUUID().slice(0, 8)}`;
     const c1 = `contact-${randomUUID().slice(0, 8)}`;
     const c2 = `contact-${randomUUID().slice(0, 8)}`;
-    await repo.recordSend({ contactId: c1, unitId: unitA, via: 'broadcast' });
-    await repo.recordSend({ contactId: c2, unitId: unitA, via: 'broadcast' });
-    await repo.recordSend({ contactId: c1, unitId: unitB, via: 'broadcast' });
+    await seedListingSend(repo, { unitId: unitA, contactId: c1, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+    await seedListingSend(repo, { unitId: unitA, contactId: c2, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+    await seedListingSend(repo, { unitId: unitB, contactId: c1, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-2' });
 
     const unitARecipients = await repo.listByUnit(unitA);
     const c1Sends = await repo.listByContact(c1);

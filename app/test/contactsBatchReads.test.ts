@@ -32,6 +32,7 @@ import {
 import { createLogger } from '../src/lib/logger.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { seedListingSend } from './helpers/listingSendSeed.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
   createFakeWorld,
@@ -148,7 +149,7 @@ describe('contact read amplification - property (unit) routes', () => {
       updated_at: '2026-06-12T09:00:00.000Z',
     });
     for (const contactId of tenants) {
-      await world.listingSendsRepo.recordSend({ contactId, unitId: 'unit-2', via: 'individual' });
+      await seedListingSend(world.listingSendsRepo, { unitId: 'unit-2', contactId, sentAt: '2026-06-16T10:00:00.000Z' });
     }
     const { app } = makeWebhookHarness({ world });
     const reads = watchReads(world);

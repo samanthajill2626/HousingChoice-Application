@@ -113,11 +113,9 @@ import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
 } from '../repos/activityEventsRepo.js';
-import {
-  createListingSendsRepo,
-  type ListingSendsRepo,
-} from '../repos/listingSendsRepo.js';
+import { createListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { applyShareLedgerEntry, ledgerEntryFor, type ShareLedgerDeps } from '../services/shareLedger.js';
 import {
   createSendMessageService,
   ProviderSendFailedError,
@@ -292,8 +290,8 @@ export interface BroadcastSendJobDeps {
   sendMessageService?: SendMessageService;
   /** BE2/C2: emit a `listing_sent` milestone per recipient actually sent. */
   activityEventsRepo?: ActivityEventsRepo;
-  /** BE4/C4: record the listing-send row per recipient sent (when unit-targeted). */
-  listingSendsRepo?: ListingSendsRepo;
+  /** BE4/C4: record the listing-send row per recipient sent (when unit-targeted); share-sent-outcome D7: its memory write only. */
+  listingSendsRepo?: ShareLedgerDeps['listingSends'];
   /** WS2: write a `broadcast_sent` unit-audit row on fan-out completion (best-effort). */
   auditRepo?: AuditRepo;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
@@ -332,7 +330,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
     const activityEvents: ActivityEventsRepo =
       deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
-    const listingSends: ListingSendsRepo =
+    const listingSends: ShareLedgerDeps['listingSends'] =
       deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
     const audit: AuditRepo = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
     sendMessage ??= createSendMessageService({
@@ -813,8 +811,16 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       await handToReconcile(owner, ref);
     }
 
-    /** Best-effort follow-ups of a RECORDED send (D7a): each is isolated and none throws. */
-    async function afterSend(contact: ContactItem, contactKey: string): Promise<void> {
+    /**
+     * Best-effort follow-ups of a RECORDED send (D7a): each is isolated and none
+     * throws. `attempt` is the appended row the record phase just wrote on the
+     * slot (share-sent-outcome D7: the ledger entry records THAT attempt).
+     */
+    async function afterSend(
+      contact: ContactItem,
+      contactKey: string,
+      attempt: { tsMsgId: string; conversationId: string },
+    ): Promise<void> {
       const ctx = recipientCtx(contactKey);
       // A2P meter: ONE token per REAL outbound SMS. Acquired AFTER the slot
       // write, the token still gates the NEXT send (post-send pacing), so the
@@ -828,6 +834,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         contactId: contact.contactId,
         unitId: snapshot.unitId,
         broadcastId: payload.broadcastId,
+        attempt: { tsMsgId: attempt.tsMsgId, conversationId: attempt.conversationId, outcome: 'accepted' },
       });
     }
 
@@ -946,7 +953,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           ['queued'],
         );
         if (recorded.moved && recorded.item) emitBroadcastProgress(events, payload.broadcastId, recorded.item);
-        await afterSend(contact, contactKey);
+        await afterSend(contact, contactKey, { tsMsgId: outcome.tsMsgId, conversationId: outcome.conversationId });
         if (!(await attempts.finishAttempt(owner, ref, { outcome: 'sent', sid: outcome.providerSid }))) {
           // Plan deviation 3: the slot is not rolled back - the takeover's
           // reconcile finds the SID through the pointer and repairs.
@@ -1204,12 +1211,24 @@ export async function resolveContact(
  * recorded send and the reconcile's adoption of a sent or delivered message
  * (SOR D15) alike. Each is best-effort: a failure is logged at ERROR and never
  * fails the send (the SMS is out and its slot recorded).
+ *
+ * share-sent-outcome D6/D7: the milestone carries the share id it records,
+ * and the ledger write is an ENTRY for `attempt` (the row the slot records)
+ * through applyShareLedgerEntry - counted by acceptance for the pass and a
+ * sent adoption, by delivery for a delivered adoption - never a blind upsert:
+ * a failure callback that landed first keeps its entry (the order rule), and
+ * the pair's sentAt is the attempt's own provider instant.
  */
 async function recordPropertySent(
-  repos: { activityEvents: ActivityEventsRepo; listingSends: ListingSendsRepo },
+  repos: { activityEvents: ActivityEventsRepo; listingSends: ShareLedgerDeps['listingSends'] },
   log: Logger,
   ctx: Record<string, unknown>,
-  args: { contactId: string; unitId: string | undefined; broadcastId: string },
+  args: {
+    contactId: string;
+    unitId: string | undefined;
+    broadcastId: string;
+    attempt: { tsMsgId: string; conversationId: string; outcome: 'accepted' | 'delivered' };
+  },
 ): Promise<void> {
   // BE2/C2: a delivered property is a `listing_sent` milestone on the
   // tenant's timeline. Prefer the unit (the thing sent) as the deep-link
@@ -1223,6 +1242,8 @@ async function recordPropertySent(
       label: 'Property sent',
       refType: hasUnit ? 'unit' : 'broadcast',
       refId: hasUnit ? unitId : args.broadcastId,
+      // share-sent-outcome D6: the timeline reads this milestone's words from the ledger entry of THIS share.
+      broadcastId: args.broadcastId,
     });
   } catch (milestoneErr) {
     log.error(
@@ -1230,22 +1251,25 @@ async function recordPropertySent(
       'broadcastFanOut: recording listing_sent milestone failed (best-effort)',
     );
   }
-  // BE4/C4: record the unit<->contact listing-send row so the "Sent to
-  // tenants" / "Properties sent" pages light up. ONLY when the broadcast
-  // targets a unit (a unit-less broadcast records nothing - there is no
-  // property to attribute). Idempotent: the upsert is safe on a redelivery.
+  // BE4/C4: the unit<->contact listing-send row lights the "Sent to tenants" /
+  // "Properties sent" pages. ONLY when the broadcast targets a unit (a
+  // unit-less broadcast records nothing - there is no property to attribute).
+  // A redelivery re-applies the same entry, which the order rule refuses.
   if (hasUnit) {
     try {
-      await repos.listingSends.recordSend({
-        contactId: args.contactId,
-        unitId,
-        via: 'broadcast',
-        broadcastId: args.broadcastId,
-      });
+      await applyShareLedgerEntry(
+        { listingSends: repos.listingSends, log },
+        {
+          unitId,
+          contactId: args.contactId,
+          broadcastId: args.broadcastId,
+          entry: ledgerEntryFor(args.attempt.tsMsgId, args.attempt.conversationId, { kind: args.attempt.outcome }),
+        },
+      );
     } catch (sendErr) {
       log.error(
         { err: sendErr, ...ctx },
-        'broadcastFanOut: recording listing-send row failed (best-effort)',
+        'broadcastFanOut: recording listing-send entry failed (best-effort)',
       );
     }
   }
@@ -1263,7 +1287,8 @@ export interface AdoptDeps {
   conversations: ConversationsRepo;
   messages: MessagesRepo;
   activityEvents: ActivityEventsRepo;
-  listingSends: ListingSendsRepo;
+  /** share-sent-outcome D7: the ledger's memory write only (recordPropertySent's entry). */
+  listingSends: ShareLedgerDeps['listingSends'];
   audit: AuditRepo;
   events: EventBus;
   log: Logger;
@@ -1459,10 +1484,17 @@ export async function adoptBroadcastRecipient(
   if (touched !== undefined) deps.events.emit('conversation.updated', toConversationUpdatedEvent(touched));
   if (slotStatus !== 'failed') {
     // A message the carrier says never arrived must not count as a property sent.
+    // share-sent-outcome D7: the entry records the adopted row - counted by
+    // delivery for a delivered row, by acceptance for a sent (or accepted) one.
     await recordPropertySent(deps, deps.log, ctx, {
       contactId: contact.contactId,
       unitId: broadcast.unitId,
       broadcastId,
+      attempt: {
+        tsMsgId: appended.tsMsgId,
+        conversationId: appended.conversationId,
+        outcome: rowStatus === 'delivered' ? 'delivered' : 'accepted',
+      },
     });
     return 'adopted';
   }

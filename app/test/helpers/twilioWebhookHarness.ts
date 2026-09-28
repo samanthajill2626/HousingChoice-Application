@@ -3069,6 +3069,8 @@ export function createFakeWorld(): FakeWorld {
         created_at: new Date().toISOString(),
         ...(input.refType !== undefined && { refType: input.refType }),
         ...(input.refId !== undefined && { refId: input.refId }),
+        // share-sent-outcome D6: the share a listing_sent milestone records.
+        ...(input.broadcastId !== undefined && { broadcastId: input.broadcastId }),
       };
       activityEvents.push(item);
       return { ...item };
@@ -3084,42 +3086,15 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
-  // In-memory listing sends (BE4/C4): mirror the repo's contractual semantics —
-  // an UPSERT keyed by (unitId, contactId) that stamps created_at on the FIRST
-  // send and refreshes sentAt/via/broadcastId on a re-send (created_at preserved),
-  // listByUnit (base table) + listByContact (newest-first by sentAt, the byContact
-  // GSI direction).
+  // In-memory listing sends (BE4/C4): mirror the repo's contractual semantics -
+  // one row per (unitId, contactId), written ONLY through putShareMemory (the
+  // share-sent-outcome D7 memory write; the blind upsert writer is retired, T7), read by
+  // listByUnit (base table) + listByContact (newest-first by sentAt, the
+  // byContact GSI direction).
   const listingSends: ListingSendItem[] = [];
   const findListingSend = (unitId: string, contactId: string): ListingSendItem | undefined =>
     listingSends.find((r) => r.unitId === unitId && r.contactId === contactId);
   const listingSendsRepo: ListingSendsRepo = {
-    async recordSend(input) {
-      const now = new Date().toISOString();
-      const sentAt = input.sentAt ?? now;
-      const existing = findListingSend(input.unitId, input.contactId);
-      if (existing) {
-        // RE-SEND: refresh sentAt/via/broadcastId + updated_at. An individual
-        // re-send with no broadcastId clears the prior attribution (mirrors the
-        // real repo's REMOVE).
-        existing.sentAt = sentAt;
-        existing.via = input.via;
-        existing.updated_at = now;
-        if (input.broadcastId !== undefined) existing.broadcastId = input.broadcastId;
-        else delete existing.broadcastId;
-        return { ...existing };
-      }
-      const item: ListingSendItem = {
-        unitId: input.unitId,
-        contactId: input.contactId,
-        sentAt,
-        via: input.via,
-        created_at: now,
-        updated_at: now,
-        ...(input.broadcastId !== undefined && { broadcastId: input.broadcastId }),
-      };
-      listingSends.push(item);
-      return { ...item };
-    },
     async getByKey(unitId, contactId) {
       const existing = findListingSend(unitId, contactId);
       return existing ? { ...existing } : undefined;

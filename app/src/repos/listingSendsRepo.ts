@@ -7,15 +7,13 @@
 //   - listByContact(contactId) -> the tenant's "Properties sent" (byContact GSI,
 //     newest-first by sentAt).
 //
-// KEY shape (lib/tables.ts): PK unitId, SK contactId -- one upsert-keyed row per
-// pairing, so a re-send can never duplicate. The byContact GSI inverts it (PK
-// contactId, SK sentAt) for the reverse direction.
+// KEY shape (lib/tables.ts): PK unitId, SK contactId -- one row per pairing, so a
+// re-send can never duplicate. The byContact GSI inverts it (PK contactId, SK
+// sentAt) for the reverse direction.
 //
-// IDEMPOTENCY / NO-RESET INVARIANT: recordSend is an UPSERT. On the FIRST send it
-// stamps sentAt/via/broadcastId + created_at; a RE-SEND refreshes sentAt/via/
-// broadcastId + updated_at but LEAVES created_at untouched (if_not_exists), so a
-// re-send never rewrites the first-write furniture. The ledger fields
-// (sentAt/via/broadcastId) are always refreshed to the latest send.
+// NO-RESET INVARIANT: the one writer, putShareMemory, stamps created_at (and
+// via) only when absent, so a later share never rewrites the first-write
+// furniture. (share-sent-outcome T7 retired the old blind upsert writer.)
 //
 // Items stay flexible documents; only the two key attrs + the byContact GSI key
 // attrs (contactId, sentAt) are contractual (lib/tables.ts).
@@ -117,25 +115,7 @@ export interface ListingSendRow {
   tour?: TourSignal;
 }
 
-/** recordSend() input — sentAt defaults to now. */
-export interface RecordSendInput {
-  contactId: string;
-  unitId: string;
-  via: ListingSendVia;
-  broadcastId?: string;
-  /** ISO 8601 override (defaults to now). */
-  sentAt?: string;
-}
-
 export interface ListingSendsRepo {
-  /**
-   * UPSERT a listing-send keyed by (unitId, contactId). CREATE stamps
-   * sentAt/via/broadcastId + created_at; RE-SEND refreshes sentAt/via/broadcastId
-   * (created_at is preserved). Returns the stored row (ALL_NEW).
-   * @deprecated share-sent-outcome T7 retires it - the one ledger writer
-   * becomes putShareMemory through services/shareLedger.applyShareLedgerEntry.
-   */
-  recordSend(input: RecordSendInput): Promise<ListingSendItem>;
   /** Point read of a single row by its full key (PK+SK). */
   getByKey(unitId: string, contactId: string): Promise<ListingSendItem | undefined>;
   /** share-sent-outcome D7: `getByKey` with ConsistentRead - the read a memory write decides from. */
@@ -321,50 +301,6 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
         }
       }
       return out;
-    },
-
-    async recordSend(input) {
-      const now = new Date().toISOString();
-      const sentAt = input.sentAt ?? now;
-      // Idempotent UPSERT. A re-send (the row already exists) refreshes
-      // sentAt/via/broadcastId + updated_at; created_at is stamped only on the
-      // first write (if_not_exists). broadcastId is set when supplied, else
-      // REMOVEd (an individual re-send clears a prior broadcast attribution
-      // rather than leaving a stale id).
-      const sets = [
-        'sentAt = :sentAt',
-        'via = :via',
-        'updated_at = :now',
-        'created_at = if_not_exists(created_at, :now)',
-      ];
-      const removes: string[] = [];
-      const values: Record<string, unknown> = {
-        ':sentAt': sentAt,
-        ':via': input.via,
-        ':now': now,
-      };
-      if (input.broadcastId !== undefined) {
-        sets.push('broadcastId = :bid');
-        values[':bid'] = input.broadcastId;
-      } else {
-        removes.push('broadcastId');
-      }
-      const updateExpression =
-        `SET ${sets.join(', ')}` + (removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : '');
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { unitId: input.unitId, contactId: input.contactId },
-          UpdateExpression: updateExpression,
-          ExpressionAttributeValues: values,
-          ReturnValues: 'ALL_NEW',
-        }),
-      );
-      log.info(
-        { unitId: input.unitId, contactId: input.contactId, via: input.via },
-        'listing send recorded',
-      );
-      return Attributes as ListingSendItem;
     },
 
     getByKey,

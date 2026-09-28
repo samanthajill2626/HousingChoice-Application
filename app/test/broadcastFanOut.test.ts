@@ -991,6 +991,58 @@ describe('broadcast.send (M1.8a)', () => {
     expect(sent.map((e) => e.contactId).sort()).toEqual(['c-alice', 'c-bob']);
     // Deep-links to the unit (the thing sent), not the broadcast.
     expect(sent.every((e) => e.refType === 'unit' && e.refId === 'unit-1')).toBe(true);
+    // share-sent-outcome D6: the milestone carries the share it records.
+    expect(sent.every((e) => e.label === 'Property sent' && e.broadcastId === 'bcast-1')).toBe(true);
+  });
+
+  it('share-sent-outcome D7: after a recorded send the ledger row carries a counted-by-acceptance entry for THIS share at the attempt instant, and the milestone carries the share id', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [alice]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const slot = world.broadcasts.get('bcast-1')!.recipients['c-alice']!;
+    expect(slot).toMatchObject({ status: 'sent' });
+    const attempt = slot.tsMsgId!;
+    const attemptInstant = new Date(Date.parse(attempt.slice(0, attempt.indexOf('#')))).toISOString();
+    const row = await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-alice');
+    expect(row).toMatchObject({ counted: true, broadcastId: 'bcast-1', sentAt: attemptInstant, via: 'broadcast' });
+    expect(row?.shares?.['bcast-1']).toEqual({ attempt, conversationId: slot.conversationId, state: 'counted', by: 'acceptance', countedAt: attemptInstant });
+    const milestone = (await world.activityEventsRepo.listByContact('c-alice')).items.find((e) => e.type === 'listing_sent');
+    expect(milestone).toMatchObject({ label: 'Property sent', refType: 'unit', refId: 'unit-1', broadcastId: 'bcast-1' });
+  });
+
+  it("share-sent-outcome D7: a failure callback that landed first (a failed entry for the same attempt) is not overwritten by the pass's acceptance", async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [alice]);
+    // The callback lands between the record phase and the pass's follow-ups:
+    // plant its failed entry, for the slot's own attempt, just before the
+    // milestone write (which runs right before the ledger write).
+    const realRecord = world.activityEventsRepo.record.bind(world.activityEventsRepo);
+    world.activityEventsRepo.record = async (input) => {
+      const slot = world.broadcasts.get('bcast-1')!.recipients['c-alice']!;
+      await world.listingSendsRepo.putShareMemory(
+        'unit-1',
+        'c-alice',
+        { shares: { 'bcast-1': { attempt: slot.tsMsgId!, conversationId: slot.conversationId!, state: 'failed' } }, counted: false, sentAt: undefined, broadcastId: undefined },
+        { token: undefined },
+      );
+      return realRecord(input);
+    };
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const row = await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-alice');
+    expect(row?.shares?.['bcast-1']?.state).toBe('failed');
+    expect(row?.counted).toBe(false);
+    expect(row?.sentAt).toBeUndefined();
+    expect(await world.listingSendsRepo.listByContact('c-alice')).toEqual([]);
   });
 
   it('does NOT record listing_sent for a skipped (opted-out) recipient', async () => {
@@ -1021,6 +1073,11 @@ describe('broadcast.send (M1.8a)', () => {
     expect(world.listingSends.every((r) => r.unitId === 'unit-1')).toBe(true);
     expect(world.listingSends.every((r) => r.via === 'broadcast')).toBe(true);
     expect(world.listingSends.every((r) => r.broadcastId === 'bcast-1')).toBe(true);
+    // share-sent-outcome D7: each row counts through THIS share's entry, counted
+    // by acceptance, and its sentAt is that entry's attempt instant.
+    expect(world.listingSends.every((r) => r.counted === true)).toBe(true);
+    expect(world.listingSends.every((r) => r.shares?.['bcast-1']?.state === 'counted' && r.shares['bcast-1'].by === 'acceptance')).toBe(true);
+    expect(world.listingSends.every((r) => r.sentAt !== undefined && r.sentAt === r.shares?.['bcast-1']?.countedAt)).toBe(true);
     // The removed `response` label is never written.
     expect(world.listingSends.every((r) => !('response' in r))).toBe(true);
   });
@@ -1051,17 +1108,17 @@ describe('broadcast.send (M1.8a)', () => {
     expect(world.listingSends).toHaveLength(0);
   });
 
-  it('best-effort capture isolation: a recordSend failure NEVER fails the send (SMS still out, recipient counted sent, error logged)', async () => {
+  it('best-effort capture isolation: a listing-send entry write failure NEVER fails the send (SMS still out, recipient counted sent, error logged)', async () => {
     const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
     seedUnit(world); // unit-1
-    seedBroadcast(world, [alice]); // unitId: 'unit-1' → would normally record a listing-send
+    seedBroadcast(world, [alice]); // unitId: 'unit-1' - would normally record a listing-send
 
     // Capture the fan-out's own logs so we can assert the swallowed error logged.
     const capture = createLogCapture();
     const capturingLogger = createLogger({ level: 'info', destination: capture.stream });
 
-    // The listing-send capture throws — it must be swallowed and never propagate.
-    world.listingSendsRepo.recordSend = async () => {
+    // The listing-send memory write throws - it must be swallowed and never propagate.
+    world.listingSendsRepo.putShareMemory = async () => {
       throw new Error('listing_sends table is on fire');
     };
     wireHandler(world, capturingLogger);
@@ -1076,11 +1133,11 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.stats.sent).toBe(1);
     expect(bcast.recipients['c-alice']?.status).toBe('sent');
     expect(bcast.status).toBe('sent');
-    // (c) The recordSend failure was logged (error level) and swallowed.
+    // (c) The entry-write failure was logged (error level) and swallowed.
     const errs = capture
       .atLevel(50)
-      .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('listing-send row failed'));
-    expect(errs.length).toBeGreaterThanOrEqual(1);
+      .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('recording listing-send entry failed'));
+    expect(errs.length).toBe(1);
   });
 
   // --- DLR-rollup race: persist the recipient slot BEFORE the pacing token ---
@@ -2542,6 +2599,10 @@ describe('broadcast.send (M1.8a)', () => {
       });
       expect(world.activityEvents.filter((e) => e.type === 'listing_sent' && e.contactId === 't-1')).toHaveLength(1);
       expect(world.listingSends.filter((r) => r.contactId === 't-1' && r.unitId === 'unit-1')).toHaveLength(1);
+      // share-sent-outcome D7: the pass's row counts through this share's entry.
+      const ledgerRow = world.listingSends.find((r) => r.contactId === 't-1' && r.unitId === 'unit-1');
+      expect(ledgerRow).toMatchObject({ counted: true, broadcastId: 'bcast-1' });
+      expect(ledgerRow?.shares?.['bcast-1']).toMatchObject({ state: 'counted', by: 'acceptance' });
       expect(world.broadcasts.get('bcast-1')!.status).toBe('sent');
     });
   });

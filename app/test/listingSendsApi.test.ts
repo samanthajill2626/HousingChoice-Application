@@ -8,9 +8,12 @@ import { describe, expect, it } from 'vitest';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { seedListingSend } from './helpers/listingSendSeed.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = ORIGIN_SECRET;
+/** share-sent-outcome T7: the seeded rows' counted instant (the retired upsert writer defaulted it to now). */
+const SENT_AT = '2026-06-16T10:00:00.000Z';
 
 function seedUnit(world: ReturnType<typeof createFakeWorld>, unitId: string): UnitItem {
   const item: UnitItem = {
@@ -39,8 +42,8 @@ describe('GET /api/units/:unitId/recipients (BE4/C4 — "Sent to tenants")', () 
   it('returns the unit recipients from listByUnit', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-1' });
-    await world.listingSendsRepo.recordSend({ contactId: 'c-2', unitId: 'unit-1', via: 'individual' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT, broadcastId: 'b-1' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-2', sentAt: SENT_AT });
 
     const res = await request(app)
       .get('/api/units/unit-1/recipients')
@@ -64,9 +67,9 @@ describe('GET /api/units/:unitId/recipients (BE4/C4 — "Sent to tenants")', () 
     const named = seedTenant(world, 'c-named');
     named.firstName = 'Brianna';
     named.lastName = 'Whitfield';
-    await world.listingSendsRepo.recordSend({ contactId: 'c-named', unitId: 'unit-1', via: 'individual' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-named', sentAt: SENT_AT });
     // No contact row for c-ghost - the row must still serve, without a name.
-    await world.listingSendsRepo.recordSend({ contactId: 'c-ghost', unitId: 'unit-1', via: 'individual' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-ghost', sentAt: SENT_AT });
 
     const res = await request(app)
       .get('/api/units/unit-1/recipients')
@@ -106,7 +109,7 @@ describe('GET /api/contacts/:contactId/listings-sent (BE4/C4 — "Listings sent"
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
     seedTenant(world, 'c-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-1' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT, broadcastId: 'b-1' });
 
     const res = await request(app)
       .get('/api/contacts/c-1/listings-sent')
@@ -141,11 +144,11 @@ describe('GET /api/contacts/:contactId/listings-sent (BE4/C4 — "Listings sent"
 });
 
 describe('the two directions return the SAME row', () => {
-  it('a single recordSend surfaces in both units/recipients and contacts/listings-sent', async () => {
+  it('a single seeded row surfaces in both units/recipients and contacts/listings-sent', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-x');
     seedTenant(world, 'c-x');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-x', unitId: 'unit-x', via: 'broadcast', broadcastId: 'b-x' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-x', contactId: 'c-x', sentAt: SENT_AT, broadcastId: 'b-x' });
 
     const byUnit = await request(app)
       .get('/api/units/unit-x/recipients')
@@ -197,8 +200,8 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
   it('recipients: a qualifying tour lights ONLY the matching (unit, tenant) row', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
-    await world.listingSendsRepo.recordSend({ contactId: 'c-2', unitId: 'unit-1', via: 'individual' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-2', sentAt: SENT_AT });
     // c-1 has a scheduled tour on unit-1; c-2 has none.
     await world.toursRepo.create({
       tourId: 'tour-c1',
@@ -227,9 +230,9 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     seedUnit(world, 'unit-x');
     seedUnit(world, 'unit-y');
     // unit-x sent to A and B; unit-y sent to A.
-    await world.listingSendsRepo.recordSend({ contactId: 'c-a', unitId: 'unit-x', via: 'broadcast' });
-    await world.listingSendsRepo.recordSend({ contactId: 'c-b', unitId: 'unit-x', via: 'broadcast' });
-    await world.listingSendsRepo.recordSend({ contactId: 'c-a', unitId: 'unit-y', via: 'broadcast' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-x', contactId: 'c-a', sentAt: SENT_AT });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-x', contactId: 'c-b', sentAt: SENT_AT });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-y', contactId: 'c-a', sentAt: SENT_AT });
     // Tenant A has a tour on unit-x ONLY.
     await world.toursRepo.create({
       tourId: 'tour-ax',
@@ -264,8 +267,8 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     seedUnit(world, 'unit-1');
     seedUnit(world, 'unit-2');
     seedTenant(world, 'c-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-2', via: 'broadcast' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-2', contactId: 'c-1', sentAt: SENT_AT });
     // c-1 has a requested tour on unit-2 only.
     await world.toursRepo.create({
       tourId: 'tour-u2',
@@ -290,7 +293,7 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
   it('E3 degrade: a tours-query failure serves 200 chipless rows and logs (recipients)', async () => {
     const { app, world, capture } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
     world.toursRepo.listByUnit = async () => {
       throw new Error('tours GSI unavailable');
     };
@@ -312,7 +315,7 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     const { app, world, capture } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
     seedTenant(world, 'c-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
     world.toursRepo.listByTenant = async () => {
       throw new Error('tours GSI unavailable');
     };
@@ -338,7 +341,7 @@ describe('PATCH /api/units/:unitId/recipients/:contactId is GONE (response label
     // body must still 404 (route gone), not 200/400.
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
 
     const res = await request(app)
       .patch('/api/units/unit-1/recipients/c-1')
@@ -352,24 +355,18 @@ describe('PATCH /api/units/:unitId/recipients/:contactId is GONE (response label
   });
 });
 
-describe('recordSend upsert semantics (no `response` field)', () => {
-  it('a re-send refreshes broadcastId attribution and preserves created_at (idempotent upsert)', async () => {
+describe('listing-send memory writes (no `response` field)', () => {
+  it('a later counted share refreshes the broadcastId attribution and preserves created_at', async () => {
     const { world } = makeWebhookHarness();
-    const first = await world.listingSendsRepo.recordSend({
-      contactId: 'c-1',
-      unitId: 'unit-1',
-      via: 'broadcast',
-      broadcastId: 'b-1',
-    });
-    // Re-send (e.g. a second broadcast of the same unit to the same tenant).
-    const resent = await world.listingSendsRepo.recordSend({
-      contactId: 'c-1',
-      unitId: 'unit-1',
-      via: 'broadcast',
-      broadcastId: 'b-2',
-    });
-    expect(resent.broadcastId).toBe('b-2'); // attribution refreshed
-    expect(resent.created_at).toBe(first.created_at); // first-write furniture preserved
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'b-1' });
+    const first = await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1');
+    // A second share of the same unit to the same tenant, counted later.
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: '2026-06-17T10:00:00.000Z', broadcastId: 'b-2' });
+    const resent = await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1');
+    expect(resent?.broadcastId).toBe('b-2'); // attribution refreshed
+    expect(resent?.sentAt).toBe('2026-06-17T10:00:00.000Z');
+    expect(Object.keys(resent?.shares ?? {}).sort()).toEqual(['b-1', 'b-2']); // both shares remembered
+    expect(resent?.created_at).toBe(first?.created_at); // first-write furniture preserved
     // No `response` label is ever written.
     expect(resent).not.toHaveProperty('response');
   });

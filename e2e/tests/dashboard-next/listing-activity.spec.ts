@@ -192,7 +192,7 @@ test.describe('Property detail - "Sent to tenants" tour chip (listing-response-t
     });
     expect(send.ok()).toBeTruthy();
 
-    // Fan-out (and its best-effort recordSend) is async -> poll the recipients
+    // Fan-out (and its best-effort listing-send ledger write) is async -> poll the recipients
     // API until BOTH send rows have landed, and both are chipless (no tour yet).
     await expect
       .poll(

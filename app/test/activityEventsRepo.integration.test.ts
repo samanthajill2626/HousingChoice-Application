@@ -72,6 +72,24 @@ describe.skipIf(!reachable)('activityEventsRepo against DynamoDB Local (throwawa
     expect(item.refType).toBe('placement');
     expect(item.refId).toBe('placement-1');
     expect(item.created_at).toBeDefined();
+    expect(item).not.toHaveProperty('broadcastId');
+  });
+
+  it('share-sent-outcome D6: record stores a listing_sent milestone share id, and the read returns it', async () => {
+    const contactId = `contact-${randomUUID().slice(0, 8)}`;
+    const item = await repo.record({
+      contactId,
+      type: 'listing_sent',
+      label: 'Property sent',
+      refType: 'unit',
+      refId: 'unit-1',
+      broadcastId: 'bcast-1',
+      at: '2026-06-16T10:00:00.000Z',
+    });
+    expect(item.broadcastId).toBe('bcast-1');
+    const { items } = await repo.listByContact(contactId);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ type: 'listing_sent', refType: 'unit', refId: 'unit-1', broadcastId: 'bcast-1' });
   });
 
   it('listByContact returns events newest-first', async () => {

@@ -385,6 +385,12 @@ describe('send.reconcile (spec D11-D16)', () => {
       // The listing_sent milestone and the "Properties sent" row: only for a sent/delivered adoption.
       expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(1);
       expect(world.listingSends).toHaveLength(1);
+      // share-sent-outcome D6/D7: the milestone names the share; a DELIVERED
+      // adoption counts the entry by delivery at the adopted row's instant.
+      expect(world.activityEvents.find((e) => e.type === 'listing_sent')).toMatchObject({ broadcastId: 'bcast-1' });
+      const adoptedInstant = new Date(Date.parse(row.tsMsgId.slice(0, row.tsMsgId.indexOf('#')))).toISOString();
+      expect(world.listingSends[0]).toMatchObject({ counted: true, broadcastId: 'bcast-1', sentAt: adoptedInstant });
+      expect(world.listingSends[0]?.shares?.['bcast-1']).toEqual({ attempt: row.tsMsgId, conversationId: row.conversationId, state: 'counted', by: 'delivery', countedAt: adoptedInstant });
       expect(world.auditEvents.filter((e) => e.event_type === 'message_sent')).toHaveLength(1);
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-1' });
       // D16a: the adoption was the last open recipient, so it finalizes.
@@ -428,6 +434,8 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(world.auditEvents.filter((e) => e.event_type === 'message_sent')).toHaveLength(1);
       expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(1);
       expect(world.listingSends).toHaveLength(1);
+      // share-sent-outcome D7: a SENT adoption counts the entry by acceptance, for the recorded row.
+      expect(world.listingSends[0]?.shares?.['bcast-1']).toMatchObject({ attempt: recorded.tsMsgId, conversationId: conv.conversationId, state: 'counted', by: 'acceptance' });
       expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMrec-1' });
     });
 

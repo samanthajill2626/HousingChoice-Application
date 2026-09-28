@@ -687,7 +687,7 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(msgLines(INFO, superseded)).toHaveLength(3);
   });
 
-  it('4c2 THIS attempt already appended its retry row (FW2, planner review A1): an AUTOMATIC child carrying the payload\'s attempt number is this attempt\'s own text - the job declines at WARN before claiming, with zero provider calls - on a first run (no record, nothing written), on a re-drive (redriven closed done/refused already_sent) and on a deferral re-run (done/retryable, nothing written); an automatic child of ANOTHER attempt number does not decline: the job claims and sends once', async () => {
+  it('4c2 THIS attempt already appended its retry row (FW2, planner review A1): an AUTOMATIC child carrying the payload\'s attempt number is this attempt\'s own text - the job declines at WARN before claiming, with zero provider calls - on a first run (no record, nothing written), on a re-drive (redriven closed done/refused already_sent) and on a deferral re-run (done/retryable, nothing written); an automatic child of ANOTHER attempt number is unreachable (FW3, planner re-review R2): the one job that could append it - a payload naming attempt 2 against a ROOT, here beside the root\'s own attempt-1 retry row - is refused at step 1 with no provider call and no record; seeded-only (unreachable in production), such a child does not decline a consistent payload: the job claims and sends once', async () => {
     wire();
     const alreadySent = 'retrySend: this attempt already appended its retry row - not re-sent';
     /** A fresh retried row with an automatic child of attempt `childAttempt` (its retrychild# pointer rides the append); each sub-case has its own row - the fake keeps records between sub-cases. */
@@ -746,13 +746,29 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(capture.atLevel(ERROR)).toHaveLength(0);
     expect(annotate).not.toHaveBeenCalled();
     expect(world.sent).toHaveLength(0);
-    // (4) an automatic child of ANOTHER attempt number (2, the payload is attempt 1) keeps the spec's carve-out: claims and sends once.
-    const other = await withAutomaticChild('SMown4', 2);
-    await run(other.row);
+    // (4) FW3 (planner re-review R2): an automatic child of ANOTHER attempt number could only be appended by a
+    // payload the retried row cannot schedule - attempt 2 against a ROOT, whose one attempt is 1. That job is
+    // refused at step 1, even beside the root's own attempt-1 retry row: no provider call, no record at attempt
+    // 1 or 2, ONE WARN naming both numbers.
+    const cannotSchedule = "retrySend: the payload's attempt is not the one the retried row can schedule - refusing";
+    const wrongAttempt = await withAutomaticChild('SMown4', 1);
+    await run(wrongAttempt.row, 2);
+    expect(calls).not.toHaveBeenCalled();
+    expect(await recordOf(wrongAttempt.row, 1)).toBeUndefined();
+    expect(await recordOf(wrongAttempt.row, 2)).toBeUndefined();
+    expect(msgLines(WARN, cannotSchedule)).toEqual([
+      expect.objectContaining({ providerSid: 'SMown4', conversationId: wrongAttempt.row.conversationId, attempt: 2, rowAttempt: 1 }),
+    ]);
+    expect(world.sent).toHaveLength(0);
+    // (5) seeded-only (unreachable in production): a root SEEDED with an automatic child of attempt 2, run with a
+    // CONSISTENT payload (attempt 1) - step 4a's carve-out stays as written: the job claims and sends once.
+    const seededOnly = await withAutomaticChild('SMown5', 2);
+    await run(seededOnly.row);
     expect(calls).toHaveBeenCalledTimes(1);
-    expect(await recordOf(other.row)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 1 });
+    expect(await recordOf(seededOnly.row)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 1 });
     expect(world.sent).toHaveLength(1);
     expect(msgLines(WARN, alreadySent)).toHaveLength(3);
+    expect(msgLines(WARN, cannotSchedule)).toHaveLength(1);
   });
 
   it('4d an existing attempt is resolved BEFORE the window: a stale attempting record (31 s) with the window already closed is taken over into reconcile, not logged window_closed; a deferral re-run whose run time slipped past the window declines "retry window closed" and sends nothing (RSW #1)', async () => {
@@ -808,6 +824,53 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     ]);
     expect(world.sendAttempts.size).toBe(0);
     expect(calls).not.toHaveBeenCalled();
+    expect(capture.atLevel(ERROR)).toHaveLength(0);
+  });
+
+  it('4f step 1 refuses a payload whose attempt is not the one the retried row can schedule, (retry_attempt ?? 0) + 1 (FW3, planner re-review R2): against a MANUAL retried row (retry_of, no retry_attempt) attempt 2 is refused with ONE WARN naming rowAttempt 1 - nothing read past the retried row, nothing claimed, no provider call; attempt 1 against a fresh manual row claims and sends once', async () => {
+    wire();
+    const cannotSchedule = "retrySend: the payload's attempt is not the one the retried row can schedule - refusing";
+    const root = await seedRetried('SMf4root', { providerTs: iso(Date.now() - 60_000) });
+    // Staff Retries of the root appended before this deploy - retry_of, no retry_attempt, no retry_root - so the
+    // root walk right after step 1 WOULD read: the decline's placement ahead of it is observable. A fresh row per sub-case.
+    const refused = await seedRetried('SMf4manual1', { retryOf: root.tsMsgId });
+    const proceeds = await seedRetried('SMf4manual2', { retryOf: root.tsMsgId });
+    const calls = providerCalls();
+    const reads = {
+      lineage: vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent'),
+      recipient: vi.spyOn(world.contactsRepo, 'getById'),
+      thread: vi.spyOn(world.conversationsRepo, 'getById'),
+      record: vi.spyOn(world.sendAttemptsRepo, 'get'),
+      marker: vi.spyOn(world.messagesRepo, 'getJobExecutionMarker'),
+      children: vi.spyOn(world.messagesRepo, 'listRetryChildrenConsistent'),
+    };
+    const claim = vi.spyOn(world.sendAttemptsRepo, 'claim');
+    const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+    // (1) attempt 2: this manual row can only schedule attempt 1.
+    await run(refused, 2);
+    expect(calls).not.toHaveBeenCalled();
+    for (const [name, read] of Object.entries(reads)) expect({ name, calls: read.mock.calls.length }).toEqual({ name, calls: 0 });
+    expect(claim).not.toHaveBeenCalled();
+    expect(annotate).not.toHaveBeenCalled();
+    expect(await recordOf(refused, 1)).toBeUndefined();
+    expect(await recordOf(refused, 2)).toBeUndefined();
+    const lines = msgLines(WARN, cannotSchedule);
+    expect(lines).toEqual([
+      expect.objectContaining({ providerSid: 'SMf4manual1', conversationId: refused.conversationId, attempt: 2, rowAttempt: 1 }),
+    ]);
+    // The base context: logged before the root walk, so no root or retried-row fields ride it.
+    expect(lines[0]).not.toHaveProperty('retryRoot');
+    expect(lines[0]).not.toHaveProperty('retriedTsMsgId');
+    expect(world.sendAttempts.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+    // (2) attempt 1 against a fresh manual row proceeds: the root walk runs, the job claims and sends once.
+    await run(proceeds, 1);
+    expect(calls).toHaveBeenCalledTimes(1);
+    expect(reads.lineage).toHaveBeenCalled();
+    expect(await recordOf(proceeds)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 1 });
+    expect(world.sent).toHaveLength(1);
+    expect(world.messages.find((m) => m.retry_of === proceeds.tsMsgId)).toMatchObject({ retry_attempt: 1, retry_root: root.tsMsgId });
+    expect(msgLines(WARN, cannotSchedule)).toHaveLength(1);
     expect(capture.atLevel(ERROR)).toHaveLength(0);
   });
 

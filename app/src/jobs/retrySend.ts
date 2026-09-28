@@ -366,6 +366,15 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
       );
       return;
     }
+    // By construction (FW3, planner re-review R2): the webhook schedules exactly this number and a deferral or re-drive reuses it - so 4a's other-attempt carve-out is unreachable.
+    const rowAttempt = (retried.retry_attempt ?? 0) + 1;
+    if (payload.attempt !== rowAttempt) {
+      log.warn(
+        { ...base, rowAttempt },
+        "retrySend: the payload's attempt is not the one the retried row can schedule - refusing",
+      );
+      return;
+    }
     const retryRoot = await resolveRetryRoot(messagesRepo, retried);
     // RSW D2: the chain's FIRST send - retry_window_start on a retry row, else
     // this row's own provider_ts (the rule the 30003 decision reads too).

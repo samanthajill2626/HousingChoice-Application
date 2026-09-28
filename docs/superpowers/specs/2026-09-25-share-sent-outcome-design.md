@@ -629,9 +629,11 @@ the build finds out of scope.
   in-memory test double, which must mirror the two readings and the promise
   reads and the record reads), the results route and row, the derived stats
   and the `retry_pending` sub-bucket, the SSE payload (the rollup's emit
-  supplies its promise), the per-share route's stats-only read (D4's
-  refetch), finalize (unchanged), the two "Sent to N" surfaces (D5), the
-  fake-twilio harness.
+  supplies its promise), the results route's stats-only read (D4's refetch:
+  `GET /api/broadcasts/:id/results` with a query flag that skips the
+  recipient list and its contact reads), finalize (unchanged), the two "Sent
+  to N" surfaces (D5), the in-memory harness double
+  (`app/test/helpers/twilioWebhookHarness.ts`, which mirrors the repo).
 - The promise and the chain end: written by RSW and 1b on message rows
   (unchanged); read by the results route and the preview route (D1, D3),
   through the newest-attempt pointer, within D1's bound.
@@ -643,8 +645,12 @@ the build finds out of scope.
   "Property sent" per ledger row - it must skip an un-counted pair), the
   repair; the in-memory ledger double must mirror the sparse index and the
   per-share memory, held to the real repo by a parity test.
-- The milestone: writer unchanged in timing, now carrying the share id;
-  reader - the contact timeline (D6).
+- The milestone: writer unchanged in timing, now carrying the share id (the
+  activity-event record input gains the field); reader - the contact timeline
+  route, where the words are composed APP-side (as is D5's landlord label);
+  the dashboard renders them verbatim. D5 and D6 both need a batch read that
+  does not exist today (shares by id; ledger rows by pair) plus their harness
+  doubles.
 - The `broadcast_sent` audit row: unchanged; its two readers derive (D5).
 - Seeds: the lean world is byte-stable and has no ledger rows; the full world's
   five ledger rows read as counted (absent flag). No seed change is required;
@@ -723,12 +729,16 @@ the build finds out of scope.
   the builder does not mistake them for regressions: Branch A's interim-rule
   pins (`share-skip-fix.spec.ts` failed-stays-flagged; the repo and route
   tests for `priorRecipientContactIds`: the queued-in-a-sending-share case is
-  kept, the DRAFT exclusion holds as a stranded case, and the FAILED-share
+  kept, the DRAFT exclusion holds as a stranded case, the FAILED-share
   exclusion becomes slot-and-record cases - a failed share's record-less
-  queued slots stay unflagged, its reached slots now flag);
-  SOR's all-unconfirmed "Failed" pill and its 21211 retry-hint pin
-  (`send-outcome-reconcile.spec.ts`); the "Sent to N tenants" label tests; the
-  label-table test that reads sent + skipped + failed as "Sent".
+  queued slots stay unflagged, its reached slots now flag - and the two
+  "a failed one still does / still is" cases flip to "a final failure does
+  not"); 1b's webhook pin that the rollup SKIPS a `retry_of` row (rewritten:
+  the row is routed); the results-row hint pin on a keyless failed row (no
+  message row, so no hint); SOR's all-unconfirmed "Failed" pill, its
+  `last_error` alert (shown under Not sent only) and its 21211 retry-hint pin
+  (`send-outcome-reconcile.spec.ts`); the "Sent to N tenants" label tests;
+  the label-table test that reads sent + skipped + failed as "Sent".
 - The `broadcasts.spec.ts` "Already sent" assertion made right after a prior
   send holds under D1 (in flight counts), and is kept.
 - All five completion gates.
@@ -825,8 +835,9 @@ the build finds out of scope.
   `broadcast_id` copy is closed by this branch's own repair.
 - Round 4's two remaining calls, RULED by Cameron 2026-09-27:
   1. D4's list refetch reads a share's stats WITHOUT its recipient list,
-     through a QUERY FLAG on the existing per-share route (the same handler
-     minus the recipient and contact reads; no new endpoint). The
+     through a QUERY FLAG on the existing results route
+     (`GET /api/broadcasts/:id/results`; the same handler minus the recipient
+     enrichment and its contact reads; no new endpoint). The
      alternatives (a new stats endpoint; no refetch, leaving a finished share
      whose retry chain failed reading Sending until reopened) are not taken.
   2. NO relay to SOR for the one-expression root `broadcast_id` change. A

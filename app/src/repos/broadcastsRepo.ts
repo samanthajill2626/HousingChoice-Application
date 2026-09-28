@@ -22,6 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   DeleteCommand,
   GetCommand,
   PutCommand,
@@ -57,15 +58,21 @@ export const LIST_PARTITION = 'broadcasts';
  * Hard cap on a broadcast's recipient count.
  *
  * The `recipients` map lives ON the broadcast item, and a DynamoDB item is
- * capped at 400KB. Each recipient slot is contactKey (~40B) + a small object
- * {status, conversationId, tsMsgId, errorCode?} (~110-160B) → budget ~150-200
- * bytes/slot. 1500 slots × ~200B ≈ 300KB, leaving comfortable headroom under
- * 400KB for the rest of the item (audience_filter, body_template, stats, etc.).
+ * capped at 400KB. A slot carries up to SIX attributes (status,
+ * conversationId, tsMsgId, errorCode, carrierSentAt, latestAttempt). A fully
+ * populated slot without the pointer is about 230 bytes (contactKey ~44B,
+ * conversationId ~41B, tsMsgId ~59B, an ISO carrierSentAt 24B, the attribute
+ * names and the map overhead); share-sent-outcome's latestAttempt pointer (a
+ * tsMsgId-sized string) adds about 75 bytes. So 1000 slots when EVERY
+ * recipient was retried is about 305KB, and the same cap bounds
+ * seed_contact_ids (1000 x ~44B), leaving room under 400KB for the rest of
+ * the item (audience_filter, body_template, stats, etc.) - the reason the cap
+ * came down from 1500 (share-sent-outcome, spec section 9).
  * The /send route REFUSES an audience over this cap (audience_too_large) so the
- * recipients map can never overflow the item — narrow the filter, or move to a
+ * recipients map can never overflow the item - narrow the filter, or move to a
  * one-item-per-recipient layout if Phase-2 ever needs unbounded audiences.
  */
-export const MAX_BROADCAST_RECIPIENTS = 1500;
+export const MAX_BROADCAST_RECIPIENTS = 1000;
 
 /**
  * The audience filter SNAPSHOT persisted on the broadcast (M1.8a): tenant
@@ -130,6 +137,14 @@ export interface BroadcastStats {
    * (readers default it to 0).
    */
   sending?: number;
+  /**
+   * share-sent-outcome D4: how many `failed` slots hold a LIVE retry promise
+   * (a SUB-bucket of `failed`: never in the bucket sum, never persisted). Set
+   * only by a caller that supplied a promise count (the results and list
+   * routes; the rollup's own lower bound on its emit); ABSENT otherwise, and
+   * the dashboard merges an absent count by keeping its last value.
+   */
+  retry_pending?: number;
 }
 
 /** Per-recipient delivery slot on the broadcast (keyed by contactKey). */
@@ -163,6 +178,14 @@ export interface BroadcastRecipient {
    * still reads "Sending...".
    */
   carrierSentAt?: string;
+  /**
+   * share-sent-outcome D1/D2: the order key of the NEWEST attempt for this
+   * recipient (a retry row's tsMsgId, or the row-less marker
+   * shareAttemptOrder.rowlessAttemptKey). ABSENT while the original send
+   * (`tsMsgId`) is the newest attempt. The promise and the chain's end are
+   * NEVER copied here - they are read from that attempt's own row (I5).
+   */
+  latestAttempt?: string;
 }
 
 export interface BroadcastItem {
@@ -266,13 +289,28 @@ export function isOptedOutCode(code: string | undefined): boolean {
  *   Legacy cumulative persisted stats are IGNORED when the map is present, so
  *   historical broadcasts (whose persisted counters double-counted delivered)
  *   still DISPLAY correctly. Same BroadcastStats shape as the persisted counters.
+ *
+ * share-sent-outcome (D1, D4) - two OPTIONAL caller-supplied facts the slots
+ * alone do not carry (they live on the newest attempt's message row):
+ *   retryPending    - the count of `failed` slots holding a LIVE retry
+ *                     promise; emitted as `retry_pending`, a SUB-bucket of
+ *                     `failed` (never in the bucket sum). Absent unless given.
+ *   unconfirmedKeys - contactKeys whose state is `unconfirmed` although the
+ *                     slot's code is not send_unconfirmed (the row says the
+ *                     chain ended unresolved): counted in `unconfirmed`, not
+ *                     `failed`.
+ * With no options the empty-map passthrough still returns the persisted
+ * object ITSELF.
  */
 export function deriveBroadcastStats(
   b: Pick<BroadcastItem, 'recipients' | 'stats'>,
+  opts?: { retryPending?: number; unconfirmedKeys?: ReadonlySet<string> },
 ): BroadcastStats {
   const recipients = b.recipients ?? {};
   const keys = Object.keys(recipients);
-  if (keys.length === 0) return b.stats;
+  if (keys.length === 0) {
+    return opts?.retryPending === undefined ? b.stats : { ...b.stats, retry_pending: opts.retryPending };
+  }
   let queued = 0;
   let sending = 0;
   let sent = 0;
@@ -300,7 +338,7 @@ export function deriveBroadcastStats(
         delivered += 1;
         break;
       case 'failed':
-        if (slot.errorCode === SEND_UNCONFIRMED_CODE) unconfirmed += 1;
+        if (slot.errorCode === SEND_UNCONFIRMED_CODE || opts?.unconfirmedKeys?.has(key) === true) unconfirmed += 1;
         else failed += 1;
         break;
       case 'skipped':
@@ -321,6 +359,7 @@ export function deriveBroadcastStats(
     skipped_opted_out,
     skipped_no_consent,
     skipped_other,
+    ...(opts?.retryPending !== undefined && { retry_pending: opts.retryPending }),
   };
 }
 
@@ -467,6 +506,32 @@ export interface BroadcastsRepo {
     allowedPriorStatuses: ReadonlyArray<BroadcastRecipient['status']>,
   ): Promise<{ moved: boolean; item?: BroadcastItem }>;
   /**
+   * share-sent-outcome D2: the attempt-ordered slot write. Applies `next`
+   * (the whole slot) and ADDs `statsDelta` in ONE conditional write whose
+   * condition names the attempt the slot currently records (`latestAttempt`,
+   * absent for the original) AND its status - so a newer attempt can leave
+   * `failed`, a delayed callback for a superseded attempt cannot, and two
+   * writers racing on one slot cannot both win. `{ applied: false }` on a
+   * failed condition (the caller re-reads and re-decides, spec D2), a missing
+   * broadcast or slot included; anything else throws. Buckets with a zero (or
+   * absent) delta are left out; an EMPTY delta writes the slot only.
+   */
+  applyAttemptOutcome(
+    broadcastId: string,
+    contactKey: string,
+    expect: AttemptOutcomeExpect,
+    next: BroadcastRecipient,
+    statsDelta: Partial<BroadcastStats>,
+  ): Promise<{ applied: boolean; item?: BroadcastItem }>;
+  /**
+   * share-sent-outcome D5: BatchGet by id (chunks of 100; unprocessed keys are
+   * retried once, then WARNed with their ids and left absent). `projection:
+   * 'stats'` reads broadcastId, status, unitId, recipients, stats only (a
+   * share item can run to 300 KB; a page of them must stay under BatchGet's
+   * 16 MB response). Missing ids are absent; duplicate ids are read once.
+   */
+  getByIds(broadcastIds: string[], opts?: { projection?: 'stats' }): Promise<Map<string, BroadcastItem>>;
+  /**
    * SOR (spec D8, D22): close a still-`queued` recipient `failed` with
    * `errorCode`, moving one count from `queued` to `statsBucket` - the cap and
    * enqueue-failure closes (`failed`) and the unresolved close (`unconfirmed`).
@@ -504,6 +569,16 @@ export interface BroadcastsRepo {
    * `not_found` from `not_draft`).
    */
   delete(broadcastId: string): Promise<DeleteBroadcastResult>;
+}
+
+/**
+ * share-sent-outcome D2: what `applyAttemptOutcome` expects the slot to hold -
+ * its status and the attempt it records (`undefined` = the slot records no
+ * `latestAttempt`, i.e. the original send is its newest attempt).
+ */
+export interface AttemptOutcomeExpect {
+  status: BroadcastRecipient['status'];
+  latestAttempt: string | undefined;
 }
 
 /** Outcome of a draft-only delete (the route maps it to 200 / 404 / 409). */
@@ -927,6 +1002,71 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
     },
 
     recordRecipientOutcome: recordOutcome,
+
+    async applyAttemptOutcome(broadcastId, contactKey, expect, next, statsDelta) {
+      // recordOutcome's expression style: names and values are built per
+      // statement, so `:pa` is bound only when the condition names an attempt
+      // and only non-zero buckets are aliased (an unused alias is a
+      // ValidationException); an EMPTY delta leaves the ADD clause out.
+      const names: Record<string, string> = { '#ck': contactKey, '#updatedAt': 'updated_at', '#status': 'status', '#la': 'latestAttempt' };
+      const values: Record<string, unknown> = { ':rec': next, ':now': new Date().toISOString(), ':ps': expect.status };
+      let attemptCond = 'attribute_not_exists(recipients.#ck.#la)';
+      if (expect.latestAttempt !== undefined) {
+        values[':pa'] = expect.latestAttempt;
+        attemptCond = 'recipients.#ck.#la = :pa';
+      }
+      const adds: string[] = [];
+      for (const [bucket, delta] of Object.entries(statsDelta)) {
+        if (typeof delta !== 'number' || delta === 0) continue;
+        const i = adds.length;
+        names[`#a${i}`] = bucket;
+        values[`:v${i}`] = delta;
+        adds.push(`stats.#a${i} :v${i}`);
+      }
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { broadcastId },
+            UpdateExpression:
+              `SET recipients.#ck = :rec, #updatedAt = :now` + (adds.length > 0 ? ` ADD ${adds.join(', ')}` : ''),
+            ConditionExpression: `attribute_exists(broadcastId) AND recipients.#ck.#status = :ps AND ${attemptCond}`,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        return { applied: true, item: Attributes as BroadcastItem };
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return { applied: false };
+        throw err;
+      }
+    },
+
+    async getByIds(broadcastIds, opts) {
+      const out = new Map<string, BroadcastItem>();
+      const ids = [...new Set(broadcastIds)];
+      const projection =
+        opts?.projection === 'stats'
+          ? { ProjectionExpression: 'broadcastId, #s, unitId, recipients, stats', ExpressionAttributeNames: { '#s': 'status' } }
+          : {};
+      for (let i = 0; i < ids.length; i += 100) {
+        let keys: Array<{ broadcastId: string }> = ids.slice(i, i + 100).map((broadcastId) => ({ broadcastId }));
+        // The first read, then ONE retry of whatever DynamoDB left unprocessed.
+        for (let round = 0; round < 2 && keys.length > 0; round += 1) {
+          const res = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys, ...projection } } }));
+          for (const item of (res.Responses?.[table] ?? []) as BroadcastItem[]) out.set(item.broadcastId, item);
+          keys = (res.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ broadcastId: string }>;
+        }
+        if (keys.length > 0) {
+          log.warn(
+            { count: keys.length, broadcastIds: keys.map((k) => k.broadcastId) },
+            'broadcasts getByIds: keys still unprocessed after one retry - left absent',
+          );
+        }
+      }
+      return out;
+    },
 
     async closeRecipientIfQueued(broadcastId, contactKey, errorCode, statsBucket) {
       const delta: Partial<BroadcastStats> = { queued: -1 };

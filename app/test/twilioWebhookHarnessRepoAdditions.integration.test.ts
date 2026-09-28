@@ -34,6 +34,7 @@ import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import {
   createBroadcastsRepo,
+  type AttemptOutcomeExpect,
   type BroadcastItem,
   type BroadcastRecipient,
   type BroadcastsRepo,
@@ -727,6 +728,44 @@ const scribble = (name: string, contactKey: string): BcStep => ({
   },
 });
 
+// share-sent-outcome T1: the attempt-ordered slot write and the BatchGet by id.
+const A_ROOT = `${T0}#SMroot`;
+const A_RETRY = `${T1}#SMretry`;
+const A_LATER = '2026-09-26T12:00:09.000Z#SMlater';
+
+const attempt = (
+  name: string,
+  contactKey: string,
+  expectSlot: AttemptOutcomeExpect,
+  next: BroadcastRecipient,
+  delta: Partial<BroadcastStats>,
+  applied: boolean,
+): BcStep => ({
+  label: `applyAttemptOutcome ${name}/${contactKey} from ${JSON.stringify(expectSlot)} -> ${JSON.stringify(next)} ${JSON.stringify(delta)}`,
+  run: async (repo, ctx) => {
+    const r = await repo.applyAttemptOutcome(bid(ctx, name), contactKey, { ...expectSlot }, { ...next }, { ...delta });
+    return { applied: r.applied, ...(r.item !== undefined && { item: normalize(r.item) }) };
+  },
+  expect: { applied },
+});
+
+const createInUnit = (name: string, unitId: string): BcStep => ({
+  label: `create ${name} in ${unitId}`,
+  run: async (repo, ctx) =>
+    normalize(
+      await repo.create({ broadcastId: bid(ctx, name), created_by: 'usr_test', audience_filter: FILTER, body_template: 'Hi [TenantName]', unitId }),
+    ),
+});
+
+/** getByIds as ANSWERED, keyed by script name: the found set and each item (minus clocks), whatever order the BatchGet returned. */
+const byIds = (names: string[], projection?: 'stats'): BcStep => ({
+  label: `getByIds ${names.join(',')}${projection !== undefined ? ` (${projection})` : ''}`,
+  run: async (repo, ctx) => {
+    const m = await repo.getByIds(names.map((n) => bid(ctx, n)), projection !== undefined ? { projection } : undefined);
+    return Object.fromEntries([...m.entries()].map(([id, item]) => [id.slice(bid(ctx, '').length), normalize(item)]));
+  },
+});
+
 const BC_STATUSES: BroadcastRecipient['status'][] = ['queued', 'sent', 'delivered', 'failed', 'skipped'];
 const PRIOR_SETS: BroadcastRecipient['status'][][] = [['queued'], ['sent'], ['queued', 'sent'], ['delivered', 'failed', 'skipped']];
 
@@ -814,6 +853,43 @@ const BC_CASES: BcCase[] = [
     name: 'returned items are snapshots: scribbling on them changes nothing stored',
     watch: ['b1'],
     steps: [createB('b1'), sendingB('b1', ['c-1']), scribble('b1', 'c-1')],
+  },
+  {
+    name: 'applyAttemptOutcome (share-sent-outcome D2): applies from the original with its delta; refuses a moved attempt, a moved status, a missing slot and a missing broadcast; applies over the recorded attempt it names',
+    watch: ['b1'],
+    steps: [
+      createB('b1'),
+      sendingB('b1', ['c1', 'c2', 'c3']),
+      record('b1', 'c1', { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: A_ROOT }, { failed: 1, queued: -1 }, ['queued'], true),
+      attempt('b1', 'c1', { status: 'failed', latestAttempt: undefined },
+        { status: 'delivered', conversationId: 'conv-1', tsMsgId: A_ROOT, latestAttempt: A_RETRY }, { failed: -1, delivered: 1 }, true),
+      record('b1', 'c2', { status: 'failed', errorCode: '30003', conversationId: 'conv-2', tsMsgId: A_ROOT, latestAttempt: A_RETRY }, { failed: 1, queued: -1 }, ['queued'], true),
+      attempt('b1', 'c2', { status: 'failed', latestAttempt: undefined },
+        { status: 'delivered', conversationId: 'conv-2', tsMsgId: A_ROOT, latestAttempt: A_RETRY }, { failed: -1, delivered: 1 }, false),
+      record('b1', 'c3', { status: 'delivered', conversationId: 'conv-3', tsMsgId: A_ROOT }, { delivered: 1, queued: -1 }, ['queued'], true),
+      attempt('b1', 'c3', { status: 'sent', latestAttempt: undefined },
+        { status: 'failed', errorCode: '30007', conversationId: 'conv-3', tsMsgId: A_ROOT, latestAttempt: A_RETRY }, { sent: -1, failed: 1 }, false),
+      attempt('b1', 'c-absent', { status: 'failed', latestAttempt: undefined },
+        { status: 'sent', latestAttempt: A_RETRY }, { failed: -1, sent: 1 }, false),
+      attempt('nope', 'c1', { status: 'failed', latestAttempt: undefined },
+        { status: 'sent', latestAttempt: A_RETRY }, { failed: -1, sent: 1 }, false),
+      attempt('b1', 'c2', { status: 'failed', latestAttempt: A_RETRY },
+        { status: 'sent', conversationId: 'conv-2', tsMsgId: A_ROOT, latestAttempt: A_LATER }, { failed: -1, sent: 1 }, true),
+      attempt('b1', 'c2', { status: 'sent', latestAttempt: A_LATER },
+        { status: 'sent', conversationId: 'conv-2', tsMsgId: A_ROOT, latestAttempt: A_LATER, carrierSentAt: T1 }, {}, true),
+    ],
+  },
+  {
+    name: 'getByIds (share-sent-outcome D5): the found items only, the stats projection, an empty list',
+    watch: ['g1', 'g2'],
+    steps: [
+      createB('g1'),
+      sendingB('g1', ['c1']),
+      createInUnit('g2', 'unit-1'),
+      byIds(['g1', 'g2', 'missing']),
+      byIds(['g1', 'g2', 'missing'], 'stats'),
+      byIds([]),
+    ],
   },
 ];
 

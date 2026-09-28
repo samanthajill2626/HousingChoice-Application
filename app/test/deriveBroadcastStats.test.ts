@@ -151,4 +151,22 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
     expect(sum).toBe(out.audience);
     expect(out.audience).toBe(Object.keys(recipients).length);
   });
+
+  // share-sent-outcome D4 / D1: the two caller-supplied options.
+  it('retry_pending is absent unless supplied, and never joins the bucket sum', () => {
+    const b = { recipients: { c1: { status: 'failed' as const, errorCode: '30003' } }, stats: { ...zeroStats(), audience: 1 } };
+    expect(deriveBroadcastStats(b).retry_pending).toBeUndefined();
+    const withPending = deriveBroadcastStats(b, { retryPending: 1 });
+    expect(withPending.retry_pending).toBe(1);
+    expect(withPending.failed).toBe(1); // the sub-bucket does not shrink failed
+  });
+  it('an unconfirmedKeys entry moves a failed slot into unconfirmed (the row said its chain ended unresolved)', () => {
+    const b = { recipients: { c1: { status: 'failed' as const, errorCode: '30003' } }, stats: { ...zeroStats(), audience: 1 } };
+    expect(deriveBroadcastStats(b, { unconfirmedKeys: new Set(['c1']) })).toMatchObject({ failed: 0, unconfirmed: 1 });
+  });
+  it('the empty-map passthrough returns the persisted object itself when no option is supplied (the :26 pin), and a copy with retry_pending when one is', () => {
+    const persisted = zeroStats();
+    expect(deriveBroadcastStats({ recipients: {}, stats: persisted })).toBe(persisted);
+    expect(deriveBroadcastStats({ recipients: {}, stats: persisted }, { retryPending: 0 })).toEqual({ ...persisted, retry_pending: 0 });
+  });
 });

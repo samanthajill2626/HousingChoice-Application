@@ -3331,6 +3331,49 @@ export function createFakeWorld(): FakeWorld {
       delta[statsBucket] = 1;
       return recordBroadcastOutcome(broadcastId, contactKey, { status: 'failed', errorCode }, delta, ['queued']);
     },
+    // share-sent-outcome T1 (spec D2): the attempt-ordered slot write, modelled
+    // on the real condition - the stored slot's status AND the attempt it
+    // records must equal `expect` (an absent latestAttempt equals undefined); a
+    // missing broadcast or slot refuses. The slot is stored without undefined
+    // fields (the document client's removeUndefinedValues) and the result is a
+    // SNAPSHOT, as ALL_NEW is. Held to the real repo by
+    // twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    async applyAttemptOutcome(broadcastId, contactKey, expect, next, statsDelta) {
+      const b = broadcasts.get(broadcastId);
+      const slot = b?.recipients?.[contactKey];
+      if (!b || slot === undefined || slot.status !== expect.status || slot.latestAttempt !== expect.latestAttempt) {
+        return { applied: false };
+      }
+      const stored = Object.fromEntries(Object.entries(next).filter(([, v]) => v !== undefined)) as BroadcastRecipient;
+      b.recipients = { ...b.recipients, [contactKey]: stored };
+      const stats = b.stats as unknown as Record<string, number>;
+      for (const [bucket, delta] of Object.entries(statsDelta)) {
+        if (typeof delta !== 'number' || delta === 0) continue;
+        stats[bucket] = (stats[bucket] ?? 0) + delta;
+      }
+      b.updated_at = new Date().toISOString();
+      return { applied: true, item: structuredClone(b) };
+    },
+    // share-sent-outcome T1 (spec D5): the BatchGet by id - found items only,
+    // each id once; the `stats` projection keeps exactly the attributes the
+    // real ProjectionExpression names (an absent one stays absent).
+    async getByIds(broadcastIds, opts) {
+      const out = new Map<string, BroadcastItem>();
+      for (const id of new Set(broadcastIds)) {
+        const b = broadcasts.get(id);
+        if (b === undefined) continue;
+        if (opts?.projection !== 'stats') {
+          out.set(id, structuredClone(b));
+          continue;
+        }
+        const projected: Record<string, unknown> = { broadcastId: b.broadcastId };
+        for (const attr of ['status', 'unitId', 'recipients', 'stats'] as const) {
+          if (b[attr] !== undefined) projected[attr] = b[attr];
+        }
+        out.set(id, structuredClone(projected) as BroadcastItem);
+      }
+      return out;
+    },
     // SOR Task 6 (spec D16a): the flip only ONE caller wins - from `sending`.
     // FW1-5: the winning flip stores its op token, as the real one does (the
     // fake never retries, so it never reads the token back).

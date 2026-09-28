@@ -1125,4 +1125,36 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
       'retrySend: retry window closed - retry chain ended without sending',
     ]);
   });
+
+  it('FW1 C-3: the gate DEFERS before the window (R2 step 4) - a reconciling record, and a FRESH attempting one, on a retried row whose window already closed: ONE INFO gate defer each, no ERROR (no spurious "retry window closed"), no claim-refused line, no retrychild# Query, nothing sent or written (Review Focus 1)', async () => {
+    wire();
+    const list = vi.spyOn(world.messagesRepo, 'listRetryChildrenConsistent');
+    const calls = providerCalls();
+    const pastWindow: Partial<NewMessage> = { providerTs: iso(Date.now() - 16 * 60_000) };
+    const deferLines = () => capture.atLevel(INFO).filter((l) => l['gate'] === 'defer');
+    // (1) reconciling: the attempt is in the reconcile's hands.
+    const handed = await seedRetried('SMc3reconciling', pastWindow);
+    const handedAt = iso(Date.now() - 60_000);
+    expect((await world.sendAttemptsRepo.claim(ownerOf(handed, 1), factsFor(handed), handedAt)).outcome).toBe('claimed');
+    expect(await world.sendAttemptsRepo.handToReconcile(ownerOf(handed, 1), { attemptNo: 1, attemptedAt: handedAt })).toBe(true);
+    const handedRecord = await recordOf(handed);
+    expect(handedRecord).toMatchObject({ state: 'reconciling' });
+    await run(handed);
+    expect(deferLines()).toEqual([
+      expect.objectContaining({ msg: 'retrySend: a concurrent delivery owns this attempt', providerSid: 'SMc3reconciling' }),
+    ]);
+    expect(await recordOf(handed)).toEqual(handedRecord);
+    // (2) a FRESH attempting record (5 s old): another delivery is inside its provider call.
+    const fresh = await seedRetried('SMc3fresh', pastWindow);
+    expect((await world.sendAttemptsRepo.claim(ownerOf(fresh, 1), factsFor(fresh), iso(Date.now() - 5_000))).outcome).toBe('claimed');
+    const freshRecord = await recordOf(fresh);
+    await run(fresh);
+    expect(deferLines().map((l) => l['providerSid'])).toEqual(['SMc3reconciling', 'SMc3fresh']);
+    expect(await recordOf(fresh)).toEqual(freshRecord);
+    // The deferral answered BEFORE every later step: no manual-child Query, no window ERROR, no claim.
+    expect(capture.atLevel(ERROR)).toHaveLength(0);
+    expect(capture.lines.filter((l) => String(l['msg']).startsWith('retrySend: claim refused'))).toHaveLength(0);
+    expect(list).not.toHaveBeenCalled();
+    expect(calls).not.toHaveBeenCalled();
+  });
 });

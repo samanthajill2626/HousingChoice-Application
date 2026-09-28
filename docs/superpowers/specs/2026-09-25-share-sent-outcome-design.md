@@ -2,10 +2,13 @@
 
 Date: 2026-09-25 (stub); rewritten 2026-09-27 against `main` @d9cb5c04 (Branch A,
 `feat/retry-send-window` and `feat/send-outcome-reconcile` Stage 1 merged).
-Status: DESIGN v3 - v1 (6e99330d) and v2 (82bdd304) revised after adversarial
-review rounds 1 and 2 (`spec-review-r1-a.md`, `spec-review-r1-b.md`,
-`spec-review-r2.md`, adjudications `spec-review-r1-adjudications.md`,
-`spec-review-r2-adjudications.md`); ready for round 3 and the human gate.
+Status: DESIGN v4 - v1 (6e99330d), v2 (82bdd304) and v3 (1951d190) revised
+after adversarial review rounds 1-3 (`spec-review-r1-a.md`,
+`spec-review-r1-b.md`, `spec-review-r2.md`, `spec-review-r3.md`;
+adjudications `spec-review-r1-adjudications.md`,
+`spec-review-r2-adjudications.md`, `spec-review-r3-adjudications.md`); v4 is
+written against Stage 1b's FINAL spec (revision 5 @dad3fecb); ready for
+round 4 (the cap) and the human gate.
 Branch `feat/share-sent-outcome`, worktree `W:\tmp\share-sent-outcome`.
 Records: `docs/superpowers/reviews/2026-09-27-share-sent-outcome/` (the three
 research findings this rewrite rests on: `research-broadcast-side-findings.md`,
@@ -38,25 +41,44 @@ sent", "Sent to N tenants" (GLOSSARY: `unit` in code, "property" to staff).
   holds only the latest attempt, records no delivery, and expires after 30
   days; nothing durable about "counted" can live on it.
 - **SOR Stage 1b (the `retrySend` adoption) is being built now and must merge
-  before this branch is PLANNED or BUILT.** This spec is written and reviewed in
-  parallel with it. What this branch requires of 1b, agreed 2026-09-27 and
-  refined after this spec's review:
+  before this branch is PLANNED or BUILT.** Its spec is FINAL: revision 5
+  @dad3fecb on `feat/retry-send-adoption`
+  (`docs/superpowers/specs/2026-09-27-retry-send-adoption-design.md`). This
+  spec takes r5's interface AS WRITTEN and asks nothing more of 1b; the plan's
+  first task verifies 1b as built against these four facts:
   1. Every retry row 1b appends - automatic, adopted, and the staff Retry
-     route's row - carries `broadcast_id` and `retry_root` (the tsMsgId of the
-     ORIGINAL send), both DERIVED by walking `retry_of` from the retried row
-     until a row that carries them or has no `retry_of` (bounded by the chain;
-     never a one-hop copy, or an unstamped ancestor would leave every later
-     retry unattributed).
+     route's row - carries `retry_root` (r5's rule: the retried row's own
+     root if it has one; else, for a pre-deploy retry row, the row reached by
+     following `retry_of` up to the attempt cap, a broken link stopping at the
+     last row read; else the retried row itself) and `broadcast_id` COPIED
+     ONE HOP from the retried row. The one-hop copy has a hole this branch
+     closes itself: a post-1b retry of an unstamped pre-1b retry row carries
+     no `broadcast_id`, so its receipt never enters the rollup. The repair
+     (D8) stamps every such row and re-applies its outcome; the window
+     between 1b's deploy and the repair is the residual, and it is small - an
+     automatic chain completes inside the 15-minute window, so only chains in
+     flight at the deploy and a staff Retry of an old, childless, failed
+     retry row fall in it.
   2. When 1b WITHDRAWS a retried row's promise because the chain ended with
      no retry row and an unresolved ruling - the reconcile's unresolved close
      and its redelivery re-apply, the job's second-unknown arm and its
-     enqueue-failed-after-handoff arm - the retried row records the durable
-     `retry_outcome` 1b already writes there. This branch reads that field
-     (D1) and, after 1b merges, calls its own slot writer at those sites (D2).
-     A chain end that leaves the promise to EXPIRE (refused, rejected, the
-     window closed at job time, the deferral cap) needs nothing more: the
-     lapse is the signal, on RSW's own clock.
-  3. 1b writes nothing to a share slot.
+     enqueue-failed-after-handoff arm - it writes `retry_outcome:
+     'unconfirmed'` on that row together with the withdrawn sentinel in
+     `retry_due_at`. This branch reads that field (D1) and, after 1b merges,
+     calls its own slot writer at those sites (D2). A chain end that leaves
+     the promise to EXPIRE (refused, rejected, the window closed at job time,
+     the deferral cap) needs nothing more: the lapse is the signal, on RSW's
+     own clock.
+  3. 1b writes nothing to a share slot. The job's two arms have NO re-apply
+     to ride: they close the record first and WITHDRAW second, a redelivered
+     job returns at INFO on a `done` record, and every post-claim write is
+     guarded so nothing throws. This branch does not ask for one: at those
+     two arms its slot write goes FIRST (D2), and the repair reads the
+     retry-owner attempt records while they live (D8).
+  4. r5's `retrychild#` pointer family and its "any child supersedes" rule (a
+     Retry pressed on a row that already has a child, from a stale view or a
+     direct call, is refused) confine the overlapping-attempt case to 1b's
+     named two-child fork and to pre-1b chains, which carry no pointers.
   Until this branch lands, a share retry's receipt is logged at INFO and
   touches nothing; the rollup's one 2.5-second re-read on a slot miss is paid
   for those receipts in the interim (a few a day at most: only share texts
@@ -70,10 +92,10 @@ sent", "Sent to N tenants" (GLOSSARY: `unit` in code, "property" to staff).
   retry (no receipt ever transitions an adopted row), and the four
   unresolved-end sites named above (no receipt exists). The webhook is fenced
   for SOR Stage 1 and opened here; the other sites are the retry-owner paths
-  1b creates, which this branch extends with a call into its own slot writer,
-  riding whatever re-apply 1b gives its own WITHDRAW at each site so the two
-  writes share one durability story. 1b's record, claim and close semantics
-  are untouched.
+  1b creates, which this branch extends with a call into its own slot writer:
+  at the reconcile's close the call rides 1b's own re-apply; at the job's two
+  arms, which have none, the call goes before 1b's record close. 1b's record,
+  claim and close semantics are untouched.
 - After this branch: nothing waits on it.
 
 ## 1. Problem
@@ -138,7 +160,8 @@ Non-goals (out of scope, with their owners):
   kept as a constraint, not built for).
 - Unit-less shares (a share with no property): their milestone keeps today's
   behavior; they write no ledger row today and none after; the repair does not
-  walk them.
+  walk them, so a pre-1b retry chain under one stays unattributed for good
+  (its share label keeps the first failure, as today).
 
 ## 3. Decisions
 
@@ -161,8 +184,15 @@ The states:
 - **unconfirmed** - "Not confirmed": the slot says `send_unconfirmed`, or the
   newest attempt's row says its chain ended `unresolved` (the text may have
   arrived either way);
-- **in flight** - slot `queued`: not yet reached by the pass, deferred, under
-  reconcile, or stranded by a pass that died - the text may be out;
+- **in flight** - slot `queued` in a share still `sending` (not yet reached
+  by the pass, deferred, under reconcile); or `queued` in a share no longer
+  `sending` when the recipient's send-attempt record exists and does not say
+  the text never went (a pass stranded mid-attempt; a route enqueue the route
+  called failed whose pass ran anyway) - the text may be out;
+- **stranded** - `queued` in a share no longer `sending` with NO send-attempt
+  record, or with a record that says the text never went (`never_sent`,
+  `refused`, `rejected`, `enqueue_failed`, `redrive_refused`): never texted -
+  a route enqueue that truly failed, a draft;
 - **failed** - failed with no live promise and no unresolved ruling: a
   carrier rejection; a chain that ended without a retry row - refused,
   rejected, the window closed, the deferral cap (the promise lapses) or the
@@ -173,30 +203,43 @@ The states:
 
 The SAFE reading ("Already sent" on the review list): reached, pending,
 unconfirmed, in flight. The STRICT reading (the labels, the counts, the
-ledger, the milestone): reached only. Failed and skipped count for neither.
+ledger, the milestone): reached only. Failed, skipped and stranded count for
+neither.
 
 The share's stored lifecycle status is never read to decide whether a tenant
 got the property. This replaces Branch A's interim rule ("failed keeps
 counting") and its whole-share exclusions, and closes
 `unconfirmed-share-invites-resend`.
 
-In flight takes the safe reading whatever the share's stored status, because
-every `queued` slot is a text that may be out or about to go out (a pass
-whose share the route marked failed on an ambiguous enqueue may still be
-sending) and a slot has no clock to tell a strand from a pass. The price: a
-strand keeps its untexted recipients flagged until SOR's sweeper closes it -
-the price Branch A already pays, named as the sweeper's population.
+In flight is told from stranded by the send-attempt record, never by the
+share's stored status: the route marks a share failed on ANY enqueue throw
+and the fan-out never reads that mark, so a share stored `failed` may have
+texted everyone (records exist) or nobody (no record: never claimed, never
+sent - the sweeper's own rule). Without the record, a route send that truly
+failed would keep its whole audience flagged for good, and the share staff
+create to recover would start every tenant unchecked. One keyed record read
+per `queued` slot of a non-`sending` share - strands only, so rare; the
+in-memory test double mirrors it. Records expire after 30 days, so an older
+strand reads stranded, which is right for the flag's purpose. The price that
+remains: a `sending` share whose pass died keeps its unreached recipients
+flagged until SOR's sweeper closes it - the price Branch A already pays,
+named as the sweeper's population.
 
 The row reads are bounded in time: only a failed-30003 slot whose newest
-attempt is younger than the retry window plus its longest refresh and grace
-(about twenty minutes, read from the message id's own provider timestamp) is
-read, for its promise and its `retry_outcome`; an older slot is judged from
-the slot alone, which by then is authoritative - every unresolved end has a
-slot writer (D2), so an old failed slot without `send_unconfirmed` is a
-final failure, and the double fault (a crash between 1b's close and this
-branch's slot write, with no re-apply) is the repair's residue (D8). A read
-that fails leaves the recipient PENDING for the flag (the safe direction) and
-is logged; it never empties the set.
+attempt is younger than the LONGEST a promise can be live, measured from that
+attempt's own provider timestamp (the message id's prefix), is read, for its
+promise and its `retry_outcome`. That bound is a derived constant, not a
+figure: the retry window, plus 1b's unknown-outcome refresh (the reconcile's
+last check delay plus the promise grace), plus the promise's own liveness
+grace, plus a one-minute margin for the skew between the provider's
+second-granular timestamp and the server clock - today 15 + 4 + 2 + 2 + 1 =
+24 minutes. An older slot is judged from the slot alone, which by then is
+authoritative: every unresolved end has a slot writer (D2), so an old failed
+slot without `send_unconfirmed` is a final failure. Two residues, both the
+repair's (D8): a guarded slot write that was dropped at one of the job's arms
+(the record still says `unresolved`), and a retry receipt whose rollup was
+lost (section 8). A read that fails leaves the recipient PENDING for the flag
+(the safe direction) and is logged; it never empties the set.
 
 ### D2. A later attempt reaches its slot: one attempt-ordered transition
 
@@ -226,10 +269,14 @@ The rule:
 - An OLDER attempt never applies (its receipt arrived after a newer attempt
   was recorded) - with ONE exception: a DELIVERED receipt applies whatever
   its attempt's age, because a delivery is the strongest fact about a
-  recipient and is never erased (I2). This covers the overlap RSW leaves open
-  (a staff Retry pressed from a stale view after the promise lapsed, while
-  the automatic retry's delivery receipt is still in flight): the delivery
-  lands, and the stale attempt's later receipts are refused from `delivered`.
+  recipient and is never erased (I2); the slot then records the delivered
+  attempt as its newest, and a delivered slot is terminal, so the pointer's
+  ordering role ends there. 1b r5 refuses a Retry on any row that already
+  has a child, so this covers only what remains open: 1b's named two-child
+  fork and pre-1b chains (a staff Retry pressed from a stale view after the
+  promise lapsed while the automatic retry's delivery receipt is in flight).
+  The delivery lands, and the other attempt's later receipts are refused
+  from `delivered`.
 - A LOST condition re-reads the slot (consistently) and re-applies under the
   same rule, up to a small bound; a write still refused is logged at WARN
   with the ids. The loser of a race is never simply dropped: a retry's
@@ -243,7 +290,12 @@ maps it today - an adopted row produces no receipt, so this is the only way it
 reaches the slot; the hook runs on a de-duplicated re-adoption too, so a
 crash after the adoption cannot lose it); and the four unresolved-end sites
 of section 0 (the slot becomes `failed` / `send_unconfirmed`, the row-less
-attempt ordered after the one it retried). A retry's mere acceptance is not
+attempt ordered after the one it retried) - at the reconcile's close the
+write rides 1b's own re-apply; at the job's two arms, which have none, it
+goes FIRST, before 1b closes the record: `send_unconfirmed` is the safe
+state, a crash after it leaves a record the redelivery or the sweeper
+resolves, and any later real outcome (an adoption, a re-drive's own row)
+supersedes it under the order rule. A retry's mere acceptance is not
 written by anyone (the retry job writes no slots); the slot learns a retry
 from the carrier's `sent` confirmation or its terminal receipt, whichever
 comes first.
@@ -297,22 +349,25 @@ caller supplies, and it is OPTIONAL in the stats shape:
   supplies its own entry and emits the count as a lower bound (at least this
   recipient) on the `broadcast.updated` it emits, so the list and results
   pages read Sending from the very event that starts the retry;
-- every other emitter (the fan-out, the reconcile, the other rollup arms)
-  OMITS the count rather than sending zero;
-- a page merging a payload whose stats omit the count keeps the row's last
-  known value, clamped to the payload's `failed` (so a retry that reaches, and
-  empties `failed`, empties the pending count with it); a payload that carries
-  the count replaces it.
+- every other emitter (the fan-out, the reconcile, the other rollup arms,
+  including the arm that ends a chain with a final failure) leaves the count
+  UNSET - nothing has to learn to omit anything, an optional field stays
+  unset whenever no promise map is supplied;
+- a page merging a payload whose stats omit the count: when the row's last
+  known count is zero, keeps zero; when it is above zero, keeps it only until
+  a debounced refetch of THAT row's stats from the route (the true count,
+  from D1's reads) replaces it - so a chain that ends in a failure receipt
+  (exhaustion, a retry's 30007), which shrinks nothing in `failed`, still
+  turns the row from Sending to Not sent within the debounce; a payload that
+  carries the count replaces it outright.
 
+Both hooks change from replacing the row's stats wholesale to this merge.
 The chips show Failed minus pending and a Retrying chip for pending, so the
-row still balances. The results page recomputes the true count on its
-debounced refetch after any event and re-judges liveness on its ticker; a
-list row is re-judged only by a later event that carries the count or by a
-visit (the list hook patches stats from events and never refetches on its
-own), so a lapsed promise, or a second pending recipient the lower bound did
-not count, can leave a list row's Retrying count stale until the page is
-reopened. Accepted: the list is a summary, and its label is right whenever
-its count is at least one and right again when `failed` empties.
+row still balances. The results page already refetches after any event and
+re-judges liveness on its ticker. What remains stale on the list: a promise
+that lapses with NO event at all (no receipt, no chain end - the job never
+ran) reads Sending until the page is reopened. Accepted: the list is a
+summary, and the results page ticks.
 
 ### D5. "Sent to N tenants" recounts and relabels at read time
 
@@ -332,11 +387,16 @@ The milestone stays written at carrier acceptance (it is a timeline fact:
 "we sent it to you then"), but it now records its share id, and its words
 derive at read time from the ledger: for a milestone that carries a share id,
 from that share's entry on the (property, tenant) row - `counted` reads
-"Property sent"; `pending` reads "Property sent" while the entry's recorded
-due instant is live and "Property text failed" once it has lapsed (a pending
-entry that never hears a retry outcome is a failure by RSW's own clock);
-`unconfirmed` reads "Property sent - not confirmed"; `failed` reads "Property
-text failed". For a milestone written before this branch (no share id), from
+"Property sent"; `unconfirmed` reads "Property sent - not confirmed"; `failed`
+reads "Property text failed"; `pending` is judged the way D1 judges pending -
+the entry names its attempt, so within D1's bound the timeline reads that
+attempt's row (its live promise, refreshed wherever 1b refreshes it, and its
+`retry_outcome`): "Property sent" while the promise is live, "Property sent -
+not confirmed" when the row says unresolved, "Property text failed" once the
+promise has lapsed or the bound has passed with no later entry write (a
+pending entry that never hears a retry outcome is a failure by RSW's own
+clock). The ledger keeps no copy of the promise; the row is its one source
+(I5). For a milestone written before this branch (no share id), from
 the row's pair-level `counted` - "Property sent" when the pair still counts,
 "Property text failed" when it does not. One ledger read per (property,
 tenant) pair on the page, batched. A milestone whose pair has no row keeps its
@@ -349,10 +409,11 @@ milestone, with the pair-level approximation for the old ones.
 The listing-send row (one per property-tenant pair) gains:
 
 - per-share memory: for each share of the pair, the attempt it currently
-  records (its order key), that attempt's ledger state - `counted`,
-  `pending`, `unconfirmed`, or `failed` - whether a `counted` entry was
-  counted by a DELIVERY (terminal) or by acceptance, the promise's due instant
-  for a `pending` entry, and the instant the entry last counted;
+  records (its order key - the message id, which D6 follows to the row for a
+  `pending` entry), that attempt's ledger state - `counted`, `pending`,
+  `unconfirmed`, or `failed` - whether a `counted` entry was counted by a
+  DELIVERY (terminal) or by acceptance, and the instant the entry last
+  counted; no copy of the promise;
 - `counted` for the pair: true when any share entry is `counted`. On a legacy
   row (no memory yet) the flag is absent and reads as counted, so no backfill
   is needed to keep today's rows listed;
@@ -398,9 +459,11 @@ Order-independence and the legacy row:
   one, or is the SAME attempt moving forward, where forward means: `counted`
   by acceptance may become `counted` by delivery, `pending` or `failed`;
   `pending` may become `failed` (the repair, for a lapsed promise whose chain
-  ended without a retry row); nothing moves back. An entry `counted` by
-  delivery is TERMINAL for that share: no write, newer attempt or not, moves
-  it (a delivery is never erased, I2). A writer that finds no entry CREATES
+  ended without a retry row); nothing moves back. Mirroring D2, an OLDER
+  attempt's DELIVERY applies too: the entry becomes `counted` by delivery for
+  that attempt. An entry `counted` by delivery is TERMINAL for that share: no
+  write, newer attempt or not, moves it (a delivery is never erased, I2). A
+  writer that finds no entry CREATES
   it - so when a failure callback lands before the pass's acceptance write
   (the common order: the pass writes after the token wait), the callback's
   `failed` entry is there first and the pass's later `counted` write for the
@@ -440,11 +503,15 @@ re-runnable. Its census, then its apply:
    deploy keep routing after it.
 3. Applies D2's transition to slots whose newest attempt differs from the
    recorded one, to slots whose recorded attempt disagrees with its own
-   message row (a slot stuck `sent` after a lost failure rollup), and to
-   failed-30003 slots whose newest attempt's row says its chain ended
-   unresolved while the slot never learned it (the double fault of D1), under
-   D2's conditions - never touching a delivered or skipped slot, never moving
-   a slot an attempt newer than the census has touched.
+   message row (a slot stuck `sent` after a lost failure rollup; a retry
+   whose receipt rollup was lost), and to failed-30003 slots whose chain
+   ended unresolved while the slot never learned it - read from the newest
+   attempt's row (`retry_outcome`) AND from the retry-owner attempt records
+   (`retry#<conversation>#<retried row>#<attempt>`, read by key while they
+   live, 30 days: a `done` / `unresolved` record is the trace a dropped
+   guarded write leaves) - under D2's conditions, never touching a delivered
+   or skipped slot, never moving a slot an attempt newer than the census has
+   touched.
 4. Rebuilds each ledger row's per-share memory, `counted`, `sentAt` and
    `broadcastId` from the slots and the rows, under the row's change token,
    never erasing an entry written after the census; and fills a row the
@@ -495,9 +562,12 @@ the build finds out of scope.
 - I7. Stage 1b writes nothing to a share slot; this branch changes nothing in
   the retry job's record, claim or close SEMANTICS - it only calls its own
   slot writer from the retry adoption and the four unresolved-end sites, after
-  1b has merged. The interface between them is the three fields on message
-  rows (`broadcast_id` and `retry_root` on every retry row, `retry_outcome`
-  on a retried row whose promise 1b withdrew).
+  1b has merged, placing that call before the record close at the job's two
+  arms. The interface between them is the three fields on message rows
+  (`broadcast_id` and `retry_root` on every retry row, `retry_outcome` on a
+  retried row whose promise 1b withdrew) and, read-only, the retry-owner
+  attempt records (D1's in-flight rule reads a recipient's record; D8 reads
+  the retry records).
 - I8. Production is written only by the deployed code paths and the
   Cameron-run repair on his explicit go; no infrastructure, index or
   dependency changes.
@@ -540,7 +610,8 @@ the build finds out of scope.
 ## 6. Sequencing and rollout
 
 1. This spec: adversarial review, then Cameron's gate. In parallel: SOR Stage
-   1b, which receives the refined section 0 requirements through Cameron.
+   1b builds its final spec (r5); nothing is relayed to it - the plan's first
+   task verifies 1b as built against section 0's four facts.
 2. After 1b merges: the plan (against the record and the retry job as built),
    plan review, the mission block, the build in this worktree with one main
    sync at the end, the planner's review, Cameron's merge.
@@ -560,33 +631,41 @@ the build finds out of scope.
 - Hermetic tests for every decision, including: D1's state table - a live
   promise, a lapsed one (a fake clock, since a lapse takes RSW's two-minute
   grace and cannot be watched end to end), a withdrawn one, a row whose
-  `retry_outcome` says unresolved, an old slot judged without a read, and a
-  failed read landing on the safe side; D2's transition - every refusal
+  `retry_outcome` says unresolved, an old slot judged without a read, a
+  failed read landing on the safe side, and the in-flight rule (queued in a
+  sending share; queued in a failed share with a live record; queued with no
+  record or a never-sent record = stranded); D2's transition - every refusal
   (delivered, skipped, an older attempt, a same-attempt regression such as a
   late `sent` after `failed`), every allowed move including an older
-  attempt's DELIVERED receipt, a lost condition
+  attempt's DELIVERED receipt, the slot-first order at the job's arms (a
+  later adoption supersedes the unconfirmed slot), a lost condition
   re-applied, and a row-less unresolved retry ordered after its retried
   attempt, each with its stats delta, through all three callers; the D3
   promise read and the hint rule for every failed-row kind; the D4 label table,
-  the chip balance with `retry_pending`, and a `broadcast.updated` carrying
-  the rollup's own promise; the D7 write rule under both orders (pass then
-  callback, callback then pass) for one attempt, across attempts, a
+  the chip balance with `retry_pending`, a `broadcast.updated` carrying the
+  rollup's own promise, and the merge in both hooks (an omitted count on a
+  pending row triggers the row refetch; on a zero row nothing); the D7 write
+  rule under both orders (pass then callback, callback then pass) for one
+  attempt, across attempts, an older attempt's delivery counting, a
   delivery-counted entry refusing a later attempt, a legacy row (the seeded
   entry survives), and a lost condition (the bounded re-read); the sparse
   index behavior of an un-counted pair and its return; the D5 recount with a
-  missing share; the D6 words for every state including a lapsed `pending`
-  and a milestone without a share id; the D8 script's dry run writes nothing,
-  its apply is idempotent, it refuses the wrong account, and it stamps a
-  chain with an unstamped ancestor.
+  missing share; the D6 words for every state including a `pending` entry
+  read from a live, a refreshed, a withdrawn and a lapsed row, and a milestone
+  without a share id; the D8 script's dry run writes nothing, its apply is
+  idempotent, it refuses the wrong account, it stamps a chain with an
+  unstamped ancestor, and it heals a slot from a `done` / `unresolved` retry
+  record.
 - End to end on the hermetic lane, with the fake carrier's fail profile and the
   lane's ten-second retry backoff: (a) a one-to-one share whose first text
   fails 30003 and whose retry delivers ends with the results row Delivered,
   the share Sent, the tenant flagged "Already sent", "Properties sent" listing
   the property, and the results row reading "will retry" in between; (b) a
   share whose text fails 30003 and whose retry also fails, exhausting the
-  chain, ends with the row Failed, the share "Not sent", the tenant NOT
-  flagged, the property gone from "Properties sent", the milestone reading
-  "Property text failed", and "will retry" gone once the chain ends; (c) a
+  chain, ends with the row Failed, the share "Not sent" on the results page
+  AND on the list (the row refetch), the tenant NOT flagged, the property gone
+  from "Properties sent", the milestone reading "Property text failed", and
+  "will retry" gone once the chain ends; (c) a
   share whose text fails 30007 ends with the row Failed (its hint shown: the
   text has a row and no promise), the share "Not sent", the tenant NOT
   flagged, the property Activity entry reading "No tenants reached"; (d) a
@@ -595,7 +674,10 @@ the build finds out of scope.
 - Tests that pin today's behavior and are rewritten to this rule, named so
   the builder does not mistake them for regressions: Branch A's interim-rule
   pins (`share-skip-fix.spec.ts` failed-stays-flagged; the repo and route
-  tests for `priorRecipientContactIds`, which keep the queued-counts case);
+  tests for `priorRecipientContactIds`: the queued-in-a-sending-share case is
+  kept, the DRAFT exclusion holds as a stranded case, and the FAILED-share
+  exclusion becomes slot-and-record cases - a failed share's record-less
+  queued slots stay unflagged, its reached slots now flag);
   SOR's all-unconfirmed "Failed" pill and its 21211 retry-hint pin
   (`send-outcome-reconcile.spec.ts`); the "Sent to N tenants" label tests; the
   label-table test that reads sent + skipped + failed as "Sent".
@@ -634,12 +716,24 @@ the build finds out of scope.
   interval the results row reads a final failure and shows the hint while the
   thread shows the retry. Bounded by receipt latency; the next receipt or the
   chain end corrects it. Accepted.
-- **A crash between 1b's unresolved close and this branch's slot write**, at
-  a site whose re-apply does not cover the slot write: the slot keeps its
-  30003 failure while the row says unresolved; within D1's bound the row read
-  gives the right state, past it the slot reads failed until the repair is
-  re-run. Accepted as the repair's residue; the plan checks each of the four
-  sites for a re-apply to ride.
+- **A dropped slot write at one of the job's two arms.** The write goes
+  first, so a crash after it costs nothing; a write that FAILS is logged and
+  dropped by 1b's post-claim guard while the record still closes
+  `unresolved`, and nothing redelivers. The slot keeps its 30003 failure;
+  within D1's bound the row read gives the right state, past it the slot reads
+  failed until the repair is re-run and reads the record. Accepted as the
+  repair's residue.
+- **A lost retry rollup.** The status webhook catches a rollup throw and
+  still answers 200, so the carrier never redelivers; if D2's re-read bound is
+  exhausted too, the retry's row exists but the slot never learns it, and past
+  D1's bound the recipient reads a final failure although the retry delivered
+  - the retry-side twin of the original's stuck-`sent` class. Healed only by a
+  re-run of the repair. Accepted, and named.
+- **1b's two-child fork.** Where an automatic and a manual retry of one row
+  race (1b's named residual, two texts may go out), a row-less unresolved end
+  of the automatic chain sorts before every row of the manual chain, so a
+  later failure of the manual chain reads the recipient failed although the
+  automatic retry may have arrived. Rare on rare; accepted with 1b's residual.
 - **Strands keep their in-flight recipients flagged** until the sweeper
   (D1). Accepted; the sweeper issue names them.
 - **The ledger's index becomes sparse.** A pair with no counted share leaves
@@ -648,10 +742,13 @@ the build finds out of scope.
   the history.
 - **A lost ledger race past the retry bound** is logged and healed by a
   re-run of the repair, not by a live healer. Accepted.
-- **Stage 1b drift.** If 1b lands without the three row fields, or with a
-  one-hop `retry_root`, the plan's first task adds or corrects them at every
-  append site (the retry job, the route, the adoption) and at the WITHDRAW
-  write, before anything else; nothing here depends on 1b's record shape.
+- **Stage 1b drift.** r5 is final, but the build is not; the plan's first
+  task verifies 1b as built against section 0's four facts (the two row
+  fields at every append site - the retry job, the route, the adoption - the
+  `retry_outcome` at every WITHDRAW, the record-first order at the job's
+  arms, the child pointers) and, on a mismatch, corrects it before anything
+  else. Nothing here depends on 1b's record shape beyond reading the retry
+  records by key.
 
 ## 9. For Cameron at the spec gate
 
@@ -671,9 +768,7 @@ the build finds out of scope.
   1000-recipient blast already takes about 17 minutes at the pacing). Say no
   and the plan sizes the worst case instead, with the over-limit write as a
   logged failure.
-- To relay to SOR for Stage 1b: the three refined requirements in section 0
-  (`retry_root` derived by WALKING the chain, never a one-hop copy; the
-  durable `retry_outcome` 1b already writes on the retried row at every
-  WITHDRAW, kept; no slot writes) - and a heads-up that this branch will later
-  call its slot writer from the retry adoption and the four WITHDRAW sites,
-  so a re-apply hook at each is welcome but not required.
+- Nothing to relay to SOR: Stage 1b's spec is final (r5) and this spec is
+  written against it. The walk request in the earlier relay is WITHDRAWN -
+  r5 already walks pre-deploy chains for `retry_root`, and the one-hop
+  `broadcast_id` copy is closed by this branch's own repair.

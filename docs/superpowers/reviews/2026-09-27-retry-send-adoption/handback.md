@@ -7,10 +7,19 @@ Records: `docs/superpowers/reviews/2026-09-27-retry-send-adoption/`
 (`build-research/`, `build/S1..S5-report.md`, `code-review/`, `self-qa.md`,
 this file).
 
-**MERGE-READY (gated @a67376d3; the only later commit is this docs-only handback record) on `feat/retry-send-adoption` (`W:\tmp\retry-send-adoption`),
+**UPDATE 2026-09-28 ~07:40 - FIX WAVE 2 (the planner's independent review):
+CODE FINAL MOVED to `56f1d757`** (FW2: `1058d8da`, `675a9100`, `56f1d757`; report
+`2093a31b`; this update is docs only). The planner's five gates were green on
+`95edb0b6`; FW2 changed two production functions and two test files, so
+**the planner re-runs the five gates on the new final commit** (by the
+planner's instruction the orchestrator ran NO e2e and no full `npm test` on
+FW2 - section 10 has what it did run). Merge-readiness below stands pending
+that re-gate.
+
+**MERGE-READY (gated @a67376d3 before FW2; FW2 re-gate is the planner's) on `feat/retry-send-adoption` (`W:\tmp\retry-send-adoption`),
 0 behind `main` (main still `3dbb5740`; no sync was needed), UNMERGED (human
-gate).** Code final at `1b5ddb01` (last code commit `bb1bbaaa`); every commit
-after it is docs only (review records, issue notes, self-QA, this handback).
+gate).** Code final at `56f1d757` (FW2); before FW2 it was `1b5ddb01` (last
+code commit `bb1bbaaa`). Every commit after `56f1d757` is docs only.
 
 **Post-merge: NO infra** (no terraform, no secrets, no flags, no schema, no
 new dependency). Owed at merge: the human sets `retry-send-lost-under-job-marker`
@@ -29,6 +38,7 @@ reconcile in production (spec section 6). Deploy and rollback notes: section 7.
 | S4 | T5 the manual Retry route (`superseded` / `retry_unresolved` / record `retry_pending`; retryRoot + broadcastId on its append; `ApiRouterDeps.sendAttemptsRepo`; the harness api block); T6 projection + dashboard ("retry not confirmed", hidden Retry, two 409 sentences, the mirror); T7 the ONE `twilio.ts` line | SHIPPED (twilio.ts 1+/1-) | `6ae0bfba`, `d574bd86`, `a7865cfe` |
 | S5 | T8 the e2e spec (items 17-19) + `selectors.md`; T9 issue notes, live self-QA, drift, gates, handback | SHIPPED | `597faa72` (spec); `c998412b` (issues); `a67376d3` (self-QA) |
 | FW1 | code review round 1 fix wave (C-1, C-2 reconcile half, C-3, C-4, C-5, C-10/A-7, A-1 comment, A-6 key test) | SHIPPED | `5a87b380`, `29e6ef36`, `1b993f00`, `dfff2ba4`, `23abb562`, `bb1bbaaa` |
+| FW2 | the planner's independent review (`planner-review/adjudications.md`, "Fix wave 2"): A1 - the OWN-ROW BELT on both sides (the job's step 4a declines before the claim when the retried row already has a child of THIS attempt number - a `redriven` record closes `done/refused` cause `already_sent`, one WARN; the reconcile's `lookup` answers `found` from that row FIRST - adoption skipped, no provider call, never a re-drive beside it); A8a - the Timeline refusal test asserts the RENDERED alert text is ASCII | SHIPPED; every behavior fix red-with-revert (`code-review/fw2-report.md`) | `1058d8da`, `675a9100`, `56f1d757` |
 
 Net vs `3dbb5740`: code (docs excluded) 41 files, +6838 / -391; with the
 branch's docs, 81 files, +17339 / -397 (the docs include the spec and plan
@@ -83,6 +93,7 @@ is S0-3 (Q1) through C-2's JOB half, FILED (section 5).
 9. The adoption reads `mediaCount` from the record (the job's plan) rather than re-planning.
 10. **(the planner's ruling on worklist 24)** A READ-ONLY run-once-marker belt for pre-deploy redeliveries: only when the gate finds NO record, the job reads `getJobExecutionMarker(jobId)` and declines (INFO) a jobId the pre-adoption code already ran (`retrySend.ts:436-454`); the job never writes a marker (test 6d). A dated `TODO(retry-send-lost-under-job-marker)` marks it for removal after the first production deploy + one SQS redelivery window.
 11. A third designed step-1 decline: a payload whose `conversationId` differs from the retried row's is refused at WARN with no record (`retrySend.ts:358-366`) - unreachable from the webhook, a deferral or a re-drive; it keeps the owner addressable (round 1 C-6).
+12. **(FW2, the planner's ruling on its review's A1) The OWN-ROW BELT; the spec's 4a carve-out narrowed to a DIFFERENT attempt number.** Spec R2 step 4a and section 4 item 4c say an AUTOMATIC child "(the attempt's own earlier success) does not trigger" the decline. One retried row has exactly one automatic attempt number (`oneToOneRetryDecision.ts:125-129`; the deferral and the re-drive reuse the payload's attempt), so a `retrychild#` pointer carrying `retryAttempt === payload.attempt` can only be THIS attempt's own text. The spec's carve-out let a re-driven attempt claim from `redriven` and SEND AGAIN beside its own row (the planner reviewer's path: a slow provider request creates the message after the reconcile's two-sided window; the SQS redelivery takes the stale record over; `never_sent`; re-drive). As built: (a) the job's step 4a checks the own child FIRST (`retrySend.ts` 4a) and declines before the claim through `declineBeforeClaim` (a `redriven` record -> `done/refused` cause `already_sent`; `done/retryable` and absent -> nothing written), one WARN `retrySend: this attempt already appended its retry row - not re-sent` with the child's ids; only an automatic child of ANOTHER attempt number is ignored; (b) the reconcile's `lookup` for a `retry_send` owner reads the pointer as its FIRST step (`ownRetryRow`, `sendReconcile.ts:1097-1123` (`ownRetryRow`), called first at `:1146-1149`) and returns `found` from the own row (its SID and status, adoption skipped, path lookup) - before the no_sender and digest checks too (the orchestrator's placement call: the pointer is local, strongly consistent proof, so an unpinned-dev `no_sender` close can no longer withdraw the promise beside an existing retry row); a pointer whose row cannot be read logs one WARN and the lookup goes on unchanged. The spec text itself is the planner's to stamp (revision 6 errata). **Residual not closed:** the ORIGINAL run's provider call still IN FLIGHT when the re-driven job passes 4a (no row yet for either check to see) - the SOR `send-attempt-rearm-residues` class.
 Plus two wording notes: C-7 - a PHONE-keyed attempt whose thread number changed follows R1 (unaddressable, left for the sweeper), not R4's digest bullet (R4's rule applies to a resolvable contact-keyed owner; round 2 adds the case is unreachable - a one-to-one thread's `participant_phone` is only rewritten for relay threads); C-8 - spec item 13's `attempt === retry_attempt` clause is proven jointly with the walk's stop at a manual row (defense in depth).
 
 ## 4. Reviews, rulings, fix wave
@@ -198,3 +209,34 @@ Known flake seen: `tour-reminders-earlier-tie-break-test-ms-race` (filed,
 low) - once in an S4 checkpoint, green alone 2/2, absent from both full
 `npm test` runs. Open questions: none. Failure budget: 0 of 2 used; infra
 recoveries 0 (no misfire, no death, no wake failure).
+
+## 10. Fix wave 2 - what the orchestrator ran on it (2026-09-28 ~07:40)
+
+The planner's independent review of `95edb0b6` (records under
+`planner-review/`: conformance 107 CONFORMS / 13 declared / 0 undeclared / 0
+MISSING, 5 LOW; the plan-blind adversarial review 2 MEDIUM, 6 LOW;
+`adjudications.md`) had its five gates green, and ruled ONE code change (A1,
+the own-row belt - deviation 12 above) plus one vacuous assertion (A8a). A
+fresh implementer built both (`code-review/fw2-report.md`): every behavior fix
+red with the fix reverted and restored byte-identical; three narrower
+mutations also caught (dropping the redriven close; removing the
+other-attempt exception; moving the reconcile check after the digest check).
+A2 (the rollup one-liner) stays Cameron's fence decision; the rest of both
+reports is filed or deferred by the planner.
+
+Run by the orchestrator on the FW2 code (`56f1d757`; tree `2093a31b`),
+bare, from the worktree - by the planner's instruction NO e2e and no full
+`npm test` (the planner re-runs the five gates on the new final commit):
+
+| check | exit | result |
+|---|---|---|
+| `npm run typecheck` | 0 | all five workspaces |
+| `npm run smoke` | 0 | 1511 import specifiers across 264 emitted files |
+| `npx eslint` on the five FW2 files | 0 | no output |
+| gate-5 eslint over the branch's 40 files | 1 | the SAME single pre-existing `Timeline.tsx:1595` error; 0 new (Timeline.tsx itself untouched by FW2) |
+| app suites: retrySendAttempt, sendReconcile, twilioStatusWebhook, apiRoutes | 0 | 339 passed (4 files); 0 `[dynamoAdmin]` |
+| dashboard: Timeline.test.tsx | 0 | 158 passed |
+
+The implementer's own wider run: app 767 passed across nine files
+(retrySendAttempt 42, sendReconcile 157, the rest unchanged); dashboard 211.
+Failure budget after FW2: still 0 of 2; infra recoveries 0.

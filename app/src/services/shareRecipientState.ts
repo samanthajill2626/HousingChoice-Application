@@ -20,6 +20,7 @@ import { SEND_ATTEMPT_CLEANUP_MS } from '../repos/sendAttemptsRepo.js';
 import { safeRecipientKey } from '../lib/sendFingerprint.js';
 import { RECONCILE_CHECK_DELAYS_MS, SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import {
+  RETRIED_ERROR_CODE,
   RETRY_OUTCOME_UNCONFIRMED,
   RETRY_PROMISE_GRACE_MS,
   RETRY_SEND_WINDOW_MS,
@@ -43,8 +44,6 @@ export const RECORD_READ_BOUND_MS = SEND_ATTEMPT_CLEANUP_MS;
 
 /** A broadcast record `done` with one of these outcomes says the text never went. */
 const NEVER_WENT = new Set<string>(['refused', 'rejected', 'enqueue_failed', 'redrive_refused']);
-/** The only retried carrier code (a 30003 slot may hold a live promise). */
-const RETRIED_CODE = '30003';
 
 /** The share fields the classification reads: the stored status (a running pass or not) and its clocks. */
 type ShareClock = Pick<BroadcastItem, 'status' | 'created_at' | 'updated_at'>;
@@ -78,7 +77,7 @@ export function classifyRecipient(share: ShareClock, slot: BroadcastRecipient, f
     }
     case 'failed': {
       if (slot.errorCode === SEND_UNCONFIRMED_CODE) return 'unconfirmed';
-      if (slot.errorCode !== RETRIED_CODE) return 'failed';
+      if (slot.errorCode !== RETRIED_ERROR_CODE) return 'failed'; // only a 30003 slot may hold a live promise
       const row = facts.row;
       if (row === undefined) return 'failed'; // outside the bound: the slot is authoritative
       if (row === 'unreadable') return 'pending'; // the safe side
@@ -103,7 +102,7 @@ function newestKey(slot: BroadcastRecipient): string | undefined {
 
 /** A failed-30003 slot whose newest attempt is younger than RETRY_ROW_READ_BOUND_MS (a key with no timestamp reads nothing). */
 export function needsRowRead(slot: BroadcastRecipient, nowMs: number): boolean {
-  if (slot.status !== 'failed' || slot.errorCode !== RETRIED_CODE) return false;
+  if (slot.status !== 'failed' || slot.errorCode !== RETRIED_ERROR_CODE) return false;
   const key = newestKey(slot);
   const ts = key === undefined ? undefined : attemptKeyTimestampMs(key);
   return ts !== undefined && nowMs - ts <= RETRY_ROW_READ_BOUND_MS;

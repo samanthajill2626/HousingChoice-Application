@@ -473,6 +473,41 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(x.world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, sent: 0, delivered: 1 });
     });
 
+    it("a share-RETRY row's receipt whose FIRST slot write throws (a transient fault) is retried and the slot still lands - the bounded transition (code review ADV-2b)", async () => {
+      const x = await seedShares('failed');
+      const real = x.world.broadcastsRepo.applyAttemptOutcome.bind(x.world.broadcastsRepo);
+      let calls = 0;
+      x.world.broadcastsRepo.applyAttemptOutcome = async (...a) => {
+        calls += 1;
+        if (calls === 1) throw new Error('dynamo blip');
+        return real(...a);
+      };
+      const res = await x.post({ MessageSid: RETRY_SID, MessageStatus: 'delivered' });
+      expect(res.status).toBe(200);
+      expect(calls).toBe(2);
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']).toMatchObject({ status: 'delivered', tsMsgId: x.root.tsMsgId, latestAttempt: x.retry.tsMsgId });
+      expect(x.world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, delivered: 1 });
+      expect(x.capture.atLevel(ERROR)).toHaveLength(0);
+    });
+
+    it("a share-RETRY row's receipt whose slot write throws PERMANENTLY logs exactly ONE 'share slot write failed after retries' ERROR - never the rollup's own catch - and answers 200", async () => {
+      const x = await seedShares('failed');
+      let calls = 0;
+      x.world.broadcastsRepo.applyAttemptOutcome = async () => {
+        calls += 1;
+        throw new Error('Item size to update has exceeded the maximum allowed size');
+      };
+      const res = await x.post({ MessageSid: RETRY_SID, MessageStatus: 'delivered' });
+      expect(res.status).toBe(200);
+      expect(calls).toBe(3);
+      const slotErrors = x.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('share slot write failed after retries'));
+      expect(slotErrors).toHaveLength(1);
+      expect(slotErrors[0]).toMatchObject({ broadcastId: 'b-1', retryRoot: x.root.tsMsgId, attempt: x.retry.tsMsgId });
+      expect(x.capture.atLevel(ERROR).filter((l) => String(l['msg']).startsWith('broadcast delivery rollup failed'))).toHaveLength(0);
+      expect(x.capture.atLevel(ERROR)).toHaveLength(1);
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']!.status).toBe('failed');
+    });
+
     it('a retry row WITHOUT retry_root logs one ERROR and touches nothing', async () => {
       const x = await seedShares('failed');
       const res = await x.post({ MessageSid: ORPHAN_RETRY_SID, MessageStatus: 'delivered' });

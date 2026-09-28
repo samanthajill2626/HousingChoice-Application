@@ -19,6 +19,7 @@
 import type { Logger } from '../lib/logger.js';
 import type { BroadcastRecipient } from '../repos/broadcastsRepo.js';
 import type { ListingSendItem, ListingSendsRepo, ShareLedgerEntry, ShareMemoryWrite } from '../repos/listingSendsRepo.js';
+import { RETRIED_ERROR_CODE } from '../lib/retrySendWindow.js';
 import { SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import { INDIVIDUAL_ATTEMPT_KEY, LEGACY_ATTEMPT_KEY, attemptKeyTimestampMs, compareAttemptKeys } from '../lib/shareAttemptOrder.js';
 
@@ -38,8 +39,6 @@ export interface ShareLedgerDeps {
 const MAX_REAPPLY = 3;
 /** The entry key of an individual send (a seeded legacy row with no share id). */
 const INDIVIDUAL_KEY = 'individual';
-/** The only retried carrier code (a failed 30003 with a live promise is pending). */
-const RETRIED_CODE = '30003';
 
 /**
  * The entry an attempt's outcome implies. A counted entry's `countedAt` is the
@@ -163,7 +162,8 @@ export function ledgerEntryForSlot(slot: BroadcastRecipient, conversationId: str
       return ledgerEntryFor(attempt, conversationId, { kind: 'accepted' });
     case 'failed':
       if (slot.errorCode === SEND_UNCONFIRMED_CODE) return ledgerEntryFor(attempt, conversationId, { kind: 'unconfirmed' });
-      return ledgerEntryFor(attempt, conversationId, { kind: slot.errorCode === RETRIED_CODE && promiseLive ? 'pending' : 'failed' });
+      // Only a failed 30003 with a live promise is pending.
+      return ledgerEntryFor(attempt, conversationId, { kind: slot.errorCode === RETRIED_ERROR_CODE && promiseLive ? 'pending' : 'failed' });
     default:
       return undefined;
   }

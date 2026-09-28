@@ -33,6 +33,14 @@ export const RETRY_PROMISE_WITHDRAWN_AT = '1970-01-01T00:00:00.000Z';
 
 /** Total send attempts for one logical message are capped at 1 + this (owned here since retry-send-adoption; jobs/retrySend.ts re-exports it). */
 export const MAX_SEND_RETRY_ATTEMPTS = 3;
+/**
+ * The carrier code an automatic one-to-one retry answers (the handset was
+ * unreachable) - the only failure a retry promise can ride. The ONE copy
+ * share-sent-outcome's services (the recipient state, the attempt outcome,
+ * the ledger) and the status webhook's retry_pending count read (code review
+ * ADV-10).
+ */
+export const RETRIED_ERROR_CODE = '30003';
 /** retry-send-adoption R5: the retried row's retry_outcome when the reconcile ruled the retry `unresolved`. The dashboard hand-copies it (routes/contact/retryPromise.ts) - pinned by retryPromiseMirror.test.ts. */
 export const RETRY_OUTCOME_UNCONFIRMED = 'unconfirmed' as const;
 export type RetryOutcome = typeof RETRY_OUTCOME_UNCONFIRMED;

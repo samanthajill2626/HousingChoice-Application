@@ -82,7 +82,7 @@ import {
 } from '../../repos/messagesRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../../repos/listingSendsRepo.js';
 import {
-  applyLaterAttempt,
+  applyLaterAttemptBounded,
   originalRowLedgerWrite,
   type AttemptOutcome,
   type ShareAttemptOutcomeDeps,
@@ -158,6 +158,7 @@ import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../../lib/rela
 import {
   isRetryPromiseLive,
   parseRetryWindowOrigin,
+  RETRIED_ERROR_CODE,
   RETRY_PROMISE_WITHDRAWN_AT,
   RETRY_WINDOW_CLOSED_CODE,
   retryFitsSendWindow,
@@ -3931,6 +3932,11 @@ export function outcomeOf(status: DeliveryStatus, errorCode: string | undefined,
  * through applyLaterAttempt (the attempt-ordered write, its ledger entry and
  * its emit). A retry row without `retry_root` is unroutable (the repair stamps
  * it): ONE ERROR. A root that matches no slot is a routing bug: ONE ERROR.
+ * BOUNDED (code review ADV-2b): the carrier never redelivers a receipt the
+ * webhook answered, so a thrown write is retried twice (a transient DynamoDB
+ * fault survives) and then logged ONCE by applyLaterAttemptBounded ('share
+ * slot write failed after retries' - a "re-run the repair" line, RUNBOOK),
+ * never propagated to the rollup's catch.
  */
 async function rollRetryIntoBroadcast(
   deps: ShareAttemptOutcomeDeps,
@@ -3946,7 +3952,7 @@ async function rollRetryIntoBroadcast(
     deps.log.error(ids, 'broadcast delivery rollup: retry row without retry_root - unrouted (the repair stamps it)');
     return;
   }
-  const result = await applyLaterAttempt(deps, {
+  const result = await applyLaterAttemptBounded(deps, {
     broadcastId: message.broadcast_id,
     conversationId: message.conversationId,
     retryRoot: message.retry_root,
@@ -4103,7 +4109,7 @@ async function rollIntoBroadcast(
   // share-sent-outcome D4: a failed 30003 with a live promise carries
   // retry_pending 1 (this recipient - a lower bound); otherwise the count
   // stays unset.
-  const pending = next === 'failed' && errorCode === '30003' && isRetryPromiseLive(promisedAt, Date.now());
+  const pending = next === 'failed' && errorCode === RETRIED_ERROR_CODE && isRetryPromiseLive(promisedAt, Date.now());
   events.emit('broadcast.updated', {
     broadcastId,
     status: updated.status,

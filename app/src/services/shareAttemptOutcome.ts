@@ -35,7 +35,7 @@ import { deriveBroadcastStats } from '../repos/broadcastsRepo.js';
 import type { MessageItem } from '../repos/messagesRepo.js';
 import type { EventBus } from '../lib/events.js';
 import { SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
-import { isRetryPromiseLive } from '../lib/retrySendWindow.js';
+import { isRetryPromiseLive, RETRIED_ERROR_CODE } from '../lib/retrySendWindow.js';
 import { safeRecipientKey } from '../lib/sendFingerprint.js';
 import { compareAttemptKeys } from '../lib/shareAttemptOrder.js';
 import { applyShareLedgerEntry, ledgerEntryFor, type ShareLedgerDeps, type ShareLedgerOutcome } from './shareLedger.js';
@@ -78,8 +78,6 @@ type Bucket = 'queued' | 'sent' | 'delivered' | 'failed' | 'unconfirmed';
 const MAX_REAPPLY = 3;
 /** applyLaterAttemptBounded: calls in all before a throw is dropped (the first + two retries). */
 const BOUNDED_TRIES = 3;
-/** The only retried carrier code (a replayed 30003 without its promise must not downgrade a pending entry). */
-const RETRIED_CODE = '30003';
 
 /** The persisted stats bucket a slot counts in (`failed` with send_unconfirmed is `unconfirmed`; a skip moves nothing here). */
 function bucketOf(slot: Pick<BroadcastRecipient, 'status' | 'errorCode'>): Bucket | undefined {
@@ -190,7 +188,8 @@ async function sideEffects(
 ): Promise<void> {
   const nowMs = (deps.now ?? Date.now)();
   const o = input.outcome;
-  const skipLedger = replayed && o.kind === 'failed' && o.errorCode === RETRIED_CODE && o.retryDueAt === undefined;
+  // A replayed 30003 without its promise must not downgrade the winner's pending entry.
+  const skipLedger = replayed && o.kind === 'failed' && o.errorCode === RETRIED_ERROR_CODE && o.retryDueAt === undefined;
   if (skipLedger) {
     deps.log.info({ ...ids, recipientKey: safeRecipientKey(contactKey) }, 'share attempt outcome: replayed failure without a promise - ledger left to the winner');
   } else {

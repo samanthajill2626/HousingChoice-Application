@@ -7,6 +7,14 @@ Records: `docs/superpowers/reviews/2026-09-27-retry-send-adoption/`
 (`build-research/`, `build/S1..S5-report.md`, `code-review/`, `self-qa.md`,
 this file).
 
+**UPDATE 2026-09-28 ~08:55 - FIX WAVE 3 (the planner's re-review; the last,
+small): CODE FINAL MOVED to `aae99caa`** (FW3: `d41a18ff` step-1 attempt
+decline, `aae99caa` the 12-hop legacy root walk, `73fe60bd` the sweeper line;
+report `5a32a184`; spec errata items 20-21 and this update are docs only).
+The planner's five gates were ALL GREEN on the FW2 final `56f1d757`; the
+planner re-runs them on `aae99caa` (the orchestrator ran NO e2e and no full
+`npm test` - section 11 has what it ran). Deviations 13 and 14 below.
+
 **UPDATE 2026-09-28 ~07:40 - FIX WAVE 2 (the planner's independent review):
 CODE FINAL MOVED to `56f1d757`** (FW2: `1058d8da`, `675a9100`, `56f1d757`; report
 `2093a31b`; this update is docs only). The planner's five gates were green on
@@ -16,10 +24,11 @@ planner's instruction the orchestrator ran NO e2e and no full `npm test` on
 FW2 - section 10 has what it did run). Merge-readiness below stands pending
 that re-gate.
 
-**MERGE-READY (gated @a67376d3 before FW2; FW2 re-gate is the planner's) on `feat/retry-send-adoption` (`W:\tmp\retry-send-adoption`),
+**MERGE-READY (gated @a67376d3 before FW2; the planner gated FW2's `56f1d757` green; the FW3 re-gate is the planner's) on `feat/retry-send-adoption` (`W:\tmp\retry-send-adoption`),
 0 behind `main` (main still `3dbb5740`; no sync was needed), UNMERGED (human
-gate).** Code final at `56f1d757` (FW2); before FW2 it was `1b5ddb01` (last
-code commit `bb1bbaaa`). Every commit after `56f1d757` is docs only.
+gate).** Code final at `aae99caa` (FW3); before it `56f1d757` (FW2), before
+that `1b5ddb01` (last code commit `bb1bbaaa`). Every commit after `aae99caa`
+is docs only.
 
 **Post-merge: NO infra** (no terraform, no secrets, no flags, no schema, no
 new dependency). Owed at merge: the human sets `retry-send-lost-under-job-marker`
@@ -38,6 +47,7 @@ reconcile in production (spec section 6). Deploy and rollback notes: section 7.
 | S4 | T5 the manual Retry route (`superseded` / `retry_unresolved` / record `retry_pending`; retryRoot + broadcastId on its append; `ApiRouterDeps.sendAttemptsRepo`; the harness api block); T6 projection + dashboard ("retry not confirmed", hidden Retry, two 409 sentences, the mirror); T7 the ONE `twilio.ts` line | SHIPPED (twilio.ts 1+/1-) | `6ae0bfba`, `d574bd86`, `a7865cfe` |
 | S5 | T8 the e2e spec (items 17-19) + `selectors.md`; T9 issue notes, live self-QA, drift, gates, handback | SHIPPED | `597faa72` (spec); `c998412b` (issues); `a67376d3` (self-QA) |
 | FW1 | code review round 1 fix wave (C-1, C-2 reconcile half, C-3, C-4, C-5, C-10/A-7, A-1 comment, A-6 key test) | SHIPPED | `5a87b380`, `29e6ef36`, `1b993f00`, `dfff2ba4`, `23abb562`, `bb1bbaaa` |
+| FW3 | the planner's re-review (`planner-review/adjudications.md`, "Fix wave 3"): R2 - step 1 refuses a payload whose attempt is not `(retry_attempt ?? 0) + 1` (WARN with `rowAttempt`, before any further read; nothing claimed); R4 - `RETRY_ROOT_WALK_MAX_HOPS` = 12 bounds `resolveRetryRoot`'s legacy walk (`automaticAncestry` keeps 3); R3 - the `already_sent` line in `send-attempt-sweeper` | SHIPPED; red-with-revert per fix (`code-review/fw3-report.md`); the retry-job dispatch audit found no inconsistent seed | `d41a18ff`, `aae99caa`, `73fe60bd` |
 | FW2 | the planner's independent review (`planner-review/adjudications.md`, "Fix wave 2"): A1 - the OWN-ROW BELT on both sides (the job's step 4a declines before the claim when the retried row already has a child of THIS attempt number - a `redriven` record closes `done/refused` cause `already_sent`, one WARN; the reconcile's `lookup` answers `found` from that row FIRST - adoption skipped, no provider call, never a re-drive beside it); A8a - the Timeline refusal test asserts the RENDERED alert text is ASCII | SHIPPED; every behavior fix red-with-revert (`code-review/fw2-report.md`) | `1058d8da`, `675a9100`, `56f1d757` |
 
 Net vs `3dbb5740`: code (docs excluded) 41 files, +6838 / -391; with the
@@ -94,6 +104,8 @@ is S0-3 (Q1) through C-2's JOB half, FILED (section 5).
 10. **(the planner's ruling on worklist 24)** A READ-ONLY run-once-marker belt for pre-deploy redeliveries: only when the gate finds NO record, the job reads `getJobExecutionMarker(jobId)` and declines (INFO) a jobId the pre-adoption code already ran (`retrySend.ts:436-454`); the job never writes a marker (test 6d). A dated `TODO(retry-send-lost-under-job-marker)` marks it for removal after the first production deploy + one SQS redelivery window.
 11. A third designed step-1 decline: a payload whose `conversationId` differs from the retried row's is refused at WARN with no record (`retrySend.ts:358-366`) - unreachable from the webhook, a deferral or a re-drive; it keeps the owner addressable (round 1 C-6).
 12. **(FW2, the planner's ruling on its review's A1) The OWN-ROW BELT; the spec's 4a carve-out narrowed to a DIFFERENT attempt number.** Spec R2 step 4a and section 4 item 4c say an AUTOMATIC child "(the attempt's own earlier success) does not trigger" the decline. One retried row has exactly one automatic attempt number (`oneToOneRetryDecision.ts:125-129`; the deferral and the re-drive reuse the payload's attempt), so a `retrychild#` pointer carrying `retryAttempt === payload.attempt` can only be THIS attempt's own text. The spec's carve-out let a re-driven attempt claim from `redriven` and SEND AGAIN beside its own row (the planner reviewer's path: a slow provider request creates the message after the reconcile's two-sided window; the SQS redelivery takes the stale record over; `never_sent`; re-drive). As built: (a) the job's step 4a checks the own child FIRST (`retrySend.ts` 4a) and declines before the claim through `declineBeforeClaim` (a `redriven` record -> `done/refused` cause `already_sent`; `done/retryable` and absent -> nothing written), one WARN `retrySend: this attempt already appended its retry row - not re-sent` with the child's ids; only an automatic child of ANOTHER attempt number is ignored; (b) the reconcile's `lookup` for a `retry_send` owner reads the pointer as its FIRST step (`ownRetryRow`, `sendReconcile.ts:1097-1123` (`ownRetryRow`), called first at `:1146-1149`) and returns `found` from the own row (its SID and status, adoption skipped, path lookup) - before the no_sender and digest checks too (the orchestrator's placement call: the pointer is local, strongly consistent proof, so an unpinned-dev `no_sender` close can no longer withdraw the promise beside an existing retry row); a pointer whose row cannot be read logs one WARN and the lookup goes on unchanged. The spec text itself is the planner's to stamp (revision 6 errata). **Residual not closed:** the ORIGINAL run's provider call still IN FLIGHT when the re-driven job passes 4a (no row yet for either check to see) - the SOR `send-attempt-rearm-residues` class.
+13. **(FW3, the planner's re-review R2) A FOURTH designed step-1 decline - the attempt invariant.** The job refuses a payload whose attempt is not the one the retried row can schedule, `(retry_attempt ?? 0) + 1`, at WARN (`retrySend: the payload's attempt is not the one the retried row can schedule - refusing`, with `rowAttempt`), right after the conversation-mismatch decline and before any further read (`retrySend.ts:369-377`) - nothing claimed, nothing sent, no record. It holds by construction (the webhook schedules exactly that number, `oneToOneRetryDecision.ts:125-129`; a deferral and a re-drive reuse the payload's attempt), so it makes step 4a's carve-out for an automatic child of a DIFFERENT attempt number (deviation 12) unreachable in production; test 4c2 keeps that carve-out only as a labelled seeded-only sub-case. An audit of every retry-job dispatch in the tests found none inconsistent. Spec errata item 21.
+14. **(FW3, the planner's re-review R4) The LEGACY root walk is bounded at `RETRY_ROOT_WALK_MAX_HOPS` = 12 hops**, not `MAX_SEND_RETRY_ATTEMPTS` (3) as spec section 0 reads (`retryChain.ts:22-31`): a manual Retry extends a chain past three rows, and a pre-deploy row would otherwise record a non-root as `retry_root` - written once, inherited by every later row, and stamped by the manual route on legacy rows of any age. Only rows without `retry_root` (pre-deploy) pay the reads; `automaticAncestry` keeps 3. **Your eye:** 12 covers three manual retries each with a full three-rung ladder; a root's own ladder ABOVE the first manual retry adds up to three more hops (15 for the deepest such row, 16 from a pressed row), and such a pre-deploy chain still stops at the last row read (as section 0 states). Raising the constant to 16 is a one-line change plus its stop test, if wanted. Spec errata item 20.
 Plus two wording notes: C-7 - a PHONE-keyed attempt whose thread number changed follows R1 (unaddressable, left for the sweeper), not R4's digest bullet (R4's rule applies to a resolvable contact-keyed owner; round 2 adds the case is unreachable - a one-to-one thread's `participant_phone` is only rewritten for relay threads); C-8 - spec item 13's `attempt === retry_attempt` clause is proven jointly with the walk's stop at a manual row (defense in depth).
 
 ## 4. Reviews, rulings, fix wave
@@ -240,3 +252,31 @@ bare, from the worktree - by the planner's instruction NO e2e and no full
 The implementer's own wider run: app 767 passed across nine files
 (retrySendAttempt 42, sendReconcile 157, the rest unchanged); dashboard 211.
 Failure budget after FW2: still 0 of 2; infra recoveries 0.
+
+## 11. Fix wave 3 - what the orchestrator ran on it (2026-09-28 ~08:55)
+
+The planner's five gates were ALL GREEN on the FW2 final `56f1d757` (typecheck
+0, smoke 0, lint 0 new by baseline, npm test 0 with 0 `[dynamoAdmin]`, e2e
+300/300 in 20.9 m). Its adversarial re-review judged both FW2 belts correct and
+ruled one last small wave (`planner-review/adjudications.md`, "Fix wave 3"),
+built by a fresh implementer (`code-review/fw3-report.md`): every behavior fix
+red with the fix reverted (the attempt check: 2 failed; a mutation moving it
+after `resolveRetryRoot` failed 4f's read assertion; the bound set back to 3
+failed three `retryChain` cases; a bound of 13 failed only the stop case),
+restored byte-identical. The orchestrator added spec section 8 items 20-21
+(section 0 read the walk bound as `MAX_SEND_RETRY_ATTEMPTS`, and section 8 had
+no item for it).
+
+Run by the orchestrator on the FW3 code (`aae99caa`; tree `5a32a184`), bare,
+from the worktree - NO e2e and no full `npm test` (the planner re-runs the five
+gates on the new final commit):
+
+| check | exit | result |
+|---|---|---|
+| `npm run typecheck` | 0 | all five workspaces |
+| `npm run smoke` | 0 | 1511 import specifiers across 264 emitted files |
+| `npx eslint` on the four FW3 `.ts` files | 0 | no output |
+| gate-5 eslint over the branch's files | 1 | the SAME single pre-existing `Timeline.tsx:1595` error; 0 new |
+| app suites: retrySendAttempt, twilioStatusWebhook, retrySendBackoff, retryChain, apiRoutes, sendReconcile | 0 | 375 passed (6 files); 0 `[dynamoAdmin]` |
+
+Failure budget after FW3: still 0 of 2; infra recoveries 0.

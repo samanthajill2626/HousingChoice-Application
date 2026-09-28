@@ -765,10 +765,11 @@ this owner too.
 ## 8. Errata as built (revision 6, 2026-09-28)
 
 The text above is the approved design. The build (code final at 1b5ddb01;
-handback 95edb0b6) departs from it in the places below, each adjudicated in a
+handback 95edb0b6; after the planner's fix waves 2 and 3, code final at
+aae99caa - items 18-21) departs from it in the places below, each adjudicated in a
 committed record under `docs/superpowers/reviews/2026-09-27-retry-send-adoption/`
 (the plan's header deviations 1-9, the orchestrator's handback deviations
-10-11, the code-review adjudications, and the planner's conformance review).
+10-14, the code-review adjudications, and the planner's conformance review).
 Share-skip Branch B builds on the rules AS BUILT, which are these.
 
 1. **R6 - the route reads ONE attempt record per pressed row**, at
@@ -885,3 +886,29 @@ Share-skip Branch B builds on the rules AS BUILT, which are these.
     What stays open: the original run's provider call still in flight when the
     re-driven job passes 4a (no row exists yet for either check) - the
     `send-attempt-rearm-residues` class.
+20. **Section 0 / R2 / R6 - the LEGACY root walk is bounded at
+    `RETRY_ROOT_WALK_MAX_HOPS` = 12 hops**, not `MAX_SEND_RETRY_ATTEMPTS` (3)
+    (fix wave 3, the planner's re-review; handback deviation 14;
+    `services/retryChain.ts`). A manual Retry extends a chain past three rows,
+    so a pre-deploy row (no `retry_root`) three hops below a manual row would
+    have recorded a non-root as `retry_root` - written once and inherited by
+    every later row of the chain, and stamped by the manual route on legacy
+    rows of any age. Three manual retries each carrying a full three-rung
+    ladder resolve within 12 hops; a root's own ladder above the first manual
+    retry can add up to three more, and such a chain (pre-deploy only) still
+    stops at the last row read, as section 0 states. Every row appended since
+    this branch carries `retry_root` and returns at hop 0. The step-4a
+    predecessor walk (`automaticAncestry`, R4) keeps `MAX_SEND_RETRY_ATTEMPTS`:
+    it walks automatic rows only.
+21. **R2 step 1 - a FOURTH designed decline: the payload's attempt must be
+    the one the retried row can schedule**, `(retry_attempt ?? 0) + 1` (fix
+    wave 3; handback deviation 13). The webhook schedules exactly that number
+    and a deferral or a re-drive reuses it, so the check holds by
+    construction; a mismatched payload is refused at WARN
+    (`retrySend: the payload's attempt is not the one the retried row can
+    schedule - refusing`, with `rowAttempt`) before any further read - nothing
+    claimed, nothing sent, no record. It makes step 4a's carve-out (an
+    automatic child of a DIFFERENT attempt number, item 18) unreachable in
+    production. A `done/refused` record with cause `already_sent` (item 18)
+    means the text EXISTS - its `retrychild#` pointer names the SID
+    (`send-attempt-sweeper`).

@@ -8,7 +8,9 @@ Status: DESIGN v5 - v1 (6e99330d), v2 (82bdd304), v3 (1951d190) and v4
 `spec-review-r4.md`; adjudications `spec-review-r<n>-adjudications.md`).
 Written against Stage 1b's FINAL spec (revision 5 @dad3fecb). Round 4 was
 the cap: its precision findings are folded here; its two remaining design
-calls are Cameron's, in section 9. AT THE HUMAN GATE.
+calls were RULED by Cameron on 2026-09-27 (section 9): the list refetch reads
+a stats-only query flag on the existing per-share route; no relay to SOR.
+GATE PASSED 2026-09-27. The plan is written once Stage 1b has merged.
 Branch `feat/share-sent-outcome`, worktree `W:\tmp\share-sent-outcome`.
 Records: `docs/superpowers/reviews/2026-09-27-share-sent-outcome/` (the three
 research findings this rewrite rests on: `research-broadcast-side-findings.md`,
@@ -373,7 +375,8 @@ caller supplies, and it is OPTIONAL in the stats shape:
   second), keeps it only until a debounced refetch of THAT share's STATS
   replaces it - a stats-only read of the per-share route (the share and its
   derived stats, without the recipient list and its contact reads that the
-  results page needs; section 9 puts its shape to Cameron) - so a chain that
+  results page needs; a query flag on the existing route, Cameron's ruling
+  of 2026-09-27) - so a chain that
   ends in a failure receipt (exhaustion, a retry's 30007), which shrinks
   nothing in `failed`, still turns the row from Sending to Not sent within
   the debounce; a payload that carries the count replaces it outright. The
@@ -802,19 +805,13 @@ the build finds out of scope.
   written against it. The walk request in the earlier relay is WITHDRAWN -
   r5 already walks pre-deploy chains for `retry_root`, and the one-hop
   `broadcast_id` copy is closed by this branch's own repair.
-- Round 4's two remaining calls (the review loop is at its cap; these are
-  yours, not a round 5):
-  1. D4's list refetch reads a share's stats WITHOUT its recipient list. The
-     per-share route today returns every recipient and reads every contact,
-     so the refetch needs a stats-only shape of it: a query flag on the
-     existing route (recommended - no new endpoint, the same handler minus
-     the recipient and contact reads), or a new stats endpoint, or no
-     refetch at all (the list then reads Sending for a finished share whose
-     retry chain failed until the page is reopened - the round-3 defect).
-  2. OPTIONAL relay to SOR, one expression: when r5 walks to the root for a
-     pre-1b retried row, take `broadcast_id` from that root too (the walk
-     already reads it). It closes the deploy-to-repair window for a post-1b
-     retry of an unstamped pre-1b retry row; without it, such a retry keeps
-     TODAY's behavior (its receipt bypasses the share) until the repair runs.
-     Recommended: skip - 1b's loop is closed, the window is not a regression,
-     and D8 covers it.
+- Round 4's two remaining calls, RULED by Cameron 2026-09-27:
+  1. D4's list refetch reads a share's stats WITHOUT its recipient list,
+     through a QUERY FLAG on the existing per-share route (the same handler
+     minus the recipient and contact reads; no new endpoint). The
+     alternatives (a new stats endpoint; no refetch, leaving a finished share
+     whose retry chain failed reading Sending until reopened) are not taken.
+  2. NO relay to SOR for the one-expression root `broadcast_id` change. A
+     post-1b retry of an unstamped pre-1b retry row keeps today's behavior
+     (its receipt bypasses the share) until the repair (D8) runs; 1b's loop
+     stays closed.

@@ -650,7 +650,7 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(world.sendAttempts.size).toBe(4);
   });
 
-  it('4c a manual retry supersedes the chain: with a MANUAL child of the retried row already appended the job declines at INFO before claiming - on a first run (no record), on a deferral re-run (done/retryable, nothing written) and on a re-drive (redriven closed refused); the check is ONE retrychild# Query that finds the child among 60 newer unrelated rows; an AUTOMATIC child does not trigger it', async () => {
+  it('4c a manual retry supersedes the chain: with a MANUAL child of the retried row already appended the job declines at INFO before claiming - on a first run (no record), on a deferral re-run (done/retryable, nothing written) and on a re-drive (redriven closed refused); the check is ONE retrychild# Query that finds the child among 60 newer unrelated rows (an AUTOMATIC child is case 4c2\'s)', async () => {
     wire();
     const superseded = 'retrySend: a manual retry superseded this attempt';
     const row = await seedRetried('SMroot1');
@@ -685,13 +685,74 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(await recordOf(row2)).toMatchObject({ state: 'done', outcome: 'refused', cause: 'manual_retry_superseded' });
     expect(calls).not.toHaveBeenCalled();
     expect(msgLines(INFO, superseded)).toHaveLength(3);
-    // (4) an AUTOMATIC child alone does not decline.
-    const row3 = await seedRetried('SMroot3');
-    await world.messagesRepo.append({ ...outboundRow('SMauto3', Date.now() + 1_000, row3.conversationId), retryOf: row3.tsMsgId, retryAttempt: 1 });
-    await run(row3);
+  });
+
+  it('4c2 THIS attempt already appended its retry row (FW2, planner review A1): an AUTOMATIC child carrying the payload\'s attempt number is this attempt\'s own text - the job declines at WARN before claiming, with zero provider calls - on a first run (no record, nothing written), on a re-drive (redriven closed done/refused already_sent) and on a deferral re-run (done/retryable, nothing written); an automatic child of ANOTHER attempt number does not decline: the job claims and sends once', async () => {
+    wire();
+    const alreadySent = 'retrySend: this attempt already appended its retry row - not re-sent';
+    /** A fresh retried row with an automatic child of attempt `childAttempt` (its retrychild# pointer rides the append); each sub-case has its own row - the fake keeps records between sub-cases. */
+    async function withAutomaticChild(sid: string, childAttempt: number): Promise<{ row: MessageItem; child: MessageItem }> {
+      const row = await seedRetried(sid);
+      await world.messagesRepo.append({
+        ...outboundRow(`${sid}-r`, Date.now() + 1_000, row.conversationId),
+        retryOf: row.tsMsgId,
+        retryAttempt: childAttempt,
+        retryRoot: row.tsMsgId,
+      });
+      return { row, child: world.messages.find((m) => m.provider_sid === `${sid}-r`)! };
+    }
+    const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+    const calls = providerCalls();
+    // (1) a first run: no record - nothing written, nothing sent.
+    const first = await withAutomaticChild('SMown1', 1);
+    const firstDue = first.row.retry_due_at;
+    await run(first.row);
+    expect(calls).not.toHaveBeenCalled();
+    expect(await recordOf(first.row)).toBeUndefined();
+    expect(first.row.retry_due_at).toBe(firstDue);
+    expect(msgLines(WARN, alreadySent)).toEqual([
+      expect.objectContaining({
+        cause: 'already_sent',
+        providerSid: 'SMown1',
+        conversationId: first.row.conversationId,
+        retriedTsMsgId: first.row.tsMsgId,
+        retryRoot: first.row.tsMsgId,
+        attempt: 1,
+        recipientKey: 'c-real',
+        childTsMsgId: first.child.tsMsgId,
+        childProviderSid: 'SMown1-r',
+      }),
+    ]);
+    // (2) a re-drive over a redriven record: declines and closes it done/refused already_sent.
+    const redriven = await withAutomaticChild('SMown2', 1);
+    await seedRedriven(ownerOf(redriven.row, 1), factsFor(redriven.row));
+    await run(redriven.row);
+    expect(await recordOf(redriven.row)).toMatchObject({ state: 'done', outcome: 'refused', cause: 'already_sent', redriveCount: 1 });
+    expect(calls).not.toHaveBeenCalled();
+    // (3) a deferral re-run over done/retryable: declines, writes nothing.
+    const retryable = await withAutomaticChild('SMown3', 1);
+    await seedRetryable(ownerOf(retryable.row, 1), factsFor(retryable.row));
+    const released = await recordOf(retryable.row);
+    await run(retryable.row, 1, { deferred: true });
+    expect(await recordOf(retryable.row)).toEqual(released);
+    expect(calls).not.toHaveBeenCalled();
+    // ONE WARN per decline; no other decline fired, nothing at ERROR, no promise write.
+    expect(msgLines(WARN, alreadySent).map((l) => [l['providerSid'], l['cause'], l['childProviderSid']])).toEqual([
+      ['SMown1', 'already_sent', 'SMown1-r'],
+      ['SMown2', 'already_sent', 'SMown2-r'],
+      ['SMown3', 'already_sent', 'SMown3-r'],
+    ]);
+    expect(msgLines(INFO, 'retrySend: a manual retry superseded this attempt')).toHaveLength(0);
+    expect(capture.atLevel(ERROR)).toHaveLength(0);
+    expect(annotate).not.toHaveBeenCalled();
+    expect(world.sent).toHaveLength(0);
+    // (4) an automatic child of ANOTHER attempt number (2, the payload is attempt 1) keeps the spec's carve-out: claims and sends once.
+    const other = await withAutomaticChild('SMown4', 2);
+    await run(other.row);
     expect(calls).toHaveBeenCalledTimes(1);
-    expect(await recordOf(row3)).toMatchObject({ state: 'done', outcome: 'sent' });
-    expect(msgLines(INFO, superseded)).toHaveLength(3);
+    expect(await recordOf(other.row)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 1 });
+    expect(world.sent).toHaveLength(1);
+    expect(msgLines(WARN, alreadySent)).toHaveLength(3);
   });
 
   it('4d an existing attempt is resolved BEFORE the window: a stale attempting record (31 s) with the window already closed is taken over into reconcile, not logged window_closed; a deferral re-run whose run time slipped past the window declines "retry window closed" and sends nothing (RSW #1)', async () => {

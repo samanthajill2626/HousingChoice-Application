@@ -275,6 +275,8 @@ type Ctx = Record<string, unknown>;
 const DEFERRAL_CAP_CAUSE = 'deferral_cap';
 /** retry-send-adoption R2 step 4a: the record cause of a re-driven attempt a manual Retry of the same row superseded. */
 const MANUAL_RETRY_SUPERSEDED_CAUSE = 'manual_retry_superseded';
+/** retry-send-adoption R2 step 4a (FW2, planner review A1): the record cause of a re-driven attempt whose own retry row already exists. */
+const ALREADY_SENT_CAUSE = 'already_sent';
 
 export interface RetrySendJobDeps {
   sendMessage?: SendMessageService;
@@ -454,11 +456,25 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     }
     const redriven = existing?.state === 'redriven';
 
-    // 4a. A MANUAL RETRY SUPERSEDES THE CHAIN (R2): a staff Retry of this same
-    // failed row - a child with retry_of and no retry_attempt - already went
-    // out. ONE consistent Query on the row's retrychild# partition (R7), never
-    // a scan of the thread. An automatic child (this chain's) does not count.
+    // 4a. THE RETRIED ROW'S CHILDREN (R2): ONE consistent Query on the row's
+    // retrychild# partition (R7), never a scan of the thread. FIRST, THIS
+    // attempt's own text (FW2, planner review A1): one retried row has exactly
+    // one automatic attempt number, so a child of THIS attempt number is this
+    // attempt's own retry row - a re-drive whose first provider call landed
+    // outside its reconcile's window must not send it again. THEN a MANUAL
+    // RETRY SUPERSEDES THE CHAIN: a staff Retry of this same failed row - a
+    // child with retry_of and no retry_attempt - already went out. Only an
+    // automatic child of ANOTHER attempt number is ignored.
     const children = await messagesRepo.listRetryChildrenConsistent(payload.conversationId, retried.tsMsgId);
+    const ownChild = children.find((child) => child.retryAttempt === payload.attempt);
+    if (ownChild !== undefined) {
+      await declineBeforeClaim(owner, redriven, ALREADY_SENT_CAUSE, octx);
+      log.warn(
+        { ...octx, cause: ALREADY_SENT_CAUSE, childTsMsgId: ownChild.tsMsgId, childProviderSid: ownChild.providerSid },
+        'retrySend: this attempt already appended its retry row - not re-sent',
+      );
+      return;
+    }
     if (children.some((child) => child.retryAttempt === undefined)) {
       await declineBeforeClaim(owner, redriven, MANUAL_RETRY_SUPERSEDED_CAUSE, octx);
       log.info({ ...octx, cause: MANUAL_RETRY_SUPERSEDED_CAUSE }, 'retrySend: a manual retry superseded this attempt');

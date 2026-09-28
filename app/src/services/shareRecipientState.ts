@@ -3,7 +3,10 @@
  * from the slot plus - inside two bounds - the newest attempt's own message
  * row (its promise and its chain's end) and, for a queued slot of a finished
  * share, the recipient's send-attempt record. Two readings: SAFE (the review
- * list's "Already sent") and STRICT (labels, counts, ledger, milestone). The
+ * list's "Already sent") and STRICT (the labels, the counts and the ledger).
+ * The tenant's "Property sent" milestone is neither: it takes spec D6's own
+ * words from the ledger - a live pending entry reads "Property sent"
+ * (contactTimeline.ts), where the STRICT reading would not count it. The
  * share's STORED status is never read to decide whether a tenant got the
  * property (I1); it only tells a running pass from a finished one.
  *
@@ -91,7 +94,11 @@ export function classifyRecipient(share: ShareClock, slot: BroadcastRecipient, f
 export function mayHaveReached(state: RecipientState): boolean {
   return state === 'reached' || state === 'pending' || state === 'unconfirmed' || state === 'in_flight';
 }
-/** STRICT reading (labels, counts, ledger, milestone): the carrier accepted or delivered it. */
+/**
+ * STRICT reading (the labels, the counts, the ledger): the carrier accepted or
+ * delivered it. Not the milestone's rule - that takes spec D6's words, and a
+ * live pending entry reads "Property sent" there (contactTimeline.ts).
+ */
 export function hasReached(state: RecipientState): boolean {
   return state === 'reached';
 }

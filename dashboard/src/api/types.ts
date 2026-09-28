@@ -3145,9 +3145,14 @@ export interface PreviewCandidate {
   seeded: boolean;
 }
 
-/** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is the
- *  set already sent for this unit (so a MANUALLY-added tenant can be annotated
- *  client-side). `truncated` warns the audience hit the page/recipient cap.
+/** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is
+ *  share-sent-outcome D1's SAFE reading over EVERY share of this unit, whatever
+ *  its stored status - the recipients the text may have reached (reached,
+ *  pending a live retry, Not confirmed, or in flight) - so a MANUALLY-added
+ *  tenant can be annotated client-side. Its entries are the shares' slot keys,
+ *  so one can be `phone#<E164>` (a recipient texted under a phone-only key),
+ *  which a contactId match never finds. `truncated` warns the audience hit the
+ *  page/recipient cap.
  *  Matching sends: `seedContactIds` is the draft's stored seed list (as-is);
  *  `unresolvedSeedIds` is the subset that failed to resolve (deleted/opted-out/
  *  unreachable/non-tenant) so the composer can show which seeds dropped. */

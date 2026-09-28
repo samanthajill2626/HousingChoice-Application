@@ -166,3 +166,15 @@ The continued reviewer B under the RE-REVIEW CHARGE, with reviewer A's round-1 r
 | 6 | LOW | deviation 9's "same rule" is inexact for the raw-`mediaUrls` seam: the adopted row would be typed mms with no media field, where `sendMessage`'s row carries the raw `mediaUrls` | ACCEPT - `adoptRetry` copies the retried row's raw `mediaUrls` when the record says media went and the row has no durable attachments (the seam the job replays); deviation 9 and test 10b state it | YES - one field on the adopted row |
 
 Round summary: 6 findings, 6 accepted (0 rejected, 0 deferred); 0 contests upheld against the planner. Decisions changed: two, both corners (a thrown release refreshes; the adopted row replays raw `mediaUrls`). Round 3 goes to the same reviewer with the same charge; if it changes no decision it is the terminal round.
+
+## Plan round 3 (2026-09-28, plan revision 3 @cddc0505 -> revision 4) - TERMINAL
+
+The continued reviewer B under the RE-REVIEW CHARGE. Report: `plan-r3-reviewer-b.md` (3 findings, all LOW). The reviewer contested neither round-2 decision change (refreshing after a thrown release: on prod the deferred run takes the stale record over and refreshes again; replaying raw `mediaUrls`: fires only when the record says media went and the row has no durable attachments, so no presigned URL is copied) and verified every revision-3 edit against `scheduler.ts` and the fake (the lazy const bindings compile and stay lazy; `finish()`'s three answers; the helper block; tests 1, 6b, 4d, 4-lost, 11 second half; the Task 1 sketch fixes).
+
+| # | severity | finding | adjudication | decision changed? |
+|---|---|---|---|---|
+| 1 | LOW | spec section 6 ("the hosted-dev checks SOR owes cover this owner too") is carried nowhere: T9 adds no note to `send-reconcile-hosted-dev-checks`, and the handback's post-merge line says only "NONE infra"; that issue's open item 1 is a possible double text the retry's reconcile now shares | ACCEPT - T9 adds the dated note (a seventh issue file) and the handback's post-merge line names the checks as a precondition for this owner too | no |
+| 2 | LOW | tests 4-lost and 4d run two sub-cases in one `it` over the same row; the fake keeps records, so 4-lost's first sub-case leaves a fresh `attempting` record that defers the second at the gate | ACCEPT - each sub-case seeds its own retried row; stated in both sketches | no |
+| 3 | LOW | the new ERROR says "the record stays attempting"; a write that threw may still have committed (`sendAttemptsRepo.ts:468-481` recovers only a replayed conditional failure) | ACCEPT - the line reads "MAY still be attempting (a thrown write can have committed)" | no |
+
+Round summary: 3 findings, 3 accepted (0 rejected, 0 deferred), NO decision changed -> the terminal round (the skill's stop rule). Plan review closed after three rounds: 29 distinct findings, 29 accepted, 0 rejected, 0 deferred; nine declared deviations from the spec's wording, all judged legitimate by both reviewers. Plan revision 4 is the build's input.

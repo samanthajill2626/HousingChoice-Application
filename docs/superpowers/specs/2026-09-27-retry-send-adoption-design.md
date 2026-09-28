@@ -2,7 +2,7 @@
 
 Anchor issue: `retry-send-lost-under-job-marker` (med). Branch
 `feat/retry-send-adoption`, cut from `main@3dbb5740`, 2026-09-27.
-Revision 2 (after design review round 1 - adjudications in
+Revision 3 (after design review rounds 1 and 2 - adjudications in
 `docs/superpowers/reviews/2026-09-27-retry-send-adoption/design-review/adjudications.md`
 - and Branch B's refined requirement of 2026-09-27).
 
@@ -33,8 +33,12 @@ Every rule below uses exactly two names:
   the row `retry_of` points to. The promise, the refresh, the withdrawal and
   `retry_outcome` are written HERE.
 - **the ROOT** - the chain's first send, `retry_root` = the retried row's
-  `retry_root` if it has one, else the retried row's own `tsMsgId`. The
-  attempt record keys on it; Branch B routes a retry's receipt by it.
+  `retry_root` if it has one, else its `retry_of` (a pre-deploy retry row
+  carries `retry_of` and no `retry_root`; one hop reaches the root), else
+  the retried row's own `tsMsgId`. Branch B routes a retry's receipt by it;
+  the record carries it as a fact (R1) but does NOT key on it: a manual
+  Retry row starts a NEW automatic chain under the same root, and its
+  attempts must never meet the earlier chain's records.
 
 Cameron's rulings of 2026-09-27 (relayed from the share-skip Branch B
 planner) bound this addendum:
@@ -127,29 +131,45 @@ what the manual Retry route trusts.
 ### R1 - the owner kind
 
 `SendAttemptOwner` gains
-`{ kind: 'retry_send'; conversationId: string; retryRoot: string; attempt: number; recipientKey: string }`.
+`{ kind: 'retry_send'; conversationId: string; retriedTsMsgId: string; attempt: number; recipientKey: string; retryRoot: string }`.
 
-- `ownerKey` = `retry#<conversationId>#<retryRoot>#<attempt>`: one record per
-  attempt of one chain; two chains in one conversation never collide.
-- `recipientKey` is captured ONCE, at claim time, and carried on the owner,
-  in the reconcile payload (hashed, `recipientKeyHash`) and in every log
-  line through `safeRecipientKey`: the retried row's `recipient_contact_id`
-  when `contactHoldsPhone(contact, participantPhone)` is true at that
-  moment (RSW relay B4), else `phone#<participantPhone>`. Nothing re-derives
-  it later; a contact edit after the claim changes no key.
+- `ownerKey` = `retry#<conversationId>#<retriedTsMsgId>#<attempt>`: the
+  webhook schedules attempt N against ONE specific failed row, so the pair
+  (retried row, attempt) names exactly one scheduled retry. A manual Retry
+  row that later fails 30003 is a new retried row and starts a fresh chain
+  with fresh records; two chains under one root never collide (round 2
+  finding 1). `retryRoot` rides the owner as a FACT (a plain attribute on
+  the record and in the payload), not as part of the key.
+- `recipientKey` is DERIVED FROM IMMUTABLE ROW DATA, not from a live check:
+  the retried row's `recipient_contact_id` when the row has one (the send
+  that appended it recorded the contact that held the number then), else
+  `phone#<conversation.participant_phone>`. The FIRST run of an attempt
+  derives it; every re-enqueue of that attempt (the deferral re-run, the
+  re-drive) and the reconcile payload carry it verbatim
+  (`payload.recipientKey`; the ref carries `recipientKeyHash`), and a crash
+  redelivery re-derives the same value from the same row - so no contact
+  edit can fork the chain into a second record (round 2 finding 2).
+  `contactHoldsPhone` still decides GATING inside `sendMessage` (RSW relay
+  B4); it no longer decides a key.
 - `attemptKey` (owner + hashed recipient) is the record's identity, as built.
 - The facts: `recipientDigest(sender, participantPhone)` where `sender` is
   the number the conversation sends from (the same derivation `sendMessage`
   makes - the build reads it from one shared helper, adding one if none is
   exported) and `participantPhone` is the conversation's `participant_phone`;
   `bodyHash` / `bodyShort` from the retried row's body; `mediaCount` = the
-  attachments the retry will carry: the retried row's `media_attachments`
-  count when a MediaStore exists, else its raw `mediaUrls` count, else 0
-  (exactly the job's own media rule, `retrySend.ts:267-301`).
+  length of the media list the retry WILL SEND, taken from the job's own
+  media resolution (`retrySend.ts:267-301`, factored into one function the
+  job, the facts and the adoption all call): attachments with a MediaStore
+  -> the attachments' count; attachments with no store -> 0 (the job sends
+  body only); no attachments and raw `mediaUrls` -> their count; else 0.
 - `SendAttemptOwnerRef` gains
-  `{ kind: 'retry_send'; conversationId; retryRoot; attempt; recipientKeyHash }`;
-  `toOwnerRef`, the payload parser and `ownerRefLog` gain the arm. The
-  payload carries no phone.
+  `{ kind: 'retry_send'; conversationId; retriedTsMsgId; attempt; retryRoot; recipientKeyHash }`;
+  `toOwnerRef`, the payload parser, `ownerRefLog` / `ownerLog` gain the arm.
+  The payload carries no phone.
+- `RetrySendPayload` gains two optional fields the parser CARRIES:
+  `recipientKey` (set by the first run; copied by every re-enqueue) and
+  `deferred: true` (set only by the deferral re-enqueue). The webhook's
+  initial enqueue sets neither.
 
 ### R2 - the job's order and phases
 
@@ -158,20 +178,42 @@ what the manual Retry route trusts.
 1. Read the retried row by provider SID (as today; not found / not
    outbound -> WARN, return). Derive `retryRoot` (section 0) and the window
    origin `oneToOneRetryWindowOrigin(retriedRow)` (RSW D2: the root's
-   `provider_ts`, carried as `retry_window_start`).
+   `provider_ts`, carried as `retry_window_start`; absent or unparseable ->
+   RSW D5 fail-open: the window checks below are skipped with the existing
+   WARN).
 2. RSW D14: read the recorded recipient by id (as today).
-3. Read the conversation (its `participant_phone`) and resolve the sender
-   number - the facts R1 needs. NEW reads, placed here.
-4. RSW D4: the strict window check. Past the window -> ERROR
-   `retry window closed` and return (as today; the promise expires on RSW's
-   clock).
+3. Read the conversation for `participant_phone` and resolve the sender
+   number - the facts R1 needs. A missing conversation, a conversation that
+   is not a one-to-one thread (`group_text`, a relay group), or one with no
+   participant phone is a DESIGNED DECLINE, never a throw: WARN
+   `retrySend: conversation not retryable` with the reason, return (the
+   promise expires) - the same refusals the webhook's decision applies
+   before scheduling (RSW D11, `oneToOneRetryDecision.ts`; the build reuses
+   its vocabulary). Derive `recipientKey` (R1) unless the payload carries
+   it.
+4. **AN EXISTING ATTEMPT IS RESOLVED BEFORE THE WINDOW GATES A NEW ONE**
+   (round 2 finding 6): read the R1 record. If it exists: `attempting`
+   older than the TTL -> `takeOver`, hand off to reconcile (R3's unknown
+   path), return; `attempting` fresh -> INFO `a concurrent delivery owns
+   this attempt`, return; `reconciling` / `redriven` / `done` -> the claim
+   rules below decide (a `redriven` record is this job's re-drive and
+   proceeds to step 5; every other state returns at INFO). A crash
+   redelivery in the last minutes of the window therefore still reaches
+   the attempt that may have sent. If the record is ABSENT:
+   a. **A MANUAL RETRY SUPERSEDES THE CHAIN** (round 2 finding 3): if the
+      conversation already holds a row with `retry_of === retriedTsMsgId`
+      and no `retry_attempt` (a staff Retry of this same failed row -
+      `listByConversationConsistent` newest-first, bounded to the rows
+      after the retried row), decline: INFO `retrySend: a manual retry
+      superseded this attempt`, return. This is the job's half of the
+      late-job and enqueue-threw gaps; the route's half is R6.
+   b. RSW D4: the strict window check. Past the window -> ERROR
+      `retry window closed` and return (as today; the promise expires).
 5. **CLAIM** (SOR D8a) on the R1 owner - the duplicate guard this job now
-   has instead of the run-once marker. `refused fresh` -> INFO
-   `a concurrent delivery owns this attempt`, return. `refused !fresh`
-   (`reconciling`, or `done` with a terminal outcome) -> INFO, return.
-   `takeover` (an `attempting` record older than the TTL - a crashed run) ->
-   `takeOver`, hand off to reconcile (R3's unknown path), return.
-   `claimed` -> `ref`; `secondUnknownWouldClose = record.redriveCount >= 1`;
+   has instead of the run-once marker. `refused fresh` -> INFO, return.
+   `refused !fresh` -> INFO, return. `takeover` -> as step 4. `claimed`
+   (from absent, `done/retryable` or `redriven`) -> `ref`;
+   `secondUnknownWouldClose = record.redriveCount >= 1`;
    `secondDeferralWouldClose = payload.deferred === true`.
 6. PREPARE: the presign (as today). A throw here is the prepare-phase
    deferral (R3, "deferred").
@@ -192,7 +234,8 @@ what the manual Retry route trusts.
 Steps 1-4 run BEFORE the claim: a throw in any of them fails the delivery
 and SQS redelivers it, and nothing was claimed or sent - the correct
 outcome (today the marker made a post-marker throw a silent loss; that is
-this issue). One outer try/catch around steps 6-8 with SOR's phase tracking
+this issue). A redelivery that arrives before the claim re-runs the reads
+and the checks once more - reads only, no send. One outer try/catch around steps 6-8 with SOR's phase tracking
 (`prepare` / `sending` / `record`); every failure-arm write through
 `guardWrite`; nothing throws after the claim.
 
@@ -215,17 +258,18 @@ the job read (absent allowed), so a writer holding a stale read loses;
 "REFRESH to T" = that write with `retryDueAt: T` followed by
 `message.persisted` for the retried row (RSW #3); "WITHDRAW" = the same
 with `retryDueAt: RETRY_PROMISE_WITHDRAWN_AT` and `retryOutcome:
-'unconfirmed'`. A terminal write that loses its condition is retried ONCE
-from a fresh read (the only competing writer is this owner's own earlier
-refresh, or the webhook's write of a NEW `retry_due_at` for a later 30003 on
-an adopted row - in which case the chain has moved on and the loser stops).
+'unconfirmed'`. The only competing writer is this owner's own earlier
+refresh (a redelivered check racing its successor), so a WITHDRAW that
+loses its condition is retried ONCE from a fresh read and then wins; a
+REFRESH that loses is dropped (the newer value stands). Every `guardWrite`
+loss is logged at ERROR (that is what `guardWrite` does).
 
 | outcome | record | retried row's promise | log | notes |
 |---|---|---|---|---|
 | `SendRefusedError` - incl. the kill switch, which `sendMessage` throws as a refusal (`SmsSendingDisabledError extends SendRefusedError`, `sendMessage.ts:107`) | `done` / `refused`, cause = the code | untouched (expires) | WARN `send refused - retry chain stopped` (as today) | |
 | rejected (SOR D1: a Twilio 4xx, 30007 / 30005 / 30006 by code) | `done` / `rejected`, cause = code or status | untouched (expires) | ERROR `retry chain ended - provider rejected the retry`, with the code | The retried row keeps its own 30003. No retry row exists. |
-| deferred: `SendNotAttemptedError`, a prepare-phase throw after the claim, or retryable (SOR D1: 429 / 20429 / 30022 / a connection that never opened) | `done` / `retryable`, cause = code or `send_retryable` | REFRESH to the new run time | WARN `retry deferred - re-scheduled` | The attempt's SINGLE deferral: `backoffMs = resolveSendRetryBackoffMs(attempt)`, `runAt = now + backoffMs`; if `retryFitsSendWindow({ originMs, nowMs: now, backoffMs })`: ENQUEUE FIRST (`enqueueSendRetry({ ...payload, deferred: true }, runAt)`), then `finishAttempt(retryable)`, then REFRESH; the re-claimed run (from `done/retryable`) reads `payload.deferred` and treats its next deferral as terminal. Otherwise, or when `secondDeferralWouldClose`: terminal - `finishAttempt(retryable)` (the claim would accept a further pass; nothing schedules one), ERROR `retry window closed` / `retry deferred twice - chain ended`, promise untouched (expires). An enqueue that throws: `finishAttempt(retryable)`, ERROR `retry re-schedule failed - chain ended`, promise untouched; nothing was sent. |
-| unknown (SOR D2: 5xx, timeout, dropped socket, anything else) | `reconciling` (`handToReconcile` FIRST), then the enqueue | REFRESH to `attemptedAt + reconcileCheckDelaysMs()[2] + RETRY_PROMISE_GRACE_MS` | INFO `retry outcome unknown - handed to reconcile` | Enqueue `send.reconcile` at check 0 with the R1 owner ref. If `secondUnknownWouldClose` (a re-driven attempt came back unknown): SOR D13a - `closeFromReconcile(unresolved, second_unknown)` then WITHDRAW, ERROR. An enqueue that throws: `closeFromReconcile(unresolved, enqueue_failed)` then WITHDRAW, ERROR (a send may have happened). |
+| deferred: `SendNotAttemptedError`, a prepare-phase throw after the claim, or retryable (SOR D1: 429 / 20429 / 30022 / a connection that never opened) | `done` / `retryable` when re-scheduled; `done` / `refused` (cause `deferral_cap` or `retry_window_closed`) when terminal | REFRESH to the new run time; untouched when terminal | WARN `retry deferred - re-scheduled`; ERROR when terminal | The attempt's SINGLE deferral: `backoffMs = resolveSendRetryBackoffMs(attempt)`, `runAt = now + backoffMs`; if not `secondDeferralWouldClose` and `retryFitsSendWindow({ originMs, nowMs: now, backoffMs })`: ENQUEUE FIRST (`enqueueSendRetry({ ...payload, recipientKey, deferred: true }, runAt)`), then `finishAttempt(retryable)`, then REFRESH; the re-claimed run (from `done/retryable`) reads `payload.deferred` and treats its next deferral as terminal. Otherwise TERMINAL: `finishAttempt(refused, cause)` - a terminal, non-claimable outcome, so a later redelivery or duplicate cannot restart a chain the spec says ended (round 2 finding 5) - ERROR `retry deferred twice - chain ended` / `retry window closed`, promise untouched (expires). An enqueue that throws: `finishAttempt(refused, enqueue_failed)`, ERROR `retry re-schedule failed - chain ended`, promise untouched; nothing was sent. |
+| unknown (SOR D2: 5xx, timeout, dropped socket, anything else) | `reconciling` (`handToReconcile` FIRST), then the enqueue | REFRESH to `attemptedAt + reconcileCheckDelaysMs()[2] + RETRY_PROMISE_GRACE_MS` | INFO `retry outcome unknown - handed to reconcile` | Enqueue `send.reconcile` at check 0 with the R1 owner ref. If `secondUnknownWouldClose` (a re-driven attempt came back unknown): SOR D13a - the record is still `attempting` here, so `finishAttempt(unresolved, second_unknown)`, then WITHDRAW, ERROR. An enqueue that throws after `handToReconcile`: `closeFromReconcile(unresolved, enqueue_failed)` then WITHDRAW, ERROR (a send may have happened). |
 | `SendAcceptedNotRecordedError` (Twilio accepted, the append failed) | `reconciling` WITH the SID, then the enqueue | REFRESH as for unknown | ERROR `sent_unrecorded` with the SID | The reconcile's known-SID path adopts it (R4). Enqueue failure as for unknown. |
 | taken over before the send (a lost re-arm) | untouched by this job | untouched | INFO | The takeover's reconcile resolves it. |
 
@@ -236,37 +280,38 @@ record's `attemptedAt` (SOR D8, as the fan-outs do), including the REFRESH.
 
 `send.reconcile` gains the fourth owner kind at EVERY owner-dispatch site
 in `app/src/jobs/sendReconcile.ts` (lines at 3dbb5740): `toOwnerRef` (:127),
-the payload parser (:179), `relayRowKey`'s exclusion type (:281), the log
-helpers (:365, :376), `resolve` (:475), `currentPhone` (:517), `heldBy`
-(:584, :595), `adopt` (:615), `afterClose` / `announceLeg` (:674, :951),
-`closeSlot` (:937), `redriveRefusal` and `enqueueRedrive` / `redrive`
-(:1078-:1195). Every `switch` on the owner kind gains a `never` default so
-a missed site is a typecheck error, not a silent no-op (`closeSlot` has
-none today).
+`parseOwnerRef` (:174-196) and `parseContinuation` (:200 - unchanged: this
+owner sends no continuation), `relayRowKey`'s exclusion type (:281), the
+log helpers (:363, :375), `resolve` (:473), `currentPhone` (:516), `heldBy`
+(:577), `adopt` (:614), `afterClose` (:967), `slotCloseOf` (:922),
+`closeSlot` (:936), `redriveRefusal` (:1123), `enqueueRedrive` (:1078),
+`closeRedriveRefused` (:1140) and `redrive` (:1170). Every `switch` on the
+owner kind gains a `never` default so a missed site is a typecheck error,
+not a silent no-op (`closeSlot` has none today); the build greps
+`owner.kind` once more at its HEAD and adds any site this list missed.
 
 Owner specifics (SOR D11-D16 as built otherwise):
 
-- **Resolve:** the ROOT row and the RETRIED ROW by `(conversationId,
-  tsMsgId)` with consistent reads. The owner names the root; the retried
-  row's `tsMsgId` rides the reconcile payload's `continuation` as
-  `{ retriedTsMsgId }` (the existing optional continuation slot, a new shape
-  for this owner), written by the job at hand-off and copied by every
-  successor check. The conversation is read for `participant_phone`
-  (eventually consistent, as the relay owners accept). The recipient key is
-  the OWNER's (never re-derived). Root or retried row not found -> INFO, the
-  record is left for the sweeper (as the other owners).
+- **Resolve:** the RETRIED ROW by `(conversationId, retriedTsMsgId)` with a
+  consistent read - the owner names it directly; the root is not read (its
+  id is a fact on the owner). The conversation is read for
+  `participant_phone` (eventually consistent, as the relay owners accept).
+  The recipient key is the OWNER's (never re-derived). Retried row not
+  found -> INFO, the record is left for the sweeper (as the other owners).
 - **Digest check:** `recipientDigest(sender, participantPhone)` against the
   record; a changed participant phone -> `unresolved` `digest_mismatch`.
 - **Lookup:** SOR D13 as built, with ONE refinement to the sibling rule that
-  applies to every owner: the chain's OWN LINEAGE is never a sibling -
-  records of kind `retry_send` with this `retryRoot`, and the root send's
-  own owner record when the root was a share text (a `broadcast` owner with
-  the root's `broadcast_id` and this recipient key). A predecessor's
-  adoption happened before this attempt began (its 30003 is what scheduled
-  this attempt), so it cannot hold this attempt's message; without the
-  exclusion every multi-rung chain in the lane would read `unresolved`.
-  Other siblings (another share to the same tenant, another chain) keep
-  SOR's rule.
+  applies to every owner: the chain's OWN LINEAGE is never a sibling. A
+  sibling record is lineage when it is a `retry_send` owner whose
+  `retryRoot` fact equals this owner's, or the root send's own owner record
+  when the root was a share text (a `broadcast` owner whose `broadcastId`
+  equals the retried row's `broadcast_id` and whose `contactKey` equals
+  this recipient key) - both computable from the sibling record's `owner`
+  and this owner alone, no extra read. A predecessor's adoption happened
+  before this attempt began (its 30003 is what scheduled this attempt), so
+  it cannot hold this attempt's message; without the exclusion every
+  multi-rung chain in the lane would read `unresolved`. Other siblings
+  (another share to the same tenant, another chain) keep SOR's rule.
 - **`heldBy` / mine:** a `sid#` pointer whose row has `retry_of ===
   retriedTsMsgId` and `retry_attempt === attempt` is MINE (the retry row
   `sendMessage` appended before a record-phase failure: a repair); any other
@@ -300,20 +345,25 @@ Owner specifics (SOR D11-D16 as built otherwise):
   claims from `redriven` (SOR D8a) and runs R2 again. Outside the window:
   `closeFromReconcile(redrive_refused, retry_window_closed)` while the
   record is still `reconciling` (the fence holds), ERROR, promise untouched
-  (expires). A re-driven job that declines BEFORE its claim (step 4 finds
-  the window closed at job time) closes its `redriven` record through
-  `closeRedriven(refused, retry_window_closed)` (SOR D8 revision 11) and
-  logs the ERROR. An enqueue that throws after `markRedriven`:
-  `closeRedriven(enqueue_failed)`, ERROR, promise untouched (nothing sent).
+  (expires). A re-driven job that declines BEFORE its claim (step 4b finds
+  the window closed at job time, or step 4a finds a manual retry) closes
+  its `redriven` record through `closeRedriven(refused, <cause>)` (SOR D8
+  revision 11) and logs the line. An enqueue that throws after
+  `markRedriven`: `closeRedriven(enqueue_failed)`, ERROR, promise untouched
+  and NO `retry_outcome` - nothing was sent, and Retry stays available
+  (round 2 finding 7).
 - **`unresolved`** (any SOR cause): `closeFromReconcile(unresolved, cause)`
   FIRST, then WITHDRAW on the retried row (R3's conditional write, retried
   once), then `message.persisted` for the retried row; ONE ERROR naming the
   cause (SOR D16). This is Cameron's Q1 ruling.
 - **Crash safety (the superseded exit):** for this owner `slotCloseOf(outcome)`
-  maps `unresolved` and `enqueue_failed` to "the WITHDRAW annotate" and
-  everything else to nothing; a redelivered check that finds the record
-  `done` for its own attempt re-applies it (idempotent: the write is a
-  no-op when `retry_due_at` is already the sentinel). `afterClose` for this
+  maps `unresolved` - and ONLY `unresolved` (an enqueue failure after a
+  possible send is recorded as `unresolved` with cause `enqueue_failed`,
+  SOR's as-built shape; a never-sent re-drive's enqueue failure is
+  `enqueue_failed` and maps to nothing) - to "the WITHDRAW annotate"; a
+  redelivered check that finds the record `done` for its own attempt
+  re-applies it (idempotent: a no-op when `retry_due_at` is already the
+  sentinel). `afterClose` for this
   owner = the retried row's `message.persisted` emit; there is no finalize
   and no root close.
 
@@ -346,33 +396,39 @@ Owner specifics (SOR D11-D16 as built otherwise):
 (`app/src/routes/api.ts:1567`) keeps RSW's guards and adds, after
 `retry_pending`:
 
-- Find the chain's attempt records through the recipient INDEX:
-  `listByRecipient(sender, recipientDigest(sender, participantPhone), since = now - 30 min)`
-  filtered to `kind === 'retry_send'` with `retryRoot` = the pressed row's
-  root (its `retry_root` ?? its `tsMsgId`). No key re-derivation: the index
-  finds the record whatever recipient key the claim captured.
+- Read the pressed row's attempt records DIRECTLY by key: the pressed row is
+  the retried row of any automatic attempt scheduled against it, so its
+  records are `retry#<conversationId>#<pressedRow.tsMsgId>#<1..MAX_SEND_RETRY_ATTEMPTS>`
+  with the R1 recipient key derived from the same immutable row data (three
+  consistent `get`s; no index, no time bound). The row's own
+  `retry_outcome` is read as a belt.
 - 409 `{ error: 'retry_unresolved' }` when any of them is `done` with
-  outcome `unresolved`, or `enqueue_failed` reached from the unknown /
-  accepted paths (cause `enqueue_failed` on a record that was `reconciling`)
-  - the Q1 ruling, enforced by the record, for good.
+  outcome `unresolved` (the ONLY outcome that means "a text may be out and
+  nobody knows"), or the row carries `retry_outcome: 'unconfirmed'` - the
+  Q1 ruling, enforced by the record, for good.
 - 409 `{ error: 'retry_pending' }` (RSW's error, so the dashboard's existing
   arm answers) when any of them is OPEN and not stale: `attempting` within
   `SEND_CLAIM_TTL_MS` of its `attemptedAt`; `reconciling` within
   `reconcileCheckDelaysMs()[2] + RETRY_PROMISE_GRACE_MS` of its
   `attemptedAt`; `redriven` within `RETRY_SEND_WINDOW_MS` of the chain's
   origin. Older open records are the sweeper's and do NOT block a person's
-  decision.
+  decision. `done` with `refused`, `rejected`, `retryable`, `sent`,
+  `adopted` or `enqueue_failed` never blocks.
 - Otherwise the route proceeds as today, and its append gains `retryRoot`
   and `broadcastId` (R7).
 
-Together: RSW's time guard covers the window between the webhook's
-schedule and the job's claim (no record exists yet); the record guard covers
-a running attempt, a pending reconcile and the unresolved close. This is the
-record-based guard `manual-retry-double-send-residual-windows` proposes; the
-build maps which of that issue's numbered gaps it closes (by the issue's
-own text: the job running later than promised, a deferral, an outcome
-pending past the promise, the joint gap) and which stay (a manual press
-racing a manual press), in a dated note.
+The two halves together: BEFORE the job's claim - the webhook's promise
+(RSW's time guard) covers the scheduled window, and if the job runs LATE
+(after the promise expired) or was enqueued by a webhook whose enqueue
+threw after SQS accepted, the job itself declines when a manual retry row
+already exists (R2 step 4a); AFTER the claim - the record covers a running
+attempt, a pending reconcile and the unresolved close. What stays open, by
+construction: a manual press and the job's claim inside the same instant
+(both read "nothing yet"); the STALE-TAB press RSW already names (a tab
+that rendered Retry before the promise was written); and a manual press
+racing a manual press. The build maps these onto
+`manual-retry-double-send-residual-windows`'s numbered gaps in a dated
+note, closing the automatic-retry gaps and leaving the rest as filed.
 
 The dashboard adds copy for 409 `retry_unresolved` beside `retry_pending`
 (`Timeline.tsx:134`): "This retry couldn't be confirmed - send a new message
@@ -390,12 +446,15 @@ instead."
   propagate attempt to attempt; for any other root `broadcast_id` is absent
   and `retry_root` is set.
 - Cost until Branch B, stated: a transitioned receipt for a share-retry
-  row now enters `twilio.ts`'s broadcast rollup, which reads the broadcast,
-  finds no slot for the retry's `tsMsgId`, waits `STATUS_UNKNOWN_SID_RETRY_DELAY_MS`
-  (2.5 s, `twilio.ts:322`) and reads again before it gives up - inside
-  Twilio's 15 s webhook budget, once per receipt of a retried share text;
-  `isBroadcastRowFor` is the reader that routes it there. Branch B removes
-  the miss when it teaches the rollup.
+  row (automatic OR manual, now that both carry `broadcast_id`) is routed
+  into the broadcast rollup by the `message.broadcast_id` check at
+  `twilio.ts:3529`; the rollup reads the broadcast, finds no slot for the
+  retry's `tsMsgId`, waits `STATUS_UNKNOWN_SID_RETRY_DELAY_MS` (2.5 s,
+  `twilio.ts:322`) and reads again before it gives up - inside Twilio's
+  15 s webhook budget, once per receipt of a retried share text. The
+  build reads `isBroadcastRowFor` (a second reader of `broadcast_id`) and
+  states in the handback what it does with a row that also carries
+  `retry_of`. Branch B removes the miss when it teaches the rollup.
 - The ONE fenced-file edit: that give-up line
   (`broadcast delivery rollup: no matching recipient slot - ignored`,
   `twilio.ts:3904`) moves from WARN to INFO and carries `broadcastId` (it
@@ -422,8 +481,9 @@ the SID when known - never a phone or a body (`safeRecipientKey`).
 On every retry row this branch appends (automatic, adopted, manual):
 `retry_of`, `retry_attempt`, `retry_window_start` (automatic and adopted
 only, as RSW defines), `retry_root`, `automated`, `recipient_contact_id`
-(when the contact held the number at claim), `broadcast_id` (when the chain
-root carried one). On the RETRIED ROW after an unresolved retry:
+(when the contact held the number at send time - `sendMessage`'s rule; on an
+adopted row, when the owner's recipient key is a contact id), `broadcast_id`
+(when the chain root carried one). On the RETRIED ROW after an unresolved retry:
 `retry_due_at = RETRY_PROMISE_WITHDRAWN_AT` and `retry_outcome: 'unconfirmed'`
 in one write. The attempt record: kind `retry_send`, the R1 fields;
 `listByRecipient(sender, digest, since)` finds every attempt to a number in
@@ -469,27 +529,44 @@ Job:
 1. **Fails on main:** an unknown provider error (a dropped socket) on the
    retry rethrows today; after this branch the job returns, the record is
    `reconciling`, one `send.reconcile` envelope carries
-   `{ kind: 'retry_send', conversationId, retryRoot, attempt: 1, recipientKeyHash }`
-   and `continuation.retriedTsMsgId`, no phone anywhere in it, the retried
-   row's `retry_due_at` is refreshed to cover the schedule and
-   `message.persisted` was emitted for it.
+   `{ kind: 'retry_send', conversationId, retriedTsMsgId, attempt: 1, retryRoot, recipientKeyHash }`,
+   no phone anywhere in it, the retried row's `retry_due_at` is refreshed
+   to cover the schedule and `message.persisted` was emitted for it.
 2. A rejected retry (21211): record `done/rejected`, no retry row, the
    retried row's 30003 and `retry_due_at` untouched, one ERROR.
 3. A refused retry (opt-out during the backoff): record `done/refused`,
    promise untouched, WARN - as today plus the record.
-4. A deferral (429): the same payload re-enqueued with `deferred: true` at
-   the RSW backoff, record `done/retryable`, `retry_due_at` refreshed to the
-   run time, emitted; the re-claimed run (attemptNo 2) sends once; a 429 on
-   a `deferred` payload ends the chain (ERROR, no third enqueue, promise
-   untouched); a deferral whose run time falls past the window ends the
-   chain (`retry window closed`); a re-DRIVEN run's first 429 still gets its
+4. A deferral (429): the same payload re-enqueued with `deferred: true` and
+   `recipientKey` at the RSW backoff (the parser carries both), record
+   `done/retryable`, `retry_due_at` refreshed to the run time, emitted; the
+   re-claimed run (attemptNo 2) sends once; a 429 on a `deferred` payload
+   ends the chain with the record `done/refused` cause `deferral_cap`
+   (ERROR, no third enqueue, promise untouched), and a redelivery of that
+   job afterwards is refused by the record and sends nothing; a deferral
+   whose run time falls past the window ends the chain `done/refused`
+   cause `retry_window_closed`; a re-DRIVEN run's first 429 still gets its
    deferral (the re-drive payload carries no `deferred`).
+4b. Records are per retried row: a manual Retry row that fails 30003 starts
+   a chain whose attempt 1 record is under the manual row's `tsMsgId` and
+   is `claimed`, not refused, although the root's own chain already ran
+   three attempts.
+4c. A manual retry supersedes the chain: with a manual Retry row of the
+   retried row already appended, the job declines at INFO before claiming
+   (no record, no send); a re-driven job in the same situation closes its
+   `redriven` record `refused`.
+4d. An existing attempt is resolved before the window: a stale `attempting`
+   record with the window already closed is taken over into reconcile, not
+   logged "window closed".
+4e. A conversation that is missing, not one-to-one, or without a
+   participant phone is a WARN decline with no record and no throw.
 5. Accepted-not-recorded (the append throws): record `reconciling` with the
    SID, one envelope, one provider call.
-6. Duplicate guard: the same envelope dispatched twice makes one provider
-   call (the second claim is refused fresh); a stale `attempting` record
-   (31 s) is taken over into reconcile by the redelivered job; a lost re-arm
-   sends nothing.
+6. Duplicate guard (replaces the marker's three cases): (a) the same
+   envelope dispatched twice makes one provider call - the second claim is
+   refused fresh; (b) a stale `attempting` record (31 s) is taken over into
+   reconcile by the redelivered job, with the same `recipientKey` derived
+   again; (c) a lost re-arm sends nothing; (d) `putJobExecutionMarker` is
+   never called by this job.
 7. A successful retry: record `done/sent`; the retry row carries `retry_of`
    (the retried row), `retry_attempt`, `retry_window_start` (the root's
    send), `retry_root`, `automated`, `recipient_contact_id` (only while
@@ -497,11 +574,13 @@ Job:
    row's `retry_due_at` is NOT written (the existing `annotates === 0` pin,
    `twilioStatusWebhook.test.ts:1855-1897`, stays green).
 8. Attempt 2: the retried row is the attempt-1 retry row; the record keys
-   on the root with `attempt: 2`; `retry_root` on the new row equals the
-   root's `tsMsgId`.
-9. Window and reads before the claim: a closed window leaves no record; a
-   conversation read that throws leaves no record and rethrows (SQS
-   redelivers); the run-once marker is not called by this job.
+   on THAT row with `attempt: 2`; `retry_root` on the new row equals the
+   root's `tsMsgId`; a pre-deploy retried row with `retry_of` and no
+   `retry_root` yields the root through `retry_of`.
+9. Window and reads before the claim: a closed window with no existing
+   record leaves no record; a conversation read that throws leaves no
+   record and rethrows (SQS redelivers); a no-origin row fails open (no
+   window check, the existing WARN).
 
 Reconcile:
 
@@ -513,7 +592,9 @@ Reconcile:
     promise refreshed) and the re-driven job claims from `redriven` and
     sends; outside the window it closes `redrive_refused` while
     `reconciling` and the promise is untouched; a re-driven job whose
-    window closed at job time closes its `redriven` record `refused`.
+    window closed at job time closes its `redriven` record `refused`; a
+    re-drive enqueue that throws closes `enqueue_failed` with NO
+    `retry_outcome`, and the route then allows Retry.
 12. `unresolved` (fail-list on all three checks): record closed first, then
     ONE write sets `retry_due_at = RETRY_PROMISE_WITHDRAWN_AT` and
     `retry_outcome: 'unconfirmed'` on the retried row, one ERROR, no
@@ -528,17 +609,20 @@ Reconcile:
 Route and dashboard:
 
 15. The manual Retry route: 409 `retry_unresolved` on a `done/unresolved`
-    record (with or without `retry_outcome` on the row); 409 `retry_pending`
-    on a fresh `attempting`, a pending `reconciling`, an in-window
-    `redriven`; 200 on a stale `attempting` (31 s), a `done/sent` and a
-    `done/retryable`; RSW's cases unchanged; the route's append carries
-    `retry_root` and `broadcast_id`.
+    record read by KEY (with or without `retry_outcome` on the row), also
+    when that record is 45 days old (no time bound); 409 `retry_pending` on
+    a fresh `attempting`, a pending `reconciling`, an in-window `redriven`;
+    200 on a stale `attempting` (31 s), a `done/sent`, a `done/retryable`,
+    a `done/refused` and a `done/enqueue_failed`; RSW's cases unchanged; the
+    route's append carries `retry_root` and `broadcast_id`.
 16. `deliveryReason('30003', { retryUnconfirmed: true })` renders
     `Phone unreachable - retry not confirmed (error 30003)` and outranks
     `retryScheduled`; `relay` outranks both; the Timeline hides Retry for
     `retry_outcome: 'unconfirmed'` and shows the `retry_unresolved` toast
-    copy; the projection carries the field; a mirror test pins
-    `RETRY_PROMISE_WITHDRAWN_AT` and the copy string to the app constants.
+    copy; the projection carries the field; a mirror test pins the
+    dashboard's copy of the withdrawn sentinel (`retryPromise.ts`) to the
+    app's `RETRY_PROMISE_WITHDRAWN_AT` (`app/src/lib/retrySendWindow.ts`)
+    and the `RetryOutcome` literal to the app's.
 
 Repo (DynamoDB Local): the `retry_send` owner's claim / re-arm / transitions
 and `listByRecipient` across owner kinds; `annotateRetryPromise` writes
@@ -555,8 +639,8 @@ never `contact-tenant-0002` / `conv-0002`):
     check, one re-drive, the retry bubble Delivered, one text.
 19. `drop_before_create` plus `fail-list` x3: the retried row reads
     `Phone unreachable - retry not confirmed`, no Retry button, the API
-    answers 409 `retry_unresolved`, exactly one ERROR in the app log, no
-    text sent.
+    answers 409 `retry_unresolved`, exactly one `send_reconcile` ERROR for
+    that owner in the app log, no text sent.
 
 ## 5. Issues
 

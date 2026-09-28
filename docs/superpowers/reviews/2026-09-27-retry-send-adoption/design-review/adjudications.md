@@ -50,3 +50,30 @@ authoritative; the chain's lineage is excluded from the sibling rule. Plus
 Cameron's Branch B refinement (`retry_root`, `broadcast_id` on every retry
 row incl. the manual route's). -> Round 2 with reviewer B continued (the
 larger accepted set), handed reviewer A's report.
+
+## Spec round 2 (2026-09-27) - reviewer B continued, spec revision 2 @08a41dc7
+
+Report: `spec-r2-reviewer-b.md` (12 findings: 1 blocking, 2 high, 4 medium,
+5 low; five are contests of round-1 rulings, all upheld).
+
+| # | finding | ruling | change in revision 3 |
+|---|---|---|---|
+| 1 | keying the record on the chain root makes a manual Retry's own 30003 chain reuse the earlier chain's records (30-day TTL): refused at INFO, silently dropped under a live promise | ACCEPT (BLOCKING) | The owner keys on the RETRIED ROW + attempt (`retry#<conversationId>#<retriedTsMsgId>#<attempt>`); `retryRoot` rides the owner as a fact. The webhook schedules attempt N against one specific failed row, so the pair is unique; a manual row that fails later is a new retried row. |
+| 2 | CONTEST A7/B6 upheld: the recipient key is recomputed by the deferral re-run, the re-drive and a crash redelivery; a contact edit forks the chain | ACCEPT (HIGH) | The key derives from IMMUTABLE row data (`recipient_contact_id` on the retried row, else the conversation's participant phone), never from `contactHoldsPhone`; the payload carries `recipientKey` on every re-enqueue; a redelivery re-derives the same value. |
+| 3 | CONTEST A2/B2 upheld: R6 still claimed closures with no record and no promise (a late job; an enqueue that threw after SQS accepted); the stale-tab gap misnamed | ACCEPT (HIGH) | The JOB declines before claiming when a manual retry row of the retried row already exists (R2 step 4a) - the job's half; the route's record guard is the other half; the residual races are named exactly (same-instant press vs claim; the stale tab; manual vs manual) and mapped by the build. |
+| 4 | CONTEST A4/B8 upheld: the `retry_unresolved` refusal lasted 30 minutes (the index lookup's bound) and the route never read `retry_outcome` | ACCEPT | With the key on the retried row the route reads the records DIRECTLY by key (three `get`s, no index, no time bound) and reads the row's `retry_outcome` as a belt. |
+| 5 | a chain that ends at a deferral leaves a claimable `done/retryable`; with the marker gone a redelivery restarts an ended chain | ACCEPT | A terminal deferral (cap or window) closes `done/refused` (cause `deferral_cap` / `retry_window_closed`) - non-claimable; only a re-scheduled deferral leaves `done/retryable`. |
+| 6 | the window check before the claim means a crash redelivery in the last minutes never takes over an attempt that may have sent | ACCEPT | R2 step 4: an EXISTING record is resolved (takeover / refuse / proceed) before the window gates a NEW claim; RSW #6's "a decline never holds a claim" still holds for the new-claim case. |
+| 7 | CONTEST B14 upheld: mapping `enqueue_failed` to withdraw+unconfirmed marks a never-sent re-drive "not confirmed"; R6's `enqueue_failed` test not computable | ACCEPT | Split: a never-sent re-drive's enqueue failure is `closeRedriven(enqueue_failed)` with NO promise write (Retry allowed); an enqueue failure after a possible send is `unresolved` cause `enqueue_failed` (SOR as built). `slotCloseOf` maps ONLY `unresolved`; R6 blocks on `done/unresolved` only. |
+| 8 | the pre-claim conversation read has no rule for a missing / group / relay conversation or a missing phone | ACCEPT | A designed decline at WARN with the webhook decision's vocabulary (RSW D11), never a throw. |
+| 9 | `{ retriedTsMsgId }` fails `parseContinuation`; the site list omits the parser, `slotCloseOf`, `afterClose` | ACCEPT (moot + fixed) | The owner carries `retriedTsMsgId`; no continuation; the site list is complete with line numbers and a `never`-default rule. |
+| 10 | CONTEST A13/B12 upheld: the router is `twilio.ts:3529`, not `isBroadcastRowFor`; its effect on retry (and now manual) rows unstated | ACCEPT | R7 names the router; the build reads `isBroadcastRowFor` and states its effect in the handback. |
+| 11 | CONTEST A15/B18 upheld: the media-count rule disagreed with the job on two paths | ACCEPT | The count is taken from the job's own media resolution, factored into one function the job, the facts and the adoption share. |
+| 12 | smaller: Resolve needlessly read the root; legacy rows' root; a phantom competing writer; the second-unknown close method; the lineage match; `parseRetrySendPayload` stripping `deferred`; unnamed marker tests; `guardWrite` logs ERROR; mirror constants; no-origin; test 19's scope | ACCEPT | Each fixed: the root is a fact (no read); `retry_root ?? retry_of ?? tsMsgId`; the writer removed; `finishAttempt(unresolved)` from `attempting`; lineage by the sibling's `owner.retryRoot` / the root's broadcast owner; the parser carries `deferred` and `recipientKey`; tests 6a-6d; ERROR stated; the mirror pins the dashboard's sentinel copy; RSW D5 fail-open stated; test 19 scoped to the owner's `send_reconcile` ERROR. |
+
+**Round 2 outcome:** 12 findings, ACCEPT 12 (5 as upheld contests of
+round-1 rulings), REJECT 0. Decisions changed: the record key (root ->
+retried row); the recipient key derivation (immutable row data, carried in
+the payload); the job's manual-supersession check; existing-attempt
+resolution before the window; terminal deferrals close `refused`; the
+`enqueue_failed` split. -> Round 3 with reviewer B continued.

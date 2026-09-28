@@ -17,6 +17,7 @@ import { deriveBroadcastStats } from '../repos/broadcastsRepo.js';
 import type { MessagesRepo } from '../repos/messagesRepo.js';
 import type { SendAttemptRecord, SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
 import { SEND_ATTEMPT_CLEANUP_MS } from '../repos/sendAttemptsRepo.js';
+import { safeRecipientKey } from '../lib/sendFingerprint.js';
 import { RECONCILE_CHECK_DELAYS_MS, SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import {
   RETRY_OUTCOME_UNCONFIRMED,
@@ -188,8 +189,9 @@ export async function resolveRecipientStates(
           const rec = await deps.attempts.get({ kind: 'broadcast', broadcastId: share.broadcastId, contactKey });
           facts.record = rec ?? null;
         } catch (err) {
+          // A slot key may be `phone#<E164>`: logged redacted (the send sites' idiom).
           deps.log.warn(
-            { err, broadcastId: share.broadcastId, contactKey },
+            { err, broadcastId: share.broadcastId, recipientKey: safeRecipientKey(contactKey) },
             'share recipient state: attempt record read failed - reading the recipient as in flight (safe)',
           );
           facts.record = 'unreadable';

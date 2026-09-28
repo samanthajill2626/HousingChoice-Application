@@ -179,6 +179,15 @@ describe('resolveRecipientStates and priorRecipientKeys', () => {
     expect(states.get('c3')?.state).toBe('in_flight');
     expect(capture.atLevel(40).length).toBe(2);
   });
+  it('a failed record read of a PHONE-keyed slot logs the key redacted, never the phone', async () => {
+    const { deps: d, capture } = deps({ recordThrows: true });
+    const states = await resolveRecipientStates(d, item('failed', { 'phone#+15550001111': slot({ status: 'queued' }) }), { recordReads: true });
+    expect(states.get('phone#+15550001111')?.state).toBe('in_flight');
+    const warns = capture.atLevel(40);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatchObject({ broadcastId: 'b1', recipientKey: 'phone#redacted' });
+    expect(JSON.stringify(warns[0])).not.toContain('5550001111');
+  });
   it('reads run at most 8 at a time', async () => {
     let inFlight = 0;
     let peak = 0;

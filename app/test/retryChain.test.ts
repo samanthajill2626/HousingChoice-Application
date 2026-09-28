@@ -10,6 +10,7 @@ import {
   automaticAncestry,
   conversationRetryDecline,
   resolveRetryRoot,
+  RETRY_ROOT_WALK_MAX_HOPS,
   retryRecipientKey,
 } from '../src/services/retryChain.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -96,7 +97,7 @@ describe('resolveRetryRoot (spec section 0)', () => {
     expect(await resolveRetryRoot(world.messagesRepo, r1)).toBe(r1.tsMsgId);
   });
 
-  it('stops after MAX_SEND_RETRY_ATTEMPTS (3) hops on a deeper pre-deploy chain', async () => {
+  it('a pre-deploy manual Retry of a full three-rung ladder reaches the TRUE root four hops up (FW3, planner re-review R4: past the old MAX_SEND_RETRY_ATTEMPTS bound)', async () => {
     const world = createFakeWorld();
     const root = await row(world, 'SMroot', 0);
     const r1 = await row(world, 'SMr1', 1, auto(root, 1));
@@ -104,9 +105,51 @@ describe('resolveRetryRoot (spec section 0)', () => {
     const r3 = await row(world, 'SMr3', 3, auto(r2, 3));
     const manual = await row(world, 'SMmanual', 4, { retryOf: r3.tsMsgId });
     const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
-    // Three hops from the manual row reach r1; the root is a fourth hop away.
-    expect(await resolveRetryRoot(world.messagesRepo, manual)).toBe(r1.tsMsgId);
-    expect(reads).toHaveBeenCalledTimes(3);
+    // Three hops from the manual row reach r1; the fourth reaches the root (the old bound of 3 answered r1).
+    expect(await resolveRetryRoot(world.messagesRepo, manual)).toBe(root.tsMsgId);
+    expect(reads).toHaveBeenCalledTimes(4);
+  });
+
+  it('a pre-deploy MIXED chain, none carrying retry_root - root <- a1 <- a2 <- a3 <- manual M <- M\'s own attempt 1 - resolves the TRUE root from that attempt in exactly five consistent reads (FW3, planner re-review R4)', async () => {
+    const world = createFakeWorld();
+    const root = await row(world, 'SMroot', 0);
+    const a1 = await row(world, 'SMa1', 1, auto(root, 1));
+    const a2 = await row(world, 'SMa2', 2, auto(a1, 2));
+    const a3 = await row(world, 'SMa3', 3, auto(a2, 3));
+    const manual = await row(world, 'SMmanual', 4, { retryOf: a3.tsMsgId });
+    const m1 = await row(world, 'SMm1', 5, auto(manual, 1));
+    const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
+    expect(await resolveRetryRoot(world.messagesRepo, m1)).toBe(root.tsMsgId);
+    expect(reads.mock.calls).toStrictEqual([
+      [CONV, manual.tsMsgId],
+      [CONV, a3.tsMsgId],
+      [CONV, a2.tsMsgId],
+      [CONV, a1.tsMsgId],
+      [CONV, root.tsMsgId],
+    ]);
+  });
+
+  it('stops after RETRY_ROOT_WALK_MAX_HOPS (12) hops on a deeper pre-deploy chain: the 12th parent - the last row read - is the answer', async () => {
+    const world = createFakeWorld();
+    // Fourteen legacy rows, none carrying retry_root: the root, then three-rung automatic ladders, each
+    // restarted by a manual Retry of its last rung (root, a1-a3, M1, b1-b3, M2, c1-c3, M3, d1).
+    const chain = [await row(world, 'SMc0', 0)];
+    for (let i = 1; i <= 13; i += 1) {
+      const parent = chain[i - 1]!;
+      const rung = i % 4;
+      chain.push(await row(world, `SMc${i}`, i, rung === 0 ? { retryOf: parent.tsMsgId } : auto(parent, rung)));
+    }
+    const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
+    // Twelve hops from chain[13] read chain[12] down to chain[1]; the root is a thirteenth hop away.
+    expect(await resolveRetryRoot(world.messagesRepo, chain[13]!)).toBe(chain[1]!.tsMsgId);
+    expect(reads).toHaveBeenCalledTimes(12);
+    expect(reads.mock.calls.map(([, tsMsgId]) => tsMsgId)).toStrictEqual(
+      chain
+        .slice(1, 13)
+        .reverse()
+        .map((m) => m.tsMsgId),
+    );
+    expect(RETRY_ROOT_WALK_MAX_HOPS).toBe(12);
   });
 });
 

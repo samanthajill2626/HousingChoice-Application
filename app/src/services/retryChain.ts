@@ -19,10 +19,21 @@ export interface LineageReader {
   getByTsMsgIdConsistent(conversationId: string, tsMsgId: string): Promise<MessageItem | undefined>;
 }
 
-/** Spec section 0: the chain ROOT of `row` - its retry_root when it carries one; a row with no retry_of is its own root; a pre-deploy retry row is walked up retry_of (consistent reads, at most MAX_SEND_RETRY_ATTEMPTS hops); a broken link stops at the last row read. */
+/**
+ * FW3 (planner re-review R4): the bound of resolveRetryRoot's LEGACY walk ONLY - automaticAncestry keeps
+ * MAX_SEND_RETRY_ATTEMPTS (it walks automatic rows only). A manual Retry extends a chain past three rows: three
+ * manual retries each carrying a full three-rung automatic ladder are 3 x (1 + 3) = 12 rows, which a walk up from
+ * the deepest of them crosses within 12 hops (a root's own ladder above the first manual retry adds up to three
+ * more rows). Every row appended since retry-send-adoption carries retry_root and returns at hop 0, so only
+ * pre-deploy rows pay the reads - and a wrong root would be written once and inherited by every later row of the
+ * chain.
+ */
+export const RETRY_ROOT_WALK_MAX_HOPS = 12;
+
+/** Spec section 0: the chain ROOT of `row` - its retry_root when it carries one; a row with no retry_of is its own root; a pre-deploy retry row is walked up retry_of (consistent reads, at most RETRY_ROOT_WALK_MAX_HOPS hops); a broken link or the bound stops at the last row read. */
 export async function resolveRetryRoot(messages: LineageReader, row: MessageItem): Promise<string> {
   let current = row;
-  for (let hop = 0; hop < MAX_SEND_RETRY_ATTEMPTS; hop += 1) {
+  for (let hop = 0; hop < RETRY_ROOT_WALK_MAX_HOPS; hop += 1) {
     if (typeof current.retry_root === 'string' && current.retry_root.length > 0) return current.retry_root;
     if (typeof current.retry_of !== 'string' || current.retry_of.length === 0) return current.tsMsgId;
     const parent = await messages.getByTsMsgIdConsistent(row.conversationId, current.retry_of);

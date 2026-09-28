@@ -108,6 +108,12 @@ import {
 import { automaticAncestry, retryRecipientKey } from '../services/retryChain.js';
 import { refreshRetryPromise, withdrawRetryPromise } from '../services/retryPromiseWrites.js';
 import {
+  applyLaterAttemptBounded,
+  type AttemptOutcome,
+  type ShareAttemptOutcomeDeps,
+} from '../services/shareAttemptOutcome.js';
+import { rowlessAttemptKey } from '../lib/shareAttemptOrder.js';
+import {
   attemptKey,
   createSendAttemptsRepo,
   type SendAttemptFacts,
@@ -331,7 +337,14 @@ interface Ctx {
   contacts: ContactsRepo;
   conversations: ConversationsRepo;
   attempts: SendAttemptsRepo;
+  /** share-sent-outcome D7: the listing-send ledger a share retry's slot write updates (the adoption's own repo). */
+  listingSends: ListingSendsRepo;
   adopt: AdoptDeps;
+}
+
+/** share-sent-outcome D2/D7: what a share retry's slot write (applyLaterAttemptBounded) runs through. */
+function shareDeps(c: Ctx): ShareAttemptOutcomeDeps {
+  return { broadcasts: c.broadcasts, ledger: { listingSends: c.listingSends, log: c.log }, events: c.events, log: c.log };
 }
 
 /** The owner as the job re-reads it: the RAW recipient key resolved from the payload's hash. */
@@ -391,7 +404,23 @@ type UnresolvedCause =
   | 'second_unknown'
   | 'enqueue_failed';
 
-type Found = { kind: 'found'; sid: string; adoption: 'adopted' | 'skipped'; status: DeliveryStatus };
+/**
+ * A found verdict. share-sent-outcome D2: a RETRY adoption (adoptRetry, and
+ * ownRetryRow's own-row proof) also names the attempt it found - its row's
+ * tsMsgId, the failure code, the provider's carrier instant (date_sent; a
+ * stored row keeps none) and the row's send-time recipient contact - so the
+ * found arm can move a share's ORIGINAL slot before the record closes.
+ */
+type Found = {
+  kind: 'found';
+  sid: string;
+  adoption: 'adopted' | 'skipped';
+  status: DeliveryStatus;
+  tsMsgId?: string;
+  errorCode?: string;
+  carrierSentAt?: string;
+  recipientContactId?: string;
+};
 
 type Verdict =
   | (Found & { path: 'known_sid' | 'lookup' })
@@ -421,6 +450,7 @@ export function registerSendReconcileJobHandler(deps: SendReconcileJobDeps = {})
     const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo(repoDeps);
     const contacts = deps.contactsRepo ?? createContactsRepo(repoDeps);
     const conversations = deps.conversationsRepo ?? createConversationsRepo(repoDeps);
+    const listingSends = deps.listingSendsRepo ?? createListingSendsRepo(repoDeps);
     ctx = {
       log,
       events,
@@ -430,13 +460,14 @@ export function registerSendReconcileJobHandler(deps: SendReconcileJobDeps = {})
       contacts,
       conversations,
       attempts: deps.sendAttemptsRepo ?? createSendAttemptsRepo(repoDeps),
+      listingSends,
       adopt: {
         broadcasts,
         contacts,
         conversations,
         messages,
         activityEvents: deps.activityEventsRepo ?? createActivityEventsRepo(repoDeps),
-        listingSends: deps.listingSendsRepo ?? createListingSendsRepo(repoDeps),
+        listingSends,
         audit: deps.auditRepo ?? createAuditRepo(repoDeps),
         events,
         log,
@@ -539,6 +570,15 @@ async function runCheck(c: Ctx, payload: SendReconcilePayload): Promise<void> {
   const verdict = record.sid !== undefined ? await adoptKnown(c, r, record, record.sid) : await lookup(c, r, record, payload.checkNo);
   switch (verdict.kind) {
     case 'found': {
+      // share-sent-outcome D2 (site 5): a share retry's found attempt reaches
+      // the share's ORIGINAL slot BEFORE the record closes - a crash between
+      // the two leaves the record reconciling, and the redelivered check
+      // re-finds the row through its own child pointer and re-runs this (a
+      // replay the transition reads as applied). Bounded, never propagated
+      // (plan deviation 11).
+      if (r.owner.kind === 'retry_send' && typeof r.row?.broadcast_id === 'string' && verdict.tsMsgId !== undefined) {
+        await adoptedShareRetry(c, r.owner, r.row.broadcast_id, verdict, verdict.tsMsgId, base);
+      }
       const closed = await c.attempts.closeFromReconcile(r.owner, record.attemptedAt, { outcome: 'adopted', sid: verdict.sid });
       c.log.info(
         {
@@ -901,6 +941,10 @@ async function adoptRetry(
     retryRoot: o.retryRoot,
     ...(retried.broadcast_id !== undefined && { broadcastId: retried.broadcast_id }),
   });
+  // share-sent-outcome D2: the send-time contact the found row names (the
+  // ledger's contact for a phone-keyed share slot) - this append's, or on a
+  // repair the stored row's own.
+  let foundRecipient = recipientContactId;
   if (appended.deduped) {
     // A dedupe is not by itself "lost": the stored row is read consistently, and only THIS attempt's own row is a repair.
     const existing = await c.messages.getByProviderSidConsistent(m.providerSid);
@@ -908,6 +952,7 @@ async function adoptRetry(
       throw new Error(`send.reconcile: the row for ${m.providerSid} deduped but cannot be read back`);
     }
     if (!isRetryRowOf(existing, o)) return { kind: 'other' };
+    foundRecipient = existing.recipient_contact_id;
   } else {
     // The send wrapper's audit row, once per message: a repaired row was audited by the send that wrote it.
     try {
@@ -943,7 +988,20 @@ async function adoptRetry(
       'send.reconcile: adopted terminal failure on a retry row - the 30003 ladder does not continue from it',
     );
   }
-  return { kind: 'found', sid: m.providerSid, adoption: appended.deduped ? 'skipped' : 'adopted', status };
+  return {
+    kind: 'found',
+    sid: m.providerSid,
+    adoption: appended.deduped ? 'skipped' : 'adopted',
+    status,
+    // share-sent-outcome D2: the attempt the found arm writes onto a share's
+    // original slot - the persisted row (on a dedupe, the first write's key),
+    // its code, the provider's date_sent as the carrier instant (as the share
+    // adoption maps it) and the row's send-time contact.
+    tsMsgId: appended.tsMsgId,
+    ...(errorCode !== undefined && { errorCode }),
+    ...(m.sentAt !== undefined && { carrierSentAt: m.sentAt }),
+    ...(foundRecipient !== undefined && { recipientContactId: foundRecipient }),
+  };
 }
 
 /**
@@ -1119,7 +1177,17 @@ async function ownRetryRow(c: Ctx, r: Resolved, o: RetrySendOwner, checkNo: numb
     );
     return undefined;
   }
-  return { kind: 'found', sid: row.provider_sid, adoption: 'skipped', status: row.delivery_status, path: 'lookup' };
+  return {
+    kind: 'found',
+    sid: row.provider_sid,
+    adoption: 'skipped',
+    status: row.delivery_status,
+    path: 'lookup',
+    // share-sent-outcome D2: the row itself is the attempt (a stored row keeps no carrier instant).
+    tsMsgId: row.tsMsgId,
+    ...(row.error_code !== undefined && { errorCode: row.error_code }),
+    ...(row.recipient_contact_id !== undefined && { recipientContactId: row.recipient_contact_id }),
+  };
 }
 
 /**
@@ -1368,10 +1436,97 @@ async function closeSlot(c: Ctx, r: Resolved, code: string, bucket: 'failed' | '
         if (withdrawn === 'failed' || withdrawn === 'lost') {
           throw new Error(`send.reconcile: the retry promise withdrawal answered '${withdrawn}' - this check fails so its redelivery re-applies it`);
         }
+        // share-sent-outcome D2 (sites 1 and 2 - this arm also runs from the
+        // superseded exit's re-apply): the WITHDRAW above goes FIRST (the
+        // fact the thread and the Retry route depend on), THEN a share
+        // retry's ORIGINAL slot records the chain's row-less unresolved end.
+        // Bounded, never propagated (plan deviation 11); a re-applied write
+        // is a no-op.
+        if (typeof r.row.broadcast_id === 'string') {
+          await unresolvedShareRetry(c, r, r.owner, r.row, r.row.broadcast_id);
+        }
       }
       return;
     default:
       return unhandledOwner(r.owner);
+  }
+}
+
+/**
+ * share-sent-outcome D2: the attempt outcome a retry adoption found, mapped as
+ * the share adoption maps a provider status (adoptBroadcastRecipient):
+ * delivered -> delivered, with the provider's carrier instant; failed /
+ * undelivered -> failed with its code (no promise - an adoption decides no
+ * retry); sent (carrier-confirmed) -> sent with the instant; anything else
+ * (accepted, queued, sending) -> a bare acceptance.
+ */
+function mapAdopted(v: Found): AttemptOutcome {
+  switch (v.status) {
+    case 'delivered':
+      return { kind: 'delivered', ...(v.carrierSentAt !== undefined && { carrierSentAt: v.carrierSentAt }) };
+    case 'failed':
+    case 'undelivered':
+      return { kind: 'failed', errorCode: v.errorCode ?? 'unknown' };
+    case 'sent':
+      return { kind: 'sent', ...(v.carrierSentAt !== undefined && { carrierSentAt: v.carrierSentAt }) };
+    default:
+      return { kind: 'sent' };
+  }
+}
+
+/**
+ * share-sent-outcome D2, site 5: the found arm's write for a share retry - the
+ * ORIGINAL slot (matched by the share id and the chain root) records the
+ * found attempt. A missing share is the transition's own WARN; a root that
+ * matches no slot is a routing bug (ONE ERROR); a write that keeps throwing is
+ * applyLaterAttemptBounded's ONE ERROR. Nothing propagates.
+ */
+async function adoptedShareRetry(
+  c: Ctx,
+  o: RetrySendOwner,
+  broadcastId: string,
+  v: Found,
+  attemptKey: string,
+  base: LogBase,
+): Promise<void> {
+  const applied = await applyLaterAttemptBounded(shareDeps(c), {
+    broadcastId,
+    conversationId: o.conversationId,
+    retryRoot: o.retryRoot,
+    attemptKey,
+    outcome: mapAdopted(v),
+    ...(v.recipientContactId !== undefined && { recipientContactId: v.recipientContactId }),
+  });
+  if (applied === 'no_slot') {
+    // `base` names the owner and the recipient key (redacted).
+    c.log.error(
+      { ...base, broadcastId, retryRoot: o.retryRoot, attempt: attemptKey },
+      'send.reconcile: no matching recipient slot for an adopted share retry - a routing bug',
+    );
+  }
+}
+
+/**
+ * share-sent-outcome D2, sites 1 and 2: after the WITHDRAW of a share retry's
+ * unresolved end, the ORIGINAL slot records it as the row-less attempt
+ * ordered right after the one retried (send_unconfirmed). Same levels as the
+ * adoption's write; nothing propagates.
+ */
+async function unresolvedShareRetry(c: Ctx, r: Resolved, o: RetrySendOwner, retried: MessageItem, broadcastId: string): Promise<void> {
+  const attemptKey = rowlessAttemptKey(o.retriedTsMsgId);
+  const applied = await applyLaterAttemptBounded(shareDeps(c), {
+    broadcastId,
+    conversationId: o.conversationId,
+    retryRoot: o.retryRoot,
+    attemptKey,
+    outcome: { kind: 'unresolved' },
+    ...(retried.recipient_contact_id !== undefined && { recipientContactId: retried.recipient_contact_id }),
+  });
+  if (applied === 'no_slot') {
+    c.log.error(
+      { event: 'send_reconcile', owner: ownerLog(o), recipientKey: safeRecipientKey(r.key), broadcastId, retryRoot: o.retryRoot, attempt: attemptKey },
+      'send.reconcile: no matching recipient slot for an unresolved share retry - a routing bug',
+    );
   }
 }
 

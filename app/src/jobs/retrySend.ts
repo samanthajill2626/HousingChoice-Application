@@ -61,6 +61,10 @@ import {
 } from '../services/sendMessage.js';
 import { conversationRetryDecline, resolveRetryRoot, retryRecipientKey } from '../services/retryChain.js';
 import { refreshRetryPromise, withdrawRetryPromise, type RetryPromiseDeps } from '../services/retryPromiseWrites.js';
+import { applyLaterAttempt, type ApplyResult, type ShareAttemptOutcomeDeps } from '../services/shareAttemptOutcome.js';
+import { createBroadcastsRepo, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { rowlessAttemptKey } from '../lib/shareAttemptOrder.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext } from '../lib/context.js';
@@ -302,6 +306,14 @@ export interface RetrySendJobDeps {
   conversationsRepo?: ConversationsRepo;
   /** retry-send-adoption R1/R2: the per-(retried row, attempt) send-attempt records - the claim is this job's duplicate guard. */
   sendAttemptsRepo?: SendAttemptsRepo;
+  /**
+   * share-sent-outcome D2: a share retry's ORIGINAL slot, written at the two
+   * unresolved-end arms (second unknown, hand-off enqueue failure). Built
+   * lazily, and only when the retried row carries a share id.
+   */
+  broadcastsRepo?: BroadcastsRepo;
+  /** share-sent-outcome D7: the listing-send ledger that slot write updates. Built lazily, like broadcastsRepo. */
+  listingSendsRepo?: ListingSendsRepo;
   /** The sender the attempt's facts pin (pinnedSender: the business number, exactly as sendMessage pins it). */
   config?: AppConfig;
   /** The bus the promise REFRESH / WITHDRAW announce the retried row on (message.persisted). */
@@ -322,6 +334,8 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
   let contacts = deps.contactsRepo;
   let conversations = deps.conversationsRepo;
   let attempts = deps.sendAttemptsRepo;
+  let broadcasts = deps.broadcastsRepo;
+  let listingSends = deps.listingSendsRepo;
   let config = deps.config;
   const events = deps.events ?? appEvents;
   // MediaStore can legitimately resolve to undefined (no MEDIA_BUCKET), so a
@@ -784,6 +798,46 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     }
 
     /**
+     * share-sent-outcome D2 (sites 3 and 4): at an unresolved end of a SHARE
+     * retry (the retried row carries broadcast_id), the share's ORIGINAL slot
+     * records the chain's row-less end - send_unconfirmed, ordered right after
+     * the retried attempt - with its ledger entry. It runs FIRST at both arms
+     * (they have no re-apply: a redelivered job returns on the done record),
+     * so a crash after it costs nothing; through guardWrite, because nothing
+     * may throw after the claim - a write that fails is ONE ERROR and the
+     * record close follows as built (the repair's residue). Never called for
+     * a one-to-one text that is not a share.
+     */
+    async function markShareUnconfirmed(owner: RetrySendOwner, retried: MessageItem, octx: Ctx): Promise<void> {
+      const broadcastId = retried.broadcast_id;
+      if (typeof broadcastId !== 'string') return;
+      const attemptKey = rowlessAttemptKey(owner.retriedTsMsgId);
+      // The transition's answer, captured inside the guard (guardWrite reports only that the write resolved).
+      const result: { applied?: ApplyResult } = {};
+      await guardWrite(log, octx, 'shareSlotUnconfirmed', async () => {
+        const shareOutcome: ShareAttemptOutcomeDeps = {
+          broadcasts: (broadcasts ??= createBroadcastsRepo({ logger: deps.logger })),
+          ledger: { listingSends: (listingSends ??= createListingSendsRepo({ logger: deps.logger })), log },
+          events,
+          log,
+          now,
+        };
+        result.applied = await applyLaterAttempt(shareOutcome, {
+          broadcastId,
+          conversationId: owner.conversationId,
+          retryRoot: owner.retryRoot,
+          attemptKey,
+          outcome: { kind: 'unresolved' },
+          ...(retried.recipient_contact_id !== undefined && { recipientContactId: retried.recipient_contact_id }),
+        });
+      });
+      // A root that matches no slot is a routing bug (every site logs it so).
+      if (result.applied === 'no_slot') {
+        log.error({ ...octx, broadcastId, attempt: attemptKey }, 'retrySend: no matching recipient slot for a share retry - a routing bug');
+      }
+    }
+
+    /**
      * Enqueue check 0 of the send.reconcile chain (never throws) and REFRESH the
      * promise to cover the whole schedule. An enqueue that fails closes the
      * attempt unresolved (a send may have happened) and WITHDRAWS the promise -
@@ -796,6 +850,9 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
           reconcileDelayMs(attemptedAt, 0, now()),
         );
       } catch (err) {
+        // share-sent-outcome D2 (site 4): the share slot FIRST, guarded - this
+        // arm has no re-apply, so the write goes before the record close.
+        await markShareUnconfirmed(owner, retried, octx);
         let closed = false;
         const wrote = await guardWrite(log, octx, 'closeFromReconcile', async () => {
           closed = await attemptsRepo.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE });
@@ -857,6 +914,9 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
       octx: Ctx,
     ): Promise<void> {
       if (secondUnknownWouldClose) {
+        // share-sent-outcome D2 (site 3): the share slot FIRST, guarded - this
+        // arm has no re-apply, so the write goes before the record close.
+        await markShareUnconfirmed(owner, retried, octx);
         const closed = await finish(owner, ref, { outcome: 'unresolved', cause: 'second_unknown' }, octx);
         const line = { err, ...octx, cause: 'second_unknown', outcome: 'unresolved' };
         if (closed !== 'won') {

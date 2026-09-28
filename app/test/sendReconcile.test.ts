@@ -64,7 +64,9 @@ import {
   RECONCILE_WINDOW_LEAD_MS,
   RECONCILE_WINDOW_TRAIL_MS,
   SEND_CLAIM_TTL_MS,
+  SEND_UNCONFIRMED_CODE,
 } from '../src/lib/sendOutcome.js';
+import { rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
 import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationParticipant } from '../src/repos/conversationsRepo.js';
@@ -4011,6 +4013,206 @@ describe('send.reconcile (spec D11-D16)', () => {
     });
 
     // ---- deviation 7 and worklist item 10: a share-RETRY row is never the share's own row ----
+
+    // ---- share-sent-outcome T6: a share retry's outcome reaches the ORIGINAL slot ----
+
+    /**
+     * A SHARE root (the retried row of attempt 1): the one-to-one 30003 row
+     * stamped with `broadcastId`, and that share (unit unit-1) whose slot
+     * c-retry failed 30003 on it. Returns the stored root row.
+     */
+    async function seedShareRoot(sid = 'SMshare-root', broadcastId = 'b-9'): Promise<MessageItem> {
+      const root = await seedRow(sid, { providerTs: iso(Date.now() - 20_000), broadcastId });
+      root.retry_due_at = iso(Date.now() + 10_000);
+      world.broadcasts.set(broadcastId, {
+        broadcastId,
+        created_by: 'usr_test',
+        created_at: iso(Date.now() - 60_000),
+        status: 'sent',
+        unitId: 'unit-1',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: BODY,
+        stats: { audience: 1, sent: 0, delivered: 0, failed: 1, unconfirmed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+        recipients: { 'c-retry': { status: 'failed', errorCode: '30003', conversationId: retryConv, tsMsgId: root.tsMsgId } },
+        updated_at: iso(Date.now() - 60_000),
+      });
+      return root;
+    }
+    const shareSlot = (broadcastId = 'b-9') => world.broadcasts.get(broadcastId)!.recipients['c-retry']!;
+    const failArmLines = () => capture.atLevel(50).filter((l) => String(l['msg']).includes('share slot write failed'));
+
+    it('share-sent-outcome: adopting a share retry (found, adopted) moves the original slot as a newer attempt BEFORE the record closes - the slot write precedes closeFromReconcile in call order; the ledger counts by delivery', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      const sentAt = new Date().toISOString();
+      plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', to: TENANT_PHONE, sentAt });
+      const slotSpy = vi.spyOn(world.broadcastsRepo, 'applyAttemptOutcome');
+      const closeSpy = vi.spyOn(world.sendAttemptsRepo, 'closeFromReconcile');
+      await runCheck(payloadOf(owner, at));
+      const adopted = retryRow(root.tsMsgId, 1)!;
+      expect(adopted).toMatchObject({ broadcast_id: 'b-9', retry_root: root.tsMsgId });
+      expect(slotSpy).toHaveBeenCalledTimes(1);
+      expect(slotSpy.mock.invocationCallOrder[0]!).toBeLessThan(closeSpy.mock.invocationCallOrder[0]!);
+      expect(shareSlot()).toEqual({ status: 'delivered', conversationId: retryConv, tsMsgId: root.tsMsgId, latestAttempt: adopted.tsMsgId, carrierSentAt: sentAt });
+      expect(world.broadcasts.get('b-9')!.stats).toMatchObject({ failed: 0, delivered: 1 });
+      expect((await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-retry'))?.shares?.['b-9']).toMatchObject({ attempt: adopted.tsMsgId, state: 'counted', by: 'delivery' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-share' });
+      expect(world.emitted.filter((e) => e.event === 'broadcast.updated' && (e.payload as { broadcastId: string }).broadcastId === 'b-9')).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('share-sent-outcome: a transient slot-write fault at the adoption hook is retried and the slot lands', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', to: TENANT_PHONE });
+      let calls = 0;
+      const real = world.broadcastsRepo.applyAttemptOutcome.bind(world.broadcastsRepo);
+      world.broadcastsRepo.applyAttemptOutcome = async (...a) => {
+        calls += 1;
+        if (calls === 1) throw new Error('dynamo blip');
+        return real(...a);
+      };
+      await runCheck(payloadOf(owner, at));
+      expect(calls).toBe(2);
+      expect(shareSlot().status).toBe('delivered');
+      expect(world.broadcasts.get('b-9')!.stats).toMatchObject({ failed: 0, delivered: 1 });
+      expect((await recordOf(owner))?.outcome).toBe('adopted');
+      expect(failArmLines()).toHaveLength(0);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('share-sent-outcome: a permanent slot-write fault at the adoption hook is ONE ERROR and the record still closes adopted (never a failed check)', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', to: TENANT_PHONE });
+      let calls = 0;
+      world.broadcastsRepo.applyAttemptOutcome = async () => {
+        calls += 1;
+        throw new Error('Item size has exceeded the maximum allowed size');
+      };
+      await runCheck(payloadOf(owner, at));
+      expect(calls).toBe(3);
+      expect(failArmLines()).toHaveLength(1);
+      expect(failArmLines()[0]).toMatchObject({ broadcastId: 'b-9', retryRoot: root.tsMsgId });
+      expect(capture.atLevel(50)).toHaveLength(1);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-share' });
+      expect(shareSlot()).toMatchObject({ status: 'failed', errorCode: '30003' });
+    });
+
+    it('share-sent-outcome: a process crash between the adoption hook and the record close (the close throws once) leaves the record reconciling; the redelivered check re-finds the adopted row through its child pointer and re-runs the hook as a de-duplicated re-adoption', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', to: TENANT_PHONE, sentAt: new Date().toISOString() });
+      let thrown = false;
+      const realClose = world.sendAttemptsRepo.closeFromReconcile.bind(world.sendAttemptsRepo);
+      world.sendAttemptsRepo.closeFromReconcile = async (...a) => {
+        if (!thrown) {
+          thrown = true;
+          throw new Error('crash');
+        }
+        return realClose(...a);
+      };
+      await expect(runCheck(payloadOf(owner, at))).rejects.toThrow('crash');
+      expect((await recordOf(owner))?.state).toBe('reconciling');
+      expect(shareSlot().status).toBe('delivered');   // the hook ran before the close
+      const slotWrites = vi.spyOn(world.broadcastsRepo, 'applyAttemptOutcome');
+      await runCheck(payloadOf(owner, at));   // the same check, redelivered
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-share' });
+      expect(lines(30).filter((l) => l['verdict'] === 'found').at(-1)).toMatchObject({ adoption: 'skipped', path: 'lookup' });
+      expect(slotWrites).not.toHaveBeenCalled();   // the slot already records it: no second write
+      expect(world.broadcasts.get('b-9')!.stats).toMatchObject({ failed: 0, delivered: 1 });
+      expect(world.messages.filter((m) => m.provider_sid === 'SMorphan-share')).toHaveLength(1);
+    });
+
+    it('share-sent-outcome 10a: adopting a share retry whose broadcast item is missing logs WARN and still closes adopted', async () => {
+      register();
+      await seedOneToOne();
+      const share = await seedRow('SMroot-share', { broadcastId: 'bcast-9', author: 'ai', automated: true });
+      const owner = rOwner(share, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-share', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('broadcast not found'))).toHaveLength(1);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-share' });
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('share-sent-outcome: an adopted share retry whose root matches no slot is ONE ERROR (a routing bug) and still closes adopted', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      world.broadcasts.get('b-9')!.recipients = { 'c-retry': { status: 'failed', errorCode: '30003', conversationId: retryConv, tsMsgId: 'another-row' } };
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      const noSlot = capture.atLevel(50).filter((l) => String(l['msg']).includes('no matching recipient slot'));
+      expect(noSlot).toHaveLength(1);
+      expect(noSlot[0]).toMatchObject({ event: 'send_reconcile', broadcastId: 'b-9', retryRoot: root.tsMsgId });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted' });
+    });
+
+    it('share-sent-outcome: an unresolved close of a share retry withdraws the promise, then writes send_unconfirmed on the original slot as a row-less attempt; the redelivered check re-applies both as no-ops; ONE unresolved ERROR in total', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      world.adapter.listMessages = async () => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      };
+      const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+      const slotWrites = vi.spyOn(world.broadcastsRepo, 'applyAttemptOutcome');
+      await runChain(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'provider_unreachable' });
+      // The WITHDRAW first, then the slot.
+      expect(annotate.mock.invocationCallOrder[0]!).toBeLessThan(slotWrites.mock.invocationCallOrder[0]!);
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      expect(shareSlot()).toEqual({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, conversationId: retryConv, tsMsgId: root.tsMsgId, latestAttempt: rowlessAttemptKey(root.tsMsgId) });
+      expect(world.broadcasts.get('b-9')!.stats).toMatchObject({ failed: 0, unconfirmed: 1 });
+      expect((await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-retry'))?.shares?.['b-9']).toMatchObject({ attempt: rowlessAttemptKey(root.tsMsgId), state: 'unconfirmed' });
+      expect(capture.atLevel(50)).toHaveLength(1);
+      expect(got).toEqual([]);
+      // A redelivered last check finds the record done for its own attempt: both re-apply as no-ops.
+      await runCheck({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 2 });
+      expect(slotWrites).toHaveBeenCalledTimes(1);
+      expect(world.broadcasts.get('b-9')!.stats).toMatchObject({ failed: 0, unconfirmed: 1 });
+      expect(capture.atLevel(50)).toHaveLength(1);
+    });
+
+    it('share-sent-outcome: at the unresolved close the WITHDRAW runs first - a permanently failing slot write is ONE ERROR, the promise is still withdrawn and the check does not fail', async () => {
+      register();
+      recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      world.adapter.listMessages = async () => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      };
+      world.broadcastsRepo.applyAttemptOutcome = async () => {
+        throw new Error('Item size has exceeded the maximum allowed size');
+      };
+      await runChain(payloadOf(owner, at));
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved' });
+      expect(failArmLines()).toHaveLength(1);
+      expect(capture.atLevel(50).filter((l) => l['msg'] === 'job failed: send.reconcile')).toHaveLength(0);
+      expect(shareSlot()).toMatchObject({ status: 'failed', errorCode: '30003' });
+    });
 
     it('isBroadcastRowFor never claims a share-RETRY row (retry_of set) for the share recipient - not even the row its slot carries (deviation 7)', () => {
       const owner = { broadcastId: 'b-1', contactId: 'c-1', slotTsMsgId: undefined };

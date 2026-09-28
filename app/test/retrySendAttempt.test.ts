@@ -46,6 +46,8 @@ import {
   RETRY_WINDOW_CLOSED_CODE,
 } from '../src/lib/retrySendWindow.js';
 import { bodyFingerprint, hashRecipientKey, recipientDigest } from '../src/lib/sendFingerprint.js';
+import { SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
+import { rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
 import type { MessageItem, NewMessage } from '../src/repos/messagesRepo.js';
 import type { SendAttemptFacts, SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
@@ -110,6 +112,9 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
       contactsRepo: world.contactsRepo,
       conversationsRepo: world.conversationsRepo,
       sendAttemptsRepo: world.sendAttemptsRepo,
+      // share-sent-outcome T6: the two unresolved-end arms write a share retry's slot and ledger entry.
+      broadcastsRepo: world.broadcastsRepo,
+      listingSendsRepo: world.listingSendsRepo,
       config,
       events: world.events,
       logger,
@@ -1365,6 +1370,109 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
       expect.objectContaining({ cause: 'enqueue_failed', outcome: 'unresolved', retriedTsMsgId: failed.tsMsgId }),
       expect.objectContaining({ cause: 'enqueue_failed', outcome: 'unresolved', retriedTsMsgId: lost.tsMsgId }),
     ]);
+  });
+
+  // ---- share-sent-outcome T6: the job's two unresolved-end arms write the share slot FIRST ----
+
+  /**
+   * A share root as the retried row (attempt 1): the 30003 row stamped with
+   * broadcast b-1, and that share (unit unit-1) whose slot c-real failed 30003
+   * on it. Returns the stored row.
+   */
+  async function seedShareRetried(sid: string): Promise<MessageItem> {
+    const row = await seedRetried(sid, { broadcastId: 'b-1' });
+    world.broadcasts.set('b-1', {
+      broadcastId: 'b-1',
+      created_by: 'usr_test',
+      created_at: iso(Date.now() - 60_000),
+      status: 'sent',
+      unitId: 'unit-1',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: BODY,
+      stats: { audience: 1, sent: 0, delivered: 0, failed: 1, unconfirmed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      recipients: { 'c-real': { status: 'failed', errorCode: '30003', conversationId: row.conversationId, tsMsgId: row.tsMsgId } },
+      updated_at: iso(Date.now() - 60_000),
+    });
+    return row;
+  }
+
+  it('share-sent-outcome: second unknown on a share retry - the original slot reads send_unconfirmed as a row-less attempt and the slot write PRECEDES the record close in call order; still ONE close ERROR', async () => {
+    wire();
+    unknownOn();
+    const row = await seedShareRetried('SMshare1');
+    await seedRedriven(ownerOf(row, 1), factsFor(row));
+    const slotSpy = vi.spyOn(world.broadcastsRepo, 'applyAttemptOutcome');
+    const finishSpy = vi.spyOn(world.sendAttemptsRepo, 'finishAttempt');
+    await run(row);
+    expect(slotSpy).toHaveBeenCalledTimes(1);
+    expect(slotSpy.mock.invocationCallOrder[0]!).toBeLessThan(finishSpy.mock.invocationCallOrder[0]!);
+    expect(world.broadcasts.get('b-1')!.recipients['c-real']).toEqual({
+      status: 'failed',
+      errorCode: SEND_UNCONFIRMED_CODE,
+      conversationId: row.conversationId,
+      tsMsgId: row.tsMsgId,
+      latestAttempt: rowlessAttemptKey(row.tsMsgId),
+    });
+    expect(world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, unconfirmed: 1 });
+    expect((await world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-real'))?.shares?.['b-1']).toMatchObject({ state: 'unconfirmed' });
+    expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'second_unknown' });
+    expect(row).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    expect(capture.atLevel(ERROR)).toEqual([
+      expect.objectContaining({ msg: 'retrySend: unknown send outcome after a re-drive - attempt closed unresolved; the retry promise is withdrawn' }),
+    ]);
+  });
+
+  it('share-sent-outcome: a hand-off enqueue failure on a share retry - the slot write goes first (before the record close), then the close and the WITHDRAW; ONE close ERROR', async () => {
+    wire();
+    unknownOn();
+    refuseEnqueues((jobName) => jobName === SEND_RECONCILE_JOB);
+    const row = await seedShareRetried('SMshare2');
+    const slotSpy = vi.spyOn(world.broadcastsRepo, 'applyAttemptOutcome');
+    const closeSpy = vi.spyOn(world.sendAttemptsRepo, 'closeFromReconcile');
+    await run(row);
+    expect(slotSpy.mock.invocationCallOrder[0]!).toBeLessThan(closeSpy.mock.invocationCallOrder[0]!);
+    expect(world.broadcasts.get('b-1')!.recipients['c-real']).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, latestAttempt: rowlessAttemptKey(row.tsMsgId) });
+    expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+    expect(capture.atLevel(ERROR)).toEqual([
+      expect.objectContaining({ msg: 'retrySend: reconcile enqueue failed - attempt closed unresolved; the retry promise is withdrawn' }),
+    ]);
+  });
+
+  it('share-sent-outcome: a hand-off enqueue failure on a share retry whose slot write THROWS - ONE guard ERROR and the close still runs', async () => {
+    wire();
+    unknownOn();
+    refuseEnqueues((jobName) => jobName === SEND_RECONCILE_JOB);
+    const row = await seedShareRetried('SMshare3');
+    world.broadcastsRepo.applyAttemptOutcome = async () => {
+      throw new Error('dynamo down');
+    };
+    await run(row);
+    expect(capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('failure-arm write failed'))).toEqual([
+      expect.objectContaining({ label: 'shareSlotUnconfirmed', retriedTsMsgId: row.tsMsgId }),
+    ]);
+    expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+    expect(row).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    expect(world.broadcasts.get('b-1')!.recipients['c-real']).toMatchObject({ status: 'failed', errorCode: '30003' });
+  });
+
+  // "A later attempt supersedes the unconfirmed slot the job wrote": after the
+  // job closes the record nothing adopts, so the superseding attempt is a NEW
+  // one (a staff Retry row's receipt). That path is Task 4's service test
+  // ("a LATER real attempt supersedes it") and Task 5's webhook route; no job
+  // test claims it.
+  it('share-sent-outcome: a retry of a one-to-one text that is NOT a share (no broadcast_id) writes no slot and reads no broadcast - at either arm', async () => {
+    wire();
+    unknownOn();
+    const reads = vi.spyOn(world.broadcastsRepo, 'getByIdConsistent');
+    const plain = await seedRetried('SMplain-su');
+    await seedRedriven(ownerOf(plain, 1), factsFor(plain));
+    await run(plain);
+    expect(await recordOf(plain)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'second_unknown' });
+    refuseEnqueues((jobName) => jobName === SEND_RECONCILE_JOB);
+    const plain2 = await seedRetried('SMplain-ho');
+    await run(plain2);
+    expect(await recordOf(plain2)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+    expect(reads).not.toHaveBeenCalled();
   });
 
   // ---- A-6: the manual Retry route reads the record KEY this job writes ----

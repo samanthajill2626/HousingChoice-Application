@@ -1083,4 +1083,46 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(read).not.toHaveBeenCalled();
     expect(world.sent).toHaveLength(2);
   });
+
+  // ---- code review round 1, fix wave FW1 --------------------------------------------
+
+  it('FW1 C-1 (4a): a re-driven attempt superseded by a manual child whose decline close THROWS fails the delivery (R2: a throw before the claim; SQS redelivers) - the record stays redriven, nothing is sent; the redelivery closes it done/refused manual_retry_superseded', async () => {
+    wire();
+    const calls = providerCalls();
+    const superseded = 'retrySend: a manual retry superseded this attempt';
+    const row = await seedRetried('SMc1manual');
+    await world.messagesRepo.append({ ...outboundRow('SMc1child', Date.now() + 1_000, row.conversationId), retryOf: row.tsMsgId, automated: false });
+    await seedRedriven(ownerOf(row, 1), factsFor(row));
+    vi.spyOn(world.sendAttemptsRepo, 'closeRedriven').mockRejectedValueOnce(new Error('closeRedriven exploded'));
+    const envelope = await envelopeFor(row);
+    await expect(dispatch(envelope)).rejects.toThrow('closeRedriven exploded');
+    expect(await recordOf(row)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+    expect(msgLines(INFO, superseded)).toHaveLength(0);
+    await dispatch(envelope); // the SQS redelivery re-runs the idempotent decline
+    expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'refused', cause: 'manual_retry_superseded' });
+    expect(msgLines(INFO, superseded)).toEqual([expect.objectContaining({ cause: 'manual_retry_superseded', retriedTsMsgId: row.tsMsgId })]);
+    // Zero provider calls throughout; the throw was never swallowed as a failure-arm write.
+    expect(calls).not.toHaveBeenCalled();
+    expect(world.sent).toHaveLength(0);
+    expect(capture.atLevel(ERROR).map((l) => l['msg'])).toEqual(['job failed: messaging.retrySend']);
+  });
+
+  it('FW1 C-1 (4b): a re-driven attempt whose job finds the window closed and whose decline close THROWS fails the delivery - the record stays redriven, nothing is sent; the redelivery closes it done/refused retry_window_closed with its ONE window ERROR', async () => {
+    wire();
+    const calls = providerCalls();
+    const late = await seedRetried('SMc1late', { providerTs: iso(Date.now() - 16 * 60_000) });
+    await seedRedriven(ownerOf(late, 1), factsFor(late));
+    vi.spyOn(world.sendAttemptsRepo, 'closeRedriven').mockRejectedValueOnce(new Error('closeRedriven exploded'));
+    const envelope = await envelopeFor(late);
+    await expect(dispatch(envelope)).rejects.toThrow('closeRedriven exploded');
+    expect(await recordOf(late)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+    await dispatch(envelope); // the SQS redelivery re-runs the idempotent decline
+    expect(await recordOf(late)).toMatchObject({ state: 'done', outcome: 'refused', cause: RETRY_WINDOW_CLOSED_CODE });
+    expect(calls).not.toHaveBeenCalled();
+    expect(world.sent).toHaveLength(0);
+    expect(capture.atLevel(ERROR).map((l) => l['msg'])).toEqual([
+      'job failed: messaging.retrySend',
+      'retrySend: retry window closed - retry chain ended without sending',
+    ]);
+  });
 });

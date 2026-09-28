@@ -675,15 +675,14 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
      * A decline before the claim (4a, 4b): a REDRIVEN record is closed
      * done/refused with the cause (SOR D8 rev 11 - the reconcile never revisits
      * a redriven record, so it would strand); on done/retryable or no record
-     * nothing is written (a redelivery re-runs the same decline).
+     * nothing is written (a redelivery re-runs the same decline). The close is
+     * a step BEFORE the claim, so it is NOT a failure-arm write (code review
+     * r1 C-1): a close that throws fails the delivery, SQS redelivers it, and
+     * the redelivery re-runs this idempotent decline (R2).
      */
     async function declineBeforeClaim(owner: RetrySendOwner, redriven: boolean, cause: string, octx: Ctx): Promise<void> {
       if (!redriven) return;
-      let closed = false;
-      const wrote = await guardWrite(log, octx, 'closeRedriven', async () => {
-        closed = await attemptsRepo.closeRedriven(owner, { outcome: 'refused', cause });
-      });
-      if (wrote && !closed) {
+      if (!(await attemptsRepo.closeRedriven(owner, { outcome: 'refused', cause }))) {
         log.info({ ...octx, cause }, 'retrySend: decline not recorded - another delivery re-claimed the re-driven attempt');
       }
     }

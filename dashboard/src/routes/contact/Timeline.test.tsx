@@ -971,7 +971,8 @@ describe('Timeline', () => {
       const alert = await screen.findByRole('alert');
       expect(alert).toHaveTextContent(sentence);
       expect(alert).not.toHaveTextContent(/Couldn't send/);
-      expect(sentence).toMatch(/^[ -~]+$/);
+      // The RENDERED copy is ASCII (planner review A8a) - not this table's own literal.
+      expect(alert.textContent ?? '').toMatch(/^[ -~]+$/);
     },
   );
 

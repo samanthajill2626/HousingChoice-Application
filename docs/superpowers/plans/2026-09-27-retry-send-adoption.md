@@ -196,32 +196,32 @@ export function pinnedSender(config: { businessPhoneNumber?: string | undefined 
   }
 ```
 
-One `it` each (in the sketches below `repo` reads as `messages` and `CONV` as `ONE_CONV`; `appendOutbound` takes ONE argument):
+One `it` each:
 
 ```ts
 it('append persists retry_root beside retry_of and writes the retrychild# pointer in the same transaction', async () => {
-  const parent = await appendOutbound(repo, { providerSid: 'SMroot1', providerTs: T0 });
-  const child = await appendOutbound(repo, { providerSid: 'SMretry1', providerTs: T1, retryOf: parent.tsMsgId, retryAttempt: 1, retryRoot: parent.tsMsgId });
-  expect((await repo.getByTsMsgIdConsistent(CONV, child.tsMsgId))).toMatchObject({ retry_of: parent.tsMsgId, retry_attempt: 1, retry_root: parent.tsMsgId });
-  expect(await repo.listRetryChildrenConsistent(CONV, parent.tsMsgId)).toEqual([{ tsMsgId: child.tsMsgId, providerSid: 'SMretry1', retryAttempt: 1 }]);
+  const parent = await appendOutbound({ providerSid: 'SMroot1', providerTs: T0 });
+  const child = await appendOutbound({ providerSid: 'SMretry1', providerTs: T1, retryOf: parent.tsMsgId, retryAttempt: 1, retryRoot: parent.tsMsgId });
+  expect((await messages.getByTsMsgIdConsistent(ONE_CONV, child.tsMsgId))).toMatchObject({ retry_of: parent.tsMsgId, retry_attempt: 1, retry_root: parent.tsMsgId });
+  expect(await messages.listRetryChildrenConsistent(ONE_CONV, parent.tsMsgId)).toEqual([{ tsMsgId: child.tsMsgId, providerSid: 'SMretry1', retryAttempt: 1 }]);
 });
-it('a manual retry row (retryOf, no retryAttempt) writes a pointer with no retryAttempt; a row with no retryOf writes none', /* two appends; listRetryChildrenConsistent(CONV, parent) has one entry without retryAttempt; listRetryChildrenConsistent(CONV, child) is [] */);
+it('a manual retry row (retryOf, no retryAttempt) writes a pointer with no retryAttempt; a row with no retryOf writes none', /* two appends; listRetryChildrenConsistent(ONE_CONV, parent) has one entry without retryAttempt; listRetryChildrenConsistent(ONE_CONV, child) is [] */);
 it('a deduped append (same providerSid) writes no second pointer', /* append the same child twice -> deduped: true; the list still has ONE entry */);
-it('the pointer read is a single consistent Query on the retrychild# partition', /* wrap the DynamoDB client (the file\'s doc client) with a spy on `send`; call listRetryChildrenConsistent; expect exactly one QueryCommand whose input has ConsistentRead: true and KeyConditionExpression on `:p` = retryChildPk(CONV, parent) and no FilterExpression */);
+it('the pointer read is a single consistent Query on the retrychild# partition', /* wrap the DynamoDB client (the file\'s doc client) with a spy on `send`; call listRetryChildrenConsistent; expect exactly one QueryCommand whose input has ConsistentRead: true and KeyConditionExpression on `:p` = retryChildPk(ONE_CONV, parent.tsMsgId) and no FilterExpression */);
 it('annotateRetryPromise writes only when retry_due_at still holds the expected value, and returns false otherwise', async () => {
-  const row = await appendOutbound(repo, { providerSid: 'SMdue1', providerTs: T0 });
+  const row = await appendOutbound({ providerSid: 'SMdue1', providerTs: T0 });
   // absent -> absent expected: written
-  expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_1 }, { retryDueAt: undefined })).toBe(true);
+  expect(await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_1 }, { retryDueAt: undefined })).toBe(true);
   // a stale expectation loses
-  expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: undefined })).toBe(false);
-  expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: 'wrong' })).toBe(false);
+  expect(await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: undefined })).toBe(false);
+  expect(await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: 'wrong' })).toBe(false);
   // the current value wins
-  expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: DUE_1 })).toBe(true);
+  expect(await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: DUE_1 })).toBe(true);
   // WITHDRAW writes both fields in one write
-  expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: 'unconfirmed' }, { retryDueAt: DUE_2 })).toBe(true);
-  expect(await repo.getByTsMsgIdConsistent(CONV, row.tsMsgId)).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+  expect(await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: 'unconfirmed' }, { retryDueAt: DUE_2 })).toBe(true);
+  expect(await messages.getByTsMsgIdConsistent(ONE_CONV, row.tsMsgId)).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
   // a missing row is false, not a throw
-  expect(await repo.annotateRetryPromise(CONV, 'nope#SMnope', { retryDueAt: DUE_1 }, { retryDueAt: undefined })).toBe(false);
+  expect(await messages.annotateRetryPromise(ONE_CONV, 'nope#SMnope', { retryDueAt: DUE_1 }, { retryDueAt: undefined })).toBe(false);
 });
 ```
 

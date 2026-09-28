@@ -77,3 +77,24 @@ retried row); the recipient key derivation (immutable row data, carried in
 the payload); the job's manual-supersession check; existing-attempt
 resolution before the window; terminal deferrals close `refused`; the
 `enqueue_failed` split. -> Round 3 with reviewer B continued.
+
+## Spec round 3 (2026-09-27) - reviewer B continued, spec revision 3 @687e53bd
+
+Report: `spec-r3-reviewer-b.md` (7 findings: 1 high, 1 medium, 5 low; two
+contests of round-2 rulings, both upheld).
+
+| # | finding | ruling | change in revision 4 |
+|---|---|---|---|
+| 1 | CONTEST r2#6/r2#3 upheld: step 4 ran the manual check and the window check only when NO record existed, so a deferral re-run and a re-drive skipped both - a late re-run could send past the window (RSW #1) and past a manual retry | ACCEPT (HIGH) | Step 4: an existing attempt is resolved first (takeover / refuse / return); then EVERY run that may send (absent, `done/retryable`, `redriven`) passes both gates; a decline on `redriven` closes the record, on `done/retryable` writes nothing (idempotent), never holds a claim. |
+| 2 | CONTEST r2#3/r2#4 upheld: R6 and 4a looked only at the pressed row; a press on an EARLIER row of the chain passes and double-sends against a pending later attempt; the "stale-tab" residual cannot occur; the real race lasts the whole manual send | ACCEPT (MEDIUM - a new route rule) | The route finds the chain's NEWEST row first (paged, bounded at the pressed row); a press on a row with a later attempt is 409 `superseded` (new dashboard copy); the record guard evaluates the newest row's records; the residual is restated as the manual send's duration. |
+| 3 | the lineage exclusion treated same-root as predecessor; a manual-retry chain and the original chain would drop each other's protection | ACCEPT | Lineage = the `retry_of` ancestry of the retried row (at most 3 reads) - the attempts that PRODUCED those rows, plus the root's broadcast owner; same root alone is not lineage. |
+| 4 | step 4a's scan had no paging or lower bound | ACCEPT | `listByConversationConsistent` paged with `before` until the page's oldest `tsMsgId` sorts before the retried row's (the ISO-leading key is the bound); R6's chain walk uses the same. |
+| 5 | R6's `reconciling` bound (360 s) is shorter than the reconcile's own SQS redelivery budget | ACCEPT | One bound for every open state: `RETRY_SEND_WINDOW_MS` from `attemptedAt`. |
+| 6 | the `phone#` key from the conversation is stable only by an unstated assumption; carrying it in the payload puts a phone in a queue payload; the reconcile's raw-key recovery unstated | ACCEPT | The key is derived the same way on every run and NOT carried (D12); the one-to-one thread's phone immutability is stated; the reconcile re-derives and checks the hash. |
+| 7 | "one hop reaches the root" false for pre-deploy attempt-2/3 rows; Branch B's root keying dropped without a recorded ruling; "a lost fence leaves attempting" wrong; test 16's sentinel copy | ACCEPT | The root walk follows `retry_of` up to the cap; section 0 records why the record does not key on the root (Cameron told at the gate); a lost fence = taken over -> `reconciling`, repaired by the reconcile's `mine` path; test 16 pins the literal and the copy only. |
+
+**Round 3 outcome:** 7 findings, ACCEPT 7, REJECT 0. Decisions changed: one
+- the route's newest-row rule (409 `superseded`); the rest restore
+invariants revision 3 had broken (RSW #1 on re-runs) or are precision.
+Round 4 is the LAST the cap allows; it reviews revision 4's deltas. If it
+still changes a decision the design goes to Cameron as a decision.

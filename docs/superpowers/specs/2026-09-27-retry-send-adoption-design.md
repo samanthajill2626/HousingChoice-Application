@@ -2,7 +2,7 @@
 
 Anchor issue: `retry-send-lost-under-job-marker` (med). Branch
 `feat/retry-send-adoption`, cut from `main@3dbb5740`, 2026-09-27.
-Revision 4 (after design review rounds 1-3 - adjudications in
+Revision 5 (after design review rounds 1-4 - adjudications in
 `docs/superpowers/reviews/2026-09-27-retry-send-adoption/design-review/adjudications.md`
 - and Branch B's refined requirement of 2026-09-27).
 
@@ -158,9 +158,10 @@ what the manual Retry route trusts.
   the retry job payload (a raw `phone#` there would put a phone in a queue
   payload, SOR D12); the reconcile ref carries `recipientKeyHash`, and the
   reconcile re-derives the raw key from the same data and confirms the
-  hash matches (a mismatch -> `unresolved` `digest_mismatch`, as a changed
-  phone would). `contactHoldsPhone` still decides GATING inside
-  `sendMessage` (RSW relay B4); it never decides a key.
+  hash matches (a mismatch means the record is unaddressable: INFO, the
+  attempt is left for the sweeper, exactly as an unresolvable owner is).
+  `contactHoldsPhone` still decides GATING inside `sendMessage` (RSW relay
+  B4); it never decides a key.
 - `attemptKey` (owner + hashed recipient) is the record's identity, as built.
 - The facts: `recipientDigest(sender, participantPhone)` where `sender` is
   the number the conversation sends from (the same derivation `sendMessage`
@@ -212,13 +213,13 @@ what the manual Retry route trusts.
    - ABSENT, `done/retryable` (a deferral re-run) or `redriven` (a
      re-drive) -> this run MAY send, so BOTH gates run, every time:
      a. **A MANUAL RETRY SUPERSEDES THE CHAIN** (round 2 finding 3): if the
-        conversation holds a row with `retry_of === retriedTsMsgId` and no
-        `retry_attempt` (a staff Retry of this same failed row), decline:
-        INFO `retrySend: a manual retry superseded this attempt`. The scan
-        is `listByConversationConsistent` newest-first, PAGED with
-        `before` until the page's oldest `tsMsgId` sorts before
-        `retriedTsMsgId` (`tsMsgId` leads with the ISO instant, so that is
-        a bound), so a busy thread cannot hide the row (round 3 finding 4).
+        retried row already has a MANUAL child - a row with
+        `retry_of === retriedTsMsgId` and no `retry_attempt` (a staff Retry
+        of this same failed row) - decline: INFO `retrySend: a manual retry
+        superseded this attempt`. Children are read through the
+        `retrychild#` pointer family (R7): ONE consistent Query on the
+        partition `retrychild#<conversationId>#<retriedTsMsgId>`, never a
+        scan of the thread (round 4 finding 2).
      b. RSW D4: the strict window check. Past the window -> ERROR
         `retry window closed` (as today).
      A decline here on a `redriven` record closes it
@@ -325,18 +326,22 @@ Owner specifics (SOR D11-D16 as built otherwise):
   record; a changed participant phone -> `unresolved` `digest_mismatch`.
 - **Lookup:** SOR D13 as built, with ONE refinement to the sibling rule that
   applies to every owner: this attempt's PREDECESSORS are never siblings.
-  The predecessors are the rows on the `retry_of` path from the retried
-  row up to the root (the retried row itself, its `retry_of`, ... - at most
-  `MAX_SEND_RETRY_ATTEMPTS` consistent reads, the same walk section 0
-  makes for a legacy root). A sibling record is a predecessor's when it is
-  a `retry_send` owner whose `retriedTsMsgId` is one of those rows'
-  `retry_of` targets (i.e. the attempt that PRODUCED a predecessor row),
-  or the root send's own owner record when the root was a share text (a
-  `broadcast` owner whose `broadcastId` equals the root's `broadcast_id`
-  and whose `contactKey` equals this recipient key). Same root is NOT
-  enough (round 3 finding 3): a manual-retry chain and the original chain
-  share a root and are NOT each other's predecessors, so they keep SOR's
-  protection against each other. A predecessor's adoption happened before
+  The predecessors are the AUTOMATIC rows on the `retry_of` path from the
+  retried row up to the root: the walk starts at the retried row and
+  follows `retry_of` while the row carries `retry_attempt` (an automatic
+  retry row); it STOPS at the first row without one - the root, or a
+  manual row (at most `MAX_SEND_RETRY_ATTEMPTS` consistent reads). A
+  sibling record is a predecessor's when it is a `retry_send` owner whose
+  `retriedTsMsgId` equals a walked row's `retry_of` AND whose `attempt`
+  equals that row's `retry_attempt` - the exact attempt that PRODUCED that
+  row (round 4 finding 1: the original chain's attempt against a manual
+  row's parent is NOT that manual row's producer) - or the root send's own
+  owner record when the chain's root was a share text (a `broadcast` owner
+  whose `broadcastId` equals the retried row's `broadcast_id` and whose
+  `contactKey` equals this recipient key). Same root is NOT enough (round 3
+  finding 3): a manual-retry chain and the original chain share a root and
+  are NOT each other's predecessors, so they keep SOR's protection against
+  each other. A predecessor's adoption happened before
   this attempt began (its 30003 is what scheduled this attempt), so it
   cannot hold this attempt's message; without the exclusion every
   multi-rung chain in the lane would read `unresolved`. Other siblings
@@ -353,8 +358,10 @@ Owner specifics (SOR D11-D16 as built otherwise):
   status helper), `author` = the retried row's `author` (`'ai'` stays
   `'ai'`, anything else `'teammate'` - the job's own rule,
   `retrySend.ts:323`), `automated: retriedRow.automated ?? true` (RSW relay
-  B4), `recipientContactId` = the owner's `recipientKey` when it is a contact
-  id (captured at claim; RSW relay B4), **`retryOf: retriedTsMsgId`,
+  B4), `recipientContactId` only when the owner's `recipientKey` is a
+  contact id AND that contact, read once, still exists and holds the
+  thread's number (`contactHoldsPhone` - the rule `sendMessage` and the
+  broadcast adoption apply; round 4 finding 4), **`retryOf: retriedTsMsgId`,
   `retryAttempt: attempt`, `retryWindowStart: oneToOneRetryWindowOrigin(retriedRow)`,
   `retryRoot`, `broadcastId: retriedRow.broadcast_id`** (RSW relay B1 #2 -
   lineage AT append; Branch B's fields). A dedupe onto a row with the same
@@ -425,18 +432,17 @@ Owner specifics (SOR D11-D16 as built otherwise):
 (`app/src/routes/api.ts:1567`) keeps RSW's guards and adds, after
 `retry_pending`:
 
-- **The chain, not the row** (round 3 finding 2): the route first finds the
-  chain's NEWEST row - the rows with `retry_of === pressedRow.tsMsgId`, and
-  theirs, walked forward through the newest-first pages of
-  `listByConversationConsistent` bounded at the pressed row (`before`
-  paging, the same bound step 4a uses). A press on a row that has a later
-  attempt (automatic or manual) is 409 `{ error: 'superseded' }`: the
-  dashboard's collapse only offers Retry on the newest row, so this is
-  reached by a stale tab or a direct API call, and it is what would
-  double-send against a pending later attempt.
-- On the newest row (the pressed row itself when nothing followed it),
-  read its attempt records DIRECTLY by key:
-  `retry#<conversationId>#<newestRow.tsMsgId>#<1..MAX_SEND_RETRY_ATTEMPTS>`
+- **Any child supersedes the press** (round 3 finding 2, round 4 finding
+  2): the route reads the pressed row's children through the `retrychild#`
+  pointer family (R7) - ONE consistent Query, no thread scan, no time
+  bound. A pressed row with ANY child (an automatic retry row or a manual
+  Retry row) is 409 `{ error: 'superseded' }`: the dashboard's collapse
+  only offers Retry on the newest row, so this is reached by a stale tab
+  or a direct API call, and it is what would double-send against a pending
+  later attempt. No forward walk to "the newest row" is needed: a child
+  existing is the whole answer.
+- On a childless pressed row, read its attempt records DIRECTLY by key:
+  `retry#<conversationId>#<pressedRow.tsMsgId>#<1..MAX_SEND_RETRY_ATTEMPTS>`
   with the R1 recipient key derived from the same immutable data (three
   consistent `get`s; no index, no time bound). The row's own
   `retry_outcome` is read as a belt.
@@ -463,7 +469,11 @@ already exists (R2 step 4a); AFTER the claim - the record covers a running
 attempt, a pending reconcile and the unresolved close. What stays open, by
 construction: a manual send IN FLIGHT while the job passes step 4a and
 claims (the manual row appears only when the manual send completes, so the
-race lasts the manual send's duration, not an instant); and a manual press
+race lasts the manual send's duration, not an instant) - and once it has
+happened the retried row has TWO children, an automatic and a manual one,
+whose chains then run independently for up to 15 minutes, each with its own
+records and its own 30003 ladder (the fork is the residual's consequence,
+named, not chased - a third text needs a second race); and a manual press
 racing a manual press. The build maps these onto
 `manual-retry-double-send-residual-windows`'s numbered gaps in a dated
 note (by the issue's text - the reviewer's reading is that this branch
@@ -483,6 +493,18 @@ instead."
 - `NewMessage` / `MessageItem` gain `retryRoot` / `retry_root`; `sendMessage`
   passes it through to the append beside `retryOf` / `retryAttempt` /
   `retryWindowStart`.
+- **The `retrychild#` pointer family** (round 4 finding 2): whenever
+  `messagesRepo.append` writes a row with `retryOf`, it also puts, in the
+  same transaction as the row and its `sid#` pointer, the item
+  `{ conversationId: 'retrychild#<conversationId>#<retryOf>', tsMsgId: <the new row's tsMsgId> }`
+  carrying `retry_attempt` (absent for a manual row), the `sid`, and the
+  row's `expires_at` if it has one. A parent's children are ONE consistent
+  Query on that partition (at most a handful of items). Every retry append
+  writes it: the automatic send, the adoption (R4), the manual route - so
+  step 4a and R6 read the same fact the row carries, without a thread
+  scan. It is a pointer, never state: nothing updates it, and the `sid#`
+  family's idempotence rule (a dedupe re-puts the same item) applies.
+  `send-attempt-sweeper` records the family beside the others.
 - Every retry row this branch appends carries `retry_root` (section 0's
   rule) and `broadcast_id` copied from the retried row: the automatic send
   (R2 step 7), the adoption (R4), and the manual Retry route's append
@@ -598,8 +620,9 @@ Job:
    retried row already appended, the job declines at INFO before claiming
    (no record, no send) - on a first run, on a deferral re-run
    (`done/retryable`, nothing written) AND on a re-drive (`redriven`
-   closed `refused`); the row is found even when 60 newer rows sit in the
-   thread (paging).
+   closed `refused`); the check is one `retrychild#` Query and finds the
+   row with 60 newer unrelated rows in the thread; an AUTOMATIC child (the
+   attempt's own earlier success) does not trigger it.
 4d. An existing attempt is resolved before the window: a stale `attempting`
    record with the window already closed is taken over into reconcile, not
    logged "window closed"; a deferral re-run whose run time slipped past
@@ -632,7 +655,9 @@ Job:
 Reconcile:
 
 10. Adoption of a found retry text writes the row with the full R4 field
-    set, the audit row once, the emit, no promise write; a second delivery
+    set and its `retrychild#` pointer, the audit row once, the emit, no
+    promise write; `recipient_contact_id` is absent when the recorded
+    contact was deleted or no longer holds the number; a second delivery
     of the same check is idempotent.
 11. `never_sent` inside the window re-drives once (a `messaging.retrySend`
     envelope with the same payload and no `deferred`, record `redriven`,
@@ -650,7 +675,11 @@ Reconcile:
     150 s -> re-driven, NOT `same_fingerprint_sibling`; a share root adopted
     inside the span likewise; an unrelated share to the same tenant inside
     the span still blocks; a MANUAL-retry chain under the same root
-    reconciling at the same time still blocks (same root is not lineage).
+    reconciling at the same time still blocks (same root is not lineage);
+    the original chain's attempt against a manual row's PARENT is not the
+    manual row's producer (the `attempt === retry_attempt` match), so the
+    manual chain keeps its protection; the ancestry walk stops at a manual
+    row and at a broken `retry_of`.
 14. The known-SID path adopts the row `sendMessage` appended before a
     record-phase failure as a repair (`mine`), writing no second row.
 
@@ -662,19 +691,20 @@ Route and dashboard:
     a fresh `attempting`, a pending `reconciling`, an in-window `redriven`;
     200 on a stale `attempting` (31 s), a `done/sent`, a `done/retryable`,
     a `done/refused` and a `done/enqueue_failed`; RSW's cases unchanged; the
-    route's append carries `retry_root` and `broadcast_id`; a press on the
-    ROOT while its attempt-1 retry row exists is 409 `superseded`, and a
-    press on the newest row of a chain whose earlier attempt is pending
-    under the older row's key still evaluates the NEWEST row's records
-    (the older attempt's record cannot be pending: it produced the newer
-    row).
+    route's append carries `retry_root` and `broadcast_id` and writes the
+    `retrychild#` pointer; a press on the ROOT while its attempt-1 retry
+    row exists is 409 `superseded` (one Query, with 60 newer unrelated rows
+    in the thread); a press on a row whose only child is a MANUAL row is
+    `superseded` too. These cases live in `app/test/apiRoutes.test.ts`,
+    whose fakes gain the attempts repo and the pointer family (a fake that
+    omitted them would default to real DynamoDB).
 16. `deliveryReason('30003', { retryUnconfirmed: true })` renders
     `Phone unreachable - retry not confirmed (error 30003)` and outranks
     `retryScheduled`; `relay` outranks both; the Timeline hides Retry for
     `retry_outcome: 'unconfirmed'` and shows the `retry_unresolved` and
     `superseded` toast copy; the projection carries the field; a mirror
-    test pins the dashboard's `RetryOutcome` literal and the copy string
-    to the app's constants.
+    test pins the dashboard's `RetryOutcome` literal to the app's (the copy
+    string is pinned in the dashboard test alone - it has no app constant).
 
 Repo (DynamoDB Local): the `retry_send` owner's claim / re-arm / transitions
 and `listByRecipient` across owner kinds; `annotateRetryPromise` writes

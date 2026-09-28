@@ -98,3 +98,25 @@ contests of round-2 rulings, both upheld).
 invariants revision 3 had broken (RSW #1 on re-runs) or are precision.
 Round 4 is the LAST the cap allows; it reviews revision 4's deltas. If it
 still changes a decision the design goes to Cameron as a decision.
+
+## Spec round 4 (2026-09-27) - reviewer B continued, spec revision 4 @8d072260 - FINAL round
+
+Report: `spec-r4-reviewer-b.md` (5 findings: 2 medium, 3 low; one contest,
+upheld).
+
+| # | finding | ruling | change in revision 5 |
+|---|---|---|---|
+| 1 | CONTEST r3#3 upheld: the ancestry rule took the original chain's attempt against a manual row's PARENT as that manual row's producer, dropping the manual chain's same-fingerprint protection | ACCEPT | The walk follows `retry_of` only through AUTOMATIC rows (stops at a row without `retry_attempt` - the root or a manual row) and a producer must match on `attempt === retry_attempt`. |
+| 2 | the route's `superseded` scan had no time bound (a press on an old bubble pages the whole thread since it); the forward newest-row walk was dead code | ACCEPT - a NEW SURFACE, put to Cameron at the gate | A `retrychild#<conversationId>#<parentTsMsgId>` pointer family written in the append transaction of every retry row (automatic, adopted, manual); step 4a and the route each become ONE consistent Query; "any child = superseded". The alternative (a bounded thread scan) was rejected as a guess at a bound. |
+| 3 | after the named race the retried row has two children whose chains run independently for 15 minutes | ACCEPT as a NAMED residue | R6 names the fork; a third text needs a second race. |
+| 4 | the adopted row recorded `recipient_contact_id` from the derived key even for a deleted or moved contact | ACCEPT | One contact read + `contactHoldsPhone` at adoption, as the broadcast adoption does. |
+| 5 | precision: the unaddressable-record wording; test 15's false claim; lineage by the retried row's `broadcast_id`; the route tests live in `apiRoutes.test.ts` (fakes must gain the repos); test 16's copy has no app constant | ACCEPT | Each fixed. |
+
+**Round 4 outcome:** 5 findings, ACCEPT 5, REJECT 0. Decision changed:
+ONE - the `retrychild#` pointer family (finding 2), a new item family
+written by every retry append. The cap is reached, so this one goes to
+Cameron at the spec gate as a decision with my recommendation (adopt it:
+the same shape as the `sid#` pointer, written in the same transaction,
+O(1) for the job and the route, and the only way to answer "does this row
+have a child?" without a thread scan). Review loop CLOSED at four rounds:
+46 distinct findings over four rounds, 46 accepted, 0 rejected.

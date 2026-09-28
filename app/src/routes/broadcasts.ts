@@ -7,6 +7,7 @@
 //   POST /api/broadcasts/:id/preview                                                 → { count, sample:[{contactId, firstName?, phone}] }
 //   POST /api/broadcasts/:id/send                                                    → { broadcastId, status:'sending', count } | 400 empty audience
 //   GET  /api/broadcasts/:id/results                                                 → { broadcastId, status, stats, recipients }
+//   GET  /api/broadcasts/:id/results?view=stats                                      -> { broadcastId, status, unitId, stats, created_at }
 //   GET  /api/broadcasts?status=&limit=                                              → { broadcasts:[...], nextCursor }
 //
 // Audience: TENANT 1:1 contacts ONLY (never relay-group rosters), filtered by
@@ -38,6 +39,7 @@ import {
   type BroadcastItem,
   type BroadcastRecipient,
   type BroadcastsRepo,
+  type BroadcastStats,
   type BroadcastStatus,
 } from '../repos/broadcastsRepo.js';
 import { createUnitsRepo, SHAREABLE_STATUSES, isDeleted, type UnitsRepo } from '../repos/unitsRepo.js';
@@ -53,7 +55,13 @@ import {
   type AudienceResolutionService,
   type ResolvedContact,
 } from '../services/audienceResolution.js';
-import { priorRecipientKeys } from '../services/shareRecipientState.js';
+import {
+  priorRecipientKeys,
+  resolveRecipientStates,
+  retryPendingCount,
+  unconfirmedByRow,
+  type ClassifiedRecipient,
+} from '../services/shareRecipientState.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 
 /** The lifecycle statuses ?status= may filter on (byStatus GSI partition). */
@@ -205,11 +213,46 @@ function decodeCursor(cursor: string): Record<string, unknown> | undefined {
  * A recipient slot as returned to the dashboard: the persisted delivery slot
  * PLUS optional raw identity (S5). Raw fields only - the dashboard composes the
  * display name (contactDisplayName), so no name is composed server-side.
+ *
+ * share-sent-outcome D3: plus the newest attempt's promise facts, read from
+ * that attempt's own message row (the ONE source, I5) for a young failed-30003
+ * slot and passed through as the row holds them - the page judges liveness on
+ * the server clock. `latestAttempt` rides the slot itself. `retryPending` marks
+ * a recipient whose D1 state is `pending` (deviation 14): a row read that
+ * failed is pending on the safe side with no due instant, and the page's
+ * ticker recount must still count it.
  */
 interface EnrichedRecipient extends BroadcastRecipient {
   firstName?: string;
   lastName?: string;
   phone?: string;
+  retryDueAt?: string;
+  retryOutcome?: string;
+  retryPending?: boolean;
+}
+
+/** share-sent-outcome D3: the promise facts a recipient's D1 state carries onto the wire (only when present). */
+function promiseFields(state: ClassifiedRecipient | undefined): Partial<EnrichedRecipient> {
+  if (state === undefined) return {};
+  return {
+    ...(state.retryDueAt !== undefined && { retryDueAt: state.retryDueAt }),
+    ...(state.retryOutcome !== undefined && { retryOutcome: state.retryOutcome }),
+    ...(state.latestAttempt !== undefined && { latestAttempt: state.latestAttempt }),
+    ...(state.state === 'pending' && { retryPending: true }),
+  };
+}
+
+/**
+ * share-sent-outcome D4: the share's derived stats with the TRUE retry_pending
+ * (always present on the results and list payloads - the routes are the truth)
+ * and a slot whose row says its chain ended unresolved counted Not confirmed,
+ * not Failed.
+ */
+function statsWithStates(b: BroadcastItem, states: Map<string, ClassifiedRecipient>): BroadcastStats {
+  return deriveBroadcastStats(b, {
+    retryPending: retryPendingCount(states),
+    unconfirmedKeys: unconfirmedByRow(states, b),
+  });
 }
 
 /** Optional-string reader off a flexible contact attribute (trimmed). */
@@ -232,10 +275,12 @@ function trimmedField(value: unknown): string | undefined {
  *   so a short map is survivable. There is NO catch: a rejected read still
  *   500s this endpoint, exactly as a rejected getById did.
  * Cost is bounded by MAX_BROADCAST_RECIPIENTS, only on this endpoint (no cache).
+ * `states` (share-sent-outcome D3) adds each recipient's promise facts.
  */
 async function enrichRecipients(
   contacts: ContactsRepo,
   recipients: Record<string, BroadcastRecipient>,
+  states?: Map<string, ClassifiedRecipient>,
 ): Promise<Record<string, EnrichedRecipient>> {
   const keys = Object.keys(recipients);
   const contactIdKeys = keys.filter((k) => !k.startsWith('phone#'));
@@ -245,7 +290,7 @@ async function enrichRecipients(
   }
   const out: Record<string, EnrichedRecipient> = {};
   for (const key of keys) {
-    const slot = recipients[key]!;
+    const slot = { ...recipients[key]!, ...promiseFields(states?.get(key)) };
     if (key.startsWith('phone#')) {
       // The phone is the key itself - no lookup, no identity leak beyond it.
       out[key] = { ...slot, phone: key.slice('phone#'.length) };
@@ -293,6 +338,7 @@ function buildRecipientsFrom(
 function toBroadcastResults(
   b: BroadcastItem,
   recipients: Record<string, EnrichedRecipient>,
+  stats: BroadcastStats,
 ): Record<string, unknown> {
   return {
     broadcastId: b.broadcastId,
@@ -302,16 +348,26 @@ function toBroadcastResults(
     // Matching sends: surface the draft's audience mode when set so the composer
     // can render the seeds_only (1:1) vs filter (1:N) affordances.
     ...(b.audience_mode !== undefined && { audience_mode: b.audience_mode }),
-    // S4: disjoint buckets derived from the recipients map (historical rows too).
-    stats: deriveBroadcastStats(b),
+    // S4: disjoint buckets derived from the recipients map (historical rows too);
+    // share-sent-outcome D4: with the true retry_pending (statsWithStates).
+    stats,
     recipients,
     ...(b.last_error !== undefined && { last_error: b.last_error }),
     created_at: b.created_at,
   };
 }
 
-/** The list-row summary (no recipients map — that's the results view). */
-function toBroadcastSummary(b: BroadcastItem): Record<string, unknown> {
+/**
+ * share-sent-outcome D4: the stats-only view (`?view=stats`, Cameron's ruling
+ * of 2026-09-27) - the share and its derived stats, WITHOUT the recipient list
+ * and its contact reads: the list page's refetch of one finished share.
+ */
+function toBroadcastStatsView(b: BroadcastItem, stats: BroadcastStats): Record<string, unknown> {
+  return { broadcastId: b.broadcastId, status: b.status, unitId: b.unitId ?? null, stats, created_at: b.created_at };
+}
+
+/** The list-row summary (no recipients map - that's the results view). */
+function toBroadcastSummary(b: BroadcastItem, stats: BroadcastStats): Record<string, unknown> {
   return {
     broadcastId: b.broadcastId,
     status: b.status,
@@ -320,8 +376,9 @@ function toBroadcastSummary(b: BroadcastItem): Record<string, unknown> {
     // Matching sends: pass the audience mode through on list rows too (dashboard
     // Task 5 reads it on BroadcastSummary).
     ...(b.audience_mode !== undefined && { audience_mode: b.audience_mode }),
-    // S4: derived disjoint stats (the byCreated GSI projects the map).
-    stats: deriveBroadcastStats(b),
+    // S4: derived disjoint stats (the byCreated GSI projects the map);
+    // share-sent-outcome D4: with the true retry_pending (statsWithStates).
+    stats,
     created_at: b.created_at,
     created_by: b.created_by,
   };
@@ -804,18 +861,36 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     res.json({ broadcastId, status: sending.status, count });
   });
 
-  // GET /api/broadcasts/:id/results — stats + per-recipient delivery map.
+  // GET /api/broadcasts/:id/results - stats + per-recipient delivery map.
+  // ?view=stats (share-sent-outcome D4, the ONLY accepted value; anything else
+  // is 400 invalid_view) returns the share and its stats alone - no recipient
+  // list, no contact reads.
   router.get('/broadcasts/:broadcastId/results', async (req, res) => {
     const { broadcastId } = req.params;
+    const view = req.query['view'];
+    if (view !== undefined && view !== 'stats') {
+      res.status(400).json({ error: 'invalid_view' });
+      return;
+    }
     const broadcast = await broadcasts.getById(broadcastId);
     if (!broadcast) {
       res.status(404).json({ error: 'broadcast_not_found' });
       return;
     }
+    // share-sent-outcome D1/D3: each recipient's state, WITHOUT record reads
+    // (deviation 12 - the record only tells in flight from stranded, which this
+    // page does not show; the composer flag alone reads it). Only a young
+    // failed-30003 slot reads its newest attempt's row, 8 at a time.
+    const states = await resolveRecipientStates({ messages, attempts, log }, broadcast);
+    const stats = statsWithStates(broadcast, states);
+    if (view === 'stats') {
+      res.json(toBroadcastStatsView(broadcast, stats));
+      return;
+    }
     // S5: resolve raw identity (firstName/lastName/phone) for each recipient so
     // the results rows are human-readable. IDs/counts only in logs (never here).
-    const recipients = await enrichRecipients(contacts, broadcast.recipients ?? {});
-    res.json(toBroadcastResults(broadcast, recipients));
+    const recipients = await enrichRecipients(contacts, broadcast.recipients ?? {}, states);
+    res.json(toBroadcastResults(broadcast, recipients, stats));
   });
 
   // GET /api/broadcasts?status=&limit= — the TEAM-WIDE list (optionally status-
@@ -854,8 +929,19 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     } else {
       page = await broadcasts.list(opts);
     }
+    // share-sent-outcome D4: each row's stats carry the true retry_pending and
+    // the results page's Not-confirmed re-bucketing, so the two agree. One
+    // state resolution per row, no record reads (deviation 12); rows run one
+    // after another so reads stay 8 in flight, and a row with no young
+    // failed-30003 slot reads nothing - a page of ordinary shares costs what
+    // it cost before.
+    const summaries: Array<Record<string, unknown>> = [];
+    for (const b of page.items) {
+      const states = await resolveRecipientStates({ messages, attempts, log }, b);
+      summaries.push(toBroadcastSummary(b, statsWithStates(b, states)));
+    }
     res.json({
-      broadcasts: page.items.map(toBroadcastSummary),
+      broadcasts: summaries,
       nextCursor:
         page.lastEvaluatedKey !== undefined ? encodeCursor(page.lastEvaluatedKey) : null,
     });

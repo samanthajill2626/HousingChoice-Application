@@ -31,7 +31,11 @@ import {
 } from '../src/repos/broadcastsRepo.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import { SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
-import { RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
+import {
+  RETRY_OUTCOME_UNCONFIRMED,
+  RETRY_PROMISE_WITHDRAWN_AT,
+  isRetryPromiseLive,
+} from '../src/lib/retrySendWindow.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -1446,6 +1450,8 @@ describe('share-broadcast API (M1.8a)', () => {
       skipped_other: 0,
       queued: 0,
       sending: 0,
+      // share-sent-outcome D4: the route always carries the true count.
+      retry_pending: 0,
     });
   });
 
@@ -1464,6 +1470,147 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(res.status).toBe(200);
     const summary = res.body.broadcasts.find((b: { broadcastId: string }) => b.broadcastId === created.broadcastId);
     expect(summary.stats).toMatchObject({ audience: 2, delivered: 1, failed: 1, sent: 0 });
+  });
+
+  // --- share-sent-outcome D3/D4: promise facts, retry_pending, ?view=stats ---
+  /** GET with the authed session. */
+  async function authedGet(app: import('express').Express, path: string) {
+    return request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+  }
+
+  it('results: a failed-30003 recipient whose row holds a live promise carries retryDueAt, latestAttempt and retryPending, and stats.retry_pending counts it', async () => {
+    const root = attemptKeyAgo(6 * 60_000, 'SMroot1');
+    const retry = attemptKeyAgo(3 * 60_000, 'SMretry1');
+    const dueAt = isoFromNow(5 * 60_000);
+    // The RETRY (the newest attempt) failed 30003 too and holds the promise.
+    seedAttemptRow(world, 'conv-1', retry, { retry_due_at: dueAt, retry_of: root });
+    seedShare(world, 'b-1', 'sent', {
+      'c-1': { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: root, latestAttempt: retry },
+      'c-2': { status: 'delivered', conversationId: 'conv-2', tsMsgId: attemptKeyAgo(6 * 60_000, 'SMroot2') },
+    });
+    const { app } = makeWebhookHarness({ world });
+    const res = await authedGet(app, '/api/broadcasts/b-1/results');
+    expect(res.status).toBe(200);
+    expect(res.body.recipients['c-1']).toMatchObject({
+      status: 'failed',
+      errorCode: '30003',
+      tsMsgId: root,
+      retryDueAt: dueAt,
+      latestAttempt: retry,
+      retryPending: true,
+    });
+    // A reached recipient carries no promise facts.
+    expect(res.body.recipients['c-2']).not.toHaveProperty('retryDueAt');
+    expect(res.body.recipients['c-2']).not.toHaveProperty('retryPending');
+    expect(res.body.stats).toMatchObject({ delivered: 1, failed: 1, retry_pending: 1 });
+  });
+
+  it('results: a recipient whose chain ended unresolved carries retryOutcome unconfirmed, is counted in stats.unconfirmed (not failed), and has no live promise; an old 30003 failure carries neither (no read)', async () => {
+    const root = attemptKeyAgo(12 * 60_000, 'SMroot1');
+    seedAttemptRow(world, 'conv-1', root, { retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: RETRY_OUTCOME_UNCONFIRMED });
+    const old = attemptKeyAgo(40 * 60_000, 'SMold2');
+    // Its row still holds a promise, but a 40-minute-old slot is past the read
+    // bound: the slot alone is authoritative and nothing reads the row.
+    seedAttemptRow(world, 'conv-2', old, { retry_due_at: isoFromNow(5 * 60_000) });
+    seedShare(world, 'b-2', 'failed', {
+      'c-1': { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: root },
+      'c-2': { status: 'failed', errorCode: '30003', conversationId: 'conv-2', tsMsgId: old },
+    });
+    const { app } = makeWebhookHarness({ world });
+    const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
+    const res = await authedGet(app, '/api/broadcasts/b-2/results');
+    expect(res.status).toBe(200);
+    expect(res.body.recipients['c-1']).toMatchObject({ retryOutcome: 'unconfirmed' });
+    // The row is the one source (I5): the route returns what it holds - here the
+    // WITHDRAWN sentinel, which is never live - and the page judges liveness.
+    expect(isRetryPromiseLive(res.body.recipients['c-1'].retryDueAt, Date.now())).toBe(false);
+    expect(res.body.recipients['c-1']).not.toHaveProperty('retryPending');
+    expect(res.body.recipients['c-2']).not.toHaveProperty('retryOutcome');
+    expect(res.body.recipients['c-2']).not.toHaveProperty('retryDueAt');
+    expect(reads.mock.calls.map((c) => c[1])).toEqual([root]);
+    expect(res.body.stats).toMatchObject({ failed: 1, unconfirmed: 1, retry_pending: 0 });
+  });
+
+  it('results: a pending recipient whose row read FAILED is still marked retryPending (no retryDueAt) and counted (deviation 14)', async () => {
+    const root = attemptKeyAgo(3 * 60_000, 'SMroot1');
+    seedShare(world, 'b-1', 'sent', {
+      'c-1': { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: root },
+    });
+    const { app } = makeWebhookHarness({ world });
+    vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent').mockRejectedValue(new Error('boom'));
+    const res = await authedGet(app, '/api/broadcasts/b-1/results');
+    expect(res.status).toBe(200);
+    expect(res.body.recipients['c-1']).toMatchObject({ status: 'failed', retryPending: true });
+    expect(res.body.recipients['c-1']).not.toHaveProperty('retryDueAt');
+    expect(res.body.stats).toMatchObject({ failed: 1, retry_pending: 1 });
+  });
+
+  it('results and list read NO send-attempt records (the composer flag alone reads them)', async () => {
+    // A queued slot of a FINISHED share is exactly what the composer flag reads
+    // a record for; these routes read it as in flight without one.
+    seedShare(world, 'b-1', 'failed', { 'c-q': { status: 'queued' }, 'c-1': { status: 'delivered' } }, { last_error: 'enqueue failed' });
+    const { app } = makeWebhookHarness({ world });
+    const reads = vi.spyOn(world.sendAttemptsRepo, 'get');
+    expect((await authedGet(app, '/api/broadcasts/b-1/results')).status).toBe(200);
+    expect((await authedGet(app, '/api/broadcasts/b-1/results?view=stats')).status).toBe(200);
+    expect((await authedGet(app, '/api/broadcasts')).status).toBe(200);
+    expect(reads).not.toHaveBeenCalled();
+  });
+
+  it('results ?view=stats returns the share and its stats with retry_pending, no recipients, and reads no contacts', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001' });
+    const root = attemptKeyAgo(2 * 60_000, 'SMroot1');
+    seedAttemptRow(world, 'conv-1', root, { retry_due_at: isoFromNow(5 * 60_000) });
+    const share = seedShare(world, 'b-1', 'sent', {
+      'c-1': { status: 'failed', errorCode: '30003', conversationId: 'conv-1', tsMsgId: root },
+    });
+    const { app } = makeWebhookHarness({ world });
+    const contactReads = vi.spyOn(world.contactsRepo, 'getDisplaysByIds');
+    const res = await authedGet(app, '/api/broadcasts/b-1/results?view=stats');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ broadcastId: 'b-1', status: 'sent', unitId: 'unit-1', stats: { failed: 1, retry_pending: 1 } });
+    expect(Object.keys(res.body).sort()).toEqual(['broadcastId', 'created_at', 'stats', 'status', 'unitId']);
+    expect(res.body.created_at).toBe(share.created_at);
+    expect(res.body.recipients).toBeUndefined();
+    expect(contactReads).not.toHaveBeenCalled();
+  });
+
+  it('results ?view=other is 400 invalid_view (stats is the only accepted value)', async () => {
+    seedShare(world, 'b-1', 'sent', { 'c-1': { status: 'delivered' } });
+    const { app } = makeWebhookHarness({ world });
+    for (const path of ['/api/broadcasts/b-1/results?view=other', '/api/broadcasts/b-1/results?view=stats&view=stats']) {
+      const res = await authedGet(app, path);
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'invalid_view' });
+    }
+  });
+
+  it('list: every summary carries stats.retry_pending (0 when nothing is pending) and the same Not-confirmed re-bucketing as results; only a young failed-30003 slot costs a read', async () => {
+    const pendingRoot = attemptKeyAgo(2 * 60_000, 'SMpend1');
+    seedAttemptRow(world, 'conv-p', pendingRoot, { retry_due_at: isoFromNow(5 * 60_000) });
+    const unresolvedRoot = attemptKeyAgo(12 * 60_000, 'SMunres1');
+    seedAttemptRow(world, 'conv-u', unresolvedRoot, { retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: RETRY_OUTCOME_UNCONFIRMED });
+    seedShare(world, 'b-pending', 'sent', {
+      'c-p': { status: 'failed', errorCode: '30003', conversationId: 'conv-p', tsMsgId: pendingRoot },
+    });
+    seedShare(world, 'b-unresolved', 'failed', {
+      'c-u': { status: 'failed', errorCode: '30003', conversationId: 'conv-u', tsMsgId: unresolvedRoot },
+    });
+    seedShare(world, 'b-plain', 'sent', { 'c-1': { status: 'delivered' }, 'c-2': { status: 'failed', errorCode: '30007' } });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const draft = await createDraft(app); // a draft's stats carry the count too
+    const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
+    const res = await authedGet(app, '/api/broadcasts');
+    expect(res.status).toBe(200);
+    const rows = res.body.broadcasts as Array<{ broadcastId: string; stats: BroadcastStats }>;
+    expect(rows.every((b) => typeof b.stats.retry_pending === 'number')).toBe(true);
+    const byId = new Map(rows.map((b) => [b.broadcastId, b.stats]));
+    expect(byId.get('b-pending')).toMatchObject({ failed: 1, retry_pending: 1 });
+    expect(byId.get('b-unresolved')).toMatchObject({ failed: 0, unconfirmed: 1, retry_pending: 0 });
+    expect(byId.get('b-plain')).toMatchObject({ delivered: 1, failed: 1, retry_pending: 0 });
+    expect(byId.get(draft)).toMatchObject({ retry_pending: 0 });
+    expect(reads.mock.calls.map((c) => c[1]).sort()).toEqual([pendingRoot, unresolvedRoot].sort());
   });
 
   // --- S5: results endpoint enriches recipients with raw identity ----------

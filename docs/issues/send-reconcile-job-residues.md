@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/messaging
 created: 2026-09-27
-updated: 2026-09-27
+updated: 2026-09-28
 refs: app/src/jobs/sendReconcile.ts:205, app/src/jobs/sendReconcile.ts:459, app/src/jobs/sendReconcile.ts:490, app/src/jobs/sendReconcile.ts:628, app/src/jobs/sendReconcile.ts:639, app/src/jobs/sendReconcile.ts:642, app/src/jobs/sendReconcile.ts:687, app/src/jobs/sendReconcile.ts:886, app/src/jobs/broadcastFanOut.ts:1295, app/src/jobs/broadcastFanOut.ts:1361, app/src/jobs/broadcastFanOut.ts:1381, app/src/repos/messagesRepo.ts:4016
 ---
 
@@ -295,3 +295,52 @@ Anchors at HEAD `91a66577` (the code is identical to the code-final commit
     was already seen. Cost and a narrow duplicate-check window only: not a
     double text, and the verdict is unchanged (the filter already discards
     the extra rows).
+
+**retry-send-adoption (2026-09-28).** `feat/retry-send-adoption` (code final
+`1b5ddb01`, UNMERGED; anchors at `5a03e20b`) adds the fourth owner,
+`retry_send` (the one-to-one 30003 retry). Status and severity unchanged.
+
+- **It inherits every residue above** that lives in the shared job - the
+  check, the lookup, the verdict writes, the parser. Its own instances: the
+  thread read behind its digest check is eventual
+  (`app/src/jobs/sendReconcile.ts:628`, item 5); its adoption's inbox touch
+  is read-then-write (`adoptRetry`, `:923-932`, item 5) and it writes the
+  audit row only on a fresh append (`:911-922`, item 1). The broadcast- and
+  relay-specific items (2-4, 7, 10, 11) name writes it does not make.
+- **The lineage walk adds reads.** Each lookup for this owner walks the
+  retried row's automatic ancestry (`predecessorMatchers`, `:1080-1095`,
+  through `app/src/services/retryChain.ts:36-45`): up to three consistent
+  GetItems per check, beside item 17's unbounded sibling read
+  (`sendReconcile.ts:1136-1149`).
+- **Pre-deploy children have no pointer** (no backfill,
+  `app/src/routes/api.ts:1636-1637`). Step 4a
+  (`app/src/jobs/retrySend.ts:457-466`) misses a manual child appended
+  before the deploy for the at most 15 minutes a chain can straddle it; the
+  route's `superseded` check (`api.ts:1638-1642`) misses a pre-deploy child
+  for good - a stale tab on a pre-deploy superseded row behaves as it did
+  before this branch (not a regression).
+- **A mixed fleet** (code review round 1 A-5): while old and new workers
+  overlap in a rolling deploy, an old worker's retry rows carry no
+  `retrychild#` pointer (and no `retry_root` or `broadcast_id`), so neither
+  step 4a nor the route sees them as children.
+- **The promise REFRESHES lengthen the accepted "promise outlives the
+  decline" tail (code review round 2 R2-5).** The unknown hand-off refreshes
+  `retry_due_at` to `attemptedAt` + the last check (240 s) + 2 minutes
+  (`retrySend.ts:795-801`), and the re-drive to now + 1 minute + 2 minutes
+  (`sendReconcile.ts:1636-1643`); the promise stays live 2 minutes past
+  that. A no-send close after a refresh writes no promise for this owner:
+  `redrive_refused` on a closed window (`:1577-1597`) and a re-drive
+  `enqueue_failed` (`:1450-1466`) are no-ops in `closeSlot` (only
+  `send_unconfirmed` writes, `:1327`), and a re-driven run that is refused,
+  rejected or declined writes none either (`retrySend.ts:673-676`,
+  `:614-635`, `:457-481`). So the bubble keeps "will retry", Retry stays hidden
+  (`dashboard/src/routes/contact/Timeline.tsx:1441`) and a press gets 409
+  `retry_pending` (`api.ts:1626-1629`) for up to about 4-5 minutes, plus one
+  60 s ticker tick - against about 3 for the job declines Cameron accepted.
+  (Build worklist item 26 names the same tail when the re-drive's REFRESH
+  lands after the re-driven run has ended.) Round 1 A-1's fix - withdraw on
+  those ends - was REJECTED against spec sections 0 and 7 and Cameron's
+  wontfix
+  [one-to-one-retry-promise-outlives-job-decline](./one-to-one-retry-promise-outlives-job-decline.md)
+  (2026-09-26), which stays untouched (spec section 5, plan Task 9); fix wave
+  FW1 corrected the `closeSlot` comment that said Retry stays available.

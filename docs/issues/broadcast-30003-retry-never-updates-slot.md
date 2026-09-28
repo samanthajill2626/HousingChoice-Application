@@ -6,6 +6,7 @@ severity: med
 status: open
 area: app/broadcasts
 created: 2026-09-25
+updated: 2026-09-28
 refs: app/src/jobs/retrySend.ts:200, app/src/services/sendMessage.ts:425, app/src/routes/webhooks/twilio.ts:3312, app/src/routes/webhooks/twilio.ts:3364, app/src/routes/webhooks/twilio.ts:3544, app/src/routes/webhooks/twilio.ts:3591, dashboard/src/routes/contact/deliveryStatus.ts:778, dashboard/src/routes/broadcasts/StatChips.test.tsx:129
 ---
 
@@ -57,3 +58,50 @@ a relaxation of the forward-only guard.
 [no-contact-code-renders-as-carrier-error](./no-contact-code-renders-as-carrier-error.md).
 Presentation finding 2 in
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/research/presentation-findings.md`.
+
+**retry-send-adoption (2026-09-28).** The ATTRIBUTION half landed on
+`feat/retry-send-adoption` (code final `1b5ddb01`, UNMERGED; anchors at
+`5a03e20b`); the MATCHING half is share-skip Branch B's (spec section 0 and
+R7; what B reads is spec R10). Status stays open.
+
+- **Every retry row the branch appends carries `broadcast_id`** (copied from
+  the retried row) **and `retry_root`**: the automatic retry
+  (`app/src/jobs/retrySend.ts:543-544`), the reconcile's adoption
+  (`app/src/jobs/sendReconcile.ts:901-902`) and the manual Retry route
+  (`app/src/routes/api.ts:1768-1769`), through `sendMessage`
+  (`app/src/services/sendMessage.ts:671`, `:680`) to the append
+  (`app/src/repos/messagesRepo.ts:2619`). The `retrychild#` pointer family
+  lists a row's retry children in one consistent Query
+  (`messagesRepo.ts:2102-2114`, written at `:2785-2799`, read at
+  `:3359-3386`). Nothing is written to the share slot.
+- **The interim rollup cost, until B.** The webhook routes every transitioned
+  receipt of a row carrying `broadcast_id` into the rollup
+  (`app/src/routes/webhooks/twilio.ts:3529`), which acts on `sent` and on
+  terminal statuses (`:3878`). A share-retry row never matches a slot (the
+  match is the slot's own conversationId + tsMsgId, `:3887-3889`), so each
+  such receipt - `sent` AND terminal, twice for a delivered text - reads the
+  broadcast, waits `STATUS_UNKNOWN_SID_RETRY_DELAY_MS` (2.5 s, `:322`,
+  `:3898`), reads it again and gives up at INFO (`:3904`).
+- **`isBroadcastRowFor` now ignores a row with `retry_of`**
+  (`app/src/jobs/broadcastFanOut.ts:1303`; plan deviation 7, a code change):
+  a share-retry row is never the broadcast recipient's own row, for the
+  reconcile's ownership test (`sendReconcile.ts:759-763`) or the broadcast
+  adoption's dedupe read-back (`broadcastFanOut.ts:1391`).
+- **The one fenced-file edit also mutes a real fault (code review round 1
+  A-3, round 2 R2-7).** The give-up line moved from WARN to INFO
+  (`twilio.ts:3904`, Cameron's Q2 ruling), so a GENUINE miss on a share's
+  OWN row (a lost or mis-keyed slot write) no longer reaches the WARN tail or
+  Recent Errors. A one-line alternative exists at the call site:
+  `&& message.retry_of === undefined` on `twilio.ts:3529` skips the rollup
+  (both reads and the 2.5 s wait) for every retry row and lets the give-up
+  line go back to WARN. It is a different line from the one Cameron
+  approved, so it is his call (the handback shows both). Either way Branch B
+  should skip or route retry receipts in the rollup and restore WARN for a
+  share's own row.
+- **Two facts for B (build worklist item 27).** A retry row appended before
+  this branch carries no `broadcast_id`, so a chain straddling the deploy
+  loses share attribution from that row on (each retry copies the field from
+  the row it retries). And a share's ROOT row can itself carry
+  `retry_outcome: 'unconfirmed'` with the withdrawn promise when its
+  attempt-1 retry is ruled unresolved (spec R10): spec R5's "never on
+  broadcast rows" does not hold for it.

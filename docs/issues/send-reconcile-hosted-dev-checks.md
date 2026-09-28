@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app/messaging
 created: 2026-09-27
-updated: 2026-09-27
+updated: 2026-09-28
 refs: docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, app/src/jobs/sendReconcile.ts:765, app/src/jobs/sendReconcile.ts:801, app/src/jobs/sendReconcile.ts:892, app/src/adapters/messaging.ts:1131, app/src/lib/sendOutcome.ts:48, app/src/lib/sendFingerprint.ts:10, app/src/jobs/sendReconcile.ts:552, app/src/adapters/messaging.ts:624, fake-twilio/src/routes/rest.ts:83
 ---
 
@@ -118,3 +118,20 @@ Anchors at HEAD `91a66577`.
    [broadcast-mms](./broadcast-mms.md) lands (see also
    [send-attempt-facts-dead-and-duplicated](./send-attempt-facts-dead-and-duplicated.md),
    item 2). Not a double text: an unmatched candidate withholds `never_sent`.
+
+**retry-send-adoption (2026-09-28).** The one-to-one retry's reconcile - the
+`retry_send` owner `feat/retry-send-adoption` adds (code final `1b5ddb01`,
+UNMERGED; anchors at `5a03e20b`) - takes the same lookup path (`lookup`,
+`app/src/jobs/sendReconcile.ts:1111-1261`; the list call `:1187-1192`),
+listing from the job's pinned sender (its facts,
+`app/src/jobs/retrySend.ts:488-496`) to the thread's number
+(`currentPhone`, `sendReconcile.ts:671-677`). So checks 1-5 above cover
+this owner too (spec section 6); status and severity unchanged. Open item 1
+is a PRECONDITION for relying on the retry's reconcile in production as
+much as on the fan-outs': if Twilio's Messages list does not show a
+still-queued message, a queued retry past the last check (+240 s) is ruled
+`never_sent` and re-driven through the retry job
+(`sendReconcile.ts:1607-1644`, `:1513-1526`) - a double text; only a closed
+retry window refuses that re-drive (`:1551-1561`). Items 4 and 5 fail safe
+here as there: an unmatched candidate closes `unresolved` - "retry not
+confirmed", the promise withdrawn - never `never_sent`.

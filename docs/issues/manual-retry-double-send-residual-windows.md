@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/messaging
 created: 2026-09-24
-updated: 2026-09-27
+updated: 2026-09-28
 refs: app/src/routes/api.ts, app/src/services/oneToOneRetryDecision.ts, app/src/routes/webhooks/twilio.ts, app/src/routes/webhooks/twilio.ts:663, app/src/jobs/relayRetryLeg.ts:395, app/src/jobs/retrySend.ts, app/src/lib/retrySendWindow.ts, app/src/adapters/scheduler.ts, dashboard/src/routes/contact/retryPromise.ts, dashboard/src/routes/contact/Timeline.tsx, docs/superpowers/specs/2026-09-24-retry-send-window-design.md, docs/superpowers/reviews/2026-09-24-retry-send-window/build-review-adversarial.md
 ---
 
@@ -101,3 +101,80 @@ that went out. At most one text either way (the rung's claim on its record);
 what can be wrong is the slot. Closing it means gating that close on the
 rung's record once the webhook is in scope. Pre-existing, not introduced by
 the branch.
+
+**retry-send-adoption (2026-09-28).** `feat/retry-send-adoption` (code final
+`1b5ddb01`, UNMERGED; anchors at `5a03e20b`) gives the retry job a
+supersession check and the manual Retry route the automatic retry's attempt
+record and a child pointer (spec R6, "The two halves together"). By the gaps
+above; status and severity unchanged.
+
+- **Gap 1 (a late job) - closed but for the in-flight overlap below.** A job
+  whose promise lapsed declines when a manual Retry row of the same failed
+  row already exists: step 4a, one consistent Query on the row's
+  `retrychild#` pointers, before the window and the claim
+  (`app/src/jobs/retrySend.ts:457-466`). In the other order the route meets
+  the job: 409 `retry_pending` while its attempt record is open
+  (`app/src/routes/api.ts:1683-1690`), 409 `superseded` once its retry row
+  exists (`:1638-1642`).
+- **Gap 2 (a stale tab on a replaced original) - closed for a row whose
+  child has a pointer.** Any child supersedes the press (`api.ts:1638-1642`;
+  "A newer attempt already exists for this message.",
+  `dashboard/src/routes/contact/Timeline.tsx:139-140`). It stays open where
+  the child has none - appended before the deploy (no backfill,
+  `api.ts:1636-1637`) or by an old worker in a mixed fleet (code review round
+  1 A-5): there a stale tab behaves as before.
+- **Gap 3 (a pending outcome) - closed.** Every path that leaves the retry
+  pending refreshes the promise - the deferral (`retrySend.ts:747`), the
+  unknown hand-off over the whole check schedule (`:795-801`), the re-drive
+  (`app/src/jobs/sendReconcile.ts:1636-1643`) - and the route refuses 409
+  `retry_pending` on an OPEN attempt record younger than
+  `RETRY_SEND_WINDOW_MS` from its `attemptedAt`, whatever the promise says
+  (`api.ts:1683-1690`).
+- **Gap 4 (an unresolved retry) - closed (Cameron's Q1 ruling).** The
+  unresolved close WITHDRAWS the promise and writes
+  `retry_outcome: 'unconfirmed'`: "retry not confirmed", Retry hidden
+  (`sendReconcile.ts:1308-1333`; the job's own closes
+  `retrySend.ts:773-794`, `:834-852`). The route answers 409
+  `retry_unresolved` from the record or the row's belt
+  (`api.ts:1670-1676`). The tail past the record's 30-day cleanup is in
+  [send-attempt-sweeper](./send-attempt-sweeper.md)'s 2026-09-28 note.
+- **Gap 5 (an enqueue that threw after SQS accepted) - closed but for the
+  in-flight overlap.** The press the withdrawn promise lets through appends a
+  manual row, and the queued job then declines at step 4a; a job that runs
+  first is met as in gap 1. The relay rung's twin (the 2026-09-27 section) is
+  untouched: the webhook stays fenced.
+
+**What remains** (decided in
+`docs/superpowers/reviews/2026-09-27-retry-send-adoption/code-review/r1-adjudications.md`
+A-2 and `r2-adjudications.md` R2-6):
+
+1. **The in-flight overlap** (spec R6, "What stays open, by construction"): a
+   staff press whose provider call is in flight while a late automatic job
+   passes step 4a and claims. The route reads the pointers and the record but
+   writes nothing the job contends on (`api.ts:1638-1690`, against
+   `retrySend.ts:461-462` and the claim at `:497`). Reproduced by round 1
+   A-2's probe: two texts and two children - a fork whose chains then run
+   independently, each with its own records and 30003 ladder. A deferred run
+   can meet the same overlap: the route does not block on `done` /
+   `retryable` and relies on the deferral's REFRESH, so a REFRESH that fails
+   reopens it.
+2. **Round 2 R2-6 widens it.** The route answers only `SendRefusedError`
+   (`api.ts:1774-1780`): a press whose own send ends unknown or
+   accepted-not-recorded is a 500 with NO manual row, so a late automatic
+   job's step 4a never sees it, and the job claims and sends. The overlap then
+   lasts until the automatic chain's window closes, not the manual send's
+   duration.
+3. **Manual vs manual** (spec R6): two presses that both pass the guards
+   before either appends.
+
+**Suggested fix for what remains** (round 1 A-2; not built on the branch - a
+new design with a product trade-off): before its provider call the route
+takes a conditional write on the SAME record key it already reads
+(`retry#<conversationId>#<pressedTsMsgId>#<(retry_attempt ?? 0) + 1>`,
+`api.ts:1652-1666`): absent -> create it `done` / `refused` with cause
+`manual_retry_superseded`; `done` / `retryable` -> close it the same way;
+open -> 409. Whichever side writes second loses (the job's gate then skips
+the closed record). Trade-off, Cameron's call: a press whose own send is then
+refused has also ended the automatic attempt. The same write would stop the
+job in R2-6's no-row case too; the press's own unknown or unrecorded outcome
+would still need the route's own adoption (send-outcome Stage 2).

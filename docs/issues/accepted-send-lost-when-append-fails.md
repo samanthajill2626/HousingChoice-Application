@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app/messaging
 created: 2026-09-10
-updated: 2026-09-27
+updated: 2026-09-28
 refs: app/src/services/sendMessage.ts:266, app/src/services/sendMessage.ts:608, app/src/services/sendMessage.ts:661, app/src/jobs/broadcastFanOut.ts:967, app/src/jobs/relayFanOut.ts:2114, app/src/jobs/sendReconcile.ts:706, app/src/jobs/missedCallAutoText.ts:254, app/src/routes/api.ts:1462, app/src/repos/messagesRepo.ts
 ---
 
@@ -103,3 +103,21 @@ and the staff send routes rethrow it to the error handler, which answers 500
 `app/src/lib/errors.ts:200`), for a text that went out and has no row - a
 re-click can send it again
 ([exactly-once-send-intent](./exactly-once-send-intent.md)).
+
+**retry-send-adoption (2026-09-28).** Piece 2 is built for `retrySend` on
+`feat/retry-send-adoption` (code final `1b5ddb01`, UNMERGED; anchors at
+`5a03e20b`); status unchanged. The job catches `SendAcceptedNotRecordedError`
+(`app/src/jobs/retrySend.ts:602-610`), logs ERROR `sent_unrecorded` and moves
+the attempt record to `reconciling` WITH the provider SID
+(`handToReconcile`, `:806-823`), then enqueues the check and refreshes the
+retried row's promise (`handOff`, `:767-803`). The check takes the known-SID
+path (`app/src/jobs/sendReconcile.ts:539`; `adoptKnown`, `:1049-1061`),
+fetches that message and appends it as the retry row the send would have
+written (`adoptRetry`, `:850-947`: the lineage, `retry_root` and the share
+stamp at append, deduped on the SID; a dedupe onto this attempt's own row is
+a repair, `:904-910`), so the text that went out gets its row and nothing
+re-sends it. Still lost as the section above says: the manual Retry route
+(now `app/src/routes/api.ts:1774-1780`) rethrows it as a 500 with no row and
+no record - which also widens the manual-vs-automatic overlap in
+[manual-retry-double-send-residual-windows](./manual-retry-double-send-residual-windows.md)
+(code review round 2 R2-6) - and the other callers that do not adopt it.

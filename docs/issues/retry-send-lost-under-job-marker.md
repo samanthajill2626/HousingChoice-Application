@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app/messaging
 created: 2026-09-25
-updated: 2026-09-27
+updated: 2026-09-28
 refs: app/src/jobs/retrySend.ts:203, app/src/jobs/retrySend.ts:212, app/src/jobs/retrySend.ts:274, app/src/jobs/retrySend.ts:317, app/src/jobs/retrySend.ts:339, app/src/routes/webhooks/twilio.ts:3581, app/src/routes/webhooks/twilio.ts:3624, app/src/services/sendMessage.ts:442, app/src/services/sendMessage.ts:608, app/src/services/sendMessage.ts:661, app/src/repos/sendAttemptsRepo.ts:329, app/src/jobs/sendReconcile.ts:369, docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
 ---
 
@@ -150,3 +150,65 @@ lineage into the append itself (`:314-327`), so the post-append annotate the
 body lists no longer exists; the webhook logs the exhausted chain at
 `app/src/routes/webhooks/twilio.ts:3581` and schedules the retry at `:3624`;
 the post-append steps D3 made best-effort are `sendMessage.ts:672-698`.
+
+**retry-send-adoption (2026-09-28).** Built on `feat/retry-send-adoption`
+(code final `1b5ddb01`, UNMERGED; anchors at `5a03e20b`) to the design
+`docs/superpowers/specs/2026-09-27-retry-send-adoption-design.md` (revision
+5); records under `docs/superpowers/reviews/2026-09-27-retry-send-adoption/`.
+`status` stays `open`: the human sets it resolved at merge.
+
+- **The marker write is gone from the job.** `messaging.retrySend` registers
+  without the run-once marker (`app/src/jobs/retrySend.ts:330-331`). Its
+  duplicate guard is the claim on a send-attempt record keyed on the retried
+  row and the attempt (the owner `:404-411`, the claim `:497-511`), re-armed
+  as the last step before the provider call (`:545-553`).
+- **Before the claim a throw is a real SQS redelivery, and nothing is
+  sent:** the retried row, read consistently, and its declines
+  (`:349-366`); the thread (`:395-403`); the shared gate (`:421-434` - a
+  stale `attempting` record is taken over and handed off, a fresh one or a
+  `reconciling` one defers, a terminal one skips); a manual child supersedes
+  (step 4a, `:457-466`); the strict window (step 4b, `:468-481`).
+- **After the claim nothing throws** (`:572-641`): sent (`:563-571`),
+  refused (`:673-676`), rejected (`:614-635`), deferred once (`:707-759`);
+  an unknown outcome goes to reconcile - `handToReconcile`, then the check-0
+  enqueue and a promise REFRESH over the check schedule (`:806-823`,
+  `:767-803`); a second unknown after a re-drive closes unresolved and
+  WITHDRAWS the promise (`:834-852`); accepted-not-recorded goes to
+  reconcile WITH its SID (`:602-610`).
+- **The reconcile's fourth owner, `retry_send`**
+  (`app/src/jobs/sendReconcile.ts`): the ref and its parser (`:147-154`,
+  `:257-272`); resolve from the retried row and the thread (`:619-640`); the
+  lineage exclusion from the sibling rule (`:1080-1095`, applied at
+  `:1136-1149`); the owner's own row (`:768-778`); the adoption as the retry
+  row with its lineage, `retry_root` and share stamp at append (`adoptRetry`,
+  `:850-947`); one re-drive through the job's own producer (`:1513-1526`)
+  only while the window fits (`:1551-1561`), with a REFRESH (`:1636-1643`);
+  the unresolved close's WITHDRAW - "retry not confirmed", no Retry
+  (`closeSlot`, `:1308-1333`) - and the retried row's emit (`afterClose`,
+  `:1375-1388`). The joint gap is closed by Cameron's Q1 ruling: the manual
+  Retry route answers 409 `retry_unresolved` from the record
+  (`app/src/routes/api.ts:1670-1676`).
+
+**Deploy note (build worklist item 24, kept beside the belt).** A retry job
+that threw under the pre-adoption code within about 10 minutes before the
+deploy (the 120 s visibility timeout x 5 receives) is redelivered to the new
+code, which no longer claims the marker and finds no record: it would claim
+and send - a possible second text after an unknown first attempt, a certain
+one after an accepted-not-recorded one. Deploy when the worker log shows no
+`retrySend` failure in the preceding ~10 minutes. The read-only pre-adoption
+belt covers the same window in code (plan deviation 10,
+`retrySend.ts:436-454`: with no record, a jobId whose marker exists is not
+re-sent - INFO `retrySend: pre-adoption delivery already ran this job - not
+re-sent`); its dated `TODO(retry-send-lost-under-job-marker)` (`:444-447`)
+says to remove it after the first production deploy plus one SQS redelivery
+window.
+
+**Rollback note (worklist item 25; code review round 1 A-5).** Pre-branch
+code cannot read a `retry_send` owner: its reconcile parser rejects the kind
+("owner.kind is not a send-attempt owner") and its attempt repo has no
+`retry_send` arm, so keying such an owner throws. A rollback while fresh
+`retry_send` records exist dead-letters their queued `send.reconcile` checks
+(five receives; pages `jobs-dlq-depth`), strands those records open, and can
+break OTHER owners' reconciles to the same recipient for about 5 minutes
+(their sibling read meets the retry's index items). Drain `send.reconcile`
+before rolling back.

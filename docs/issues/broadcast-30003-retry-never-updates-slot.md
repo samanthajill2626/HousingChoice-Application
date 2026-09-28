@@ -98,6 +98,12 @@ R7; what B reads is spec R10). Status stays open.
   approved, so it is his call (the handback shows both). Either way Branch B
   should skip or route retry receipts in the rollup and restore WARN for a
   share's own row.
+- **2026-09-28 (post-verdict): Cameron took the call-site alternative.** The
+  rollup at `twilio.ts:3529` is skipped when the row carries `retry_of` and
+  the give-up line is back at WARN (the fence relaxed for that one line only;
+  `app/test/twilioStatusWebhook.test.ts` pins the skip: no broadcast read, no
+  wait, no give-up line for a share-retry receipt). Branch B removes the skip
+  when it routes retry receipts by `broadcast_id` + `retry_root`.
 - **Two facts for B (build worklist item 27).** A retry row appended before
   this branch carries no `broadcast_id`, so a chain straddling the deploy
   loses share attribution from that row on (each retry copies the field from

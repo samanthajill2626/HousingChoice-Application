@@ -853,9 +853,16 @@ Share-skip Branch B builds on the rules AS BUILT, which are these.
     (`broadcastFanOut.ts`) additionally ignores rows with `retry_of` at both
     of its callers - a CODE change in a file section 2's "In" list does not
     name (plan deviation 7); the `twilio.ts` rollup does not use it and
-    always misses a retry row (R7's stated cost). A one-line alternative at
-    the rollup's call site (guard on `retry_of`, keep the give-up line at
-    WARN) is recorded for Cameron's decision, not built.
+    always misses a retry row (R7's stated cost). **Cameron's decision of
+    2026-09-28 (post-verdict, after the Branch B planner's check against B's
+    spec v5): the INFO downgrade is REPLACED by the other single fenced line**
+    - the rollup call at `twilio.ts:3529` is skipped when the row carries
+    `retry_of` (no 2.5 s wait, no broadcast reads for a share-retry receipt)
+    and the give-up line is back at WARN, so a genuine slot miss on a share's
+    own row keeps its warning. The fence ruling is relaxed for that one line
+    only; Branch B opens the fence and replaces the skip with its own routing
+    of retry rows (`broadcast_id` + `retry_root`), removing the line rather
+    than living beside it.
 16. **R6 - the in-flight residual is wider than stated**: a manual press whose
     own send ends UNKNOWN appends no manual row, so a late automatic job can
     pass step 4a and claim for the rest of the window (two rare events at
@@ -887,7 +894,11 @@ Share-skip Branch B builds on the rules AS BUILT, which are these.
     re-driven job passes 4a (no row exists yet for either check) - the
     `send-attempt-rearm-residues` class.
 20. **Section 0 / R2 / R6 - the LEGACY root walk is bounded at
-    `RETRY_ROOT_WALK_MAX_HOPS` = 12 hops**, not `MAX_SEND_RETRY_ATTEMPTS` (3)
+    `RETRY_ROOT_WALK_MAX_HOPS` = 16 hops** (12 at fix wave 3; raised to 16 on
+    Cameron's decision of 2026-09-28 so the 15-hop pre-deploy shape - a root's
+    own ladder, then three manual retries each with a full ladder - resolves
+    its true root; a wrong root would route a retry's receipt to no slot and
+    log at ERROR per receipt under Branch B's rules), not `MAX_SEND_RETRY_ATTEMPTS` (3)
     (fix wave 3, the planner's re-review; handback deviation 14;
     `services/retryChain.ts`). A manual Retry extends a chain past three rows,
     so a pre-deploy row (no `retry_root`) three hops below a manual row would

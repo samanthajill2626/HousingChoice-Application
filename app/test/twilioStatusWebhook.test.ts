@@ -371,11 +371,12 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     expect(world.emitted.filter((e) => e.event === 'broadcast.updated').length).toBe(emitsAfterFirst);
   });
 
-  it('broadcast rollup: a receipt for a share-RETRY row (broadcast_id, no slot of its own) gives up at INFO after the one re-load - never a WARN (retry-send-adoption R7, the one fenced line)', async () => {
+  it('broadcast rollup: a receipt for a share-RETRY row (broadcast_id + retry_of) SKIPS the rollup - no broadcast read, no wait, no give-up line (retry-send-adoption, the one fenced line; Cameron 2026-09-28)', async () => {
     // Since retry-send-adoption every retry of a share text carries the share's
     // broadcast_id (R7), while the recipient slot still names the share's OWN
-    // row until share-skip Branch B teaches the rollup to follow retry_root. The
-    // miss is expected, so its give-up is not a prod warning line.
+    // row until share-skip Branch B routes retry receipts by broadcast_id +
+    // retry_root. Until then the rollup is skipped for a retry row outright:
+    // the give-up path stays a WARN for a GENUINE miss on a share's own row.
     const { app, world, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 5 });
     const shareRow = await seedOutbound(world, 'SMbcastroot', { broadcast_id: 'bcast-retry' });
     const retryRow = await seedOutbound(world, 'SMbcastretry', {
@@ -410,19 +411,11 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       statusParams({ MessageSid: 'SMbcastretry', MessageStatus: 'delivered' }),
     );
     expect(res.status).toBe(200);
-    // The retry row's own status is recorded; the rollup looked twice and gave up.
+    // The retry row's own status is recorded; the rollup was never entered: no broadcast read, no give-up line at any level.
     expect((await world.messagesRepo.getByProviderSid('SMbcastretry'))?.delivery_status).toBe('delivered');
-    expect(reads).toBe(2);
-    const giveUps = capture.lines.filter((l) => String(l['msg']).includes('no matching recipient slot'));
-    expect(giveUps).toHaveLength(1);
-    expect(giveUps[0]).toMatchObject({
-      level: 30,
-      msg: 'broadcast delivery rollup: no matching recipient slot - ignored',
-      broadcastId: 'bcast-retry',
-      conversationId: retryRow.conversationId,
-    });
-    expect(String(giveUps[0]!['msg'])).toMatch(/^[ -~]+$/);
-    expect(capture.atLevel(WARN).filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+    expect(reads).toBe(0);
+    expect(capture.lines.filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+    expect(retryRow.retry_of).toBe(shareRow.tsMsgId);
     // Nothing moved on the share: the slot, the stats and the live surfaces.
     const bcast = world.broadcasts.get('bcast-retry')!;
     expect(bcast.recipients['c-1']?.status).toBe('failed');

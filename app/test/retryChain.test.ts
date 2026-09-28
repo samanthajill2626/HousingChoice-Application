@@ -129,27 +129,40 @@ describe('resolveRetryRoot (spec section 0)', () => {
     ]);
   });
 
-  it('stops after RETRY_ROOT_WALK_MAX_HOPS (12) hops on a deeper pre-deploy chain: the 12th parent - the last row read - is the answer', async () => {
+  it('the deepest pre-deploy shape - the root\'s own ladder, then three manual retries each with a full ladder (15 hops) - resolves the TRUE root within the bound (Cameron 2026-09-28: 16)', async () => {
     const world = createFakeWorld();
-    // Fourteen legacy rows, none carrying retry_root: the root, then three-rung automatic ladders, each
-    // restarted by a manual Retry of its last rung (root, a1-a3, M1, b1-b3, M2, c1-c3, M3, d1).
+    // Sixteen legacy rows, none carrying retry_root: root, a1-a3, M1, b1-b3, M2, c1-c3, M3, d1-d3.
     const chain = [await row(world, 'SMc0', 0)];
-    for (let i = 1; i <= 13; i += 1) {
+    for (let i = 1; i <= 15; i += 1) {
       const parent = chain[i - 1]!;
       const rung = i % 4;
       chain.push(await row(world, `SMc${i}`, i, rung === 0 ? { retryOf: parent.tsMsgId } : auto(parent, rung)));
     }
     const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
-    // Twelve hops from chain[13] read chain[12] down to chain[1]; the root is a thirteenth hop away.
-    expect(await resolveRetryRoot(world.messagesRepo, chain[13]!)).toBe(chain[1]!.tsMsgId);
-    expect(reads).toHaveBeenCalledTimes(12);
+    expect(await resolveRetryRoot(world.messagesRepo, chain[15]!)).toBe(chain[0]!.tsMsgId);
+    expect(reads).toHaveBeenCalledTimes(15);
+  });
+
+  it('stops after RETRY_ROOT_WALK_MAX_HOPS (16) hops on a still deeper pre-deploy chain: the 16th parent - the last row read - is the answer', async () => {
+    const world = createFakeWorld();
+    // Eighteen legacy rows, none carrying retry_root (root, then ladders restarted by manual Retries, as above).
+    const chain = [await row(world, 'SMc0', 0)];
+    for (let i = 1; i <= 17; i += 1) {
+      const parent = chain[i - 1]!;
+      const rung = i % 4;
+      chain.push(await row(world, `SMc${i}`, i, rung === 0 ? { retryOf: parent.tsMsgId } : auto(parent, rung)));
+    }
+    const reads = vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent');
+    // Sixteen hops from chain[17] read chain[16] down to chain[1]; the root is a seventeenth hop away.
+    expect(await resolveRetryRoot(world.messagesRepo, chain[17]!)).toBe(chain[1]!.tsMsgId);
+    expect(reads).toHaveBeenCalledTimes(16);
     expect(reads.mock.calls.map(([, tsMsgId]) => tsMsgId)).toStrictEqual(
       chain
-        .slice(1, 13)
+        .slice(1, 17)
         .reverse()
         .map((m) => m.tsMsgId),
     );
-    expect(RETRY_ROOT_WALK_MAX_HOPS).toBe(12);
+    expect(RETRY_ROOT_WALK_MAX_HOPS).toBe(16);
   });
 });
 

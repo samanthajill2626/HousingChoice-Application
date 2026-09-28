@@ -20,15 +20,15 @@ export interface LineageReader {
 }
 
 /**
- * FW3 (planner re-review R4): the bound of resolveRetryRoot's LEGACY walk ONLY - automaticAncestry keeps
- * MAX_SEND_RETRY_ATTEMPTS (it walks automatic rows only). A manual Retry extends a chain past three rows: three
- * manual retries each carrying a full three-rung automatic ladder are 3 x (1 + 3) = 12 rows, which a walk up from
- * the deepest of them crosses within 12 hops (a root's own ladder above the first manual retry adds up to three
- * more rows). Every row appended since retry-send-adoption carries retry_root and returns at hop 0, so only
- * pre-deploy rows pay the reads - and a wrong root would be written once and inherited by every later row of the
- * chain.
+ * FW3 (planner re-review R4; raised to 16 on Cameron's decision of 2026-09-28): the bound of resolveRetryRoot's
+ * LEGACY walk ONLY - automaticAncestry keeps MAX_SEND_RETRY_ATTEMPTS (it walks automatic rows only). A manual
+ * Retry extends a chain past three rows: a root's own three-rung ladder, then three manual retries each carrying a
+ * full three-rung ladder, put the deepest row 3 + 3 x (1 + 3) = 15 hops from the root, which 16 hops cross.
+ * Every row appended since retry-send-adoption carries retry_root and returns at hop 0, so only pre-deploy rows
+ * pay the reads - and a wrong root would be written once and inherited by every later row of the chain, routing
+ * a retry's receipt to no slot under Branch B's rules.
  */
-export const RETRY_ROOT_WALK_MAX_HOPS = 12;
+export const RETRY_ROOT_WALK_MAX_HOPS = 16;
 
 /** Spec section 0: the chain ROOT of `row` - its retry_root when it carries one; a row with no retry_of is its own root; a pre-deploy retry row is walked up retry_of (consistent reads, at most RETRY_ROOT_WALK_MAX_HOPS hops); a broken link or the bound stops at the last row read. */
 export async function resolveRetryRoot(messages: LineageReader, row: MessageItem): Promise<string> {

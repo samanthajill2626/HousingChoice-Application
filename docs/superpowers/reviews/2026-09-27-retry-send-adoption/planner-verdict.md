@@ -161,3 +161,17 @@ Failure budget 0 of 2 used; infra recoveries 0; no stall, no misfire, no
 usage-limit death. 6.5 hours from dispatch to the first handback; fix wave 2
 and the re-gate on top. Every slice, review round, fix wave and self-QA is a
 committed record under `docs/superpowers/reviews/2026-09-27-retry-send-adoption/`.
+
+## Post-verdict: Cameron's two decisions, landed on the branch (2026-09-28, small-fix gates)
+
+Both decisions above were taken (checked by the Branch B planner against B's
+spec v5): (1) the rollup one-liner - the rollup call at `twilio.ts:3529` is
+skipped when the row carries `retry_of` and the give-up line is back at WARN
+(the fence relaxed for that one line only; B replaces the skip with its own
+routing); (2) `RETRY_ROOT_WALK_MAX_HOPS` raised from 12 to 16 so the 15-hop
+pre-deploy shape resolves its true root. Landed as one commit on the branch
+before the merge, under the small-fix gates (typecheck, the touched suites,
+smoke, gate-5 lint, plus the affected e2e specs) - the gate results are quoted
+in the commit's handback line below. Spec errata items 15 and 20 and the
+issue note record both.
+Small-fix gates on the two fixes (bare, from the worktree, 2026-09-28 09:27-09:31): `TYPECHECK_EXIT=0` (0 `error TS`); `npx vitest run` on `twilioStatusWebhook`, `retryChain`, `retrySendAttempt`, `sendReconcile` `EXIT=0`; `SMOKE_EXIT=0`; `npx eslint` on the four touched files `EXIT=0` (0 problems; 0 at the merge base); the four affected e2e specs (`retry-send-adoption`, `one-to-one-30003-retry`, `send-outcome-reconcile`, `broadcasts`) through the e2e workspace `EXIT=0`, **12 passed (2.3 m)**. `twilio.ts` differs from main by exactly ONE line (the guard); the give-up line is byte-identical to main. The full five-gate battery was last run green at 217b19dc (code aae99caa) - these two fixes ride on it under Cameron's small-fix ruling.

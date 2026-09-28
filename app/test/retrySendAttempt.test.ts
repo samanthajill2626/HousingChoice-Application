@@ -527,7 +527,7 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(row.retry_due_at).toBe(before);
     expect(capture.atLevel(ERROR)).toEqual([
       expect.objectContaining({
-        msg: 'retrySend: a deferred re-run would land past the window - chain ended',
+        msg: 'retrySend: retry window closed - a deferred re-run would land past the window; chain ended',
         cause: RETRY_WINDOW_CLOSED_CODE,
         outcome: 'refused',
       }),
@@ -1156,5 +1156,86 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(capture.lines.filter((l) => String(l['msg']).startsWith('retrySend: claim refused'))).toHaveLength(0);
     expect(list).not.toHaveBeenCalled();
     expect(calls).not.toHaveBeenCalled();
+  });
+
+  it('FW1 C-5 (second unknown): the unresolved close line states what the WITHDRAW did - a write that throws (failed) or loses twice (lost) reads "withdrawal failed - the record decides", never "withdrawn"; a row already withdrawn reads "withdrawn"; ONE close line each, after the helper\'s own ERROR', async () => {
+    wire();
+    unknownOn();
+    const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+    const withdrawn = 'retrySend: unknown send outcome after a re-drive - attempt closed unresolved; the retry promise is withdrawn';
+    const notWithdrawn =
+      'retrySend: unknown send outcome after a re-drive - attempt closed unresolved; the retry promise withdrawal failed - the record decides';
+    // (1) failed: the WITHDRAW's write throws.
+    const failed = await seedRetried('SMc5failed');
+    const failedDue = failed.retry_due_at;
+    await seedRedriven(ownerOf(failed, 1), factsFor(failed));
+    annotate.mockRejectedValueOnce(new Error('annotate exploded'));
+    await run(failed);
+    expect(await recordOf(failed)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'second_unknown' });
+    expect(failed.retry_due_at).toBe(failedDue);
+    expect(failed).not.toHaveProperty('retry_outcome');
+    // (2) lost: both WITHDRAW writes lose their condition.
+    const lost = await seedRetried('SMc5lost');
+    const lostDue = lost.retry_due_at;
+    await seedRedriven(ownerOf(lost, 1), factsFor(lost));
+    annotate.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+    await run(lost);
+    expect(await recordOf(lost)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'second_unknown' });
+    expect(lost.retry_due_at).toBe(lostDue);
+    expect(lost).not.toHaveProperty('retry_outcome');
+    // (3) already: the row already holds the sentinel AND the outcome - a no-op that IS withdrawn.
+    const already = await seedRetried('SMc5already');
+    already.retry_due_at = RETRY_PROMISE_WITHDRAWN_AT;
+    already.retry_outcome = 'unconfirmed';
+    await seedRedriven(ownerOf(already, 1), factsFor(already));
+    const writesBefore = annotate.mock.calls.length;
+    await run(already);
+    expect(await recordOf(already)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'second_unknown' });
+    expect(annotate.mock.calls.length).toBe(writesBefore);
+    expect(capture.atLevel(ERROR).map((l) => [l['providerSid'], l['msg']])).toEqual([
+      ['SMc5failed', 'failure-arm write failed (best-effort); the attempt record decides'],
+      ['SMc5failed', notWithdrawn],
+      ['SMc5lost', 'retry promise withdrawal lost twice - a concurrent writer keeps moving the promise'],
+      ['SMc5lost', notWithdrawn],
+      ['SMc5already', withdrawn],
+    ]);
+    expect(msgLines(ERROR, notWithdrawn)).toEqual([
+      expect.objectContaining({ cause: 'second_unknown', outcome: 'unresolved', retriedTsMsgId: failed.tsMsgId }),
+      expect.objectContaining({ cause: 'second_unknown', outcome: 'unresolved', retriedTsMsgId: lost.tsMsgId }),
+    ]);
+  });
+
+  it('FW1 C-5 (hand-off enqueue failure): the unresolved enqueue_failed close line reads "withdrawal failed - the record decides" when the WITHDRAW fails (its write throws) or is lost twice - never "withdrawn"; ONE close line each, after the helper\'s own ERROR', async () => {
+    wire();
+    unknownOn();
+    refuseEnqueues((jobName) => jobName === SEND_RECONCILE_JOB);
+    const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+    const notWithdrawn = 'retrySend: reconcile enqueue failed - attempt closed unresolved; the retry promise withdrawal failed - the record decides';
+    // (1) failed: the WITHDRAW's write throws.
+    const failed = await seedRetried('SMc5hofailed');
+    const failedDue = failed.retry_due_at;
+    annotate.mockRejectedValueOnce(new Error('annotate exploded'));
+    await run(failed);
+    expect(await recordOf(failed)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+    expect(failed.retry_due_at).toBe(failedDue);
+    expect(failed).not.toHaveProperty('retry_outcome');
+    // (2) lost: both WITHDRAW writes lose their condition.
+    const lost = await seedRetried('SMc5holost');
+    const lostDue = lost.retry_due_at;
+    annotate.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+    await run(lost);
+    expect(await recordOf(lost)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+    expect(lost.retry_due_at).toBe(lostDue);
+    expect(lost).not.toHaveProperty('retry_outcome');
+    expect(capture.atLevel(ERROR).map((l) => [l['providerSid'], l['msg']])).toEqual([
+      ['SMc5hofailed', 'failure-arm write failed (best-effort); the attempt record decides'],
+      ['SMc5hofailed', notWithdrawn],
+      ['SMc5holost', 'retry promise withdrawal lost twice - a concurrent writer keeps moving the promise'],
+      ['SMc5holost', notWithdrawn],
+    ]);
+    expect(msgLines(ERROR, notWithdrawn)).toEqual([
+      expect.objectContaining({ cause: 'enqueue_failed', outcome: 'unresolved', retriedTsMsgId: failed.tsMsgId }),
+      expect.objectContaining({ cause: 'enqueue_failed', outcome: 'unresolved', retriedTsMsgId: lost.tsMsgId }),
+    ]);
   });
 });

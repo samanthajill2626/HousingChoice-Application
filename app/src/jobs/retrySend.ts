@@ -719,7 +719,7 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
         await finish(owner, ref, { outcome: 'refused', cause: RETRY_WINDOW_CLOSED_CODE }, octx);
         log.error(
           { err, ...octx, cause: RETRY_WINDOW_CLOSED_CODE, outcome: 'refused' },
-          'retrySend: a deferred re-run would land past the window - chain ended',
+          'retrySend: retry window closed - a deferred re-run would land past the window; chain ended',
         );
         return;
       }
@@ -771,12 +771,20 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
         const wrote = await guardWrite(log, octx, 'closeFromReconcile', async () => {
           closed = await attemptsRepo.closeFromReconcile(owner, attemptedAt, { outcome: 'unresolved', cause: ENQUEUE_FAILED_CODE });
         });
-        if (wrote && closed) await withdrawRetryPromise(promise, retried, octx);
+        const line = { err, ...octx, attemptedAt, cause: ENQUEUE_FAILED_CODE, outcome: 'unresolved' };
+        if (!wrote || !closed) {
+          log.error(line, 'retrySend: reconcile enqueue failed and its unresolved close was lost or failed - the record decides');
+          return;
+        }
+        // ONE close line either way, stating what the WITHDRAW did (code review
+        // r1 C-5): a lost or failed one - the helper logged its own ERROR - is
+        // never reported as withdrawn.
+        const withdrawn = await withdrawRetryPromise(promise, retried, octx);
         log.error(
-          { err, ...octx, attemptedAt, cause: ENQUEUE_FAILED_CODE, outcome: 'unresolved' },
-          wrote && closed
+          line,
+          withdrawn === 'written' || withdrawn === 'already'
             ? 'retrySend: reconcile enqueue failed - attempt closed unresolved; the retry promise is withdrawn'
-            : 'retrySend: reconcile enqueue failed and its unresolved close was lost or failed - the record decides',
+            : 'retrySend: reconcile enqueue failed - attempt closed unresolved; the retry promise withdrawal failed - the record decides',
         );
         return;
       }
@@ -821,12 +829,20 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     ): Promise<void> {
       if (secondUnknownWouldClose) {
         const closed = await finish(owner, ref, { outcome: 'unresolved', cause: 'second_unknown' }, octx);
-        if (closed === 'won') await withdrawRetryPromise(promise, retried, octx);
+        const line = { err, ...octx, cause: 'second_unknown', outcome: 'unresolved' };
+        if (closed !== 'won') {
+          log.error(line, 'retrySend: unknown send outcome after a re-drive - its unresolved close was lost or failed; the record decides');
+          return;
+        }
+        // ONE close line either way, stating what the WITHDRAW did (code review
+        // r1 C-5): a lost or failed one - the helper logged its own ERROR - is
+        // never reported as withdrawn.
+        const withdrawn = await withdrawRetryPromise(promise, retried, octx);
         log.error(
-          { err, ...octx, cause: 'second_unknown', outcome: 'unresolved' },
-          closed === 'won'
+          line,
+          withdrawn === 'written' || withdrawn === 'already'
             ? 'retrySend: unknown send outcome after a re-drive - attempt closed unresolved; the retry promise is withdrawn'
-            : 'retrySend: unknown send outcome after a re-drive - its unresolved close was lost or failed; the record decides',
+            : 'retrySend: unknown send outcome after a re-drive - attempt closed unresolved; the retry promise withdrawal failed - the record decides',
         );
         return;
       }

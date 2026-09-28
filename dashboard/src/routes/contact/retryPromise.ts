@@ -19,6 +19,20 @@
 export const RETRY_PROMISE_GRACE_MS = 120_000;
 
 /**
+ * MIRROR of RETRY_OUTCOME_UNCONFIRMED in app/src/lib/retrySendWindow.ts
+ * (retry-send-adoption R5) - hand-copied for the same reason as the grace
+ * above, and pinned to the app's value by retryPromiseMirror.test.ts. A
+ * retried message carries `retry_outcome` with this value when the reconcile
+ * ruled its automatic retry `unresolved`: the bubble reads "retry not
+ * confirmed" and offers no Retry, and the manual Retry route refuses with 409
+ * `retry_unresolved`. It is the ONE dashboard literal: api/types.ts derives
+ * the wire type from it. The withdrawn stamp alone (the epoch retry_due_at an
+ * enqueue failure writes) is NOT this outcome - that message stays a plain
+ * failure and keeps its Retry.
+ */
+export const RETRY_OUTCOME_UNCONFIRMED = 'unconfirmed' as const;
+
+/**
  * Is the promise live at `serverNowMs` - the SERVER's clock (`serverNowMs()` in
  * api/serverClock.ts), never the browser's? True while `serverNowMs` is before
  * `retry_due_at + RETRY_PROMISE_GRACE_MS`; false for an absent or unparseable

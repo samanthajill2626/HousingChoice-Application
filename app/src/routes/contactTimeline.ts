@@ -30,6 +30,7 @@ import { Router } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { RETRY_OUTCOME_UNCONFIRMED, type RetryOutcome } from '../lib/retrySendWindow.js';
 import {
   createActivityEventsRepo,
   type ActivityEventItem,
@@ -178,6 +179,13 @@ interface TimelineMessage extends TimelineBase {
    *  manual Retry route's D10 guard reads the same field. Absent when no retry
    *  was scheduled. */
   retry_due_at?: string;
+  /** retry-send-adoption R5: 'unconfirmed' when the reconcile ruled this
+   *  FAILED message's automatic retry `unresolved` - written with the withdrawn
+   *  retry_due_at in one write (see MessageItem.retry_outcome). The client reads
+   *  "retry not confirmed" and hides Retry; the manual Retry route refuses with
+   *  409 retry_unresolved. Absent otherwise - the withdrawn stamp ALONE (an
+   *  enqueue failure's withdrawal) carries none and stays a plain failure. */
+  retry_outcome?: RetryOutcome;
   fromPhone?: string;
   toPhone?: string;
   // --- Email channel v1 (type:'email' items) -----------------------------------
@@ -450,6 +458,8 @@ function toTimelineMessage(
     // retry-send-window D7/D8: projected verbatim, the withdrawn sentinel
     // (1970-01-01) included - the client reads that as an expired promise.
     ...(typeof m.retry_due_at === 'string' && { retry_due_at: m.retry_due_at }),
+    // retry-send-adoption R5: only the one value this branch writes is projected.
+    ...(m.retry_outcome === RETRY_OUTCOME_UNCONFIRMED && { retry_outcome: RETRY_OUTCOME_UNCONFIRMED }),
     ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
     ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
     // `imported_from` is an undeclared rider the importer PUTs on the item

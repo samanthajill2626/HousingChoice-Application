@@ -37,7 +37,7 @@ import {
 // projection/presenter boundary. Established practice - see consentDrift.test.ts.
 import { presentCallState } from '../../dashboard/src/routes/contact/presentCallState.js';
 import type { TimelineMessage as DashboardTimelineMessage } from '../../dashboard/src/api/types.js';
-import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
+import { RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 
 const TENANT = 'c-tenant';
 const PHONE_A = '+15550100001';
@@ -400,6 +400,45 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
       RETRY_PROMISE_WITHDRAWN_AT,
     );
     expect(items.find((i) => i.tsMsgId.endsWith('#SM-plain'))!).not.toHaveProperty('retry_due_at');
+  });
+
+  it('retry-send-adoption R5: projects retry_outcome on a retried row the reconcile ruled unresolved, and nothing on one without - the withdrawn sentinel alone included', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    for (const [minute, sid] of [
+      ['10:00', 'SM-unconfirmed'],
+      ['10:01', 'SM-withdrawn'],
+      ['10:02', 'SM-plain'],
+      ['10:03', 'SM-unknown-outcome'],
+    ] as const) {
+      await seedMessage('conv-a', `2026-06-16T${minute}:00.000Z`, sid, {
+        direction: 'outbound',
+        body: sid,
+        deliveryStatus: 'failed',
+      });
+    }
+    // The WITHDRAW writes both fields in one conditional write (never append),
+    // so stamp the stored rows directly. SM-withdrawn is RSW's enqueue-failure
+    // withdrawal: the sentinel with NO outcome, which must stay a plain failure.
+    const stored = (sid: string) => world.messages.find((m) => m.provider_sid === sid)!;
+    stored('SM-unconfirmed').retry_due_at = RETRY_PROMISE_WITHDRAWN_AT;
+    stored('SM-unconfirmed').retry_outcome = RETRY_OUTCOME_UNCONFIRMED;
+    stored('SM-withdrawn').retry_due_at = RETRY_PROMISE_WITHDRAWN_AT;
+    // A value this branch never writes is not projected (only 'unconfirmed' is).
+    (stored('SM-unknown-outcome') as Record<string, unknown>)['retry_outcome'] = 'something-else';
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    expect(res.status).toBe(200);
+    // Typed as the DASHBOARD's TimelineMessage: `npm run typecheck` fails here
+    // until the client type declares the field.
+    const items = res.body.items as DashboardTimelineMessage[];
+    const item = (sid: string) => items.find((i) => i.tsMsgId.endsWith(`#${sid}`))!;
+    expect(item('SM-unconfirmed').retry_outcome).toBe('unconfirmed');
+    expect(item('SM-unconfirmed').retry_due_at).toBe(RETRY_PROMISE_WITHDRAWN_AT);
+    expect(item('SM-withdrawn')).not.toHaveProperty('retry_outcome');
+    expect(item('SM-withdrawn').retry_due_at).toBe(RETRY_PROMISE_WITHDRAWN_AT);
+    expect(item('SM-plain')).not.toHaveProperty('retry_outcome');
+    expect(item('SM-unknown-outcome')).not.toHaveProperty('retry_outcome');
   });
 
   it('emits imported:true only on a row the importer stamped', async () => {

@@ -13,13 +13,18 @@
 // copies and compare RESOLVED values and answers, from the dashboard side,
 // because the app module is a near-leaf and the app's test tsconfig has no
 // `jsx` option to take the traffic the other way.
+//
+// retry-send-adoption R5 adds a second hand copy to the same module: the
+// RETRY_OUTCOME_UNCONFIRMED literal the screen keys "retry not confirmed" on,
+// pinned below beside the grace.
 import { describe, expect, it } from 'vitest';
 import {
   isRetryPromiseLive as appIsRetryPromiseLive,
+  RETRY_OUTCOME_UNCONFIRMED as APP_RETRY_OUTCOME_UNCONFIRMED,
   RETRY_PROMISE_GRACE_MS as APP_RETRY_PROMISE_GRACE_MS,
   RETRY_PROMISE_WITHDRAWN_AT,
 } from '../../../../app/src/lib/retrySendWindow.js';
-import { isRetryPromiseLive, RETRY_PROMISE_GRACE_MS } from './retryPromise.js';
+import { isRetryPromiseLive, RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_GRACE_MS } from './retryPromise.js';
 
 const DUE = '2026-09-25T20:42:00.000Z';
 const DUE_MS = Date.parse(DUE);
@@ -48,6 +53,15 @@ describe('dashboard retry promise mirrors app/src/lib/retrySendWindow.ts', () =>
         appIsRetryPromiseLive(stamp, nowMs),
       );
     }
+  });
+
+  // retry-send-adoption R5: the retried row's `retry_outcome` value when the
+  // reconcile ruled its retry unresolved. The screen reads "retry not confirmed"
+  // and hides Retry on exactly this value; if the copies drifted, the bubble
+  // would offer a Retry the route refuses with 409 retry_unresolved.
+  it('the "retry not confirmed" outcome is the SAME literal on both sides', () => {
+    expect(RETRY_OUTCOME_UNCONFIRMED).toBe(APP_RETRY_OUTCOME_UNCONFIRMED);
+    expect(RETRY_OUTCOME_UNCONFIRMED).toBe('unconfirmed');
   });
 
   it('does not compare two vacuous answers', () => {

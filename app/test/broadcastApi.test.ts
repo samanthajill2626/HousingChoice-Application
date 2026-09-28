@@ -1585,6 +1585,28 @@ describe('share-broadcast API (M1.8a)', () => {
     }
   });
 
+  it('results reads the share CONSISTENTLY in both views - the list refetches a finished share ~400 ms after the write whose event triggered it, and no later event corrects a stale read (code review R2-1); a missing share is still 404', async () => {
+    seedShare(world, 'b-1', 'sent', { 'c-1': { status: 'delivered' } });
+    const { app } = makeWebhookHarness({ world });
+    // The double's consistent read delegates THROUGH getById (a spy on getById
+    // would see it), so the consistent spy reads the unspied original instead.
+    const read = world.broadcastsRepo.getById;
+    const consistent = vi.spyOn(world.broadcastsRepo, 'getByIdConsistent').mockImplementation((id) => read(id));
+    const eventual = vi.spyOn(world.broadcastsRepo, 'getById');
+    expect((await authedGet(app, '/api/broadcasts/b-1/results')).status).toBe(200);
+    expect(consistent).toHaveBeenCalledTimes(1);
+    expect((await authedGet(app, '/api/broadcasts/b-1/results?view=stats')).status).toBe(200);
+    expect(consistent).toHaveBeenCalledTimes(2);
+    expect(consistent.mock.calls).toEqual([['b-1'], ['b-1']]);
+    for (const path of ['/api/broadcasts/b-gone/results', '/api/broadcasts/b-gone/results?view=stats']) {
+      const res = await authedGet(app, path);
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'broadcast_not_found' });
+    }
+    expect(consistent).toHaveBeenCalledTimes(4);
+    expect(eventual).not.toHaveBeenCalled();
+  });
+
   it('list: every summary carries stats.retry_pending (0 when nothing is pending) and the same Not-confirmed re-bucketing as results; only a young failed-30003 slot costs a read', async () => {
     const pendingRoot = attemptKeyAgo(2 * 60_000, 'SMpend1');
     seedAttemptRow(world, 'conv-p', pendingRoot, { retry_due_at: isoFromNow(5 * 60_000) });

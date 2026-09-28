@@ -872,7 +872,12 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       res.status(400).json({ error: 'invalid_view' });
       return;
     }
-    const broadcast = await broadcasts.getById(broadcastId);
+    // A CONSISTENT read, in both views (code review R2-1): the list's stats
+    // refetch and the results page's post-event refetch run about 400 ms after
+    // the write whose event triggered them - at a chain's end no later event
+    // follows, so a replica that had not applied that write would lock in the
+    // pre-write label. The row reads beside it are consistent too.
+    const broadcast = await broadcasts.getByIdConsistent(broadcastId);
     if (!broadcast) {
       res.status(404).json({ error: 'broadcast_not_found' });
       return;

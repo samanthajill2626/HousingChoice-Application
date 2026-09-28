@@ -2,7 +2,7 @@
 
 Anchor issue: `retry-send-lost-under-job-marker` (med). Branch
 `feat/retry-send-adoption`, cut from `main@3dbb5740`, 2026-09-27.
-Revision 5 - APPROVED AS IS by Cameron on 2026-09-27 (the `retrychild#` pointer family adopted; the review loop closed at four rounds, 46 findings accepted, 0 rejected). After design review rounds 1-4 - adjudications in
+Revision 6 - section 8 "Errata as built" added by the planner on 2026-09-28 after the build (code final 56f1d757); the approved text is revision 5 - APPROVED AS IS by Cameron on 2026-09-27 (the `retrychild#` pointer family adopted; the review loop closed at four rounds, 46 findings accepted, 0 rejected). After design review rounds 1-4 - adjudications in
 `docs/superpowers/reviews/2026-09-27-retry-send-adoption/design-review/adjudications.md`
 - and Branch B's refined requirement of 2026-09-27).
 
@@ -761,3 +761,127 @@ this owner too.
 - Removing the marker from this job changes its behavior on a redelivery
   BEFORE the claim (steps 1-4): the redelivered job runs the reads and the
   window check again and then claims - one extra pass of reads, no send.
+
+## 8. Errata as built (revision 6, 2026-09-28)
+
+The text above is the approved design. The build (code final at 1b5ddb01;
+handback 95edb0b6) departs from it in the places below, each adjudicated in a
+committed record under `docs/superpowers/reviews/2026-09-27-retry-send-adoption/`
+(the plan's header deviations 1-9, the orchestrator's handback deviations
+10-11, the code-review adjudications, and the planner's conformance review).
+Share-skip Branch B builds on the rules AS BUILT, which are these.
+
+1. **R6 - the route reads ONE attempt record per pressed row**, at
+   `(retry_attempt ?? 0) + 1`: the webhook schedules exactly that attempt
+   number against a failed row (`oneToOneRetryDecision.ts:125-129`), and a
+   deferral or a re-drive reuses it, so the other two keys can never exist
+   (plan deviation 1). Section 4 item 15's "three gets" reads accordingly.
+2. **R6 - "stale" is one bound**: an open record (`attempting`, `reconciling`,
+   `redriven`) blocks the press while it is at most `RETRY_SEND_WINDOW_MS`
+   old from its `attemptedAt`; section 4 item 15's "200 on a stale attempting
+   (31 s)" was a leftover of the claim-TTL bound review round 3 replaced - a
+   31 s `attempting` record answers 409 `retry_pending` (plan deviation 8).
+3. **R6 - "enforced by the record, for good" holds for the record's 30-day
+   cleanup horizon** (`expires_at`, set at claim and re-arm); after it the
+   row's `retry_outcome` belt is the only guard, and a lost WITHDRAW then
+   leaves an unresolved row manually retryable (`send-attempt-sweeper`).
+4. **R3 - the ADAPTER's kill switch** (`messagingErrors.ts`'s
+   `SmsSendingDisabledError`, classified `rejected` with code
+   `sms_sending_disabled`) takes the REFUSED arm (`done/refused`, WARN), as the
+   table means; the wrapper's own kill switch is a `SendRefusedError` and lands
+   there directly (plan deviation 2).
+5. **R2 step 1 reads the retried row CONSISTENTLY** (`getByProviderSidConsistent`):
+   the R3 condition's expected `retry_due_at` comes from that read (plan
+   deviation 3). A payload whose `conversationId` differs from the retried
+   row's is a third designed step-1 decline (WARN, no record; unreachable from
+   any producer) - handback deviation 11.
+6. **R2 - a READ-ONLY run-once-marker belt for pre-deploy redeliveries** (the
+   planner's ruling on build worklist item 24; handback deviation 10): only
+   when the step-4 gate finds NO record, the job reads
+   `getJobExecutionMarker(jobId)` and declines at INFO a jobId the
+   pre-adoption code already ran. The job never WRITES a marker. A dated
+   `TODO(retry-send-lost-under-job-marker)` marks the belt for removal after
+   the first production deploy plus one SQS redelivery window. The deploy note
+   (deploy when the worker log shows no `retrySend` failure in the preceding
+   ~10 minutes) stays as belt-and-braces.
+7. **R3 - "every guardWrite loss is logged at ERROR"**: `guardWrite` answers
+   whether a write RESOLVED (a throw is its ERROR); every fenced write in the
+   job captures its own fence answer inside the callback and logs a LOST fence
+   itself at INFO ("the takeover owns the record") - plan deviation 6. A LOST
+   release after a deferral enqueue refreshes nothing (the takeover's reconcile
+   refreshes for itself); a THROWN release still refreshes the promise (the
+   deferred job is live) and names the possible strand at ERROR.
+8. **R3 - "the attempt's SINGLE deferral" holds per PAYLOAD**, not per record:
+   an SQS redelivery of the original envelope after its own retryable release
+   can re-claim from `done/retryable` and take a second deferral. The claim
+   still prevents a double text and the hop bound is unchanged (planner
+   conformance review, finding 3).
+9. **R3 / R4 - the WITHDRAW re-apply is a NO-OP** when the row already holds
+   the sentinel and `retry_outcome` (no write, no emit); a replayed promise
+   write therefore skips its `message.persisted` emit - an open dashboard
+   stays stale until its next refetch (`retry-promise-write-replay-skips-rerender`,
+   low, filed). The job's own unresolved close whose WITHDRAW is lost or throws
+   is not re-applied by anything (the record still refuses the press with 409
+   `retry_unresolved`; the display half is the filed C-2 job-half residue in
+   `send-attempt-sweeper`).
+10. **R4 - the WITHDRAW map lives in `closeSlot`'s `retry_send` arm**, keyed on
+    `SEND_UNCONFIRMED_CODE` (`slotCloseOf` takes no owner); the superseded
+    exit's re-apply is identical in effect (plan deviation 5).
+11. **R4 - the adoption reads `mediaCount` from the RECORD** (the job's own
+    `planRetryMedia` answer at claim time) rather than re-running the plan: the
+    retried row's `media_attachments` ride the adopted row when the record says
+    media went and the row has them; else its raw `mediaUrls` (the internal/e2e
+    seam the job replays); nothing when the plan sent body only (plan
+    deviation 9).
+12. **R4 / R1 - a PHONE-keyed attempt whose thread number changed** follows R1
+    (unaddressable: the re-derived key's hash no longer matches, INFO, left for
+    the sweeper), not R4's `digest_mismatch` bullet, which applies to a
+    resolvable contact-keyed owner. In practice unreachable: a one-to-one
+    thread's `participant_phone` is rewritten only for relay threads (code
+    review C-7).
+13. **R5 - `retry_outcome` CAN appear on a share's own root row** (a share text
+    to one tenant whose attempt-1 retry went unresolved): "never on relay or
+    broadcast rows" means the relay and broadcast SLOT families, not the
+    one-to-one root row of a share, which Q1 and R10 need marked.
+14. **R7 - the pointer item carries no `expires_at`**: message rows never do;
+    the clause is vacuous as written. The `retrychild#` family has no reaper
+    (recorded in `send-attempt-sweeper`).
+15. **R7 - the one fenced line is re-worded in ASCII as well as re-leveled**
+    (the source string carried a U+2014; every touched line must be ASCII; no
+    test or doc matched the string) - plan deviation 4. `isBroadcastRowFor`
+    (`broadcastFanOut.ts`) additionally ignores rows with `retry_of` at both
+    of its callers - a CODE change in a file section 2's "In" list does not
+    name (plan deviation 7); the `twilio.ts` rollup does not use it and
+    always misses a retry row (R7's stated cost). A one-line alternative at
+    the rollup's call site (guard on `retry_of`, keep the give-up line at
+    WARN) is recorded for Cameron's decision, not built.
+16. **R6 - the in-flight residual is wider than stated**: a manual press whose
+    own send ends UNKNOWN appends no manual row, so a late automatic job can
+    pass step 4a and claim for the rest of the window (two rare events at
+    once; not introduced here; `manual-retry-double-send-residual-windows`,
+    A-2 / R2-6).
+17. **Section 4 - the e2e gate budget is 1800 s**, not 1500 s (SOR's green runs
+    took 23.2 and 23.7 minutes and this branch adds three slow specs; 300
+    specs pass in about 21 minutes).
+18. **R2 step 4a - THIS attempt's own child declines** (fix wave 2, the
+    planner's plan-blind adversarial review, finding 1): one retried row has
+    exactly one automatic attempt number, so a `retrychild#` pointer carrying
+    `retry_attempt === payload.attempt` can only be this attempt's own text; the
+    job declines BEFORE the claim (a `redriven` record closes `done/refused`
+    cause `already_sent`; `done/retryable` and absent write nothing) at WARN.
+    The approved carve-out "an AUTOMATIC child does not trigger it" holds only
+    for a child of a DIFFERENT attempt number. Without this, a re-drive after a
+    first provider call that landed outside the reconcile's two-sided window
+    (or a provider list miss) sent the retry twice. Section 4 item 4c's
+    "an AUTOMATIC child does not trigger it" reads accordingly.
+19. **R4 - the reconcile's lookup answers from the attempt's own row FIRST**:
+    for a `retry_send` owner, `lookup` reads the `retrychild#` partition before
+    the sender and digest checks and before the provider list; a child of this
+    attempt number is read consistently and returns `found` (its SID and
+    delivery status, adoption `skipped`, no provider call, no second row). The
+    placement ahead of the `no_sender` and `digest_mismatch` closes is
+    deliberate: those would WITHDRAW the promise beside an existing retry row.
+    A pointer whose row cannot be read logs ONE WARN and the lookup goes on.
+    What stays open: the original run's provider call still in flight when the
+    re-driven job passes 4a (no row exists yet for either check) - the
+    `send-attempt-rearm-residues` class.

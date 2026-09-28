@@ -2,7 +2,7 @@
 
 Anchor issue: `retry-send-lost-under-job-marker` (med). Branch
 `feat/retry-send-adoption`, cut from `main@3dbb5740`, 2026-09-27.
-Revision 5 (after design review rounds 1-4 - adjudications in
+Revision 5 - APPROVED AS IS by Cameron on 2026-09-27 (the `retrychild#` pointer family adopted; the review loop closed at four rounds, 46 findings accepted, 0 rejected). After design review rounds 1-4 - adjudications in
 `docs/superpowers/reviews/2026-09-27-retry-send-adoption/design-review/adjudications.md`
 - and Branch B's refined requirement of 2026-09-27).
 

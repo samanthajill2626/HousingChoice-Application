@@ -23,7 +23,7 @@ import { dashboardUrl } from '../../support/urls.js';
 //   1. accept_then_drop on a relay leg  -> adopted, Delivered on the open thread;
 //   2. drop_before_create on a share    -> never_sent, re-driven once, share Sent;
 //   3. reject (21211) on a share        -> Failed with the code, no reconcile;
-//   4. drop_before_create + fail-list   -> unresolved, Not confirmed, share Failed.
+//   4. drop_before_create + fail-list   -> unresolved, Not confirmed, share Not confirmed.
 //
 // THE LANE SHORTENS THE WINDOW. E2E_SEND_RECONCILE_DELAYS_MS (2000,4000,8000 in
 // scripts/e2e-session.mjs's childEnv, read by reconcileCheckDelaysMs in
@@ -455,13 +455,14 @@ test('reject 21211 on one share recipient: that recipient fails with the code an
   await expect(statusPill(page, 'Sent')).toBeVisible({ timeout: 15_000 });
 
   // --- Assert 2: THE ROWS. The rejected row names the code through the
-  //     unmapped-code fallback and - being a failure the platform is sure of -
-  //     keeps its "open conversation to retry" hint: the positive control for
-  //     that hint's absence in the Not confirmed test below. ---
+  //     unmapped-code fallback, and carries NO "open conversation to retry"
+  //     hint: a synchronous rejection has no message row, so the conversation
+  //     has nothing to retry (share-sent-outcome D3). The hint's positive
+  //     control is share-sent-outcome.spec.ts (a 30007 row, an exhausted chain). ---
   const rejectedRow = recipientRow(page, rejected.name);
   await expect(rejectedRow).toContainText('Failed');
   await expect(rejectedRow).toContainText('Delivery failed (error 21211)');
-  await expect(rejectedRow.getByRole('link', { name: /open conversation to retry/ })).toHaveCount(1);
+  await expect(rejectedRow.getByRole('link', { name: /open conversation to retry/ })).toHaveCount(0);
   await expect(recipientRow(page, fine.name)).toContainText('Delivered');
 
   // --- Assert 3: THE PATH - the pass's rejected arm, never the reconcile. The
@@ -488,7 +489,7 @@ test('reject 21211 on one share recipient: that recipient fails with the code an
   expect(await textsTo(request, fine.phone, needle)).toBe(1);
 });
 
-test('fail-list for the whole window: the recipient closes Not confirmed, is never re-sent, and the share reads Failed with the unconfirmed prose', async ({
+test('fail-list for the whole window: the recipient closes Not confirmed, is never re-sent, and the share reads Not confirmed with no last_error alert', async ({
   page,
   request,
 }) => {
@@ -528,13 +529,15 @@ test('fail-list for the whole window: the recipient closes Not confirmed, is nev
   await expect(row).toContainText("Couldn't confirm whether this text went out");
   await expect(row).not.toContainText('Failed');
 
-  // --- Assert 3: THE SHARE (D16a). An all-unconfirmed share has no "not
-  //     confirmed" status, so it reads Failed, and its last_error is the
-  //     unconfirmed prose rather than "all recipients failed". ---
-  await expect(statusPill(page, 'Failed')).toBeVisible({ timeout: 15_000 });
+  // --- Assert 3: THE SHARE (share-sent-outcome D4). An all-unconfirmed share
+  //     is stored `failed` with the unconfirmed prose as its last_error (D16a),
+  //     but its pill derives from its recipients - none reached, none pending,
+  //     one unconfirmed - so it reads Not confirmed, and the stored last_error
+  //     shows under Not sent only, so no alert renders. ---
+  await expect(statusPill(page, 'Not confirmed')).toBeVisible({ timeout: 15_000 });
   await expect(
     page.getByRole('alert').filter({ hasText: "Couldn't confirm any text went out" }),
-  ).toBeVisible({ timeout: 15_000 });
+  ).toHaveCount(0);
   await expect(page.getByRole('link', { name: /open conversation to retry/ })).toHaveCount(0);
 
   // --- Assert 4: THE PATH. One hand-off, a failed lookup WARN at checks 0 and

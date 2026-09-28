@@ -13,13 +13,13 @@ import { expectTodayReady } from '../../support/today.js';
 //      "Not sent" (D6), its row says why (D7), and once consent is recorded the
 //      next share of the property does NOT flag them "Already sent" (D5: a
 //      skipped slot never counts).
-//   3. A recipient whose text FAILED (carrier 30007) inside a share that still
-//      finalized "sent" keeps their "Already sent" flag - the interim rule,
-//      pinned as such (D5; Branch B replaces it). The share carries a SECOND,
-//      delivering recipient on purpose: a one-recipient share whose only text
-//      fails finalizes `failed` and is excluded whole (today's rule, spec
-//      section 1 item 7), and the fake's failure lands asynchronously, so a
-//      single-recipient version of this test would race finalize.
+//   3. A recipient whose text FAILED (carrier 30007, a final failure: never
+//      retried) is NOT flagged "Already sent" by the next share of the
+//      property, even inside a share that finalized "sent": Branch A's interim
+//      rule (failed keeps counting) is gone - share-sent-outcome D1 flags only
+//      a recipient the text may have reached. The share carries a SECOND,
+//      delivering recipient on purpose, so it reads Sent whatever the timing
+//      of the fake's asynchronous failure; the flag is judged per recipient.
 // Sends are proven through the fake-twilio thread store, never real SMS.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const DARIO = {
@@ -247,7 +247,7 @@ test.describe('share-skip-fix - one-to-one shares', () => {
     await expect(row.getByRole('checkbox')).toBeChecked();
   });
 
-  test('a recipient whose text FAILED, in a share that still finalized sent, stays "Already sent" (the interim rule, pinned)', async ({
+  test('a recipient whose text FAILED (30007, final), in a share that still finalized sent, is NOT "Already sent" (share-sent-outcome D1)', async ({
     page,
     request,
   }) => {
@@ -259,9 +259,9 @@ test.describe('share-skip-fix - one-to-one shares', () => {
     // Arm the NEXT message to the failing handset with a carrier failure. The
     // fake fails it ASYNCHRONOUSLY (a status callback ~300 ms after the send),
     // so the share also carries a normal recipient: with one recipient the
-    // callback could land before finalize and the share would close `failed`
-    // and be excluded whole - a real rule, not a flake. Two recipients make
-    // the share finalize `sent` whatever the timing.
+    // callback could land before finalize and the share would close `failed`.
+    // Two recipients make the share finalize `sent` whatever the timing - the
+    // case this test pins: a failed recipient inside a share that reads Sent.
     await setDeliveryOutcome(request, {
       partyNumber: failing.phone,
       profile: { kind: 'fail', failState: 'failed', errorCode: '30007' },
@@ -277,10 +277,12 @@ test.describe('share-skip-fix - one-to-one shares', () => {
     await expect(recipients.getByText('Delivered').first()).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('header').getByText('Sent', { exact: true })).toBeVisible({ timeout: 15_000 });
 
-    // D5 (failed -> still flagged, interim): the next share of the property flags
-    // the failed recipient exactly as it flags the delivered one.
+    // share-sent-outcome D1 (a final failure -> NOT flagged): the next share of
+    // the property does not flag the failed recipient, although the share it
+    // failed in reads Sent; as the seeded recipient the row stays checked.
     const row = await openReviewRow(page, unitId, failing.contactId, failing.firstName);
-    await expect(row.getByText('Already sent')).toBeVisible();
+    await expect(row).toBeVisible();
+    await expect(row.getByText('Already sent')).toHaveCount(0);
     await expect(row.getByRole('checkbox')).toBeChecked(); // seeded, so still checked
   });
 });

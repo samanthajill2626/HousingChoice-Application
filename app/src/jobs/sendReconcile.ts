@@ -1309,14 +1309,26 @@ async function closeSlot(c: Ctx, r: Resolved, code: string, bucket: 'failed' | '
       // retry-send-adoption R4 (Cameron's Q1 ruling): a retry has no slot - an
       // UNRESOLVED close WITHDRAWS the retried row's promise instead: the
       // sentinel AND retry_outcome 'unconfirmed' in ONE conditional write,
-      // retried once from a fresh read (withdrawRetryPromise never throws; a
-      // row already withdrawn is a no-op, so the superseded exit's re-apply
-      // is idempotent). redrive_refused and enqueue_failed write NOTHING:
-      // nothing went out, the promise expires on RSW's clock and Retry stays
-      // available. Plan deviation 5: the map lives here, keyed on the code,
-      // because slotCloseOf takes no owner.
+      // retried once from a fresh read. A row already withdrawn answers
+      // 'already' with no write, so the superseded exit's re-apply is
+      // idempotent. withdrawRetryPromise never throws; a WITHDRAW it answers
+      // 'failed' or 'lost' (after its own ERROR) is THROWN here (code review
+      // r1 C-2 - the FW1-4 shape every other owner's slot close has): this
+      // check fails, and its redelivery finds the record done for this attempt
+      // and re-applies the WITHDRAW through the superseded exit.
+      // redrive_refused and enqueue_failed write NOTHING: nothing went out, and
+      // the promise expires on its own - possibly REFRESHED - clock (the
+      // unknown hand-off's, the re-drive's), so for up to a few minutes after
+      // such a close the bubble keeps its promise and the route's time guard
+      // answers 409 retry_pending until it expires: the accepted class
+      // one-to-one-retry-promise-outlives-job-decline (spec sections 0 and 7).
+      // Plan deviation 5: the map lives here, keyed on the code, because
+      // slotCloseOf takes no owner.
       if (code === SEND_UNCONFIRMED_CODE && r.row !== undefined) {
-        await withdrawRetryPromise({ messages: c.messages, events: c.events, log: c.log }, r.row, { ...ownerLog(r.owner) });
+        const withdrawn = await withdrawRetryPromise({ messages: c.messages, events: c.events, log: c.log }, r.row, { ...ownerLog(r.owner) });
+        if (withdrawn === 'failed' || withdrawn === 'lost') {
+          throw new Error(`send.reconcile: the retry promise withdrawal answered '${withdrawn}' - this check fails so its redelivery re-applies it`);
+        }
       }
       return;
     default:

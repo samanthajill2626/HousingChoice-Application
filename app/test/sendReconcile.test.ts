@@ -3470,7 +3470,7 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
     });
 
-    it('11c a re-drive enqueue that throws closes enqueue_failed with NO retry_outcome and the promise untouched (nothing was sent: Retry stays available); a redelivered verdict re-applies nothing to the promise', async () => {
+    it('11c a re-drive enqueue that throws closes enqueue_failed with NO retry_outcome and the promise untouched (nothing was sent: Retry returns once the promise expires); a redelivered verdict re-applies nothing to the promise', async () => {
       register();
       await seedOneToOne();
       const root = await seedRow('SMroot');
@@ -3634,6 +3634,85 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(got).toEqual([]);
       expect(capture.atLevel(50)).toHaveLength(1);
       expect(lines(50)[0]).toMatchObject({ verdict: 'unresolved', cause: 'second_unknown' });
+    });
+
+    // ---- code review round 1, fix wave FW1: C-2 (a WITHDRAW that does not land is re-applied) ----
+
+    /**
+     * An unresolved chain (the list fails on every check) whose FIRST delivery
+     * of the last check meets `withdrawAnswer` at the WITHDRAW - 'failed' (its
+     * write throws once) or 'lost' (its two writes lose their condition) - then
+     * the SQS redelivery of that SAME check envelope. Every other promise write
+     * goes through. Returns the retried row, the owner and the spy.
+     */
+    async function unresolvedWithdrawFault(withdrawAnswer: 'failed' | 'lost') {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const due = iso(Date.now() + 10_000);
+      root.retry_due_at = due;
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      world.adapter.listMessages = async () => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      };
+      const real = world.messagesRepo.annotateRetryPromise.bind(world.messagesRepo);
+      let faults = 0;
+      const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise').mockImplementation(async (conversationId, tsMsgId, patch, expected) => {
+        if (patch.retryOutcome !== undefined && faults < (withdrawAnswer === 'failed' ? 1 : 2)) {
+          faults += 1;
+          if (withdrawAnswer === 'failed') throw new Error('annotate exploded');
+          return false;
+        }
+        return real(conversationId, tsMsgId, patch, expected);
+      });
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      // The last check, taken off the queue so it can be delivered twice: an SQS redelivery keeps its envelope.
+      const index = outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB);
+      const [last] = outbound.delayed.splice(index, 1);
+      expect((last!.envelope.payload as SendReconcilePayload).checkNo).toBe(2);
+      const wire = JSON.stringify(last!.envelope);
+      await expect(dispatchJob(JSON.parse(wire) as unknown)).rejects.toThrow(`withdrawal answered '${withdrawAnswer}'`);
+      // The record closed FIRST; the row still promises; nothing re-rendered yet (afterClose did not run).
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'provider_unreachable' });
+      expect(root.retry_due_at).toBe(due);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(persistedFor(root.tsMsgId)).toHaveLength(0);
+      // The SQS redelivery of that same check: the superseded exit re-applies the WITHDRAW, then afterClose.
+      await dispatchJob(JSON.parse(wire) as unknown);
+      await outbound.settle();
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      expect(persistedFor(root.tsMsgId)).toHaveLength(2);
+      expect(lines(30).filter((l) => String(l['msg']).includes('superseded'))).toEqual([
+        expect.objectContaining({ state: 'done', outcome: 'unresolved', checkNo: 2 }),
+      ]);
+      // ONE unresolved ERROR in total: the redelivery logs no verdict of its own.
+      expect(lines(50).filter((l) => l['verdict'] === 'unresolved')).toHaveLength(1);
+      expect(got).toEqual([]);
+      expect(world.sent).toHaveLength(0);
+      return { root, owner, annotate };
+    }
+
+    it('FW1 C-2 (failed): a WITHDRAW whose write THROWS at the unresolved close fails the check (after the helper\'s ERROR); the redelivery of that check finds the record done for its own attempt and re-applies the WITHDRAW through the superseded exit - ONE unresolved ERROR in total', async () => {
+      const { annotate } = await unresolvedWithdrawFault('failed');
+      expect(annotate).toHaveBeenCalledTimes(2);
+      expect(capture.atLevel(50).map((l) => l['msg'])).toEqual([
+        'send.reconcile: unresolved - the platform cannot tell whether this text went out; closed send_unconfirmed, never re-sent',
+        'failure-arm write failed (best-effort); the attempt record decides',
+        'job failed: send.reconcile',
+      ]);
+    });
+
+    it('FW1 C-2 (lost): a WITHDRAW LOST twice (the promise kept moving) fails the check the same way; its redelivery re-applies the WITHDRAW - ONE unresolved ERROR in total', async () => {
+      const { annotate } = await unresolvedWithdrawFault('lost');
+      expect(annotate).toHaveBeenCalledTimes(3);
+      expect(capture.atLevel(50).map((l) => l['msg'])).toEqual([
+        'send.reconcile: unresolved - the platform cannot tell whether this text went out; closed send_unconfirmed, never re-sent',
+        'retry promise withdrawal lost twice - a concurrent writer keeps moving the promise',
+        'job failed: send.reconcile',
+      ]);
     });
 
     // ---- the lineage exclusion in the sibling rule (spec section 4 item 13; R4, R12) ----

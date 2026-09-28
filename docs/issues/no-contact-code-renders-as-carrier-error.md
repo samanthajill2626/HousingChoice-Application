@@ -29,14 +29,15 @@ leg row then reads "Delivery failed (error send_failed)". The rule the
 send-outcome design adopts (D23: "new codes render as prose, never as fake
 carrier numbers") covers only the codes that branch adds.
 
-**May be fixed first elsewhere.** `feat/share-skip-fix` (Branch A, spec
-`docs/superpowers/specs/2026-09-24-share-skip-fix-design.md`, D7) gives every
-skipped or failed SHARE recipient a plain-words reason, including "No contact or
-phone on file" for this code and "Not sent (code)" for any other unmapped code.
-That branch is sequenced to merge before `feat/send-outcome-reconcile`, so it
-may land the share-row fix first; this issue closes with whichever merges
-first for the share row. The relay-slot `send_failed` token is not in that
-branch's scope and should be checked separately when closing.
+**Partial resolution, verified 2026-09-28.** `feat/share-skip-fix` (Branch A)
+has merged and been retired. The share-row `no_contact` case is fixed:
+`DeliveryBadge` calls `shareRecipientReason`, whose failed-row special case
+returns "No contact or phone on file"
+(`dashboard/src/routes/broadcasts/broadcastFormat.ts:162-169`). The original
+share-row diagnosis above is historical. This issue remains open for the
+relay-slot `send_failed` token and the generic app-code fallback; those were
+outside Branch A's scope, and the shared `deliveryReason` map still has no
+`send_failed` entry. See the [Branch A closeout](../superpowers/reviews/2026-09-24-share-skip-fix/README.md).
 
 **Suggested fix.** Found along the way (the
 [send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md),

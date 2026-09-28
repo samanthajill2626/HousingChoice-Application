@@ -1,3 +1,5 @@
+> **Closeout update, 2026-09-28:** Branch A is merged and retired; its branch and both build/ops worktrees are gone. The import window is closed. See the [closeout record](README.md). The original handback below retains its pre-merge status and gate results as historical evidence.
+
 # Build handback - share-skip-fix (Branch A)
 
 Date: 2026-09-25. Orchestrator: Claude Fable 5.1 (AUTO mode). Branch

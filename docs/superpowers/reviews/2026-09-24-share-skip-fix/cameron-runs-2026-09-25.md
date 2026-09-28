@@ -1,3 +1,5 @@
+> **Closeout update, 2026-09-28:** Branch A has merged, closing the import window described below. The pinned ops worktree has been retired. See the [closeout record](README.md) for preservation details and the conditional re-run rule; the original operator evidence follows unchanged.
+
 # Cameron's D1/D2 runs - 2026-09-25 (the committed record)
 
 Relayed to the planner in chat on 2026-09-25; the orchestrator's copy lives in

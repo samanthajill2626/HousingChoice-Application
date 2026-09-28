@@ -311,9 +311,14 @@ The rule:
 The callers, all in this branch: the status webhook's rollup (a retry row's
 transitioning receipt: confirmed-sent, delivered, failed); the reconcile's
 adoption of a retry (the adopted row's provider status, as the share adoption
-maps it today - an adopted row produces no receipt, so this is the only way it
-reaches the slot; the hook runs on a de-duplicated re-adoption too, so a
-crash after the adoption cannot lose it); and the four unresolved-end sites
+maps it today - a receipt that outruns the adoption's append is dropped at
+the webhook, so the hook is the only sure way the attempt reaches the slot;
+a receipt that lands after the append transitions the row and reaches the
+rollup like any retry row, and the same-attempt-forward rule reconciles the
+two; the hook is placed BEFORE the reconcile closes the record, so a crash
+leaves the record open and the redelivered check re-finds the row through its
+own child pointer and re-runs the hook as a de-duplicated re-adoption - after
+the close nothing re-applies an `adopted` outcome); and the four unresolved-end sites
 of section 0 (the slot becomes `failed` / `send_unconfirmed`, the row-less
 attempt ordered after the one it retried) - at the reconcile's close the
 write rides 1b's own re-apply; at the job's two arms, which have none, it

@@ -5189,6 +5189,8 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // verbatim (contact-rosters D10), so the voice router reads no unit at
       // all - and TwilioVoiceWebhookDeps no longer declares the field.
       broadcastsRepo: world.broadcastsRepo,
+      // share-sent-outcome D7: the status rollup writes the pair's ledger entry.
+      listingSendsRepo: world.listingSendsRepo,
       // M1.9b founder call-triage: the voice router resolves the founder (admin
       // user(s)) via the SAME fake users repo the auth gate uses, reads the
       // founder-editable quick-replies from the world settings, and dispatches

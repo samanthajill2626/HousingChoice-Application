@@ -36,6 +36,7 @@ import {
 } from '../src/services/sendMessage.js';
 import { loadConfig } from '../src/lib/config.js';
 import { RETRY_PROMISE_WITHDRAWN_AT, RETRY_SEND_WINDOW_MS } from '../src/lib/retrySendWindow.js';
+import { outcomeOf } from '../src/routes/webhooks/twilio.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import {
   createFakeWorld,
@@ -371,56 +372,216 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     expect(world.emitted.filter((e) => e.event === 'broadcast.updated').length).toBe(emitsAfterFirst);
   });
 
-  it('broadcast rollup: a receipt for a share-RETRY row (broadcast_id + retry_of) SKIPS the rollup - no broadcast read, no wait, no give-up line (retry-send-adoption, the one fenced line; Cameron 2026-09-28)', async () => {
-    // Since retry-send-adoption every retry of a share text carries the share's
-    // broadcast_id (R7), while the recipient slot still names the share's OWN
-    // row until share-skip Branch B routes retry receipts by broadcast_id +
-    // retry_root. Until then the rollup is skipped for a retry row outright:
-    // the give-up path stays a WARN for a GENUINE miss on a share's own row.
-    const { app, world, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 5 });
-    const shareRow = await seedOutbound(world, 'SMbcastroot', { broadcast_id: 'bcast-retry' });
-    const retryRow = await seedOutbound(world, 'SMbcastretry', {
-      broadcast_id: 'bcast-retry',
-      retry_of: shareRow.tsMsgId,
-      retry_root: shareRow.tsMsgId,
-    });
-    const now = new Date().toISOString();
-    world.broadcasts.set('bcast-retry', {
-      broadcastId: 'bcast-retry',
-      created_by: 'usr_test',
-      created_at: now,
-      status: 'sent',
-      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
-      body_template: 'hi',
-      stats: { audience: 1, sent: 1, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
-      recipients: {
-        'c-1': { status: 'failed', conversationId: shareRow.conversationId, tsMsgId: shareRow.tsMsgId },
-      },
-      updated_at: now,
-    } satisfies BroadcastItem);
-    let reads = 0;
-    const realGetById = world.broadcastsRepo.getById.bind(world.broadcastsRepo);
-    world.broadcastsRepo.getById = async (id: string) => {
-      reads += 1;
-      return realGetById(id);
-    };
+  // share-sent-outcome D2/D7 (Task 5): the rollup routes a share-RETRY row's
+  // receipt (broadcast_id + retry_of) to the ORIGINAL slot by broadcast_id +
+  // retry_root through the attempt-ordered transition, writes an original
+  // row's ledger entry, and puts the promise - taken from the retry decision,
+  // never from the row image read before the status write - on the emit.
+  describe('share rollup (share-sent-outcome)', () => {
+    const ROOT_SID = 'SMshareroot';
+    const RETRY_SID = 'SMshareretry';
+    const ORPHAN_RETRY_SID = 'SMshareorphan';
+    const STRAY_RETRY_SID = 'SMsharestray';
+    const ROOT2_SID = 'SMshareroot2';
+    const PHONE_KEY = 'phone#+15550102222';
 
-    const res = await signedTwilioPost(
-      app,
-      STATUS_PATH,
-      statusParams({ MessageSid: 'SMbcastretry', MessageStatus: 'delivered' }),
-    );
-    expect(res.status).toBe(200);
-    // The retry row's own status is recorded; the rollup was never entered: no broadcast read, no give-up line at any level.
-    expect((await world.messagesRepo.getByProviderSid('SMbcastretry'))?.delivery_status).toBe('delivered');
-    expect(reads).toBe(0);
-    expect(capture.lines.filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
-    expect(retryRow.retry_of).toBe(shareRow.tsMsgId);
-    // Nothing moved on the share: the slot, the stats and the live surfaces.
-    const bcast = world.broadcasts.get('bcast-retry')!;
-    expect(bcast.recipients['c-1']?.status).toBe('failed');
-    expect(bcast.stats.delivered).toBe(0);
-    expect(world.emitted.filter((e) => e.event === 'broadcast.updated')).toHaveLength(0);
+    function share(broadcastId: string, recipients: BroadcastItem['recipients'], stats: Partial<BroadcastItem['stats']>): BroadcastItem {
+      const now = new Date().toISOString();
+      return {
+        broadcastId,
+        created_by: 'usr_test',
+        created_at: now,
+        status: 'sent',
+        unitId: 'unit-1',
+        audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+        body_template: 'hi',
+        stats: { audience: 1, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0, ...stats },
+        recipients,
+        updated_at: now,
+      };
+    }
+
+    /**
+     * Share b-1 whose slot c-1 records the ORIGINAL row ROOT (`slot` sets its
+     * status: `failed` 30003 for the retry cases, `sent` for the original
+     * row's own receipts), the retry row RETRY (retry_of = retry_root = ROOT,
+     * one minute NEWER, so it orders after ROOT), a retry row with no
+     * retry_root, a retry row whose root matches no slot, and share b-2 whose
+     * PHONE-keyed slot records ROOT2, a row with no recipient contact.
+     */
+    async function seedShares(slot: 'failed' | 'sent') {
+      const h = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 5 });
+      const t0 = Date.now() - 120_000;
+      const root = await seedOutbound(h.world, ROOT_SID, { provider_ts: new Date(t0).toISOString(), broadcast_id: 'b-1', recipient_contact_id: 'c-1' });
+      const retry = await seedOutbound(h.world, RETRY_SID, {
+        provider_ts: new Date(t0 + 60_000).toISOString(),
+        broadcast_id: 'b-1',
+        retry_of: root.tsMsgId,
+        retry_root: root.tsMsgId,
+        retry_attempt: 1,
+        retry_window_start: root.provider_ts,
+        recipient_contact_id: 'c-1',
+      });
+      await seedOutbound(h.world, ORPHAN_RETRY_SID, { provider_ts: new Date(t0 + 61_000).toISOString(), broadcast_id: 'b-1', retry_of: root.tsMsgId });
+      await seedOutbound(h.world, STRAY_RETRY_SID, { provider_ts: new Date(t0 + 62_000).toISOString(), broadcast_id: 'b-1', retry_of: 'nobody', retry_root: 'nobody' });
+      const root2 = await seedOutbound(h.world, ROOT2_SID, { provider_ts: new Date(t0 + 1_000).toISOString(), broadcast_id: 'b-2' });
+      h.world.broadcasts.set('b-1', share(
+        'b-1',
+        { 'c-1': slot === 'failed'
+          ? { status: 'failed', errorCode: '30003', conversationId: root.conversationId, tsMsgId: root.tsMsgId }
+          : { status: 'sent', conversationId: root.conversationId, tsMsgId: root.tsMsgId } },
+        slot === 'failed' ? { failed: 1 } : { sent: 1 },
+      ));
+      h.world.broadcasts.set('b-2', share('b-2', { [PHONE_KEY]: { status: 'sent', conversationId: root2.conversationId, tsMsgId: root2.tsMsgId } }, { sent: 1 }));
+      const post = (params: Record<string, string>) => signedTwilioPost(h.app, STATUS_PATH, statusParams(params));
+      const updatedEvents = () =>
+        h.world.emitted
+          .filter((e) => e.event === 'broadcast.updated')
+          .map((e) => e.payload as { broadcastId: string; status: string; stats: { failed: number; retry_pending?: number } });
+      /** Make the world's message read return a COPY (the double returns the LIVE element, which would hide a stale-image read). */
+      const readCopies = () => {
+        const real = h.world.messagesRepo.getByProviderSid.bind(h.world.messagesRepo);
+        h.world.messagesRepo.getByProviderSid = async (sid) => {
+          const r = await real(sid);
+          return r === undefined ? undefined : { ...r };
+        };
+      };
+      return { ...h, root, retry, root2, post, updatedEvents, readCopies };
+    }
+
+    it('a receipt for a share-RETRY row reaches the ORIGINAL slot through the attempt-ordered transition: delivered leaves failed, stats move, broadcast.updated fires, the ledger counts by delivery', async () => {
+      const x = await seedShares('failed');
+      const res = await x.post({ MessageSid: RETRY_SID, MessageStatus: 'delivered' });
+      expect(res.status).toBe(200);
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']).toMatchObject({ status: 'delivered', tsMsgId: x.root.tsMsgId, latestAttempt: x.retry.tsMsgId });
+      expect(x.world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, delivered: 1 });
+      expect(x.updatedEvents().at(-1)).toMatchObject({ broadcastId: 'b-1' });
+      expect((await x.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ attempt: x.retry.tsMsgId, state: 'counted', by: 'delivery' });
+      // No give-up line: the retry row was routed, not missed.
+      expect(x.capture.lines.filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+    });
+
+    it("a share-RETRY row's carrier 'sent' then 'delivered' walk the slot forward on the same attempt, keeping the carrier instant", async () => {
+      const x = await seedShares('failed');
+      await x.post({ MessageSid: RETRY_SID, MessageStatus: 'sent' });
+      const sentSlot = x.world.broadcasts.get('b-1')!.recipients['c-1']!;
+      expect(sentSlot).toMatchObject({ status: 'sent', latestAttempt: x.retry.tsMsgId });
+      expect(sentSlot.carrierSentAt).toBeDefined();
+      expect((await x.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ state: 'counted', by: 'acceptance' });
+      await x.post({ MessageSid: RETRY_SID, MessageStatus: 'delivered' });
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']).toMatchObject({ status: 'delivered', carrierSentAt: sentSlot.carrierSentAt });
+      expect(x.world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, sent: 0, delivered: 1 });
+    });
+
+    it('a retry row WITHOUT retry_root logs one ERROR and touches nothing', async () => {
+      const x = await seedShares('failed');
+      const res = await x.post({ MessageSid: ORPHAN_RETRY_SID, MessageStatus: 'delivered' });
+      expect(res.status).toBe(200);
+      expect(x.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('unrouted')).length).toBe(1);
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']!.status).toBe('failed');
+      expect(x.updatedEvents()).toHaveLength(0);
+    });
+
+    it('a retry row whose root matches no slot logs one ERROR (a routing bug)', async () => {
+      const x = await seedShares('failed');
+      await x.post({ MessageSid: STRAY_RETRY_SID, MessageStatus: 'delivered' });
+      expect(x.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('no matching recipient slot')).length).toBe(1);
+      expect(x.capture.atLevel(WARN).filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']!.status).toBe('failed');
+    });
+
+    it("a retry row's own 30003 failure with a new promise: the slot stays failed on the newer attempt, the emit carries retry_pending 1, the ledger entry is pending - the promise from the decision (the read returns a copy here too)", async () => {
+      const x = await seedShares('failed');
+      x.readCopies();
+      await x.post({ MessageSid: RETRY_SID, MessageStatus: 'undelivered', ErrorCode: '30003' });
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']).toMatchObject({ status: 'failed', errorCode: '30003', latestAttempt: x.retry.tsMsgId });
+      expect(x.updatedEvents().at(-1)).toMatchObject({ broadcastId: 'b-1', stats: { retry_pending: 1 } });
+      expect((await x.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']?.state).toBe('pending');
+      // The retry itself was scheduled (attempt 2), so the promise is real.
+      expect((await x.world.messagesRepo.getByProviderSid(RETRY_SID))?.retry_due_at).toBeDefined();
+    });
+
+    it("an ORIGINAL row's 30003 failure with a promise: the slot fails as today, the emit carries retry_pending 1, the ledger entry is pending - and the promise comes from the decision, not from the row image the webhook read before writing", async () => {
+      const x = await seedShares('sent');
+      // Pin the source of the value: make the world's read return a COPY.
+      x.readCopies();
+      const res = await x.post({ MessageSid: ROOT_SID, MessageStatus: 'undelivered', ErrorCode: '30003' });
+      expect(res.status).toBe(200);
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']).toMatchObject({ status: 'failed', errorCode: '30003' });
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']!.latestAttempt).toBeUndefined();
+      expect(x.updatedEvents().at(-1)).toMatchObject({ broadcastId: 'b-1', stats: { failed: 1, retry_pending: 1 } });
+      expect((await x.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ attempt: x.root.tsMsgId, state: 'pending' });
+    });
+
+    it("an ORIGINAL row's 30007 failure carries no promise: the emit leaves the count unset and the ledger entry is failed", async () => {
+      const x = await seedShares('sent');
+      await x.post({ MessageSid: ROOT_SID, MessageStatus: 'undelivered', ErrorCode: '30007' });
+      expect(x.updatedEvents().at(-1)?.stats.retry_pending).toBeUndefined();
+      expect((await x.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ attempt: x.root.tsMsgId, state: 'failed' });
+    });
+
+    it("an ORIGINAL row's delivered receipt counts the ledger entry by delivery at the row's instant; a phone-keyed slot whose row has no recipient contact writes nothing", async () => {
+      const x = await seedShares('sent');
+      await x.post({ MessageSid: ROOT_SID, MessageStatus: 'delivered' });
+      const rootInstant = x.root.tsMsgId.slice(0, x.root.tsMsgId.indexOf('#'));
+      expect((await x.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-1'))?.shares?.['b-1']).toMatchObject({ state: 'counted', by: 'delivery', countedAt: rootInstant });
+      await x.post({ MessageSid: ROOT2_SID, MessageStatus: 'undelivered', ErrorCode: '30007' });   // share b-2, slot phone#..., row without recipient_contact_id
+      expect(x.world.broadcasts.get('b-2')!.recipients[PHONE_KEY]).toMatchObject({ status: 'failed', errorCode: '30007' });
+      expect(x.world.listingSends.filter((r) => r.shares?.['b-2'] !== undefined)).toHaveLength(0);
+      expect(await x.world.listingSendsRepo.getByKeyConsistent('unit-1', 'c-2')).toBeUndefined();
+      expect(x.capture.atLevel(30).some((l) => String(l['msg']).includes('share ledger: no contact for the pair - no ledger entry'))).toBe(true);
+      expect(x.capture.lines.every((l) => !JSON.stringify(l).includes('+15550102222'))).toBe(true);
+    });
+
+    it('an ORIGINAL row whose slot never appears keeps the give-up line at WARN, in ASCII', async () => {
+      const x = await seedShares('sent');
+      x.world.broadcasts.get('b-1')!.recipients = { 'c-1': { status: 'queued' } };
+      await x.post({ MessageSid: ROOT_SID, MessageStatus: 'delivered' });
+      expect(x.capture.atLevel(WARN).filter((l) => l['msg'] === 'broadcast delivery rollup: no matching recipient slot - ignored')).toHaveLength(1);
+      expect(x.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+    });
+
+    it('outcomeOf maps only sent / delivered / failed / undelivered; queued (Twilio accepted, sending, scheduled) and queued_pending map to nothing (a non-terminal status never reaches a slot)', () => {
+      // outcomeOf is exported for this pin: a `queued` status never TRANSITIONS an already-sent row, so no webhook post can reach the rollup with one - the unit pin is the only observable check.
+      // mapTwilioStatus folds Twilio's accepted / sending / scheduled into `queued`.
+      expect(outcomeOf('queued', undefined, undefined)).toBeUndefined();
+      expect(outcomeOf('queued_pending', undefined, undefined)).toBeUndefined();
+      expect(outcomeOf('sent', undefined, undefined)).toMatchObject({ kind: 'sent' });
+      expect((outcomeOf('sent', undefined, undefined) as { carrierSentAt?: string }).carrierSentAt).toBeDefined();
+      expect(outcomeOf('delivered', undefined, undefined)).toEqual({ kind: 'delivered' });
+      expect(outcomeOf('undelivered', '30003', '2026-09-28T12:05:00.000Z')).toEqual({ kind: 'failed', errorCode: '30003', retryDueAt: '2026-09-28T12:05:00.000Z' });
+      expect(outcomeOf('failed', undefined, undefined)).toEqual({ kind: 'failed', errorCode: 'unknown' });
+    });
+
+    it("an original row's 30003 whose retry enqueue FAILS: the withdrawal emits broadcast.updated with the count UNSET after the rollup's 1", async () => {
+      const x = await seedShares('sent');
+      configureOutboundQueue({
+        async enqueue() {
+          throw new Error('sqs down');
+        },
+      });
+      await x.post({ MessageSid: ROOT_SID, MessageStatus: 'undelivered', ErrorCode: '30003' });
+      expect((await x.world.messagesRepo.getByProviderSid(ROOT_SID))?.retry_due_at).toBe(RETRY_PROMISE_WITHDRAWN_AT);
+      const forShare = x.updatedEvents().filter((e) => e.broadcastId === 'b-1');
+      expect(forShare).toHaveLength(2);
+      expect(forShare.at(-2)?.stats.retry_pending).toBe(1);
+      expect(forShare.at(-1)?.stats.retry_pending).toBeUndefined();
+      expect(forShare.at(-1)?.stats.failed).toBe(1);
+    });
+
+    it("a retry row's 30003 whose retry enqueue FAILS: the withdrawal re-reads the share and emits it with the count UNSET", async () => {
+      const x = await seedShares('failed');
+      configureOutboundQueue({
+        async enqueue() {
+          throw new Error('sqs down');
+        },
+      });
+      await x.post({ MessageSid: RETRY_SID, MessageStatus: 'undelivered', ErrorCode: '30003' });
+      const forShare = x.updatedEvents().filter((e) => e.broadcastId === 'b-1');
+      expect(forShare).toHaveLength(2);
+      expect(forShare.at(-2)?.stats.retry_pending).toBe(1);
+      expect(forShare.at(-1)?.stats.retry_pending).toBeUndefined();
+    });
   });
 
   it('PERSISTENT unknown SID → one retried lookup, then ERROR (level 50, alarmed) + 200 ack, never a 500', async () => {

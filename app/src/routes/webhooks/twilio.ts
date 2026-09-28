@@ -45,6 +45,7 @@ import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import {
   createBroadcastsRepo,
   deriveBroadcastStats,
+  type BroadcastItem,
   type BroadcastRecipient,
   type BroadcastsRepo,
 } from '../../repos/broadcastsRepo.js';
@@ -75,9 +76,17 @@ import {
   relayMemberKey,
   type DeliveryStatus,
   type MediaAttachment,
+  type MessageItem,
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../../repos/messagesRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../../repos/listingSendsRepo.js';
+import {
+  applyLaterAttempt,
+  originalRowLedgerWrite,
+  type AttemptOutcome,
+  type ShareAttemptOutcomeDeps,
+} from '../../services/shareAttemptOutcome.js';
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { resolveRelayInbound } from '../../services/relayInboundResolution.js';
@@ -147,6 +156,7 @@ import {
 } from '../../lib/relayRetryClaim.js';
 import { evaluateRelayRetryGates, type RelayRetryGateCode } from '../../lib/relayRetryGates.js';
 import {
+  isRetryPromiseLive,
   parseRetryWindowOrigin,
   RETRY_PROMISE_WITHDRAWN_AT,
   RETRY_WINDOW_CLOSED_CODE,
@@ -264,6 +274,8 @@ export interface TwilioWebhookDeps {
   placementDeadlinesRepo?: PlacementDeadlinesRepo;
   /** Share-broadcast results rollup (M1.8a); the real repo by default. */
   broadcastsRepo?: BroadcastsRepo;
+  /** share-sent-outcome D7: the rollup writes the pair's listing-send ledger entry; the real repo by default. */
+  listingSendsRepo?: ListingSendsRepo;
   /**
    * Org settings - the group cross-check / railed-inbound liveness high-water
    * marks are written through it. (It used to also resolve the operator's
@@ -566,6 +578,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const placementDeadlines =
@@ -576,6 +589,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const groupRail = deps.groupRailEnqueuer ?? createGroupRailEnqueuer({ logger: log });
   const groupCrossCheck = deps.groupCrossCheck ?? createGroupCrossCheck({ logger: log });
   const pushService = deps.pushService ?? createPushService({ config, logger: deps.logger });
+  // share-sent-outcome D2/D7: what the rollup's later-attempt transition and
+  // the original row's ledger write run through.
+  const shareOutcomeDeps: ShareAttemptOutcomeDeps = { broadcasts, ledger: { listingSends, log }, events, log };
 
   // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
   // placement-linked conversation (a relay/placement thread carries
@@ -3465,6 +3481,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       ErrorCode,
       oneToOneRetry?.kind === 'retry' ? { retryDueAt: oneToOneRetry.runAt.toISOString() } : undefined,
     );
+    // share-sent-outcome D4/D7: the promise this callback made is EXACTLY the
+    // retry_due_at the status write just stamped - taken from the decision,
+    // never from `message.retry_due_at` (the row image read BEFORE the write;
+    // a first 30003 failure holds none there).
+    const promisedAt = oneToOneRetry?.kind === 'retry' ? oneToOneRetry.runAt.toISOString() : undefined;
+    // The share the rollup rolled an ORIGINAL row into (the enqueue-failure
+    // withdrawal below re-emits it with the promise count unset).
+    let rolled: { item: BroadcastItem; contactKey: string } | undefined;
     const transportOutcome =
       transportEvidence.kind === 'observed'
         ? await messages.setMessageActualTransport(
@@ -3526,19 +3550,33 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // find the matching recipient slot by those keys (no new GSI). Only
       // terminal transitions move the rollup — a sent→delivered (no failed)
       // bumps `delivered`; *→failed bumps `failed`. Never 5xx the callback.
-      if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0 && message.retry_of === undefined) {
+      // share-sent-outcome D2: a share-RETRY row (retry_of set) is routed to
+      // the ORIGINAL slot by broadcast_id + retry_root through the
+      // attempt-ordered transition (rollRetryIntoBroadcast); an ORIGINAL row
+      // rolls up as it always has, then writes the pair's ledger entry for a
+      // delivered or failed transition (D7).
+      if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0) {
         try {
-          await rollIntoBroadcast(
-            broadcasts,
-            events,
-            log,
-            message.broadcast_id,
-            message.conversationId,
-            message.tsMsgId,
-            mappedStatus,
-            ErrorCode,
-            statusRetryDelayMs,
-          );
+          if (message.retry_of !== undefined) {
+            await rollRetryIntoBroadcast(shareOutcomeDeps, message, mappedStatus, ErrorCode, promisedAt);
+          } else {
+            rolled = await rollIntoBroadcast(
+              broadcasts,
+              events,
+              log,
+              message.broadcast_id,
+              message.conversationId,
+              message.tsMsgId,
+              mappedStatus,
+              ErrorCode,
+              statusRetryDelayMs,
+              promisedAt,
+            );
+            const outcome = outcomeOf(mappedStatus, ErrorCode, promisedAt);
+            if (rolled !== undefined && outcome !== undefined && outcome.kind !== 'sent') {
+              await originalRowLedgerWrite(shareOutcomeDeps, { share: rolled.item, contactKey: rolled.contactKey, row: message, outcome });
+            }
+          }
         } catch (err) {
           log.error({ err, providerSid: MessageSid, broadcastId: message.broadcast_id }, 'broadcast delivery rollup failed — message status recorded, broadcast stats stale');
         }
@@ -3635,6 +3673,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
               // row is re-emitted, so the bubble drops "will retry" and shows
               // its Retry button. The enqueue failure itself rethrows to the
               // arm's catch below, which logs today's ERROR (D9).
+              let withdrawn = false;
               try {
                 await messages.annotateMessage(message.conversationId, message.tsMsgId, {
                   retryDueAt: RETRY_PROMISE_WITHDRAWN_AT,
@@ -3645,6 +3684,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                   direction: message.direction,
                   deliveryStatus: mappedStatus,
                 });
+                withdrawn = true;
               } catch (withdrawErr) {
                 // Spec section 9: the promise then stands until it expires (at
                 // most the backoff plus RETRY_PROMISE_GRACE_MS).
@@ -3652,6 +3692,29 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                   { err: withdrawErr, providerSid: MessageSid },
                   'one-to-one 30003 retry promise NOT withdrawn after a failed enqueue - it stands until it expires',
                 );
+              }
+              // share-sent-outcome D4 (plan deviation 13): the rollup above
+              // emitted this row's share with retry_pending 1; the promise is
+              // gone, so the share is re-emitted with the count UNSET (only the
+              // rollup emits a count) - a list holding the count refetches the
+              // share's stats. The original path has the rolled item; a retry
+              // row never called rollIntoBroadcast, so the share is re-read.
+              if (withdrawn && typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0) {
+                try {
+                  const withdrawnShare = message.retry_of !== undefined ? await broadcasts.getById(message.broadcast_id) : rolled?.item;
+                  if (withdrawnShare !== undefined) {
+                    events.emit('broadcast.updated', {
+                      broadcastId: withdrawnShare.broadcastId,
+                      status: withdrawnShare.status,
+                      stats: deriveBroadcastStats(withdrawnShare),
+                    });
+                  }
+                } catch (shareErr) {
+                  log.warn(
+                    { err: shareErr, providerSid: MessageSid, broadcastId: message.broadcast_id },
+                    'share re-emit after a withdrawn retry promise failed (best-effort; a list keeps its last count until it refetches)',
+                  );
+                }
               }
               throw enqueueErr;
             }
@@ -3844,11 +3907,70 @@ function broadcastSlotMayTransition(current: BroadcastRecipient['status'] | unde
 }
 
 /**
+ * share-sent-outcome D2: what a transitioning receipt says about its attempt.
+ * Only the carrier-confirmed `sent` (stamped now, as the rollup stamps an
+ * original slot's carrierSentAt), `delivered` (no instant: the rollup stamps
+ * none on a delivery, and the same-attempt rule keeps the slot's) and a
+ * failure (`failed` / `undelivered`, with the promise the retry decision made)
+ * reach a slot; any other status (`queued` - Twilio's accepted, sending,
+ * scheduled - or `queued_pending`) maps to nothing.
+ */
+export function outcomeOf(status: DeliveryStatus, errorCode: string | undefined, promisedAt: string | undefined): AttemptOutcome | undefined {
+  if (status === 'delivered') return { kind: 'delivered' };
+  if (status === 'failed' || status === 'undelivered') {
+    return { kind: 'failed', errorCode: errorCode ?? 'unknown', ...(promisedAt !== undefined && { retryDueAt: promisedAt }) };
+  }
+  if (status === 'sent') return { kind: 'sent', carrierSentAt: new Date().toISOString() };
+  return undefined;
+}
+
+/**
+ * share-sent-outcome D2: a share-RETRY row's transitioning receipt reaches
+ * the ORIGINAL slot - matched by the share id and the row's `retry_root`
+ * against the slot's original message pointer, never by the slot key -
+ * through applyLaterAttempt (the attempt-ordered write, its ledger entry and
+ * its emit). A retry row without `retry_root` is unroutable (the repair stamps
+ * it): ONE ERROR. A root that matches no slot is a routing bug: ONE ERROR.
+ */
+async function rollRetryIntoBroadcast(
+  deps: ShareAttemptOutcomeDeps,
+  message: MessageItem,
+  status: DeliveryStatus,
+  errorCode: string | undefined,
+  promisedAt: string | undefined,
+): Promise<void> {
+  const outcome = outcomeOf(status, errorCode, promisedAt);
+  if (outcome === undefined || typeof message.broadcast_id !== 'string') return;
+  const ids = { broadcastId: message.broadcast_id, conversationId: message.conversationId, tsMsgId: message.tsMsgId };
+  if (typeof message.retry_root !== 'string' || message.retry_root.length === 0) {
+    deps.log.error(ids, 'broadcast delivery rollup: retry row without retry_root - unrouted (the repair stamps it)');
+    return;
+  }
+  const result = await applyLaterAttempt(deps, {
+    broadcastId: message.broadcast_id,
+    conversationId: message.conversationId,
+    retryRoot: message.retry_root,
+    attemptKey: message.tsMsgId,
+    outcome,
+    ...(message.recipient_contact_id !== undefined && { recipientContactId: message.recipient_contact_id }),
+  });
+  if (result === 'no_slot') {
+    deps.log.error({ ...ids, retryRoot: message.retry_root }, 'broadcast delivery rollup: no matching recipient slot for a retry row - a routing bug');
+  }
+}
+
+/**
  * (M1.8a) Roll a 1:1 delivery-status transition into the owning broadcast: find
  * the recipient slot whose persisted conversationId+tsMsgId match this message,
  * apply the forward-only terminal status, bump the broadcast's delivered/failed
  * counter, and emit broadcast.updated. O(1) load-by-id; the slot is found by
  * scanning the broadcast's (bounded) recipients map for the matching keys.
+ *
+ * share-sent-outcome: returns the share as written and the slot key it
+ * matched when the slot moved (the caller writes the pair's ledger entry and
+ * the enqueue-failure withdrawal re-emits it), else undefined; `promisedAt`
+ * (the retry decision's run time) puts `retry_pending: 1` on the emit of a
+ * failed 30003 whose promise is live - the rollup's lower bound (spec D4).
  */
 async function rollIntoBroadcast(
   broadcasts: BroadcastsRepo,
@@ -3860,7 +3982,8 @@ async function rollIntoBroadcast(
   deliveryStatus: DeliveryStatus,
   errorCode: string | undefined,
   statusRetryDelayMs: number,
-): Promise<void> {
+  promisedAt?: string,
+): Promise<{ item: BroadcastItem; contactKey: string } | undefined> {
   // Terminal outcomes (delivered/failed) transition the slot + stats. The
   // carrier's NON-terminal 'sent' instead stamps the carrierSentAt marker: the
   // fan-out's dispatch already claimed the slot as status 'sent' (its
@@ -3901,7 +4024,9 @@ async function rollIntoBroadcast(
       ? Object.entries(reloaded.recipients ?? {}).find(([, r]) => matchesSlot(r))
       : undefined;
     if (!entry) {
-      log.warn({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot — ignored');
+      // share-sent-outcome: an ORIGINAL row's miss (the lost-rollup class)
+      // stays WARN; a retry row never reaches here (rollRetryIntoBroadcast).
+      log.warn({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot - ignored');
       return;
     }
   }
@@ -3937,7 +4062,7 @@ async function rollIntoBroadcast(
       });
     }
     log.info({ broadcastId }, 'broadcast recipient carrier-sent marker rolled in');
-    return;
+    return item ? { item, contactKey } : undefined;
   }
 
   // Atomic forward-only transition: condition the slot write on the slot still
@@ -3975,10 +4100,15 @@ async function rollIntoBroadcast(
   const updated = await broadcasts.bumpStats(broadcastId, delta);
   // The emit carries DERIVED disjoint stats from the ALL_NEW item (zero extra
   // reads), so the dashboard chips reconcile to the recipients map.
+  // share-sent-outcome D4: a failed 30003 with a live promise carries
+  // retry_pending 1 (this recipient - a lower bound); otherwise the count
+  // stays unset.
+  const pending = next === 'failed' && errorCode === '30003' && isRetryPromiseLive(promisedAt, Date.now());
   events.emit('broadcast.updated', {
     broadcastId,
     status: updated.status,
-    stats: deriveBroadcastStats(updated),
+    stats: deriveBroadcastStats(updated, pending ? { retryPending: 1 } : undefined),
   });
   log.info({ broadcastId, deliveryStatus: next }, 'broadcast delivery rolled into stats');
+  return { item: updated, contactKey };
 }

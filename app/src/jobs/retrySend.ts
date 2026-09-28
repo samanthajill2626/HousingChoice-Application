@@ -441,6 +441,10 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     // written: every post-deploy job, deferral and re-drive carries a fresh
     // jobId and meets no marker. An eventually consistent Get is enough - the
     // marker was written at least one visibility timeout before a redelivery.
+    // TODO(retry-send-lost-under-job-marker): remove this belt after the first
+    // production deploy of retry-send-adoption plus one SQS redelivery window
+    // (about 10 minutes); it guards only envelopes the pre-adoption code ran.
+    // Dated 2026-09-28 (code review r1 C-10 / A-7).
     if (existing === undefined) {
       const jobId = getContext()?.jobId;
       if (typeof jobId === 'string' && jobId.length > 0 && (await messagesRepo.getJobExecutionMarker(jobId))) {

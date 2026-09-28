@@ -520,6 +520,16 @@ lives with the table. A pointer, never state: a sweeper reads it only as
 "this row has a child". Children appended before the deploy have none (no
 backfill).
 
+**(FW2/FW3, 2026-09-28) `already_sent` is not a refusal.** A `retry_send`
+record closed `done` / `refused` with cause `already_sent` means the retry
+text EXISTS: step 4a declines a re-driven attempt whose own retry row is
+already appended (`app/src/jobs/retrySend.ts:478-486` at `aae99caa`, the
+close `declineBeforeClaim(owner, redriven, ALREADY_SENT_CAUSE, octx)` at
+`:480`; only a `redriven` record is closed so), and the retried row's
+`retrychild#` pointer for that attempt names its SID. `closeRedriven` has no
+`sent` outcome (`app/src/repos/sendAttemptsRepo.ts:159-162`), and nothing
+reads `cause` today - a sweeper or a report must not count it as a refusal.
+
 **Fix wave FW1's out-of-list finding 1 (`fw1-report.md`, "Found, not in the
 list"): round 1 C-1's shape in SOR's relay code.** Checked at `5a03e20b`. No
 new issue: its rung half is item 9 above, and its fan-out twin is added

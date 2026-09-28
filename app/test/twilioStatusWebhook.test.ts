@@ -1230,6 +1230,19 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(() =>
       parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: MAX_SEND_RETRY_ATTEMPTS + 1 }),
     ).toThrow(/cap/);
+    // retry-send-adoption R1: the parser CARRIES `deferred: true` (only the
+    // deferral re-enqueue sets it) and drops any other value.
+    expect(parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: 1, deferred: true })).toEqual({
+      providerSid: 's',
+      conversationId: 'c',
+      attempt: 1,
+      deferred: true,
+    });
+    expect(parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: 1, deferred: false })).toEqual({
+      providerSid: 's',
+      conversationId: 'c',
+      attempt: 1,
+    });
   });
 
   it('backoff doubles per attempt (60s, 120s, 240s)', () => {

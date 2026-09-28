@@ -36,6 +36,7 @@ import {
 } from '../src/services/sendMessage.js';
 import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messagingErrors.js';
 import { bodyFingerprint, recipientDigest } from '../src/lib/sendFingerprint.js';
+import { pinnedSender } from '../src/lib/outboundSender.js';
 import { previewSendRefusal } from '../src/services/sendRefusalPreview.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import { SEND_REFUSAL_CASES, SEND_REFUSAL_PHONE } from './helpers/sendRefusalCases.js';
@@ -913,6 +914,17 @@ describe('outbound sender pinning (1:1)', () => {
       providerSid: 'SMfake-1',
     });
     expect(f.sent).toEqual([{ to: '+15550100001', body: 'hello' }]);
+  });
+
+  // retry-send-adoption R1: the ONE derivation of the pinned sender. The
+  // retry job's attempt facts read the same function, so a record's `sender`
+  // is the number this service pins.
+  it('pinnedSender: an explicit from wins, else the business number, else undefined', () => {
+    expect(pinnedSender({ businessPhoneNumber: MAIN }, '+15550109001')).toBe('+15550109001');
+    expect(pinnedSender({ businessPhoneNumber: MAIN })).toBe(MAIN);
+    expect(pinnedSender({ businessPhoneNumber: MAIN }, undefined)).toBe(MAIN);
+    expect(pinnedSender({ businessPhoneNumber: undefined })).toBeUndefined();
+    expect(pinnedSender({})).toBeUndefined();
   });
 });
 

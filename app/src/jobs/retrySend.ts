@@ -16,6 +16,7 @@ import {
   createMessagesRepo,
   mediaAttachmentsOf,
   type MediaAttachment,
+  type MessageItem,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
 import {
@@ -31,6 +32,7 @@ import {
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
 import {
+  MAX_SEND_RETRY_ATTEMPTS,
   oneToOneRetryWindowOrigin,
   parseRetryWindowOrigin,
   withinRetrySendWindow,
@@ -47,8 +49,10 @@ export const RETRY_SEND_JOB = 'messaging.retrySend';
  */
 export const RETRY_PRESIGN_TTL_SECONDS = 3600;
 
-/** Total send attempts for one logical message are capped at 1 + this. */
-export const MAX_SEND_RETRY_ATTEMPTS = 3;
+// The retry cap is owned by the import-free leaf lib/retrySendWindow.ts since
+// retry-send-adoption; re-exported here so every existing importer (the
+// 30003 decision, the tests) keeps resolving it through this module.
+export { MAX_SEND_RETRY_ATTEMPTS };
 
 /** Exponential backoff: 60s, 120s, 240s for attempts 1..3. */
 export function retryBackoffMs(attempt: number): number {
@@ -61,6 +65,13 @@ export interface RetrySendPayload {
   conversationId: string;
   /** 1-based attempt number of THIS retry. */
   attempt: number;
+  /**
+   * retry-send-adoption R1/R3: set ONLY by the deferral re-enqueue, so the
+   * re-claimed run treats its next deferral as terminal. The webhook's initial
+   * enqueue and a re-drive never set it; the parser carries `true` and drops
+   * any other value.
+   */
+  deferred?: true;
 }
 
 export function parseRetrySendPayload(payload: unknown): RetrySendPayload {
@@ -80,7 +91,12 @@ export function parseRetrySendPayload(payload: unknown): RetrySendPayload {
   if (p.attempt > MAX_SEND_RETRY_ATTEMPTS) {
     throw new Error(`retrySend: attempt ${p.attempt} exceeds cap ${MAX_SEND_RETRY_ATTEMPTS}`);
   }
-  return { providerSid: p.providerSid, conversationId: p.conversationId, attempt: p.attempt };
+  return {
+    providerSid: p.providerSid,
+    conversationId: p.conversationId,
+    attempt: p.attempt,
+    ...(p.deferred === true && { deferred: true as const }),
+  };
 }
 
 /**
@@ -126,6 +142,34 @@ export function resolveSendRetryBackoffMs(attempt: number): number {
  */
 export async function enqueueSendRetry(payload: RetrySendPayload, runAt: Date): Promise<void> {
   await enqueue(RETRY_SEND_JOB, payload, { runAt });
+}
+
+/**
+ * retry-send-adoption R1: what a retry of `original` WILL SEND. `attachments`
+ * are re-presigned fresh later (never a stored URL); `rawMediaUrls` are
+ * replayed as stored (the internal/e2e seam, a row with no attachments);
+ * `droppedAttachments` means the row has attachments but no MediaStore exists,
+ * so the retry goes body only. `mediaCount` is the attempt fact.
+ */
+export interface RetryMediaPlan {
+  attachments?: MediaAttachment[];
+  rawMediaUrls?: string[];
+  mediaCount: number;
+  droppedAttachments: boolean;
+}
+
+/** R1: what the retry WILL SEND, decided synchronously so the claim's mediaCount is known before the presign (retrySend.ts's media rule as built). */
+export function planRetryMedia(original: MessageItem, hasStore: boolean): RetryMediaPlan {
+  const attachments = mediaAttachmentsOf(original);
+  if (attachments.length > 0) {
+    return hasStore
+      ? { attachments, mediaCount: attachments.length, droppedAttachments: false }
+      : { mediaCount: 0, droppedAttachments: true };
+  }
+  if (original.mediaUrls !== undefined) {
+    return { rawMediaUrls: original.mediaUrls, mediaCount: original.mediaUrls.length, droppedAttachments: false };
+  }
+  return { mediaCount: 0, droppedAttachments: false };
 }
 
 export interface RetrySendJobDeps {

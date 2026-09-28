@@ -32,6 +32,7 @@ import {
   type SendMessageResult,
 } from '../adapters/messaging.js';
 import { bodyFingerprint, recipientDigest } from '../lib/sendFingerprint.js';
+import { pinnedSender } from '../lib/outboundSender.js';
 import { classifySendFailure, type SendFailureClassification } from '../lib/sendOutcome.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -586,7 +587,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // docs/issues/one-to-one-sender-not-pinned-to-ported-number.md.
     // An unconfigured BUSINESS_PHONE_NUMBER (dev/test only — prod+twilio
     // fail-fasts at boot) degrades to the previous service-picks behavior.
-    const sender = from ?? config.businessPhoneNumber;
+    const sender = pinnedSender(config, from);
     const { transportIntent, prepared } = await notAttempted(() => {
       const intent = adapter.classifyMessageTransport({
         hasForwardableMedia:

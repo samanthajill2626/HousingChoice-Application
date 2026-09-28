@@ -31,6 +31,12 @@ export const RETRY_PROMISE_GRACE_MS = 2 * 60_000;
 /** Written over retry_due_at when a promise must be withdrawn (D7 enqueue failure). */
 export const RETRY_PROMISE_WITHDRAWN_AT = '1970-01-01T00:00:00.000Z';
 
+/** Total send attempts for one logical message are capped at 1 + this (owned here since retry-send-adoption; jobs/retrySend.ts re-exports it). */
+export const MAX_SEND_RETRY_ATTEMPTS = 3;
+/** retry-send-adoption R5: the retried row's retry_outcome when the reconcile ruled the retry `unresolved`. The dashboard hand-copies it (routes/contact/retryPromise.ts) - pinned by retryPromiseMirror.test.ts. */
+export const RETRY_OUTCOME_UNCONFIRMED = 'unconfirmed' as const;
+export type RetryOutcome = typeof RETRY_OUTCOME_UNCONFIRMED;
+
 /**
  * D3/D4/D8: the close code a WINDOW decline writes on a relay retry rung - the
  * relay claim (D3) or the relay job (D4) found the retry would go out more

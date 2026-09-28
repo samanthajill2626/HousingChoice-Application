@@ -234,7 +234,8 @@ const seed = (patch: { checkNo?: number; redriveCount?: number }, o = 0): Step =
       names['#rc'] = 'redrive_count';
       values[':rc'] = patch.redriveCount;
     }
-    const recipientKey = owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+    const recipientKey =
+      owner.kind === 'broadcast' ? owner.contactKey : owner.kind === 'retry_send' ? owner.recipientKey : owner.memberKey;
     await doc.send(
       new UpdateCommand({
         TableName: table,
@@ -397,11 +398,20 @@ const CASES: Case[] = [
     ],
   },
   {
-    name: 'siblings on one recipient: three owner kinds at the same instant, ordered by the index sort key',
+    name: 'siblings on one recipient: four owner kinds at the same instant, ordered by the index sort key; the retry owner re-armed, handed off and closed',
     owners: (id) => [
       broadcastOwner(id),
       { kind: 'relay_leg', relayConversationId: `conv-${id}`, sourceTsMsgId: `2026-09-26T11:00:00.000Z#SM${id}`, memberKey: 'contact-9' },
       { kind: 'relay_rung', relayConversationId: `conv-${id}`, retryTsMsgId: `2026-09-26T11:05:00.000Z#SMr${id}`, memberKey: 'phone#+16175550100' },
+      // retry-send-adoption R1: keyed on the retried row and the attempt; the chain root rides as a fact.
+      {
+        kind: 'retry_send',
+        conversationId: `conv-${id}`,
+        retriedTsMsgId: `2026-09-26T11:10:00.000Z#SMt${id}`,
+        attempt: 2,
+        recipientKey: 'phone#+16175550100',
+        retryRoot: `2026-09-26T11:00:00.000Z#SMroot${id}`,
+      },
     ],
     steps: [
       claim(T0),
@@ -409,6 +419,11 @@ const CASES: Case[] = [
       claim(T0, undefined, { o: 2 }),
       finish('last', { outcome: 'sent', sid: 'SMr' }, true, 2),
       claim(at(1_000), { outcome: 'refused', fresh: true }, { o: 1 }),
+      claim(T0, { outcome: 'claimed', record: { state: 'attempting', attemptNo: 1, attemptedAt: T0 } }, { o: 3 }),
+      rearm('last', at(2_000), { attemptNo: 1, attemptedAt: at(2_000) }, 3),
+      hand('last', true, 'SMt', 3),
+      claim(at(3_000), { outcome: 'refused', fresh: false, record: { state: 'reconciling', sid: 'SMt' } }, { o: 3 }),
+      closeRec(at(2_000), { outcome: 'unresolved', cause: 'provider_unreachable' }, true, 3),
     ],
   },
   {
@@ -531,7 +546,8 @@ function fakeIndex(world: FakeWorld, partition: string): FakeWorld['sendAttemptI
 
 /** The real record's op token (FW1-5): `last_op`, which no read method returns. */
 async function realOp(owner: SendAttemptOwner): Promise<unknown> {
-  const recipientKey = owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+  const recipientKey =
+    owner.kind === 'broadcast' ? owner.contactKey : owner.kind === 'retry_send' ? owner.recipientKey : owner.memberKey;
   const { Item } = await doc.send(
     new GetCommand({
       TableName: table,

@@ -88,6 +88,29 @@ describe('sendAttemptsRepo keys (spec D8a, D12)', () => {
     expect(ownerKey(a)).toBe(ownerKey(b));
     expect(attemptKey(a)).not.toBe(attemptKey(b));
   });
+
+  it('retry_send (retry-send-adoption R1): the owner key is the RETRIED ROW and the attempt; the chain root is a fact on the owner, never part of any key', () => {
+    const owner: Extract<SendAttemptOwner, { kind: 'retry_send' }> = {
+      kind: 'retry_send',
+      conversationId: 'conv-1',
+      retriedTsMsgId: 'T#SMa',
+      attempt: 2,
+      recipientKey: 'c-1',
+      retryRoot: 'T0#SMroot',
+    };
+    expect(ownerKey(owner)).toBe('retry#conv-1#T#SMa#2');
+    expect(attemptKey(owner)).toBe('retry#conv-1#T#SMa#2|c-1');
+    // A phone-keyed attempt (no recorded recipient): the key carries only the hash.
+    const phoneKeyed = { ...owner, recipientKey: 'phone#+15550100001' };
+    expect(attemptKey(phoneKeyed)).toBe(`retry#conv-1#T#SMa#2|${hashRecipientKey('phone#+15550100001')}`);
+    expect(attemptKey(phoneKeyed)).not.toContain('+1555');
+    // Two owners differing ONLY in their root are ONE record: the root is not the identity.
+    expect(ownerKey({ ...owner, retryRoot: 'T9#SMother' })).toBe(ownerKey(owner));
+    expect(attemptKey({ ...owner, retryRoot: 'T9#SMother' })).toBe(attemptKey(owner));
+    // Another attempt number, or another retried row (a manual Retry row's own chain), is another record.
+    expect(attemptKey({ ...owner, attempt: 3 })).not.toBe(attemptKey(owner));
+    expect(attemptKey({ ...owner, retriedTsMsgId: 'T#SMb' })).not.toBe(attemptKey(owner));
+  });
 });
 
 describe('sendAttemptsRepo claim - cancellation attribution (build finding T5-4; stub document client)', () => {
@@ -275,7 +298,7 @@ describe.skipIf(!reachable)('sendAttemptsRepo on DynamoDB Local (spec D8a/D11)',
   });
 
   async function rawRecord(o: SendAttemptOwner): Promise<Record<string, unknown> | undefined> {
-    const recipientKey = o.kind === 'broadcast' ? o.contactKey : o.memberKey;
+    const recipientKey = o.kind === 'broadcast' ? o.contactKey : o.kind === 'retry_send' ? o.recipientKey : o.memberKey;
     const { Item } = await doc.send(
       new GetCommand({
         TableName: table,
@@ -340,6 +363,52 @@ describe.skipIf(!reachable)('sendAttemptsRepo on DynamoDB Local (spec D8a/D11)',
     await repo.claim(rung, facts, T0);
     expect(await rawRecord(rung)).toMatchObject({ conversationId: `sendattempt#rung#conv-${seq}#${T0}#SMr${seq}`, tsMsgId: 'contact-9' });
     expect(await repo.get(rung)).toMatchObject({ owner: rung, state: 'attempting' });
+  });
+
+  it('a retry_send owner (retry-send-adoption R1) claims, re-arms and hands off like any owner; its hashed phone key is the sort key; it lists beside a broadcast attempt to the same number; the stored owner map carries all six fields', async () => {
+    const retry: Extract<SendAttemptOwner, { kind: 'retry_send' }> = {
+      kind: 'retry_send',
+      conversationId: `conv-${seq}`,
+      retriedTsMsgId: `${T0}#SMretried${seq}`,
+      attempt: 2,
+      recipientKey: PHONE_KEY,
+      retryRoot: `2026-09-26T11:50:00.000Z#SMroot${seq}`,
+    };
+    expect(await repo.claim(retry, facts, T0)).toStrictEqual({
+      outcome: 'claimed',
+      record: { owner: retry, state: 'attempting', attemptNo: 1, attemptedAt: T0, redriveCount: 0, checkNo: 0, ...facts },
+    });
+    const R = plus(T0, 2_000);
+    expect(await repo.rearm(retry, { attemptNo: 1, attemptedAt: T0 }, R)).toStrictEqual({ attemptNo: 1, attemptedAt: R });
+    expect(await repo.handToReconcile(retry, { attemptNo: 1, attemptedAt: R }, 'SMretry-sid')).toBe(true);
+    expect(await repo.get(retry)).toMatchObject({ owner: retry, state: 'reconciling', attemptNo: 1, attemptedAt: R, sid: 'SMretry-sid' });
+    // This case's broadcast owner: the SAME number from the same sender, a little later.
+    await repo.claim(owner, facts, T1);
+    const rows = await repo.listByRecipient(SENDER, facts.recipientDigest, T0);
+    expect(rows.map((r) => [r.owner.kind, r.attemptedAt])).toEqual([
+      ['broadcast', T1],
+      ['retry_send', R],
+    ]);
+    const raw = await rawRecord(retry);
+    expect(raw).toMatchObject({
+      conversationId: `sendattempt#retry#conv-${seq}#${T0}#SMretried${seq}#2`,
+      tsMsgId: hashRecipientKey(PHONE_KEY),
+      attempt_state: 'reconciling',
+      attempted_at: R,
+      sid: 'SMretry-sid',
+    });
+    // The owner map keeps the raw recipient key (the reconcile re-derives and compares it) - the KEYS never do.
+    expect(raw!['owner']).toStrictEqual(retry);
+    expect(Object.keys(raw!['owner'] as Record<string, unknown>).sort()).toEqual([
+      'attempt',
+      'conversationId',
+      'kind',
+      'recipientKey',
+      'retriedTsMsgId',
+      'retryRoot',
+    ]);
+    expect(String(raw!['conversationId'])).not.toContain('6175550100');
+    expect(String(raw!['tsMsgId'])).not.toContain('6175550100');
   });
 
   it('the index item is written in the claim transaction, keyed by sender and digest, sorted by attempt start', async () => {

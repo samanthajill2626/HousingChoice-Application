@@ -949,6 +949,24 @@ const RETRY_SCHEDULED_REASONS: Record<string, string> = {
 };
 
 /**
+ * retry-send-adoption R5: the ONE-TO-ONE retry the reconcile ruled
+ * `unresolved` - a text may have reached the member and nobody knows. Read only
+ * when the caller says so (`retryUnconfirmed`: the failed message carries
+ * `retry_outcome: 'unconfirmed'`) and the leg is NOT a relay leg. Checked FIRST,
+ * ahead of the promise: an unresolved retry has no promise left (its
+ * retry_due_at was withdrawn in the same write), so nothing may read "will
+ * retry" beside it. The row itself DID fail, so the tone stays the failure's
+ * (`presentDeliveryStatus`), unlike SOR's `send_unconfirmed`.
+ *
+ * 30003 is the whole map for the same reason as RETRY_SCHEDULED_REASONS'. ASCII,
+ * with the `(error <code>)` tail from the shared template. Staff-facing copy, so
+ * it lives here, never in the app's message catalog.
+ */
+const RETRY_UNCONFIRMED_REASONS: Record<string, string> = {
+  '30003': 'Phone unreachable - retry not confirmed',
+};
+
+/**
  * Overrides that apply ONLY to a RELAY leg, checked after MMS_ERROR_CODE_REASONS
  * and before ERROR_CODE_REASONS.
  *
@@ -998,6 +1016,12 @@ export interface DeliveryReasonOptions {
    *  the email card, the property-send results row) omits it and reads the
    *  plain failure. */
   retryScheduled?: boolean;
+  /** retry-send-adoption R5: the automatic retry of THIS failed one-to-one
+   *  message was ruled `unresolved` - it carries `retry_outcome: 'unconfirmed'`.
+   *  Read only for 30003, only when `relay` is not set, and AHEAD of
+   *  `retryScheduled`. Set by the same single caller as `retryScheduled` (the
+   *  one-to-one bubble's message-level chip); every other surface omits it. */
+  retryUnconfirmed?: boolean;
 }
 
 /**
@@ -1162,7 +1186,13 @@ export function deliveryReason(
   // thing it exists to prevent. The MMS hedge is about what the CARRIER could not
   // move; the relay override is about what THIS APP will not do next. When both
   // apply, the carrier's reading is the one staff need first.
+  //
+  // retry-send-adoption R5: the unconfirmed retry outranks the promise (an
+  // unresolved retry has no promise left), and relay outranks both.
   const mapped =
+    (opts.retryUnconfirmed === true && opts.relay !== true
+      ? ownReason(RETRY_UNCONFIRMED_REASONS, errorCode)
+      : undefined) ??
     (opts.retryScheduled === true && opts.relay !== true
       ? ownReason(RETRY_SCHEDULED_REASONS, errorCode)
       : undefined) ??

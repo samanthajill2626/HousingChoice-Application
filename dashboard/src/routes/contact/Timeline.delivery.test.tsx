@@ -671,6 +671,47 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     },
   );
 
+  // retry-send-adoption R5 (Cameron's Q1 ruling): a retry the reconcile ruled
+  // `unresolved` may have reached the member, so the retried row reads "retry
+  // not confirmed" and offers NO Retry - staff compose a new message instead.
+  // It keys on `retry_outcome`, never on the withdrawn sentinel alone (the next
+  // case), and it outranks a live stamp: an unresolved retry has no promise left.
+  const UNCONFIRMED_TEXT = 'Undelivered - Phone unreachable - retry not confirmed (error 30003)';
+
+  it.each([
+    ['the withdrawn sentinel the WITHDRAW writes beside it', () => '1970-01-01T00:00:00.000Z'],
+    ['a live stamp (the outcome outranks the promise)', liveStamp],
+  ] as Array<[string, () => string]>)(
+    'retry-send-adoption R5: an unresolved retry reads "retry not confirmed" and hides Retry - with %s',
+    (_label, stamp) => {
+      renderTimeline({
+        items: [{ ...ONE_TO_ONE_30003, retry_due_at: stamp(), retry_outcome: 'unconfirmed' }],
+        onRetry: vi.fn(),
+      });
+      expect(screen.getByText(UNCONFIRMED_TEXT)).toBeInTheDocument();
+      expect(screen.queryByText(/will retry/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', RETRY_BUTTON)).not.toBeInTheDocument();
+    },
+  );
+
+  it('retry-send-adoption R5: an unresolved retry on an MMS bubble reads "retry not confirmed" too - media: true does not suppress it', () => {
+    renderTimeline({
+      items: [
+        { ...ONE_TO_ONE_30003, type: 'mms', retry_due_at: '1970-01-01T00:00:00.000Z', retry_outcome: 'unconfirmed' },
+      ],
+      onRetry: vi.fn(),
+    });
+    expect(screen.getByText(UNCONFIRMED_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole('button', RETRY_BUTTON)).not.toBeInTheDocument();
+  });
+
+  it("retry-send-adoption R5: the sentinel WITHOUT retry_outcome (RSW's enqueue-failure withdrawal) still reads the plain failure and offers Retry (Review Focus 3)", () => {
+    renderTimeline({ items: [{ ...ONE_TO_ONE_30003, retry_due_at: '1970-01-01T00:00:00.000Z' }], onRetry: vi.fn() });
+    expect(screen.getByText(PLAIN_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText(/retry not confirmed/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', RETRY_BUTTON)).toBeInTheDocument();
+  });
+
   it('revealed, a queued_pending HOLD still renders no list', () => {
     const msg: TimelineItem = {
       ...RELAY_OUT,

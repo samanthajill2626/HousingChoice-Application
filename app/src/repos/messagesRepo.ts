@@ -41,6 +41,7 @@ import {
   type TransportAggregationState,
 } from '../lib/messageTransport.js';
 import { isE164 } from '../lib/phone.js';
+import type { RetryOutcome } from '../lib/retrySendWindow.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import type { FanoutClaimResult } from './fanoutClaim.js';
 
@@ -720,8 +721,11 @@ export interface NewMessage {
   dueRow?: MessageDueRow;
   /**
    * Share-broadcast id (M1.8a): when set, the persisted message is tagged with
-   * `broadcast_id` so the delivery-status callback rollup can resolve which
-   * broadcast's recipient slot to update by the provider SID alone.
+   * `broadcast_id`. Set on a share's own one-to-one send, whose recipient slot
+   * the delivery-status callback rollup resolves by the provider SID alone -
+   * and, since retry-send-adoption (R7), on every one-to-one RETRY row of a
+   * share text (automatic, adopted or manual), copied from the retried row. A
+   * retry row also carries retryOf and is never the share slot's own row.
    */
   broadcastId?: string;
   /**
@@ -745,6 +749,15 @@ export interface NewMessage {
    * first send. Never on a manual Retry: a human chose to send now.
    */
   retryWindowStart?: string;
+  /**
+   * retry-send-adoption R7: the tsMsgId of the retry chain's ROOT (the chain's
+   * first send), stored as `retry_root` beside retry_of on every one-to-one
+   * retry row - the automatic retry, the reconcile's adoption and the manual
+   * Retry route all pass it - so share-skip Branch B can route a retry's
+   * receipt by it. Absent on a normal send; a retry row appended before this
+   * field existed has none (services/retryChain.ts walks retry_of instead).
+   */
+  retryRoot?: string;
   /**
    * retry-send-window D14: whether the one-to-one send that appended this row
    * was automated. Stored as `automated`, FALSE INCLUDED - a row without it
@@ -1040,6 +1053,8 @@ export interface MessageItem {
   retry_attempt?: number;
   /** retry-send-window D2/D6: the automatic retry chain's origin, written at append (see NewMessage.retryWindowStart). */
   retry_window_start?: string;
+  /** retry-send-adoption R7: the retry chain's ROOT tsMsgId, written at append (see NewMessage.retryRoot). */
+  retry_root?: string;
   /**
    * retry-send-window D7: when the automatic 30003 retry of THIS failed
    * one-to-one message runs (ISO 8601). Written in the SAME conditional write
@@ -1048,8 +1063,18 @@ export interface MessageItem {
    * RETRY_PROMISE_WITHDRAWN_AT (lib/retrySendWindow.ts, already expired) when
    * the enqueue fails. The promise is live while now < retry_due_at +
    * RETRY_PROMISE_GRACE_MS. Absent when no retry was scheduled.
+   * retry-send-adoption R3: the retry job and the reconcile move it ONLY
+   * through the conditional annotateRetryPromise (a REFRESH, or the WITHDRAW).
    */
   retry_due_at?: string;
+  /**
+   * retry-send-adoption R5: 'unconfirmed' when the reconcile ruled THIS row's
+   * automatic retry `unresolved` - "retry not confirmed": no promise and no
+   * Retry. Written ONLY by annotateRetryPromise's WITHDRAW, in the same write
+   * that sets retry_due_at to RETRY_PROMISE_WITHDRAWN_AT; never by append.
+   * Display only: the manual Retry route trusts the attempt record.
+   */
+  retry_outcome?: RetryOutcome;
   /** retry-send-window D14: the send's automated flag, false included (see NewMessage.automated). */
   automated?: boolean;
   /** retry-send-window D14: the recipient contact the send named (see NewMessage.recipientContactId). */
@@ -1124,9 +1149,12 @@ export interface MessageItem {
    */
   group_participant_map?: Record<string, string>;
   /**
-   * Share-broadcast id (M1.8a): set on an outbound broadcast send so the
+   * Share-broadcast id (M1.8a): set on a share's own one-to-one send so the
    * delivery-status callback can roll delivered/failed into the broadcast's
-   * stats by SID lookup. Absent on 1:1 / relay messages.
+   * stats by SID lookup, and (retry-send-adoption R7) on every one-to-one retry
+   * row of a share text, copied from the retried row - such a row also carries
+   * retry_of and is never the share slot's own row. Absent on relay messages
+   * and on every other one-to-one message.
    */
   broadcast_id?: string;
 
@@ -1504,6 +1532,31 @@ export interface MessagesRepo {
   getManyByTsMsgIds(conversationId: string, tsMsgIds: string[]): Promise<Map<string, MessageItem>>;
   /** Stamp operational metadata (media S3 keys / the retry promise's retry_due_at) onto a message. Never retry lineage: that is append-only (D6). */
   annotateMessage(conversationId: string, tsMsgId: string, annotations: MessageAnnotations): Promise<void>;
+  /**
+   * retry-send-adoption R7: ONE parent row's retry children - its automatic and
+   * manual retry rows - read as ONE consistent Query on the pointer partition
+   * `retrychild#<conversationId>#<parentTsMsgId>`, in sort-key (tsMsgId) order;
+   * never a scan of the thread. `append` writes the pointer in the same
+   * transaction as every row carrying retryOf, so every such row has one; a
+   * retry row appended before the family existed has none (no backfill).
+   * Empty when the row has no child.
+   */
+  listRetryChildrenConsistent(conversationId: string, parentTsMsgId: string): Promise<RetryChildPointer[]>;
+  /**
+   * retry-send-adoption R3: the retry PROMISE write, conditioned on the row's
+   * `retry_due_at` still holding `expect.retryDueAt` (undefined = the row holds
+   * no promise), so a writer holding a stale read loses. A REFRESH passes only
+   * `retryDueAt`; the WITHDRAW passes RETRY_PROMISE_WITHDRAWN_AT with
+   * `retryOutcome` and writes both fields in ONE write. true = written; false =
+   * the condition failed (a moved promise, or no such row); anything else
+   * throws. Emits nothing: the caller emits message.persisted.
+   */
+  annotateRetryPromise(
+    conversationId: string,
+    tsMsgId: string,
+    patch: { retryDueAt: string; retryOutcome?: RetryOutcome },
+    expect: { retryDueAt: string | undefined },
+  ): Promise<boolean>;
   /**
    * Newest-first page of ONE conversation's media pointers (2026-08-18) - the
    * gallery's index, see the MEDIA POINTERS block above. `before` is a pointer
@@ -2037,6 +2090,29 @@ function sysSidPk(providerSid: string): string {
   return `syssid#${providerSid}`;
 }
 
+/**
+ * retry-send-adoption R7: the RETRY-CHILD pointer family. Every append of a row
+ * carrying retryOf also puts `{ conversationId: retrychild#<conversationId>#<retryOf>,
+ * tsMsgId: <the child row's tsMsgId>, provider_sid, retry_attempt? }` in the
+ * SAME transaction, so a parent's children are ONE consistent Query (the retry
+ * job's supersession check, the manual Retry route's `superseded` refusal)
+ * instead of a scan of the thread. A pointer, never state: written with the
+ * row, never updated. Its own partition, so listByConversation never sees it.
+ */
+export const RETRY_CHILD_PARTITION_PREFIX = 'retrychild#';
+
+/** Partition key of ONE parent row's retry-child pointers. */
+export function retryChildPk(conversationId: string, parentTsMsgId: string): string {
+  return `${RETRY_CHILD_PARTITION_PREFIX}${conversationId}#${parentTsMsgId}`;
+}
+
+/** One retry child of a parent row, as its pointer records it; `retryAttempt` is absent on a manual Retry row. */
+export interface RetryChildPointer {
+  tsMsgId: string;
+  providerSid: string;
+  retryAttempt?: number;
+}
+
 /** Point-readable dedupe marker for ONE Conversations event (IMxx). */
 function groupCrossCheckMarkerPk(messageSid: string): string {
   return `groupim#${messageSid}`;
@@ -2539,6 +2615,8 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         // retry_window_start (the chain's origin, retry-send-window D2/D6), so a
         // fast 30003 on the retry can never read a row without them.
         ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
+        // retry-send-adoption R7: the chain's root, beside retry_of.
+        ...(message.retryRoot !== undefined && { retry_root: message.retryRoot }),
         ...(message.retryAttempt !== undefined && { retry_attempt: message.retryAttempt }),
         ...(message.retryWindowStart !== undefined && {
           retry_window_start: message.retryWindowStart,
@@ -2691,6 +2769,30 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                           ...message.dueRow.attributes,
                         },
                         ConditionExpression: 'attribute_not_exists(tsMsgId)',
+                      },
+                    },
+                  ]
+                : []),
+              // retry-send-adoption R7: the retrychild# pointer - "does this row
+              // have a child?" as ONE consistent Query, for the retry job's
+              // supersession check and the manual Retry route. A pointer, never
+              // state: written with the row, never updated, only by the
+              // winning append (a dedupe cancels the whole transaction). AFTER
+              // the email pointer and the due row, so index 1 stays the SID
+              // pointer and index 2 the email pointer (the dedupe attribution
+              // below reads them by position); UNCONDITIONED, like the media
+              // pointers - a redelivery cancels on the SID pointer first.
+              ...(message.retryOf !== undefined
+                ? [
+                    {
+                      Put: {
+                        TableName: table,
+                        Item: {
+                          conversationId: retryChildPk(message.conversationId, message.retryOf),
+                          tsMsgId,
+                          provider_sid: message.providerSid,
+                          ...(message.retryAttempt !== undefined && { retry_attempt: message.retryAttempt }),
+                        },
                       },
                     },
                   ]
@@ -3252,6 +3354,75 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           log.error({ err, conversationId, tsMsgId }, 'media pointers not written for annotated attachments');
         }
       }
+    },
+
+    async listRetryChildrenConsistent(conversationId, parentTsMsgId) {
+      // retry-send-adoption R7: ONE consistent Query on the parent's own pointer
+      // partition (a handful of items), paged on LastEvaluatedKey like
+      // sendAttemptsRepo.listByRecipient. Ascending sort key = tsMsgId order.
+      const children: RetryChildPointer[] = [];
+      let startKey: Record<string, unknown> | undefined;
+      do {
+        const page = await doc.send(
+          new QueryCommand({
+            TableName: table,
+            KeyConditionExpression: 'conversationId = :p',
+            ExpressionAttributeValues: { ':p': retryChildPk(conversationId, parentTsMsgId) },
+            ConsistentRead: true,
+            ...(startKey !== undefined && { ExclusiveStartKey: startKey }),
+          }),
+        );
+        const items = (page.Items ?? []) as Array<{ tsMsgId: string; provider_sid: string; retry_attempt?: unknown }>;
+        for (const item of items) {
+          children.push({
+            tsMsgId: item.tsMsgId,
+            providerSid: item.provider_sid,
+            ...(typeof item.retry_attempt === 'number' && { retryAttempt: item.retry_attempt }),
+          });
+        }
+        startKey = page.LastEvaluatedKey;
+      } while (startKey !== undefined);
+      return children;
+    },
+
+    async annotateRetryPromise(conversationId, tsMsgId, patch, expect) {
+      // retry-send-adoption R3: four expression shapes (REFRESH or WITHDRAW, a
+      // promise expected or none), each listing EXACTLY the aliases it uses -
+      // DynamoDB rejects an unused name or value with a ValidationException.
+      const withdraw = patch.retryOutcome !== undefined;
+      const expected = expect.retryDueAt !== undefined;
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: withdraw ? 'SET #due = :due, #ro = :ro' : 'SET #due = :due',
+            ConditionExpression: expected
+              ? 'attribute_exists(tsMsgId) AND #due = :expected'
+              : 'attribute_exists(tsMsgId) AND attribute_not_exists(#due)',
+            ExpressionAttributeNames: { '#due': 'retry_due_at', ...(withdraw && { '#ro': 'retry_outcome' }) },
+            ExpressionAttributeValues: {
+              ':due': patch.retryDueAt,
+              ...(withdraw && { ':ro': patch.retryOutcome }),
+              ...(expected && { ':expected': expect.retryDueAt }),
+            },
+          }),
+        );
+      } catch (err) {
+        // A moved promise OR a missing row: the caller decides what a loss means.
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+      log.info(
+        {
+          conversationId,
+          tsMsgId,
+          retryDueAt: patch.retryDueAt,
+          ...(withdraw && { retryOutcome: patch.retryOutcome }),
+        },
+        'retry promise annotated',
+      );
+      return true;
     },
 
     async putMediaPointers(conversationId, tsMsgId, attachments) {

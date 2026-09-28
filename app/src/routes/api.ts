@@ -38,7 +38,12 @@ import {
 } from '../lib/outboundMediaLimits.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { normalizeEmailAddress } from '../lib/email.js';
-import { isRetryPromiseLive } from '../lib/retrySendWindow.js';
+import {
+  isRetryPromiseLive,
+  MAX_SEND_RETRY_ATTEMPTS,
+  RETRY_OUTCOME_UNCONFIRMED,
+  RETRY_SEND_WINDOW_MS,
+} from '../lib/retrySendWindow.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
   appEvents,
@@ -72,6 +77,8 @@ import {
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import { createContactsRepo, isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createSendAttemptsRepo, type SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
+import { resolveRetryRoot, retryRecipientKey } from '../services/retryChain.js';
 import { conversationsForContact } from '../lib/contactThreads.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
@@ -290,6 +297,12 @@ export interface ApiRouterDeps {
   sendEmailService?: SendEmailService;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
+  /**
+   * retry-send-adoption R6: the send-attempt records the manual Retry route
+   * reads by key (a strongly consistent Get) before it re-sends. Injected in
+   * tests (the world fake); defaults to the real repo.
+   */
+  sendAttemptsRepo?: SendAttemptsRepo;
   auditRepo?: AuditRepo;
   /**
    * S3 media store (M1.9c: serve the founder-bridge recording back to the authed
@@ -567,6 +580,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // (listByState); the service has no list method.
   const poolNumbers = deps.poolNumbersRepo ?? createPoolNumbersRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+  // retry-send-adoption R6: read only by the manual Retry route, after its
+  // existing guards; constructing it touches no network.
+  const sendAttempts = deps.sendAttemptsRepo ?? createSendAttemptsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   // BE2/C2: the activity-event log feeds the merged timeline + is emitted into
   // by the placement/relay/phone flows. Shared across the sub-routers below.
@@ -1560,7 +1576,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // bubble. A manual human send: automated:false (never breaker-metered) — so it
   // escapes the per-conversation breaker. It fires a real SMS, and because a
   // successful retry mints a NEW SID and never clears the original's `failed`
-  // status, the same failed SID stays retryable indefinitely. Front it with the
+  // status, the same failed SID stayed retryable indefinitely (since
+  // retry-send-adoption R6 a row that already has a retry child answers 409
+  // superseded instead). Front it with the
   // SAME `manualSendLimiter` instance as the send route so retries + sends share
   // the ONE per-user manual-send budget (30/min) — a stuck Retry loop can't
   // machine-gun texts (spec §1), and no client gets 30 sends + 30 retries.
@@ -1606,6 +1624,67 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // time-based guard leaves are filed as
     // manual-retry-double-send-residual-windows.
     if (isRetryPromiseLive(original.retry_due_at, Date.now())) {
+      res.status(409).json({ error: 'retry_pending' });
+      return;
+    }
+    // retry-send-adoption R6: ANY child supersedes the press. The dashboard's
+    // collapse offers Retry only on a chain's newest row, so a press on a row
+    // that already has a child - an automatic retry row or a manual one - is a
+    // stale tab or a direct call, and it would send beside a later attempt. ONE
+    // strongly consistent Query on the pressed row's retrychild# pointers (every
+    // retry append writes one in its own transaction); never a scan of the
+    // thread, and no time bound. A child appended before the pointer family
+    // existed has no pointer and is not seen here (no backfill).
+    const children = await messages.listRetryChildrenConsistent(conversationId, original.tsMsgId);
+    if (children.length > 0) {
+      res.status(409).json({ error: 'superseded' });
+      return;
+    }
+    // R6: the automatic retry's attempt RECORD, read by key - at the ONE attempt
+    // number the status webhook can have scheduled against this row,
+    // (retry_attempt ?? 0) + 1 (plan deviation 1), under the recipient key R1
+    // derives from the same immutable data the retry job keys it on
+    // (services/retryChain.ts). A strongly consistent Get; none past the cap and
+    // none without a key. The record is authoritative; the row's retry_outcome
+    // is a belt that outlives the record's 30-day cleanup. The chain root is a
+    // fact on the owner, never part of its key, and it rides this press's
+    // append below (R7).
+    const conversation = await conversations.getById(conversationId);
+    const recipientKey = retryRecipientKey(original, conversation);
+    const retryRoot = await resolveRetryRoot(messages, original);
+    const attempt = (original.retry_attempt ?? 0) + 1;
+    const record =
+      recipientKey !== undefined && attempt <= MAX_SEND_RETRY_ATTEMPTS
+        ? await sendAttempts.get({
+            kind: 'retry_send',
+            conversationId,
+            retriedTsMsgId: original.tsMsgId,
+            attempt,
+            recipientKey,
+            retryRoot,
+          })
+        : undefined;
+    // R6, Cameron's Q1 ruling: a retry the reconcile ruled `unresolved` may have
+    // reached the member and nobody knows - never a second text from here; staff
+    // compose a new message instead.
+    if (
+      original.retry_outcome === RETRY_OUTCOME_UNCONFIRMED ||
+      (record?.state === 'done' && record.outcome === 'unresolved')
+    ) {
+      res.status(409).json({ error: 'retry_unresolved' });
+      return;
+    }
+    // R6: an OPEN attempt (attempting, reconciling, redriven) is still in the
+    // job's or the reconcile's hands: RSW's retry_pending while it is at most
+    // RETRY_SEND_WINDOW_MS old from its attemptedAt - one bound for every open
+    // state (plan deviation 8). An older open record is the sweeper's and does
+    // not block a person's decision; a done record with any other outcome never
+    // blocks.
+    if (
+      record !== undefined &&
+      record.state !== 'done' &&
+      Date.now() - Date.parse(record.attemptedAt) <= RETRY_SEND_WINDOW_MS
+    ) {
       res.status(409).json({ error: 'retry_pending' });
       return;
     }
@@ -1683,6 +1762,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         author: original.author === 'ai' ? 'ai' : 'teammate',
         // Lineage: the new message supersedes the failed one in the timeline.
         retryOf: original.tsMsgId,
+        // retry-send-adoption R7: the chain root and the share stamp, copied
+        // from the pressed row, so a manual retry of a share text stays
+        // attributed to its broadcast (share-skip Branch B reads both).
+        retryRoot,
+        ...(original.broadcast_id !== undefined && { broadcastId: original.broadcast_id }),
         // retry-send-window D14: the recorded recipient, when it still exists.
         ...(recipient !== undefined && { recipient }),
       });

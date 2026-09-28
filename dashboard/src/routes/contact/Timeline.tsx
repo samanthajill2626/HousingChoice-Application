@@ -51,7 +51,7 @@ import {
   relayRetryKey,
 } from './relayRetryJoin.js';
 import type { EffectiveRelayLeg, RelayRetryRow } from './relayRetryJoin.js';
-import { isRetryPromiseLive } from './retryPromise.js';
+import { isRetryPromiseLive, RETRY_OUTCOME_UNCONFIRMED } from './retryPromise.js';
 import { serverNowMs } from '../../api/serverClock.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
@@ -133,6 +133,13 @@ function sendFailureMessage(err: unknown): string {
       // which would invite pressing again.
       case 'retry_pending':
         return 'A retry is already scheduled for this message.';
+      // retry-send-adoption R6: a press on a row the collapse no longer offers
+      // (a stale tab), and a retry the platform could not confirm - each says
+      // what to do instead, never the generic line that invites pressing again.
+      case 'superseded':
+        return 'A newer attempt already exists for this message.';
+      case 'retry_unresolved':
+        return "This retry couldn't be confirmed - send a new message instead.";
     }
   }
   return "Couldn't send — please try again.";
@@ -1042,6 +1049,11 @@ function MessageBubble({
   // thread's server-clock snapshot, never the browser clock. It drives the
   // chip's copy below and hides the Retry button while it holds.
   const retryPromiseLive = showsRetryPromise(msg, promiseNowMs);
+  // retry-send-adoption R5: the reconcile ruled this message's automatic retry
+  // `unresolved` - the chip reads "retry not confirmed" (outranking any
+  // promise) and the Retry button is withheld. Keyed on `retry_outcome`, never
+  // on the withdrawn stamp alone, which an enqueue failure also writes.
+  const retryUnconfirmed = msg.retry_outcome === RETRY_OUTCOME_UNCONFIRMED;
   // DELIBERATELY no `relay` flag here, and this is the one place in this
   // component where that is a decision rather than an omission. This site reads
   // the MESSAGE's own error_code, not a leg's: a relay source message never gets
@@ -1056,7 +1068,7 @@ function MessageBubble({
   // conversations (app/src/routes/contactTimeline.ts), and the group view's
   // fixed field list drops `retry_due_at` (conversation/useRelayThread.ts).
   const reason = delivery?.isFailure
-    ? deliveryReason(msg.error_code, { media: isMms, retryScheduled: retryPromiseLive })
+    ? deliveryReason(msg.error_code, { media: isMms, retryScheduled: retryPromiseLive, retryUnconfirmed })
     : undefined;
   // The product flag for every LEG-scoped reason in this bubble: the rollup, the
   // accessible-name recital and the per-recipient row. ONE PROP, derived twice
@@ -1422,8 +1434,11 @@ function MessageBubble({
       ) : null}
       {/* retry-send-window D10: no Retry while an automatic retry of this
        *  message is promised - the server refuses a manual one over the same
-       *  window (409 retry_pending), and a press mid-wait was the double text. */}
-      {delivery?.isFailure && onRetry && !retryPromiseLive ? (
+       *  window (409 retry_pending), and a press mid-wait was the double text.
+       *  retry-send-adoption R5: none either once the retry was ruled
+       *  unresolved - staff send a new message (the server answers 409
+       *  retry_unresolved). */}
+      {delivery?.isFailure && onRetry && !retryPromiseLive && !retryUnconfirmed ? (
         <button
           type="button"
           className={styles.retry}

@@ -3,11 +3,32 @@ id: group-recipient-delivered-receipt-lost-to-sent-race
 title: A member's delivered receipt that races its sent receipt is dropped for good - updateRecipientDeliveryStatus logs "lost a race" and returns false instead of re-reading, so the row reads Sent forever
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/messaging
 created: 2026-09-27
-refs: app/src/repos/messagesRepo.ts:3873, app/src/repos/messagesRepo.ts:3877, app/src/repos/messagesRepo.ts:3930, app/src/repos/messagesRepo.ts:3936, app/src/repos/messagesRepo.ts:133, app/src/services/groupReceipts.ts:448, app/src/routes/webhooks/twilio.ts:3139, e2e/tests/dashboard-next/group-text-per-recipient-delivery.spec.ts:63, e2e/tests/dashboard-next/group-text-reply-all.spec.ts:45
+resolved: 2026-09-27
+refs: app/src/repos/messagesRepo.ts:3877, app/src/repos/messagesRepo.ts:3946, app/src/services/groupReceipts.ts:448, app/src/routes/webhooks/twilio.ts:3139, e2e/tests/dashboard-next/group-text-per-recipient-delivery.spec.ts:63, e2e/tests/dashboard-next/group-text-reply-all.spec.ts:45
 ---
+
+**RESOLVED (2026-09-27) - a DUPLICATE, fixed at `abc793ef`
+(`fix/recipient-delivery-race`, merged before `79b9479e`).** Filed in parallel
+with the same diagnosis under
+[group-reply-live-rollup-full-suite-flake](./group-reply-live-rollup-full-suite-flake.md),
+which is the CANONICAL record (root cause, the load evidence, and the other
+specs it failed). The fix differs from the suggestion below: instead of a
+re-read-and-retry, the write's condition is now
+`delivery_recipients.#mk.#st IN (allowed priors)` (the same guard
+`updateDeliveryStatus` uses), so a `delivered` that read `queued` and finds
+`sent` commits in the SAME write, and a late lower status is still refused.
+That also makes the stale first read below harmless for this race: a stale
+read can only show an EARLIER status, which the forward-only check admits,
+and the write's condition then judges the real current one. Pinned by a
+gated DynamoDB Local test (`app/test/groupSendRepo.integration.test.ts`)
+that forces this exact interleave for group and relay (including a 30003
+`undelivered` after `sent`) plus the reverse refusal; red on the old
+condition, green on the new. Full five gates green on the branch (e2e 293
+passed, zero "lost a race" lines). The refs above are re-anchored to main
+after both merges; the body below keeps its original `91a66577` anchors.
 
 **Found by.** The planner's post-build review of `feat/send-outcome-reconcile`
 (2026-09-27), from its own hermetic e2e gate run (not a numbered review

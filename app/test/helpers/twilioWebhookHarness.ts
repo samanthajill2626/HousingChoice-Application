@@ -96,10 +96,12 @@ import {
   isSuccessfulDeliveryStatus,
   mediaAttachmentsOf,
   mediaPointerSk,
+  retryChildPk,
   type MediaPointer,
   type MessageItem,
   type MessagesRepo,
   type RelayRecipientDelivery,
+  type RetryChildPointer,
   type ParkedEmailEvent,
   groupCrossCheckDueSortKey,
   GROUP_CROSSCHECK_DUE_KIND,
@@ -242,6 +244,14 @@ export interface FakeWorld {
   relaySidPointers: Map<string, { conversationId: string; tsMsgId: string; memberKey: string }>;
   /** System-send SID markers (syssid#): providerSid → kind (e.g. cell_verification). */
   systemSidMarkers: Map<string, string>;
+  /**
+   * retry-send-adoption R7: the retrychild# pointers the fake `append` writes,
+   * keyed by `retryChildPk(conversationId, parentTsMsgId)`. An explicit map
+   * written by append (like the real transaction), never derived from rows, so
+   * a row a test pushes straight into `messages` has no pointer - as in
+   * production. `listRetryChildrenConsistent` answers in UTF-8 tsMsgId order.
+   */
+  retryChildren: Map<string, RetryChildPointer[]>;
   contacts: ContactItem[];
   flagWrites: { contactId: string; flag: ContactFlag; value: boolean }[];
   /** Conversation-level sms_opt_out writes (setSmsOptOut calls), in order. */
@@ -503,6 +513,8 @@ export function createFakeWorld(): FakeWorld {
   >();
   // System-send SID markers (syssid#), providerSid -> kind.
   const systemSidMarkers = new Map<string, string>();
+  // retry-send-adoption R7: retrychild# pointers, retryChildPk(...) -> children.
+  const retryChildren = new Map<string, RetryChildPointer[]>();
   // Group texting (S5): parked delivery receipts, IMxx -> (MBxx -> receipt).
   const parkedGroupReceipts = new Map<
     string,
@@ -1241,6 +1253,9 @@ export function createFakeWorld(): FakeWorld {
         ...(message.recipientContactId !== undefined && {
           recipient_contact_id: message.recipientContactId,
         }),
+        // retry-send-adoption R7: the chain's root, beside retry_of (pinned by
+        // twilioWebhookHarnessRetryFields.test.ts).
+        ...(message.retryRoot !== undefined && { retry_root: message.retryRoot }),
         // Relay 30003 retry lineage (spec D11/D12): preserve the six lineage
         // values the real repo persists, plus retry-send-window's window origin
         // (the relay block of messagesRepo.ts `append`). Without them a claim
@@ -1306,6 +1321,19 @@ export function createFakeWorld(): FakeWorld {
         ...(message.email_new_address === true && { email_new_address: true }),
         ...(message.attachments_truncated === true && { attachments_truncated: true }),
       });
+      // retry-send-adoption R7: the retrychild# pointer rides the append, like
+      // the real transaction - never a dedupe (it returned above). A same-key
+      // Put replaces, so one child tsMsgId is one entry.
+      if (message.retryOf !== undefined) {
+        const key = retryChildPk(message.conversationId, message.retryOf);
+        const pointer: RetryChildPointer = {
+          tsMsgId,
+          providerSid: message.providerSid,
+          ...(message.retryAttempt !== undefined && { retryAttempt: message.retryAttempt }),
+        };
+        const pointers = (retryChildren.get(key) ?? []).filter((p) => p.tsMsgId !== tsMsgId);
+        retryChildren.set(key, [...pointers, pointer]);
+      }
       return { deduped: false, tsMsgId, conversationId: message.conversationId };
     },
     async getByProviderSid(sid) {
@@ -1472,6 +1500,27 @@ export function createFakeWorld(): FakeWorld {
       if (annotations.mediaAttachments !== undefined) item.media_attachments = annotations.mediaAttachments;
       // retry-send-window D7: the enqueue-failure withdrawal.
       if (annotations.retryDueAt !== undefined) item.retry_due_at = annotations.retryDueAt;
+    },
+    async listRetryChildrenConsistent(conversationId, parentTsMsgId) {
+      // 'conversationId = :p' on the parent's pointer partition: ascending sort
+      // key, which DynamoDB orders by UTF-8 bytes (`utf8Order`, the attempts
+      // twin's comparator) - the parity suite compares every answer strictly.
+      // Copies, like the real repo's fresh read.
+      return (retryChildren.get(retryChildPk(conversationId, parentTsMsgId)) ?? [])
+        .map((pointer) => ({ ...pointer }))
+        .sort((a, b) => utf8Order(a.tsMsgId, b.tsMsgId));
+    },
+    async annotateRetryPromise(conversationId, tsMsgId, patch, expected) {
+      // The real condition: 'attribute_exists(tsMsgId) AND #due = :expected', or
+      // '... AND attribute_not_exists(#due)' when no promise is expected. A
+      // missing row or a moved promise answers false and writes nothing; the
+      // WITHDRAW's two fields land in one step.
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (item === undefined) return false;
+      if (item.retry_due_at !== expected.retryDueAt) return false;
+      item.retry_due_at = patch.retryDueAt;
+      if (patch.retryOutcome !== undefined) item.retry_outcome = patch.retryOutcome;
+      return true;
     },
     async putMediaPointers() {
       // The fake DERIVES the media index from the stored messages (below), so
@@ -4406,8 +4455,22 @@ export function createFakeWorld(): FakeWorld {
   const sendAttemptIndex: FakeWorld['sendAttemptIndex'] = [];
   const sendAttemptOps = new Map<string, string>();
   const attemptSnapshot = (record: SendAttemptRecord): SendAttemptRecord => structuredClone(record);
-  const attemptRecipientKey = (owner: SendAttemptOwner): string =>
-    owner.kind === 'broadcast' ? owner.contactKey : owner.memberKey;
+  // The repo's recipientKeyOf, restated (an exhaustive switch like it).
+  const attemptRecipientKey = (owner: SendAttemptOwner): string => {
+    switch (owner.kind) {
+      case 'broadcast':
+        return owner.contactKey;
+      case 'relay_leg':
+      case 'relay_rung':
+        return owner.memberKey;
+      case 'retry_send':
+        return owner.recipientKey;
+      default: {
+        const unhandled: never = owner;
+        throw new Error(`fake sendAttempts: unhandled owner kind ${String((unhandled as { kind?: unknown }).kind)}`);
+      }
+    }
+  };
   /** DynamoDB orders a string range key by its UTF-8 bytes. */
   const utf8Order = (a: string, b: string): number => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
   /** The index Put of a claim or a re-arm: a same-key item is replaced, as the real Put does. */
@@ -4615,6 +4678,7 @@ export function createFakeWorld(): FakeWorld {
     jobExecutionMarkers,
     relaySidPointers,
     systemSidMarkers,
+    retryChildren,
     contacts,
     flagWrites,
     optOutSets,
@@ -4931,6 +4995,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
+      // retry-send-adoption R6: the manual Retry route reads the attempt
+      // records here - the same fake the retry job and the reconcile write.
+      sendAttemptsRepo: world.sendAttemptsRepo,
       auditRepo: world.auditRepo,
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,

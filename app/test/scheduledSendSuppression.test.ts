@@ -297,6 +297,9 @@ function makeSendFakes(
     getByTsMsgIdConsistent: async () => undefined,
     getManyByTsMsgIds: async () => new Map(),
     annotateMessage: async () => {},
+    // retry-send-adoption (R3, R7) - no retry runs in this suite.
+    listRetryChildrenConsistent: async () => [],
+    annotateRetryPromise: async () => true,
     putMediaPointers: async () => {},
     listMediaPointers: async () => [],
     putJobExecutionMarker: async () => true,

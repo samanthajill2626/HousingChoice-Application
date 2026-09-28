@@ -1291,12 +1291,16 @@ export interface AdoptBroadcastArgs {
  * share share it too - so the row must carry this share's `broadcast_id` AND
  * name no other contact: its `recipient_contact_id` absent (the send wrapper
  * records one only while the named contact holds the thread's number), this
- * contact, or the row this recipient's slot already carries.
+ * contact, or the row this recipient's slot already carries. A RETRY row
+ * (`retry_of` set) is never the recipient's own row: since retry-send-adoption
+ * (R7, plan deviation 7) every one-to-one retry of a share text carries the
+ * share's `broadcast_id` too, and its receipts are share-skip Branch B's.
  */
 export function isBroadcastRowFor(
-  row: Pick<MessageItem, 'broadcast_id' | 'recipient_contact_id' | 'tsMsgId'>,
+  row: Pick<MessageItem, 'broadcast_id' | 'recipient_contact_id' | 'tsMsgId' | 'retry_of'>,
   owner: { broadcastId: string; contactId: string | undefined; slotTsMsgId: string | undefined },
 ): boolean {
+  if (row.retry_of !== undefined) return false;
   if (row.broadcast_id !== owner.broadcastId) return false;
   return (
     row.recipient_contact_id === undefined ||

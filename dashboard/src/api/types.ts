@@ -3,6 +3,10 @@
 // starts with the auth shapes (B0.3); page phases extend it with the legacy
 // reuse + the §API Contract types (C1-C7) from the build plan.
 
+// Type-only, and `.js`-suffixed: the APP's typecheck also compiles this file
+// (app/test/contactTimeline.test.ts imports it under NodeNext resolution).
+import type { RETRY_OUTCOME_UNCONFIRMED } from '../routes/contact/retryPromise.js';
+
 /** Team role. admin = the founder role; va = virtual assistant. */
 export type UserRole = 'admin' | 'va';
 
@@ -2517,6 +2521,11 @@ interface TimelineBase {
   at: string; /* ISO, sort key */
 }
 
+/** retry-send-adoption R5: the one `retry_outcome` value the server projects -
+ *  derived from the dashboard's single literal (routes/contact/retryPromise.ts),
+ *  which retryPromiseMirror.test.ts pins to the app's. */
+export type RetryOutcome = typeof RETRY_OUTCOME_UNCONFIRMED;
+
 export interface TimelineMessage extends TimelineBase, MessageTransportFields {
   kind: 'message';
   conversationId: string;
@@ -2545,6 +2554,12 @@ export interface TimelineMessage extends TimelineBase, MessageTransportFields {
    *  (app/src/routes/contactTimeline.ts), and the group view's fixed field list
    *  drops the field (routes/conversation/useRelayThread.ts). */
   retry_due_at?: string;
+  /** retry-send-adoption R5: present only when the reconcile ruled this FAILED
+   *  message's automatic retry `unresolved` (written with the withdrawn
+   *  retry_due_at in one write). The bubble reads "retry not confirmed" and
+   *  offers no Retry; the route refuses a press with 409 `retry_unresolved`.
+   *  The withdrawn stamp ALONE carries no outcome and stays a plain failure. */
+  retry_outcome?: RetryOutcome;
   // --- Relay 30003 retry lineage (spec D11/D17) -----------------------------
   // The four of the seven stored lineage values this client PROJECTS. A relay
   // retry is a NEW source row addressed to one member, and these are its

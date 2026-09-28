@@ -3,7 +3,9 @@
 // case injects its own clock (D13).
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_SEND_RETRY_ATTEMPTS,
   RETRY_JOB_GRACE_MS,
+  RETRY_OUTCOME_UNCONFIRMED,
   RETRY_PROMISE_GRACE_MS,
   RETRY_PROMISE_WITHDRAWN_AT,
   RETRY_SEND_WINDOW_MS,
@@ -27,6 +29,13 @@ describe('retrySendWindow constants (spec D1, D3, D7, D10)', () => {
     expect(RETRY_PROMISE_GRACE_MS).toBe(2 * MIN);
     expect(RETRY_PROMISE_WITHDRAWN_AT).toBe('1970-01-01T00:00:00.000Z');
     expect(Date.parse(RETRY_PROMISE_WITHDRAWN_AT)).toBe(0);
+  });
+
+  // retry-send-adoption: the cap moved into this import-free leaf (the job
+  // re-exports it), and R5's "retry not confirmed" outcome lives beside it.
+  it('pins the retry cap and the unconfirmed retry outcome (retry-send-adoption R5)', () => {
+    expect(MAX_SEND_RETRY_ATTEMPTS).toBe(3);
+    expect(RETRY_OUTCOME_UNCONFIRMED).toBe('unconfirmed');
   });
 });
 

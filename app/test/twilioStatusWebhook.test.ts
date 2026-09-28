@@ -3,7 +3,7 @@
 // package); in-memory fakes; the jobs gates run for real against the
 // InMemorySchedulerAdapter (envelope machinery, never raw scheduler calls).
 import { setTimeout as delay } from 'node:timers/promises';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -23,6 +23,7 @@ import {
   resolveSendRetryBackoffMs,
   RETRY_SEND_JOB,
   retryBackoffMs,
+  type RetrySendJobDeps,
 } from '../src/jobs/retrySend.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import type { MessageItem, MessagesRepo } from '../src/repos/messagesRepo.js';
@@ -368,6 +369,58 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     const after = world.broadcasts.get('bcast-dup')!.recipients['c-1']!;
     expect(after.carrierSentAt).toBe(stamped); // never re-stamped
     expect(world.emitted.filter((e) => e.event === 'broadcast.updated').length).toBe(emitsAfterFirst);
+  });
+
+  it('broadcast rollup: a receipt for a share-RETRY row (broadcast_id + retry_of) SKIPS the rollup - no broadcast read, no wait, no give-up line (retry-send-adoption, the one fenced line; Cameron 2026-09-28)', async () => {
+    // Since retry-send-adoption every retry of a share text carries the share's
+    // broadcast_id (R7), while the recipient slot still names the share's OWN
+    // row until share-skip Branch B routes retry receipts by broadcast_id +
+    // retry_root. Until then the rollup is skipped for a retry row outright:
+    // the give-up path stays a WARN for a GENUINE miss on a share's own row.
+    const { app, world, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 5 });
+    const shareRow = await seedOutbound(world, 'SMbcastroot', { broadcast_id: 'bcast-retry' });
+    const retryRow = await seedOutbound(world, 'SMbcastretry', {
+      broadcast_id: 'bcast-retry',
+      retry_of: shareRow.tsMsgId,
+      retry_root: shareRow.tsMsgId,
+    });
+    const now = new Date().toISOString();
+    world.broadcasts.set('bcast-retry', {
+      broadcastId: 'bcast-retry',
+      created_by: 'usr_test',
+      created_at: now,
+      status: 'sent',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'hi',
+      stats: { audience: 1, sent: 1, delivered: 0, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      recipients: {
+        'c-1': { status: 'failed', conversationId: shareRow.conversationId, tsMsgId: shareRow.tsMsgId },
+      },
+      updated_at: now,
+    } satisfies BroadcastItem);
+    let reads = 0;
+    const realGetById = world.broadcastsRepo.getById.bind(world.broadcastsRepo);
+    world.broadcastsRepo.getById = async (id: string) => {
+      reads += 1;
+      return realGetById(id);
+    };
+
+    const res = await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: 'SMbcastretry', MessageStatus: 'delivered' }),
+    );
+    expect(res.status).toBe(200);
+    // The retry row's own status is recorded; the rollup was never entered: no broadcast read, no give-up line at any level.
+    expect((await world.messagesRepo.getByProviderSid('SMbcastretry'))?.delivery_status).toBe('delivered');
+    expect(reads).toBe(0);
+    expect(capture.lines.filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+    expect(retryRow.retry_of).toBe(shareRow.tsMsgId);
+    // Nothing moved on the share: the slot, the stats and the live surfaces.
+    const bcast = world.broadcasts.get('bcast-retry')!;
+    expect(bcast.recipients['c-1']?.status).toBe('failed');
+    expect(bcast.stats.delivered).toBe(0);
+    expect(world.emitted.filter((e) => e.event === 'broadcast.updated')).toHaveLength(0);
   });
 
   it('PERSISTENT unknown SID → one retried lookup, then ERROR (level 50, alarmed) + 200 ack, never a 500', async () => {
@@ -1220,6 +1273,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
 describe('messaging.retrySend job (worker side)', () => {
   afterEach(() => {
     _resetForTests();
+    vi.restoreAllMocks();
   });
 
   it('payload parsing rejects malformed payloads and the attempt cap', () => {
@@ -1230,6 +1284,19 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(() =>
       parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: MAX_SEND_RETRY_ATTEMPTS + 1 }),
     ).toThrow(/cap/);
+    // retry-send-adoption R1: the parser CARRIES `deferred: true` (only the
+    // deferral re-enqueue sets it) and drops any other value.
+    expect(parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: 1, deferred: true })).toEqual({
+      providerSid: 's',
+      conversationId: 'c',
+      attempt: 1,
+      deferred: true,
+    });
+    expect(parseRetrySendPayload({ providerSid: 's', conversationId: 'c', attempt: 1, deferred: false })).toEqual({
+      providerSid: 's',
+      conversationId: 'c',
+      attempt: 1,
+    });
   });
 
   it('backoff doubles per attempt (60s, 120s, 240s)', () => {
@@ -1268,7 +1335,7 @@ describe('messaging.retrySend job (worker side)', () => {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
     });
-    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: send }));
     await outbound.deliverDelayed(dispatchJob);
 
     // the retry went to the provider with the SAME body, automated:true path
@@ -1327,7 +1394,7 @@ describe('messaging.retrySend job (worker side)', () => {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
     });
-    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, mediaStore, logger });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: send, mediaStore }));
     await outbound.deliverDelayed(dispatchJob);
 
     // Exactly one fresh presign happened for the one attachment.
@@ -1368,7 +1435,7 @@ describe('messaging.retrySend job (worker side)', () => {
       auditRepo: world.auditRepo,
     });
     // No mediaStore dep at all - proves the fallback path needs none.
-    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: send }));
     await outbound.deliverDelayed(dispatchJob);
 
     expect(world.sent[0]?.mediaUrls).toEqual([RAW_URL]);
@@ -1394,7 +1461,7 @@ describe('messaging.retrySend job (worker side)', () => {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
     });
-    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: send }));
     await outbound.deliverDelayed(dispatchJob);
 
     const retried = world.messages.find((m) => m.retry_of !== undefined)!;
@@ -1426,7 +1493,7 @@ describe('messaging.retrySend job (worker side)', () => {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
     });
-    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: send }));
     await outbound.deliverDelayed(dispatchJob);
 
     expect(world.sent).toHaveLength(0);
@@ -1434,7 +1501,7 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(warn).toBeDefined();
   });
 
-  it('EXECUTION GUARD: a redelivered job (same jobId) sends NOTHING and resolves (consumer can delete)', async () => {
+  it('DUPLICATE GUARD: a redelivered job (same jobId) meets the record - the gate skips the finished attempt, nothing is re-sent, and the delivery resolves', async () => {
     const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
     configureOutboundQueue(outbound);
     const capture = createLogCapture();
@@ -1456,26 +1523,29 @@ describe('messaging.retrySend job (worker side)', () => {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
     });
-    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: send }));
 
-    // First delivery: marker written (keyed by the envelope jobId), send happens.
+    // First delivery: the attempt is claimed, sent and closed done/sent.
     await dispatchJob(JSON.parse(JSON.stringify(envelope)));
     expect(world.sent).toHaveLength(1);
-    expect([...world.jobExecutionMarkers.keys()]).toEqual([envelope.jobId]);
+    expect(world.sendAttempts.size).toBe(1);
+    expect([...world.sendAttempts.values()][0]).toMatchObject({ state: 'done', outcome: 'sent' });
 
     // SQS redelivery of the SAME message (DeleteMessage failure / visibility
-    // overrun / SIGTERM mid-flight): must resolve SUCCESSFULLY — so the
-    // consumer deletes it — without re-texting the human.
+    // overrun / SIGTERM mid-flight): it must resolve SUCCESSFULLY - so the
+    // consumer deletes it - without re-texting the human. The step-4 gate
+    // answers from the finished record BEFORE any claim.
     await expect(dispatchJob(JSON.parse(JSON.stringify(envelope)))).resolves.toBeUndefined();
     expect(world.sent).toHaveLength(1); // nothing re-sent
-    const suppressed = capture.lines.find((l) =>
-      String(l['msg']).includes('duplicate delivery suppressed'),
-    );
-    expect(suppressed).toBeDefined();
-    expect(suppressed?.['jobId']).toBe(envelope.jobId);
+    const skipped = capture.lines.filter((l) => l['msg'] === 'retrySend: this attempt is already resolved');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatchObject({ gate: 'skip', jobId: envelope.jobId });
+    expect(capture.lines.some((l) => String(l['msg']).includes('claim refused'))).toBe(false);
+    // The run-once marker is gone from this job: the claim is its duplicate guard.
+    expect(world.jobExecutionMarkers.size).toBe(0);
   });
 
-  it('EXECUTION GUARD: a non-conditional marker write failure propagates as a handler failure (redelivery)', async () => {
+  it('a throwing attempt-record read BEFORE the claim propagates as a handler failure (redelivery) - nothing sent, nothing claimed', async () => {
     const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
     configureOutboundQueue(outbound);
     const logger = createLogger({ destination: createLogCapture().stream });
@@ -1487,21 +1557,18 @@ describe('messaging.retrySend job (worker side)', () => {
     await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
     const envelope = outbound.delayed[0]!.envelope;
 
-    world.messagesRepo.putJobExecutionMarker = async () => {
-      throw new Error('marker write exploded');
-    };
-    registerRetrySendJobHandler({
-      sendMessage: async () => {
-        throw new Error('must not be reached — guard precedes the send');
-      },
-      messagesRepo: world.messagesRepo,
-      logger,
-    });
-
-    await expect(dispatchJob(JSON.parse(JSON.stringify(envelope)))).rejects.toThrow(
-      'marker write exploded',
+    vi.spyOn(world.sendAttemptsRepo, 'get').mockRejectedValue(new Error('record read exploded'));
+    registerRetrySendJobHandler(
+      retryDeps(world, logger, {
+        sendMessage: async () => {
+          throw new Error('must not be reached - the record read precedes the claim and the send');
+        },
+      }),
     );
-    expect(world.sent).toHaveLength(0); // marker failure stops BEFORE the provider
+
+    await expect(dispatchJob(JSON.parse(JSON.stringify(envelope)))).rejects.toThrow('record read exploded');
+    expect(world.sent).toHaveLength(0); // the read failure stops BEFORE the provider
+    expect(world.sendAttempts.size).toBe(0);
   });
 
   it('a missing original message WARNs and does nothing', async () => {
@@ -1514,13 +1581,13 @@ describe('messaging.retrySend job (worker side)', () => {
     configureJobsLogger(logger);
 
     const world = createFakeWorld();
-    registerRetrySendJobHandler({
-      sendMessage: async () => {
-        throw new Error('must not be called');
-      },
-      messagesRepo: world.messagesRepo,
-      logger,
-    });
+    registerRetrySendJobHandler(
+      retryDeps(world, logger, {
+        sendMessage: async () => {
+          throw new Error('must not be called');
+        },
+      }),
+    );
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMnope', conversationId: 'conv-x', attempt: 1 });
     await outbound.settle(); // immediate dispatch is deferred - drain it
@@ -1550,6 +1617,27 @@ describe('messaging.retrySend job (worker side)', () => {
     const logger = createLogger({ destination: capture.stream });
     configureJobsLogger(logger);
     return { outbound, capture, logger };
+  }
+
+  /**
+   * retry-send-adoption (plan Task 4): EVERY dep the job reads, over the
+   * world's fakes - a registration missing one would lazily build a REAL
+   * DynamoDB repo. The config carries no BUSINESS_PHONE_NUMBER, so the sends'
+   * `world.sent` pins keep their exact `{ to, body }` shape (no `from`) and
+   * the attempt record's `sender` is simply absent in this file. Each site
+   * keeps its own sendMessage / now / mediaStore through `extra`.
+   */
+  function retryDeps(world: FakeWorld, logger: Logger, extra: Partial<RetrySendJobDeps> = {}): RetrySendJobDeps {
+    return {
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      conversationsRepo: world.conversationsRepo,
+      sendAttemptsRepo: world.sendAttemptsRepo,
+      events: world.events,
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger,
+      ...extra,
+    };
   }
 
   /** A spy send service: records every input and answers a fake outcome. */
@@ -1583,13 +1671,7 @@ describe('messaging.retrySend job (worker side)', () => {
     const world = createFakeWorld();
     const seeded = await seedOutbound(world, 'SMlate01', { provider_ts: jobIso(JOB_NOW - 16 * 60_000) });
     const calls: SendMessageInput[] = [];
-    registerRetrySendJobHandler({
-      sendMessage: spySend(calls),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: spySend(calls), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMlate01', conversationId: seeded.conversationId, attempt: 1 });
     await outbound.settle();
@@ -1598,8 +1680,8 @@ describe('messaging.retrySend job (worker side)', () => {
     const closed = capture.atLevel(ERROR).filter((l) => l['retryDecision'] === 'window_closed');
     expect(closed).toHaveLength(1);
     expect(closed[0]!['msg']).toBe('retrySend: retry window closed - retry chain ended without sending');
-    // The check sits AFTER the execution marker (D4): a redelivery ends there.
-    expect(world.jobExecutionMarkers.size).toBe(1);
+    // A decline before the claim holds no claim (RSW #6): nothing is written.
+    expect(world.sendAttempts.size).toBe(0);
   });
 
   // D13: the job's window check pinned at its EXACT boundary, as the helpers'
@@ -1619,13 +1701,7 @@ describe('messaging.retrySend job (worker side)', () => {
         provider_ts: jobIso(JOB_NOW - RETRY_SEND_WINDOW_MS - extraMs),
       });
       const calls: SendMessageInput[] = [];
-      registerRetrySendJobHandler({
-        sendMessage: spySend(calls),
-        messagesRepo: world.messagesRepo,
-        contactsRepo: world.contactsRepo,
-        now: () => JOB_NOW,
-        logger,
-      });
+      registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: spySend(calls), now: () => JOB_NOW }));
 
       await enqueue(RETRY_SEND_JOB, { providerSid: sid, conversationId: seeded.conversationId, attempt: 1 });
       await outbound.settle();
@@ -1647,13 +1723,7 @@ describe('messaging.retrySend job (worker side)', () => {
       retry_window_start: jobIso(JOB_NOW - 16 * 60_000),
     });
     const calls: SendMessageInput[] = [];
-    registerRetrySendJobHandler({
-      sendMessage: spySend(calls),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: spySend(calls), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMchain01', conversationId: seeded.conversationId, attempt: 2 });
     await outbound.settle();
@@ -1667,13 +1737,7 @@ describe('messaging.retrySend job (worker side)', () => {
     const seeded = await seedOutbound(world, 'SMnots01', { provider_ts: jobIso(JOB_NOW - 30_000) });
     delete (seeded as { provider_ts?: string }).provider_ts;
     const calls: SendMessageInput[] = [];
-    registerRetrySendJobHandler({
-      sendMessage: spySend(calls),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: spySend(calls), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMnots01', conversationId: seeded.conversationId, attempt: 1 });
     await outbound.settle();
@@ -1692,28 +1756,40 @@ describe('messaging.retrySend job (worker side)', () => {
     const world = createFakeWorld();
     const seeded = await seedOutbound(world, 'SMlegacy01', { provider_ts: jobIso(JOB_NOW - 30_000) });
     const calls: SendMessageInput[] = [];
-    registerRetrySendJobHandler({
-      sendMessage: spySend(calls),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: spySend(calls), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMlegacy01', conversationId: seeded.conversationId, attempt: 1 });
     await outbound.settle();
 
-    expect(calls).toEqual([
-      {
-        conversationId: seeded.conversationId,
-        body: 'outbound body',
-        automated: true,
-        author: 'teammate',
-        retryOf: seeded.tsMsgId,
-        retryAttempt: 1,
-        retryWindowStart: seeded.provider_ts,
-      },
-    ]);
+    // retry-send-adoption: the input now also carries the chain root and the
+    // claim's re-arm hook (a function, so the pin names the exact key set
+    // instead of one toEqual); still no recipient, media or share stamp.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      conversationId: seeded.conversationId,
+      body: 'outbound body',
+      automated: true,
+      author: 'teammate',
+      retryOf: seeded.tsMsgId,
+      retryAttempt: 1,
+      retryWindowStart: seeded.provider_ts,
+      retryRoot: seeded.tsMsgId,
+    });
+    expect(typeof calls[0]!.beforeProviderSend).toBe('function');
+    expect(calls[0]).not.toHaveProperty('broadcastId');
+    expect(Object.keys(calls[0]!).sort()).toEqual(
+      [
+        'author',
+        'automated',
+        'beforeProviderSend',
+        'body',
+        'conversationId',
+        'retryAttempt',
+        'retryOf',
+        'retryRoot',
+        'retryWindowStart',
+      ].sort(),
+    );
   });
 
   it('retry-send-window D14: a recorded recipient that no longer exists WARNs and falls back to the phone lookup - no recipient passed', async () => {
@@ -1725,13 +1801,7 @@ describe('messaging.retrySend job (worker side)', () => {
       recipient_contact_id: 'c-gone',
     });
     const calls: SendMessageInput[] = [];
-    registerRetrySendJobHandler({
-      sendMessage: spySend(calls),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: spySend(calls), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMgone01', conversationId: seeded.conversationId, attempt: 1 });
     await outbound.settle();
@@ -1745,7 +1815,7 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(warn?.['recipientContactId']).toBe('c-gone');
   });
 
-  it('retry-send-window D14: a THROWING recipient read fails the delivery BEFORE the execution marker, so SQS redelivers it', async () => {
+  it('retry-send-window D14: a THROWING recipient read fails the delivery BEFORE the claim, so SQS redelivers it', async () => {
     const { logger } = wireJobs();
     const world = createFakeWorld();
     const seeded = await seedOutbound(world, 'SMrcpt01', {
@@ -1756,15 +1826,14 @@ describe('messaging.retrySend job (worker side)', () => {
     world.contactsRepo.getById = async () => {
       throw new Error('recipient read exploded');
     };
-    registerRetrySendJobHandler({
-      sendMessage: async () => {
-        throw new Error('must not be reached - the recipient read precedes the marker and the send');
-      },
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(
+      retryDeps(world, logger, {
+        sendMessage: async () => {
+          throw new Error('must not be reached - the recipient read precedes the claim and the send');
+        },
+        now: () => JOB_NOW,
+      }),
+    );
     // A delayed enqueue records the envelope without dispatching it, so the
     // test dispatches it itself and sees the rejection.
     const envelope = await enqueue(
@@ -1774,7 +1843,7 @@ describe('messaging.retrySend job (worker side)', () => {
     );
 
     await expect(dispatchJob(JSON.parse(JSON.stringify(envelope)))).rejects.toThrow('recipient read exploded');
-    expect(world.jobExecutionMarkers.size).toBe(0); // no marker: the redelivery runs the job again
+    expect(world.sendAttempts.size).toBe(0); // nothing claimed: the redelivery runs the job again
     expect(world.sent).toHaveLength(0);
   });
 
@@ -1801,13 +1870,7 @@ describe('messaging.retrySend job (worker side)', () => {
       breakerCounts += 1;
       return 1;
     };
-    registerRetrySendJobHandler({
-      sendMessage: realSend(world, logger),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: realSend(world, logger), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMperson01', conversationId: seeded.conversationId, attempt: 1 });
     await outbound.settle();
@@ -1834,13 +1897,7 @@ describe('messaging.retrySend job (worker side)', () => {
       breakerCounts += 1;
       return 1;
     };
-    registerRetrySendJobHandler({
-      sendMessage: realSend(world, logger),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: realSend(world, logger), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMauto01', conversationId: seeded.conversationId, attempt: 1 });
     await outbound.settle();
@@ -1874,13 +1931,12 @@ describe('messaging.retrySend job (worker side)', () => {
     world.messagesRepo.annotateMessage = async () => {
       annotates += 1;
     };
-    registerRetrySendJobHandler({
-      sendMessage: realSend(world, logger),
-      messagesRepo: world.messagesRepo,
-      contactsRepo: world.contactsRepo,
-      now: () => JOB_NOW,
-      logger,
-    });
+    // retry-send-adoption: the promise's own conditional write too - a success writes NO promise.
+    world.messagesRepo.annotateRetryPromise = async () => {
+      annotates += 1;
+      return true;
+    };
+    registerRetrySendJobHandler(retryDeps(world, logger, { sendMessage: realSend(world, logger), now: () => JOB_NOW }));
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMchain02', conversationId: seeded.conversationId, attempt: 2 });
     await outbound.settle();

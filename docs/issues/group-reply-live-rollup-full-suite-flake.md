@@ -54,6 +54,10 @@ GATED DynamoDB Local test that forces the logged interleave on every run
 (group delivered, relay delivered, relay undelivered after `sent`; plus the
 reverse refusal) - red on the old condition (3 failed), green on the new. The
 e2e specs and their 60 s no-reload polls are unchanged; they were right.
+The same bug was filed independently the same day by the
+`feat/send-outcome-reconcile` planner as
+[group-recipient-delivered-receipt-lost-to-sent-race](./group-recipient-delivered-receipt-lost-to-sent-race.md),
+now closed as a duplicate of this one.
 
 **Sighting (2026-09-27 afternoon, `feat/voicemail-greeting` gate runs) -
 the reopen signature, now DETERMINISTIC IN ISOLATION.** A full `npm run e2e`

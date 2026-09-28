@@ -7,14 +7,23 @@
 // the per-file DynamoDB access key automatically and must NOT carry the shared
 // lane marker.
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
+import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
 import { getTableSpec } from '../src/lib/tables.js';
-import { createMessagesRepo, type NewMessage } from '../src/repos/messagesRepo.js';
+import {
+  buildTsMsgId,
+  createMessagesRepo,
+  RETRY_CHILD_PARTITION_PREFIX,
+  retryChildPk,
+  type MessageItem,
+  type NewMessage,
+} from '../src/repos/messagesRepo.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 async function endpointReachable(): Promise<boolean> {
@@ -267,5 +276,263 @@ describe.skipIf(!reachable)('relay retry lineage against DynamoDB Local', () => 
     expect(await messages.getByTsMsgId(CONV, without.tsMsgId)).not.toHaveProperty(
       'relay_retry_window_start',
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // retry-send-adoption (R3, R5, R7): the ONE-TO-ONE 30003 retry lineage. A
+  // one-to-one retry row carries retry_of (plus retry_attempt when automatic)
+  // and, since this branch, retry_root; every append of a row with retryOf
+  // also puts a retrychild# pointer in the SAME transaction, so "does this row
+  // have a child?" is one consistent Query. The relay builder above stamps
+  // relay fields and is not reused.
+  // ---------------------------------------------------------------------------
+  describe('one-to-one retry lineage (retry-send-adoption)', () => {
+    const ONE_CONV = `conv-1to1-${randomUUID().slice(0, 8)}`;
+    const T0 = '2026-09-27T12:00:00.000Z';
+    const T1 = '2026-09-27T12:01:00.000Z';
+    const T2 = '2026-09-27T12:02:30.000Z';
+    const DUE_1 = '2026-09-27T12:02:00.000Z';
+    const DUE_2 = '2026-09-27T12:03:00.000Z';
+
+    /** One outbound one-to-one row in ONE_CONV; returns the stored row (consistent read). */
+    async function appendOutbound(
+      fields: { providerSid: string; providerTs: string } & Partial<NewMessage>,
+    ): Promise<MessageItem> {
+      const res = await messages.append({
+        conversationId: ONE_CONV,
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'hello',
+        deliveryStatus: 'undelivered',
+        errorCode: '30003',
+        ...fields,
+      });
+      return (await messages.getByTsMsgIdConsistent(ONE_CONV, res.tsMsgId))!;
+    }
+
+    /** Every retrychild# item in the table whose sort key is `childTsMsgId`, under ANY parent. */
+    async function pointersNaming(childTsMsgId: string): Promise<Record<string, unknown>[]> {
+      const found: Record<string, unknown>[] = [];
+      let startKey: Record<string, unknown> | undefined;
+      do {
+        const page = await doc.send(
+          new ScanCommand({
+            TableName: table,
+            FilterExpression: 'tsMsgId = :t AND begins_with(conversationId, :p)',
+            ExpressionAttributeValues: { ':t': childTsMsgId, ':p': RETRY_CHILD_PARTITION_PREFIX },
+            ConsistentRead: true,
+            ...(startKey !== undefined && { ExclusiveStartKey: startKey }),
+          }),
+        );
+        found.push(...((page.Items ?? []) as Record<string, unknown>[]));
+        startKey = page.LastEvaluatedKey;
+      } while (startKey !== undefined);
+      return found;
+    }
+
+    it('append persists retry_root beside retry_of and writes the retrychild# pointer in the same transaction', async () => {
+      const parent = await appendOutbound({ providerSid: 'SMroot1', providerTs: T0 });
+      const child = await appendOutbound({
+        providerSid: 'SMretry1',
+        providerTs: T1,
+        retryOf: parent.tsMsgId,
+        retryAttempt: 1,
+        retryRoot: parent.tsMsgId,
+      });
+      expect(await messages.getByTsMsgIdConsistent(ONE_CONV, child.tsMsgId)).toMatchObject({
+        retry_of: parent.tsMsgId,
+        retry_attempt: 1,
+        retry_root: parent.tsMsgId,
+      });
+      expect(await messages.listRetryChildrenConsistent(ONE_CONV, parent.tsMsgId)).toStrictEqual([
+        { tsMsgId: child.tsMsgId, providerSid: 'SMretry1', retryAttempt: 1 },
+      ]);
+      // A pointer, never state: the item is the child's ids and attempt, nothing else.
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { conversationId: retryChildPk(ONE_CONV, parent.tsMsgId), tsMsgId: child.tsMsgId },
+          ConsistentRead: true,
+        }),
+      );
+      expect(Item).toStrictEqual({
+        conversationId: `retrychild#${ONE_CONV}#${parent.tsMsgId}`,
+        tsMsgId: child.tsMsgId,
+        provider_sid: 'SMretry1',
+        retry_attempt: 1,
+      });
+      // retry_root is only ever what the caller passed; retry_outcome is never an append field.
+      expect(parent).not.toHaveProperty('retry_root');
+      expect(child).not.toHaveProperty('retry_outcome');
+    });
+
+    it('the pointer rides the append transaction: an append another item cancels writes neither the row nor the pointer', async () => {
+      const parent = await appendOutbound({ providerSid: 'SMroot5', providerTs: T0 });
+      const dueRow = { partition: `due-probe#${randomUUID()}`, sortKey: `${T2}#probe#1`, attributes: { kind: 'probe' } };
+      // A first append takes the due row's key, so a retry row carrying the SAME
+      // due row is cancelled by that row's condition - not by its own sid#.
+      await appendOutbound({ providerSid: 'SMholder5', providerTs: T0, dueRow });
+      await expect(
+        messages.append({
+          conversationId: ONE_CONV,
+          type: 'sms',
+          direction: 'outbound',
+          author: 'teammate',
+          body: 'hello',
+          deliveryStatus: 'queued',
+          providerSid: 'SMretry5',
+          providerTs: T1,
+          retryOf: parent.tsMsgId,
+          retryAttempt: 1,
+          retryRoot: parent.tsMsgId,
+          dueRow,
+        }),
+      ).rejects.toThrow();
+      expect(await messages.getByProviderSidConsistent('SMretry5')).toBeUndefined();
+      expect(await messages.listRetryChildrenConsistent(ONE_CONV, parent.tsMsgId)).toStrictEqual([]);
+      expect(await pointersNaming(buildTsMsgId(T1, 'SMretry5'))).toStrictEqual([]);
+    });
+
+    it('a manual retry row (retryOf, no retryAttempt) writes a pointer with no retryAttempt; a row with no retryOf writes none', async () => {
+      const parent = await appendOutbound({ providerSid: 'SMroot2', providerTs: T0 });
+      const manual = await appendOutbound({
+        providerSid: 'SMmanual2',
+        providerTs: T1,
+        retryOf: parent.tsMsgId,
+        retryRoot: parent.tsMsgId,
+      });
+      expect(await messages.listRetryChildrenConsistent(ONE_CONV, parent.tsMsgId)).toStrictEqual([
+        { tsMsgId: manual.tsMsgId, providerSid: 'SMmanual2' },
+      ]);
+      expect(await messages.listRetryChildrenConsistent(ONE_CONV, manual.tsMsgId)).toStrictEqual([]);
+      // The root has no parent, so no pointer anywhere in the table names it.
+      expect(await pointersNaming(parent.tsMsgId)).toStrictEqual([]);
+      expect(await pointersNaming(manual.tsMsgId)).toHaveLength(1);
+    });
+
+    it("lists a parent's children in sort-key (tsMsgId) order, whatever the append order", async () => {
+      const parent = await appendOutbound({ providerSid: 'SMroot6', providerTs: T0 });
+      const later = await appendOutbound({
+        providerSid: 'SMauto6',
+        providerTs: T2,
+        retryOf: parent.tsMsgId,
+        retryAttempt: 1,
+        retryRoot: parent.tsMsgId,
+      });
+      const earlier = await appendOutbound({
+        providerSid: 'SMmanual6',
+        providerTs: T1,
+        retryOf: parent.tsMsgId,
+        retryRoot: parent.tsMsgId,
+      });
+      expect(await messages.listRetryChildrenConsistent(ONE_CONV, parent.tsMsgId)).toStrictEqual([
+        { tsMsgId: earlier.tsMsgId, providerSid: 'SMmanual6' },
+        { tsMsgId: later.tsMsgId, providerSid: 'SMauto6', retryAttempt: 1 },
+      ]);
+    });
+
+    it('a deduped append (same providerSid) writes no second pointer', async () => {
+      const parent = await appendOutbound({ providerSid: 'SMroot3', providerTs: T0 });
+      const lineage = { retryOf: parent.tsMsgId, retryAttempt: 1, retryRoot: parent.tsMsgId };
+      const first = await appendOutbound({ providerSid: 'SMretry3', providerTs: T1, ...lineage });
+      // The redelivery computes ANOTHER key (another providerTs), so a pointer
+      // written outside the cancelled transaction would land a second item.
+      const again = await messages.append({
+        conversationId: ONE_CONV,
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'hello',
+        deliveryStatus: 'queued',
+        providerSid: 'SMretry3',
+        providerTs: T2,
+        ...lineage,
+      });
+      expect(again).toStrictEqual({ deduped: true, tsMsgId: first.tsMsgId, conversationId: ONE_CONV });
+      expect(await messages.listRetryChildrenConsistent(ONE_CONV, parent.tsMsgId)).toStrictEqual([
+        { tsMsgId: first.tsMsgId, providerSid: 'SMretry3', retryAttempt: 1 },
+      ]);
+      expect(await pointersNaming(buildTsMsgId(T2, 'SMretry3'))).toStrictEqual([]);
+    });
+
+    it('the pointer read is a single consistent Query on the retrychild# partition', async () => {
+      const parent = await appendOutbound({ providerSid: 'SMroot4', providerTs: T0 });
+      await appendOutbound({
+        providerSid: 'SMretry4',
+        providerTs: T1,
+        retryOf: parent.tsMsgId,
+        retryAttempt: 1,
+        retryRoot: parent.tsMsgId,
+      });
+      const send = vi.spyOn(doc, 'send');
+      try {
+        expect(await messages.listRetryChildrenConsistent(ONE_CONV, parent.tsMsgId)).toHaveLength(1);
+        expect(send).toHaveBeenCalledTimes(1);
+        const command: unknown = send.mock.calls[0]?.[0];
+        expect(command).toBeInstanceOf(QueryCommand);
+        const input = (command as QueryCommand).input;
+        expect(input).toMatchObject({
+          TableName: table,
+          ConsistentRead: true,
+          KeyConditionExpression: 'conversationId = :p',
+          ExpressionAttributeValues: { ':p': retryChildPk(ONE_CONV, parent.tsMsgId) },
+        });
+        expect(input.FilterExpression).toBeUndefined();
+      } finally {
+        send.mockRestore();
+      }
+    });
+
+    it('annotateRetryPromise writes only when retry_due_at still holds the expected value, and returns false otherwise', async () => {
+      const row = await appendOutbound({ providerSid: 'SMdue1', providerTs: T0 });
+      // absent -> absent expected: written
+      expect(
+        await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_1 }, { retryDueAt: undefined }),
+      ).toBe(true);
+      // a stale expectation loses, and writes nothing
+      expect(
+        await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: undefined }),
+      ).toBe(false);
+      expect(
+        await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: 'wrong' }),
+      ).toBe(false);
+      expect((await messages.getByTsMsgIdConsistent(ONE_CONV, row.tsMsgId))?.retry_due_at).toBe(DUE_1);
+      // the current value wins
+      expect(
+        await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: DUE_1 }),
+      ).toBe(true);
+      // WITHDRAW writes both fields in one write
+      expect(
+        await messages.annotateRetryPromise(
+          ONE_CONV,
+          row.tsMsgId,
+          { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: 'unconfirmed' },
+          { retryDueAt: DUE_2 },
+        ),
+      ).toBe(true);
+      expect(await messages.getByTsMsgIdConsistent(ONE_CONV, row.tsMsgId)).toMatchObject({
+        retry_due_at: RETRY_PROMISE_WITHDRAWN_AT,
+        retry_outcome: 'unconfirmed',
+      });
+      // a missing row is false, not a throw
+      expect(
+        await messages.annotateRetryPromise(ONE_CONV, 'nope#SMnope', { retryDueAt: DUE_1 }, { retryDueAt: undefined }),
+      ).toBe(false);
+    });
+
+    it('annotateRetryPromise withdraws a row that never held a promise (the fourth expression shape); a stale withdraw writes neither field', async () => {
+      const row = await appendOutbound({ providerSid: 'SMdue2', providerTs: T0 });
+      const withdraw = { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: 'unconfirmed' as const };
+      expect(await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, withdraw, { retryDueAt: DUE_1 })).toBe(false);
+      const untouched = await messages.getByTsMsgIdConsistent(ONE_CONV, row.tsMsgId);
+      expect(untouched).not.toHaveProperty('retry_due_at');
+      expect(untouched).not.toHaveProperty('retry_outcome');
+      expect(await messages.annotateRetryPromise(ONE_CONV, row.tsMsgId, withdraw, { retryDueAt: undefined })).toBe(true);
+      expect(await messages.getByTsMsgIdConsistent(ONE_CONV, row.tsMsgId)).toMatchObject({
+        retry_due_at: RETRY_PROMISE_WITHDRAWN_AT,
+        retry_outcome: 'unconfirmed',
+      });
+    });
   });
 });

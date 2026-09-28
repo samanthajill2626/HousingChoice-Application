@@ -32,6 +32,7 @@ import {
   type SendMessageResult,
 } from '../adapters/messaging.js';
 import { bodyFingerprint, recipientDigest } from '../lib/sendFingerprint.js';
+import { pinnedSender } from '../lib/outboundSender.js';
 import { classifySendFailure, type SendFailureClassification } from '../lib/sendOutcome.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -330,8 +331,11 @@ export interface SendMessageInput {
    * STAMPED with `broadcast_id = broadcastId` so the delivery-status callback
    * rollup (webhooks/twilio.ts) can find this broadcast's recipient slot by the
    * SID alone and roll delivered/failed into the broadcast stats. ADDITIVE: the
-   * 1:1 send path (opt-out gate → breaker → persist-at-send → audit) is
-   * otherwise UNCHANGED — absent on every non-broadcast send (relay + 1:1).
+   * 1:1 send path (opt-out gate, breaker, persist-at-send, audit) is otherwise
+   * UNCHANGED. Passed by the broadcast fan-out for a share's own send and,
+   * since retry-send-adoption (R7), by every retry of a share text (the
+   * automatic retry and the manual Retry route), copied from the retried row;
+   * absent on every other send (relay included).
    */
   broadcastId?: string;
   /**
@@ -357,6 +361,13 @@ export interface SendMessageInput {
    * never passes it: a human chose to send now.
    */
   retryWindowStart?: string;
+  /**
+   * retry-send-adoption R7: the chain root, persisted as retry_root beside
+   * retry_of; the automatic retry and the manual Retry route pass it here (the
+   * reconcile's adoption appends it through messagesRepo.append directly).
+   * Absent on a normal send.
+   */
+  retryRoot?: string;
   /**
    * share-skip-fix I8: the contact the CALLER already resolved as the
    * recipient (the broadcast fan-out's fenced tenant), handed over as the
@@ -444,6 +455,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       retryOf,
       retryAttempt,
       retryWindowStart,
+      retryRoot,
       recipient,
       beforeProviderSend,
     } = input;
@@ -586,7 +598,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // docs/issues/one-to-one-sender-not-pinned-to-ported-number.md.
     // An unconfigured BUSINESS_PHONE_NUMBER (dev/test only — prod+twilio
     // fail-fasts at boot) degrades to the previous service-picks behavior.
-    const sender = from ?? config.businessPhoneNumber;
+    const sender = pinnedSender(config, from);
     const { transportIntent, prepared } = await notAttempted(() => {
       const intent = adapter.classifyMessageTransport({
         hasForwardableMedia:
@@ -653,8 +665,9 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
         actualTransport: result.actualTransport,
       }),
       // M1.8a: stamp the broadcast id so the delivery-callback rollup can find
-      // this recipient's broadcast slot by the SID alone (additive — absent on
-      // 1:1 / relay sends).
+      // this recipient's broadcast slot by the SID alone. Additive: set on a
+      // share's own send and on a retry of a share text (retry-send-adoption
+      // R7); absent on every other send.
       ...(broadcastId !== undefined && { broadcastId }),
       // Retry lineage, stamped AT APPEND (retry-send-window D6): the manual
       // Retry passes retryOf alone; the automatic 30003 retry passes all three,
@@ -663,6 +676,8 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       ...(retryOf !== undefined && { retryOf }),
       ...(retryAttempt !== undefined && { retryAttempt }),
       ...(retryWindowStart !== undefined && { retryWindowStart }),
+      // retry-send-adoption R7: the chain root rides the append beside retryOf.
+      ...(retryRoot !== undefined && { retryRoot }),
       // retry-send-window D14: the send's own flags, so its automatic retry is
       // sent the same way - `automated` on EVERY row (false included: the
       // input's default is a person's send) and the caller's recipient by id.

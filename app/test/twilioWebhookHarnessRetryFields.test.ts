@@ -13,7 +13,7 @@
 // messagesRepoRetryLineage.integration.test.ts); neither can see the double.
 import { describe, expect, it } from 'vitest';
 import { RETRY_PROMISE_WITHDRAWN_AT } from '../src/lib/retrySendWindow.js';
-import type { NewMessage } from '../src/repos/messagesRepo.js';
+import { buildTsMsgId, retryChildPk, type NewMessage } from '../src/repos/messagesRepo.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const CONV = 'conv-rsw-harness';
@@ -131,6 +131,161 @@ describe('twilioWebhookHarness fake - retry-send-window fields', () => {
     expect(await world.messagesRepo.getByProviderSid('SMrswfake0007')).toMatchObject({
       retry_due_at: RETRY_PROMISE_WITHDRAWN_AT,
       delivery_status: 'failed',
+    });
+  });
+});
+
+// retry-send-adoption (R3, R5, R7): the same vacuous-pass risk for this
+// branch's fields. The fake must carry retry_root through its allowlist, write
+// the retrychild# pointer ONLY where the real append does (a row with retryOf,
+// never on a dedupe), answer the pointer read in the real Query's sort-key
+// order, and hold annotateRetryPromise to the real condition. The real repo's
+// twin is messagesRepoRetryLineage.integration.test.ts; the two are held to
+// each other step by step in twilioWebhookHarnessRepoAdditions.integration.test.ts.
+describe('twilioWebhookHarness fake - retry-send-adoption fields', () => {
+  const T0 = '2026-09-27T12:00:00.000Z';
+  const T1 = '2026-09-27T12:01:00.000Z';
+  const T2 = '2026-09-27T12:02:30.000Z';
+  const DUE_1 = '2026-09-27T12:02:00.000Z';
+  const DUE_2 = '2026-09-27T12:03:00.000Z';
+
+  it('append carries retry_root beside retry_of, and never writes retry_outcome', async () => {
+    const world = createFakeWorld();
+    const parent = await world.messagesRepo.append(outbound('SMrsa0001', T0));
+    const child = await world.messagesRepo.append({
+      ...outbound('SMrsa0002', T1),
+      retryOf: parent.tsMsgId,
+      retryAttempt: 1,
+      retryRoot: parent.tsMsgId,
+      // Not a NewMessage field: an allowlist that copied unknown keys would store it.
+      ...({ retryOutcome: 'unconfirmed' } as object),
+    });
+    const row = await world.messagesRepo.getByTsMsgId(CONV, child.tsMsgId);
+    expect(row).toMatchObject({ retry_of: parent.tsMsgId, retry_attempt: 1, retry_root: parent.tsMsgId });
+    expect(row).not.toHaveProperty('retry_outcome');
+    expect(await world.messagesRepo.getByTsMsgId(CONV, parent.tsMsgId)).not.toHaveProperty('retry_root');
+  });
+
+  it('append writes the retrychild# pointer for a row with retryOf - with retryAttempt when automatic - and none otherwise', async () => {
+    const world = createFakeWorld();
+    const parent = await world.messagesRepo.append(outbound('SMrsa0011', T0));
+    const auto = await world.messagesRepo.append({
+      ...outbound('SMrsa0012', T1),
+      retryOf: parent.tsMsgId,
+      retryAttempt: 1,
+      retryRoot: parent.tsMsgId,
+    });
+    const manual = await world.messagesRepo.append({
+      ...outbound('SMrsa0013', T2),
+      retryOf: parent.tsMsgId,
+      retryRoot: parent.tsMsgId,
+    });
+    expect(await world.messagesRepo.listRetryChildrenConsistent(CONV, parent.tsMsgId)).toStrictEqual([
+      { tsMsgId: auto.tsMsgId, providerSid: 'SMrsa0012', retryAttempt: 1 },
+      { tsMsgId: manual.tsMsgId, providerSid: 'SMrsa0013' },
+    ]);
+    expect(await world.messagesRepo.listRetryChildrenConsistent(CONV, auto.tsMsgId)).toStrictEqual([]);
+    // The map holds exactly the one partition the parent's children wrote.
+    expect([...world.retryChildren.keys()]).toStrictEqual([retryChildPk(CONV, parent.tsMsgId)]);
+  });
+
+  it('a deduped append writes no second pointer, even under another provider timestamp', async () => {
+    const world = createFakeWorld();
+    const parent = await world.messagesRepo.append(outbound('SMrsa0021', T0));
+    const lineage = { retryOf: parent.tsMsgId, retryAttempt: 1, retryRoot: parent.tsMsgId };
+    const first = await world.messagesRepo.append({ ...outbound('SMrsa0022', T1), ...lineage });
+    const again = await world.messagesRepo.append({ ...outbound('SMrsa0022', T2), ...lineage });
+    expect(again).toStrictEqual({ deduped: true, tsMsgId: first.tsMsgId, conversationId: CONV });
+    expect(await world.messagesRepo.listRetryChildrenConsistent(CONV, parent.tsMsgId)).toStrictEqual([
+      { tsMsgId: first.tsMsgId, providerSid: 'SMrsa0022', retryAttempt: 1 },
+    ]);
+  });
+
+  it('answers in sort-key (tsMsgId) order whatever the append order, and as a copy', async () => {
+    const world = createFakeWorld();
+    const parent = await world.messagesRepo.append(outbound('SMrsa0031', T0));
+    const later = await world.messagesRepo.append({
+      ...outbound('SMrsa0032', T2),
+      retryOf: parent.tsMsgId,
+      retryAttempt: 1,
+    });
+    const earlier = await world.messagesRepo.append({ ...outbound('SMrsa0033', T1), retryOf: parent.tsMsgId });
+    const answer = await world.messagesRepo.listRetryChildrenConsistent(CONV, parent.tsMsgId);
+    expect(answer).toStrictEqual([
+      { tsMsgId: earlier.tsMsgId, providerSid: 'SMrsa0033' },
+      { tsMsgId: later.tsMsgId, providerSid: 'SMrsa0032', retryAttempt: 1 },
+    ]);
+    // Scribbling on the answer changes nothing stored (the real repo answers a fresh read).
+    answer.pop();
+    answer[0]!.providerSid = 'SMscribbled';
+    expect(await world.messagesRepo.listRetryChildrenConsistent(CONV, parent.tsMsgId)).toHaveLength(2);
+    expect((await world.messagesRepo.listRetryChildrenConsistent(CONV, parent.tsMsgId))[0]?.providerSid).toBe(
+      'SMrsa0033',
+    );
+  });
+
+  it('a row pushed straight into world.messages has no pointer - only append writes one, as in production', async () => {
+    const world = createFakeWorld();
+    const parent = await world.messagesRepo.append(outbound('SMrsa0041', T0));
+    world.messages.push({
+      conversationId: CONV,
+      tsMsgId: buildTsMsgId(T1, 'SMrsa0042'),
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      provider_sid: 'SMrsa0042',
+      provider_ts: T1,
+      delivery_status: 'sent',
+      created_at: T1,
+      retry_of: parent.tsMsgId,
+      retry_attempt: 1,
+    });
+    expect(await world.messagesRepo.listRetryChildrenConsistent(CONV, parent.tsMsgId)).toStrictEqual([]);
+  });
+
+  it('annotateRetryPromise mirrors the real condition: the four shapes, a stale expectation, a missing row', async () => {
+    const world = createFakeWorld();
+    const row = await world.messagesRepo.append(outbound('SMrsa0051', T0));
+    const repo = world.messagesRepo;
+    const stored = async () => repo.getByTsMsgId(CONV, row.tsMsgId);
+    // absent -> absent expected: written
+    expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_1 }, { retryDueAt: undefined })).toBe(true);
+    // stale expectations lose and write nothing
+    expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: undefined })).toBe(false);
+    expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: 'wrong' })).toBe(false);
+    expect((await stored())?.retry_due_at).toBe(DUE_1);
+    // the current value wins
+    expect(await repo.annotateRetryPromise(CONV, row.tsMsgId, { retryDueAt: DUE_2 }, { retryDueAt: DUE_1 })).toBe(true);
+    // WITHDRAW writes both fields in one call
+    expect(
+      await repo.annotateRetryPromise(
+        CONV,
+        row.tsMsgId,
+        { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: 'unconfirmed' },
+        { retryDueAt: DUE_2 },
+      ),
+    ).toBe(true);
+    expect(await stored()).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    // a missing row is false, not a throw
+    expect(await repo.annotateRetryPromise(CONV, 'nope#SMnope', { retryDueAt: DUE_1 }, { retryDueAt: undefined })).toBe(
+      false,
+    );
+  });
+
+  it('annotateRetryPromise withdraws a row that never held a promise; a stale withdraw writes neither field', async () => {
+    const world = createFakeWorld();
+    const row = await world.messagesRepo.append(outbound('SMrsa0061', T0));
+    const withdraw = { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: 'unconfirmed' as const };
+    expect(await world.messagesRepo.annotateRetryPromise(CONV, row.tsMsgId, withdraw, { retryDueAt: DUE_1 })).toBe(false);
+    const untouched = await world.messagesRepo.getByTsMsgId(CONV, row.tsMsgId);
+    expect(untouched).not.toHaveProperty('retry_due_at');
+    expect(untouched).not.toHaveProperty('retry_outcome');
+    expect(await world.messagesRepo.annotateRetryPromise(CONV, row.tsMsgId, withdraw, { retryDueAt: undefined })).toBe(
+      true,
+    );
+    expect(await world.messagesRepo.getByTsMsgId(CONV, row.tsMsgId)).toMatchObject({
+      retry_due_at: RETRY_PROMISE_WITHDRAWN_AT,
+      retry_outcome: 'unconfirmed',
     });
   });
 });

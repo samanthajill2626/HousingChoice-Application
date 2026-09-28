@@ -947,6 +947,35 @@ describe('Timeline', () => {
     expect(alert).not.toHaveTextContent(/Couldn't send/);
   });
 
+  // retry-send-adoption R6: the route's two new refusals. A stale tab reads
+  // both - the collapse offers Retry only on a chain's newest row, and a row
+  // the reconcile ruled unresolved hides Retry - so each names what to do
+  // instead, never the generic line that invites pressing again.
+  it.each([
+    ['superseded', 'A newer attempt already exists for this message.'],
+    ['retry_unresolved', "This retry couldn't be confirmed - send a new message instead."],
+  ])(
+    'retry-send-adoption R6: a 409 %s on the manual Retry reads its own sentence, never the generic line',
+    async (code, sentence) => {
+      const failed: TimelineItem = {
+        ...MESSAGE_OUT,
+        id: 'm-fail',
+        tsMsgId: 'm-fail',
+        delivery_status: 'undelivered',
+        error_code: '30003',
+        body: 'This one failed',
+      };
+      const onRetry = vi.fn().mockRejectedValue(new ApiError(409, code, code));
+      renderTimeline({ items: [failed], onRetry });
+      fireEvent.click(screen.getByRole('button', { name: /Retry sending/i }));
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent(sentence);
+      expect(alert).not.toHaveTextContent(/Couldn't send/);
+      // The RENDERED copy is ASCII (planner review A8a) - not this table's own literal.
+      expect(alert.textContent ?? '').toMatch(/^[ -~]+$/);
+    },
+  );
+
   it('hides a failed message that a delivered retry superseded (retry_of), keeping only the retry', () => {
     const failed: TimelineItem = {
       ...MESSAGE_OUT,

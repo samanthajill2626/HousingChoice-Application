@@ -835,10 +835,42 @@ describe('deliveryReason', () => {
     expect(deliveryReason(undefined, { retryScheduled: true })).toBeUndefined();
   });
 
+  // retry-send-adoption R5: a retry the reconcile ruled `unresolved` reads
+  // "retry not confirmed". It outranks the promise (an unresolved retry has
+  // none left - its stamp was withdrawn in the same write), and `relay` outranks
+  // both: a relay leg never reads one-to-one retry copy. Only 30003 moves.
+  it('retry-send-adoption R5: retryUnconfirmed reads "retry not confirmed" and outranks retryScheduled; relay outranks both; no other code moves', () => {
+    const unconfirmed = 'Phone unreachable - retry not confirmed (error 30003)';
+    expect(deliveryReason('30003', { retryUnconfirmed: true })).toBe(unconfirmed);
+    expect(deliveryReason('30003', { retryUnconfirmed: true, retryScheduled: true })).toBe(unconfirmed);
+    expect(deliveryReason('30003', { retryUnconfirmed: true, media: true })).toBe(unconfirmed);
+    expect(deliveryReason('30003', { retryUnconfirmed: true, relay: true })).toBe('Phone unreachable (error 30003)');
+    expect(deliveryReason('30003', { retryUnconfirmed: true, relay: true, retryScheduled: true })).toBe(
+      'Phone unreachable (error 30003)',
+    );
+    expect(deliveryReason('30003', { retryUnconfirmed: false })).toBe('Phone unreachable (error 30003)');
+    expect(deliveryReason('30003', { retryUnconfirmed: false, retryScheduled: true })).toBe(
+      'Phone unreachable - will retry (error 30003)',
+    );
+    expect(deliveryReason('30007', { retryUnconfirmed: true })).toBe('Carrier filtered the message (error 30007)');
+    expect(deliveryReason('30005', { retryUnconfirmed: true, media: true })).toBe(
+      "Attachment didn't get through, texts may still work (error 30005)",
+    );
+    expect(deliveryReason('99999', { retryUnconfirmed: true })).toBe('Delivery failed (error 99999)');
+    expect(deliveryReason('transient_cap', { retryUnconfirmed: true })).toBe(
+      'Sending gave up after repeated temporary errors',
+    );
+    expect(deliveryReason(undefined, { retryUnconfirmed: true })).toBeUndefined();
+  });
+
   // New and touched copy is ASCII (spec D8): the old entry's separator was a
   // U+2014 em dash, and neither sentence may carry it forward.
   it('writes the 30003 copy in ASCII, with and without the promise', () => {
-    for (const reason of [deliveryReason('30003'), deliveryReason('30003', { retryScheduled: true })]) {
+    for (const reason of [
+      deliveryReason('30003'),
+      deliveryReason('30003', { retryScheduled: true }),
+      deliveryReason('30003', { retryUnconfirmed: true }),
+    ]) {
       expect(reason).not.toContain(EM_DASH);
       expect(reason).toMatch(/^[ -~]+$/);
     }

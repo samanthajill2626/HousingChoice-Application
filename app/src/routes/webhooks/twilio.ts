@@ -3526,7 +3526,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // find the matching recipient slot by those keys (no new GSI). Only
       // terminal transitions move the rollup — a sent→delivered (no failed)
       // bumps `delivered`; *→failed bumps `failed`. Never 5xx the callback.
-      if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0) {
+      if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0 && message.retry_of === undefined) {
         try {
           await rollIntoBroadcast(
             broadcasts,

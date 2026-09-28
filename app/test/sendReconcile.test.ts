@@ -31,6 +31,7 @@ import {
   type BroadcastSendPayload,
 } from '../src/jobs/broadcastFanOut.js';
 import { RELAY_FANOUT_JOB, type RelayFanOutPayload } from '../src/jobs/relayFanOut.js';
+import { RETRY_SEND_JOB } from '../src/jobs/retrySend.js';
 import {
   RELAY_RETRY_LEG_JOB,
   _resetRelayRetryLegForTests,
@@ -44,11 +45,18 @@ import {
   reconcileDelayMs,
   registerSendReconcileJobHandler,
   toOwnerRef,
+  type RetrySendOwner,
   type SendReconcilePayload,
 } from '../src/jobs/sendReconcile.js';
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { relayRetryDigest, relayRetryProviderSid } from '../src/lib/relayRetryClaim.js';
+import {
+  MAX_SEND_RETRY_ATTEMPTS,
+  RETRY_JOB_GRACE_MS,
+  RETRY_PROMISE_GRACE_MS,
+  RETRY_PROMISE_WITHDRAWN_AT,
+} from '../src/lib/retrySendWindow.js';
 import { bodyFingerprint, hashRecipientKey, recipientDigest } from '../src/lib/sendFingerprint.js';
 import {
   RECONCILE_CHECK_DELAYS_MS,
@@ -60,7 +68,7 @@ import {
 import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationParticipant } from '../src/repos/conversationsRepo.js';
-import { buildTsMsgId, type MessageItem, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
+import { buildTsMsgId, type MessageItem, type NewMessage, type RelayRecipientDelivery } from '../src/repos/messagesRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import type { SendAttemptFacts, SendAttemptOwner } from '../src/repos/sendAttemptsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
@@ -3004,6 +3012,1041 @@ describe('send.reconcile (spec D11-D16)', () => {
     });
   });
 
+  describe('retry_send owner (retry-send-adoption R4)', () => {
+    /** The one-to-one tenant's number (file-local: T_PHONE belongs to the broadcast fixtures). */
+    const TENANT_PHONE = '+15550100077';
+    const iso = (ms: number): string => new Date(ms).toISOString();
+    /** The one-to-one thread's id - MINTED by the fake (`conv-<n>`), never hard-coded; set by seedOneToOne. */
+    let retryConv = '';
+
+    /** A one-to-one thread with a consented tenant; returns the contact and the conversation. */
+    async function seedOneToOne(): Promise<{ contact: ContactItem; conversation: ConversationItem }> {
+      const contact: ContactItem = { contactId: 'c-retry', type: 'tenant', status: 'active', phone: TENANT_PHONE, consent_method: 'inbound_text' };
+      world.contacts.push(contact);
+      const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(TENANT_PHONE, 'tenant_1to1');
+      retryConv = conversation.conversationId;
+      return { contact, conversation };
+    }
+
+    /**
+     * An outbound 30003 row in that thread (the ROOT by default; pass retryOf /
+     * retryAttempt / retryRoot for a retry row). Returns the STORED row - the
+     * live object the fake keeps - so a test may stamp retry_due_at on it.
+     */
+    async function seedRow(sid: string, fields: Partial<NewMessage> = {}): Promise<MessageItem> {
+      await world.messagesRepo.append({
+        conversationId: retryConv,
+        providerSid: sid,
+        providerTs: iso(Date.now() - 30_000),
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: BODY,
+        deliveryStatus: 'undelivered',
+        errorCode: '30003',
+        automated: false,
+        recipientContactId: 'c-retry',
+        ...fields,
+      });
+      return world.messages.find((m) => m.provider_sid === sid)!;
+    }
+
+    /** Attempt `attempt` of the automatic retry of `row` (the RETRIED row), keyed as the job keys it (R1). */
+    const rOwner = (
+      row: MessageItem,
+      attempt: number,
+      recipientKey = 'c-retry',
+      retryRoot = row.retry_root ?? row.tsMsgId,
+    ): RetrySendOwner => ({ kind: 'retry_send', conversationId: row.conversationId, retriedTsMsgId: row.tsMsgId, attempt, recipientKey, retryRoot });
+    /** The retry row attempt `attempt` of `retriedTsMsgId` produced, if any. */
+    const retryRow = (retriedTsMsgId: string, attempt: number) =>
+      world.messages.find((m) => m.retry_of === retriedTsMsgId && m.retry_attempt === attempt);
+    const persistedFor = (tsMsgId: string) =>
+      world.emitted.filter((e) => e.event === 'message.persisted' && (e.payload as { tsMsgId: string }).tsMsgId === tsMsgId);
+    const notFoundLines = () => capture.atLevel(30).filter((l) => String(l['msg']).includes('owner recipient not found'));
+
+    it('the owner renders in every log line as strings - kind, conversationId, retriedTsMsgId, attempt, retryRoot - and never with a phone or its recipient hash (ownerLog, ownerRefLog)', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const expected = { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: root.tsMsgId, attempt: '2', retryRoot: root.tsMsgId };
+      // Resolvable, but no record: superseded - the line renders the RESOLVED owner (ownerLog).
+      await runCheck(payloadOf(rOwner(root, 2), new Date().toISOString()));
+      const superseded = lines(30).filter((l) => String(l['msg']).includes('superseded'));
+      expect(superseded).toHaveLength(1);
+      expect(superseded[0]!['owner']).toStrictEqual(expected);
+      expect(superseded[0]).toMatchObject({ recipientKey: 'c-retry', state: 'absent' });
+      // A reference whose hash matches no key the rows derive: unaddressable - the line renders the REFERENCE (ownerRefLog).
+      await runCheck(payloadOf(rOwner(root, 2, 'c-someone-else'), new Date().toISOString()));
+      const notFound = notFoundLines();
+      expect(notFound).toHaveLength(1);
+      expect(notFound[0]!['owner']).toStrictEqual(expected);
+      // A phone-keyed attempt (the row records no recipient): redacted, never hashed or in the clear.
+      const phoneRow = await seedRow('SMroot-phone', { recipientContactId: undefined });
+      await runCheck(payloadOf(rOwner(phoneRow, 1, `phone#${TENANT_PHONE}`), new Date().toISOString()));
+      expect(lines(30).filter((l) => String(l['msg']).includes('superseded'))[1]).toMatchObject({ recipientKey: 'phone#redacted' });
+      const all = JSON.stringify(capture.lines);
+      expect(all).not.toContain(TENANT_PHONE);
+      expect(all).not.toContain('phonehash#');
+    });
+
+    // ---- adoption (spec section 4 items 10 and 14) ----
+
+    it('10 a listed orphan adopts as the retry row sendMessage would have appended - the full R4 field set, its retrychild# pointer, one audit row, the emits, the inbox moved forward - and NO promise write', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 20_000) });
+      const due = iso(Date.now() + 10_000);
+      root.retry_due_at = due;
+      world.conversations.get(retryConv)!.last_activity_at = iso(Date.now() - 3_600_000);
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      const orphan = plant({ providerSid: 'SMorphan-r', providerStatus: 'delivered', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      const row = retryRow(root.tsMsgId, 1)!;
+      expect(row).toMatchObject({
+        conversationId: retryConv,
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: BODY,
+        provider_sid: 'SMorphan-r',
+        provider_ts: orphan.createdAt,
+        delivery_status: 'delivered',
+        transport_schema_version: 1,
+        requested_transport: 'sms',
+        retry_of: root.tsMsgId,
+        retry_attempt: 1,
+        retry_window_start: root.provider_ts,
+        retry_root: root.tsMsgId,
+        automated: false,
+        recipient_contact_id: 'c-retry',
+      });
+      for (const absent of ['broadcast_id', 'error_code', 'media_attachments', 'mediaUrls', 'retry_due_at', 'retry_outcome']) {
+        expect(row, absent).not.toHaveProperty(absent);
+      }
+      expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toEqual([
+        { tsMsgId: row.tsMsgId, providerSid: 'SMorphan-r', retryAttempt: 1 },
+      ]);
+      expect(world.auditEvents.filter((e) => e.event_type === 'message_sent')).toEqual([
+        { entityKey: `conversations#${retryConv}`, event_type: 'message_sent', payload: { providerSid: 'SMorphan-r', automated: false, author: 'teammate' } },
+      ]);
+      expect(persistedFor(row.tsMsgId).map((e) => e.payload)).toEqual([
+        { conversationId: retryConv, tsMsgId: row.tsMsgId, direction: 'outbound', deliveryStatus: 'delivered' },
+      ]);
+      // The status-preserving touch with no preview, forward only, announced.
+      expect(world.conversations.get(retryConv)).toMatchObject({ status: 'open', last_activity_at: orphan.createdAt });
+      expect(world.emitted.filter((e) => e.event === 'conversation.updated')).toHaveLength(1);
+      // No promise write on an adoption: the retried row's promise expires on RSW's clock.
+      expect(root.retry_due_at).toBe(due);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-r' });
+      const found = lines(30).filter((l) => l['verdict'] === 'found');
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({
+        adoption: 'adopted',
+        path: 'lookup',
+        sid: 'SMorphan-r',
+        owner: { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: root.tsMsgId, attempt: '1', retryRoot: root.tsMsgId },
+      });
+    });
+
+    it('10a the adopted row copies broadcast_id from a share root and follows the original send: ai stays ai, automated stays automated, and a legacy row with no automated flag is retried automated', async () => {
+      register();
+      await seedOneToOne();
+      const share = await seedRow('SMroot-share', { broadcastId: 'bcast-9', author: 'ai', automated: true });
+      const shareOwner = rOwner(share, 1);
+      const atShare = await reconciling(shareOwner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-share', to: TENANT_PHONE });
+      await runCheck(payloadOf(shareOwner, atShare));
+      expect(retryRow(share.tsMsgId, 1)).toMatchObject({
+        broadcast_id: 'bcast-9',
+        author: 'ai',
+        automated: true,
+        retry_root: share.tsMsgId,
+        delivery_status: 'sent',
+      });
+      expect(world.auditEvents.filter((e) => e.event_type === 'message_sent').map((e) => e.payload)).toEqual([
+        { providerSid: 'SMorphan-share', automated: true, author: 'ai' },
+      ]);
+      // A root appended before the automated flag existed: retried automated (RSW relay B4), as the job does.
+      const legacy = await seedRow('SMroot-legacy', { automated: undefined });
+      const legacyOwner = rOwner(legacy, 1);
+      const atLegacy = await reconciling(legacyOwner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-legacy', to: TENANT_PHONE });
+      await runCheck(payloadOf(legacyOwner, atLegacy));
+      expect(retryRow(legacy.tsMsgId, 1)).toMatchObject({ automated: true, author: 'teammate' });
+      expect(retryRow(legacy.tsMsgId, 1)).not.toHaveProperty('broadcast_id');
+    });
+
+    it('10b recipient_contact_id rides the adopted row only while the recorded contact exists undeleted and still holds the thread number', async () => {
+      register();
+      const { contact } = await seedOneToOne();
+      /** Reconcile a fresh root's attempt 1 against a fresh orphan; the adopted row. */
+      async function adoptOne(n: number): Promise<MessageItem> {
+        const root = await seedRow(`SMroot-${n}`);
+        const owner = rOwner(root, 1);
+        const at = await reconciling(owner, factsFor(TENANT_PHONE));
+        plant({ providerSid: `SMorphan-${n}`, to: TENANT_PHONE });
+        await runCheck(payloadOf(owner, at));
+        expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: `SMorphan-${n}` });
+        return retryRow(root.tsMsgId, 1)!;
+      }
+      expect(await adoptOne(1)).toMatchObject({ recipient_contact_id: 'c-retry' });
+      contact.deleted_at = iso(Date.now());
+      expect(await adoptOne(2)).not.toHaveProperty('recipient_contact_id');
+      delete contact.deleted_at;
+      contact.phone = '+15558675309';
+      expect(await adoptOne(3)).not.toHaveProperty('recipient_contact_id');
+    });
+
+    it('10b2 media rides the adopted row only when the attempt sent media (the record\'s mediaCount - deviation 9): the retried row\'s attachments, else its raw mediaUrls; nothing when the job sent the body only', async () => {
+      register();
+      await seedOneToOne();
+      const attachments = [{ s3Key: 'media/out/photo-1.jpg', contentType: 'image/jpeg' }];
+      async function adoptOne(n: number, fields: Partial<NewMessage>, mediaCount: number): Promise<MessageItem> {
+        const root = await seedRow(`SMroot-${n}`, { type: 'mms', ...fields });
+        const owner = rOwner(root, 1);
+        const at = await reconciling(owner, factsFor(TENANT_PHONE, { mediaCount }));
+        plant({ providerSid: `SMorphan-${n}`, to: TENANT_PHONE, mediaCount });
+        await runCheck(payloadOf(owner, at));
+        expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: `SMorphan-${n}` });
+        return retryRow(root.tsMsgId, 1)!;
+      }
+      // Attachments on the root, but the job had no store and sent the body only (mediaCount 0).
+      const bodyOnly = await adoptOne(1, { mediaAttachments: attachments }, 0);
+      expect(bodyOnly).toMatchObject({ type: 'sms', requested_transport: 'sms' });
+      expect(bodyOnly).not.toHaveProperty('media_attachments');
+      expect(bodyOnly).not.toHaveProperty('mediaUrls');
+      // The job re-presigned the attachments and sent them: the durable keys ride, never a stored presigned URL.
+      const withMedia = await adoptOne(2, { mediaAttachments: attachments, mediaUrls: ['https://bucket.example/presigned-expired'] }, 1);
+      expect(withMedia).toMatchObject({ type: 'mms', requested_transport: 'mms', media_attachments: attachments });
+      expect(withMedia).not.toHaveProperty('mediaUrls');
+      // No attachments, raw mediaUrls (the internal/e2e seam the job replays): they ride as sent.
+      const raw = await adoptOne(3, { mediaUrls: ['https://media.example/raw-1.jpg'] }, 1);
+      expect(raw).toMatchObject({ type: 'mms', mediaUrls: ['https://media.example/raw-1.jpg'] });
+      expect(raw).not.toHaveProperty('media_attachments');
+    });
+
+    it('10c the ORIGINAL message inside the window is held by its own row (other) - never adopted as the retry (Review Focus 2)', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 5_000) });
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      // The root's provider twin sits in the window with the same body, OLDER than the retry's orphan (walked first).
+      plant({ providerSid: 'SMroot', providerStatus: 'undelivered', errorCode: '30003', to: TENANT_PHONE, createdAt: root.provider_ts });
+      plant({ providerSid: 'SMorphan-r', providerStatus: 'sent', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-r' });
+      expect(world.messages.filter((m) => m.provider_sid === 'SMroot')).toHaveLength(1);
+      expect(retryRow(root.tsMsgId, 1)).toMatchObject({ provider_sid: 'SMorphan-r' });
+      expect(lines(50)).toHaveLength(0);
+    });
+
+    it('10c2 nor is the original\'s twin an UNMATCHED candidate: with a different fingerprint (its photo, a body-only retry) and nothing else in the window, the last check is never_sent - one re-drive - not unidentified_candidate (Review Focus 2)', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', {
+        providerTs: iso(Date.now() - 5_000),
+        type: 'mms',
+        mediaAttachments: [{ s3Key: 'media/out/photo-1.jpg', contentType: 'image/jpeg' }],
+      });
+      const owner = rOwner(root, 1);
+      // The job had no media store: it sent the body only.
+      const at = await reconciling(owner, factsFor(TENANT_PHONE, { mediaCount: 0 }));
+      plant({ providerSid: 'SMroot', providerStatus: 'undelivered', errorCode: '30003', to: TENANT_PHONE, createdAt: root.provider_ts, mediaCount: 1 });
+      await runChain(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMroot', conversationId: retryConv, attempt: 1 }]);
+      expect(lines(50)).toHaveLength(0);
+    });
+
+    it('10d a redelivered check is idempotent: the same envelope twice adopts once - one row, one pointer, one audit row', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-r', to: TENANT_PHONE });
+      const envelope = await enqueue(SEND_RECONCILE_JOB, payloadOf(owner, at), { runAt: new Date(Date.now() + 600_000) });
+      const [item] = outbound.delayed.splice(outbound.delayed.findIndex((d) => d.envelope.jobId === envelope.jobId), 1);
+      const wire = JSON.stringify(item!.envelope);
+      await dispatchJob(JSON.parse(wire) as unknown);
+      await dispatchJob(JSON.parse(wire) as unknown);
+      await outbound.settle();
+      expect(world.messages.filter((m) => m.provider_sid === 'SMorphan-r')).toHaveLength(1);
+      expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toHaveLength(1);
+      expect(world.auditEvents.filter((e) => e.event_type === 'message_sent')).toHaveLength(1);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-r' });
+    });
+
+    it('10e the known-SID path adopts the row sendMessage appended before a record-phase failure as a repair (mine): no second row, no audit row, adoption skipped (spec 14)', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const retry = await seedRow('SMretry1', {
+        providerTs: iso(Date.now()),
+        deliveryStatus: 'queued',
+        errorCode: undefined,
+        retryOf: root.tsMsgId,
+        retryAttempt: 1,
+        retryWindowStart: root.provider_ts,
+        retryRoot: root.tsMsgId,
+      });
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE), { sid: 'SMretry1' });
+      plant({ providerSid: 'SMretry1', providerStatus: 'sent', to: TENANT_PHONE });
+      const count = world.messages.length;
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runCheck(payloadOf(owner, at));
+      expect(list).not.toHaveBeenCalled();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMretry1' });
+      expect(world.messages).toHaveLength(count);
+      expect(world.auditEvents.filter((e) => e.event_type === 'message_sent')).toHaveLength(0);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')[0]).toMatchObject({ path: 'known_sid', adoption: 'skipped', sid: 'SMretry1' });
+      expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toEqual([
+        { tsMsgId: retry.tsMsgId, providerSid: 'SMretry1', retryAttempt: 1 },
+      ]);
+    });
+
+    it('10f a known SID held by ANOTHER row of the thread (here the original\'s own) is unresolved sid_held_elsewhere naming it as a message row - never fetched - and the promise is withdrawn', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      root.retry_due_at = iso(Date.now() + 10_000);
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE), { sid: 'SMroot' });
+      plant({ providerSid: 'SMroot', providerStatus: 'undelivered', errorCode: '30003', to: TENANT_PHONE });
+      const get = vi.spyOn(world.adapter, 'getMessage');
+      await runCheck(payloadOf(owner, at));
+      expect(get).not.toHaveBeenCalled();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'sid_held_elsewhere' });
+      expect(lines(50)).toHaveLength(1);
+      expect(lines(50)[0]).toMatchObject({ verdict: 'unresolved', cause: 'sid_held_elsewhere', heldBy: `message#${retryConv}#${root.tsMsgId}` });
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    });
+
+    it('10g a free-looking match whose append dedupes onto ANOTHER lineage is someone else\'s: not adopted, nothing written, the chain goes on', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      // Staff re-typed the same text meanwhile: its row holds the SID.
+      await world.messagesRepo.append({
+        conversationId: retryConv,
+        providerSid: 'SMstaff-1',
+        providerTs: iso(Date.now()),
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: BODY,
+        deliveryStatus: 'sent',
+        automated: false,
+      });
+      plant({ providerSid: 'SMstaff-1', to: TENANT_PHONE });
+      // This check's holder read races that append: it sees no row, so the SID looks free.
+      vi.spyOn(world.messagesRepo, 'getByProviderSidConsistent').mockResolvedValueOnce(undefined);
+      const count = world.messages.length;
+      await runCheck(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'reconciling', checkNo: 1 });
+      expect(retryRow(root.tsMsgId, 1)).toBeUndefined();
+      expect(world.messages).toHaveLength(count);
+      expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toEqual([]);
+      expect(world.auditEvents).toHaveLength(0);
+      expect(scheduledChecks()).toHaveLength(1);
+    });
+
+    it('10h an adopted terminal failure is recorded honestly with its code and WARNed (the 30003 ladder does not continue from it); a success status carries no code', async () => {
+      register();
+      await seedOneToOne();
+      const failedRoot = await seedRow('SMroot-f');
+      const owner = rOwner(failedRoot, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-f', providerStatus: 'undelivered', errorCode: '30003', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMorphan-f' });
+      expect(retryRow(failedRoot.tsMsgId, 1)).toMatchObject({ delivery_status: 'undelivered', error_code: '30003' });
+      const warns = capture.atLevel(40).filter((l) => String(l['msg']).includes('adopted terminal failure on a retry row'));
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toMatchObject({
+        event: 'send_reconcile',
+        sid: 'SMorphan-f',
+        deliveryStatus: 'undelivered',
+        errorCode: '30003',
+        owner: { kind: 'retry_send', retriedTsMsgId: failedRoot.tsMsgId, attempt: '1' },
+      });
+      // A delivered message the provider reports with a stray code adopts code-free.
+      const okRoot = await seedRow('SMroot-ok');
+      const okOwner = rOwner(okRoot, 1);
+      const okAt = await reconciling(okOwner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-ok', providerStatus: 'delivered', errorCode: '30003', to: TENANT_PHONE });
+      await runCheck(payloadOf(okOwner, okAt));
+      expect(retryRow(okRoot.tsMsgId, 1)).toMatchObject({ delivery_status: 'delivered' });
+      expect(retryRow(okRoot.tsMsgId, 1)).not.toHaveProperty('error_code');
+    });
+
+    // ---- never_sent (spec section 4 item 11) ----
+
+    it('11 never_sent inside the window re-drives ONCE: a messaging.retrySend envelope with the retried row\'s providerSid, the attempt and NO deferred; the record redriven; the promise REFRESHED and emitted; a redelivered verdict enqueues nothing', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 20_000) });
+      root.retry_due_at = iso(Date.now() + 10_000);
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      const last = await runNextCheck();
+      expect(last.checkNo).toBe(2);
+      expect(got).toEqual([{ providerSid: 'SMroot', conversationId: retryConv, attempt: 1 }]);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      const refreshed = Date.parse(root.retry_due_at!);
+      expect(refreshed).toBeGreaterThanOrEqual(Date.now() + RETRY_JOB_GRACE_MS + RETRY_PROMISE_GRACE_MS - 5_000);
+      expect(refreshed).toBeLessThanOrEqual(Date.now() + RETRY_JOB_GRACE_MS + RETRY_PROMISE_GRACE_MS);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(persistedFor(root.tsMsgId).map((e) => e.payload)).toEqual([
+        { conversationId: retryConv, tsMsgId: root.tsMsgId, direction: 'outbound', deliveryStatus: 'undelivered' },
+      ]);
+      expect(lines(40).filter((l) => l['verdict'] === 'never_sent')).toHaveLength(1);
+      expect(capture.atLevel(50)).toHaveLength(0);
+      // The verdict delivered again: the record is redriven now - nothing is marked, enqueued or refreshed again.
+      const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+      await runCheck(last);
+      expect(got).toHaveLength(1);
+      expect(annotate).not.toHaveBeenCalled();
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+    });
+
+    it('11a never_sent OUTSIDE the window closes redrive_refused / retry_window_closed while reconciling: ONE ERROR, no enqueue, the promise untouched - a redelivered verdict writes nothing either', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 16 * 60_000) });
+      const due = iso(Date.now() + 10_000);
+      root.retry_due_at = due;
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      const last = await runNextCheck();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'redrive_refused', cause: 'retry_window_closed', redriveCount: 0 });
+      expect(got).toEqual([]);
+      expect(root.retry_due_at).toBe(due);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(annotate).not.toHaveBeenCalled();
+      const errors = capture.atLevel(50);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({
+        event: 'send_reconcile',
+        verdict: 'never_sent',
+        cause: 'retry_window_closed',
+        checkNo: 2,
+        owner: { kind: 'retry_send', retriedTsMsgId: root.tsMsgId, attempt: '1', retryRoot: root.tsMsgId },
+      });
+      expect(lines(40).filter((l) => l['verdict'] === 'never_sent')).toHaveLength(0);
+      // afterClose: the retried row re-renders (its promise will expire).
+      expect(persistedFor(root.tsMsgId)).toHaveLength(1);
+      await runCheck(last);
+      expect(annotate).not.toHaveBeenCalled();
+      expect(root.retry_due_at).toBe(due);
+      expect(capture.atLevel(50)).toHaveLength(1);
+    });
+
+    it('11b never_sent with NO usable window origin fails open (RSW D5): the re-drive is enqueued', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      root.provider_ts = 'not a time';
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(owner, at));
+      expect(got).toEqual([{ providerSid: 'SMroot', conversationId: retryConv, attempt: 1 }]);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+    });
+
+    it('11c a re-drive enqueue that throws closes enqueue_failed with NO retry_outcome and the promise untouched (nothing was sent: Retry returns once the promise expires); a redelivered verdict re-applies nothing to the promise', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const due = iso(Date.now() + 10_000);
+      root.retry_due_at = due;
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      configureOutboundQueue({
+        async enqueue(envelope, opts) {
+          if (envelope.jobName === RETRY_SEND_JOB) throw new Error('queue down');
+          return outbound.enqueue(envelope, opts);
+        },
+      });
+      const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      const last = await runNextCheck();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'enqueue_failed', cause: 'enqueue_failed', redriveCount: 1 });
+      expect(root.retry_due_at).toBe(due);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(annotate).not.toHaveBeenCalled();
+      const errors = capture.atLevel(50);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ verdict: 'never_sent', cause: 'enqueue_failed', err: { message: 'queue down' } });
+      await runCheck(last);
+      expect(annotate).not.toHaveBeenCalled();
+      expect(root).not.toHaveProperty('retry_outcome');
+    });
+
+    // ---- unresolved (spec section 4 item 12) ----
+
+    it('12 unresolved (the list fails on every check): the record closes FIRST, then ONE write sets the sentinel AND retry_outcome unconfirmed; one ERROR; no re-send; a redelivered check re-applies the withdrawal, and one more is a no-op', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      root.retry_due_at = iso(Date.now() + 10_000);
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      world.adapter.listMessages = async () => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      };
+      const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise');
+      const close = vi.spyOn(world.sendAttemptsRepo, 'closeFromReconcile');
+      await runChain(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'provider_unreachable' });
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      expect(annotate).toHaveBeenCalledTimes(1);
+      expect(annotate.mock.calls[0]!.slice(0, 3)).toEqual([
+        retryConv,
+        root.tsMsgId,
+        { retryDueAt: RETRY_PROMISE_WITHDRAWN_AT, retryOutcome: 'unconfirmed' },
+      ]);
+      // The record FIRST (D8 as built), then the withdrawal.
+      expect(close.mock.invocationCallOrder[0]!).toBeLessThan(annotate.mock.invocationCallOrder[0]!);
+      const errors = capture.atLevel(50);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({
+        event: 'send_reconcile',
+        verdict: 'unresolved',
+        cause: 'provider_unreachable',
+        checkNo: 2,
+        owner: { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: root.tsMsgId, attempt: '1', retryRoot: root.tsMsgId },
+      });
+      expect(got).toEqual([]);
+      expect(world.sent).toHaveLength(0);
+      // The withdrawal's emit, then afterClose's: the retried row re-renders "retry not confirmed".
+      expect(persistedFor(root.tsMsgId)).toHaveLength(2);
+      // A redelivered last check finds the record done for its own attempt: the superseded exit re-applies the withdrawal.
+      delete root.retry_outcome;
+      root.retry_due_at = iso(Date.now() + 10_000);
+      await runCheck({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 2 });
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      expect(annotate).toHaveBeenCalledTimes(2);
+      // Once more, already withdrawn: no write at all.
+      await runCheck({ owner: toOwnerRef(owner), attemptedAt: at, checkNo: 2 });
+      expect(annotate).toHaveBeenCalledTimes(2);
+      expect(capture.atLevel(50)).toHaveLength(1);
+    });
+
+    it('12a a CONTACT-keyed attempt whose thread number changed or vanished still resolves (the key is the recorded contact) and is unresolved digest_mismatch - never listed - with the promise withdrawn', async () => {
+      register();
+      await seedOneToOne();
+      const conv = world.conversations.get(retryConv)!;
+      const rootA = await seedRow('SMroot-a');
+      const rootB = await seedRow('SMroot-b');
+      const ownerA = rOwner(rootA, 1);
+      const ownerB = rOwner(rootB, 1);
+      const atA = await reconciling(ownerA, factsFor(TENANT_PHONE));
+      const atB = await reconciling(ownerB, factsFor(TENANT_PHONE));
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      conv.participant_phone = '+15558675309';
+      await runCheck(payloadOf(ownerA, atA));
+      delete conv.participant_phone;
+      await runCheck(payloadOf(ownerB, atB));
+      expect(list).not.toHaveBeenCalled();
+      for (const [owner, root] of [[ownerA, rootA], [ownerB, rootB]] as const) {
+        expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'digest_mismatch' });
+        expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      }
+      expect(lines(50).map((l) => l['cause'])).toEqual(['digest_mismatch', 'digest_mismatch']);
+    });
+
+    it('12a2 a PHONE-keyed attempt (the row records no recipient) whose thread number vanished or changed is unaddressable: INFO "owner recipient not found", the record stays reconciling for the sweeper, the promise untouched', async () => {
+      register();
+      await seedOneToOne();
+      const conv = world.conversations.get(retryConv)!;
+      const due = iso(Date.now() + 10_000);
+      const rootA = await seedRow('SMroot-a', { recipientContactId: undefined });
+      const rootB = await seedRow('SMroot-b', { recipientContactId: undefined });
+      rootA.retry_due_at = due;
+      rootB.retry_due_at = due;
+      const ownerA = rOwner(rootA, 1, `phone#${TENANT_PHONE}`);
+      const ownerB = rOwner(rootB, 1, `phone#${TENANT_PHONE}`);
+      const atA = await reconciling(ownerA, factsFor(TENANT_PHONE));
+      const atB = await reconciling(ownerB, factsFor(TENANT_PHONE));
+      delete conv.participant_phone;
+      await runCheck(payloadOf(ownerA, atA));
+      conv.participant_phone = '+15558675309';
+      await runCheck(payloadOf(ownerB, atB));
+      expect(notFoundLines()).toHaveLength(2);
+      for (const [owner, root] of [[ownerA, rootA], [ownerB, rootB]] as const) {
+        expect(await recordOf(owner)).toMatchObject({ state: 'reconciling', checkNo: 0 });
+        expect(root.retry_due_at).toBe(due);
+        expect(root).not.toHaveProperty('retry_outcome');
+      }
+      expect(scheduledChecks()).toHaveLength(0);
+      expect(JSON.stringify(capture.lines)).not.toContain(TENANT_PHONE);
+    });
+
+    it('12b a retried row that no longer exists leaves the record for the sweeper (INFO): nothing written, nothing scheduled', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      world.messages.splice(world.messages.indexOf(root), 1);
+      await runCheck(payloadOf(owner, at));
+      expect(await recordOf(owner)).toMatchObject({ state: 'reconciling', checkNo: 0 });
+      expect(notFoundLines()).toHaveLength(1);
+      expect(scheduledChecks()).toHaveLength(0);
+    });
+
+    it('12c the second unknown after one re-drive closes unresolved second_unknown and withdraws - never a second re-drive (D13a)', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      root.retry_due_at = iso(Date.now() + 10_000);
+      const owner = rOwner(root, 1);
+      const facts = factsFor(TENANT_PHONE);
+      const first = await reconciling(owner, facts, { at: iso(Date.now() - 120_000) });
+      expect(await world.sendAttemptsRepo.markRedriven(owner, first)).toBe(true);
+      // The re-driven attempt went unknown again and is reconciling with redriveCount 1 (case 20's form).
+      const claimed = await world.sendAttemptsRepo.claim(owner, facts, new Date().toISOString());
+      expect(claimed).toMatchObject({ outcome: 'claimed', record: { attemptNo: 2, redriveCount: 1 } });
+      expect(await world.sendAttemptsRepo.takeOver(owner, claimed.record)).toBe(true);
+      await runChain(payloadOf(owner, claimed.record.attemptedAt));
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'second_unknown' });
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      expect(got).toEqual([]);
+      expect(capture.atLevel(50)).toHaveLength(1);
+      expect(lines(50)[0]).toMatchObject({ verdict: 'unresolved', cause: 'second_unknown' });
+    });
+
+    // ---- code review round 1, fix wave FW1: C-2 (a WITHDRAW that does not land is re-applied) ----
+
+    /**
+     * An unresolved chain (the list fails on every check) whose FIRST delivery
+     * of the last check meets `withdrawAnswer` at the WITHDRAW - 'failed' (its
+     * write throws once) or 'lost' (its two writes lose their condition) - then
+     * the SQS redelivery of that SAME check envelope. Every other promise write
+     * goes through. Returns the retried row, the owner and the spy.
+     */
+    async function unresolvedWithdrawFault(withdrawAnswer: 'failed' | 'lost') {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot');
+      const due = iso(Date.now() + 10_000);
+      root.retry_due_at = due;
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      world.adapter.listMessages = async () => {
+        throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      };
+      const real = world.messagesRepo.annotateRetryPromise.bind(world.messagesRepo);
+      let faults = 0;
+      const annotate = vi.spyOn(world.messagesRepo, 'annotateRetryPromise').mockImplementation(async (conversationId, tsMsgId, patch, expected) => {
+        if (patch.retryOutcome !== undefined && faults < (withdrawAnswer === 'failed' ? 1 : 2)) {
+          faults += 1;
+          if (withdrawAnswer === 'failed') throw new Error('annotate exploded');
+          return false;
+        }
+        return real(conversationId, tsMsgId, patch, expected);
+      });
+      await runCheck(payloadOf(owner, at));
+      await runNextCheck();
+      // The last check, taken off the queue so it can be delivered twice: an SQS redelivery keeps its envelope.
+      const index = outbound.delayed.findIndex((d) => d.envelope.jobName === SEND_RECONCILE_JOB);
+      const [last] = outbound.delayed.splice(index, 1);
+      expect((last!.envelope.payload as SendReconcilePayload).checkNo).toBe(2);
+      const wire = JSON.stringify(last!.envelope);
+      await expect(dispatchJob(JSON.parse(wire) as unknown)).rejects.toThrow(`withdrawal answered '${withdrawAnswer}'`);
+      // The record closed FIRST; the row still promises; nothing re-rendered yet (afterClose did not run).
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'provider_unreachable' });
+      expect(root.retry_due_at).toBe(due);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(persistedFor(root.tsMsgId)).toHaveLength(0);
+      // The SQS redelivery of that same check: the superseded exit re-applies the WITHDRAW, then afterClose.
+      await dispatchJob(JSON.parse(wire) as unknown);
+      await outbound.settle();
+      expect(root).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+      expect(persistedFor(root.tsMsgId)).toHaveLength(2);
+      expect(lines(30).filter((l) => String(l['msg']).includes('superseded'))).toEqual([
+        expect.objectContaining({ state: 'done', outcome: 'unresolved', checkNo: 2 }),
+      ]);
+      // ONE unresolved ERROR in total: the redelivery logs no verdict of its own.
+      expect(lines(50).filter((l) => l['verdict'] === 'unresolved')).toHaveLength(1);
+      expect(got).toEqual([]);
+      expect(world.sent).toHaveLength(0);
+      return { root, owner, annotate };
+    }
+
+    it('FW1 C-2 (failed): a WITHDRAW whose write THROWS at the unresolved close fails the check (after the helper\'s ERROR); the redelivery of that check finds the record done for its own attempt and re-applies the WITHDRAW through the superseded exit - ONE unresolved ERROR in total', async () => {
+      const { annotate } = await unresolvedWithdrawFault('failed');
+      expect(annotate).toHaveBeenCalledTimes(2);
+      expect(capture.atLevel(50).map((l) => l['msg'])).toEqual([
+        'send.reconcile: unresolved - the platform cannot tell whether this text went out; closed send_unconfirmed, never re-sent',
+        'failure-arm write failed (best-effort); the attempt record decides',
+        'job failed: send.reconcile',
+      ]);
+    });
+
+    it('FW1 C-2 (lost): a WITHDRAW LOST twice (the promise kept moving) fails the check the same way; its redelivery re-applies the WITHDRAW - ONE unresolved ERROR in total', async () => {
+      const { annotate } = await unresolvedWithdrawFault('lost');
+      expect(annotate).toHaveBeenCalledTimes(3);
+      expect(capture.atLevel(50).map((l) => l['msg'])).toEqual([
+        'send.reconcile: unresolved - the platform cannot tell whether this text went out; closed send_unconfirmed, never re-sent',
+        'retry promise withdrawal lost twice - a concurrent writer keeps moving the promise',
+        'job failed: send.reconcile',
+      ]);
+    });
+
+    // ---- fix wave FW2 (planner review A1): THIS attempt's own row, by its retrychild# pointer ----
+
+    /** The one-to-one world for the FW2 cases: the reconcile registered, the re-drive recorded (never run). */
+    async function ownRowWorld(): Promise<unknown[]> {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      return got;
+    }
+
+    /**
+     * A retried row (`SMroot-<n>`, its promise due in 10 s) whose attempt 1 is
+     * reconciling WITHOUT a sid - a takeover of a run whose provider call was
+     * still in flight - and a child of it appended through the fake's append,
+     * so its retrychild# pointer exists: attempt `childAttempt`'s retry row
+     * (`SMown-<n>`, sent), created 100 s after the attempt started - outside
+     * the window [at - 60 s, at + 90 s] (the adversarial review's late text).
+     * The provider lists nothing.
+     */
+    async function withChildRow(n: number, childAttempt: number, facts: SendAttemptFacts = factsFor(TENANT_PHONE)) {
+      const root = await seedRow(`SMroot-${n}`, { providerTs: iso(Date.now() - 20_000) });
+      const due = iso(Date.now() + 10_000);
+      root.retry_due_at = due;
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, facts);
+      const child = await seedRow(`SMown-${n}`, {
+        providerTs: iso(Date.parse(at) + 100_000),
+        deliveryStatus: 'sent',
+        errorCode: undefined,
+        retryOf: root.tsMsgId,
+        retryAttempt: childAttempt,
+        retryRoot: root.tsMsgId,
+      });
+      return { root, due, owner, at, child };
+    }
+
+    const ownRowMissing = "send.reconcile: a retrychild# pointer names this attempt's retry row but the row cannot be read - the lookup goes on";
+
+    it('FW2 A1: a retried row that already holds THIS attempt\'s own retry row (its retrychild# pointer) is found from that row at check 0 - done/adopted with its SID, adoption skipped, path lookup - before any provider list: no re-drive, no second row, no audit row, no promise write', async () => {
+      const got = await ownRowWorld();
+      const { root, due, owner, at, child } = await withChildRow(1, 1);
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      const count = world.messages.length;
+      await runChain(payloadOf(owner, at));
+      expect(list).not.toHaveBeenCalled();
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: 'SMown-1' });
+      expect(got).toEqual([]);
+      expect(scheduledChecks()).toHaveLength(0);
+      expect(world.messages).toHaveLength(count);
+      expect(await world.messagesRepo.listRetryChildrenConsistent(retryConv, root.tsMsgId)).toEqual([
+        { tsMsgId: child.tsMsgId, providerSid: 'SMown-1', retryAttempt: 1 },
+      ]);
+      expect(world.auditEvents).toHaveLength(0);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')).toEqual([
+        expect.objectContaining({ path: 'lookup', adoption: 'skipped', sid: 'SMown-1', deliveryStatus: 'sent', checkNo: 0 }),
+      ]);
+      // Neither refreshed nor withdrawn; afterClose re-renders the retried row once, and nothing re-announces the child.
+      expect(root.retry_due_at).toBe(due);
+      expect(root).not.toHaveProperty('retry_outcome');
+      expect(persistedFor(root.tsMsgId)).toHaveLength(1);
+      expect(persistedFor(child.tsMsgId)).toHaveLength(0);
+      expect(capture.atLevel(40)).toHaveLength(0);
+      expect(capture.atLevel(50)).toHaveLength(0);
+    });
+
+    it('FW2 A1: the own-row proof wins over every provider-side verdict (the check is the lookup\'s FIRST step) - with the list throwing on every check, with no sender on the record (no_sender) and with the thread\'s number changed (digest_mismatch), each attempt is found/adopted from its own row: never unresolved, no ERROR, the promise never withdrawn', async () => {
+      const got = await ownRowWorld();
+      const list = vi
+        .spyOn(world.adapter, 'listMessages')
+        .mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+      // (1) the provider unreachable on every check (unresolved provider_unreachable before FW2).
+      const unreachable = await withChildRow(1, 1);
+      await runChain(payloadOf(unreachable.owner, unreachable.at));
+      // (2) a record with no sender - an unpinned dev send (unresolved no_sender before FW2).
+      const unpinned = await withChildRow(2, 1, factsFor(TENANT_PHONE, { sender: null }));
+      expect(await recordOf(unpinned.owner)).not.toHaveProperty('sender');
+      await runChain(payloadOf(unpinned.owner, unpinned.at));
+      // (3) the thread's number changed after the send (unresolved digest_mismatch before FW2).
+      const renumbered = await withChildRow(3, 1);
+      world.conversations.get(retryConv)!.participant_phone = '+15558675309';
+      await runChain(payloadOf(renumbered.owner, renumbered.at));
+      for (const [n, s] of [[1, unreachable], [2, unpinned], [3, renumbered]] as const) {
+        expect(await recordOf(s.owner)).toMatchObject({ state: 'done', outcome: 'adopted', sid: `SMown-${n}` });
+        expect(s.root.retry_due_at).toBe(s.due);
+        expect(s.root).not.toHaveProperty('retry_outcome');
+      }
+      expect(lines(30).filter((l) => l['verdict'] === 'found').map((l) => [l['sid'], l['path'], l['adoption'], l['checkNo']])).toEqual([
+        ['SMown-1', 'lookup', 'skipped', 0],
+        ['SMown-2', 'lookup', 'skipped', 0],
+        ['SMown-3', 'lookup', 'skipped', 0],
+      ]);
+      expect(list).not.toHaveBeenCalled();
+      expect(capture.atLevel(50)).toHaveLength(0);
+      expect(capture.atLevel(40)).toHaveLength(0);
+      expect(got).toEqual([]);
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('FW2 A1 (control): a child of ANOTHER attempt number is not this attempt\'s row - the pointer partition is read once per check and the lookup runs as before: never_sent at the last check, ONE re-drive', async () => {
+      const got = await ownRowWorld();
+      const { owner, at } = await withChildRow(1, 2);
+      const children = vi.spyOn(world.messagesRepo, 'listRetryChildrenConsistent');
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runChain(payloadOf(owner, at));
+      expect(children).toHaveBeenCalledTimes(3);
+      expect(children).toHaveBeenCalledWith(retryConv, owner.retriedTsMsgId);
+      expect(list).toHaveBeenCalledTimes(3);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMroot-1', conversationId: retryConv, attempt: 1 }]);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')).toHaveLength(0);
+      expect(lines(40).filter((l) => l['verdict'] === 'never_sent')).toHaveLength(1);
+      expect(lines(40).filter((l) => l['msg'] === ownRowMissing)).toHaveLength(0);
+    });
+
+    it('FW2 A1 (anomaly): a pointer of THIS attempt whose row cannot be read WARNs once per check - naming the owner and the child\'s tsMsgId - and the lookup runs unchanged: here never_sent at the last check and ONE re-drive', async () => {
+      const got = await ownRowWorld();
+      const { owner, at, child } = await withChildRow(1, 1);
+      const read = world.messagesRepo.getByTsMsgIdConsistent.bind(world.messagesRepo);
+      vi.spyOn(world.messagesRepo, 'getByTsMsgIdConsistent').mockImplementation(async (conversationId, tsMsgId) =>
+        tsMsgId === child.tsMsgId ? undefined : read(conversationId, tsMsgId),
+      );
+      const list = vi.spyOn(world.adapter, 'listMessages');
+      await runChain(payloadOf(owner, at));
+      const missing = lines(40).filter((l) => l['msg'] === ownRowMissing);
+      expect(missing.map((l) => l['checkNo'])).toEqual([0, 1, 2]);
+      expect(missing[0]).toMatchObject({
+        childTsMsgId: child.tsMsgId,
+        recipientKey: 'c-retry',
+        owner: { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: owner.retriedTsMsgId, attempt: '1', retryRoot: owner.retryRoot },
+      });
+      expect(list).toHaveBeenCalledTimes(3);
+      expect(await recordOf(owner)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMroot-1', conversationId: retryConv, attempt: 1 }]);
+      expect(lines(30).filter((l) => l['verdict'] === 'found')).toHaveLength(0);
+    });
+
+    // ---- the lineage exclusion in the sibling rule (spec section 4 item 13; R4, R12) ----
+
+    it('13 attempt 1 adopted, then attempt 2 never_sent inside the sibling span is RE-DRIVEN - the record that produced the retried row is lineage, not a sibling', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 30_000) });
+      // Attempt 1: its record done/adopted with the retry row it adopted.
+      const a1 = rOwner(root, 1);
+      const at1 = await reconciling(a1, factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      const r1 = await seedRow('SMretry1', { providerTs: iso(Date.now() - 19_000), retryOf: root.tsMsgId, retryAttempt: 1, retryRoot: root.tsMsgId });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(a1, at1, { outcome: 'adopted', sid: 'SMretry1' })).toBe(true);
+      // Attempt 2 retries r1 and finds nothing.
+      const a2 = rOwner(r1, 2);
+      expect(a2.retryRoot).toBe(root.tsMsgId);
+      const at2 = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at2));
+      expect(await recordOf(a2)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMretry1', conversationId: retryConv, attempt: 2 }]);
+      expect(lines(50)).toHaveLength(0);
+    });
+
+    /** A share's record for a recipient of this number (`contactKey`, c-retry by default) claimed at `atMs`; closed adopted when asked, else left reconciling (open). */
+    async function shareRecord(broadcastId: string, atMs: number, adopted: boolean, contactKey = 'c-retry'): Promise<void> {
+      const owner: SendAttemptOwner = { kind: 'broadcast', broadcastId, contactKey };
+      const at = await reconciling(owner, factsFor(TENANT_PHONE), { at: iso(atMs) });
+      if (adopted) {
+        expect(await world.sendAttemptsRepo.closeFromReconcile(owner, at, { outcome: 'adopted', sid: `SM${broadcastId}` })).toBe(true);
+      }
+    }
+
+    it('13a a share root\'s OWN broadcast record, adopted inside the span, is lineage too: attempt 1 on the share root is re-driven', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 25_000), broadcastId: 'bcast-1' });
+      await shareRecord('bcast-1', Date.now() - 20_000, true);
+      const a1 = rOwner(root, 1);
+      const at = await reconciling(a1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a1, at));
+      expect(await recordOf(a1)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toHaveLength(1);
+    });
+
+    it('13a2 an UNRELATED share to the same tenant, still open inside the span, keeps SOR\'s protection: the attempt is unresolved same_fingerprint_sibling although its own share\'s record is excluded', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 25_000), broadcastId: 'bcast-1' });
+      await shareRecord('bcast-1', Date.now() - 20_000, true);
+      await shareRecord('bcast-2', Date.now() - 10_000, false);
+      const a1 = rOwner(root, 1);
+      const at = await reconciling(a1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a1, at));
+      expect(await recordOf(a1)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+    });
+
+    it('13a3 the SAME share\'s record for ANOTHER contact on this number is not lineage either (R2 #18): it still withholds never_sent', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 25_000), broadcastId: 'bcast-1' });
+      await shareRecord('bcast-1', Date.now() - 20_000, true);
+      await shareRecord('bcast-1', Date.now() - 15_000, false, 'c-housemate');
+      const a1 = rOwner(root, 1);
+      const at = await reconciling(a1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a1, at));
+      expect(await recordOf(a1)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+    });
+
+    it('13b a MANUAL-retry chain under the same root still blocks (the same root is not lineage): the original chain\'s attempt against the manual row\'s PARENT is not the manual row\'s producer', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 60_000) });
+      // The original chain's attempt 1 against the root, still reconciling.
+      await reconciling(rOwner(root, 1), factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      // A staff Retry of the root (a manual row: retry_of, no retry_attempt) that itself failed 30003.
+      const manual = await seedRow('SMmanual', { providerTs: iso(Date.now() - 15_000), retryOf: root.tsMsgId, retryRoot: root.tsMsgId });
+      const m1 = rOwner(manual, 1);
+      expect(m1.retryRoot).toBe(root.tsMsgId);
+      const at = await reconciling(m1, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(m1, at));
+      expect(await recordOf(m1)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+      expect(manual).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
+    });
+
+    it('13c the ancestry walk stops at a BROKEN retry_of - the rows read so far are still lineage: the producer of the retried row is excluded and attempt 2 is re-driven', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      // r1's retry_of names a row that is gone; attempt 1 against that missing row produced r1.
+      const missing = '2026-09-27T09:00:00.000Z#SMgone';
+      const r1 = await seedRow('SMretry1', { providerTs: iso(Date.now() - 19_000), retryOf: missing, retryAttempt: 1, retryRoot: missing });
+      const producer: RetrySendOwner = { kind: 'retry_send', conversationId: retryConv, retriedTsMsgId: missing, attempt: 1, recipientKey: 'c-retry', retryRoot: missing };
+      const atP = await reconciling(producer, factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(producer, atP, { outcome: 'adopted', sid: 'SMretry1' })).toBe(true);
+      const a2 = rOwner(r1, 2);
+      const at2 = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at2));
+      expect(await recordOf(a2)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toHaveLength(1);
+    });
+
+    /** A staff Retry of `root` (a manual row) whose OWN chain's attempt 1 was adopted inside the span as m1; returns m1. */
+    async function manualChainAdopted(root: MessageItem): Promise<MessageItem> {
+      const manual = await seedRow('SMmanual', { providerTs: iso(Date.now() - 25_000), retryOf: root.tsMsgId, retryRoot: root.tsMsgId });
+      const producer = rOwner(manual, 1);
+      const at = await reconciling(producer, factsFor(TENANT_PHONE), { at: iso(Date.now() - 20_000) });
+      const m1 = await seedRow('SMmanual-r1', {
+        providerTs: iso(Date.now() - 19_000),
+        retryOf: manual.tsMsgId,
+        retryAttempt: 1,
+        retryRoot: root.tsMsgId,
+      });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(producer, at, { outcome: 'adopted', sid: 'SMmanual-r1' })).toBe(true);
+      return m1;
+    }
+
+    it('13d under a manual retry\'s own chain the walk reaches the automatic row: its producer (attempt 1 against the MANUAL row) is lineage - attempt 2 is re-driven', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 60_000) });
+      const m1 = await manualChainAdopted(root);
+      const a2 = rOwner(m1, 2);
+      const at = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at));
+      expect(await recordOf(a2)).toMatchObject({ state: 'redriven', redriveCount: 1 });
+      expect(got).toEqual([{ providerSid: 'SMmanual-r1', conversationId: retryConv, attempt: 2 }]);
+    });
+
+    it('13e the ancestry walk STOPS at the manual row: the original chain\'s attempt beyond it, adopted inside the span, still withholds never_sent', async () => {
+      register();
+      const got = recordJobs(RETRY_SEND_JOB);
+      await seedOneToOne();
+      const root = await seedRow('SMroot', { providerTs: iso(Date.now() - 60_000) });
+      const a1 = rOwner(root, 1);
+      const at1 = await reconciling(a1, factsFor(TENANT_PHONE), { at: iso(Date.now() - 30_000) });
+      expect(await world.sendAttemptsRepo.closeFromReconcile(a1, at1, { outcome: 'adopted', sid: 'SMorig-r1' })).toBe(true);
+      const m1 = await manualChainAdopted(root);
+      const a2 = rOwner(m1, 2);
+      const at = await reconciling(a2, factsFor(TENANT_PHONE));
+      await runChain(payloadOf(a2, at));
+      expect(await recordOf(a2)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'same_fingerprint_sibling' });
+      expect(got).toEqual([]);
+    });
+
+    // ---- deviation 7 and worklist item 10: a share-RETRY row is never the share's own row ----
+
+    it('isBroadcastRowFor never claims a share-RETRY row (retry_of set) for the share recipient - not even the row its slot carries (deviation 7)', () => {
+      const owner = { broadcastId: 'b-1', contactId: 'c-1', slotTsMsgId: undefined };
+      expect(isBroadcastRowFor({ broadcast_id: 'b-1', recipient_contact_id: 'c-1', tsMsgId: 'x' }, owner)).toBe(true);
+      expect(isBroadcastRowFor({ broadcast_id: 'b-1', recipient_contact_id: 'c-1', tsMsgId: 'x', retry_of: 'root' }, owner)).toBe(false);
+      expect(isBroadcastRowFor({ broadcast_id: 'b-1', tsMsgId: 'x', retry_of: 'root' }, owner)).toBe(false);
+      expect(isBroadcastRowFor({ broadcast_id: 'b-1', tsMsgId: 'x', retry_of: 'root' }, { ...owner, slotTsMsgId: 'x' })).toBe(false);
+    });
+
+    it('a broadcast attempt whose known SID is a RETRY row of its own share is sid_held_elsewhere, and the holder is named as a message row - never as the share\'s own row (worklist item 10)', async () => {
+      register();
+      const t = seedTenant();
+      seedBroadcast([t.contactId]);
+      const conv = await world.conversationsRepo.createOrGetByParticipantPhone(t.phone!, 'tenant_1to1');
+      const shareRow = {
+        conversationId: conv.conversationId,
+        type: 'sms' as const,
+        direction: 'outbound' as const,
+        author: 'teammate' as const,
+        body: BODY,
+        broadcastId: 'bcast-1',
+        automated: true,
+        recipientContactId: t.contactId,
+      };
+      const root = await world.messagesRepo.append({ ...shareRow, providerSid: 'SMshare-root', providerTs: iso(Date.now() - 60_000), deliveryStatus: 'undelivered', errorCode: '30003' });
+      const retry = await world.messagesRepo.append({
+        ...shareRow,
+        providerSid: 'SMshare-retry',
+        providerTs: iso(Date.now()),
+        deliveryStatus: 'sent',
+        retryOf: root.tsMsgId,
+        retryAttempt: 1,
+        retryRoot: root.tsMsgId,
+      });
+      const at = await reconciling(bOwner(t.contactId), factsFor(t.phone!), { sid: 'SMshare-retry' });
+      plant({ providerSid: 'SMshare-retry', providerStatus: 'sent', to: t.phone! });
+      await runCheck(payloadOf(bOwner(t.contactId), at));
+      expect(await recordOf(bOwner(t.contactId))).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'sid_held_elsewhere' });
+      expect(lines(50)).toHaveLength(1);
+      expect(lines(50)[0]).toMatchObject({ heldBy: `message#${conv.conversationId}#${retry.tsMsgId}` });
+      expect(slotOf(t.contactId)).toEqual({ status: 'failed', errorCode: 'send_unconfirmed' });
+    });
+  });
+
   describe('the payload, the owner reference and the row owner test', () => {
     it('the parser refuses every other malformed field: empty or missing ids, a null payload, owner or continuation, a non-string attemptedAt, a negative check index', () => {
       const at = new Date().toISOString();
@@ -3032,11 +4075,66 @@ describe('send.reconcile (spec D11-D16)', () => {
         { kind: 'broadcast', broadcastId: 'b', contactKey: key },
         { kind: 'relay_leg', relayConversationId: 'c', sourceTsMsgId: 's', memberKey: key },
         { kind: 'relay_rung', relayConversationId: 'c', retryTsMsgId: 'r', memberKey: key },
+        { kind: 'retry_send', conversationId: 'c', retriedTsMsgId: 'r', attempt: 1, recipientKey: key, retryRoot: 'root' },
       ];
       for (const owner of owners) {
         const ref = toOwnerRef(owner);
         expect(ref.recipientKeyHash).toBe(hashRecipientKey(key));
         expect(JSON.stringify(ref)).not.toContain('phone#+');
+      }
+    });
+
+    it('retry_send (retry-send-adoption R1): the reference round-trips through the payload - the ids, the NUMERIC attempt and the root carried, the recipient key only as its hash', () => {
+      const at = new Date().toISOString();
+      for (const recipientKey of ['c-retry', 'phone#+15550100009']) {
+        const owner: RetrySendOwner = {
+          kind: 'retry_send',
+          conversationId: 'conv-1',
+          retriedTsMsgId: '2026-09-27T12:00:00.000Z#SMa',
+          attempt: 2,
+          recipientKey,
+          retryRoot: '2026-09-27T11:59:00.000Z#SMroot',
+        };
+        const ref = toOwnerRef(owner);
+        expect(ref).toStrictEqual({
+          kind: 'retry_send',
+          conversationId: 'conv-1',
+          retriedTsMsgId: '2026-09-27T12:00:00.000Z#SMa',
+          attempt: 2,
+          retryRoot: '2026-09-27T11:59:00.000Z#SMroot',
+          recipientKeyHash: hashRecipientKey(recipientKey),
+        });
+        const parsed = parseSendReconcilePayload(JSON.parse(JSON.stringify({ owner: ref, attemptedAt: at, checkNo: 1 })) as unknown);
+        expect(parsed).toStrictEqual({ owner: ref, attemptedAt: at, checkNo: 1 });
+        expect(JSON.stringify(parsed)).not.toContain('phone#+');
+      }
+    });
+
+    it('retry_send: the parser refuses an attempt outside 1..MAX_SEND_RETRY_ATTEMPTS, a fractional or string attempt, and a missing id or root', () => {
+      const at = new Date().toISOString();
+      const good = { kind: 'retry_send', conversationId: 'conv-1', retriedTsMsgId: 'T#SMa', attempt: 1, retryRoot: 'T0#SMroot', recipientKeyHash: 'c-1' };
+      expect(parseSendReconcilePayload({ owner: good, attemptedAt: at, checkNo: 0 }).owner).toStrictEqual(good);
+      expect(parseSendReconcilePayload({ owner: { ...good, attempt: MAX_SEND_RETRY_ATTEMPTS }, attemptedAt: at, checkNo: 0 }).owner).toMatchObject({
+        attempt: MAX_SEND_RETRY_ATTEMPTS,
+      });
+      const { attempt: _attempt, ...noAttempt } = good;
+      const { retryRoot: _retryRoot, ...noRoot } = good;
+      const { conversationId: _conversationId, ...noConversation } = good;
+      const { retriedTsMsgId: _retriedTsMsgId, ...noRetried } = good;
+      const bad: unknown[] = [
+        { ...good, attempt: 0 },
+        { ...good, attempt: MAX_SEND_RETRY_ATTEMPTS + 1 },
+        { ...good, attempt: '1' },
+        { ...good, attempt: 1.5 },
+        noAttempt,
+        noRoot,
+        { ...good, retryRoot: '' },
+        noConversation,
+        noRetried,
+        { ...good, recipientKeyHash: '' },
+      ];
+      for (const owner of bad) {
+        expect(() => parseSendReconcilePayload({ owner, attemptedAt: at, checkNo: 0 }), JSON.stringify(owner)).toThrow(/^sendReconcile: /);
       }
     });
 

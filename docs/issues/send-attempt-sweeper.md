@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app/messaging
 created: 2026-09-25
-updated: 2026-09-27
+updated: 2026-09-28
 refs: docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, app/src/repos/sendAttemptsRepo.ts:30, app/src/repos/sendAttemptsRepo.ts:329, app/src/lib/tables.ts:232, app/src/jobs/relayFanOut.ts:1381, app/src/jobs/relayRetryLeg.ts:939, app/src/jobs/sendReconcile.ts:370, app/src/jobs/sendReconcile.ts:1041, app/src/repos/messagesRepo.ts:714, app/src/services/groupSendStaleness.ts:1, app/src/jobs/groupGuardrails.ts:7, app/src/routes/webhooks/twilio.ts:2936, app/src/routes/webhooks/twilio.ts:3039, dashboard/src/routes/contact/deliveryStatus.ts:274
 ---
 
@@ -425,3 +425,140 @@ A SIGTERM-aware fan-out loop (stop at a recipient boundary, re-enqueue the
 remainder under a fresh `jobId` before exit) would remove the common case at
 its source; the owner sweep is still needed for a SIGKILL or a crash. Both
 are recorded as directions in the H-1 issue, not designed.
+
+**retry-send-adoption (2026-09-28).** `feat/retry-send-adoption` (code final
+`1b5ddb01`, UNMERGED; anchors at `5a03e20b`) adds a fourth owner kind and a
+third item family this sweeper will meet. Status and severity unchanged.
+Records: `docs/superpowers/reviews/2026-09-27-retry-send-adoption/code-review/`
+(`r1-adjudications.md`, `r2-adjudications.md`, `fw1-report.md`).
+
+**The `retry_send` owner** - one automatic one-to-one 30003 retry attempt
+(`app/src/repos/sendAttemptsRepo.ts:63-70`). Its `ownerKey` is
+`retry#<conversationId>#<retriedTsMsgId>#<attempt>` (`:177-179`): the
+RETRIED row (the one the job names by SID) and the attempt; the chain root is
+the `retryRoot` fact, never part of the key. The record partition is
+`sendattempt#` plus that key; its sort key is the recipient key - the retried
+row's `recipient_contact_id`, else `phone#<participant_phone>`
+(`app/src/services/retryChain.ts:48-55`) - hashed when it carries a phone.
+The reconcile payload carries the ids and the recipient HASH
+(`app/src/jobs/sendReconcile.ts:147-154`); each check re-derives the key from
+the retried row and the thread and compares (`:619-640`). A death
+mid-attempt is taken over by the SQS redelivery of the owner's own job,
+through the gate (`app/src/jobs/retrySend.ts:421-426`; spec R12). What is
+left for this sweeper:
+
+10. **A guarded write that throws leaves `attempting`** (guardWrite's ERROR):
+    a close after a refusal, a rejection, a deferral cap or a closed window
+    (`finish`, `retrySend.ts:651-670`); the record phase after a send
+    (`:563-567`; the retry row exists, so the route's `superseded` answers
+    first); the deferral's release (`:745-754`), after which the promise is
+    still refreshed (`:747`) and the deferred run takes the record over past
+    the claim TTL (production backoffs are 60-240 s) or, under a shorter
+    backoff (the lane's 10 s), defers and strands; and `handToReconcile`
+    (`:806-823`), which leaves an UNKNOWN outcome with no chain and the
+    promise unrefreshed.
+11. **A death between a record write and its enqueue** (round 1 A-4): the
+    hand-off or a takeover, then the check-0 enqueue (`retrySend.ts:815`,
+    `:424`, `:508`; the enqueue `:769-772`), leaves `reconciling`;
+    `markRedriven`, then the re-drive enqueue (`sendReconcile.ts:1619`,
+    `:1631`), leaves `redriven` (item 4's class). Every redelivery of the
+    job defers on `reconciling` (`app/src/lib/sendAttemptGate.ts:38`) and is
+    deleted. For items 10 and 11 alike: once the promise lapses (at most
+    `attemptedAt` + 480 s) the bubble offers Retry, but the route answers 409
+    `retry_pending` until `attemptedAt` + 15 minutes
+    (`app/src/routes/api.ts:1683-1690`), then lets a press through - a
+    second text if the stranded attempt had been accepted. (A backlog that
+    runs the checks late shows the same flicker without a crash.)
+12. **A re-driven job that declines at step 1 or 3** - the retried row
+    missing or not outbound, the conversation missing, a group or phone-less
+    (`retrySend.ts:349-366`, `:395-403`, all before the gate) - leaves its
+    record `redriven`, which the route reads as `retry_pending` for 15
+    minutes. Practically unreachable: the reconcile read both just before
+    the re-drive. Steps 4a and 4b close a `redriven` record `done` /
+    `refused` (`:687-692`); since round 1 C-1 a close that throws fails the
+    delivery and the redelivery re-runs it, so only a PERSISTENT fault
+    strands it there - dead-lettered after five receives, paging
+    `jobs-dlq-depth` (`fw1-report.md`, "Found, not in the list", item 2).
+13. **C-2's job half (round 1 C-2).** A WITHDRAW that fails after the JOB's
+    own unresolved close - a second unknown after a re-drive
+    (`retrySend.ts:834-852`) or a failed check-0 enqueue (`:773-794`) - is
+    never re-applied: the job returns normally, and a redelivery would meet
+    the gate's skip on the `done` record (`sendAttemptGate.ts:33`). The row
+    keeps its promise, then reads the plain 30003 failure WITH Retry; the
+    route still refuses 409 `retry_unresolved` from the record
+    (`api.ts:1670-1676`) for its 30-day life (item 15). The reconcile's half
+    is fixed: its failed WITHDRAW now fails the check, and the redelivery
+    re-applies it through the superseded exit
+    (`sendReconcile.ts:1327-1332`, `:528-532`); a persistent fault
+    dead-letters there with the record `done` / `unresolved`, which a scan
+    of OPEN records will not see.
+14. **C-7: a PHONE-keyed attempt whose thread number changed** is
+    unaddressable - the re-derived key no longer hashes to the ref
+    (`sendReconcile.ts:629-630`), every check logs INFO `owner recipient not
+    found` (`:501-509`), the record stays `reconciling` and the promise
+    untouched (R1 governs over R4's digest rule; pinned by
+    `app/test/sendReconcile.test.ts:3577`). Practically unreachable (round
+    2): a one-to-one thread's `participant_phone` is only rewritten for
+    relay threads (`app/src/repos/conversationsRepo.ts:2158`).
+15. **The TTL residue.** The record's `expires_at` is set only at the claim
+    and the re-arm (`sendAttemptsRepo.ts:327`, `:436`), 30 days out
+    (`SEND_ATTEMPT_CLEANUP_MS`, `:48`). After that the route's
+    `retry_unresolved` refusal rests on the row's `retry_outcome` belt alone
+    (`api.ts:1670-1672`), so a lost WITHDRAW (item 13) leaves an unresolved
+    row manually retryable - the second text Cameron's Q1 ruling rules out.
+
+**The `retrychild#` family** (spec R7), beside `sid#`, `relaysid#`,
+`syssid#` and the media pointers: partition
+`retrychild#<conversationId>#<parentTsMsgId>`, sort key the child row's
+`tsMsgId`, attributes `provider_sid` and `retry_attempt` (absent on a manual
+Retry row) (`app/src/repos/messagesRepo.ts:2102-2114`). Put, unconditioned,
+inside the append transaction of every row carrying `retryOf`
+(`:2785-2799`); never updated; read by one consistent Query (`:3359-3386`)
+from the job's step 4a (`retrySend.ts:461`) and the manual Retry route
+(`api.ts:1638`). It carries no `expires_at` - message rows have none - so it
+lives with the table. A pointer, never state: a sweeper reads it only as
+"this row has a child". Children appended before the deploy have none (no
+backfill).
+
+**(FW2/FW3, 2026-09-28) `already_sent` is not a refusal.** A `retry_send`
+record closed `done` / `refused` with cause `already_sent` means the retry
+text EXISTS: step 4a declines a re-driven attempt whose own retry row is
+already appended (`app/src/jobs/retrySend.ts:478-486` at `aae99caa`, the
+close `declineBeforeClaim(owner, redriven, ALREADY_SENT_CAUSE, octx)` at
+`:480`; only a `redriven` record is closed so), and the retried row's
+`retrychild#` pointer for that attempt names its SID. `closeRedriven` has no
+`sent` outcome (`app/src/repos/sendAttemptsRepo.ts:159-162`), and nothing
+reads `cause` today - a sweeper or a report must not count it as a refusal.
+
+**Fix wave FW1's out-of-list finding 1 (`fw1-report.md`, "Found, not in the
+list"): round 1 C-1's shape in SOR's relay code.** Checked at `5a03e20b`. No
+new issue: its rung half is item 9 above, and its fan-out twin is added
+here. Round 1 C-1 made this branch's pre-claim decline close unguarded
+(`retrySend.ts:687-692`): the job has no run-once marker, so a throw there
+is a real SQS redelivery that re-runs the idempotent decline. SOR's relay
+jobs keep the guarded form:
+
+- the rung's `closeUnlessOwned` (`app/src/jobs/relayRetryLeg.ts:672-722`,
+  the guarded `closeRedriven` at `:684-689`), reached before the claim from
+  the gate refusals (`:749`), the window gate (`:801`) and the send deadline
+  (`:1046`) - item 9;
+- the relay fan-out's `closeRedriveRefused`
+  (`app/src/jobs/relayFanOut.ts:1680-1719`, the guarded `closeRedriven` at
+  `:1697-1699`, documented "never throws"), reached from a re-drive pass
+  that cannot run (`:846`, `:860`, `:866`, `:882`, `:1124`, `:1148`,
+  `:1494`): a thrown close logs guardWrite's ERROR and skips the member
+  (`:1700`), so its record stays `redriven` and its slot as it was - the
+  same strand as item 9, not listed before.
+
+The C-1 fix does not transfer as it stands: both jobs still claim the
+run-once marker before these closes (`relayRetryLeg.ts:450-459`,
+`relayFanOut.ts:829-841`), so an unguarded throw would fail the delivery and
+its redelivery - the same jobId - would be suppressed: the same strand plus
+a `job failed` line (why SOR kept the rung's close guarded, its FW2
+deviation 6). Directions, SOR's call: re-run the decline under a fresh
+envelope, the way SOR's own unguarded pre-claim closes reach the unit's
+prepare catch and are deferred and carried (`relayFanOut.ts:1871-1881`,
+`app/src/jobs/broadcastFanOut.ts:652-659`); or drop the marker for the
+claim as the duplicate guard, as `retrySend` now has; else this sweeper's
+orphaned-`redriven` re-drive (the suggested fix above). Nothing is sent
+either way.

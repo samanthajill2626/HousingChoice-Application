@@ -166,7 +166,7 @@ export const CHAIN_PAGE_LIMIT = 100;
  * revisits it, so its chain ended unresolved. The production schedule is the
  * reference; a lane's shortened delays only make its records stale sooner.
  */
-export const STALE_RECONCILING_MS = RECONCILE_CHECK_DELAYS_MS[2]! + RETRY_PROMISE_GRACE_MS;
+export const STALE_RECONCILING_MS = RECONCILE_CHECK_DELAYS_MS[RECONCILE_CHECK_DELAYS_MS.length - 1]! + RETRY_PROMISE_GRACE_MS;
 
 /**
  * The error classes a failed slot or ledger WRITE aborts the run on (code

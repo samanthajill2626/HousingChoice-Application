@@ -1230,21 +1230,31 @@ write one (additive `notes` appends are not field writes and are never demoted).
 |---|---|---|
 | `AI_EXTRACTION_ENABLED` | `false` in production, `true` otherwise | Master kill switch. When off, the webhook schedules nothing and the worker starts no poll - the feature is inert. |
 | `EXTRACTION_DRIVER` | `anthropic` in production, `console` otherwise | LLM driver. `anthropic` = real call; `console` = logs a summary and returns nothing (keeps local dev offline); `fake` = deterministic test seam. **`fake` is REFUSED by the prod config validator** (throws at boot). |
-| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget is model-sensitive. |
+| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget and the thinking-off form are both model-sensitive. |
 | `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
 | `ANTHROPIC_API_KEY` | (unset) | Anthropic REST key. Required when `AI_EXTRACTION_ENABLED` and `EXTRACTION_DRIVER=anthropic` in production, or the config fails fast at boot. |
 
-**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** The driver sends
-`thinking: {type:'disabled'}` explicitly and budgets `max_tokens` (`MAX_OUTPUT_TOKENS`, currently 4096
+**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** The driver turns thinking off
+explicitly on every call and budgets `max_tokens` (`MAX_OUTPUT_TOKENS`, currently 4096
 in `app/src/adapters/extraction.ts`) for the JSON alone. **Never drop that parameter.** What an ABSENT
 `thinking` means is decided per model - `claude-opus-4-8` runs without thinking, `claude-sonnet-5` runs
 adaptive thinking - and `max_tokens` caps thinking and response text *together*. Omitting it therefore
 lets a model swap silently hand the JSON budget to reasoning tokens with no other change in the repo.
 That is exactly what broke prod extraction on **2026-08-15**: the model had moved to `claude-sonnet-5`,
 every large run stopped dead on the cap, and the failures surfaced only as `extraction poll: row failed`.
-After any model change, watch the AI run log for `truncated` failures and raise `MAX_OUTPUT_TOKENS` if
-the new model writes longer. `voice` runs are the largest output by construction (a `speakerRoles` pair
-per `Speaker N` label on top of the all-required object), so they truncate first.
+
+The OFF switch is itself per-model, and a wrong one fails EVERY run as a `driver` error (a 400).
+`claude-sonnet-5-5` refuses `{type:'disabled'}` and takes `{type:'between_tools'}` instead (text only on
+this no-tools request), while every earlier model refuses `between_tools`. The driver sends
+`between_tools` to the models in `BETWEEN_TOOLS_MODELS` (same file) and `disabled` to everything else,
+so **check a new model's accepted thinking settings before swapping to it**, and add it to that set if
+it refuses `disabled`. `claude-opus-5-5` and the Fable/Mythos models accept neither - thinking cannot
+be turned off there, and the driver does not support them.
+
+After any model change, watch the AI run log for `driver` and `truncated` failures, and raise
+`MAX_OUTPUT_TOKENS` if the new model writes longer. `voice` runs are the largest output by
+construction (a `speakerRoles` pair per `Speaker N` label on top of the all-required object), so they
+truncate first.
 
 **Housing authority: why an extracted one sometimes arrives as a suggestion.** The field is free
 text, not a closed vocabulary. `lib/housingAuthority.ts` collapses known variants to one spelling

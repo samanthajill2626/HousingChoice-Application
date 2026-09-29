@@ -170,7 +170,7 @@ export const EMPTY_EXTRACTION: ExtractionResult = Object.freeze({ fields: {} }) 
  * HEADROOM, not the fix. Run 4bf0cf42 measured it: 2048 output tokens billed
  * against ~500 characters of emitted JSON - order of 150 tokens of text, with
  * the other ~1900 spent on thinking the request never asked for and never saw.
- * 2048 was always ample for the JSON alone; THINKING_CONFIG below is what
+ * 2048 was always ample for the JSON alone; thinkingOff() below is what
  * actually reclaims it. 4096 just means a verbose future model has somewhere to
  * go before it truncates again.
  */
@@ -190,8 +190,21 @@ const MAX_OUTPUT_TOKENS = 4096;
  * Extraction is mechanical structured output against a fixed schema, so there
  * is nothing here for thinking to buy. Stating it explicitly makes the budget
  * mean the same thing on whatever model AI_EXTRACTION_MODEL names next.
+ *
+ * The OFF switch itself is per-model, and a wrong one is a 400 on EVERY run.
+ * claude-sonnet-5-5 refuses `disabled`; its lowest setting is `between_tools`,
+ * which on a request with no tools (this one) returns text only, exactly what
+ * `disabled` does on the models before it - and every one of those refuses
+ * `between_tools`. A model missing from this set gets `disabled`, so check a
+ * new model's accepted thinking settings before pointing AI_EXTRACTION_MODEL at
+ * it. claude-opus-5-5 and the Fable/Mythos models accept neither: thinking
+ * cannot be turned off there at all, and this driver does not support them.
  */
-const THINKING_CONFIG = { type: 'disabled' } as const;
+const BETWEEN_TOOLS_MODELS: ReadonlySet<string> = new Set(['claude-sonnet-5-5']);
+
+function thinkingOff(model: string) {
+  return BETWEEN_TOOLS_MODELS.has(model) ? ({ type: 'between_tools' } as const) : ({ type: 'disabled' } as const);
+}
 
 class ConsoleExtractionDriver implements ExtractionDriver {
   readonly kind = 'console' as const;
@@ -239,7 +252,7 @@ class AnthropicExtractionDriver implements ExtractionDriver {
       message = await this.client.messages.create({
         model: this.model,
         max_tokens: MAX_OUTPUT_TOKENS,
-        thinking: THINKING_CONFIG,
+        thinking: thinkingOff(this.model),
         output_config: { format: { type: 'json_schema', schema: EXTRACTION_SCHEMA } },
         system: buildExtractionSystemPrompt(),
         messages: [{ role: 'user', content: buildExtractionUserContent(input) }],

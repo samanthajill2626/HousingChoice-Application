@@ -345,6 +345,25 @@ describe('anthropic driver - malformed SDK responses (F9)', () => {
     expect(sdk.lastRequest?.['max_tokens']).toBe(4096);
   });
 
+  it.each([
+    // The OFF form is per-model, and each wrong pairing is a 400 on EVERY run:
+    // claude-sonnet-5-5 refuses 'disabled' (its lowest setting is
+    // 'between_tools', text-only on a no-tools request), and every earlier model
+    // refuses 'between_tools'. claude-sonnet-5 is what deployed envs run today.
+    ['claude-opus-4-8', { type: 'disabled' }],
+    ['claude-sonnet-5', { type: 'disabled' }],
+    ['claude-sonnet-5-5', { type: 'between_tools' }],
+  ])('sends %s the thinking-off form it accepts', async (onModel, off) => {
+    sdk.reply = {
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 12, output_tokens: 5 },
+      content: [{ type: 'text', text: '{"fields":{}}' }],
+    };
+    await createExtractionDriver({ driver: 'anthropic', model: onModel, apiKey: 'sk-test' }).extract(baseInput);
+    expect(sdk.lastRequest?.['model']).toBe(onModel);
+    expect(sdk.lastRequest?.['thinking']).toEqual(off);
+  });
+
   it('reports a max_tokens stop as a TRUNCATION, keeping the partial JSON as evidence', async () => {
     // The cap was spent mid-object. Without this arm the truncated text reaches
     // JSON.parse and the run is filed as errorKind 'parse' - a malformed-model

@@ -3,10 +3,11 @@ id: send-reconcile-hosted-dev-checks
 title: Checks owed at the first hosted-dev run of send.reconcile - whether unsent messages are listed, the list's order and paging, the Messaging Service settings that rewrite bodies, and the MMS media count (a possible double text rides on the first)
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/messaging
 created: 2026-09-27
 updated: 2026-09-28
+resolved: 2026-09-28
 refs: docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, app/src/jobs/sendReconcile.ts:765, app/src/jobs/sendReconcile.ts:801, app/src/jobs/sendReconcile.ts:892, app/src/adapters/messaging.ts:1131, app/src/lib/sendOutcome.ts:48, app/src/lib/sendFingerprint.ts:10, app/src/jobs/sendReconcile.ts:552, app/src/adapters/messaging.ts:624, fake-twilio/src/routes/rest.ts:83
 ---
 
@@ -90,6 +91,34 @@ the human's request.
 [send-attempt-rearm-residues](./send-attempt-rearm-residues.md) (the other
 double-text windows), [send-attempt-sweeper](./send-attempt-sweeper.md).
 
+## Resolution - 2026-09-28
+
+The human authorized the hosted-dev checks, dev/prod settings reads, and test
+messages to their number. [The completed run record](../superpowers/reviews/2026-09-24-send-outcome-reconcile/hosted-dev-checks-2026-09-28.md)
+contains the actual provider observations and their limits. The SMS
+delivered and its stored body/fingerprint matched, including its URL. Paging
+by next-page URL and provider page size 1000 were verified. Smart Encoding
+and MMS Converter are on in both environments; custom opt-out configurations
+were read in both Consoles. The human then sent the single-image MMS while
+the observer was running: it appeared at the top of the list while queued
+with a null sent date, disproving the concern that only sent messages are
+listed. Its media count briefly read 0, became 1 while still queued, and
+stayed 1 through delivery in both list and fetch; the body/fingerprint always
+matched. A visible unmatched media count withholds `never_sent` under current
+code. Exact global ordering, accepted-state visibility, and maximum provider
+indexing/media-hydration delays are not established by these samples; the
+final complete-walk rule does not depend on assuming a global sort order.
+The current Console showed custom opt-out configuration without a separate
+enabled flag; the ordinary SMS/MMS body checks found no rewrite affecting
+the fingerprint.
+
+Cameron subsequently confirmed that the feature is deployed. That is operator
+confirmation, not an agent inspection of running containers; the older SSM
+deployment records are retained in the run record with that distinction.
+**The requested provider checklist is complete and this issue is resolved.**
+Forcing a live ambiguous-send reconciliation job, keyword canaries, and more
+manual messages were not additional requirements of this checklist.
+
 ## Addendum 2026-09-27 - planner post-build review: the media half of the fingerprint
 
 Found by the planner's post-build review of `feat/send-outcome-reconcile`
@@ -119,7 +148,7 @@ Anchors at HEAD `91a66577`.
    [send-attempt-facts-dead-and-duplicated](./send-attempt-facts-dead-and-duplicated.md),
    item 2). Not a double text: an unmatched candidate withholds `never_sent`.
 
-**retry-send-adoption (2026-09-28).** The one-to-one retry's reconcile - the
+**Historical retry-send-adoption scope note (2026-09-28, before resolution).** The one-to-one retry's reconcile - the
 `retry_send` owner `feat/retry-send-adoption` adds (code final `1b5ddb01`,
 UNMERGED; anchors at `5a03e20b`) - takes the same lookup path (`lookup`,
 `app/src/jobs/sendReconcile.ts:1111-1261`; the list call `:1187-1192`),

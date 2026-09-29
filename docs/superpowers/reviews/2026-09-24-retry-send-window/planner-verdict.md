@@ -1,3 +1,5 @@
+> **Closeout update, 2026-09-28:** This branch is merged and retired; its worktree and directory are gone. See the [closeout record](README.md) for preserved evidence and the dashboard-reload note. The original verdict below retains its pre-merge status, instructions, and gate results as historical evidence; its Cameron questions were answered on 2026-09-26.
+
 # Planner verdict - retry send window (feat/retry-send-window)
 
 Date: 2026-09-26. Planner: this session (the feature-mission planner). Branch

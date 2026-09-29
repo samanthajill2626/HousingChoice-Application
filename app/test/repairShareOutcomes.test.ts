@@ -429,6 +429,32 @@ describe.skipIf(!reachable)('repair-share-outcomes (spec D8) against DynamoDB Lo
     expect(await slotOf('b-7o')).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, latestAttempt: rowlessAttemptKey(withdrawn.ROOT) });
   });
 
+  it("a 30003 failure on an original with NO retry row in its chain (the retry, if any, is one the census cannot see: a pre-RSW row with no lineage) keeps its counted legacy ledger row as it is - counted, its sentAt - on a dry run AND an apply, every ledger counter 0; a slot stuck sent over such a row still moves to failed 30003 and leaves the row alone too (planner fix wave, conformance 2)", async () => {
+    const ZERO_LEDGER = { rowsToCreate: 0, rowsCreated: 0, pairsToRecount: 0, pairsRecounted: 0, pairsToUncount: 0, pairsUncounted: 0 };
+
+    const k = ids('b-22');
+    await seedShareWithChain({ broadcastId: 'b-22', slotStatus: 'failed', rows: [{ tsMsgId: k.ROOT, status: 'failed', errorCode: '30003' }] });
+    await seedListingSend(listingSends, { unitId: k.unitId, contactId: k.contactId, sentAt: T_ROOT, broadcastId: 'b-22' });
+    const rowBefore = await ledgerOf('b-22');
+    expect(rowBefore).toMatchObject({ counted: true, sentAt: T_ROOT, broadcastId: 'b-22' });
+    expect(await run('b-22', false)).toMatchObject({ slotsWalked: 1, slotsToMove: 0, slotsFailed: 0, ...ZERO_LEDGER });
+    expect(await ledgerOf('b-22')).toStrictEqual(rowBefore);
+    expect(await run('b-22', true)).toMatchObject({ slotsWalked: 1, slotsToMove: 0, slotsMoved: 0, slotsFailed: 0, ...ZERO_LEDGER });
+    expect(await ledgerOf('b-22')).toStrictEqual(rowBefore);
+    expect(await slotOf('b-22')).toMatchObject({ status: 'failed', errorCode: '30003' });
+
+    const s = ids('b-23');
+    await seedShareWithChain({ broadcastId: 'b-23', slotStatus: 'sent', rows: [{ tsMsgId: s.ROOT, status: 'failed', errorCode: '30003' }] });
+    await seedListingSend(listingSends, { unitId: s.unitId, contactId: s.contactId, sentAt: T_ROOT, broadcastId: 'b-23' });
+    const stuckBefore = await ledgerOf('b-23');
+    expect(await run('b-23', false)).toMatchObject({ slotsToMove: 1, slotsMoved: 0, ...ZERO_LEDGER });
+    expect(await run('b-23', true)).toMatchObject({ slotsToMove: 1, slotsMoved: 1, slotsFailed: 0, ...ZERO_LEDGER });
+    expect(await slotOf('b-23')).toMatchObject({ status: 'failed', errorCode: '30003' });
+    // The slot write's own ledger side effect wrote nothing either.
+    expect(await ledgerOf('b-23')).toStrictEqual(stuckBefore);
+    expect(await ledgerOf('b-23')).toMatchObject({ counted: true, sentAt: T_ROOT, broadcastId: 'b-23' });
+  });
+
   it("an original row that is missing is unjudgeable and untouched; a row that claims this original (retry_root) but does not walk to it is a broken lineage; another slot's chain in the same thread (same broadcast_id, another root) is ignored", async () => {
     const k8 = ids('b-8');
     await seedShareWithChain({ broadcastId: 'b-8', slotStatus: 'failed', rows: [] });

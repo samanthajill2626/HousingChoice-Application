@@ -58,7 +58,13 @@
 //      compared with the stored row by the service's own rule
 //      (ledgerWouldChange) and, on an apply, written through
 //      applyShareLedgerEntry (a refused no-op when applyLaterAttempt already
-//      wrote it as the slot moved).
+//      wrote it as the slot moved). ONE class keeps its row as it is (planner
+//      fix wave, conformance 2): a slot whose chain is EMPTY (the original is
+//      its newest attempt) and that is (or moves to) failed 30003 - a pre-RSW
+//      retry that carries no lineage joins no chain, so the census cannot see
+//      a retry that may have reached the tenant, and writing the slot's failed
+//      entry would un-count a legacy counted row. No entry is forecast or
+//      written for it (the slot's own move, when it moves, writes none either).
 // Every write is conditional: slots through applyLaterAttempt, ledger rows
 // through applyShareLedgerEntry, rows through stampRetryAttribution - this
 // script never Puts or Updates a share or a ledger row itself.
@@ -113,7 +119,7 @@ import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { tableName } from '../src/lib/config.js';
 import { createEventBus } from '../src/lib/events.js';
 import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
-import { isRetryPromiseLive, RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_GRACE_MS } from '../src/lib/retrySendWindow.js';
+import { isRetryPromiseLive, RETRIED_ERROR_CODE, RETRY_OUTCOME_UNCONFIRMED, RETRY_PROMISE_GRACE_MS } from '../src/lib/retrySendWindow.js';
 import { safeRecipientKey } from '../src/lib/sendFingerprint.js';
 import { RECONCILE_CHECK_DELAYS_MS, SEND_UNCONFIRMED_CODE } from '../src/lib/sendOutcome.js';
 import { attemptKeyTimestampMs, compareAttemptKeys, rowlessAttemptKey } from '../src/lib/shareAttemptOrder.js';
@@ -345,6 +351,30 @@ interface SlotRun {
   originalKey: string;
   /** Conversation reads, cached per share (two slots of one share can share a thread). */
   conversations: Map<string, ConversationItem | undefined>;
+}
+
+/**
+ * The ledger a slot write gets when the pair's row is left as it is (header
+ * step 5, the empty-chain 30003 class): it reads no row and writes nothing, so
+ * applyLaterAttempt's own ledger side effect is a no-op for that slot.
+ */
+function untouchedLedger(log: Logger): ShareLedgerDeps {
+  return { listingSends: { getByKeyConsistent: async () => undefined, putShareMemory: async () => true }, log };
+}
+
+/**
+ * Header step 5's one exception: the slot's chain is EMPTY (the original is
+ * its newest attempt) and the slot, as the step leaves it, is failed 30003 on
+ * that original - a retry with no lineage is invisible here, so the pair's
+ * ledger row is left as it is.
+ */
+function keepsLedgerRow(chain: ChainRows, slot: BroadcastRecipient, originalKey: string): boolean {
+  return (
+    chain.rows.length === 0 &&
+    slot.status === 'failed' &&
+    slot.errorCode === RETRIED_ERROR_CODE &&
+    (slot.latestAttempt ?? slot.tsMsgId) === originalKey
+  );
 }
 
 function emptyReport(): RepairReport {
@@ -731,6 +761,7 @@ async function repairSlot(r: SlotRun): Promise<void> {
   // 4. THE SLOT.
   const moves = wouldApply(slot, decided) && !slotRecords(slot, decided);
   const projected = moves ? projectSlot(slot, decided) : slot;
+  const keepLedger = keepsLedgerRow(chain, projected, originalKey);
   let current: BroadcastRecipient | undefined = slot;
   let slotWriteFailed = false;
   if (moves) {
@@ -743,7 +774,8 @@ async function repairSlot(r: SlotRun): Promise<void> {
       resetProbe(r.probe);
       // Bounded (code review R2-F2): a throw is retried twice, as at every live
       // site, then answered 'threw' - its error kept by the probe.
-      const result = await applyLaterAttemptBounded(r.slotDeps, {
+      const slotDeps = keepLedger ? { ...r.slotDeps, ledger: untouchedLedger(log) } : r.slotDeps;
+      const result = await applyLaterAttemptBounded(slotDeps, {
         broadcastId: share.broadcastId,
         conversationId,
         retryRoot: originalKey,
@@ -778,6 +810,13 @@ async function repairSlot(r: SlotRun): Promise<void> {
   if (contactId === undefined) {
     report.unjudgeable.noContact += 1;
     log.info(ids, `${SCRIPT_NAME} - no contact for the pair (a phone-keyed slot whose newest row names none): the ledger is left as it is`);
+    return;
+  }
+  if (keepLedger) {
+    log.info(
+      { ...ids, contactId },
+      `${SCRIPT_NAME} - a 30003 failure with no retry row in its chain: a retry with no lineage (pre-RSW) is invisible to the census and may have reached the tenant, so the pair's ledger row is left as it is`,
+    );
     return;
   }
   const promiseLive = isRetryPromiseLive(newest.retry_due_at, r.nowMs);

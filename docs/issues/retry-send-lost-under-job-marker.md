@@ -122,7 +122,7 @@ issue to close).
 (piece 2 for this caller is this adoption),
 [exactly-once-send-intent](./exactly-once-send-intent.md),
 [manual-retry-double-send-residual-windows](./manual-retry-double-send-residual-windows.md)
-(on `feat/retry-send-window` until it merges),
+(from the merged `feat/retry-send-window` branch),
 [send-attempt-sweeper](./send-attempt-sweeper.md). Sweep finding F4 in
 `docs/superpowers/reviews/2026-09-24-send-outcome-reconcile/research/marker-sweep-findings.md`.
 

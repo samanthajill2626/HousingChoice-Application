@@ -1,3 +1,5 @@
+> **Closeout update, 2026-09-28:** Branch A is merged and retired; its branch and both build/ops worktrees are gone. See the [closeout record](README.md). The original verdict below retains its pre-merge status and gate results as historical evidence.
+
 # Planner verdict - share-skip-fix (Branch A)
 
 Date: 2026-09-25. Planner: Claude Fable 5.1 (the feature-mission planner; the

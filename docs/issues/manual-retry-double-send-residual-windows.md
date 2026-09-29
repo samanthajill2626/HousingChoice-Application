@@ -64,8 +64,9 @@ still time-based, and it is withdrawn at once when the retry's enqueue fails
    The relay retry rung has a twin of this gap that the send-attempt record
    cannot cover - see the 2026-09-27 section at the end.
 
-Gaps 3 and 4 belong to reconcile's `retrySend` adoption, planned after
-`feat/retry-send-window` merges.
+Gaps 3 and 4 were assigned to reconcile's `retrySend` adoption after
+`feat/retry-send-window`, which has now merged. See the dated adoption update
+below for their later disposition.
 
 A robust fix needs a claim both sides contend on - a conditional write taken
 before sending by the manual route and the automatic job alike, with consistent

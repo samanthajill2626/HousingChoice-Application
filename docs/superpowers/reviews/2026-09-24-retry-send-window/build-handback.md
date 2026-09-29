@@ -1,3 +1,5 @@
+> **Closeout update, 2026-09-28:** This branch is merged and retired; its worktree and directory are gone. Cameron's later answers are recorded in the planner verdict and summarized in the [closeout record](README.md). The original handback below retains its earlier status, questions, and gate results as historical evidence.
+
 # Build handback - feat/retry-send-window
 
 Worktree `W:\tmp\retry-send-window`, branch `feat/retry-send-window`. Every final

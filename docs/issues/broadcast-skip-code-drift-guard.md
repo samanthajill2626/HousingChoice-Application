@@ -31,9 +31,11 @@ compile error.
 dashboard mirror typed `Record<ShareSkipCode, string>` so a missing entry fails
 the build (the pattern `BroadcastStats` already uses across the two workspaces).
 
-**Timing.** Do this AFTER `feat/send-outcome-reconcile` and `feat/retry-send-window`
-land: both ADD codes to these exact sites (SOR's `send_unconfirmed`, RSW's retry
-codes), so introducing the union earlier would collide with their merges.
+**Timing update (2026-09-28).** The sequencing prerequisite is satisfied:
+`feat/send-outcome-reconcile` and `feat/retry-send-window` are both merged.
+The guard remains open as separate work. The original ordering avoided
+collisions with their code additions at these sites (SOR's `send_unconfirmed`,
+RSW's retry codes); it is no longer a reason to wait for either branch.
 
 **Addendum (planner adversarial review, 2026-09-25, finding 5).** The drift has
 a second face: `isOptedOutCode(undefined)` is true by design, because a skipped

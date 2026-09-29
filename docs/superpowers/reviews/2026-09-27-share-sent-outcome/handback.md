@@ -36,8 +36,14 @@ merge base - NO drift, no second sync needed); UNMERGED (human gate).**
   legacy >1000-recipient share). An apply that exits 1 `COMPLETED WITH
   FAILURES` closes the window for every slot except the ones its ERROR lines
   name; an ABORTED apply (a PARTIAL report) for none - fix and re-run.
-- The human resolves the three closed issues at merge (their RESOLVED blocks
-  are written; status stays open until merged).
+- The three closed issues already read `status: resolved` / `resolved:
+  2026-09-28` on the branch (their RESOLVED blocks are written); the merge
+  itself carries the flip - no human edit is needed. (Corrected by the
+  planner's fix wave: this line said the status stayed open until merged.)
+- A visible change ships with the branch: the property-send recipient cap
+  fell from 1500 to 1000 (Cameron approved it at the spec gate); a blast of
+  1001-1500 tenants is now refused `audience_too_large`. The RUNBOOK's
+  repair section names it.
 - The RUNBOOK names the log lines that mean "re-run the repair" (a Logs
   Insights query is given); nothing schedules it.
 
@@ -130,7 +136,9 @@ needed; no `[dynamoAdmin]` sighting in any run.
 8. Repair (fix waves): per-slot write failures continue with `slotsFailed` and exit 1; SYSTEMIC error classes abort; `slotsMoved` counts only the run's own change; a `sent` row is carrier-confirmed at its own instant; `lost` past the bound is per slot.
 9. Results route: `getByIdConsistent` in both views (R2-1).
 10. The gate fixture flip (7386968d).
-11. Unjudgeable slots: `noContact` / `noRecipientKey` ARE judged and moved (only `originalMissing` / `brokenLineage` leave a slot); a lineage-less pre-RSW retry is counted nowhere (spec D8 names it among the reported; the RUNBOOK says so).
+11. Unjudgeable slots: `noContact` / `noRecipientKey` ARE judged and moved (only `originalMissing` / `brokenLineage` leave a slot); a lineage-less pre-RSW retry is counted nowhere (spec D8 names it among the reported; the RUNBOOK says so). Its LEDGER half follows the spec since the planner's fix wave: a slot whose chain is empty and that is (or moves to) failed 30003 gets no ledger entry from the repair, so a legacy counted row is left as it is.
+12. e2e (a) pins the "will retry" copy through the API poll, the DeliveryBadge unit test and self-QA H1, not end to end (plan T14's choice; round 1's G4 accepted it; declared by the planner's review).
+13. A share-id milestone with no entry on an existing ledger row takes the pair-level words (D6's fallback; plan T12; the spec's D6 now says so).
 
 ## Review findings and resolutions
 
@@ -192,7 +200,8 @@ was stopped (benign).
 
 ## Issues
 
-Closed (RESOLVED blocks written; the human resolves at merge):
+Closed (RESOLVED blocks written; frontmatter already `status: resolved` on
+the branch, so the merge carries it):
 `broadcast-30003-retry-never-updates-slot`, `unconfirmed-share-invites-resend`,
 `tenant-timeline-property-sent-milestone-after-failed-delivery`. Amended:
 `send-attempt-sweeper`. Filed (LOW, accepted residuals):
@@ -225,6 +234,25 @@ Closed (RESOLVED blocks written; the human resolves at merge):
   not measurable on a lane.
 - `hasReached` has no production caller (kept as the documented STRICT
   predicate of the shared interface).
+- The lost-callback class (planner review, adversarial 1): a retry's
+  ACCEPTANCE is never written to the slot (spec D2: the slot learns a retry
+  from its carrier confirmation or its terminal receipt; I7 fences the job).
+  If BOTH its `sent` confirmation and its terminal receipt fail to route (a
+  lost callback, the webhook's unknown-SID drop, a bounded write that gave
+  up, a no-slot miss), the slot reads the retried attempt's final failure
+  after 24 minutes and the tenant is un-flagged. Low frequency; the repair's
+  re-run heals it (its trigger lines, incl. the unknown-SID drop, are on the
+  RUNBOOK's list). Filed as `share-retry-rollup-lost-past-reread-bound`.
+- The composer flag's record-read cost on a route-failed blast (spec D1's
+  price): a share the send route marked failed after `markSending` has every
+  slot queued, so each preview of the unit reads one never-claimed record
+  per slot (up to 1000) for 30 days. Strands only, so rare.
+- The filter tabs go by STORED status while the pills derive from buckets
+  (spec D4: the tabs and the stored status are unchanged), so the "Failed"
+  tab can hold a "Sent" pill. A UX call for Cameron, later.
+- The repair pages each slot's conversation on its own, with no reuse across
+  shares; the RUNBOOK's cost estimate is unmeasured - the dev census
+  measures it before prod.
 
 ## Recoveries and process
 

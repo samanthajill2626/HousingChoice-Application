@@ -442,7 +442,9 @@ pending entry that never hears a retry outcome is a failure by RSW's own
 clock). The ledger keeps no copy of the promise; the row is its one source
 (I5). For a milestone written before this branch (no share id), from
 the row's pair-level `counted` - "Property sent" when the pair still counts,
-"Property text failed" when it does not. One ledger read per (property,
+"Property text failed" when it does not. A milestone that carries a share id
+but finds no entry for that share on an existing row takes the same
+pair-level words. One ledger read per (property,
 tenant) pair on the page, batched. A milestone whose pair has no row keeps its
 stored words. This closes
 `tenant-timeline-property-sent-milestone-after-failed-delivery` for every
@@ -471,7 +473,8 @@ The listing-send row (one per property-tenant pair) gains:
 Only `counted` entries count; `pending` and `unconfirmed` do not ("Properties
 sent" lists texts we believe reached the tenant; a pending retry lists the
 pair again the moment it reaches). The ledger holds no time-bound fact that
-counts: a `pending` entry's due instant is read only by D6's words.
+counts: a `pending` entry's promise is read from its attempt's row (I5), only
+by D6's words.
 
 Writers, each a conditional read-modify-write keyed on the row's change token
 (`updated_at`), re-read and re-applied on a lost condition up to a small bound,
@@ -482,7 +485,7 @@ and logged at ERROR with the pair's ids when the bound is exhausted:
 - the reconcile's share adoption (today: only an adopted sent/delivered;
   a delivered adoption is `counted` by delivery);
 - the webhook's rollup for the original attempt (new): delivered -> `counted`
-  by delivery; failed 30003 with a live promise -> `pending` with its due;
+  by delivery; failed 30003 with a live promise -> `pending`;
   failed without -> `failed`;
 - the D2 callers for a later attempt (new): reached -> `counted` (by delivery
   when delivered) with the new attempt; failed 30003 with a live promise ->

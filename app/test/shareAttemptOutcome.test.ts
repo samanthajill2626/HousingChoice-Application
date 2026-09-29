@@ -231,10 +231,31 @@ describe('applyLaterAttempt', () => {
   });
   it('no slot and no broadcast are reported, never thrown', async () => {
     const x = world({});
-    expect(await applyLaterAttempt(x.deps, { ...base, retryRoot: 'other', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_slot');
+    expect(await applyLaterAttempt(x.deps, { ...base, conversationId: 'conv-other', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_slot');
     expect(await applyLaterAttempt(x.deps, { ...base, broadcastId: 'nope', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_broadcast');
     expect(x.capture.atLevel(40).filter((l) => String(l.msg).includes('broadcast not found')).length).toBe(1);
     expect(x.emitted.length).toBe(0);
+  });
+  it("a miss tells its two causes apart (planner fix wave, adversarial 2): 'slot_unmatched' when the share holds a slot for the row's conversation whose original pointer differs (a wrong or unstamped root) or is absent, or the retry's recipient's own queued slot with no pointer yet (the fan-out's record phase pending); 'no_slot' only when nothing of the share ties to the row; nothing is written either way", async () => {
+    const wrongRoot = world({});
+    expect(await applyLaterAttempt(wrongRoot.deps, { ...base, retryRoot: 'other', attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('slot_unmatched');
+    expect(wrongRoot.slot()).toMatchObject({ status: 'failed', errorCode: '30003', tsMsgId: ROOT });
+    expect(wrongRoot.slot().latestAttempt).toBeUndefined();
+
+    const noPointer = world({});
+    noPointer.w.broadcasts.get('b1')!.recipients['c1'] = { status: 'failed', errorCode: '30003', conversationId: 'conv-1' };
+    expect(await applyLaterAttempt(noPointer.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('slot_unmatched');
+
+    const recordPending = world({});
+    recordPending.w.broadcasts.get('b1')!.recipients['c1'] = { status: 'queued' };
+    expect(await applyLaterAttempt(recordPending.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' }, recipientContactId: 'c1' })).toBe('slot_unmatched');
+    // Nothing ties the row to that queued slot: no recipient named, or another recipient's.
+    expect(await applyLaterAttempt(recordPending.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' } })).toBe('no_slot');
+    expect(await applyLaterAttempt(recordPending.deps, { ...base, attemptKey: RETRY, outcome: { kind: 'delivered' }, recipientContactId: 'c2' })).toBe('no_slot');
+    expect(recordPending.slot()).toStrictEqual({ status: 'queued' });
+
+    for (const x of [wrongRoot, noPointer, recordPending]) expect(x.emitted.length).toBe(0);
+    expect((await wrongRoot.ledger())).toBeUndefined();
   });
 });
 

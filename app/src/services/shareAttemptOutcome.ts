@@ -71,7 +71,14 @@ export interface ShareAttemptOutcomeDeps {
   now?: () => number;
 }
 
-export type ApplyResult = 'applied' | 'refused' | 'no_slot' | 'no_broadcast' | 'lost';
+/**
+ * A miss is one of two (planner fix wave, adversarial 2): `'slot_unmatched'`
+ * - the share holds a slot for this recipient without the matching original
+ * pointer (a record phase pending, or a chain the repair has not stamped):
+ * benign, the callers WARN and the repair re-checks; `'no_slot'` - nothing of
+ * the share ties to the row: a routing bug, the callers ERROR.
+ */
+export type ApplyResult = 'applied' | 'refused' | 'no_slot' | 'slot_unmatched' | 'no_broadcast' | 'lost';
 
 type Bucket = 'queued' | 'sent' | 'delivered' | 'failed' | 'unconfirmed';
 /** Re-reads after a lost condition (so up to 1 + MAX_REAPPLY writes). */
@@ -211,11 +218,25 @@ async function sideEffects(
 }
 
 /**
+ * Why no slot matched the attempt's conversation + original pointer. A slot
+ * that names the row's conversation with another original pointer or none (a
+ * wrong or unstamped `retry_root`), or the retry's recipient's own queued
+ * slot with no pointer at all (the fan-out's record phase pending: a queued
+ * slot carries neither conversationId nor tsMsgId until its record write
+ * lands) is `'slot_unmatched'`; anything else is `'no_slot'`.
+ */
+function missOf(slots: Array<[string, BroadcastRecipient]>, input: LaterAttempt): 'no_slot' | 'slot_unmatched' {
+  if (slots.some(([, s]) => s.conversationId === input.conversationId)) return 'slot_unmatched';
+  const own = input.recipientContactId === undefined ? undefined : slots.find(([key]) => key === input.recipientContactId)?.[1];
+  return own !== undefined && own.status === 'queued' && own.conversationId === undefined ? 'slot_unmatched' : 'no_slot';
+}
+
+/**
  * Apply a later attempt's outcome to its share slot (spec D2) and, when it
  * applied, its ledger entry (D7) and a `broadcast.updated` emit. Never throws
  * for a refusal, a missing slot or a missing share; a repo fault propagates
- * (the callers bound or guard it). `'no_slot'`: the CALLER picks the level
- * (ERROR for a retry row - a routing bug).
+ * (the callers bound or guard it). A miss: the CALLER picks the level -
+ * `'no_slot'` ERROR (a routing bug), `'slot_unmatched'` WARN (missOf).
  */
 export async function applyLaterAttempt(deps: ShareAttemptOutcomeDeps, input: LaterAttempt): Promise<ApplyResult> {
   const ids = { broadcastId: input.broadcastId, conversationId: input.conversationId, retryRoot: input.retryRoot, attempt: input.attemptKey, outcome: input.outcome.kind };
@@ -225,8 +246,9 @@ export async function applyLaterAttempt(deps: ShareAttemptOutcomeDeps, input: La
       deps.log.warn(ids, 'share attempt outcome: broadcast not found');
       return 'no_broadcast';
     }
-    const found = Object.entries(share.recipients ?? {}).find(([, s]) => s.conversationId === input.conversationId && s.tsMsgId === input.retryRoot);
-    if (found === undefined) return 'no_slot';
+    const slots = Object.entries(share.recipients ?? {});
+    const found = slots.find(([, s]) => s.conversationId === input.conversationId && s.tsMsgId === input.retryRoot);
+    if (found === undefined) return missOf(slots, input);
     const [contactKey, slot] = found;
     const recipientKey = safeRecipientKey(contactKey);
     // Deviation 15, first check: a replayed call (a throw after a committed

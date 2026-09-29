@@ -831,9 +831,17 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
           ...(retried.recipient_contact_id !== undefined && { recipientContactId: retried.recipient_contact_id }),
         });
       });
-      // A root that matches no slot is a routing bug (every site logs it so).
+      // A root that matches no slot (every site logs it so): ERROR when nothing
+      // of the share ties to the row - a routing bug; WARN when the share holds a
+      // slot for the recipient without the matching original pointer (the record
+      // phase pending or the chain unstamped - the repair re-checks).
       if (result.applied === 'no_slot') {
         log.error({ ...octx, broadcastId, attempt: attemptKey }, 'retrySend: no matching recipient slot for a share retry - a routing bug');
+      } else if (result.applied === 'slot_unmatched') {
+        log.warn(
+          { ...octx, broadcastId, attempt: attemptKey },
+          "retrySend: retry row's conversation has a slot but no matching original pointer - the record phase may be pending or the chain unstamped (the repair re-checks)",
+        );
       }
     }
 

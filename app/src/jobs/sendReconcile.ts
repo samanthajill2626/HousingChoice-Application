@@ -1486,11 +1486,18 @@ function mapAdopted(v: Found): AttemptOutcome {
   }
 }
 
+/** The WARN of a share-retry slot write that answered 'slot_unmatched' (planner fix wave, adversarial 2), both sites. */
+const SLOT_UNMATCHED_MSG =
+  "send.reconcile: retry row's conversation has a slot but no matching original pointer - the record phase may be pending or the chain unstamped (the repair re-checks)";
+
 /**
  * share-sent-outcome D2, site 5: the found arm's write for a share retry - the
  * ORIGINAL slot (matched by the share id and the chain root) records the
  * found attempt. A missing share is the transition's own WARN; a root that
- * matches no slot is a routing bug (ONE ERROR); a write that keeps throwing is
+ * matches no slot is ONE line - WARN when the share holds a slot for the
+ * recipient without the matching original pointer ('slot_unmatched': the
+ * record phase pending or the chain unstamped, the repair re-checks), else
+ * ERROR, a routing bug; a write that keeps throwing is
  * applyLaterAttemptBounded's ONE ERROR. Nothing propagates.
  */
 async function adoptedShareRetry(
@@ -1515,6 +1522,8 @@ async function adoptedShareRetry(
       { ...base, broadcastId, retryRoot: o.retryRoot, attempt: attemptKey },
       'send.reconcile: no matching recipient slot for an adopted share retry - a routing bug',
     );
+  } else if (applied === 'slot_unmatched') {
+    c.log.warn({ ...base, broadcastId, retryRoot: o.retryRoot, attempt: attemptKey }, SLOT_UNMATCHED_MSG);
   }
 }
 
@@ -1538,6 +1547,11 @@ async function unresolvedShareRetry(c: Ctx, r: Resolved, o: RetrySendOwner, retr
     c.log.error(
       { event: 'send_reconcile', owner: ownerLog(o), recipientKey: safeRecipientKey(r.key), broadcastId, retryRoot: o.retryRoot, attempt: attemptKey },
       'send.reconcile: no matching recipient slot for an unresolved share retry - a routing bug',
+    );
+  } else if (applied === 'slot_unmatched') {
+    c.log.warn(
+      { event: 'send_reconcile', owner: ownerLog(o), recipientKey: safeRecipientKey(r.key), broadcastId, retryRoot: o.retryRoot, attempt: attemptKey },
+      SLOT_UNMATCHED_MSG,
     );
   }
 }

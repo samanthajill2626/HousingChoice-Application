@@ -517,12 +517,39 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(x.updatedEvents()).toHaveLength(0);
     });
 
-    it('a retry row whose root matches no slot logs one ERROR (a routing bug)', async () => {
+    it('a retry row whose conversation no slot of the share names logs one ERROR (a routing bug) and no WARN', async () => {
       const x = await seedShares('failed');
-      await x.post({ MessageSid: STRAY_RETRY_SID, MessageStatus: 'delivered' });
+      await seedOutbound(x.world, 'SMsharelost', { broadcast_id: 'b-1', retry_of: 'nobody', retry_root: 'nobody', recipient_contact_id: 'c-9' }, '+15550107777');
+      await x.post({ MessageSid: 'SMsharelost', MessageStatus: 'delivered' });
       expect(x.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('no matching recipient slot')).length).toBe(1);
       expect(x.capture.atLevel(WARN).filter((l) => String(l['msg']).includes('no matching recipient slot'))).toHaveLength(0);
+      expect(x.capture.atLevel(WARN).filter((l) => String(l['msg']).includes('no matching original pointer'))).toHaveLength(0);
       expect(x.world.broadcasts.get('b-1')!.recipients['c-1']!.status).toBe('failed');
+    });
+
+    it("a retry row whose conversation HAS a slot of the share without the matching original pointer - a slot with no tsMsgId, a wrong root, the recipient's own queued slot (the record phase pending) - logs one WARN each and no routing-bug ERROR; nothing moves (planner fix wave, adversarial 2)", async () => {
+      const WARN_MSG = "broadcast delivery rollup: retry row's conversation has a slot but no matching original pointer - the record phase may be pending or the chain unstamped (the repair re-checks)";
+      const x = await seedShares('failed');
+      // b-3: the slot for the retry's conversation carries no tsMsgId.
+      x.world.broadcasts.set('b-3', share('b-3', { 'c-1': { status: 'failed', errorCode: '30003', conversationId: x.root.conversationId } }, { failed: 1 }));
+      await seedOutbound(x.world, 'SMsharenoptr', { broadcast_id: 'b-3', retry_of: x.root.tsMsgId, retry_root: x.root.tsMsgId, recipient_contact_id: 'c-1' });
+      // b-4: the recipient's slot is still queued - no pointer at all.
+      x.world.broadcasts.set('b-4', share('b-4', { 'c-1': { status: 'queued' } }, { queued: 1 }));
+      await seedOutbound(x.world, 'SMsharequeued', { broadcast_id: 'b-4', retry_of: x.root.tsMsgId, retry_root: x.root.tsMsgId, recipient_contact_id: 'c-1' });
+
+      await x.post({ MessageSid: 'SMsharenoptr', MessageStatus: 'delivered' });
+      // b-1's STRAY row: its conversation's slot records ROOT, its root is another row.
+      await x.post({ MessageSid: STRAY_RETRY_SID, MessageStatus: 'delivered' });
+      await x.post({ MessageSid: 'SMsharequeued', MessageStatus: 'delivered' });
+
+      const warns = x.capture.atLevel(WARN).filter((l) => l['msg'] === WARN_MSG);
+      expect(warns.map((l) => l['broadcastId'])).toEqual(['b-3', 'b-1', 'b-4']);
+      expect(warns[0]).toMatchObject({ broadcastId: 'b-3', conversationId: x.root.conversationId, retryRoot: x.root.tsMsgId });
+      expect(x.capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('routing bug'))).toHaveLength(0);
+      expect(x.world.broadcasts.get('b-3')!.recipients['c-1']).toStrictEqual({ status: 'failed', errorCode: '30003', conversationId: x.root.conversationId });
+      expect(x.world.broadcasts.get('b-1')!.recipients['c-1']!.status).toBe('failed');
+      expect(x.world.broadcasts.get('b-4')!.recipients['c-1']).toStrictEqual({ status: 'queued' });
+      expect(x.updatedEvents()).toHaveLength(0);
     });
 
     it("a retry row's own 30003 failure with a new promise: the slot stays failed on the newer attempt, the emit carries retry_pending 1, the ledger entry is pending - the promise from the decision (the read returns a copy here too)", async () => {

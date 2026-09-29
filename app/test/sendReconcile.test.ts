@@ -4178,7 +4178,23 @@ describe('send.reconcile (spec D11-D16)', () => {
       expect(capture.atLevel(50)).toHaveLength(0);
     });
 
-    it('share-sent-outcome: an adopted share retry whose root matches no slot is ONE ERROR (a routing bug) and still closes adopted', async () => {
+    it('share-sent-outcome: an adopted share retry whose conversation no slot of the share names is ONE ERROR (a routing bug) and still closes adopted', async () => {
+      register();
+      await seedOneToOne();
+      const root = await seedShareRoot();
+      world.broadcasts.get('b-9')!.recipients = { 'c-other': { status: 'failed', errorCode: '30003', conversationId: 'conv-elsewhere', tsMsgId: 'another-row' } };
+      const owner = rOwner(root, 1);
+      const at = await reconciling(owner, factsFor(TENANT_PHONE));
+      plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', to: TENANT_PHONE });
+      await runCheck(payloadOf(owner, at));
+      const noSlot = capture.atLevel(50).filter((l) => String(l['msg']).includes('no matching recipient slot'));
+      expect(noSlot).toHaveLength(1);
+      expect(noSlot[0]).toMatchObject({ event: 'send_reconcile', broadcastId: 'b-9', retryRoot: root.tsMsgId });
+      expect(capture.atLevel(40).filter((l) => String(l['msg']).includes('no matching original pointer'))).toHaveLength(0);
+      expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted' });
+    });
+
+    it("share-sent-outcome: an adopted share retry whose conversation HAS a slot of the share with another original pointer (a wrong or unstamped root) is ONE WARN - never the routing-bug ERROR - and still closes adopted (planner fix wave, adversarial 2)", async () => {
       register();
       await seedOneToOne();
       const root = await seedShareRoot();
@@ -4187,9 +4203,12 @@ describe('send.reconcile (spec D11-D16)', () => {
       const at = await reconciling(owner, factsFor(TENANT_PHONE));
       plant({ providerSid: 'SMorphan-share', providerStatus: 'delivered', to: TENANT_PHONE });
       await runCheck(payloadOf(owner, at));
-      const noSlot = capture.atLevel(50).filter((l) => String(l['msg']).includes('no matching recipient slot'));
-      expect(noSlot).toHaveLength(1);
-      expect(noSlot[0]).toMatchObject({ event: 'send_reconcile', broadcastId: 'b-9', retryRoot: root.tsMsgId });
+      const unmatched = capture.atLevel(40).filter((l) => String(l['msg']).includes('no matching original pointer'));
+      expect(unmatched).toHaveLength(1);
+      expect(unmatched[0]).toMatchObject({ event: 'send_reconcile', broadcastId: 'b-9', retryRoot: root.tsMsgId });
+      expect(String(unmatched[0]!['msg'])).toBe("send.reconcile: retry row's conversation has a slot but no matching original pointer - the record phase may be pending or the chain unstamped (the repair re-checks)");
+      expect(capture.atLevel(50).filter((l) => String(l['msg']).includes('routing bug'))).toHaveLength(0);
+      expect(shareSlot()).toStrictEqual({ status: 'failed', errorCode: '30003', conversationId: retryConv, tsMsgId: 'another-row' });
       expect(await recordOf(owner)).toMatchObject({ state: 'done', outcome: 'adopted' });
     });
 

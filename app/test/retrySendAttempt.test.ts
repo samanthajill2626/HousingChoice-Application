@@ -1455,6 +1455,29 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(world.broadcasts.get('b-1')!.recipients['c-real']).toMatchObject({ status: 'failed', errorCode: '30003' });
   });
 
+  it("share-sent-outcome: a share retry whose conversation HAS a slot of the share with another original pointer is ONE WARN at the job's arm - never the routing-bug ERROR - and nothing moves; a slot in no conversation of the retry's is the ERROR (planner fix wave, adversarial 2)", async () => {
+    wire();
+    unknownOn();
+    refuseEnqueues((jobName) => jobName === SEND_RECONCILE_JOB);
+    const row = await seedShareRetried('SMshare4');
+    world.broadcasts.get('b-1')!.recipients = { 'c-real': { status: 'failed', errorCode: '30003', conversationId: row.conversationId, tsMsgId: 'another-row' } };
+    await run(row);
+    const unmatched = capture.atLevel(WARN).filter((l) => String(l['msg']).includes('no matching original pointer'));
+    expect(unmatched).toHaveLength(1);
+    expect(unmatched[0]).toMatchObject({
+      broadcastId: 'b-1',
+      msg: "retrySend: retry row's conversation has a slot but no matching original pointer - the record phase may be pending or the chain unstamped (the repair re-checks)",
+    });
+    expect(capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('routing bug'))).toHaveLength(0);
+    expect(world.broadcasts.get('b-1')!.recipients['c-real']).toStrictEqual({ status: 'failed', errorCode: '30003', conversationId: row.conversationId, tsMsgId: 'another-row' });
+
+    const lost = await seedShareRetried('SMshare5');
+    world.broadcasts.get('b-1')!.recipients = { 'c-other': { status: 'failed', errorCode: '30003', conversationId: 'conv-elsewhere', tsMsgId: 'another-row' } };
+    await run(lost);
+    expect(capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('routing bug'))).toHaveLength(1);
+    expect(capture.atLevel(WARN).filter((l) => String(l['msg']).includes('no matching original pointer'))).toHaveLength(1);
+  });
+
   // "A later attempt supersedes the unconfirmed slot the job wrote": after the
   // job closes the record nothing adopts, so the superseding attempt is a NEW
   // one (a staff Retry row's receipt). That path is Task 4's service test

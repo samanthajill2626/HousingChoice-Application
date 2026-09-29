@@ -3931,7 +3931,10 @@ export function outcomeOf(status: DeliveryStatus, errorCode: string | undefined,
  * against the slot's original message pointer, never by the slot key -
  * through applyLaterAttempt (the attempt-ordered write, its ledger entry and
  * its emit). A retry row without `retry_root` is unroutable (the repair stamps
- * it): ONE ERROR. A root that matches no slot is a routing bug: ONE ERROR.
+ * it): ONE ERROR. A root that matches no slot is ONE line: WARN when the
+ * share holds a slot for the row's conversation (or the recipient's queued
+ * slot) without the matching original pointer - the record phase pending or
+ * the chain unstamped, the repair re-checks - else ERROR, a routing bug.
  * BOUNDED (code review ADV-2b): the carrier never redelivers a receipt the
  * webhook answered, so a thrown write is retried twice (a transient DynamoDB
  * fault survives) and then logged ONCE by applyLaterAttemptBounded ('share
@@ -3962,6 +3965,11 @@ async function rollRetryIntoBroadcast(
   });
   if (result === 'no_slot') {
     deps.log.error({ ...ids, retryRoot: message.retry_root }, 'broadcast delivery rollup: no matching recipient slot for a retry row - a routing bug');
+  } else if (result === 'slot_unmatched') {
+    deps.log.warn(
+      { ...ids, retryRoot: message.retry_root },
+      "broadcast delivery rollup: retry row's conversation has a slot but no matching original pointer - the record phase may be pending or the chain unstamped (the repair re-checks)",
+    );
   }
 }
 

@@ -1,3 +1,5 @@
+> **Closeout update, 2026-09-28:** This branch is merged and retired; its worktree and directory are gone. Deployment is operator-confirmed and the hosted-dev checklist is resolved. See the [closeout record](README.md) for preserved evidence and follow-up scope. The original verdict, merge instructions, and gate results below are historical evidence.
+
 # Planner verdict - send-outcome classification and reconcile (Stage 1)
 
 Date: 2026-09-27 19:20 EDT. Planner: Claude Fable 5.1 (the mission's planner

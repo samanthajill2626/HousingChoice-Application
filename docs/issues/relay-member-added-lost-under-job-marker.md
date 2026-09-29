@@ -45,9 +45,9 @@ Sec 9:
   (`relayFanOut.ts:908`, `relayAnnouncements.ts:181`, `:229`) - re-enqueue under
   a fresh `jobId` (bounded) or record a visible failure; never throw into the
   marker.
-- Send-shaped: adopt the send-outcome core + the send-attempt record once
-  `feat/send-outcome-reconcile` lands (D1-D3 classification, the D7a phase
-  split, reconcile for `unknown`), in `sendRelayAnnouncement`, which both jobs
+- Send-shaped: adopt the send-outcome core + the send-attempt record from
+  `feat/send-outcome-reconcile` (merged at `79b9479e`): D1-D3 classification, the D7a phase
+  split, and reconcile for `unknown`, in `sendRelayAnnouncement`, which both jobs
   share.
 
 **Related.**

@@ -45,7 +45,7 @@ records for REFUSALS; this issue is the thrown-error path, whose loss (not just
 its label) needs the fix below.
 
 **Suggested fix.** Group: send-shaped - adopt the send-outcome core + the
-send-attempt record once `feat/send-outcome-reconcile` lands (see the
+send-attempt record from `feat/send-outcome-reconcile` (merged at `79b9479e`; see the
 [send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md),
 Sec 9). With D3's typed errors the 1:1 route can tell "nothing was sent" (the
 rung can be released for the next tick or recorded as not sent) from `unknown`

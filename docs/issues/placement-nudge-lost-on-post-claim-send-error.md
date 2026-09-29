@@ -31,7 +31,7 @@ is logged, and one nudge is at stake per failure. The false "Sent" is the part
 that misleads.
 
 **Suggested fix.** Group: send-shaped - adopt the send-outcome core + the
-send-attempt record once `feat/send-outcome-reconcile` lands (see the
+send-attempt record from `feat/send-outcome-reconcile` (merged at `79b9479e`; see the
 [send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md),
 Sec 9): with D3's typed errors a nudge whose send was never attempted can be
 released or recorded as not sent, an `unknown` outcome can be reconciled, and

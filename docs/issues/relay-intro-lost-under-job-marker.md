@@ -50,8 +50,8 @@ Sec 9:
   when they fail, so the job can safely re-enqueue itself under a fresh `jobId`
   (bounded), or record a visible failure - but it must not throw into the
   marker.
-- Send-shaped: adopt the send-outcome core + the send-attempt record once
-  `feat/send-outcome-reconcile` lands - classify the per-member provider error
+- Send-shaped: adopt the send-outcome core + the send-attempt record from
+  `feat/send-outcome-reconcile` (merged at `79b9479e`) - classify the per-member provider error
   (D1-D3), split the member unit into prepare / send / record phases (D7a) so a
   post-send write failure is `sent_unrecorded` rather than `failed`, and hand
   an `unknown` outcome to the reconcile job.

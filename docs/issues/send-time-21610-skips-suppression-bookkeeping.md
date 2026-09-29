@@ -22,10 +22,10 @@ Twilio can also refuse the CREATE itself with 21610 (the send-outcome design's
 D1 lists it among send-time 4xx rejections). That error goes nowhere near the
 webhook: the adapter rethrows it unchanged (`app/src/adapters/messaging.ts:676-708`),
 there is no message SID and so no status callback, and no send path records the
-opt-out. Today the fan-outs do not even recognise the code (it takes the
-unknown-error throw of
-[throw-for-redelivery-defeated-by-job-marker](./throw-for-redelivery-defeated-by-job-marker.md));
-after `feat/send-outcome-reconcile` it is classified `rejected` and the
+opt-out. Before the send-outcome core, the fan-outs did not recognise the code
+(it took the unknown-error throw of
+[throw-for-redelivery-defeated-by-job-marker](./throw-for-redelivery-defeated-by-job-marker.md)).
+Since `feat/send-outcome-reconcile` merged at `79b9479e`, it is classified `rejected` and the
 recipient is marked `failed` with 21610 - honest for that one send, but the
 contact is still not flagged.
 
@@ -40,8 +40,8 @@ for example one sent to a different number in the Messaging Service.
 
 **Suggested fix.** Found along the way (the
 [send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md),
-Sec 9); send-shaped - it lands naturally with the send-outcome core, once
-`feat/send-outcome-reconcile` lands: a `rejected` outcome carrying 21610 runs
+Sec 9); send-shaped - extend the send-outcome core, now merged at `79b9479e`:
+a `rejected` outcome carrying 21610 runs
 the same number-scoped bookkeeping the webhook arm runs (flag the contact only
 when the refused number is its primary; audit with a distinct source such as
 `twilio_21610_send`), shared rather than copied. Relay legs need the

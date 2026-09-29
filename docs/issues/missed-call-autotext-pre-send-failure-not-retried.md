@@ -42,7 +42,7 @@ best-effort, and the ERROR at `:260-263` is logged (for the send-try cases;
 the settings read and the token acquire leave only the `job failed` line).
 
 **Suggested fix.** Group: send-shaped - adopt the send-outcome core + the
-send-attempt record once `feat/send-outcome-reconcile` lands (see the
+send-attempt record from `feat/send-outcome-reconcile` (merged at `79b9479e`; see the
 [send-outcome-reconcile design](../superpowers/specs/2026-09-24-send-outcome-reconcile-design.md),
 Sec 9). With D3's typed errors the handler can tell `SendNotAttemptedError` and
 a `rejected` / `retryable` provider failure (nothing sent: safe to re-enqueue

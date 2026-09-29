@@ -1438,21 +1438,48 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     ]);
   });
 
-  it('share-sent-outcome: a hand-off enqueue failure on a share retry whose slot write THROWS - ONE guard ERROR and the close still runs', async () => {
+  it("share-sent-outcome: a hand-off enqueue failure on a share retry whose slot write THROWS every time - tried three times (the bounded write every site uses), then ONE 'share slot write failed after retries' ERROR, never the guard's, and the close still runs", async () => {
     wire();
     unknownOn();
     refuseEnqueues((jobName) => jobName === SEND_RECONCILE_JOB);
     const row = await seedShareRetried('SMshare3');
+    let calls = 0;
     world.broadcastsRepo.applyAttemptOutcome = async () => {
+      calls += 1;
       throw new Error('dynamo down');
     };
     await run(row);
-    expect(capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('failure-arm write failed'))).toEqual([
-      expect.objectContaining({ label: 'shareSlotUnconfirmed', retriedTsMsgId: row.tsMsgId }),
+    expect(calls).toBe(3);
+    expect(capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('share slot write failed after retries'))).toEqual([
+      expect.objectContaining({ broadcastId: 'b-1', retryRoot: row.tsMsgId, attempt: rowlessAttemptKey(row.tsMsgId), outcome: 'unresolved' }),
     ]);
+    expect(capture.atLevel(ERROR).filter((l) => String(l['msg']).includes('failure-arm write failed'))).toHaveLength(0);
     expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
     expect(row).toMatchObject({ retry_due_at: RETRY_PROMISE_WITHDRAWN_AT, retry_outcome: 'unconfirmed' });
     expect(world.broadcasts.get('b-1')!.recipients['c-real']).toMatchObject({ status: 'failed', errorCode: '30003' });
+  });
+
+  it('share-sent-outcome: a share retry whose slot write throws ONCE (a transient fault) is retried at the job arm and the slot lands send_unconfirmed - no ERROR for the slot (planner fix wave, adversarial 5)', async () => {
+    wire();
+    unknownOn();
+    refuseEnqueues((jobName) => jobName === SEND_RECONCILE_JOB);
+    const row = await seedShareRetried('SMshare6');
+    const real = world.broadcastsRepo.applyAttemptOutcome.bind(world.broadcastsRepo);
+    let calls = 0;
+    world.broadcastsRepo.applyAttemptOutcome = async (...a) => {
+      calls += 1;
+      if (calls === 1) throw new Error('dynamo blip');
+      return real(...a);
+    };
+    await run(row);
+    expect(calls).toBe(2);
+    expect(world.broadcasts.get('b-1')!.recipients['c-real']).toMatchObject({ status: 'failed', errorCode: SEND_UNCONFIRMED_CODE, latestAttempt: rowlessAttemptKey(row.tsMsgId) });
+    expect(world.broadcasts.get('b-1')!.stats).toMatchObject({ failed: 0, unconfirmed: 1 });
+    expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'unresolved', cause: 'enqueue_failed' });
+    // The only ERROR is the arm's own close line: nothing for the slot.
+    expect(capture.atLevel(ERROR)).toEqual([
+      expect.objectContaining({ msg: 'retrySend: reconcile enqueue failed - attempt closed unresolved; the retry promise is withdrawn' }),
+    ]);
   });
 
   it("share-sent-outcome: a share retry whose conversation HAS a slot of the share with another original pointer is ONE WARN at the job's arm - never the routing-bug ERROR - and nothing moves; a slot in no conversation of the retry's is the ERROR (planner fix wave, adversarial 2)", async () => {

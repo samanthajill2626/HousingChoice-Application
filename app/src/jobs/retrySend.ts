@@ -61,7 +61,7 @@ import {
 } from '../services/sendMessage.js';
 import { conversationRetryDecline, resolveRetryRoot, retryRecipientKey } from '../services/retryChain.js';
 import { refreshRetryPromise, withdrawRetryPromise, type RetryPromiseDeps } from '../services/retryPromiseWrites.js';
-import { applyLaterAttempt, type ApplyResult, type ShareAttemptOutcomeDeps } from '../services/shareAttemptOutcome.js';
+import { applyLaterAttemptBounded, type ApplyResult, type ShareAttemptOutcomeDeps } from '../services/shareAttemptOutcome.js';
 import { createBroadcastsRepo, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { rowlessAttemptKey } from '../lib/shareAttemptOrder.js';
@@ -803,17 +803,20 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
      * records the chain's row-less end - send_unconfirmed, ordered right after
      * the retried attempt - with its ledger entry. It runs FIRST at both arms
      * (they have no re-apply: a redelivered job returns on the done record),
-     * so a crash after it costs nothing; through guardWrite, because nothing
-     * may throw after the claim - a write that fails is ONE ERROR and the
-     * record close follows as built (the repair's residue). Never called for
-     * a one-to-one text that is not a share.
+     * so a crash after it costs nothing. BOUNDED like every other site
+     * (planner fix wave, adversarial 5): a thrown slot write is retried twice
+     * (a transient DynamoDB fault survives), then applyLaterAttemptBounded's
+     * ONE ERROR ('share slot write failed after retries') and the record close
+     * follows as built (the repair's residue); inside guardWrite, because
+     * nothing may throw after the claim. Never called for a one-to-one text
+     * that is not a share.
      */
     async function markShareUnconfirmed(owner: RetrySendOwner, retried: MessageItem, octx: Ctx): Promise<void> {
       const broadcastId = retried.broadcast_id;
       if (typeof broadcastId !== 'string') return;
       const attemptKey = rowlessAttemptKey(owner.retriedTsMsgId);
       // The transition's answer, captured inside the guard (guardWrite reports only that the write resolved).
-      const result: { applied?: ApplyResult } = {};
+      const result: { applied?: ApplyResult | 'threw' } = {};
       await guardWrite(log, octx, 'shareSlotUnconfirmed', async () => {
         const shareOutcome: ShareAttemptOutcomeDeps = {
           broadcasts: (broadcasts ??= createBroadcastsRepo({ logger: deps.logger })),
@@ -822,7 +825,7 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
           log,
           now,
         };
-        result.applied = await applyLaterAttempt(shareOutcome, {
+        result.applied = await applyLaterAttemptBounded(shareOutcome, {
           broadcastId,
           conversationId: owner.conversationId,
           retryRoot: owner.retryRoot,

@@ -286,7 +286,8 @@ export async function applyLaterAttempt(deps: ShareAttemptOutcomeDeps, input: La
 }
 
 /**
- * Plan deviation 11 (the reconcile's two sites): `applyLaterAttempt` with a
+ * Plan deviation 11 (the reconcile's two sites; since then the webhook, the
+ * retry job's two arms and the repair too): `applyLaterAttempt` with a
  * THROW retried twice (a transient DynamoDB fault survives), then ONE ERROR
  * with the ids and `'threw'` - never propagated, so a permanent failure (the
  * 400 KB item-size error) never loops a check through the queue to the DLQ.

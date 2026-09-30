@@ -192,3 +192,49 @@ describe('useTodayPastTours', () => {
     expect(getTours).toHaveBeenCalledTimes(4);
   });
 });
+
+describe('useTodayPastTours - round-2 review fixes', () => {
+  it('a live reload reuses names it already looked up (N3)', async () => {
+    serveTours([tour('a', 1), tour('b', 2)]);
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(getContact).toHaveBeenCalledTimes(2);
+    expect(getUnit).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'toured' });
+    });
+    await waitFor(() => expect(getTours).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(getContact).toHaveBeenCalledTimes(2);
+    expect(getUnit).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed lookup is not cached: the next reload asks again', async () => {
+    serveTours([tour('a', 1)]);
+    getContact.mockRejectedValueOnce(new Error('blip'));
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.rows[0]?.tenant).toBe('c-a'));
+
+    act(() => {
+      lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'toured' });
+    });
+    await waitFor(() => expect(result.current.rows[0]?.tenant).toBe('Name c-a Tenant'));
+    expect(getContact).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed live reload keeps the rows and sets reloadFailed (N6)', async () => {
+    serveTours([tour('a', 1)]);
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.reloadFailed).toBe(false);
+
+    getTours.mockRejectedValue(new Error('down'));
+    act(() => {
+      lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'toured' });
+    });
+    await waitFor(() => expect(result.current.reloadFailed).toBe(true));
+    expect(result.current.status).toBe('ready');
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['a']);
+  });
+});

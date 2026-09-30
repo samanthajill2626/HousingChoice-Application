@@ -21,9 +21,16 @@ let state: {
 vi.mock('./useToday.js', () => ({ useToday: () => state }));
 
 // The past-tours section's hook, mocked the same way (its fetching is covered in
-// useTodayPastTours.test.tsx). Default: settled, nothing to list.
-let past: TodayPastToursState = { status: 'ready', rows: [], total: 0 };
-vi.mock('./useTodayPastTours.js', () => ({ useTodayPastTours: () => past }));
+// useTodayPastTours.test.tsx). Default: settled, nothing to list, and the last
+// reload did not fail (reloadFailed defaults to false unless a test sets it).
+let past: Omit<TodayPastToursState, 'reloadFailed'> & { reloadFailed?: boolean } = {
+  status: 'ready',
+  rows: [],
+  total: 0,
+};
+vi.mock('./useTodayPastTours.js', () => ({
+  useTodayPastTours: (): TodayPastToursState => ({ reloadFailed: false, ...past }),
+}));
 
 // The nag card drives the two relay endpoints directly; mock them, keep the rest.
 const closeConversation = vi.fn();
@@ -443,5 +450,31 @@ describe('Today - past tours needing an outcome (Sam item 18)', () => {
     expect(screen.getByRole('link', { name: 'Open the Past tab' })).toHaveAttribute('href', '/tours/past');
     expect(screen.getByRole('link', { name: /James Porter/ })).toHaveAttribute('href', '/contacts/k1');
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('Today - round-2 review fixes', () => {
+  it('a failed live reload keeps the rows and says so (N6)', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1, reloadFailed: true };
+    renderToday();
+    expect(within(screen.getByRole('list', { name: 'Past tours needing an outcome' })).getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(/could not refresh past tours/i);
+  });
+
+  it('no refresh note when the last reload did not fail', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1 };
+    renderToday();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('the close-nag Open link to a tour carries the back pointer to Today (N4)', async () => {
+    const user = userEvent.setup();
+    state = { status: 'ready', source: 'server', items: [], relayCloseNags: [makeNag()], dismissNag: vi.fn() };
+    renderToday();
+    await user.click(screen.getByRole('link', { name: 'Open' }));
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
   });
 });

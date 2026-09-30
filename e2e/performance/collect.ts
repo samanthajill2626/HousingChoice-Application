@@ -67,13 +67,13 @@ const BACKGROUND_REFRESH_DECLARATIONS: BackgroundRefreshDeclaration[] = [
     shapes: [shape('/api/inbox/unread-count', [], 'inbox_badge'), shape('/api/unmatched-email', ['filter'])],
   },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.today, trigger: 'sse', shapes: [shape('/api/today', ['day', 'toursFrom', 'toursTo'])] },
-  {
-    sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.todayPastTours, trigger: 'sse',
-    shapes: [
-      shape('/api/tours', ['from', 'to']), shape('/api/tours', ['status']),
-      shape('/api/contacts/:contactId'), shape('/api/units/:unitId'),
-    ],
-  },
+  // NOT declared here: Today's past-tours section also reloads on tour.updated
+  // (dashboard/src/routes/today/useTodayPastTours.ts), but its shapes - the
+  // tours range and status reads and the contact/unit point reads - are the
+  // detail pages' own reads, and BACKGROUND_SHAPES is global: declaring them
+  // would reclassify a post-load refetch of those shapes as background refresh
+  // on every surface and hide exactly the regression this ledger exists to
+  // catch. Perf samples block writes, so no tour.updated fires while sampling.
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.inbox, trigger: 'sse', shapes: [shape('/api/inbox', ['filter', 'limit'])] },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.unmatchedEmail, trigger: 'sse', shapes: [shape('/api/unmatched-email', ['filter'])] },
   {

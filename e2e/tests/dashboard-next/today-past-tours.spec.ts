@@ -45,12 +45,18 @@ async function devLogin(page: Page): Promise<void> {
   await expectTodayReady(page);
 }
 
+/** Every tour the test creates, registered the moment it exists and decided in
+ *  afterEach even if the test failed midway (review N5). */
+const created: string[] = [];
+
 async function createTour(page: Page, unitId: string, scheduledAt: string): Promise<string> {
   const res = await page.request.post(`${NEXT}/api/tours`, {
     data: { tenantId: TENANT_ID, unitId, scheduledAt, tourType: 'self_guided' },
   });
   expect(res.ok(), await res.text()).toBeTruthy();
-  return ((await res.json()) as { tour: { tourId: string } }).tour.tourId;
+  const tourId = ((await res.json()) as { tour: { tourId: string } }).tour.tourId;
+  created.push(tourId);
+  return tourId;
 }
 
 async function patchTour(page: Page, tourId: string, data: Record<string, unknown>): Promise<void> {
@@ -82,8 +88,6 @@ async function decideQuietly(page: Page, tourId: string): Promise<void> {
 }
 
 test.describe('Today - past tours needing an outcome', () => {
-  /** Every tour the test creates, decided in afterEach even if the test failed midway. */
-  const created: string[] = [];
   test.afterEach(async ({ page }) => {
     for (const id of created.splice(0)) await decideQuietly(page, id);
   });
@@ -101,7 +105,6 @@ test.describe('Today - past tours needing an outcome', () => {
     const noShowId = await createTour(page, UNIT_A, pastAt(3, 10));
     await patchTour(page, needsOutcomeId, { status: 'toured' });
     await patchTour(page, noShowId, { status: 'no_show' });
-    created.push(notMarkedId, needsOutcomeId, noShowId);
 
     await page.goto(`${NEXT}/`);
     await expectTodayReady(page);
@@ -131,6 +134,11 @@ test.describe('Today - past tours needing an outcome', () => {
     await page.setViewportSize(MID_880);
     const cards = list.getByRole('link');
     await expect(cards).toHaveCount(2);
+    // The check's premise, asserted (review P-a): the pane is inside the
+    // stacking band. A changed sidebar default fails HERE, loudly, instead of
+    // quietly testing the one-line layout.
+    const pane = Math.round((await list.boundingBox())?.width ?? 0);
+    expect(pane, 'the Today pane width at an 880px window').toBeLessThan(760);
     const clipped = await cards.evaluateAll((els) =>
       els.flatMap((card) =>
         Array.from(card.querySelectorAll('*'))
@@ -160,13 +168,14 @@ test.describe('Today - past tours needing an outcome', () => {
     await expect(page.locator(`a[href^="/tours/${needsOutcomeId}"]`)).toHaveCount(0);
 
     // The cap: five more Not marked tours (4-8 days ago) make six that qualify.
-    for (let d = 4; d <= 8; d++) created.push(await createTour(page, d % 2 === 0 ? UNIT_A : UNIT_B, pastAt(d, 10)));
+    const older: string[] = [];
+    for (let d = 4; d <= 8; d++) older.push(await createTour(page, d % 2 === 0 ? UNIT_A : UNIT_B, pastAt(d, 10)));
     await page.goto(`${NEXT}/`);
     await expectTodayReady(page);
     await expect(list.getByRole('listitem')).toHaveCount(5);
     const capped = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
     // Most recent first: yesterday's, then 4, 5, 6 and 7 days ago (8 is cut).
-    expect(capped).toEqual([`/tours/${notMarkedId}`, ...created.slice(3, 7).map((id) => `/tours/${id}`)]);
+    expect(capped).toEqual([`/tours/${notMarkedId}`, ...older.slice(0, 4).map((id) => `/tours/${id}`)]);
     // Six qualify for Today; the Past tab also lists the no-show: seven.
     const seeAll = page.getByRole('link', { name: 'See all 7 on the Past tab' });
     await expect(seeAll).toBeVisible();

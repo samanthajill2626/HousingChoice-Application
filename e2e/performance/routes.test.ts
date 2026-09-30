@@ -450,9 +450,7 @@ describe('route registry completeness', () => {
       'contact_detail', 'conversation_detail', 'group_thread', 'person_thread',
       'contact_inbox_probe', 'unmatched_email_probe',
     ] as const) cited(CONTRACT_SOURCE_LEDGER.blockedWrites[surface]);
-    // 13 = the 12 timer/SSE readers plus Today's past-tours section
-    // (feat/today-past-tours).
-    expect(Object.keys(CONTRACT_SOURCE_LEDGER.background)).toHaveLength(13);
+    expect(Object.keys(CONTRACT_SOURCE_LEDGER.background)).toHaveLength(12);
     for (const source of Object.values(CONTRACT_SOURCE_LEDGER.background)) cited(source);
   });
 

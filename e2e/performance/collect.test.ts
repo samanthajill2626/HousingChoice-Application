@@ -369,7 +369,6 @@ describe('checked-in background policy', () => {
       'dashboard/src/routes/placements/usePlacementNudges.ts:96-116',
       'dashboard/src/app/UnreadContext.tsx:48,168-292',
       'dashboard/src/routes/today/useToday.ts:39,126-153',
-      'dashboard/src/routes/today/useTodayPastTours.ts:54,136-151',
       'dashboard/src/routes/inbox/useInbox.ts:77,249-266',
       'dashboard/src/routes/email/useUnmatchedEmail.ts:69,142-158',
       'dashboard/src/routes/shared/useRoster.ts:98-137',

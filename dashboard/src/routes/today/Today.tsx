@@ -150,7 +150,12 @@ function RelayCloseNagRow({
           </span>
         </span>
         <span className={styles.nagActions}>
-          <Link className={styles.nagOpen} to={nagOpenHref(nag)}>
+          <Link
+            className={styles.nagOpen}
+            to={nagOpenHref(nag)}
+            // A tour opened from Today returns to Today (as the queue rows do).
+            state={nag.ownerType === 'tour' && nag.ownerId ? BACK_TO_TODAY : undefined}
+          >
             Open
           </Link>
           <button
@@ -242,6 +247,11 @@ function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.El
           <PastTourRow key={row.tour.tourId} row={row} />
         ))}
       </ul>
+      {past.reloadFailed ? (
+        <p className={styles.sectionError} role="alert">
+          Could not refresh past tours. Reload the page to see the latest.
+        </p>
+      ) : null}
       <Link className={styles.moreLink} to="/tours/past">
         {more ? `See all ${past.total} on the Past tab` : 'Open the Past tab'}
       </Link>

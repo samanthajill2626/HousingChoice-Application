@@ -13,8 +13,9 @@
 //   the cap. A failed lookup is NOT a deletion: the row stays, labeled by id
 //   (the Past tab's fallback).
 // - Live refresh: a tour.updated event (a status or outcome PATCH, a
-//   conversion) reloads the rows, debounced; names already looked up are
-//   reused, and a failed reload keeps the rows and says so (reloadFailed).
+//   conversion) reloads the rows, debounced; addresses already looked up are
+//   reused (tenants are re-read, for their delete state), and a failed reload
+//   keeps the rows and says so (reloadFailed).
 // - Failure isolation: a failed load is this section's error, never the page's.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -61,12 +62,13 @@ function isDeletedContact(c: Contact): boolean {
   return typeof c.deleted_at === 'string' && c.deleted_at.length > 0;
 }
 
-/** Successful lookups, kept for the hook's lifetime so a live reload re-reads
- *  nobody it already named. A failed lookup is never stored: it retries on the
- *  next reload. (A rename or delete shows on the next mount - the Past tab's
- *  own contact list has the same horizon.) */
+/** Successful PROPERTY lookups, kept for the hook's lifetime so a live reload
+ *  re-reads no property it already named (a failed lookup is never stored: it
+ *  retries on the next reload). Tenants are deliberately NOT kept: on Today a
+ *  tenant's soft-delete decides whether the row shows at all, so every pass
+ *  re-reads the listed tenants and a delete made in another tab takes effect on
+ *  the next reload rather than the next mount (review R3-2). */
 interface LabelCache {
-  contacts: Map<string, Contact>;
   units: Map<string, UnitItem>;
 }
 
@@ -102,7 +104,8 @@ function cachedLookup<T>(
  *  best-effort: a failure resolves to undefined, so this never rejects (an
  *  aborted pass resolves to [] and is discarded by the caller). */
 async function labelRows(tours: Tour[], signal: AbortSignal, cache: LabelCache): Promise<TodayPastTourRow[]> {
-  const contactOf = cachedLookup(cache.contacts, getContact, signal);
+  // A fresh map per pass: tenants are only de-duplicated within this pass.
+  const contactOf = cachedLookup(new Map<string, Contact>(), getContact, signal);
   const unitOf = cachedLookup(cache.units, getUnit, signal);
 
   const kept: { tour: Tour; contact: Contact | undefined }[] = [];
@@ -144,7 +147,7 @@ export function useTodayPastTours(): TodayPastToursState {
   const eligible = useMemo(() => selectTodayPastTours(past), [past]);
   const pastCount = past.length;
   const [labeled, setLabeled] = useState<{ rows: TodayPastTourRow[]; total: number } | null>(null);
-  const cacheRef = useRef<LabelCache>({ contacts: new Map(), units: new Map() });
+  const cacheRef = useRef<LabelCache>({ units: new Map() });
 
   useEffect(() => {
     if (pastStatus !== 'ready') return;

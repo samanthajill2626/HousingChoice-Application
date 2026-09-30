@@ -478,3 +478,37 @@ describe('Today - round-2 review fixes', () => {
     expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
   });
 });
+
+describe('Today - round-3 review fixes', () => {
+  const ITEMS: TodayItem[] = [
+    { group: 'unreplied', refType: 'contact', refId: 'k1', who: 'James Porter', why: 'Hi' },
+    { group: 'ai_suggestions', refType: 'contact', refId: 'k2', who: 'Ann Lee', why: '1 suggestion(s)' },
+  ];
+
+  it('holds the groups below the past-tours section until it settles, so they never jump (N1)', () => {
+    state = { status: 'ready', source: 'server', items: ITEMS };
+    past = { status: 'idle', rows: [], total: 0 };
+    renderToday();
+    // Above the section: shown at once. Below it: held.
+    expect(screen.getByRole('heading', { name: 'Unreplied' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'AI suggestions to review' })).not.toBeInTheDocument();
+  });
+
+  it('shows them once the section settles - with rows, empty, or failed', () => {
+    for (const settled of [
+      { status: 'ready' as const, rows: [pastRow('a')], total: 1 },
+      { status: 'ready' as const, rows: [], total: 0 },
+      { status: 'error' as const, rows: [], total: 0 },
+    ]) {
+      state = { status: 'ready', source: 'server', items: ITEMS };
+      past = settled;
+      const { unmount } = render(
+        <MemoryRouter>
+          <Today />
+        </MemoryRouter>,
+      );
+      expect(screen.getByRole('heading', { name: 'AI suggestions to review' })).toBeInTheDocument();
+      unmount();
+    }
+  });
+});

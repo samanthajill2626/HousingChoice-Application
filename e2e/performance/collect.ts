@@ -73,7 +73,10 @@ const BACKGROUND_REFRESH_DECLARATIONS: BackgroundRefreshDeclaration[] = [
   // detail pages' own reads, and BACKGROUND_SHAPES is global: declaring them
   // would reclassify a post-load refetch of those shapes as background refresh
   // on every surface and hide exactly the regression this ledger exists to
-  // catch. Perf samples block writes, so no tour.updated fires while sampling.
+  // catch. A tour.updated rarely fires while sampling (samples block browser
+  // writes; only a worker-side emit such as a roster action can), and if one
+  // does, the reload's GETs are TODAY_GETS shapes: they lengthen that sample,
+  // they do not break its contract.
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.inbox, trigger: 'sse', shapes: [shape('/api/inbox', ['filter', 'limit'])] },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.unmatchedEmail, trigger: 'sse', shapes: [shape('/api/unmatched-email', ['filter'])] },
   {

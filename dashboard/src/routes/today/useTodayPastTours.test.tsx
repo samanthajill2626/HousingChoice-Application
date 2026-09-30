@@ -194,33 +194,51 @@ describe('useTodayPastTours', () => {
 });
 
 describe('useTodayPastTours - round-2 review fixes', () => {
-  it('a live reload reuses names it already looked up (N3)', async () => {
+  it('a live reload reuses the addresses it already looked up, and re-reads the tenants (N3, R3-2)', async () => {
     serveTours([tour('a', 1), tour('b', 2)]);
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.rows).toHaveLength(2));
     expect(getContact).toHaveBeenCalledTimes(2);
     expect(getUnit).toHaveBeenCalledTimes(2);
 
+    // The reload brings a third tour, so its relabel pass is OBSERVABLE: once
+    // row c shows, that pass has run all its lookups (review R3-1 - waiting on
+    // the stale rows alone proved nothing).
+    serveTours([tour('c', 1), tour('a', 2), tour('b', 3)]);
     act(() => {
-      lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'toured' });
+      lastHandlers.onTourUpdated?.({ tourId: 'c', status: 'toured' });
     });
-    await waitFor(() => expect(getTours).toHaveBeenCalledTimes(4));
-    await waitFor(() => expect(result.current.rows).toHaveLength(2));
-    expect(getContact).toHaveBeenCalledTimes(2);
-    expect(getUnit).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['c', 'a', 'b']));
+    // Addresses: only c's is new. Tenants: all three re-read (delete state).
+    expect(getUnit).toHaveBeenCalledTimes(3);
+    expect(getContact).toHaveBeenCalledTimes(5);
   });
 
-  it('a failed lookup is not cached: the next reload asks again', async () => {
-    serveTours([tour('a', 1)]);
-    getContact.mockRejectedValueOnce(new Error('blip'));
+  it('a tenant soft-deleted in another tab leaves the section on the next reload (R3-2)', async () => {
+    serveTours([tour('a', 1), tour('b', 2)]);
     const { result } = renderHook(() => useTodayPastTours());
-    await waitFor(() => expect(result.current.rows[0]?.tenant).toBe('c-a'));
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+
+    getContact.mockImplementation((id: string) =>
+      Promise.resolve(contactFor(id, id === 'c-a' ? { deleted_at: '2026-09-30T00:00:00Z' } : {})),
+    );
+    act(() => {
+      lastHandlers.onTourUpdated?.({ tourId: 'b', status: 'toured' });
+    });
+    await waitFor(() => expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['b']));
+  });
+
+  it('a failed address lookup is not cached: the next reload asks again', async () => {
+    serveTours([tour('a', 1)]);
+    getUnit.mockRejectedValueOnce(new Error('blip'));
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.rows[0]?.property).toBe('u-a'));
 
     act(() => {
       lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'toured' });
     });
-    await waitFor(() => expect(result.current.rows[0]?.tenant).toBe('Name c-a Tenant'));
-    expect(getContact).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.rows[0]?.property).toBe('u-a Main St'));
+    expect(getUnit).toHaveBeenCalledTimes(2);
   });
 
   it('a failed live reload keeps the rows and sets reloadFailed (N6)', async () => {

@@ -43,6 +43,7 @@ const GROUP_META: { group: TodayGroup; label: string }[] = [
 /** The past-tours section follows this group (Cameron 2026-09-30: after
  *  "Follow-ups due", before "AI suggestions to review"). */
 const PAST_TOURS_AFTER: TodayGroup = 'follow_ups';
+const PAST_TOURS_AFTER_INDEX = GROUP_META.findIndex((m) => m.group === PAST_TOURS_AFTER);
 
 const PAST_TOURS_LABEL = 'Past tours needing an outcome';
 
@@ -305,11 +306,15 @@ export function Today(): React.JSX.Element {
       ) : null}
 
       {status === 'ready'
-        ? GROUP_META.map(({ group, label }) => {
+        ? GROUP_META.map(({ group, label }, index) => {
             const rows = items.filter((i) => i.group === group);
+            // A group placed BELOW the past-tours section waits until that
+            // section settles, so the section can never land late and shove
+            // those rows out from under the pointer (review N1).
+            const held = index > PAST_TOURS_AFTER_INDEX && past.status === 'idle';
             return (
               <Fragment key={group}>
-                {rows.length > 0 ? (
+                {rows.length > 0 && !held ? (
                   <section className={styles.group}>
                     <h2 className={styles.groupHeading}>{label}</h2>
                     <ul className={styles.rows} aria-label={label}>

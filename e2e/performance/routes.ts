@@ -703,7 +703,7 @@ assertRouteRegistry(ROUTES);
 
 export const CONTRACT_SOURCE_LEDGER = Object.freeze({
   endpoints: Object.freeze({
-    '/': { base: 'dashboard/src/routes/today/useToday.ts:41-74; dashboard/src/routes/today/useTodayPastTours.ts:68-160; dashboard/src/routes/tours/useTours.ts:296-343' },
+    '/': { base: 'dashboard/src/routes/today/useToday.ts:41-74; dashboard/src/routes/today/useTodayPastTours.ts:71-163; dashboard/src/routes/tours/useTours.ts:296-343' },
     '/contacts': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/tenants': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/landlords': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
@@ -757,7 +757,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     placement_person_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:109-155,189-213,274-333',
   } as const),
   terminals: Object.freeze({
-    '/': 'dashboard/src/routes/today/Today.tsx:35-47,225-260,277-290',
+    '/': 'dashboard/src/routes/today/Today.tsx:35-48,226-261,278-291',
     '/contacts': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/tenants': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/landlords': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',

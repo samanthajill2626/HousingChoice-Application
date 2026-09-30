@@ -91,3 +91,17 @@ logged error. So the evidence is the outcome, not the error count: one full
 run after the fix, clean except the pre-existing failure. The 2 residual
 EADDRINUSE lines say the pool still runs close to its edge at peak; the
 residual churn (see "Under load" above) is the lever if failures return.
+
+## Confirmation run - same HEAD (2026-09-30, full e2e again)
+
+303 passed, 1 failed, 0 did not run (17.8 min), and this time ZERO socket
+errors in the log (no proxy `connect EADDRINUSE`, no browser `net::ERR_*`).
+`contact-create.spec.ts:157` passed; the one failure was
+`a2p-compliance.spec.ts:323` (test #5, early in the run): the property prefill
+and the test's typed text concatenated in the Message field. The same failure
+appeared once before the fix (feat/today-past-tours, first full run), so it is
+an intermittent race of its own, not port exhaustion - filed
+`docs/issues/a2p-consent-reinclude-fill-races-prefill.md`.
+
+Two full runs after the fix, 303/304 each, against four before it at
+292-293 with 7 unrun each time.

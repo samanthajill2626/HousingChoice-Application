@@ -1176,45 +1176,19 @@ describe('messaging.retrySend on the send-attempt record (retry-send-adoption T4
     expect(all).not.toContain('phonehash#');
   });
 
-  // ---- deviation 10: the pre-adoption belt (worklist item 24) ----------------------
+  // ---- the job reads no run-once marker (the pre-adoption belt was removed 2026-09-29) ----
 
-  it('deviation 10: a redelivery of a job the pre-adoption code already ran (its run-once marker present, no attempt record) is not re-sent - nothing claimed, ONE INFO naming the jobId; a fresh job for the same row still sends', async () => {
+  it('a job whose jobId has a run-once marker and no attempt record is not suppressed - the marker is never read; the job claims and sends once', async () => {
     wire();
+    const read = vi.spyOn(world.messagesRepo, 'getJobExecutionMarker');
     const row = await seedRetried('SMbelt1');
     const envelope = await envelopeFor(row);
     world.jobExecutionMarkers.set(envelope.jobId, row.conversationId);
     const calls = providerCalls();
     await dispatch(envelope);
-    expect(calls).not.toHaveBeenCalled();
-    expect(world.sendAttempts.size).toBe(0);
-    expect(msgLines(INFO, 'retrySend: pre-adoption delivery already ran this job - not re-sent')).toEqual([
-      expect.objectContaining({ jobId: envelope.jobId, retryRoot: row.tsMsgId, retriedTsMsgId: row.tsMsgId, attempt: 1 }),
-    ]);
-    // The belt keys on THAT jobId: any other delivery (every post-deploy job) proceeds.
-    await dispatch(await envelopeFor(row));
     expect(calls).toHaveBeenCalledTimes(1);
     expect(await recordOf(row)).toMatchObject({ state: 'done', outcome: 'sent' });
-    // Read, never written.
-    expect([...world.jobExecutionMarkers.keys()]).toEqual([envelope.jobId]);
-  });
-
-  it('deviation 10: the belt is read ONLY with no attempt record - a done/retryable record (a deferral re-run) or a redriven one (a re-drive) with a marker for its jobId is not consulted, and the job claims and sends', async () => {
-    wire();
-    const read = vi.spyOn(world.messagesRepo, 'getJobExecutionMarker');
-    const retryable = await seedRetried('SMbelt2');
-    await seedRetryable(ownerOf(retryable, 1), factsFor(retryable));
-    const deferredEnvelope = await envelopeFor(retryable, 1, { deferred: true });
-    world.jobExecutionMarkers.set(deferredEnvelope.jobId, retryable.conversationId);
-    await dispatch(deferredEnvelope);
-    expect(await recordOf(retryable)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2 });
-    const redriven = await seedRetried('SMbelt3');
-    await seedRedriven(ownerOf(redriven, 1), factsFor(redriven));
-    const redriveEnvelope = await envelopeFor(redriven);
-    world.jobExecutionMarkers.set(redriveEnvelope.jobId, redriven.conversationId);
-    await dispatch(redriveEnvelope);
-    expect(await recordOf(redriven)).toMatchObject({ state: 'done', outcome: 'sent', attemptNo: 2, redriveCount: 1 });
     expect(read).not.toHaveBeenCalled();
-    expect(world.sent).toHaveLength(2);
   });
 
   // ---- code review round 1, fix wave FW1 --------------------------------------------

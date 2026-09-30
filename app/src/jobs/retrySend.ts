@@ -67,7 +67,6 @@ import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingS
 import { rowlessAttemptKey } from '../lib/shareAttemptOrder.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
-import { getContext } from '../lib/context.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { guardWrite } from '../lib/guardWrite.js';
 import { pinnedSender } from '../lib/outboundSender.js';
@@ -458,25 +457,6 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
       return;
     }
     const existing = gate.record;
-    // THE PRE-ADOPTION BELT (plan deviation 10; the planner's ruling on build
-    // worklist item 24). With NO record, a jobId the pre-adoption code already
-    // ran - it wrote the run-once marker before its provider call - is an SQS
-    // redelivery across the deploy whose first run may have sent (an unknown
-    // or unrecorded outcome was rethrown), so it is NOT re-sent. READ, never
-    // written: every post-deploy job, deferral and re-drive carries a fresh
-    // jobId and meets no marker. An eventually consistent Get is enough - the
-    // marker was written at least one visibility timeout before a redelivery.
-    // TODO(retry-send-lost-under-job-marker): remove this belt after the first
-    // production deploy of retry-send-adoption plus one SQS redelivery window
-    // (about 10 minutes); it guards only envelopes the pre-adoption code ran.
-    // Dated 2026-09-28 (code review r1 C-10 / A-7).
-    if (existing === undefined) {
-      const jobId = getContext()?.jobId;
-      if (typeof jobId === 'string' && jobId.length > 0 && (await messagesRepo.getJobExecutionMarker(jobId))) {
-        log.info({ ...octx, jobId }, 'retrySend: pre-adoption delivery already ran this job - not re-sent');
-        return;
-      }
-    }
     const redriven = existing?.state === 'redriven';
 
     // 4a. THE RETRIED ROW'S CHILDREN (R2): ONE consistent Query on the row's

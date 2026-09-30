@@ -15,11 +15,11 @@ refs: app/src/jobs/retrySend.ts:203, app/src/jobs/retrySend.ts:212, app/src/jobs
 merged.** Its code final `3f38bcc2` is an ancestor of `main` (on `main` since
 2026-09-28, ahead of that day's production deploy). The job no longer claims
 the run-once marker; the retry is owned by the send-outcome core as the
-`retry_send` owner, as described in the 2026-09-28 section below. One
-follow-up is left in code: the read-only pre-adoption belt at
-`app/src/jobs/retrySend.ts:469` carries a `TODO(retry-send-lost-under-job-marker)`
-to remove it after the first production deploy plus one SQS redelivery
-window. That condition is met; removing the belt is its own small change.
+`retry_send` owner, as described in the 2026-09-28 section below. The
+read-only pre-adoption belt (plan deviation 10), whose
+`TODO(retry-send-lost-under-job-marker)` said to remove it after the first
+production deploy plus one SQS redelivery window, was removed on 2026-09-29
+once that condition was met; the job now reads no run-once marker at all.
 The deploy and rollback notes below are kept as history.
 
 **Problem.** `messaging.retrySend` is the one automatic retry for a one-to-one

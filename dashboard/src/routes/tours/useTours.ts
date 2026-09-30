@@ -249,6 +249,19 @@ export function selectOffRangeTours(tours: Tour[], now: Date = new Date()): Tour
     });
 }
 
+/** How many past tours the Today page lists before it points at the Past tab. */
+export const TODAY_PAST_TOURS_CAP = 5;
+
+/** The Past rows the Today page lists (Cameron 2026-09-30, Sam's item 18):
+ *  the Past tab's own rows, in the Past tab's order, minus no-shows. A no-show
+ *  has no way off the list yet (issue past-tab-no-show-rows-need-an-exit), so
+ *  on the home page it would sit there for the whole window. Filtering the
+ *  Past tab's SELECTED rows - never re-deriving them - keeps one rule: change
+ *  the Past tab and Today follows. Pure; never mutates its input. */
+export function selectTodayPastTours(past: Tour[]): Tour[] {
+  return past.filter((t) => t.status !== 'no_show');
+}
+
 /** The plain-words state chip for a Past row (spec 4.3). Any other status
  *  falls back to its label so a mis-selected row is never blank. */
 export function pastState(tour: Tour): string {

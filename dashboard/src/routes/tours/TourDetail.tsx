@@ -20,7 +20,7 @@
 // dismiss (or for a tour marked toured elsewhere). The Past tab's "Record
 // outcome" deep-links here with ?outcome=1, which opens the same modal once and
 // strips itself; its rows also pass state.back so the back arrow returns to
-// Past. A REQUESTED tour reaches the same gate through the kebab's "Mark already
+// Past. The Today page's past-tours rows do the same, back to Today. A REQUESTED tour reaches the same gate through the kebab's "Mark already
 // toured": the visit happened without us booking it, and scheduling it just to
 // record the outcome would arm - and send - a reminder ladder for a visit
 // already in the past. Audience: staff see "property" for the unit (GLOSSARY).
@@ -98,15 +98,22 @@ const RESCHEDULABLE_UI: ReadonlySet<TourStatus> = new Set<TourStatus>([
 /** Cancel shows for the pre-tour (non-dead) statuses. */
 const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>(['requested', 'scheduled']);
 
-/** The tours-list routes a back pointer may name (spec 4.6). Anything else
- *  falls back to /tours - router state is client-supplied. */
-const BACK_TARGETS: ReadonlySet<string> = new Set(['/tours', '/tours/past', '/tours/closed']);
+/** The routes a back pointer may name (spec 4.6): the tours-list tabs, and
+ *  Today ('/', its past-tours rows). Anything else falls back to /tours -
+ *  router state is client-supplied. */
+const BACK_TARGETS: ReadonlySet<string> = new Set(['/tours', '/tours/past', '/tours/closed', '/']);
 
-/** Where the back arrow goes: the tab that opened this page when its link
- *  said so (the Past tab's rows), else the Active list. */
+/** Where the back arrow goes: the page that opened this one when its link
+ *  said so (the Past tab's rows, Today's past-tours rows), else the Active
+ *  list. */
 function backHref(state: unknown): string {
   const back = typeof state === 'object' && state !== null ? (state as { back?: unknown }).back : undefined;
   return typeof back === 'string' && BACK_TARGETS.has(back) ? back : '/tours';
+}
+
+/** The back arrow's accessible name: it says where it goes. */
+function backLabel(href: string): string {
+  return href === '/' ? 'Back to Today' : 'Back to tours';
 }
 
 export function TourDetail(): React.JSX.Element {
@@ -260,7 +267,7 @@ function TourDetailLoaded({
   // `state` resets it to null (react-router createLocation), which would drop
   // the back pointer on exactly this path. It runs only while the param is
   // present, so the plain row-link path never touches its state. The Past
-  // tab's "Record outcome" is the only producer.
+  // tab's "Record outcome" and Today's "Needs outcome" rows are the producers.
   const [searchParams, setSearchParams] = useSearchParams();
   const wantsOutcome = searchParams.get('outcome') === '1';
   const [modal, setModal] = useState<
@@ -627,7 +634,7 @@ function TourDetailLoaded({
   return (
     <div className={shell.page}>
       <header className={shell.header}>
-        <Link to={backTo} className={styles.backBtn} aria-label="Back to tours">
+        <Link to={backTo} className={styles.backBtn} aria-label={backLabel(backTo)}>
           {'\u2190'}
         </Link>
         <div className={shell.identity}>

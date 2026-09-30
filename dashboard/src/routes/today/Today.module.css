@@ -172,6 +172,34 @@
   white-space: nowrap;
 }
 
+/* A past tour's date + time, beside its state chip (plain text, not a chip). */
+.when {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* The past-tours section's link to the Tours page's Past tab. */
+.moreLink {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-brand);
+}
+
+.moreLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* The past-tours section's own load failure (the rest of Today still shows). */
+.sectionError {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
 /* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
  * stack the text block over the chips so the name + reason get a full line each
  * and the chips wrap onto their own line instead of overflowing or crushing the

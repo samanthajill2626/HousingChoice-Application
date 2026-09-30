@@ -1,8 +1,9 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RelayCloseNag, TodayItem } from '../../api/index.js';
+import type { RelayCloseNag, TodayItem, Tour } from '../../api/index.js';
+import type { TodayPastTourRow, TodayPastToursState } from './useTodayPastTours.js';
 
 // Drive the page entirely through a mocked useToday so the render test is
 // independent of fetching/SSE (those are covered in useToday.test.tsx).
@@ -18,6 +19,11 @@ let state: {
   source: 'server',
 };
 vi.mock('./useToday.js', () => ({ useToday: () => state }));
+
+// The past-tours section's hook, mocked the same way (its fetching is covered in
+// useTodayPastTours.test.tsx). Default: settled, nothing to list.
+let past: TodayPastToursState = { status: 'ready', rows: [], total: 0 };
+vi.mock('./useTodayPastTours.js', () => ({ useTodayPastTours: () => past }));
 
 // The nag card drives the two relay endpoints directly; mock them, keep the rest.
 const closeConversation = vi.fn();
@@ -38,10 +44,39 @@ function renderToday(): void {
     <MemoryRouter>
       <Routes>
         <Route path="/" element={<Today />} />
-        <Route path="/tours/:tourId" element={<div>TOUR PAGE</div>} />
+        <Route path="/tours/:tourId" element={<TourPageProbe />} />
       </Routes>
     </MemoryRouter>,
   );
+}
+
+/** The tour route's stand-in: shows the query string and the router state the
+ *  row link carried, so a test can read both after a click. */
+function TourPageProbe(): React.JSX.Element {
+  const location = useLocation();
+  return (
+    <div>
+      TOUR PAGE <span data-testid="search">{location.search}</span>
+      <span data-testid="state">{JSON.stringify(location.state)}</span>
+    </div>
+  );
+}
+
+function pastRow(tourId: string, over: Partial<Tour> = {}, labels: Partial<TodayPastTourRow> = {}): TodayPastTourRow {
+  return {
+    tour: {
+      tourId,
+      tenantId: 'c1',
+      unitId: 'u1',
+      scheduledAt: new Date(2026, 8, 24, 14, 30).toISOString(),
+      tourType: 'self_guided',
+      status: 'toured',
+      ...over,
+    } as Tour,
+    tenant: 'Tasha Nguyen',
+    property: '88 Sycamore St',
+    ...labels,
+  };
 }
 
 function makeNag(over: Partial<RelayCloseNag> = {}): RelayCloseNag {
@@ -58,6 +93,7 @@ function makeNag(over: Partial<RelayCloseNag> = {}): RelayCloseNag {
 
 beforeEach(() => {
   state = { status: 'loading', items: [], source: 'server' };
+  past = { status: 'ready', rows: [], total: 0 };
   closeConversation.mockReset().mockResolvedValue({});
   deferCloseNag.mockReset().mockResolvedValue({});
 });
@@ -254,5 +290,126 @@ describe('Today - relay close-nag card (D5)', () => {
     ).toBeInTheDocument();
     // No owner -> Open falls back to the conversation.
     expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/conversations/g1');
+  });
+});
+
+describe('Today - past tours needing an outcome (Sam item 18)', () => {
+  const HEADING = 'Past tours needing an outcome';
+
+  it('sits after Follow-ups due and before AI suggestions to review', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [
+        { group: 'follow_ups', refType: 'placement', refId: 'k1', who: 'A', why: 'Follow-up due' },
+        { group: 'ai_suggestions', refType: 'contact', refId: 'k2', who: 'B', why: '1 suggestion(s)' },
+      ],
+    };
+    past = { status: 'ready', rows: [pastRow('t1')], total: 1 };
+    renderToday();
+    const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(['Follow-ups due', HEADING, 'AI suggestions to review']);
+  });
+
+  it('renders each row with tenant, property, date and the Past state, as one link', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = {
+      status: 'ready',
+      rows: [pastRow('t1', { status: 'scheduled' }), pastRow('t2', { outcome: 'move_forward', moveForward: true, convertible: true })],
+      total: 2,
+    };
+    renderToday();
+    const list = screen.getByRole('list', { name: HEADING });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    const notMarked = within(list).getByRole('link', {
+      name: 'Tour for Tasha Nguyen at 88 Sycamore St on Sep 24, 2026, 2:30 PM, Not marked',
+    });
+    expect(notMarked).toHaveAttribute('href', '/tours/t1');
+    expect(within(notMarked).getByText('Tasha Nguyen')).toBeInTheDocument();
+    expect(within(notMarked).getByText('88 Sycamore St')).toBeInTheDocument();
+    expect(within(notMarked).getByText('Sep 24, 2026, 2:30 PM')).toBeInTheDocument();
+    expect(within(notMarked).getByText('Not marked')).toBeInTheDocument();
+    // A Needs placement row opens the plain tour page (Start placement lives there).
+    expect(within(list).getByRole('link', { name: /, Needs placement$/ })).toHaveAttribute('href', '/tours/t2');
+  });
+
+  it('a Needs outcome row opens the tour with Record outcome up, and carries the back pointer to Today', async () => {
+    const user = userEvent.setup();
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('t1')], total: 1 };
+    renderToday();
+    const link = screen.getByRole('link', { name: /, Needs outcome$/ });
+    expect(link).toHaveAttribute('href', '/tours/t1?outcome=1');
+    await user.click(link);
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    expect(screen.getByTestId('search')).toHaveTextContent('?outcome=1');
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+
+  it('an undated row reads Undated, never a dangling "on"', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('t1', { scheduledAt: undefined })], total: 1 };
+    renderToday();
+    const link = screen.getByRole('link', { name: 'Tour for Tasha Nguyen at 88 Sycamore St, undated, Needs outcome' });
+    expect(within(link).getByText('Undated')).toBeInTheDocument();
+  });
+
+  it('links "See all N on the Past tab" when it shows only some of them', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: ['a', 'b', 'c', 'd', 'e'].map((id) => pastRow(id)), total: 12 };
+    renderToday();
+    expect(within(screen.getByRole('list', { name: HEADING })).getAllByRole('listitem')).toHaveLength(5);
+    expect(screen.getByRole('link', { name: 'See all 12 on the Past tab' })).toHaveAttribute('href', '/tours/past');
+  });
+
+  it('links "Open the Past tab" when every one is shown', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1 };
+    renderToday();
+    expect(screen.getByRole('link', { name: 'Open the Past tab' })).toHaveAttribute('href', '/tours/past');
+    expect(screen.queryByRole('link', { name: /^See all/ })).not.toBeInTheDocument();
+  });
+
+  it('past tours alone are not "all caught up"', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a')], total: 1 };
+    renderToday();
+    expect(screen.getByRole('heading', { name: HEADING })).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
+  it('"all caught up" waits while the section is still loading', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'idle', rows: [], total: 0 };
+    renderToday();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: HEADING })).not.toBeInTheDocument();
+  });
+
+  it('no section at all when nothing qualifies', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'unreplied', refType: 'contact', refId: 'k1', who: 'A', why: 'Hi' }],
+    };
+    past = { status: 'ready', rows: [], total: 0 };
+    renderToday();
+    expect(screen.queryByRole('heading', { name: HEADING })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Past tab/ })).not.toBeInTheDocument();
+  });
+
+  it('a failed section load says so in the section and leaves the rest of Today alone', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'unreplied', refType: 'contact', refId: 'k1', who: 'James Porter', why: 'Hi' }],
+    };
+    past = { status: 'error', rows: [], total: 0 };
+    renderToday();
+    expect(screen.getByRole('heading', { name: HEADING })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t load past tours/i);
+    expect(screen.getByRole('link', { name: 'Open the Past tab' })).toHaveAttribute('href', '/tours/past');
+    expect(screen.getByRole('link', { name: /James Porter/ })).toHaveAttribute('href', '/contacts/k1');
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
   });
 });

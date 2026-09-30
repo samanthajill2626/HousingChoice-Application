@@ -28,6 +28,8 @@ import {
   pastToursDateRange,
   selectPastTours,
   selectOffRangeTours,
+  selectTodayPastTours,
+  TODAY_PAST_TOURS_CAP,
   useClosedTours,
   usePastTours,
   useTours,
@@ -289,6 +291,43 @@ describe('selectPastTours', () => {
     const input = [...ROWS];
     selectPastTours(input, NOW);
     expect(input.map((t) => t.tourId)).toEqual(ROWS.map((t) => t.tourId));
+  });
+});
+
+describe('selectTodayPastTours (the Today page, Sam item 18)', () => {
+  const base = { tenantId: 'c', unitId: 'u', tourType: 'self_guided' } as const;
+  const PAST = [
+    { ...base, tourId: 'a', status: 'toured' },
+    { ...base, tourId: 'b', status: 'no_show' },
+    { ...base, tourId: 'c', status: 'scheduled' },
+    { ...base, tourId: 'd', status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true },
+    { ...base, tourId: 'e', status: 'no_show' },
+  ] as Tour[];
+
+  it('keeps every Past row except no-shows, in the Past order', () => {
+    expect(selectTodayPastTours(PAST).map((t) => t.tourId)).toEqual(['a', 'c', 'd']);
+  });
+
+  it('filters the Past selection end to end: selectPastTours output minus no-shows', () => {
+    const NOW = new Date(2026, 8, 26, 15, 30, 0, 0);
+    const at = (d: number): string => new Date(2026, 8, d, 14, 0, 0, 0).toISOString();
+    const rows = [
+      { ...base, tourId: 'ns', scheduledAt: at(23), status: 'no_show' },
+      { ...base, tourId: 'sc', scheduledAt: at(25), status: 'scheduled' },
+      { ...base, tourId: 'to', scheduledAt: at(24), status: 'toured' },
+      { ...base, tourId: 'dec', scheduledAt: at(22), status: 'toured', outcome: 'not_a_fit', moveForward: false },
+    ] as Tour[];
+    expect(selectTodayPastTours(selectPastTours(rows, NOW)).map((t) => t.tourId)).toEqual(['sc', 'to']);
+  });
+
+  it('never mutates its input', () => {
+    const input = [...PAST];
+    selectTodayPastTours(input);
+    expect(input.map((t) => t.tourId)).toEqual(PAST.map((t) => t.tourId));
+  });
+
+  it('caps Today at five rows', () => {
+    expect(TODAY_PAST_TOURS_CAP).toBe(5);
   });
 });
 

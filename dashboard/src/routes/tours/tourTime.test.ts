@@ -5,8 +5,11 @@ import { describe, expect, it } from 'vitest';
 import {
   currentHourLocal,
   FAR_FUTURE_DAYS,
+  formatDate,
+  formatTime,
   pastTourTimeWarning,
   tourTimeWarning,
+  whenLabel,
 } from './tourTime.js';
 
 /** A datetime-local value `msFromNow` relative to `now`, in host-local time
@@ -93,5 +96,28 @@ describe('currentHourLocal', () => {
 
   it('zero-pads single-digit months, days, and hours', () => {
     expect(currentHourLocal(new Date(2026, 0, 5, 8, 59))).toBe('2026-01-05T08:00');
+  });
+});
+
+// The row display shared by the Tours page and Today's past-tours rows.
+describe('whenLabel / formatDate / formatTime', () => {
+  const ISO = new Date(2026, 8, 24, 14, 30).toISOString();
+
+  it('whenLabel reads "Sep 24, 2026, 2:30 PM" with plain spaces only', () => {
+    const label = whenLabel(ISO);
+    expect(label).toBe('Sep 24, 2026, 2:30 PM');
+    expect(label).not.toMatch(/[\u202f\u00a0]/);
+  });
+
+  it('an undated or unparseable value is empty, never "Invalid Date"', () => {
+    expect(whenLabel(undefined)).toBe('');
+    expect(whenLabel('not-a-date')).toBe('');
+    expect(formatDate(undefined)).toBe('');
+    expect(formatTime('not-a-date')).toBe('');
+  });
+
+  it('formatDate is the date alone and formatTime the time alone', () => {
+    expect(formatDate(ISO)).toBe('Sep 24, 2026');
+    expect(formatTime(ISO).replace(/[\u202f\u00a0]/g, ' ')).toBe('2:30 PM');
   });
 });

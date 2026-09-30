@@ -4,11 +4,13 @@
 // dot), each row a link to its placement/contact/conversation. A distinct
 // "Relay groups to close" section (relay-number-lifecycle D5) leads the ready
 // content: each still-open relay group whose 28-day close-nag is due, with Close /
-// Keep-open actions. Empty groups are skipped; loading shows a Spinner, error an
-// inline message, all-empty (no items AND no nags) a friendly "all caught up"
-// state. Matches the locked mockup structure in the new design language (tokens +
-// CSS Modules).
-import { useState } from 'react';
+// Keep-open actions. A "Past tours needing an outcome" section (Sam's item 18)
+// sits after "Follow-ups due": the Tours page's Past rows minus no-shows, up to
+// five, with a link to the Past tab (useTodayPastTours). Empty groups are
+// skipped; loading shows a Spinner, error an inline message, all-empty (no
+// items, no nags, no past tours) a friendly "all caught up" state. Matches the
+// locked mockup structure in the new design language (tokens + CSS Modules).
+import { Fragment, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   closeConversation,
@@ -19,7 +21,14 @@ import {
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
+import { whenLabel } from '../tours/tourTime.js';
+import { pastState } from '../tours/useTours.js';
 import { useToday } from './useToday.js';
+import {
+  useTodayPastTours,
+  type TodayPastTourRow,
+  type TodayPastToursState,
+} from './useTodayPastTours.js';
 import styles from './Today.module.css';
 
 /** Human heading per group, in canonical display order. */
@@ -30,6 +39,16 @@ const GROUP_META: { group: TodayGroup; label: string }[] = [
   { group: 'follow_ups', label: 'Follow-ups due' },
   { group: 'ai_suggestions', label: 'AI suggestions to review' },
 ];
+
+/** The past-tours section follows this group (Cameron 2026-09-30: after
+ *  "Follow-ups due", before "AI suggestions to review"). */
+const PAST_TOURS_AFTER: TodayGroup = 'follow_ups';
+
+const PAST_TOURS_LABEL = 'Past tours needing an outcome';
+
+/** Router state the past-tours rows carry so the tour page's back arrow
+ *  returns to Today. */
+const BACK_TO_TODAY = { back: '/' } as const;
 
 /** The deep-link target for a row, driven by its refType. The contact +
  *  conversation routes are placeholders for now (B2+) — that's expected. */
@@ -158,9 +177,81 @@ function RelayCloseNagRow({
   );
 }
 
+/** One past tour (Sam's item 18): tenant - property - when - the Past tab's
+ *  state chip. A "Needs outcome" row opens the tour page with the Record
+ *  outcome dialog up (the Past tab's ?outcome=1 deep link); the others open the
+ *  tour page, where Mark toured / Start placement live. Its accessible name
+ *  mirrors a Past row's: identity, date, then the state. */
+function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
+  const { tour, tenant, property } = row;
+  const when = whenLabel(tour.scheduledAt);
+  const state = pastState(tour);
+  const needsOutcome = tour.status === 'toured' && tour.outcome === undefined;
+  const who = when.length > 0 ? `${tenant} at ${property} on ${when}` : `${tenant} at ${property}, undated`;
+  return (
+    <li className={styles.rowItem}>
+      <Link
+        to={needsOutcome ? `/tours/${tour.tourId}?outcome=1` : `/tours/${tour.tourId}`}
+        state={BACK_TO_TODAY}
+        className={styles.row}
+        aria-label={`Tour for ${who}, ${state}`}
+      >
+        <span className={styles.main}>
+          <span className={styles.who}>{tenant}</span>
+          <span className={styles.why}>{property}</span>
+        </span>
+        <span className={styles.meta}>
+          <span className={styles.when}>{when.length > 0 ? when : 'Undated'}</span>
+          <span className={styles.tag}>{state}</span>
+        </span>
+      </Link>
+    </li>
+  );
+}
+
+/** The past-tours section. Hidden until its rows (names included) are ready
+ *  and whenever there are none; a failed load says so here and leaves the
+ *  rest of Today alone. The Past tab link carries the full count when the
+ *  section is showing only some of them. */
+function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.Element | null {
+  if (past.status === 'idle') return null;
+  if (past.status === 'error') {
+    return (
+      <section className={styles.group}>
+        <h2 className={styles.groupHeading}>{PAST_TOURS_LABEL}</h2>
+        <p className={styles.sectionError} role="alert">
+          We couldn&apos;t load past tours.{' '}
+          <Link className={styles.moreLink} to="/tours/past">
+            Open the Past tab
+          </Link>
+        </p>
+      </section>
+    );
+  }
+  if (past.rows.length === 0) return null;
+  const more = past.total > past.rows.length;
+  return (
+    <section className={styles.group}>
+      <h2 className={styles.groupHeading}>{PAST_TOURS_LABEL}</h2>
+      <ul className={styles.rows} aria-label={PAST_TOURS_LABEL}>
+        {past.rows.map((row) => (
+          <PastTourRow key={row.tour.tourId} row={row} />
+        ))}
+      </ul>
+      <Link className={styles.moreLink} to="/tours/past">
+        {more ? `See all ${past.total} on the Past tab` : 'Open the Past tab'}
+      </Link>
+    </section>
+  );
+}
+
 export function Today(): React.JSX.Element {
   const { status, items, relayCloseNags = [], dismissNag = () => {} } = useToday();
+  const past = useTodayPastTours();
   const hasNags = relayCloseNags.length > 0;
+  // "All caught up" waits for the past-tours section to settle, so it never
+  // flashes above rows that are about to appear.
+  const noPastTours = past.status === 'ready' && past.rows.length === 0;
 
   return (
     <div className={styles.page}>
@@ -175,7 +266,7 @@ export function Today(): React.JSX.Element {
         </p>
       ) : null}
 
-      {status === 'ready' && items.length === 0 && !hasNags ? (
+      {status === 'ready' && items.length === 0 && !hasNags && noPastTours ? (
         <div className={styles.empty}>
           <p className={styles.emptyTitle}>All caught up</p>
           <p className={styles.emptyBody}>Nothing needs you right now.</p>
@@ -197,19 +288,23 @@ export function Today(): React.JSX.Element {
         </section>
       ) : null}
 
-      {status === 'ready' && items.length > 0
+      {status === 'ready'
         ? GROUP_META.map(({ group, label }) => {
             const rows = items.filter((i) => i.group === group);
-            if (rows.length === 0) return null;
             return (
-              <section key={group} className={styles.group}>
-                <h2 className={styles.groupHeading}>{label}</h2>
-                <ul className={styles.rows} aria-label={label}>
-                  {rows.map((item) => (
-                    <Row key={`${item.refType}:${item.refId}`} item={item} />
-                  ))}
-                </ul>
-              </section>
+              <Fragment key={group}>
+                {rows.length > 0 ? (
+                  <section className={styles.group}>
+                    <h2 className={styles.groupHeading}>{label}</h2>
+                    <ul className={styles.rows} aria-label={label}>
+                      {rows.map((item) => (
+                        <Row key={`${item.refType}:${item.refId}`} item={item} />
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
+                {group === PAST_TOURS_AFTER ? <PastToursSection past={past} /> : null}
+              </Fragment>
             );
           })
         : null}

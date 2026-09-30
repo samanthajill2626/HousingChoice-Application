@@ -54,6 +54,7 @@ import { Button, Spinner } from '../../ui/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
 import { ScheduleTourForm } from './ScheduleTourForm.js';
 import { pastState, useClosedTours, usePastTours, useTours } from './useTours.js';
+import { formatDate, formatTime, whenLabel } from './tourTime.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { useListings } from '../listings/useListings.js';
 import styles from './ToursPage.module.css';
@@ -76,25 +77,6 @@ function propertyLabel(units: Map<string, UnitItem>, unitId: string): string {
   const u = units.get(unitId);
   if (!u) return unitId;
   return formatAddress(u.address) || unitId;
-}
-
-/** Format just the time part of a scheduledAt ISO string for display, e.g.
- *  "2:30 PM". Returns '' when absent or unparseable. */
-function formatTime(iso: string | undefined): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-}
-
-/** Format the DATE of a scheduledAt ISO string, e.g. "Jul 14, 2026" — the
- *  Closed section's lead column (a months-old tour's time-of-day is noise).
- *  Returns '' when absent or unparseable. */
-function formatDate(iso: string | undefined): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 /** YYYY-MM-DD local key for grouping. Returns '' for undefined input. */
@@ -620,20 +602,6 @@ const BACK_TO_PAST = { back: '/tours/past' } as const;
  *  fixed strings - never a raw server code. */
 type MarkResult = { ok: true } | { ok: false; message: MarkFailure };
 type MarkFailure = 'Could not check the tour' | 'Changed since the list loaded' | 'The update failed';
-
-/** U+202F / U+00A0: the en-US formatters emit one before AM/PM on ICU 72+
- *  hosts (the repo convention, inbox/inboxTime.ts, maps them to U+0020). */
-const NBSP_LIKE = /[\u202f\u00a0]/g;
-
-/** The row's "Sep 24, 2026, 2:30 PM" string (also the suffix of every label),
- *  with plain spaces only, so the text and every accessible name read the
- *  same on every host. */
-function whenLabel(iso: string | undefined): string {
-  return [formatDate(iso), formatTime(iso)]
-    .filter((s) => s.length > 0)
-    .join(', ')
-    .replace(NBSP_LIKE, ' ');
-}
 
 export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Element {
   const navigate = useNavigate();

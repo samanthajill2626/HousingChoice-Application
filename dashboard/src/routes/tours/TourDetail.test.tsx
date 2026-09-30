@@ -196,7 +196,7 @@ function renderDetail(tourId = 'tour-abc') {
 
 /** Wait for the loaded page (past the loading spinner). */
 async function waitLoaded() {
-  await screen.findByRole('link', { name: 'Back to tours' });
+  await screen.findByRole('link', { name: /^Back to (tours|Today)$/ });
 }
 
 
@@ -1908,5 +1908,22 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
     renderAt('', { back: '/tours/closed' });
     await waitLoaded();
     expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours/closed');
+  });
+
+  it('the back arrow returns to Today (state.back = /) and says so', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('', { back: '/' });
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Back to Today' })).toHaveAttribute('href', '/');
+    expect(screen.queryByRole('link', { name: 'Back to tours' })).not.toBeInTheDocument();
+  });
+
+  it('strips the param WITHOUT losing state.back (the Needs-outcome row from Today)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('?outcome=1', { back: '/' });
+    await waitLoaded();
+    expect(await screen.findByRole('dialog', { name: 'Record outcome' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(''));
+    expect(screen.getByRole('link', { name: 'Back to Today' })).toHaveAttribute('href', '/');
   });
 });

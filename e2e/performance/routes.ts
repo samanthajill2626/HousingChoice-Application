@@ -757,7 +757,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     placement_person_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:109-155,189-213,274-333',
   } as const),
   terminals: Object.freeze({
-    '/': 'dashboard/src/routes/today/Today.tsx:35-48,226-261,278-291',
+    '/': 'dashboard/src/routes/today/Today.tsx:35-47,225-260,277-290',
     '/contacts': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/tenants': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/landlords': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',

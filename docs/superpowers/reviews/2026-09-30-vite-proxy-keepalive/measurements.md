@@ -68,3 +68,26 @@ entry through a real Vite server to a real target: 20 requests must reuse one
 connection and never answer `Connection: close`, and every proxy entry must
 share one keep-alive agent with an idle timeout under 65 s. Mutation-checked:
 removing `agent: appAgent` fails both tests.
+
+## Completion gates - HEAD 3d1f804c (2026-09-30 15:01-15:22)
+
+Run bare, one after another, by a detached script; Terraform 1.16.2 (winget,
+installed during this session) prepended to PATH.
+
+| Gate | Exit | Reading |
+|---|---|---|
+| 1 `npm run typecheck` | 0 | clean |
+| 2 `npm test` | 0 | every workspace green - app 399 files / 8109 tests, dashboard 210 / 3554, e2e workspace 22 / 501 (incl. the new keep-alive test and maintenancePage.test.ts, now that Terraform is on PATH), 34 / 275, 13 / 111. No `[dynamoAdmin]` line. |
+| 3 `npm run smoke` | 0 | clean |
+| 4 `npm run e2e` | 1 | **303 passed, 1 failed, 0 did not run** (18.3 min). The one failure is `contact-create.spec.ts:157`, the pre-existing failure that reproduces alone on main (issue `contact-create-link-relationship-e2e-fails-on-rerun`, filed on feat/today-past-tours). The dashboard proxy logged `connect EADDRINUSE` twice in the whole run and no test failed from it. |
+| 5 `npx eslint <branch files>` | 0 | clean |
+
+Before the fix, every full run on this PC (four runs, main included) ended
+292-293 passed, 5-6 failed, 7 did not run, with a different set of late specs
+each time. The LOGGED socket errors were never numerous - 2 to 9 proxy
+`connect EADDRINUSE` lines and 0 to 2 browser `net::ERR_*` per run - because
+most exhaustion failures surfaced as timeouts and missing elements, not as a
+logged error. So the evidence is the outcome, not the error count: one full
+run after the fix, clean except the pre-existing failure. The 2 residual
+EADDRINUSE lines say the pool still runs close to its edge at peak; the
+residual churn (see "Under load" above) is the lever if failures return.

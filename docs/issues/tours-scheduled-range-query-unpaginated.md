@@ -35,3 +35,10 @@ filed as low debt rather than fixed in the Past tab build.
 Add an integration test against DynamoDB Local with a `Limit: 1`-forced page
 size (or enough seeded rows) proving a range read returns every row across
 pages.
+
+**Update 2026-09-30.** The Today page now reads this window too:
+feat/today-past-tours added a "Past tours needing an outcome" section that
+reuses the Past tab's loader (`usePastTours`), so a truncated range read would
+also drop the most recent rows from the landing page. Still low at the
+current volume (review finding L9,
+`docs/superpowers/reviews/2026-09-30-today-past-tours/`).

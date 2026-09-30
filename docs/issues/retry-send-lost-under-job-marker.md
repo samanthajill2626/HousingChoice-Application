@@ -3,12 +3,24 @@ id: retry-send-lost-under-job-marker
 title: An automatic 30003 retry (retrySend) that errors after its job marker is claimed is silently lost; its adoption into the send-outcome core is that mission's Stage 1b, with stated requirements
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/messaging
 created: 2026-09-25
-updated: 2026-09-28
+updated: 2026-09-29
+resolved: 2026-09-29
 refs: app/src/jobs/retrySend.ts:203, app/src/jobs/retrySend.ts:212, app/src/jobs/retrySend.ts:274, app/src/jobs/retrySend.ts:317, app/src/jobs/retrySend.ts:339, app/src/routes/webhooks/twilio.ts:3581, app/src/routes/webhooks/twilio.ts:3624, app/src/services/sendMessage.ts:442, app/src/services/sendMessage.ts:608, app/src/services/sendMessage.ts:661, app/src/repos/sendAttemptsRepo.ts:329, app/src/jobs/sendReconcile.ts:369, docs/superpowers/specs/2026-09-24-send-outcome-reconcile-design.md, docs/superpowers/specs/2026-09-24-retry-send-window-design.md
 ---
+
+**Resolution (2026-09-29). Closed by Cameron: `feat/retry-send-adoption` is
+merged.** Its code final `3f38bcc2` is an ancestor of `main` (on `main` since
+2026-09-28, ahead of that day's production deploy). The job no longer claims
+the run-once marker; the retry is owned by the send-outcome core as the
+`retry_send` owner, as described in the 2026-09-28 section below. One
+follow-up is left in code: the read-only pre-adoption belt at
+`app/src/jobs/retrySend.ts:469` carries a `TODO(retry-send-lost-under-job-marker)`
+to remove it after the first production deploy plus one SQS redelivery
+window. That condition is met; removing the belt is its own small change.
+The deploy and rollback notes below are kept as history.
 
 **Problem.** `messaging.retrySend` is the one automatic retry for a one-to-one
 text that failed with 30003 (handset unreachable). The status webhook schedules

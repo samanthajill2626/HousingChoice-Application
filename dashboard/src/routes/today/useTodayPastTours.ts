@@ -42,8 +42,10 @@ export interface TodayPastToursState {
   status: 'idle' | 'ready' | 'error';
   /** Up to TODAY_PAST_TOURS_CAP rows, in the Past tab's order. */
   rows: TodayPastTourRow[];
-  /** How many Past rows qualify for Today (no-shows excluded) - the "See all
-   *  N" count. It counts a deleted tenant's tour too: the Past tab lists it. */
+  /** How many rows the Past tab lists - the "See all N on the Past tab" count,
+   *  so the link names what the click lands on. It includes what Today leaves
+   *  out (no-shows, a deleted tenant's tours), so it can exceed rows.length
+   *  even when Today lists everything it qualifies. */
   total: number;
 }
 
@@ -115,6 +117,7 @@ export function useTodayPastTours(): TodayPastToursState {
   // `past` is a new array on every load, so this (and the labeling effect)
   // re-runs per load and never on an unrelated render.
   const eligible = useMemo(() => selectTodayPastTours(past), [past]);
+  const pastCount = past.length;
   const [labeled, setLabeled] = useState<{ rows: TodayPastTourRow[]; total: number } | null>(null);
 
   useEffect(() => {
@@ -125,10 +128,10 @@ export function useTodayPastTours(): TodayPastToursState {
     // rows on screen until this lands.
     void labelRows(eligible, controller.signal).then((rows) => {
       if (controller.signal.aborted) return;
-      setLabeled({ rows, total: eligible.length });
+      setLabeled({ rows, total: pastCount });
     });
     return () => controller.abort();
-  }, [pastStatus, eligible]);
+  }, [pastStatus, eligible, pastCount]);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(

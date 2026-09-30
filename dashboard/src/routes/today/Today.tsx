@@ -71,6 +71,9 @@ function Row({ item }: { item: TodayItem }): React.JSX.Element {
     <li className={styles.rowItem}>
       <Link
         to={hrefFor(item)}
+        // A tour opened from Today (a "Tours today" row) returns to Today, the
+        // same as the past-tours rows below.
+        state={item.refType === 'tour' ? BACK_TO_TODAY : undefined}
         className={`${styles.row} ${item.attention ? styles.flagged : ''}`}
       >
         {/* Attention flag = an amber severity stripe down the card's left edge (CSS,
@@ -193,7 +196,7 @@ function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
       <Link
         to={needsOutcome ? `/tours/${tour.tourId}?outcome=1` : `/tours/${tour.tourId}`}
         state={BACK_TO_TODAY}
-        className={styles.row}
+        className={`${styles.row} ${styles.pastRow}`}
         aria-label={`Tour for ${who}, ${state}`}
       >
         <span className={styles.main}>
@@ -211,8 +214,9 @@ function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
 
 /** The past-tours section. Hidden until its rows (names included) are ready
  *  and whenever there are none; a failed load says so here and leaves the
- *  rest of Today alone. The Past tab link carries the full count when the
- *  section is showing only some of them. */
+ *  rest of Today alone. The Past tab link carries the Past tab's own row count
+ *  whenever that tab holds more than this section lists (it also lists
+ *  no-shows). */
 function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.Element | null {
   if (past.status === 'idle') return null;
   if (past.status === 'error') {
@@ -250,15 +254,17 @@ export function Today(): React.JSX.Element {
   const past = useTodayPastTours();
   const hasNags = relayCloseNags.length > 0;
   // "All caught up" waits for the past-tours section to settle, so it never
-  // flashes above rows that are about to appear.
+  // flashes above rows that are about to appear; meanwhile an otherwise empty
+  // page keeps its spinner rather than going blank.
   const noPastTours = past.status === 'ready' && past.rows.length === 0;
+  const settling = status === 'ready' && items.length === 0 && !hasNags && past.status === 'idle';
 
   return (
     <div className={styles.page}>
       <h1 className={styles.title}>Today</h1>
       <p className={styles.sub}>What needs you, across every placement and contact.</p>
 
-      {status === 'loading' ? <Spinner center /> : null}
+      {status === 'loading' || settling ? <Spinner center /> : null}
 
       {status === 'error' ? (
         <p className={styles.error} role="alert">

@@ -83,13 +83,14 @@ describe('useTodayPastTours', () => {
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['new', 'old']);
-    expect(result.current.total).toBe(2);
+    // The "See all N" count is the Past tab's: it lists the no-show too.
+    expect(result.current.total).toBe(3);
     expect(result.current.rows[0]).toMatchObject({ tenant: 'Name c-new Tenant', property: 'u-new Main St' });
     // Only the listed rows are looked up - never the no-show's tenant.
     expect(getContact).not.toHaveBeenCalledWith('c-ns', expect.anything());
   });
 
-  it('shows at most five rows and reports the full count for "See all N"', async () => {
+  it('shows at most five rows and reports the Past tab count for "See all N"', async () => {
     serveTours(Array.from({ length: 7 }, (_, i) => tour(`t${i}`, i + 1)));
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.status).toBe('ready'));
@@ -142,7 +143,7 @@ describe('useTodayPastTours', () => {
     expect(result.current.rows).toEqual([]);
   });
 
-  it('a tour.updated event reloads the rows (debounced)', async () => {
+  it('a tour.updated event reloads the rows', async () => {
     serveTours([tour('a', 1), tour('b', 2)]);
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.rows).toHaveLength(2));
@@ -152,10 +153,42 @@ describe('useTodayPastTours', () => {
     serveTours([tour('b', 2)]);
     act(() => {
       lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'closed' });
-      lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'closed' });
     });
     await waitFor(() => expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['b']));
-    // Two events inside the debounce window cost one reload (two reads).
+    expect(getTours).toHaveBeenCalledTimes(4);
+  });
+
+  it('debounces: events 200ms apart reload once, 300ms after the LAST one', async () => {
+    serveTours([tour('a', 1)]);
+    const { result } = renderHook(() => useTodayPastTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(getTours).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers(); // release the global Date pin (test/setup.ts) first
+    vi.useFakeTimers();
+    act(() => {
+      lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'toured' });
+    });
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    act(() => {
+      lastHandlers.onTourUpdated?.({ tourId: 'a', status: 'toured' });
+    });
+    // 400ms after the first event, 200ms after the second: still inside the
+    // window the second one restarted, so nothing has reloaded.
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(getTours).toHaveBeenCalledTimes(2);
+    // Past 300ms after the second event: exactly one reload (its two reads).
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(getTours).toHaveBeenCalledTimes(4);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
     expect(getTours).toHaveBeenCalledTimes(4);
   });
 });

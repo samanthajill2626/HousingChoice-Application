@@ -180,6 +180,42 @@
   white-space: nowrap;
 }
 
+/* A past-tour row names a tenant AND a property and carries two meta items
+ * (date + state), so it needs more room than a queue row before it can sit on
+ * one line. The name may shrink (with an ellipsis) instead of running over
+ * the date, and below a 760px pane the row stacks early - name, then
+ * property, then the chips - rather than squeezing the property out (review
+ * P2: a long name overlapped the date and hid the property at a ~590px pane). */
+.pastRow .who {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@container (max-width: 760px) {
+  .pastRow {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .pastRow .main {
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 2px;
+  }
+  /* Stacked, the name and the property each own a line: let both wrap. */
+  .pastRow .who,
+  .pastRow .why {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .pastRow .meta {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+}
+
 /* The past-tours section's link to the Tours page's Past tab. */
 .moreLink {
   font-size: var(--fs-sm);

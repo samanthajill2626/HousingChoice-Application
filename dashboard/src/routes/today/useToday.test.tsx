@@ -9,7 +9,11 @@ const getToday = vi.fn();
 const getAllPlacements = vi.fn();
 const getAllConversations = vi.fn();
 const getTours = vi.fn();
-let lastHandlers: { onPlacementUpdated?: () => void; onConversationUpdated?: () => void } = {};
+let lastHandlers: {
+  onPlacementUpdated?: () => void;
+  onConversationUpdated?: () => void;
+  onTourUpdated?: () => void;
+} = {};
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -158,6 +162,18 @@ describe('useToday', () => {
     });
     lastHandlers.onPlacementUpdated?.();
     await waitFor(() => expect(screen.getByTestId('first')).toHaveTextContent('Updated'));
+    expect(getToday).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetches when a tour.updated event arrives (a tour leaving Tours today)', async () => {
+    getToday.mockResolvedValue(TODAY);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(getToday).toHaveBeenCalledTimes(1);
+
+    getToday.mockResolvedValue({ ...TODAY, items: [] });
+    lastHandlers.onTourUpdated?.();
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('0'));
     expect(getToday).toHaveBeenCalledTimes(2);
   });
 });

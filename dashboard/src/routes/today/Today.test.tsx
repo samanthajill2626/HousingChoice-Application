@@ -378,12 +378,44 @@ describe('Today - past tours needing an outcome (Sam item 18)', () => {
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
   });
 
-  it('"all caught up" waits while the section is still loading', () => {
+  it('"all caught up" waits while the section is still loading, and the page keeps its spinner', () => {
     state = { status: 'ready', source: 'server', items: [] };
     past = { status: 'idle', rows: [], total: 0 };
     renderToday();
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: HEADING })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toBeInTheDocument();
+  });
+
+  it('no spinner while the section loads when the queue already has rows', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'unreplied', refType: 'contact', refId: 'k1', who: 'A', why: 'Hi' }],
+    };
+    past = { status: 'idle', rows: [], total: 0 };
+    renderToday();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('a "Tours today" row also carries the back pointer to Today', async () => {
+    const user = userEvent.setup();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [{ group: 'tours_today', refType: 'tour', refId: 'tt1', who: 'Tasha Nguyen', why: 'Tour today', tag: 'Tour' }],
+    };
+    renderToday();
+    await user.click(screen.getByRole('link', { name: /Tasha Nguyen/ }));
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+
+  it('links the Past tab count when the Past tab holds more than Today lists (its no-shows)', () => {
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('a'), pastRow('b')], total: 3 };
+    renderToday();
+    expect(screen.getByRole('link', { name: 'See all 3 on the Past tab' })).toHaveAttribute('href', '/tours/past');
   });
 
   it('no section at all when nothing qualifies', () => {

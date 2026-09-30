@@ -72,6 +72,7 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
   '/': [
     '/api/today?day&toursFrom&toursTo#required', '/api/placements?limit#conditional',
     '/api/conversations?#conditional', '/api/tours?from&to#conditional',
+    '/api/tours?status#conditional', '/api/contacts/:contactId?#conditional', '/api/units/:unitId?#conditional',
   ],
   '/contacts': CONTACT_SHAPES,
   '/contacts/tenants': CONTACT_SHAPES,
@@ -449,7 +450,9 @@ describe('route registry completeness', () => {
       'contact_detail', 'conversation_detail', 'group_thread', 'person_thread',
       'contact_inbox_probe', 'unmatched_email_probe',
     ] as const) cited(CONTRACT_SOURCE_LEDGER.blockedWrites[surface]);
-    expect(Object.keys(CONTRACT_SOURCE_LEDGER.background)).toHaveLength(12);
+    // 13 = the 12 timer/SSE readers plus Today's past-tours section
+    // (feat/today-past-tours).
+    expect(Object.keys(CONTRACT_SOURCE_LEDGER.background)).toHaveLength(13);
     for (const source of Object.values(CONTRACT_SOURCE_LEDGER.background)) cited(source);
   });
 

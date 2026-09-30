@@ -2,8 +2,8 @@
 // (GET /api/today, §C7); when that endpoint isn't live yet (ApiError 404) it
 // falls back to assembling the SAME TodayItem[] client-side from /api/placements +
 // /api/conversations + /api/tours (buildTodayFromSources). Subscribes to the SSE stream and
-// refetches (debounced) on placement.updated / conversation.updated so the queue
-// stays live. Returns a small { status, items, source } state for the view.
+// refetches (debounced) on placement.updated / conversation.updated /
+// suggestion.updated / tour.updated so the queue stays live. Returns a small { status, items, source } state for the view.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -145,6 +145,11 @@ export function useToday(): TodayState {
     // conversation-fact-extraction: a new/accepted/dismissed suggestion changes the
     // "AI suggestions to review" group count.
     onSuggestionUpdated: scheduleRefetch,
+    // A tour marked toured, canceled or rescheduled leaves (or joins) "Tours
+    // today"; without this it stayed listed until an unrelated event - and,
+    // since the past-tours section reloads on the same event, one tour could
+    // show in both sections at once.
+    onTourUpdated: scheduleRefetch,
   });
 
   return { ...state, dismissNag };

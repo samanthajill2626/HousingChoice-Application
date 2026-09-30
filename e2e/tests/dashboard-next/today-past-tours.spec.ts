@@ -9,14 +9,15 @@
 // - the same setup as tours-past.spec.ts.
 //
 //   Today lists the Not marked and the Needs outcome tour, most recent first,
-//   and NOT the no-show; Today is not "all caught up"; "Open the Past tab"
-//   links to /tours/past. The Needs
+//   and NOT the no-show; Today is not "all caught up"; the link names the Past
+//   tab's own count ("See all 3" - it lists the no-show too). The Needs
 //   outcome row opens its tour with the Record outcome dialog up, and the back
 //   arrow ("Back to Today") returns to Today. Recording that outcome through
 //   the API drops the row LIVE (the tour.updated event), with no reload. With
-//   six qualifying tours Today shows five and "See all 6 on the Past tab".
-//   No horizontal overflow at 360px. Every tour this spec creates is decided
-//   at the end, so no later spec inherits a Today section it did not expect.
+//   six qualifying tours Today shows five, and "See all 7 on the Past tab"
+//   lands on seven Past rows. No horizontal overflow at 360px. Every tour this
+//   spec creates is decided afterwards - in afterEach too, so a failure midway
+//   cannot leave a later spec a Today section it did not expect.
 import { test, expect, type Page } from '@playwright/test';
 import { expectTodayReady } from '../../support/today.js';
 import { NARROW_360, WIDE_RESTORE, expectNoHorizontalOverflow } from '../../support/viewport.js';
@@ -26,6 +27,9 @@ const TENANT_ID = 'contact-tenant-0001'; // Tasha Nguyen
 const UNIT_A = 'unit-0001'; // 1450 Joseph E. Boone Blvd NW
 const UNIT_B = 'unit-0002'; // 88 Sycamore St
 const HEADING = 'Past tours needing an outcome';
+/** An 880px window: above the 768px nav breakpoint, so the expanded sidebar
+ *  (240px) and the content padding leave a ~592px pane. */
+const MID_880 = { width: 880, height: 800 } as const;
 
 /** `daysAgo` days before today at `hour`:00 LOCAL, as an ISO instant. */
 function pastAt(daysAgo: number, hour: number): string {
@@ -68,7 +72,22 @@ test.beforeAll(async ({ request }) => {
   expect(res.ok(), `reseed failed: ${res.status()} ${await res.text()}`).toBeTruthy();
 });
 
+/** decide() for cleanup: never throws, so a teardown cannot mask the real failure. */
+async function decideQuietly(page: Page, tourId: string): Promise<void> {
+  try {
+    await decide(page, tourId);
+  } catch {
+    // Best-effort: a later spec's reseed is the backstop.
+  }
+}
+
 test.describe('Today - past tours needing an outcome', () => {
+  /** Every tour the test creates, decided in afterEach even if the test failed midway. */
+  const created: string[] = [];
+  test.afterEach(async ({ page }) => {
+    for (const id of created.splice(0)) await decideQuietly(page, id);
+  });
+
   test('lists past tours minus no-shows, deep-links Record outcome, back to Today, live drop, cap of five', async ({
     page,
   }) => {
@@ -82,7 +101,7 @@ test.describe('Today - past tours needing an outcome', () => {
     const noShowId = await createTour(page, UNIT_A, pastAt(3, 10));
     await patchTour(page, needsOutcomeId, { status: 'toured' });
     await patchTour(page, noShowId, { status: 'no_show' });
-    const created = [notMarkedId, needsOutcomeId, noShowId];
+    created.push(notMarkedId, needsOutcomeId, noShowId);
 
     await page.goto(`${NEXT}/`);
     await expectTodayReady(page);
@@ -98,13 +117,28 @@ test.describe('Today - past tours needing an outcome', () => {
     await expect(list.getByRole('link', { name: /^Tour for Tasha Nguyen at .* on .*, Needs outcome$/ })).toBeVisible();
     // The no-show is on the Past tab only - nowhere on Today.
     await expect(page.locator(`a[href^="/tours/${noShowId}"]`)).toHaveCount(0);
-    // Two rows, all shown: the footer offers the Past tab without a count.
-    await expect(page.getByRole('link', { name: 'Open the Past tab' })).toHaveAttribute('href', '/tours/past');
+    // The link names what the Past tab holds: these two plus the no-show.
+    await expect(page.getByRole('link', { name: 'See all 3 on the Past tab' })).toHaveAttribute('href', '/tours/past');
 
     // Narrow: the section's rows must not push Today sideways.
     await page.setViewportSize(NARROW_360);
     await expect(list.getByRole('listitem')).toHaveCount(2);
     await expectNoHorizontalOverflow(page, 'Today with past tours at 360px');
+    // Mid-width: an 880px window leaves a ~592px pane beside the expanded
+    // sidebar - the band where a one-line past-tour row squeezed the property
+    // out (review P2). The row stacks there, so no text inside any card is
+    // clipped. Two cards, counted first, so the check is never vacuous.
+    await page.setViewportSize(MID_880);
+    const cards = list.getByRole('link');
+    await expect(cards).toHaveCount(2);
+    const clipped = await cards.evaluateAll((els) =>
+      els.flatMap((card) =>
+        Array.from(card.querySelectorAll('*'))
+          .filter((el) => el.scrollWidth > el.clientWidth + 1)
+          .map((el) => `${el.tagName.toLowerCase()}: ${el.textContent ?? ''}`),
+      ),
+    );
+    expect(clipped, 'clipped text inside a past-tour card at an 880px window').toEqual([]);
     await page.setViewportSize(WIDE_RESTORE);
 
     // The Needs outcome row: the tour page with Record outcome up, param stripped.
@@ -133,11 +167,13 @@ test.describe('Today - past tours needing an outcome', () => {
     const capped = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
     // Most recent first: yesterday's, then 4, 5, 6 and 7 days ago (8 is cut).
     expect(capped).toEqual([`/tours/${notMarkedId}`, ...created.slice(3, 7).map((id) => `/tours/${id}`)]);
-    const seeAll = page.getByRole('link', { name: 'See all 6 on the Past tab' });
+    // Six qualify for Today; the Past tab also lists the no-show: seven.
+    const seeAll = page.getByRole('link', { name: 'See all 7 on the Past tab' });
     await expect(seeAll).toBeVisible();
     await seeAll.click();
     await expect(page).toHaveURL(/\/tours\/past$/);
     await expect(page.getByRole('heading', { name: 'Past tours' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Past tours' }).getByRole('listitem')).toHaveCount(7);
 
     // Leave the lane as we found it: decide every tour this spec created. The
     // Past tab's empty state proves it (it renders only once loaded, so the

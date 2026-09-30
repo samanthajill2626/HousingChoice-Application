@@ -67,6 +67,13 @@ const BACKGROUND_REFRESH_DECLARATIONS: BackgroundRefreshDeclaration[] = [
     shapes: [shape('/api/inbox/unread-count', [], 'inbox_badge'), shape('/api/unmatched-email', ['filter'])],
   },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.today, trigger: 'sse', shapes: [shape('/api/today', ['day', 'toursFrom', 'toursTo'])] },
+  {
+    sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.todayPastTours, trigger: 'sse',
+    shapes: [
+      shape('/api/tours', ['from', 'to']), shape('/api/tours', ['status']),
+      shape('/api/contacts/:contactId'), shape('/api/units/:unitId'),
+    ],
+  },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.inbox, trigger: 'sse', shapes: [shape('/api/inbox', ['filter', 'limit'])] },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.unmatchedEmail, trigger: 'sse', shapes: [shape('/api/unmatched-email', ['filter'])] },
   {

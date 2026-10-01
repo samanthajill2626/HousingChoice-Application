@@ -1,4 +1,5 @@
 /// <reference types="vitest/config" />
+import http from 'node:http';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -10,9 +11,24 @@ import react from '@vitejs/plugin-react';
 // app child; Vite reads it here to proxy to the correct lane app port.
 // In `npm run dev` (lane 0), APP_PORT is unset → falls back to 8080.
 const appPort = Number(process.env['APP_PORT'] ?? 8080);
+
+// ONE keep-alive pool for every request proxied to the app. Without an agent,
+// Vite's proxy opens a new TCP connection per request AND sends
+// `Connection: close` upstream, so the app answers close and the browser's own
+// socket to Vite is closed too: two connections churned per /api call, each
+// parking a port in TIME_WAIT for 2 minutes. On 2026-09-30 three e2e scenario
+// specs (1.8 min) peaked at 15,490 TIME_WAIT sockets against a ~15k Windows
+// ephemeral pool, and full runs lost random late specs to ERR_ADDRESS_IN_USE /
+// ERR_NO_BUFFER_SPACE. `timeout` retires an IDLE pooled socket after 30s -
+// before the app's 65s keepAliveTimeout (app/src/index.ts) can close it under
+// a reuse (Node 24 does not derive this from the server's Keep-Alive hint);
+// it never cuts an in-flight response, so the SSE stream is unaffected.
+// Dev and e2e only - production has no Vite.
+const appAgent = new http.Agent({ keepAlive: true, timeout: 30_000 });
 const appProxy = {
   target: `http://127.0.0.1:${appPort}`,
   headers: { 'x-origin-verify': 'dev-placeholder-not-a-secret' },
+  agent: appAgent,
 };
 
 // Stamps the launch commit (set by scripts/e2e-session.mjs as VITE_E2E_COMMIT)
@@ -40,7 +56,8 @@ function commitStampPlugin() {
 // 2026-08-24 and applied to the app server the same day; 65s clears every
 // stall a live e2e test can produce (30s per-test budget) with 2x margin,
 // and headersTimeout must exceed keepAliveTimeout (Node's rule).
-// See docs/issues/app-server-default-keepalive-timeout.md.
+// See docs/issues/app-server-default-keepalive-timeout.md. (The proxy's own
+// pool to the app is `appAgent` above; before 2026-09-30 it had none.)
 function keepAliveHardeningPlugin(): import('vite').Plugin {
   return {
     name: 'keep-alive-hardening',

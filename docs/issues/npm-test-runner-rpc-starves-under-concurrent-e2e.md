@@ -127,3 +127,34 @@ thrashing, not less work.
 **Raising this number is not a speed win, it is a way to reintroduce the false
 red.** If someone wants more parallelism later, measure a quiet-box run first -
 the 1.3% gap is the entire prize.
+
+**2026-10-01: raised 4 -> 10 on the new 24-core PC, measured both ways.** The
+sentence above was true of the old 16-thread box and is NOT true of this one.
+Same suite grown to 399 files / 8110 tests; quiet box, interleaved
+4-8-12-16-16-12-8-4, every run exit 0 with 0 RPC timeouts:
+
+| maxWorkers | run 1 | run 2 |
+|---|---|---|
+| 4 | 76.8s | 84.8s |
+| 8 | 45.0s | 51.0s |
+| 12 | 35.4s | 40.2s |
+| 16 | 34.5s | 37.9s |
+
+Here the cap WAS the bottleneck (cumulative work / 4 was close to the wall
+clock), and 12 is the knee - 16 buys ~2s more and costs 4 more cores of
+headroom. 12 in the config form (no CLI flag) was then proved under load, with
+two full e2e suites running from two worktrees - and 10 SHIPS, below the knee
+by choice, to leave more cores for the suites other worktrees run alongside
+(fewer workers only lightens the coordinator's load, so the 12 proof covers
+it):
+
+- `npm test` x3 back to back: all exit 0, 0 RPC timeouts, 0 unhandled errors;
+  app 63.4s / 67.2s / 71.8s. CPU avg 63%, peak 95%.
+- Then TWO concurrent `npm test` runs (one per worktree, both at 12) on top of
+  the two e2e suites: both exit 0, 0 RPC timeouts; app 139.7s / 138.4s (they
+  share DynamoDB Local). CPU avg 65%, 18 of 40 five-second samples >= 90%,
+  peak 100%.
+
+The dashboard workspace sets no cap (vitest's default, cores - 1 = 23 forks
+here) and stayed green in every one of those runs (29-44s). Records:
+`docs/superpowers/reviews/2026-10-01-search-scroll-prefill/measurements.md`.

@@ -21,17 +21,33 @@ export default defineConfig({
     // NON-ZERO with ZERO failing tests, which reads as a broken test that does
     // not exist. See docs/issues/npm-test-runner-rpc-starves-under-concurrent-e2e.md.
     //
-    // 4 is measured, not guessed. All four runs, 336 files / 5977 tests:
+    // The number is MEASURED, and it is machine-dependent. 2026-08-26, the old
+    // 16-thread box, 336 files / 5977 tests: 4 was chosen because parallelism
+    // above it bought ~nothing there (the suite was waiting on DynamoDB Local):
     //
     //   quiet box, 16 threads   249.8s   0 errors   exit 0
     //   quiet box,  4 threads   253.1s   0 errors   exit 0   (+1.3%)
     //   under load, 16 threads  347.8s   1 error    exit 1   <- the failure
     //   under load,  4 threads  361.7s   0 errors   exit 0
     //
-    // So the parallelism above 4 was buying ~nothing even on an idle box: this
-    // suite is bound by DynamoDB Local I/O, not CPU. It was only ever costing
-    // the coordinator its core. Raising this number is not a speed win; it is a
-    // way to reintroduce the false red.
+    // 2026-10-01, the new 24-core box, 399 files / 8110 tests, quiet, two runs
+    // each (interleaved 4-8-12-16-16-12-8-4), 0 errors, every run exit 0:
+    //
+    //    4 workers   76.8s  84.8s
+    //    8 workers   45.0s  51.0s
+    //   12 workers   35.4s  40.2s
+    //   16 workers   34.5s  37.9s
+    //
+    // On this box the cap WAS the bottleneck, and 12 is the knee: 16 buys ~2s
+    // more while taking 4 more cores from whatever runs beside it - which is
+    // exactly how the coordinator starved before. 12 was then proved clean
+    // under two concurrent e2e suites plus two concurrent `npm test` runs.
+    // The shipped value is 10, deliberately BELOW the knee (Cameron's call):
+    // several worktrees run suites side by side here, so the last few seconds
+    // are worth less than the cores they would take from everything else.
+    // Re-measure before raising it again, and prove the new number UNDER LOAD,
+    // not just on a quiet box.
+    // Measurements: docs/superpowers/reviews/2026-10-01-search-scroll-prefill/.
     // MUST be top-level `maxWorkers`, NOT poolOptions.threads.maxThreads. A
     // first attempt used the latter and was INERT: vitest 3's default pool is
     // `forks` (defaults.B7q_naMc.js), and each pool reads only its own key -
@@ -41,7 +57,7 @@ export default defineConfig({
     // A/B below was measured with the CLI's --maxWorkers, which resolves to
     // this option and works for either pool; shipping the poolOptions form
     // changed the mechanism without re-testing it, and the failure recurred.
-    maxWorkers: 4,
+    maxWorkers: 10,
     // Timeouts under cross-worktree load are contention, never hangs — keep a
     // generous budget (belt-and-braces alongside the per-key isolation; this
     // mirrors the feat/tours-sequence mitigation and must survive the merge).

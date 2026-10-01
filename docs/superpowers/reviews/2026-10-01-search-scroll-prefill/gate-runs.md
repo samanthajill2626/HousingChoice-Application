@@ -14,3 +14,28 @@ DynamoDB Local freshly started this session. New PC (24 cores).
 | 5 | `npx eslint` on the 5 branch .ts/.tsx files | exit 0 |
 
 No lane listener survived the e2e run.
+
+## Round 2 - globalSetupEnsure fixed keys (after the first merge)
+
+main was fast-forwarded to ac9307ad (the branch head), so the branch
+continued from main with nothing to sync. Commits: 659dc49a (fixed keys),
+e4c1a24f (guard marker). DynamoDB Local had been restarted earlier that day
+and held 131-133 databases during these runs.
+
+| # | Gate | Head | Result |
+| --- | --- | --- | --- |
+| 1 | `npm run typecheck` | e4c1a24f | exit 0 |
+| 2 | `npm test` | 659dc49a | **exit 1** - `dynamoAccessKeyGuard.test.ts` "every unmarked suite that CREATES container tables mints per-run random names" flagged `globalSetupEnsure.test.ts`: removing `Math.random` removed what the guard accepted. Correct catch; fixed in e4c1a24f by declaring the keys `hc:dynamo-lane worktree-derived-keys` and deriving them from `testAccessKeyId()` |
+| 2 | `npm test` | e4c1a24f | exit 0 - app 399 files (60.9s), dashboard 211, e2e 22, fake-twilio 34, fake-twilio-web 13; 0 `Timeout calling`, 0 `[dynamoAdmin]` |
+| 3 | `npm run smoke` | 659dc49a | exit 0 |
+| 4 | `npm run e2e` | 659dc49a | exit 0 - 305 passed, 17.2m |
+| 5 | `npx eslint` on the branch's .ts files (app/test/globalSetupEnsure.test.ts) | e4c1a24f | exit 0 |
+
+Gates 3 and 4 were not re-run at e4c1a24f: that commit changes only
+`app/test/globalSetupEnsure.test.ts`, which neither the compiled app (smoke)
+nor the e2e harness loads.
+
+The app suite's 60.9s (vs 38-40s on a fresh container at the same 10
+workers) is the database-count creep described in
+`docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md`, not
+this change.

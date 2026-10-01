@@ -70,16 +70,18 @@ the same ~60 per-file databases (the key is the file's path, not the
 worktree's), so they contend on the same SQLite locks - each took 94s instead
 of ~40s.
 
-**Suggested fixes (not started).**
-1. Stop the leak: give `globalSetupEnsure.test.ts` FIXED keys (derived from the
-   worktree key) and drop their tables at the start as well as the end, so
-   "fresh" stays true without minting a new database each run.
-2. Bound the per-file databases and isolate worktrees: key by vitest worker
-   slot plus worktree (`VITEST_POOL_ID`) instead of by file. A worker runs one
-   file at a time, so that keeps per-file lock isolation, caps a run at
-   maxWorkers databases, and stops two worktrees sharing databases. Needs care
-   with the ledger sweep and the shared-table opt-in marker.
-3. Reproduce the 80.8s state with the full mix while sampling
+**Fixes.**
+1. DONE 2026-10-01 (fix/search-scroll-prefill): `globalSetupEnsure.test.ts`
+   now uses two FIXED keys derived from the worktree key, empties them first
+   with its own helper, and requires them empty. Verified: three runs added 2
+   databases on the first and none after; residue planted under both keys is
+   cleared and the suite passes.
+2. FILED as [app-test-dynamo-databases-by-leased-run-slot](./app-test-dynamo-databases-by-leased-run-slot.md):
+   stop concurrent worktrees sharing the per-file databases while keeping the
+   count bounded. (The first idea here - worker slot plus WORKTREE - was wrong:
+   it makes the count grow with every worktree, undoing the 2026-08-23
+   machine-wide decision. The filed design leases a run slot instead.)
+3. OPEN, this issue: reproduce the 80.8s state with the full mix while sampling
    `docker stats` and `jcmd 1 VM.native_memory` (needs
    `-XX:NativeMemoryTracking=summary`, which changes the container args and so
    recreates - wipes - it).

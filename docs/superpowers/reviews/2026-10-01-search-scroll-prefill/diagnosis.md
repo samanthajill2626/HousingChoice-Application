@@ -80,8 +80,18 @@ edit-ownership guard (docs/issues/broadcast-composer-prefill-overwrites-edit.md)
 correctly keeps it.
 
 The failing value's link is the dashboard origin (`flyerLinkFor`, the
-pre-draft fallback), so it was the FIRST prefill - on property load - that
-straddled the fill, not the later re-seed when the draft's flyerUrl arrives.
+pre-draft fallback), so in the observed failures it was the FIRST prefill - on
+property load - that straddled the fill.
+
+The prefill is written TWICE, and the second write is a hazard too. The body
+change creates a draft (`useComposerDraft`, debounced POST /api/broadcasts),
+whose response carries the server's flyerUrl
+(`<publicBase>/p/<unitId>?cta=text`, `app/src/lib/mergeFields.ts`) - a
+different string from the fallback - and the prefill effect re-seeds the body
+with it. Forced interleave (hold the draft POST, select the first prefill,
+release, insertText): 3 of 3 end `...?cta=text` + typed text. So the
+issue's suggested wait (`toHaveValue(/Details:/)`) would have closed only the
+first window; the fix waits for the `?cta=text` ending, as the share specs do.
 
 Deterministic reproduction: hold `GET /api/units/<id>` with `page.route`, run
 fill's step 1 verbatim on the empty textarea, release the route, wait for the
@@ -96,7 +106,8 @@ Nothing is concatenated out of sight.
 
 ### Fix (test only)
 
-Wait for the prefill before filling, at both a2p-compliance fill sites: :365
+Wait for the SETTLED prefill (the value ends `/p/<unitId>?cta=text`) before
+filling, at both a2p-compliance fill sites: :365
 (first compose - the "Send a property" heading it waits for renders before the
 property loads) and :420 (re-include - no wait at all). Both are followed by an
 exact-value check, which is what turns a straddle into a failure.

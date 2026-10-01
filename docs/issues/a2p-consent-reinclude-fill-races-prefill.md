@@ -3,10 +3,11 @@ id: a2p-consent-reinclude-fill-races-prefill
 title: a2p-compliance.spec:323 types its message while the property prefill lands - the draft becomes prefill + typed text
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-09-30
-refs: e2e/tests/dashboard-next/a2p-compliance.spec.ts:418, dashboard/src/routes/broadcasts/BroadcastComposer.tsx, docs/issues/broadcast-composer-prefill-overwrites-edit.md
+resolved: 2026-10-01
+refs: e2e/tests/dashboard-next/a2p-compliance.spec.ts:418, dashboard/src/routes/broadcasts/BroadcastComposer.tsx, docs/issues/broadcast-composer-prefill-overwrites-edit.md, docs/superpowers/reviews/2026-10-01-search-scroll-prefill/diagnosis.md
 ---
 
 **Problem.** `a2p-compliance.spec.ts:323` ("a no-consent tenant is surfaced in
@@ -42,3 +43,18 @@ to settle before typing - e.g. `await expect(message).toHaveValue(/Details:/)`
 earlier in this spec (the first compose step) and in other broadcast specs.
 If a real user can hit it (typing in the first instant after opening a
 prefilled composer), that is a separate, product-side question.
+
+**Resolution (2026-10-01, fix/search-scroll-prefill).** Mechanism confirmed:
+Playwright's textarea `fill()` selects the contents and inserts in a later
+round trip, and a prefill commit in between collapses the selection, so the
+insert appends. Forced with `page.route`, 3 of 3. BUT the suggested
+`/Details:/` wait is NOT enough: the prefill is written twice - on property
+load (dashboard fallback link), then again when the first draft returns the
+server's `?cta=text` flyerUrl - and the second write straddles a fill the same
+way (also forced, 3 of 3). The spec now waits for the value to end
+`/p/<unitId>?cta=text` before BOTH fills (first compose and re-include), the
+pattern the share specs already use. Test-only: a person either types before
+the prefill (the 2026-09-08 guard keeps it) or sees it appear first, so nothing
+is concatenated out of sight. broadcasts.spec.ts fills the same way at two
+sites but asserts no exact body, so it was left alone. Details:
+`docs/superpowers/reviews/2026-10-01-search-scroll-prefill/diagnosis.md`.

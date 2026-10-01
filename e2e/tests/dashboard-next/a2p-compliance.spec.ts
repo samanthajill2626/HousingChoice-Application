@@ -361,6 +361,15 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     // Compose from the property → 2-BR audience pre-filled → Preview.
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
     await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
+    // Let the property prefill SETTLE before typing. fill() selects the field's
+    // contents, then inserts in a separate round trip; a prefill that commits in
+    // between leaves the typed text AFTER it. The heading renders before the
+    // property loads, and the prefill is written twice (on load with the
+    // dashboard's fallback link, again when the first draft returns the server's
+    // `?cta=text` link), so wait for the second.
+    // See docs/issues/a2p-consent-reinclude-fill-races-prefill.md.
+    const prefillSettled = new RegExp(`/p/${unitId}\\?cta=text$`);
+    await expect(page.getByLabel('Message')).toHaveValue(prefillSettled, { timeout: 10_000 });
     const body = `Open house ${stamp} — 2BR available.`;
     await page.getByLabel('Message').fill(body);
     const previewBtn = page.getByRole('button', { name: 'Preview recipients' });
@@ -416,6 +425,8 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     });
     expect(patch2.ok()).toBeTruthy();
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
+    // Same prefill race as the first compose above.
+    await expect(page.getByLabel('Message')).toHaveValue(prefillSettled, { timeout: 10_000 });
     const reincludedBody = `Re-include ${stamp}`;
     await page.getByLabel('Message').fill(reincludedBody);
     const previewBtn2 = page.getByRole('button', { name: 'Preview recipients' });

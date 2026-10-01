@@ -263,4 +263,43 @@ describe('ContactSearchField', () => {
 
     expect(onChange).toHaveBeenCalledWith({ name: 'Alice Smith', contactId: 'c1' });
   });
+
+  // A scroll dismisses the list ONLY when it moved the input. The browser reports
+  // a scroll at its next frame, so one that happened just before the list opened
+  // can arrive just after - and the list, measured post-scroll, is not stale.
+  it('a scroll that left the input in place keeps the list open', () => {
+    setup({ name: 'Ali' });
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.scroll(document.body);
+    });
+
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('a scroll that moved the input dismisses the list', () => {
+    setup({ name: 'Ali' });
+    const input = screen.getByRole('combobox');
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+
+    vi.spyOn(input, 'getBoundingClientRect').mockReturnValue({
+      top: -120,
+      left: 0,
+      bottom: -90,
+      right: 200,
+      width: 200,
+      height: 30,
+      x: 0,
+      y: -120,
+      toJSON: () => ({}),
+    } as DOMRect);
+    act(() => {
+      fireEvent.scroll(document.body);
+    });
+
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+  });
 });

@@ -73,6 +73,9 @@ export function UnitSearchField({
   const [pos, setPos] = useState<{ top: number; left: number; width: number; maxHeight: string } | null>(
     null,
   );
+  /** The input's viewport position when the list was measured - what a scroll
+   *  must change before the list counts as stale. */
+  const anchorRef = useRef<{ top: number; left: number } | null>(null);
 
   // stable, instance-unique ids
   const uid = useId();
@@ -88,10 +91,12 @@ export function UnitSearchField({
   // useLayoutEffect so it never paints at a stale position.
   useLayoutEffect(() => {
     if (!isListShown || !inputRef.current) {
+      anchorRef.current = null;
       setPos(null);
       return;
     }
     const rect = inputRef.current.getBoundingClientRect();
+    anchorRef.current = { top: rect.top, left: rect.left };
     const top = rect.bottom + 4;
     setPos({
       top,
@@ -105,10 +110,23 @@ export function UnitSearchField({
   // Capture phase so an ancestor modal body's scroll counts; scrolls inside the
   // list are ignored. Outside-click checks BOTH refs: the list is portaled out
   // of this field's subtree, so a click on an option is otherwise "outside".
+  // A scroll that left the input where it was measured is ignored too: the
+  // browser reports a scroll a frame late, so the event may predate the list.
+  // See ContactSearchField's header.
   useEffect(() => {
     if (!isListShown) return;
     const onScroll = (e: Event): void => {
       if (listRef.current && e.target instanceof Node && listRef.current.contains(e.target)) return;
+      const anchor = anchorRef.current;
+      const rect = inputRef.current?.getBoundingClientRect();
+      if (
+        anchor !== null &&
+        rect !== undefined &&
+        Math.abs(rect.top - anchor.top) < 0.5 &&
+        Math.abs(rect.left - anchor.left) < 0.5
+      ) {
+        return;
+      }
       setDismissed(true);
     };
     const onResize = (): void => setDismissed(true);

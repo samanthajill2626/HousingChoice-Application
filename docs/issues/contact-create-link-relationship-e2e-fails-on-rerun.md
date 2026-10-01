@@ -1,13 +1,19 @@
 ---
 id: contact-create-link-relationship-e2e-fails-on-rerun
-title: contact-create.spec "editing a contact can LINK an existing contact" fails on main when re-run on the same lane (no suggestions list)
+title: contact-create.spec "editing a contact can LINK an existing contact" intermittently loses its suggestion list to a late-reported scroll (NOT lane state)
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-09-30
-refs: e2e/tests/dashboard-next/contact-create.spec.ts:157, dashboard/src/routes/contact/ContactDetail.tsx:514, dashboard/src/routes/contact/RelationshipsEditor.tsx
+resolved: 2026-10-01
+refs: e2e/tests/dashboard-next/contact-create.spec.ts:157, dashboard/src/routes/contact/ContactSearchField.tsx, dashboard/src/routes/contact/UnitSearchField.tsx, docs/superpowers/reviews/2026-10-01-search-scroll-prefill/diagnosis.md
 ---
+
+**CORRECTION (2026-10-01): the lane-state hypothesis below is WRONG.** Every
+`npm run e2e` wipes and reseeds the lane at startup, so nothing accumulates
+between runs, and the roster always held Marcus Bell. The failure is a ~1-in-10
+race in the search field's dismiss-on-scroll; see the Resolution at the end.
 
 **Problem.** `e2e/tests/dashboard-next/contact-create.spec.ts:157` ("editing a
 contact can LINK an existing contact as a relationship (not just free text)")
@@ -42,3 +48,19 @@ Marcus Bell is in `allContacts` (the network tab / the hook's source) and
 whether the typeahead filters or caps matches. If the roster is truncated, fix
 the read; separately, make the spec self-sufficient (reseed in beforeAll, or
 create its own link target) so its result does not depend on lane history.
+
+**Resolution (2026-10-01, fix/search-scroll-prefill).** `ContactSearchField`
+dismissed its position:fixed list on ANY scroll. Browsers report a scroll at
+the next rendering frame, so the edit dialog's scroll from the spec's
+`fill('Caseworker')` was sometimes delivered just AFTER `fill('Marcus')` opened
+the list - and closed a list that had been measured post-scroll and was
+correctly placed. The spec types once and waits, so it never recovered.
+Instrumented event order, roster checks, and the ruled-out hypotheses are in
+`docs/superpowers/reviews/2026-10-01-search-scroll-prefill/diagnosis.md`.
+
+Fix: `ContactSearchField` and `UnitSearchField` (same listener) record the
+input's position when the list is measured and ignore a scroll that left it
+there; a scroll that moved the input still dismisses. Unit tests cover both
+directions in each field. No spec change was needed. Real spec
+`--repeat-each 40`: main 36 pass / 4 fail, the fix 40 / 0
+(`measurements.md` beside the diagnosis).

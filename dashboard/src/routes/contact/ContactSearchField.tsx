@@ -29,6 +29,13 @@
 // rather than chasing it (scrolls inside the list itself are ignored - it
 // scrolls internally when long). Outside-click has to check BOTH refs, since
 // the list is no longer inside the field's own subtree.
+// A scroll dismisses ONLY IF IT MOVED THE INPUT. The browser delivers a scroll
+// event at its next rendering frame, not when the scroll happened, so a scroll
+// that landed just BEFORE the list opened can be reported just AFTER - by which
+// point the list was measured at the post-scroll position and is not stale.
+// Dismissing on that event closed a correct list on the first keystroke (an e2e
+// that types once and waits failed ~1 run in 10; see
+// docs/issues/contact-create-link-relationship-e2e-fails-on-rerun.md).
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { type Contact } from '../../api/index.js';
@@ -90,6 +97,9 @@ export function ContactSearchField({
   const [pos, setPos] = useState<{ top: number; left: number; width: number; maxHeight: string } | null>(
     null,
   );
+  /** The input's viewport position when the list was measured - what a scroll
+   *  must change before the list counts as stale. */
+  const anchorRef = useRef<{ top: number; left: number } | null>(null);
 
   // Fix 5: stable, instance-unique ids
   const uid = useId();
@@ -109,10 +119,12 @@ export function ContactSearchField({
   // useLayoutEffect so the list never paints at a stale position.
   useLayoutEffect(() => {
     if (!isListShown || !inputRef.current) {
+      anchorRef.current = null;
       setPos(null);
       return;
     }
     const rect = inputRef.current.getBoundingClientRect();
+    anchorRef.current = { top: rect.top, left: rect.left };
     const top = rect.bottom + 4;
     setPos({
       top,
@@ -127,11 +139,23 @@ export function ContactSearchField({
   // Fixed coordinates go stale the moment anything scrolls or resizes - dismiss
   // instead of chasing (StageMenu's ruling). Capture phase so a scroll in ANY
   // ancestor container counts, including a modal body; scrolls inside the list
-  // itself are ignored, since it scrolls internally when long.
+  // itself are ignored, since it scrolls internally when long. A scroll that left
+  // the input where it was measured is ignored too (see the header): the list is
+  // still correctly placed, and the event may predate the list entirely.
   useEffect(() => {
     if (!isListShown) return;
     const onScroll = (e: Event): void => {
       if (listRef.current && e.target instanceof Node && listRef.current.contains(e.target)) return;
+      const anchor = anchorRef.current;
+      const rect = inputRef.current?.getBoundingClientRect();
+      if (
+        anchor !== null &&
+        rect !== undefined &&
+        Math.abs(rect.top - anchor.top) < 0.5 &&
+        Math.abs(rect.left - anchor.left) < 0.5
+      ) {
+        return;
+      }
       setDismissed(true);
     };
     const onResize = (): void => setDismissed(true);

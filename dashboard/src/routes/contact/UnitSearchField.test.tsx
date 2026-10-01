@@ -210,4 +210,42 @@ describe('UnitSearchField', () => {
       unitId: 'unit-0002',
     });
   });
+
+  // A scroll dismisses the list ONLY when it moved the input - same rule as
+  // ContactSearchField (a scroll is reported a frame late, so it can predate the list).
+  it('a scroll that left the input in place keeps the list open', () => {
+    setup({ label: 'Sycamore' });
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.scroll(document.body);
+    });
+
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('a scroll that moved the input dismisses the list', () => {
+    setup({ label: 'Sycamore' });
+    const input = screen.getByRole('combobox');
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+
+    vi.spyOn(input, 'getBoundingClientRect').mockReturnValue({
+      top: -120,
+      left: 0,
+      bottom: -90,
+      right: 200,
+      width: 200,
+      height: 30,
+      x: 0,
+      y: -120,
+      toJSON: () => ({}),
+    } as DOMRect);
+    act(() => {
+      fireEvent.scroll(document.body);
+    });
+
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+  });
 });

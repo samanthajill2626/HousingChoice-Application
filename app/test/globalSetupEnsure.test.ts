@@ -1,8 +1,8 @@
 // Tests for the globalSetup ensureKeyedLocalTables() core logic.
 //
 // Verifies:
-//   1. A fresh random key starts with no tables — calling ensureKeyedLocalTables
-//      creates them (DescribeTable on hc-local-tours succeeds).
+//   1. An EMPTY key (this suite's own, emptied first) gets every table -
+//      calling ensureKeyedLocalTables creates them (hc-local-tours among them).
 //   2. A second call is an idempotent no-op (no throw, no error).
 //   3. A non-local endpoint is skipped with a console.warn (no throw).
 //
@@ -10,13 +10,13 @@
 // when nothing answers at DYNAMODB_ENDPOINT (default http://localhost:8000)
 // the whole suite is skipped so `npm test` stays green without Docker.
 import {
-  DescribeTableCommand,
+  DeleteTableCommand,
   ListTablesCommand,
-  ResourceNotFoundException,
+  waitUntilTableNotExists,
 } from '@aws-sdk/client-dynamodb';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDynamoClient } from '../src/lib/dynamo.js';
-import { LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
+import { isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
 import { ensureKeyedLocalTables } from './globalSetup.js';
 import { dropKeyedLocalTables } from './globalTeardown.js';
 
@@ -39,8 +39,27 @@ if (!reachable) {
   );
 }
 
-// A fresh random key that has NEVER been used — guarantees the DB is empty.
-const freshKey = `hctestfresh${Math.random().toString(36).slice(2, 10)}`;
+// FIXED keys, never random. DynamoDB Local opens a database - a SQLite
+// connection plus four threads that live until the JVM exits - for every access
+// key it sees, and dropping a key's tables does not close it: no API can. This
+// suite used to mint TWO random keys per run, the one per-RUN source of new
+// databases among the test keys (measured 2026-10-01: 67 -> 69 -> 71 -> 73
+// databases over four runs; test time creeps with the count). See
+// docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md.
+//
+// Derived from the WORKTREE key, so two worktrees running at once never share
+// them (each run empties its keys first, which would wreck a neighbour's run),
+// at a bounded cost of two databases per worktree. "Empty" is now a
+// precondition the suite ESTABLISHES (emptyKey) and then asserts, instead of a
+// property a never-seen random key happened to have.
+const worktreeKey = process.env.HC_TEST_WORKTREE_ACCESS_KEY;
+if (worktreeKey === undefined || worktreeKey === '') {
+  throw new Error(
+    '[globalSetupEnsure] HC_TEST_WORKTREE_ACCESS_KEY is unset - app/vitest.config.ts sets it for every worker.',
+  );
+}
+const freshKey = `${worktreeKey}fresh`;
+const dropKey = `${worktreeKey}drop`;
 
 /**
  * A client BOUND to `key`.
@@ -73,38 +92,65 @@ function clientForKey(key: string): ReturnType<typeof createDynamoClient> {
   }
 }
 
+/** Every table name in `key`'s own database (paged - never trust one page). */
+async function tablesUnderKey(key: string): Promise<string[]> {
+  const client = clientForKey(key);
+  try {
+    const names: string[] = [];
+    let start: string | undefined;
+    do {
+      const out = await client.send(new ListTablesCommand({ ExclusiveStartTableName: start }));
+      names.push(...(out.TableNames ?? []));
+      start = out.LastEvaluatedTableName;
+    } while (start !== undefined);
+    return names;
+  } finally {
+    client.destroy();
+  }
+}
+
+/**
+ * Delete EVERY table under one of this suite's own keys - the precondition that
+ * replaced "a random key has never been used". A killed earlier run can leave
+ * tables under a fixed key, so each run empties its keys before relying on them.
+ *
+ * Deliberately NOT dropKeyedLocalTables (nor dropAllTables, which it wraps):
+ * those are what this suite TESTS, and a precondition built on the code under
+ * test would let a broken drop hide itself. Local only - it deletes.
+ */
+async function emptyKey(key: string): Promise<void> {
+  if (!isLocalEndpoint(endpoint)) {
+    throw new Error(`[globalSetupEnsure] refusing to empty ${key} on non-local ${endpoint}`);
+  }
+  const names = await tablesUnderKey(key);
+  const client = clientForKey(key);
+  try {
+    for (const name of names) {
+      await client.send(new DeleteTableCommand({ TableName: name }));
+      await waitUntilTableNotExists({ client, maxWaitTime: 60 }, { TableName: name });
+    }
+  } finally {
+    client.destroy();
+  }
+}
+
 describe.skipIf(!reachable)('ensureKeyedLocalTables()', () => {
   afterAll(async () => {
-    // MUST drop what this suite created. `freshKey` is random per run, so before
-    // this existed every `npm test` stranded 22 tables under a key nobody could
-    // ever name again - DynamoDB Local cannot enumerate databases, so they were
-    // unreachable until an operator stopped the container. This suite was the
-    // one source of genuinely PER-RUN accumulation (the worktree and lane keys
-    // are stable and get reused).
+    // Drop what this suite created, so its databases sit EMPTY between runs. The
+    // keys are fixed now, so nothing is stranded either way - the next run would
+    // empty them - but an empty database is the cheapest kind to keep alive.
     await dropKeyedLocalTables({ endpoint, key: freshKey });
   }, 60_000);
 
   beforeAll(async () => {
-    // Confirm the key is truly fresh: hc-local-tours must not exist yet. Asked
-    // through a client BOUND to freshKey - the previous version asked the
-    // worktree key's database, where the answer is always "it exists".
-    const probe = clientForKey(freshKey);
-    try {
-      await probe.send(new DescribeTableCommand({ TableName: 'hc-local-tours' }));
-      // Reaching here means the key was not fresh - vanishingly unlikely with a
-      // random suffix. Skip the precondition rather than failing the suite.
-    } catch (err) {
-      if (!(err instanceof ResourceNotFoundException)) {
-        // Unexpected error — re-throw so beforeAll fails loudly.
-        throw err;
-      }
-      // ResourceNotFoundException is expected: fresh key, no tables — good.
-    } finally {
-      probe.destroy();
-    }
-  }, 15_000);
+    // Establish, then REQUIRE, an empty key - asked through a client BOUND to
+    // freshKey. (Before 2026-08-16 this asked the worktree key's database, where
+    // hc-local-tours always exists, so the test could not fail.)
+    await emptyKey(freshKey);
+    expect(await tablesUnderKey(freshKey)).toEqual([]);
+  }, 60_000);
 
-  it('creates all hc-local- tables under a fresh key', async () => {
+  it('creates all hc-local- tables under an empty key', async () => {
     // Call with the fresh key explicitly — process.env is NOT mutated by vitest
     // test.env at this point (that only applies to workers), so we pass key directly.
     await ensureKeyedLocalTables({ endpoint, key: freshKey });
@@ -154,8 +200,9 @@ describe.skipIf(!reachable)('ensureKeyedLocalTables()', () => {
   });
 
   it('dropKeyedLocalTables removes the tables ensure created, and is safe to repeat', async () => {
-    // Rebuild under a second throwaway key so this cannot race the suite above.
-    const dropKey = `hctestdrop${Math.random().toString(36).slice(2, 10)}`;
+    // Rebuild under the suite's second key so this cannot race the tests above,
+    // and empty it first (a killed run can leave tables under a fixed key).
+    await emptyKey(dropKey);
 
     const keyed = clientForKey(dropKey);
     const listUnderKey = async (): Promise<number> => {

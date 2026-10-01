@@ -15,6 +15,7 @@ import {
   waitUntilTableNotExists,
 } from '@aws-sdk/client-dynamodb';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { testAccessKeyId } from '../../e2e/support/lane.mjs';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import { isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
 import { ensureKeyedLocalTables } from './globalSetup.js';
@@ -39,27 +40,27 @@ if (!reachable) {
   );
 }
 
-// FIXED keys, never random. DynamoDB Local opens a database - a SQLite
-// connection plus four threads that live until the JVM exits - for every access
-// key it sees, and dropping a key's tables does not close it: no API can. This
-// suite used to mint TWO random keys per run, the one per-RUN source of new
-// databases among the test keys (measured 2026-10-01: 67 -> 69 -> 71 -> 73
-// databases over four runs; test time creeps with the count). See
-// docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md.
-//
-// Derived from the WORKTREE key, so two worktrees running at once never share
-// them (each run empties its keys first, which would wreck a neighbour's run),
-// at a bounded cost of two databases per worktree. "Empty" is now a
-// precondition the suite ESTABLISHES (emptyKey) and then asserts, instead of a
-// property a never-seen random key happened to have.
-const worktreeKey = process.env.HC_TEST_WORKTREE_ACCESS_KEY;
-if (worktreeKey === undefined || worktreeKey === '') {
-  throw new Error(
-    '[globalSetupEnsure] HC_TEST_WORKTREE_ACCESS_KEY is unset - app/vitest.config.ts sets it for every worker.',
-  );
-}
-const freshKey = `${worktreeKey}fresh`;
-const dropKey = `${worktreeKey}drop`;
+/**
+ * hc:dynamo-lane worktree-derived-keys
+ *
+ * NOT random. DynamoDB Local opens a database - a SQLite connection plus four
+ * threads that live until the JVM exits - for every access key it sees, and
+ * dropping a key's tables does not close it: no API can. This suite used to
+ * mint TWO random keys per run, the one per-RUN source of new databases among
+ * the test keys (measured 2026-10-01: 67 -> 69 -> 71 -> 73 databases over four
+ * runs; test time creeps with the count). See
+ * docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md.
+ *
+ * NOT a fixed literal either: each run empties its keys first, so two worktrees
+ * sharing one would wreck each other's runs. Derived from the WORKTREE identity
+ * - the same answer dynamoKeyLedger.test.ts reached for its probe key - so the
+ * cost is two databases per worktree, bounded, and never shared. The marker
+ * above tells dynamoAccessKeyGuard.test.ts this is the mechanism in use.
+ * "Empty" is now a precondition the suite ESTABLISHES (emptyKey) and then
+ * asserts, instead of a property a never-seen random key happened to have.
+ */
+const freshKey = `${testAccessKeyId()}fresh`;
+const dropKey = `${testAccessKeyId()}drop`;
 
 /**
  * A client BOUND to `key`.

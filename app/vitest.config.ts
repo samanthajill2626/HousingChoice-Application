@@ -37,6 +37,7 @@ export default defineConfig({
     //    8 workers   45.0s  51.0s
     //   12 workers   35.4s  40.2s
     //   16 workers   34.5s  37.9s
+    //   10 workers   38.2s  40.2s   (measured later, freshly restarted container)
     //
     // On this box the cap WAS the bottleneck, and 12 is the knee: 16 buys ~2s
     // more while taking 4 more cores from whatever runs beside it - which is

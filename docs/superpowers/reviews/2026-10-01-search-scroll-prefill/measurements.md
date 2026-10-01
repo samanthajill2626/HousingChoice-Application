@@ -73,7 +73,7 @@ suites take ~2x; still green, and still under the old 4-worker quiet figure x2.
 Both load e2e suites: 305 passed, 0 failed, 19.6m each (17.2m alone at gate
 time) - the extra `npm test` load cost them time, not correctness.
 
-### The 10-worker quiet timing is NOT valid yet - DynamoDB Local degraded
+### The first 10-worker timing was invalid - DynamoDB Local had degraded
 
 After the load runs, two quiet runs at the shipped 10 (config, no flag) took
 73.4s / 78.2s - all green, exit 0, 0 RPC timeouts - but a re-check at 8 then
@@ -81,8 +81,26 @@ took 80.8s against 45.0s / 51.0s earlier. The container, not the worker
 count, had slowed ~1.7x: `docker stats` showed it at 1.92-1.96 GiB, right at
 the JVM's `-Xmx2g` cap, at ~3% CPU while idle, 555 threads, 102 database
 files (177 MB on the 6 GB tmpfs). Only a restart resets it, and a restart
-wipes the shared container (lane 0 included), so it waits on Cameron. Tracked
-in `docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md`.
+wipes the shared container (lane 0 included); Cameron approved one (below).
+Cause analysis - the heap guess above turned out WRONG - is in
+`docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md`.
 
 10 ships on the bracket: 8 (45-51s) and 12 (35-40s) measured on a healthy
 container, 12 proven under load, and 10 green twice even on the degraded one.
+
+### After a restart (Cameron's go): the clean 10-worker numbers
+
+Container restarted (`npm run db:stop` + `db:start`; 217 MiB, 67 threads, 0
+databases). Interleaved, quiet box, all exit 0, 0 RPC timeouts:
+
+| Run | maxWorkers | Duration | Container after (databases / threads / memory) |
+| --- | --- | --- | --- |
+| 1 | 8 | 45.41s | 67 / 383 / 844 MiB |
+| 2 | 10 | 38.20s | 69 / 391 / 938 MiB |
+| 3 | 8 | 45.44s | 71 / 400 / 997 MiB |
+| 4 | 10 | 40.24s | 73 / 409 / 1.02 GiB |
+
+So 10 = 38-40s against 4 = 77-85s: about half the time. The database count
+climbing by 2 per run is a leak in `globalSetupEnsure.test.ts`; the follow-up
+experiments (40 empty databases, one e2e suite, a dual-worktree app run) are
+in `docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md`.

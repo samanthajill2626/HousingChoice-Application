@@ -139,6 +139,7 @@ Same suite grown to 399 files / 8110 tests; quiet box, interleaved
 | 8 | 45.0s | 51.0s |
 | 12 | 35.4s | 40.2s |
 | 16 | 34.5s | 37.9s |
+| 10 (shipped; timed later on a freshly restarted container) | 38.2s | 40.2s |
 
 Here the cap WAS the bottleneck (cumulative work / 4 was close to the wall
 clock), and 12 is the knee - 16 buys ~2s more and costs 4 more cores of

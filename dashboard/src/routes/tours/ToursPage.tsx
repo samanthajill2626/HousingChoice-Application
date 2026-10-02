@@ -23,11 +23,14 @@
 //                 reaches the Past view mounted when it ends. A full page
 //                 reload ends the batch.
 //
-//   Closed (/tours/closed) — the "not live" tours: status closed (terminal)
+//   Closed (/tours/closed) - the "not live" tours: status closed (reopenable
+//                 from its tour page unless it became a placement - spec 9.2)
 //                 AND canceled (revivable - Cameron 2026-07-15), newest first
 //                 (fetched only on this view). Rows show the tour DATE (not
 //                 time-of-day - these can be months old); the status badge
-//                 tells Closed and Canceled apart.
+//                 tells Closed and Canceled apart, and a closed row with an
+//                 outcome carries it as one more badge beside the status (so
+//                 "No outcome recorded" and "Not a fit" read apart - spec 9.3).
 //
 // The Active view's header carries "+ New tour" (Cameron 2026-07-15): the SAME
 // Schedule-a-tour dialog the tenant file opens, with both sides free typeaheads;
@@ -42,6 +45,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
+  TOUR_OUTCOME_LABELS,
   TOUR_STATUS_LABELS,
   TOUR_TYPE_LABELS,
   getTour,
@@ -150,6 +154,12 @@ function TourRow({ tour, contacts, units, timeDisplay }: TourRowProps): React.JS
         <span className={styles.meta}>
           {timeLabel !== undefined ? <span className={styles.time}>{timeLabel}</span> : null}
           <span className={styles.badge}>{statusLabel}</span>
+          {/* A closed tour's outcome (spec 9.3), so "No outcome recorded" and
+              "Not a fit" read apart. Text only: the link's aria-label above is
+              its accessible name. Never on a canceled tour. */}
+          {tour.status === 'closed' && tour.outcome !== undefined ? (
+            <span className={styles.badge}>{TOUR_OUTCOME_LABELS[tour.outcome] ?? tour.outcome}</span>
+          ) : null}
           <span className={styles.badge}>{typeLabel}</span>
         </span>
       </Link>
@@ -590,8 +600,9 @@ const PAGE_TITLE: Record<ToursView, string> = {
 
 const PAGE_INTRO: Record<ToursView, string> = {
   active: 'Upcoming scheduled tours and unbooked tour requests.',
-  past: 'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome or a placement, and no-shows.',
-  closed: 'Tours that ended - converted into a placement, closed as not a fit, or canceled.',
+  past: 'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome or a placement, and no-shows. Tours with no outcome close on their own two weeks after their date or their last update.',
+  closed:
+    'Tours that ended - converted into a placement, closed as not a fit, closed automatically with no outcome, or canceled.',
 };
 
 /** Router state the Past tab's links carry so the tour page's back arrow

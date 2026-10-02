@@ -113,9 +113,10 @@ export interface ClosedToursState {
   closed: Tour[];
 }
 
-/** LAZY fetch for the Closed view: the "not live" tours — status closed
- *  (terminal) AND canceled (revivable) — fetched only while `enabled` is true
- *  (re-fetching fresh each time the view shows). */
+/** LAZY fetch for the Closed view: the "not live" tours - status closed
+ *  (reopenable from its tour page unless it became a placement) AND canceled
+ *  (revivable) - fetched only while `enabled` is true (re-fetching fresh each
+ *  time the view shows). An auto-closed tour is one of them. */
 export function useClosedTours(enabled: boolean): ClosedToursState {
   const [state, setState] = useState<ClosedToursState>({ status: 'idle', closed: [] });
 

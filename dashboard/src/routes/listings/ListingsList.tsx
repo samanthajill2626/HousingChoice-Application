@@ -1,46 +1,59 @@
-// ListingsList — the Listings list view (§IA: Workspace ▸ Listings). FIRST-PASS
-// / pending-design: a clean, conventional, accessible records list (heading -
-// search box - a list of rows linking to the listing detail page) in the new
-// design language (tokens + CSS Modules). Reuses the listing format helpers
-// (shortAddress / statusLabel / formatBedsBaths / formatRent). Not the final
-// visual design — deliberately low-risk.
+// ListingsList - the Properties list (Active and Deleted tabs): heading - tabs -
+// filters - search - rows linking to the property page, in the design language
+// (tokens + CSS Modules). The Active tab opens on Available and leads with the
+// by-housing-authority summary Sam asked for (tracker #1:
+// docs/superpowers/specs/2026-10-01-properties-available-view-design.md).
+//
+// ALL filter state lives in the URL (status / voucher / ha / q, parsed and
+// written by propertyFacets). The component stays MOUNTED across /listings and
+// /listings/deleted (sibling routes in the same element position, App.tsx), so
+// component state would carry from one tab to the other - which is how an
+// authority picked on Active once locked the Deleted tab at zero rows
+// (docs/issues/properties-authority-filter-invisible-lock.md). The one piece of
+// local state is the search box's text; see the note on it below.
 import { useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import {
-  LISTING_STATUSES,
-  LISTING_STATUS_LABELS,
-  type UnitItem,
-  type UnitStatus,
-} from '../../api/index.js';
+import { Link, useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom';
+import { LISTING_STATUSES, LISTING_STATUS_LABELS, type UnitItem } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
-import { displaySpelling, normalizeAuthorityKey } from '../contacts/tenantFacets.js';
-import {
-  authoritiesOf,
-  formatBedsBaths,
-  formatRent,
-  shortAddress,
-  statusLabel,
-} from '../listing/listingFormat.js';
+import { NONE_KEY, VOUCHER_BUCKETS } from '../contacts/tenantFacets.js';
+import { formatBedsBaths, formatRent, shortAddress, statusLabel } from '../listing/listingFormat.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
+import { PropertySummary } from './PropertySummary.js';
+import {
+  applyPropertyFilters,
+  applyPropertySelection,
+  authorityOptions,
+  buildAuthoritySummary,
+  countSelection,
+  parsePropertySelection,
+  pruneSelection,
+  type PropertySelection,
+  type PropertyView,
+  type StatusFilter,
+  type SummaryCounts,
+} from './propertyFacets.js';
 import { useListings } from './useListings.js';
 import styles from './ListingsList.module.css';
-
-type StatusFilter = UnitStatus | 'all';
 
 const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   { value: 'all', label: 'All statuses' },
   ...LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] })),
 ];
 
-/** Humanize an authority slug for the filter chips: tokens <= 3 chars become
- *  acronyms, longer ones are title-cased — 'atlanta_housing' → "Atlanta Housing",
- *  'ga_dca' → "GA DCA". */
-function humanizeAuthority(slug: string): string {
-  return slug
-    .split(/[_\s]+/)
-    .filter(Boolean)
-    .map((w) => (w.length <= 3 ? w.toUpperCase() : `${w[0]!.toUpperCase()}${w.slice(1)}`))
-    .join(' ');
+/** The "nothing recorded" chip label - the Tenants list's word for it. */
+const NOT_RECORDED = 'Not recorded';
+
+/** The voucher chips: the Tenants list's fixed five, then Not recorded. */
+const VOUCHER_CHIPS: ReadonlyArray<{ key: string; label: string }> = [
+  ...VOUCHER_BUCKETS,
+  { key: NONE_KEY, label: NOT_RECORDED },
+];
+
+/** Toggle one key in a facet set, returning a new set. */
+function toggled(keys: ReadonlySet<string>, key: string): Set<string> {
+  const next = new Set(keys);
+  if (!next.delete(key)) next.add(key);
+  return next;
 }
 
 function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
@@ -63,6 +76,57 @@ function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
   );
 }
 
+/** One multi-select chip group: the uppercase label, the chips, and a Clear
+ *  once anything is selected. Divs + aria-pressed buttons, deliberately NO
+ *  ul/li, so the rows list stays the only source of listitems. */
+function ChipGroup({
+  labelId,
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  labelId: string;
+  label: string;
+  options: ReadonlyArray<{ key: string; label: string }>;
+  selected: ReadonlySet<string>;
+  onChange: (next: Set<string>) => void;
+}): React.JSX.Element {
+  return (
+    <div className={styles.control}>
+      <span className={styles.controlLabel} id={labelId}>
+        {label}
+      </span>
+      <div className={styles.chips} role="group" aria-labelledby={labelId}>
+        {options.map((o) => {
+          const on = selected.has(o.key);
+          return (
+            <button
+              key={o.key}
+              type="button"
+              className={`${styles.chip} ${on ? styles.chipOn : ''}`}
+              aria-pressed={on}
+              onClick={() => onChange(toggled(selected, o.key))}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+        {selected.size > 0 ? (
+          <button
+            type="button"
+            className={styles.clear}
+            aria-label={`Clear ${label.toLowerCase()} filter`}
+            onClick={() => onChange(new Set<string>())}
+          >
+            Clear
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export interface ListingsListProps {
   /** The "Deleted" view (soft-deleted listings) vs the normal active list. */
   deleted?: boolean;
@@ -77,66 +141,66 @@ const VIEW_TABS: { deleted: boolean; label: string; to: string }[] = [
 
 export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.Element {
   const navigate = useNavigate();
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { status, units } = useListings(deleted);
+  const view: PropertyView = deleted ? 'deleted' : 'active';
   // The "New property" dialog (Active view only) with an empty landlord picker.
   const [creating, setCreating] = useState(false);
-  const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  // Multi-select of housing authorities, holding NORMALIZED keys (one key per
-  // authority, however its spellings vary). EMPTY = no filter -> show every
-  // authority (the "cleared" state).
-  const [selectedHAs, setSelectedHAs] = useState<Set<string>>(new Set());
 
-  // The housing authorities present in the loaded listings - the multi-select
-  // options. Each unit contributes EVERY authority it accepts (`authoritiesOf`,
-  // which synthesizes a legacy `jurisdiction` string), and spellings collapse by
-  // normalized key, so one authority is one chip no matter how import
-  // generations spelled it (spec section 8, reusing section 5's rule). The chip
-  // shows the most frequent RAW spelling; the key is what the filter matches.
-  const housingAuthorities = useMemo(() => {
-    const spellingsByKey = new Map<string, Map<string, number>>();
-    for (const u of units) {
-      for (const raw of authoritiesOf(u)) {
-        const key = normalizeAuthorityKey(raw);
-        if (key.length === 0) continue; // whitespace-only: no chip to show
-        const spellings = spellingsByKey.get(key) ?? new Map<string, number>();
-        spellings.set(raw, (spellings.get(raw) ?? 0) + 1);
-        spellingsByKey.set(key, spellings);
-      }
-    }
-    // Sorted on the normalized key - the case-folded label - so the order is
-    // case-insensitive alphabetical and platform-independent.
-    return [...spellingsByKey.entries()]
-      .map(([key, spellings]) => ({ key, display: displaySpelling(spellings) }))
-      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  }, [units]);
+  // The search box keeps its OWN text, and the URL's `q` only persists it. The
+  // router applies every URL change inside a transition (react-router 7's
+  // BrowserRouter), so an input bound straight to the URL would lag a keystroke
+  // and could drop characters. Typing REPLACES the URL and is never read back;
+  // the URL's `q` is adopted only on a navigation that did not come from the box
+  // - Back/Forward, a tab switch, a summary count (PUSH or POP) - and on mount
+  // (a reload, or Back from a property page, which remounts this list).
+  const urlQuery = parsePropertySelection(searchParams, view).q;
+  const [query, setQuery] = useState(urlQuery);
+  const [syncedKey, setSyncedKey] = useState(location.key);
+  if (location.key !== syncedKey) {
+    setSyncedKey(location.key);
+    if (navigationType !== 'REPLACE' && query !== urlQuery) setQuery(urlQuery);
+  }
 
-  const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return units.filter((u) => {
-      if (statusFilter !== 'all' && u.status !== statusFilter) return false;
-      // List-aware: a unit matches when ANY authority it accepts normalizes to a
-      // selected key.
-      if (
-        selectedHAs.size > 0 &&
-        !authoritiesOf(u).some((raw) => selectedHAs.has(normalizeAuthorityKey(raw)))
-      ) {
-        return false;
-      }
-      if (q && !shortAddress(u.address, u.unitId).toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [units, query, statusFilter, selectedHAs]);
+  // Authority chips and summary rows come from EVERY loaded unit of this view
+  // (never the filtered rows), labelled with the STORED spelling.
+  const authority = useMemo(() => authorityOptions(units), [units]);
+  // The effective selection: the URL's, minus anything no chip shows (the
+  // invisible-lock invariant - propertyFacets.pruneSelection), plus the box's text.
+  const selection = useMemo<PropertySelection>(
+    () => ({ ...pruneSelection(parsePropertySelection(searchParams, view), authority), q: query }),
+    [searchParams, view, authority, query],
+  );
+  const visible = useMemo(() => applyPropertyFilters(units, selection), [units, selection]);
+  // The summary is the Active tab's alone; its counts follow the voucher filter.
+  const summary = useMemo(
+    () => (deleted ? null : buildAuthoritySummary(units, selection.voucher, authority)),
+    [deleted, units, selection.voucher, authority],
+  );
 
-  const toggleHA = (ha: string): void =>
-    setSelectedHAs((prev) => {
-      const next = new Set(prev);
-      if (next.has(ha)) next.delete(ha);
-      else next.add(ha);
-      return next;
-    });
+  /** Serialize a new selection, REPLACING the history entry: Back leaves the
+   *  page rather than walking chip toggles (the Tenants-list rule). */
+  function update(next: PropertySelection): void {
+    const params = new URLSearchParams(searchParams);
+    applyPropertySelection(params, next, view);
+    setSearchParams(params, { replace: true });
+  }
+
+  /** Where a summary count links. A count is a drill-down NAVIGATION (a push),
+   *  so Back returns to the view it was clicked from. */
+  function countLink(column: keyof SummaryCounts, key: string | null): { pathname: string; search: string } {
+    const params = new URLSearchParams(searchParams);
+    applyPropertySelection(params, countSelection(selection, column, key), view);
+    const search = params.toString();
+    return { pathname: location.pathname, search: search.length > 0 ? `?${search}` : '' };
+  }
 
   const showControls = status === 'ready' && units.length > 0;
+  const authorityChips = authority.hasUnrecorded
+    ? [...authority.options, { key: NONE_KEY, label: NOT_RECORDED }]
+    : authority.options;
 
   return (
     <div className={styles.page}>
@@ -149,21 +213,31 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
         ) : null}
       </div>
       <p className={styles.sub}>
-        {deleted ? 'Soft-deleted properties. Open one to restore it.' : 'All property records.'}
+        {deleted
+          ? 'Soft-deleted properties. Open one to restore it.'
+          : 'Available properties by default - change the status filter to see the rest.'}
       </p>
 
       <nav className={styles.tabs} aria-label="Properties view">
-        {VIEW_TABS.map((t) => (
-          <Link
-            key={t.label}
-            to={t.to}
-            className={`${styles.tab} ${t.deleted === deleted ? styles.tabActive : ''}`}
-            {...(t.deleted === deleted && { 'aria-current': 'page' })}
-          >
-            {t.label}
-          </Link>
-        ))}
+        {VIEW_TABS.map((t) => {
+          const current = t.deleted === deleted;
+          return (
+            <Link
+              key={t.label}
+              // Only the CURRENT tab carries the query (re-clicking it keeps the
+              // filters); the other tab is the bare path, so switching views
+              // always starts clean.
+              to={current ? { pathname: t.to, search: searchParams.toString() } : t.to}
+              className={`${styles.tab} ${current ? styles.tabActive : ''}`}
+              {...(current && { 'aria-current': 'page' })}
+            >
+              {t.label}
+            </Link>
+          );
+        })}
       </nav>
+
+      {showControls && summary !== null ? <PropertySummary summary={summary} linkFor={countLink} /> : null}
 
       {showControls ? (
         <div className={styles.controls}>
@@ -174,8 +248,8 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
             <select
               id="listings-status"
               className={styles.select}
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+              value={selection.status}
+              onChange={(e) => update({ ...selection, status: e.target.value as StatusFilter })}
             >
               {STATUS_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -185,38 +259,21 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
             </select>
           </div>
 
-          {housingAuthorities.length > 0 ? (
-            <div className={styles.control}>
-              <span className={styles.controlLabel} id="ha-filter-label">
-                Housing authority
-              </span>
-              <div className={styles.chips} role="group" aria-labelledby="ha-filter-label">
-                {housingAuthorities.map((ha) => {
-                  const on = selectedHAs.has(ha.key);
-                  return (
-                    <button
-                      key={ha.key}
-                      type="button"
-                      className={`${styles.chip} ${on ? styles.chipOn : ''}`}
-                      aria-pressed={on}
-                      onClick={() => toggleHA(ha.key)}
-                    >
-                      {humanizeAuthority(ha.display)}
-                    </button>
-                  );
-                })}
-                {selectedHAs.size > 0 ? (
-                  <button
-                    type="button"
-                    className={styles.clear}
-                    onClick={() => setSelectedHAs(new Set())}
-                  >
-                    Clear
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
+          <ChipGroup
+            labelId="voucher-filter-label"
+            label="Voucher size"
+            options={VOUCHER_CHIPS}
+            selected={selection.voucher}
+            onChange={(voucher) => update({ ...selection, voucher })}
+          />
+
+          <ChipGroup
+            labelId="ha-filter-label"
+            label="Housing authority"
+            options={authorityChips}
+            selected={selection.ha}
+            onChange={(ha) => update({ ...selection, ha })}
+          />
         </div>
       ) : null}
 
@@ -230,7 +287,10 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
           className={styles.searchInput}
           placeholder="Search by address"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            update({ ...selection, q: e.target.value });
+          }}
           disabled={status !== 'ready'}
         />
       </div>
@@ -261,9 +321,12 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
           </ul>
         ) : (
           <p className={styles.noMatches}>
-            {query.trim()
-              ? `No matches for “${query.trim()}”.`
-              : 'No properties match the selected filters.'}
+            {/* Entity quotes, never literal curly ones - added lines stay ASCII. */}
+            {query.trim() ? (
+              <>No matches for &ldquo;{query.trim()}&rdquo;.</>
+            ) : (
+              'No properties match the selected filters.'
+            )}
           </p>
         )
       ) : null}

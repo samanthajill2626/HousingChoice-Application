@@ -10,7 +10,8 @@
 //   3. a count is a drill-down: it sets the status and that authority, and the
 //      list shows exactly the properties counted - and a reload keeps it;
 //   4. the voucher-size filter narrows the list AND the summary;
-//   5. Back from a property page returns to the same filtered view;
+//   5. Back from a property page returns to the same filtered view, typed
+//      search included;
 //   6. the Deleted tab starts clean, on every status;
 //   7. no sideways scroll at 360px.
 //
@@ -152,12 +153,19 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     await expect(list.getByRole('listitem')).toContainText(both);
     await expect(rowA.getByRole('cell')).toHaveText(['1', '0']);
 
-    // 5. Into the property and Back: the same filtered view returns.
-    const filteredUrl = page.url();
+    // 5. Type a search, open the property straight from the list, and come
+    //    Back: the same filtered view returns, typed text included. The text
+    //    reaches the URL only when the box loses focus or a row is opened -
+    //    never per keystroke - so this proves that save in a real browser.
+    const search = page.getByRole('searchbox', { name: 'Search properties', exact: true });
+    await search.fill(stamp);
+    await expect(list.getByRole('listitem')).toHaveCount(1);
     await list.getByRole('link', { name: new RegExp(both) }).click();
     await expect(page.getByRole('heading', { name: both, exact: false }).first()).toBeVisible();
     await page.goBack();
-    await expect(page).toHaveURL(filteredUrl);
+    await expect(page).toHaveURL(new RegExp(`[?&]voucher=3(&|$)`));
+    await expect(page).toHaveURL(new RegExp(`[?&]q=${stamp}(&|$)`));
+    await expect(search).toHaveValue(stamp);
     await expect(list.getByRole('listitem')).toHaveCount(1);
     await expect(list.getByRole('listitem')).toContainText(both);
     await expect(

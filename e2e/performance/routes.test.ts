@@ -823,3 +823,24 @@ describe('representative resolvers', () => {
     )).resolves.toEqual({ kind: 'skip', reason: 'unresolved_branch' });
   });
 });
+
+describe('Properties list terminal copy', () => {
+  // The terminal contract matches the page by EXACT text. Nothing else ties the
+  // two together, so a copy edit on the page would turn every sample into a
+  // misattributed ready_timeout (code review r2, C2-6). Read the page source and
+  // require every populated/empty string the contract waits for.
+  it('names only strings the Properties page actually renders', () => {
+    const pageSource = readFileSync(
+      fileURLToPath(new URL('../../dashboard/src/routes/listings/ListingsList.tsx', import.meta.url)),
+      'utf8',
+    );
+    for (const surfaceId of ['/listings', '/listings/deleted']) {
+      const route = ROUTES.find((candidate) => candidate.surfaceId === surfaceId)!;
+      const names = [...route.terminal.populated, ...route.terminal.empty]
+        .map((contract) => contract.name)
+        .filter((name): name is string => typeof name === 'string');
+      expect(names.length).toBeGreaterThan(1);
+      for (const name of names) expect(pageSource, `${surfaceId} waits for "${name}"`).toContain(name);
+    }
+  });
+});

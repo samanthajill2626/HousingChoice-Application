@@ -169,6 +169,17 @@ export type PatchTourInput = Partial<
   Omit<TourItem, 'tourId' | '_schedPartition' | 'createdAt' | 'updatedAt'>
 >;
 
+/** Options for `patch`. Omitted, the patch is unconditional (beyond existence). */
+export interface PatchTourOptions {
+  /**
+   * Write ONLY while the stored status still equals this - the status the
+   * caller read and ran its guards on. A mismatch throws
+   * ConditionalCheckFailedException, exactly like a missing tour; a caller
+   * that must tell the two apart re-reads (PATCH /api/tours/:id does).
+   */
+  expectedStatus?: string;
+}
+
 export interface ToursRepo {
   /** Create a tour (generates tourId); returns the stored item. */
   create(input: CreateTourInput): Promise<TourItem>;
@@ -202,10 +213,12 @@ export interface ToursRepo {
   /**
    * SET-merge patch: only supplied fields are written; omitted fields are LEFT as
    * stored (no-overwrite contract). updatedAt is always bumped. Throws
-   * ConditionalCheckFailedException when the tourId does not exist.
-   * Returns the post-patch item (ALL_NEW).
+   * ConditionalCheckFailedException when the tourId does not exist - and, with
+   * `opts.expectedStatus`, when the stored status no longer equals it (tour
+   * auto-close: a staff PATCH must not overwrite a close that landed after its
+   * read). Returns the post-patch item (ALL_NEW).
    */
-  patch(tourId: string, updates: PatchTourInput): Promise<TourItem>;
+  patch(tourId: string, updates: PatchTourInput, opts?: PatchTourOptions): Promise<TourItem>;
   /**
    * Atomically CLAIM the tour's group-thread slot (relay provisioning): sets
    * groupThreadId to `value` ONLY when none exists yet. Throws
@@ -395,7 +408,7 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       return all;
     },
 
-    async patch(tourId, updates) {
+    async patch(tourId, updates, opts) {
       // SET each supplied non-null field; REMOVE each explicit-null field
       // (the only way to truly clear an attribute). Omitted (undefined) fields
       // are LEFT untouched. Names are expression-aliased so reserved words are
@@ -422,6 +435,16 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       values[':updatedAt'] = new Date().toISOString();
       sets.push('#updatedAt = :updatedAt');
 
+      // Existence always; the caller's status precondition when it gave one. A
+      // second placeholder for `status` is legal beside a `#k<i>` that SETs it
+      // (only overlapping UPDATE paths are refused).
+      const conditions = ['attribute_exists(tourId)'];
+      if (opts?.expectedStatus !== undefined) {
+        names['#expectedStatus'] = 'status';
+        values[':expectedStatus'] = opts.expectedStatus;
+        conditions.push('#expectedStatus = :expectedStatus');
+      }
+
       const clauses = [`SET ${sets.join(', ')}`];
       if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
 
@@ -430,7 +453,7 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
           TableName: table,
           Key: { tourId },
           UpdateExpression: clauses.join(' '),
-          ConditionExpression: 'attribute_exists(tourId)',
+          ConditionExpression: conditions.join(' AND '),
           ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ReturnValues: 'ALL_NEW',

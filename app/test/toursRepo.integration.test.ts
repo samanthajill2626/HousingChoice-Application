@@ -566,4 +566,62 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     // ask for it.
     expect(seen).toEqual([undefined, true, undefined]);
   });
+
+  // -------------------------------------------------------------------------
+  // Tour auto-close and reopen (Sam #18, 2026-10-01): the conditional writes.
+  //
+  // Every case below also runs against the harness fake in
+  // toursRepoFakeConditions.test.ts - a fake looser than the store would make
+  // every route test built on it lie. Stored rows are read through rawTour.
+  // -------------------------------------------------------------------------
+
+  it('patch with expectedStatus writes while the stored status matches, and refuses once it does not', async () => {
+    const { ConditionalCheckFailedException: Err } = await import('../src/repos/toursRepo.js');
+    const tour = await tours.create({
+      tenantId: 'contact-expect-1',
+      unitId: 'unit-expect-1',
+      scheduledAt: '2026-09-10T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+    // `status` is both SET and conditioned on here (two placeholders, one
+    // attribute) - the PATCH route's own shape.
+    const patched = await tours.patch(tour.tourId, { status: 'toured' }, { expectedStatus: 'scheduled' });
+    expect(patched.status).toBe('toured');
+    const before = await rawTour(tour.tourId);
+    expect(before).toMatchObject({ status: 'toured' });
+
+    // A caller still holding the 'scheduled' read loses - and writes nothing.
+    await expect(
+      tours.patch(tour.tourId, { status: 'no_show' }, { expectedStatus: 'scheduled' }),
+    ).rejects.toBeInstanceOf(Err);
+    // The precondition holds even when the patch does not touch status.
+    await expect(
+      tours.patch(tour.tourId, { scheduledAt: '2026-09-11T15:00:00.000Z' }, { expectedStatus: 'scheduled' }),
+    ).rejects.toBeInstanceOf(Err);
+    expect(await rawTour(tour.tourId)).toEqual(before);
+  });
+
+  it('(PIN) patch without opts keeps the unconditional contract', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-expect-2',
+      unitId: 'unit-expect-2',
+      scheduledAt: '2026-09-10T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await tours.patch(tour.tourId, { status: 'toured' }, { expectedStatus: 'scheduled' });
+
+    const patched = await tours.patch(tour.tourId, { status: 'no_show' });
+
+    expect(patched.status).toBe('no_show');
+    expect(await rawTour(tour.tourId)).toMatchObject({ status: 'no_show' });
+  });
+
+  it('(PIN) patch with expectedStatus on a missing tour throws ConditionalCheckFailedException and creates nothing', async () => {
+    const { ConditionalCheckFailedException: Err } = await import('../src/repos/toursRepo.js');
+    await expect(
+      tours.patch('tour-ghost-expected', { status: 'toured' }, { expectedStatus: 'scheduled' }),
+    ).rejects.toBeInstanceOf(Err);
+    expect(await rawTour('tour-ghost-expected')).toBeUndefined();
+  });
 });

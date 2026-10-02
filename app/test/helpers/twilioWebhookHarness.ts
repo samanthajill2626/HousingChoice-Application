@@ -3510,10 +3510,19 @@ export function createFakeWorld(): FakeWorld {
         .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
         .map((t) => ({ ...t }));
     },
-    async patch(tourId, updates) {
+    async patch(tourId, updates, opts) {
       const t = toursMap.get(tourId);
       if (!t) {
         throw new TourConditionalCheckFailedException({ message: `patch: no tour ${tourId}`, $metadata: {} });
+      }
+      // The expected-status precondition (tour auto-close, spec 8.3) - checked
+      // BEFORE the loop below mutates the stored row in place, and in the same
+      // tick, like the real ConditionExpression.
+      if (opts?.expectedStatus !== undefined && t.status !== opts.expectedStatus) {
+        throw new TourConditionalCheckFailedException({
+          message: `patch: tour ${tourId} status is not ${opts.expectedStatus}`,
+          $metadata: {},
+        });
       }
       for (const [key, value] of Object.entries(updates)) {
         if (value === undefined) continue;

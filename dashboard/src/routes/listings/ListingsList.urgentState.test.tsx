@@ -6,7 +6,7 @@
 // the filters are urgent local state, every control still responds at once and
 // each write carries every earlier choice; a URL-driven control would sit
 // unchanged and the last write would hold only the last tap.
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -71,5 +71,19 @@ describe('ListingsList filters do not wait for the router', () => {
 
     await userEvent.tab();
     expect(writes).toEqual(['voucher=2', 'voucher=2&q=Two']);
+  });
+
+  it('a chip write carries search text the box never saved', () => {
+    render(
+      <MemoryRouter initialEntries={['/listings']}>
+        <ListingsList />
+      </MemoryRouter>,
+    );
+    // fireEvent moves no focus, so the box never blurs: only the chip writes.
+    fireEvent.change(screen.getByRole('searchbox', { name: /search/i }), { target: { value: 'Two' } });
+    fireEvent.click(
+      within(screen.getByRole('group', { name: /voucher size/i })).getByRole('button', { name: '2-BR' }),
+    );
+    expect(writes).toEqual(['voucher=2&q=Two']);
   });
 });

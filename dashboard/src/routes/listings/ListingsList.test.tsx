@@ -1,6 +1,6 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UnitItem } from '../../api/index.js';
 import type { ListingsState } from './useListings.js';
@@ -105,6 +105,17 @@ function BackButton(): React.JSX.Element {
   );
 }
 
+/** Someone ELSE replacing the URL with the bare list - what the router does
+ *  for a nav link whose target equals the current URL. */
+function ForeignReplaceButton(): React.JSX.Element {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => void navigate('/listings', { replace: true })}>
+      Foreign replace
+    </button>
+  );
+}
+
 /** The two list routes exactly as App.tsx mounts them (siblings, same element
  *  position - so the list stays MOUNTED across a tab switch), plus a property
  *  page to navigate into and back out of. `from` puts an earlier history entry
@@ -120,6 +131,7 @@ function renderAt(entry = '/listings', from?: string): void {
       </Routes>
       <LocationProbe />
       <BackButton />
+      <ForeignReplaceButton />
     </MemoryRouter>,
   );
 }
@@ -721,6 +733,104 @@ describe('ListingsList', () => {
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: /clear voucher size filter/i }));
       expect(within(voucherGroup()).getByRole('button', { name: 'Studio' })).toHaveFocus();
+    });
+
+    it('Show all statuses keeps keyboard focus on the status filter', async () => {
+      activeState = {
+        status: 'ready',
+        units: [{ unitId: 'o9', landlordId: 'l1', status: 'occupied', address: { line1: '9 Taken Way' } }],
+      };
+      renderAt();
+      await userEvent.click(screen.getByRole('button', { name: 'Show all statuses' }));
+      expect(statusSelect()).toHaveFocus();
+    });
+  });
+
+  // Code review round 2: the page tells its OWN URL writes (stamped with history
+  // state) from everyone else's navigations, and adopts all of the latter.
+  describe('adopting the URL', () => {
+    it('a late commit of the page own write never wipes a newer keystroke', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      const box = screen.getByRole('searchbox', { name: /search/i });
+      // Both events land before the chip's URL write commits (it commits in a
+      // transition, after the urgent keystroke).
+      await act(async () => {
+        fireEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+        fireEvent.change(box, { target: { value: 'T' } });
+      });
+      expect(location()).toBe('/listings?voucher=2');
+      expect(box).toHaveValue('T');
+    });
+
+    it('a same-URL replace made by someone else IS adopted', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      const box = screen.getByRole('searchbox', { name: /search/i });
+      fireEvent.change(box, { target: { value: 'Two' } });
+      expect(rows()).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Foreign replace' }));
+      expect(box).toHaveValue('');
+      expect(rows()).toHaveLength(2);
+    });
+
+    it('a count whose target is the current URL (a router REPLACE) still clears the search', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      const box = screen.getByRole('searchbox', { name: /search/i });
+      // No blur, so the URL stays bare and the All-row count targets it exactly.
+      fireEvent.change(box, { target: { value: 'Two' } });
+      fireEvent.click(screen.getByRole('link', { name: 'Show 2 available properties for all authorities' }));
+      expect(location()).toBe('/listings');
+      expect(box).toHaveValue('');
+      expect(rows()).toHaveLength(2);
+    });
+
+    it('while the view loads, the current tab link keeps the authority filter', () => {
+      activeState = { status: 'loading', units: [] };
+      renderAt('/listings?ha=dca');
+      const tabs = screen.getByRole('navigation', { name: 'Properties view' });
+      expect(within(tabs).getByRole('link', { name: 'Active' })).toHaveAttribute('href', '/listings?ha=dca');
+    });
+
+    it('opening a row saves the search even when the box never blurred', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      fireEvent.change(screen.getByRole('searchbox', { name: /search/i }), { target: { value: 'Both' } });
+      fireEvent.click(screen.getByRole('link', { name: /2 Avail Both Ave/ }));
+      expect(screen.getByText('Property page')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+      expect(location()).toBe('/listings?q=Both');
+      expect(screen.getByRole('searchbox', { name: /search/i })).toHaveValue('Both');
+    });
+  });
+
+  // Under a REAL browser history (BrowserRouter), a write must never land on an
+  // entry that a still-pending PUSH or Back/Forward has already moved to.
+  describe('under a browser history', () => {
+    afterEach(() => {
+      window.history.replaceState(null, '', '/');
+    });
+
+    it('skips a filter write while a navigation is pending, so that navigation wins', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      window.history.replaceState(null, '', '/listings');
+      render(
+        <BrowserRouter>
+          <Routes>
+            <Route path="/listings" element={<ListingsList />} />
+            <Route path="/listings/deleted" element={<ListingsList deleted />} />
+          </Routes>
+        </BrowserRouter>,
+      );
+      // A navigation the browser has started but the router has not committed:
+      // the history entry (and its react-router index) has already moved.
+      const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0;
+      window.history.pushState({ usr: null, key: 'pending', idx: idx + 1 }, '', '/listings/deleted');
+
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+      // The pending entry is untouched: no replace landed on it.
+      expect(window.location.pathname + window.location.search).toBe('/listings/deleted');
     });
   });
 });

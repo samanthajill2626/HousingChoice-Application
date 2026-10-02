@@ -153,11 +153,13 @@
   outline-offset: 1px;
 }
 
+/* Text buttons (Clear, Show all statuses). The darker brand tone: the base brand
+ * blue is about 4.4:1 on the page background, under AA for this size. */
 .clear {
   padding: var(--sp-1) var(--sp-2);
   border: none;
   background: transparent;
-  color: var(--c-brand);
+  color: var(--c-brand-hover);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   cursor: pointer;

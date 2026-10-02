@@ -12,13 +12,21 @@
 // URL can drop keystrokes. Local state updates urgently instead.
 //
 //   - Chips and the dropdown write the URL at once (REPLACE).
-//   - The search box writes it on BLUR (and with any other filter write), never
-//     per keystroke: WebKit throttles replaceState (100 calls per 10 s) and
-//     throws past that, which would kill every URL write on the page.
-//   - The URL is ADOPTED into local state on mount and on every navigation that
-//     is not one of this page's own REPLACE writes: Back/Forward, a tab switch,
-//     a nav link, a summary count. A count also applies its selection in place on
-//     a plain click, because the router turns a same-URL link into a REPLACE.
+//   - The search box writes it on BLUR, when a row is opened, and with any other
+//     filter write - never per keystroke: WebKit throttles replaceState (100
+//     calls per 10 s) and throws past that, which would kill every URL write on
+//     the page. (Text typed and then abandoned by a browser Back/Forward is not
+//     saved; leaving the page that way is leaving the search.)
+//   - Every write is STAMPED with history state (OWN_WRITE). The URL is ADOPTED
+//     into local state on mount and on every navigation that is not a stamped
+//     write: Back/Forward always, and any PUSH or REPLACE that someone else made
+//     - a tab switch, a nav link, a summary count (the router turns a same-URL
+//     link into a REPLACE, so "not a REPLACE" would be the wrong test). The stamp
+//     keeps a LATE commit of the page's own earlier write from reverting a newer
+//     choice.
+//   - A write is skipped while a navigation is still pending (the browser's
+//     history entry has already moved; its transition has not committed): the
+//     pending tab switch or Back wins rather than being overwritten.
 //
 // The component stays MOUNTED across /listings and /listings/deleted (sibling
 // routes in the same element position, App.tsx); the tab switch is a PUSH to a
@@ -26,7 +34,7 @@
 // authority picked on Active from locking the Deleted tab
 // (docs/issues/properties-authority-filter-invisible-lock.md), with
 // pruneSelection as the second defense.
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom';
 import { LISTING_STATUSES, LISTING_STATUS_LABELS, type UnitItem } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
@@ -76,13 +84,36 @@ function searchFor(base: URLSearchParams, sel: UnitListSelection, view: UnitList
   return params.toString();
 }
 
-function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
+/** The history state stamped on this page's own URL writes (see the header). */
+const OWN_WRITE = Object.freeze({ unitListFilterWrite: true });
+
+function isOwnWrite(state: unknown): boolean {
+  return (
+    typeof state === 'object' &&
+    state !== null &&
+    (state as Record<string, unknown>)['unitListFilterWrite'] === true
+  );
+}
+
+/** The browser history's stack index, which react-router 7 keeps in
+ *  `window.history.state.idx`. A PUSH or a Back/Forward moves it; a REPLACE -
+ *  every write this page makes - does not. Undefined without a real browser
+ *  history (a MemoryRouter), which disarms the pending-navigation check. */
+function historyIdx(): unknown {
+  if (typeof window === 'undefined') return undefined;
+  const state: unknown = window.history.state;
+  return typeof state === 'object' && state !== null ? (state as Record<string, unknown>)['idx'] : undefined;
+}
+
+function Row({ unit, onOpen }: { unit: UnitItem; onOpen: () => void }): React.JSX.Element {
   const address = shortAddress(unit.address, unit.unitId);
   const beds = formatBedsBaths(unit.beds, unit.baths);
   const rent = formatRent(unit.rent_min, unit.rent_max);
   return (
     <li className={styles.rowItem}>
-      <Link to={`/listings/${unit.unitId}`} className={styles.row}>
+      {/* onOpen saves the search before the row navigates: a tap that does not
+       *  blur the box first (iOS) must not lose it. */}
+      <Link to={`/listings/${unit.unitId}`} className={styles.row} onClick={onOpen}>
         <span className={styles.address}>{address}</span>
         {/* Meta chips grouped so on a tight content pane they wrap to their own
          *  line below the address instead of crushing it (container query in CSS). */}
@@ -176,22 +207,28 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
   const [creating, setCreating] = useState(false);
 
   // Local filter state, adopted from the URL on mount and on every navigation
-  // that is not this page's own REPLACE write (see the header). The REPLACE skip
-  // also keeps a LATE commit of an earlier write from reverting a newer choice.
+  // that is not one of this page's own stamped writes (see the header): a POP
+  // always, a PUSH or REPLACE unless it carries OWN_WRITE.
   const urlSelection = parseUnitListSelection(searchParams, view);
   const [chosen, setChosen] = useState<UnitListSelection>(urlSelection);
   const [syncedKey, setSyncedKey] = useState(location.key);
   if (location.key !== syncedKey) {
     setSyncedKey(location.key);
-    if (navigationType !== 'REPLACE') setChosen(urlSelection);
+    if (navigationType === 'POP' || !isOwnWrite(location.state)) setChosen(urlSelection);
   }
 
   // Authority chips and summary rows come from EVERY loaded unit of this view
   // (never the filtered rows), labelled with the STORED spelling.
   const authority = useMemo(() => authorityOptions(units), [units]);
   // The effective selection: the chosen one minus anything no chip shows (the
-  // invisible-lock invariant - unitListFacets.pruneSelection).
-  const selection = useMemo(() => pruneSelection(chosen, authority), [chosen, authority]);
+  // invisible-lock invariant - unitListFacets.pruneSelection). ONLY once the
+  // view's units are ready: a loading view has no chips to prune against, and
+  // pruning then would strip every authority out of the URLs built below. Nothing
+  // filters, and no control shows, while it loads.
+  const selection = useMemo(
+    () => (status === 'ready' ? pruneSelection(chosen, authority) : chosen),
+    [status, chosen, authority],
+  );
   const visible = useMemo(() => applyUnitListFilters(units, selection), [units, selection]);
   // The summary is the Active tab's alone; its counts follow the voucher filter.
   const summary = useMemo(
@@ -199,10 +236,24 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
     [deleted, units, selection.voucher, authority],
   );
 
-  /** Persist a selection to the URL - a REPLACE, so Back leaves the page rather
-   *  than walking filter changes (the Tenants-list rule). */
+  // The history index of the COMMITTED location. While a PUSH or a Back/Forward
+  // is still in flight, the browser's index has already moved past it.
+  const committedIdx = useRef<unknown>(undefined);
+  useEffect(() => {
+    committedIdx.current = historyIdx();
+  }, [location.key]);
+
+  /** Persist a selection to the URL - a stamped REPLACE, so Back leaves the page
+   *  rather than walking filter changes (the Tenants-list rule). Skipped while a
+   *  PUSH or Back/Forward is pending: replacing the browser's current entry then
+   *  would cancel the tab switch or Back the user already made, and overwrite
+   *  the entry it landed on. The pending navigation wins and is adopted. */
   function persist(next: UnitListSelection): void {
-    setSearchParams(new URLSearchParams(searchFor(searchParams, next, view)), { replace: true });
+    if (historyIdx() !== committedIdx.current) return;
+    setSearchParams(new URLSearchParams(searchFor(searchParams, next, view)), {
+      replace: true,
+      state: OWN_WRITE,
+    });
   }
 
   /** A filter change: apply it now, persist it now. Always writes: comparing
@@ -213,8 +264,9 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
     persist(next);
   }
 
-  /** Leaving the search box persists its text - only when that changes the URL,
-   *  so tabbing through the page spends no history calls. (Comparing against
+  /** Leaving the search box - or opening a row - persists its text, only when
+   *  that changes the URL, so tabbing through the page spends no history calls.
+   *  (Comparing against
    *  the committed URL could only skip wrongly after a blur, a refocus, an edit
    *  back to the committed text and a second blur, all inside one router
    *  transition - not a human sequence.) */
@@ -222,7 +274,9 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
     if (searchFor(searchParams, selection, view) !== searchParams.toString()) persist(selection);
   }
 
-  /** Where a summary count links (a PUSH, so Back undoes the drill-down). */
+  /** Where a summary count links. A PUSH, so Back undoes the drill-down - or, on
+   *  a same-URL target, the router's REPLACE; either way it is not a stamped
+   *  write, so the selection is adopted from the URL it lands on. */
   function countLink(column: keyof SummaryCounts, key: string | null): { pathname: string; search: string } {
     const search = searchFor(searchParams, countSelection(selection, column, key), view);
     return { pathname: location.pathname, search: search.length > 0 ? `?${search}` : '' };
@@ -232,7 +286,11 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
   const authorityChips = authority.hasUnrecorded
     ? [...authority.options, { key: NONE_KEY, label: NONE_LABEL }]
     : authority.options;
-  const currentSearch = searchFor(searchParams, selection, view);
+  // The current tab's link carries the UNPRUNED choice, typed text included: a
+  // click on it while the view is still loading must not drop a selection the
+  // loaded view would show.
+  const currentSearch = searchFor(searchParams, chosen, view);
+  const statusRef = useRef<HTMLSelectElement>(null);
 
   return (
     <div className={styles.page}>
@@ -270,11 +328,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
       </nav>
 
       {showControls && summary !== null ? (
-        <AuthoritySummary
-          summary={summary}
-          linkFor={countLink}
-          onCount={(column, key) => setChosen(countSelection(selection, column, key))}
-        />
+        <AuthoritySummary summary={summary} linkFor={countLink} />
       ) : null}
 
       {showControls ? (
@@ -285,6 +339,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
             </label>
             <select
               id="listings-status"
+              ref={statusRef}
               className={styles.select}
               value={selection.status}
               onChange={(e) => change({ ...selection, status: e.target.value as StatusFilter })}
@@ -357,7 +412,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
         visible.length > 0 ? (
           <ul className={styles.rows} aria-label="Properties">
             {visible.map((unit) => (
-              <Row key={unit.unitId} unit={unit} />
+              <Row key={unit.unitId} unit={unit} onOpen={persistSearch} />
             ))}
           </ul>
         ) : isDefaultSelection(selection, view) ? (
@@ -368,7 +423,12 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
             <button
               type="button"
               className={styles.clear}
-              onClick={() => change({ ...selection, status: 'all' })}
+              onClick={() => {
+                change({ ...selection, status: 'all' });
+                // This button unmounts as the rows appear; keep keyboard focus
+                // on the control it just changed instead of the page body.
+                statusRef.current?.focus();
+              }}
             >
               Show all statuses
             </button>

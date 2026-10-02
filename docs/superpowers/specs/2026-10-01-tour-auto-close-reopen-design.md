@@ -3,7 +3,7 @@
 - Date: 2026-10-01
 - Branch: `feat/tour-auto-close` (worktree `W:\tmp\tour-auto-close`, cut from main @ae04122d)
 - Source: Sam's improvement #18 (remaining part), HousingChoice Improvements Tracker
-- Status: DRAFT 2 - adversarial review round 2. Per Cameron's instruction of
+- Status: DRAFT 3 - adversarial review round 3. Per Cameron's instruction of
   2026-10-01 the planner approves this spec itself after the review rounds;
   every decision the planner took alone is listed in section 14, and the
   review rulings are in
@@ -33,8 +33,9 @@ long. This change does NOT build #6 or the filterable tour list.
    placement" tours (toured, move-forward recorded, no placement created).
    The platform never marks anyone a no-show by itself. (Refined by the
    planner after review - section 5.3 and D3: the clock never starts before
-   the tour was created or last marked by a person, so a visit recorded late
-   still gets its two weeks.)
+   the tour was created or last marked by a person - or, for a tour nobody
+   has marked since this feature shipped, last changed - so a visit recorded
+   late still gets its two weeks.)
 2. **What reopen returns to.** The state the tour was in when it closed:
    toured with no outcome, no-show, or scheduled with a past date (the Past
    tab's "Not marked"). A tour closed as "Not a fit" returns to toured with
@@ -60,10 +61,10 @@ long. This change does NOT build #6 or the filterable tour list.
    Record outcome dialog keeps its two choices.
 
 Accepted defaults: "two weeks" is exactly 14 days (336 hours); Reopen lives
-on the tour page only; the Past tab intro gains one sentence ("Tours with no
-outcome close on their own two weeks after their date."); an auto-closed tour
-shows "Closed automatically on <date>" instead of the "Moving forward: No"
-line.
+on the tour page only; the Past tab intro gains one sentence (worded to
+match the clock floor: "Tours with no outcome close on their own two weeks
+after their date or their last update."); an auto-closed tour shows "Closed
+automatically on <date>" instead of the "Moving forward: No" line.
 
 ## 3. How tours work today (verified on main @ae04122d)
 
@@ -208,16 +209,26 @@ Reopen removes `autoClosedAt` and `autoClosedFrom`. Nothing removes
 - `convertible === true` -> null (`false` or absent is fine);
 - `convertedPlacementId` is any string (finished or a `pending:` claim) -> null;
 - clock start = the LATEST of: `createdAt`; `scheduledAt` when it is a
-  non-empty string; `lastMarkedAt` when present. Any of these present but
-  unparseable -> null. (No status-specific undated branch: an undated
-  candidate of any status uses `createdAt` / `lastMarkedAt`.)
+  non-empty string; and the MARK - `lastMarkedAt` when present, otherwise
+  `updatedAt`. Any of these present but unparseable -> null. (No
+  status-specific undated branch: an undated candidate of any status uses
+  `createdAt` and the mark.)
 - due = clock start + `AUTO_CLOSE_AFTER_MS`.
+
+Why `updatedAt` stands in when `lastMarkedAt` is absent: no row written
+before this feature ships carries `lastMarkedAt` (there is no migration), and
+a tour staff marked toured or no-show in the two weeks before the deploy
+must not close on the first run. For such a row `updatedAt` is never earlier
+than its last mark. Once a person marks, reschedules or reopens a tour after
+the deploy, `lastMarkedAt` exists and unrelated writes (a roster edit, a
+group open) no longer move its clock.
 
 A tour is due when `due <= now`. Consequences: a tour booked ahead closes 14
 days after its time; a tour marked toured, a no-show or rescheduled after its
 date gets 14 days from that mark; a tour created after its own date (an API
 create with a past time) gets 14 days from its creation; a reopened tour gets
-14 days from the reopen.
+14 days from the reopen; a tour nobody has marked since the deploy gets 14
+days from its last change of any kind.
 
 ## 6. The auto-close sweep
 
@@ -247,8 +258,9 @@ create with a past time) gets 14 days from its creation; a reopened tour gets
 
 Without `tourIds`: `listByStatus('scheduled')`, `listByStatus('toured')`,
 `listByStatus('no_show')` (each pages to exhaustion), filtered by
-`autoCloseDueAtMs(tour) <= now`. Never the scheduled-range read (one page, no
-undated tours).
+`isAutoCloseDue(tour, nowMs)` (null-safe: a non-candidate is never due - do
+NOT compare `autoCloseDueAtMs(...)` to `now` directly, `null <= n` is true in
+JavaScript). Never the scheduled-range read (one page, no undated tours).
 
 ### 6.3 The close write (one conditional update per tour)
 
@@ -266,7 +278,15 @@ New repo method `toursRepo.autoCloseIf(tour, rotation)`:
   absent) AND `lastMarkedAt` equal to the value read (or absent likewise);
 - returns the updated item, or `undefined` on `ConditionalCheckFailedException`
   (something changed between the read and the write - the change wins, the
-  sweep skips the tour this run and re-evaluates it next run).
+  sweep skips the tour this run and re-evaluates it next run);
+- refuses up front (returns `undefined`, no write) when the status it was
+  handed is not a candidate status - defense in depth for the `tourIds` path,
+  which reads tours of any status.
+
+Residual (accepted): for a row with no `lastMarkedAt`, an unrelated write
+(roster edit, group open) racing the close is not detected - the condition
+does not compare `updatedAt` (millisecond stamps make that guard unsound).
+Such a write would only have postponed the close.
 
 `rotation` is a fresh UUID: the pointer then names a ladder no row carries,
 which is how "no live ladder" is expressed (same as the PATCH terminal
@@ -391,7 +411,10 @@ and closes again 14 days later if nothing is recorded.
    On `ConditionalCheckFailedException` the route re-reads consistently:
    tour missing -> 404 `tour_not_found`; otherwise 409 `{ error:
    'tour_changed', detail: 'This tour changed while you were saving - reload
-   and try again.' }`, before any side effect runs. The harness fake mirrors
+   and try again.' }`, before any side effect runs. (The tour page shows an
+   `ApiError` as `<error> (<detail>)`, like every other 409 today -
+   `dashboard/src/api/client.ts:75-83` - so the detail is not standalone
+   copy.) The harness fake mirrors
    the precondition. Existing tests that wrap `world.toursRepo.patch` to park
    a request (the concurrent-reschedule and terminal-vs-revival tests in
    `app/test/toursApi.test.ts`) forward the new third argument.
@@ -425,12 +448,15 @@ create's pointer write, tests) is unchanged.
 
 - `reopenTargetOf(tour)` in a small pure module mirrors 7.2 (null when not
   reopenable).
-- "Reopen tour" is in the kebab whenever the tour is reopenable, and is the
-  PRIMARY CTA when the ladder has nothing else. On a closed, unconverted tour
-  with `convertible: true`, "Start placement" stays primary (existing order).
-  A converted tour shows "View placement" and no Reopen anywhere.
+- ONE placement per state: "Reopen tour" is the PRIMARY CTA when the tour is
+  reopenable and the ladder has nothing else; on a closed, unconverted tour
+  with `convertible: true`, "Start placement" stays primary (existing order)
+  and "Reopen tour" is the kebab's item instead. Never both at once. A
+  converted tour shows "View placement" and no Reopen anywhere.
 - Reopen opens a confirm dialog (title "Reopen tour", buttons "Cancel" /
-  "Reopen tour") whose body says where the tour goes and that nothing is sent:
+  "Yes, reopen" - the confirm must not share the header button's name: the
+  shared Modal does not make the page inert, and Playwright names match by
+  substring) whose body says where the tour goes and that nothing is sent:
   - to toured: "This tour goes back to Toured so you can record a different
     outcome. Nothing is sent."
   - to no_show: "This tour goes back to No show so you can reschedule it.
@@ -447,6 +473,12 @@ create's pointer write, tests) is unchanged.
 - Outcome card for `no_outcome`: "Outcome: No outcome recorded" and the line
   "Closed automatically on <short date of autoClosedAt>" in place of "Moving
   forward". Other outcomes unchanged.
+- The Record outcome dialog: an `ApiError` with status 409 (the tour closed
+  or changed while the dialog was open - `illegal_exit_gate`,
+  `tour_changed`) shows "This tour changed since the page loaded - reload and
+  try again." instead of "Couldn't record the outcome - please try again."
+  (a retry cannot succeed). Other errors keep the existing copy; other tour
+  dialogs are unchanged.
 
 ### 9.3 Tours page (`ToursPage.tsx`)
 
@@ -455,7 +487,7 @@ create's pointer write, tests) is unchanged.
 - Closed tab intro: "Tours that ended - converted into a placement, closed as
   not a fit, closed automatically with no outcome, or canceled."
 - Past tab intro: append "Tours with no outcome close on their own two weeks
-  after their date."
+  after their date or their last update."
 - Past selection is unchanged; a reopened tour inside the Past window
   reappears by the existing rules (7.5 caveat beyond it).
 
@@ -523,14 +555,17 @@ any unconverted closed tour.
 
 - Model: `autoCloseDueAtMs` truth table (each status; outcome present;
   `convertible` true / false; converted; `pending:` claim; undated of each
-  candidate status; `lastMarkedAt` before and after the date; created after
-  the date; the exact 14-day boundary; unparseable instants);
-  `reopenTargetFor` table; `TOUR_OUTCOMES` / labels / `STAFF_TOUR_OUTCOMES`
-  pins.
+  candidate status; `lastMarkedAt` before and after the date; with NO
+  `lastMarkedAt`, `updatedAt` after the date floors the clock and before it
+  does not; with `lastMarkedAt` present, a later `updatedAt` is IGNORED;
+  created after the date; the exact 14-day boundary; unparseable instants);
+  `isAutoCloseDue` false for every non-candidate; `reopenTargetFor` table;
+  `TOUR_OUTCOMES` / labels / `STAFF_TOUR_OUTCOMES` pins.
 - Repo (DynamoDB Local, `app/test/toursRepo.integration.test.ts`): `patch`
   with `expectedStatus` wins / loses; `autoCloseIf` wins on an untouched
   candidate and loses on each of: status changed, outcome set, conversion
   claimed, `convertible: true`, `scheduledAt` changed, `lastMarkedAt` changed;
+  it refuses a non-candidate status without writing;
   `reopenIf` wins, removes the five attributes, sets `lastMarkedAt`, and loses
   on a converted / changed tour. A matching unit test drives the harness fake
   through the same cases.
@@ -544,11 +579,12 @@ any unconverted closed tour.
   the dev tick's validation and scoping; existing closed-terminal pins hold.
 - Listing chip: auto-closed from toured -> "toured"; from scheduled /
   no_show -> no chip.
-- Dashboard: reopen CTA / kebab matrix (auto-closed from each status,
-  not-a-fit, convertible-unconverted, converted, pending claim, closed with no
-  outcome), dialog copy, chaining into Record outcome with the guarded close,
-  Outcome card for `no_outcome`, Closed-tab badge, Today includes no-shows,
-  activity labels.
+- Dashboard: reopen CTA / kebab matrix - exactly ONE "Reopen tour" control
+  per state (auto-closed from each status, not-a-fit, convertible-unconverted
+  -> kebab only, converted, pending claim, closed with no outcome), dialog
+  copy and its "Yes, reopen" confirm, chaining into Record outcome with the
+  guarded close, the Record outcome dialog's 409 copy, Outcome card for
+  `no_outcome`, Closed-tab badge, Today includes no-shows, activity labels.
 - e2e:
   1. NEW `e2e/tests/dashboard-next/tour-auto-close.spec.ts` (now-relative
      dates, accessibility-first selectors, every tick passes `tourIds`):
@@ -560,10 +596,11 @@ any unconverted closed tour.
         outcome recorded"; the Closed tab shows the badge; the tour page
         shows "Closed automatically on"; nothing was sent to the tenant or
         the landlord (fake Twilio thread store).
-     b. Reopen it from the tour page: the dialog says "Not marked"; the tour
-        is back on the Past tab as "Not marked"; a tick 15 days ahead of the
-        REAL now closes it again only after the reopen's two weeks (tick at
-        now + 1 day: open; at now + 15 days: closed).
+     b. Reopen it from the tour page ("Reopen tour", then the dialog's "Yes,
+        reopen" - scope dialog controls to the dialog): the dialog says "Not
+        marked"; the tour is back on the Past tab as "Not marked"; a tick
+        scoped to it closes it again only after the reopen's two weeks (tick
+        at now + 1 day: open; at now + 15 days: closed).
      c. A toured tour closed as "Not a fit": Reopen lands in Record outcome.
      Every tour the spec creates is closed or decided in `afterEach`.
   2. REWRITE `e2e/tests/dashboard-next/today-past-tours.spec.ts` for no-shows
@@ -620,10 +657,13 @@ Readers that must agree with the new states:
 - Conversion route: an auto-closed tour is not convertible - unchanged.
 - Contact timeline Upcoming walk (`contactTimeline.ts:1080-1194`): reminder
   rows only - unchanged.
-- Seeds: lean has no tours; full-profile tours are created at seed time, so
-  none is due for 14 days; the cast's old convertible tour
-  (`app/src/lib/seed/cast.ts:799-817`) is excluded (`convertible: true`). No
-  seed change.
+- Seeds: lean has no tours (e2e uses lean). The full-profile matrix writes
+  past `createdAt` / `scheduledAt` (`app/src/lib/seed/matrix.ts:911-916`,
+  `:957-963`), so in the local demo world its two no-shows auto-close about 9
+  and 11 days after a full reseed if a worker runs - acceptable for a demo
+  world; the cast's old convertible tour (`app/src/lib/seed/cast.ts:799-817`)
+  is excluded (`convertible: true`); `live.ts` uses the seed clock. No seed
+  change.
 - Activity vocabularies: 9.5 / 10.1 (`history.ts`' seed vocabulary is NOT
   extended - no auto-closed tours are seeded).
 
@@ -642,14 +682,17 @@ Readers that must agree with the new states:
   - relay close-nags are armed on their open relay groups and surface on
     Today about four weeks later;
   - a tenant's "Toured" chip stays only where the tour had been marked toured.
-- Preview before deploying: the Tours page Past tab rows dated more than 14
-  days ago, minus "Needs placement" rows, plus toured "Undated" rows created
-  or changed more than 14 days ago. BLIND SPOT: the Past tab covers 90 days
-  and one page of the range read, so older candidates (tours from before
-  early July with no outcome) close without appearing there - they are on no
-  list today either. Review after the run: the Closed tab, newest first,
-  shows each auto-closed tour with the "No outcome recorded" badge; any of
-  them can be reopened from its page.
+- Preview before deploying (the Past tab is live in production since Sep
+  28): the Past tab rows dated more than 14 days ago, minus "Needs placement"
+  rows and minus any row a person changed in the last 14 days (marked
+  toured / no-show, rescheduled - those keep the rest of their two weeks);
+  plus "Undated" rows last changed more than 14 days ago (the Past tab does
+  not show that date; the tour page's history does). BLIND SPOT: the Past tab
+  covers 90 days and one page of the range read, so older candidates (tours
+  from before early July with no outcome) close without appearing there -
+  they are on no list today either. Review after the run: the Closed tab,
+  newest first, shows each auto-closed tour with the "No outcome recorded"
+  badge; any of them can be reopened from its page.
 - For #6: auto-close is the exit for "past tour with no outcome". #6 must
   decide explicitly how a `requested` (undated) tour counts, because nothing
   closes those.
@@ -664,20 +707,22 @@ Readers that must agree with the new states:
   `lastMarkedAt`) instead of inferring from activity rows.
 - D3 THE CLOCK FLOOR (refines decision 1 - worth Cameron's eye): the clock
   starts at the latest of the tour time, its creation and the last time a
-  person marked, rescheduled or reopened it. Without it, "Mark already
-  toured" with a real date three weeks back (or "Mark toured" on day 13)
-  closes the tour within 15 minutes of being recorded - before anyone can
-  record the outcome. Cost: a tour marked toured or no-show after its date
-  closes 14 days after that mark rather than 14 days after the date.
+  person marked, rescheduled or reopened it (`lastMarkedAt`; for a tour
+  nobody has marked since the deploy, its last change, `updatedAt`). Without
+  it, "Mark already toured" with a real date three weeks back (or "Mark
+  toured" on day 13, or a mark made the week before the deploy) closes the
+  tour within 15 minutes - before anyone can record the outcome. Cost: a tour
+  marked toured or no-show after its date closes 14 days after that mark
+  rather than 14 days after the date.
 - D4 Sweep interval 15 minutes (code constant), candidates read by status.
 - D5 Concurrency by field-equality conditions on the close and the reopen,
   plus a status precondition (and a consistent read) on every staff PATCH,
   answering 409 `tour_changed`.
 - D6 Legacy closed tours with neither provenance nor a decided outcome are
   refused (`tour_reopen_unsupported`) rather than guessed.
-- D7 Reopen asks for confirmation; it is in the tour page's kebab whenever
-  allowed and is the primary CTA when nothing else is; "Start placement"
-  keeps priority on a convertible tour.
+- D7 Reopen asks for confirmation ("Yes, reopen"); it is the primary CTA when
+  nothing else is, and the kebab item only when "Start placement" holds the
+  primary slot (a convertible tour) - one placement per state.
 - D8 The listing-send chip keeps "Toured" for a tour auto-closed from toured.
 - D9 The close-nag clear on reopen checks the group's owner when recorded.
 - D10 No seed changes; e2e creates tours through the API and scopes every
@@ -687,6 +732,9 @@ Readers that must agree with the new states:
   copy option for Cameron / Sam, not built).
 - D13 No manual exit for no-shows (Sam's Sep 30 decision); the issue closes
   by that decision.
+- D14 The Record outcome dialog maps a 409 to "This tour changed since the
+  page loaded - reload and try again." (the auto-close makes that refusal
+  likelier at the two-week boundary); other tour dialogs are unchanged.
 
 ## 15. Issue registry and docs
 

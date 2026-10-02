@@ -61,3 +61,31 @@ plan, not by a reviewer):
 - C3 The in-memory harness `toursRepo` must implement the new conditional
   methods with the SAME conditions as the real repo, plus a DynamoDB Local
   integration test of the real ones.
+
+## Spec round 2 (draft 2 @87d4bf2e)
+
+One reviewer (B, continued). Report: `spec-r2-b.md`.
+
+| # | finding | ruling | decision changed? |
+|---|---|---|---|
+| R2-1 | Rows marked BEFORE the deploy carry no `lastMarkedAt`, so the first run closes tours marked toured / no-show / rescheduled in the two weeks before the deploy whose date or creation is older - the case D3 exists to prevent; legacy undated rows got worse than draft 1; the preview text ("created or changed") matches neither the sweep nor the Past tab | ACCEPT. Clock floor = `lastMarkedAt` when present, otherwise `updatedAt` (for a row no person has marked since the feature shipped, `updatedAt` is never earlier than its last mark; no migration). Section 2.1 and 13 re-worded to match. The reviewer's UNVERIFIED point is settled: the Past tab is live in production since Sep 28 (tracker #18 note), so the preview can be run before deploying | YES (clock rule) |
+| R2-2 | 6.2 dropped draft 1's null guard (`null <= n` is true in JS); in the `tourIds` path a non-candidate status would pass the 6.3 condition | ACCEPT. 6.2 names `isAutoCloseDue` (null-safe); `autoCloseIf` refuses a non-candidate status up front without writing (defense in depth) | NO (precision) |
+| R2-3 | Section 12's seed claim is false: the matrix writes past `createdAt` / `scheduledAt` (`matrix.ts:911-916`, `:957-963`); its no-shows are due 9 and 11 days after a full reseed | ACCEPT as a correction (local demo world only; e2e uses lean, which has no tours) | NO |
+| R2-4 | The Past tab sentence ("two weeks after their date") is false for the common case under D3 | ACCEPT. Copy: "Tours with no outcome close on their own two weeks after their date or their last update." | NO (copy) |
+| R2-5 | "Reopen tour" can be three same-named buttons (primary, a kebab that today renders nothing for a closed tour, and the dialog's confirm); the shared Modal does not make the page inert, so a page-scoped selector hits two | ACCEPT. One placement per state: primary CTA when the ladder has nothing else; kebab ONLY when "Start placement" holds the primary slot. The dialog's confirm button is "Yes, reopen" (not a substring collision with "Reopen tour") | YES (UI placement) |
+| R2-6 | The 409 `detail` is not standalone copy (the page shows `code (detail)`); after a close, the commoner refusal (`illegal_exit_gate` from an open Record outcome dialog) shows "please try again", which cannot succeed | ACCEPT. Spec stops calling the detail staff copy (it renders like every other 409 today). The Record outcome dialog maps an `ApiError` 409 to "This tour changed since the page loaded - reload and try again." (the Reopen dialog's copy); other tour dialogs unchanged | YES (small surface) |
+
+Contests: B3 (heading rename) and B9 (label "false") - the reviewer CONCEDED
+both (with the correction that the Today spec's heading is one constant, so
+the e2e churn cost was overstated; the rename stays Cameron's copy call).
+
+Fixes the reviewer verified as correct: the PATCH precondition and
+consistent read (parked tests park after the real write), field-equality
+conditions (including the close -> reopen -> same-status ABA case), the
+guarded close, the listing chip, `StaffTourOutcome`, the Today e2e rewrite,
+`tourIds` scoping, and that the harness fake is the only other `ToursRepo`.
+
+### Round 2 result
+
+Decisions changed (legacy clock floor, Reopen placement, Record outcome 409
+copy) -> round 3 on draft 3, same reviewer, in parallel with plan round 1.

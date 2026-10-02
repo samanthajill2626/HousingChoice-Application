@@ -5,7 +5,7 @@
 - Branch `feat/tour-auto-close`, worktree `W:\tmp\tour-auto-close`, cut from
   main @ae04122d. Mission records:
   `docs/superpowers/reviews/2026-10-01-tour-auto-close/`.
-- Status: PLAN v1 (adversarial plan review pending).
+- Status: PLAN v2 (against spec DRAFT 3; adversarial plan review round 1).
 
 ## 0. Ground rules for this plan
 
@@ -44,7 +44,7 @@
 | staff outcomes | `['move_forward', 'not_a_fit']` |
 | `AUTO_CLOSE_AFTER_MS` | `14 * 24 * 60 * 60 * 1000` (1209600000) |
 | `AUTO_CLOSE_STATUSES` | `['scheduled', 'toured', 'no_show']` |
-| clock start | latest of `createdAt`, `scheduledAt` (non-empty), `lastMarkedAt` |
+| clock start | latest of `createdAt`, `scheduledAt` (non-empty), and the mark: `lastMarkedAt` when present, otherwise `updatedAt` |
 | `TOUR_AUTO_CLOSE_INTERVAL_MS` | `15 * 60 * 1000` (worker poll; code constant, no env var) |
 | new attributes | `autoClosedAt`, `autoClosedFrom`, `lastMarkedAt` |
 | new activity types | `tour_auto_closed`, `tour_reopened` |
@@ -56,14 +56,16 @@
 | PATCH race error | 409 `{ error: 'tour_changed', detail: 'This tour changed while you were saving - reload and try again.' }` |
 | dev tick | `POST /__dev/tour-auto-close/tick` `{ now?, tourIds? }`; `tourIds`: 1..50 non-empty strings |
 | dev tick 400s | `'now must be a valid ISO 8601 datetime'`, `'tourIds must be a non-empty array of at most 50 tour ids'` |
-| reopen dialog | title `'Reopen tour'`, buttons `'Cancel'` / `'Reopen tour'` |
+| reopen dialog | title `'Reopen tour'`, buttons `'Cancel'` / `'Yes, reopen'` |
+| Reopen placement | primary CTA when the ladder has nothing else; kebab item ONLY when `convertible === true` puts "Start placement" in the primary slot; never both |
+| Record outcome 409 | an `ApiError` 409 shows `'This tour changed since the page loaded - reload and try again.'` |
 | reopen copy (toured) | `'This tour goes back to Toured so you can record a different outcome. Nothing is sent.'` |
 | reopen copy (no_show) | `'This tour goes back to No show so you can reschedule it. Nothing is sent.'` |
 | reopen copy (scheduled) | `'This tour goes back to Not marked so you can mark it toured or a no-show, or reschedule it. Nothing is sent.'` |
 | reopen errors (UI) | 409: `'This tour changed since the page loaded - reload and try again.'`; other: `"Couldn't reopen the tour - please try again."` |
 | outcome card | `'Closed automatically on <shortDate(autoClosedAt)>'` replaces the Moving forward row for `no_outcome` |
 | Closed tab intro | `'Tours that ended - converted into a placement, closed as not a fit, closed automatically with no outcome, or canceled.'` |
-| Past tab intro (append) | `' Tours with no outcome close on their own two weeks after their date.'` |
+| Past tab intro (append) | `' Tours with no outcome close on their own two weeks after their date or their last update.'` |
 
 Things this change must NOT do: send any message, arm any reminder on
 reopen, change any seed, add an env var, change infra or a GSI, rename the
@@ -80,7 +82,7 @@ Today section, add a manual no-show exit, let staff record `no_outcome`.
 | S5 sweep | 5.1 nag clear helper, 5.2 job, 5.3 worker, 5.4 dev tick | `jobs/tourAutoClose.ts`, `worker.ts`, `dev.ts` |
 | S6 reopen | 6.1 route | `app/src/routes/tours.ts` |
 | S7 chip | 7.1 listing chip | `app/src/lib/listingSendTour.ts` |
-| S8 dashboard | 8.1 api, 8.2 pure module, 8.3 kebab, 8.4 dialog, 8.5 tour page, 8.6 tours page, 8.7 Today, 8.8 labels | `dashboard/src/...` |
+| S8 dashboard | 8.1 api, 8.2 pure module, 8.3 kebab, 8.4 dialog, 8.4b outcome-dialog 409, 8.5 tour page, 8.6 tours page, 8.7 Today, 8.8 labels | `dashboard/src/...` |
 | S9 e2e | 9.1 Today spec rewrite, 9.2 new spec | `e2e/tests/dashboard-next/` |
 | S10 docs | 10.1 glossary, 10.2 issues, 10.3 runbook | docs |
 | S11 gates | main sync + the five gates | - |
@@ -182,11 +184,18 @@ and these cases (each its own `it`):
    `2026-10-19T00:00:00.000Z`.
 9. undated (no `scheduledAt`, and `scheduledAt: ''`) toured AND no_show ->
    createdAt + 14 days; with `lastMarkedAt` later -> that + 14 days.
-10. unparseable `createdAt`, `scheduledAt` or `lastMarkedAt` -> null; missing
-    `createdAt` -> null.
-11. `isAutoCloseDue(BASE, DUE - 1) === false`, `isAutoCloseDue(BASE, DUE) ===
+10. unparseable `createdAt`, `scheduledAt`, `lastMarkedAt` or `updatedAt` ->
+    null; missing `createdAt` -> null.
+11. LEGACY FLOOR: no `lastMarkedAt`, `updatedAt: '2026-10-08T00:00:00.000Z'`
+    (after the date) -> `2026-10-22T00:00:00.000Z`; no `lastMarkedAt`,
+    `updatedAt` before the date -> DUE; `lastMarkedAt:
+    '2026-09-20T00:00:00.000Z'` present AND a later `updatedAt:
+    '2026-10-08T00:00:00.000Z'` -> DUE (updatedAt is ignored once a mark
+    exists).
+12. `isAutoCloseDue(BASE, DUE - 1) === false`, `isAutoCloseDue(BASE, DUE) ===
     true` (the boundary is inclusive), `isAutoCloseDue({ ...BASE, status:
-    'requested' }, DUE + 1) === false`.
+    'requested' }, DUE + 1) === false`, and false for every non-candidate of
+    case 3-6 at `Number.MAX_SAFE_INTEGER` (the null guard).
 
 GREEN: append to `toursModel.ts` (after the reschedulability block):
 
@@ -195,9 +204,11 @@ GREEN: append to `toursModel.ts` (after the reschedulability block):
 // A tour that still has no outcome two weeks after its CLOCK START is closed by
 // the sweep (jobs/tourAutoClose.ts) with outcome `no_outcome`. The clock starts
 // at the LATEST of: the tour's creation, its scheduled time (when it has one),
-// and the last time a person marked / rescheduled / reopened it
-// (`lastMarkedAt`) - so a visit recorded late, or a reopened tour, still gets
-// its full two weeks. Pure: the job, the dev tick and the tests share it.
+// and its MARK - the last time a person marked / rescheduled / reopened it
+// (`lastMarkedAt`), or, for a tour nobody has marked since this shipped, its
+// last change (`updatedAt`, never earlier than a pre-deploy mark). So a visit
+// recorded late, a reopened tour, or one marked just before the deploy still
+// gets its full two weeks. Pure: the job, the dev tick and the tests share it.
 
 /** Two weeks, exactly (336 hours). */
 export const AUTO_CLOSE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
@@ -223,6 +234,7 @@ export interface AutoCloseClockInput {
   scheduledAt?: unknown;
   createdAt?: unknown;
   lastMarkedAt?: unknown;
+  updatedAt?: unknown;
 }
 
 /** Epoch ms of a non-empty ISO string, or null. */
@@ -251,10 +263,15 @@ export function autoCloseDueAtMs(tour: AutoCloseClockInput): number | null {
     if (at === null) return null;
     start = Math.max(start, at);
   }
-  if (tour.lastMarkedAt !== undefined) {
-    const marked = parseIsoMs(tour.lastMarkedAt);
-    if (marked === null) return null;
-    start = Math.max(start, marked);
+  // The mark: lastMarkedAt once a person has marked / rescheduled / reopened
+  // the tour since this shipped; before that, updatedAt stands in (no
+  // migration - spec 5.3). Once lastMarkedAt exists, unrelated writes that
+  // bump updatedAt (a roster edit, a group open) no longer move the clock.
+  const mark = tour.lastMarkedAt !== undefined ? tour.lastMarkedAt : tour.updatedAt;
+  if (mark !== undefined) {
+    const markedMs = parseIsoMs(mark);
+    if (markedMs === null) return null;
+    start = Math.max(start, markedMs);
   }
   return start + AUTO_CLOSE_AFTER_MS;
 }
@@ -433,6 +450,10 @@ RED, integration AND fake-parity (same cases in both files):
    needed (no delete API) - instead call it with `{ ...read, tourId:
    'tour-missing' }` -> undefined.
 4. it never throws for a condition failure.
+5. it refuses a non-candidate status UP FRONT (returns undefined and issues
+   no write - spy on `doc.send` is not needed: assert the stored row is
+   unchanged) for a `canceled`, a `requested` and a `closed` tour handed to
+   it as read.
 
 GREEN - interface:
 
@@ -455,6 +476,9 @@ real repo:
 
 ```ts
     async autoCloseIf(tour, rotation) {
+      // Defense in depth (spec 6.3): only a candidate status may ever be
+      // closed as no_outcome, whatever the caller's due filter did.
+      if (!isAutoCloseStatus(tour.status)) return undefined;
       const now = new Date().toISOString();
       const names: Record<string, string> = {
         '#st': 'status',
@@ -524,6 +548,7 @@ fake (synchronous check-and-set):
 
 ```ts
     async autoCloseIf(tour, rotation) {
+      if (!isAutoCloseStatus(tour.status)) return undefined;
       const t = toursMap.get(tour.tourId);
       if (
         !t ||
@@ -547,6 +572,9 @@ fake (synchronous check-and-set):
       return { ...t };
     },
 ```
+
+(Both files import `isAutoCloseStatus` from `lib/toursModel.js`; the repo
+already imports types from there.)
 
 GREEN both files + typecheck. Commit.
 
@@ -935,7 +963,13 @@ fresh `createEventBus()` (from `../src/lib/events.js`) whose `tour.updated`
 and `scheduled.updated` emits the test records. Seed the tenant contact and a
 unit with a landlord as `toursApi.test.ts` does. Create tours through
 `world.toursRepo.create({ ..., createdAt })` (the fake honors a supplied
-`createdAt`). Cases:
+`createdAt`). CLOCK TRAP: the fake stamps `updatedAt` with the WALL clock on
+every write, and with no `lastMarkedAt` the clock's mark IS `updatedAt`
+(spec 5.3) - a tour just created through the fake is not due for 14 REAL
+days whatever its dates say. So after every setup write, set
+`world.toursMap.get(id)!.updatedAt = <the case's intended last change>`
+(normally its `createdAt`), or give it an explicit `lastMarkedAt`, and build
+each case's injected `now` from those values. Cases:
 
 1. a scheduled tour created `2026-08-25T00:00:00.000Z`, dated
    `2026-09-01T15:00:00.000Z`; `runTourAutoClose('2026-09-20T00:00:00.000Z',
@@ -949,7 +983,8 @@ unit with a landlord as `toursApi.test.ts` does. Create tours through
 3. skipped (closed 0, due 0): requested; canceled; closed; toured with
    `outcome: 'move_forward', moveForward: true, convertible: true`; toured
    with `convertedPlacementId: 'pending:x'`; a tour whose `lastMarkedAt` is
-   within the window.
+   within the window; a LEGACY tour (no `lastMarkedAt`) whose `updatedAt` is
+   within the window (marked just before the deploy).
 4. each candidate status closes: toured (undated: created 20 days before
    now), no_show.
 5. lost write: replace `world.toursRepo.autoCloseIf` with one that returns
@@ -1132,7 +1167,8 @@ and injected `tourAutoCloseDeps` from a fake world):
   400 `tourIds must be a non-empty array of at most 50 tour ids`;
 - `{ now: '2026-09-20T00:00:00Z' }` -> 200 `{ ok: true, now:
   '2026-09-20T00:00:00.000Z', scanned, due, closed, lost, failed }` and the
-  due tour is closed;
+  due tour is closed (same CLOCK TRAP as Task 5.2: set the seeded tour's
+  `updatedAt` / `createdAt` in `world.toursMap` so it is due at that `now`);
 - `{ now, tourIds: [a] }` with two due tours -> only `a` closed.
 
 GREEN:
@@ -1394,6 +1430,9 @@ GREEN. Commit.
 
 ### Task 8.3 - kebab item (`TourActionsMenu.tsx`)
 
+(The kebab carries Reopen ONLY on a convertible, unconverted closed tour,
+where "Start placement" holds the primary slot - Task 8.5 computes that.)
+
 RED (`TourActionsMenu.test.tsx`): with `canReopen` true the menu shows a
 "Reopen tour" item that calls `onReopen`; a kebab with ONLY `canReopen` true
 renders (not the empty-kebab null); default (prop omitted) shows no item.
@@ -1406,13 +1445,26 @@ the file header's action list. Commit.
 
 RED (`TourDetail.test.tsx` or a new `TourModals.test.tsx` if one exists for
 other modals): renders a dialog named "Reopen tour" with the body for its
-`target`; "Reopen tour" awaits `onConfirm` then calls `onClose`; a rejected
-`onConfirm` with an `ApiError` of status 409 shows the 409 copy, any other
-error the generic copy, and the dialog stays open; "Cancel" calls `onClose`
-only.
+`target`; its confirm button is "Yes, reopen" (NOT "Reopen tour" - the page
+behind the shared Modal is not inert and Playwright names match by
+substring); "Yes, reopen" awaits `onConfirm` then calls `onClose`; a
+rejected `onConfirm` with an `ApiError` of status 409 shows the 409 copy,
+any other error the generic copy, and the dialog stays open; "Cancel" calls
+`onClose` only.
 GREEN: mirror `CancelTourModal`'s structure exactly (same Modal, buttons,
 busy handling), props `{ target: ReopenTarget; onClose: () => void;
 onConfirm: () => Promise<void> }`. Commit.
+
+### Task 8.4b - Record outcome dialog: a 409 says reload, not retry
+
+RED (where `RecordOutcomeModal` is tested): `onConfirm` rejecting with an
+`ApiError` of status 409 shows "This tour changed since the page loaded -
+reload and try again."; any other rejection keeps "Couldn't record the
+outcome - please try again.".
+GREEN: in `RecordOutcomeModal`'s catch (`TourModals.tsx` around `:298-305`),
+branch on `err instanceof ApiError && err.status === 409`. Share the string
+with the Reopen dialog (one exported constant in `TourModals.tsx`). Other
+tour dialogs are unchanged. Commit.
 
 ### Task 8.5 - tour page wiring (`TourDetail.tsx`)
 
@@ -1420,9 +1472,12 @@ RED (`TourDetail.test.tsx`, with the client mocked the way the file already
 mocks `patchTour`):
 
 - primary CTA "Reopen tour" for: closed + `autoClosedFrom: 'scheduled'` +
-  `outcome: 'no_outcome'`; closed + `not_a_fit`;
+  `outcome: 'no_outcome'`; closed + `not_a_fit` - and the kebab has NO
+  "Reopen tour" item (exactly one "Reopen tour" control on the page: assert
+  `getAllByRole('button', { name: 'Reopen tour' })` length 1 with the kebab
+  open);
 - closed + `move_forward` + `convertible: true` (unconverted): primary "Start
-  placement", and the kebab has "Reopen tour";
+  placement", and the kebab has "Reopen tour" (again exactly one);
 - converted (`convertedPlacementId: 'placement-1'`): "View placement", no
   "Reopen tour" in the CTA or the kebab; `'pending:x'` likewise no Reopen;
 - closed, no outcome, no autoClosedFrom: no Reopen anywhere;
@@ -1448,7 +1503,9 @@ GREEN:
   `else if (reopenTarget !== null) { primaryCta = (<Button size="sm"
   onClick={openReopen}>Reopen tour</Button>); }` (the converted and
   convertible branches stay first).
-- kebab: `canReopen={reopenTarget !== null}` and `onReopen={openReopen}`.
+- kebab: `canReopen={reopenTarget !== null && tour.convertible === true}`
+  (only when "Start placement" holds the primary slot - one placement per
+  state, spec 9.2) and `onReopen={openReopen}`.
 - confirm handler:
 
 ```ts
@@ -1597,15 +1654,17 @@ Tests (one `test.describe`, `beforeAll` reseeds like today-past-tours):
    landlord since `since` is empty.
 2. `'reopen returns it to Not marked and gives it a fresh two weeks'`: on the
    same kind of tour (create + close as in 1), open the tour page, click
-   "Reopen tour", the dialog shows the scheduled copy, confirm; the badge
-   reads "Scheduled"; the Past tab (`/tours/past`) lists it as "Not marked";
+   "Reopen tour", the dialog (`getByRole('dialog', { name: 'Reopen tour' })`)
+   shows the scheduled copy, click its "Yes, reopen" (scoped to the dialog);
+   the badge reads "Scheduled"; the Past tab (`/tours/past`) lists it as "Not
+   marked";
    `tick([id], daysFromNow(1))` -> `closed 0`; `tick([id],
    daysFromNow(15))` -> `closed 1`.
 3. `'a not-a-fit tour reopens straight into Record outcome'`: create
    `pastAt(3, 10)`, PATCH toured, PATCH `{ outcome: 'not_a_fit', moveForward:
-   false, status: 'closed' }`; tour page -> "Reopen tour" -> confirm -> the
-   "Record outcome" dialog is visible; Cancel it; the tour reads "Toured"
-   and the CTA "Record outcome".
+   false, status: 'closed' }`; tour page -> "Reopen tour" -> the dialog's
+   "Yes, reopen" -> the "Record outcome" dialog is visible; Cancel it; the
+   tour reads "Toured" and the CTA "Record outcome".
 Cleanup in `afterEach`: for every created tour that is not closed, decide it
 (toured + not a fit) so no later spec sees it on Past or Today.
 Run the spec alone GREEN, then commit.

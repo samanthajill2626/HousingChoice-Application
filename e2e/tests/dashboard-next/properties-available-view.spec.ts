@@ -156,11 +156,14 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     // 5. Type a search, open the property straight from the list, and come
     //    Back: the same filtered view returns, typed text included. The text
     //    reaches the URL only when the box loses focus or a row is opened -
-    //    never per keystroke - so this proves that save in a real browser.
+    //    never per keystroke. The row is opened with a DISPATCHED click (no
+    //    pointer, so the box never blurs, as with an iOS tap), so only the
+    //    row-open save can carry the text; the blur save is pinned by the
+    //    component suite.
     const search = page.getByRole('searchbox', { name: 'Search properties', exact: true });
     await search.fill(stamp);
     await expect(list.getByRole('listitem')).toHaveCount(1);
-    await list.getByRole('link', { name: new RegExp(both) }).click();
+    await list.getByRole('link', { name: new RegExp(both) }).dispatchEvent('click');
     await expect(page.getByRole('heading', { name: both, exact: false }).first()).toBeVisible();
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`[?&]voucher=3(&|$)`));

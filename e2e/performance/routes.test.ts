@@ -836,11 +836,17 @@ describe('Properties list terminal copy', () => {
     );
     for (const surfaceId of ['/listings', '/listings/deleted']) {
       const route = ROUTES.find((candidate) => candidate.surfaceId === surfaceId)!;
-      const names = [...route.terminal.populated, ...route.terminal.empty]
-        .map((contract) => contract.name)
-        .filter((name): name is string => typeof name === 'string');
-      expect(names.length).toBeGreaterThan(1);
-      for (const name of names) expect(pageSource, `${surfaceId} waits for "${name}"`).toContain(name);
+      const contracts = [...route.terminal.populated, ...route.terminal.empty];
+      expect(contracts.length).toBeGreaterThan(1);
+      for (const contract of contracts) {
+        // Role-aware, so a common word cannot pass on unrelated text: a `text`
+        // contract needs its exact sentence, a named `list` its exact aria-label.
+        const name = contract.name;
+        expect(typeof name, `${surfaceId}: a ${contract.role} contract without a name`).toBe('string');
+        const needle = contract.role === 'list' ? `aria-label="${name}"` : `${name}`;
+        expect(['text', 'list'], `${surfaceId}: unexpected role ${contract.role}`).toContain(contract.role);
+        expect(pageSource, `${surfaceId} waits for ${contract.role} "${name}"`).toContain(needle);
+      }
     }
   });
 });

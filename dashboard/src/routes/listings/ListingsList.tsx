@@ -34,7 +34,7 @@
 // authority picked on Active from locking the Deleted tab
 // (docs/issues/properties-authority-filter-invisible-lock.md), with
 // pruneSelection as the second defense.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom';
 import { LISTING_STATUSES, LISTING_STATUS_LABELS, type UnitItem } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
@@ -237,9 +237,13 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
   );
 
   // The history index of the COMMITTED location. While a PUSH or a Back/Forward
-  // is still in flight, the browser's index has already moved past it.
+  // is still in flight, the browser's index has already moved past it. Recorded
+  // in a LAYOUT effect - inside the commit, before any later event can run. A
+  // passive effect runs after paint, so a filter tap landing between a
+  // committed navigation and that effect read a stale index and was wrongly
+  // skipped as "pending" (code review r3).
   const committedIdx = useRef<unknown>(undefined);
-  useEffect(() => {
+  useLayoutEffect(() => {
     committedIdx.current = historyIdx();
   }, [location.key]);
 
@@ -426,8 +430,9 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
               onClick={() => {
                 change({ ...selection, status: 'all' });
                 // This button unmounts as the rows appear; keep keyboard focus
-                // on the control it just changed instead of the page body.
-                statusRef.current?.focus();
+                // on the control it just changed instead of the page body -
+                // without scrolling a phone back up, away from the new rows.
+                statusRef.current?.focus({ preventScroll: true });
               }}
             >
               Show all statuses

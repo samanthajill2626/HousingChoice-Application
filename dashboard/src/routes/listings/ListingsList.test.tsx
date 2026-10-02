@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -803,6 +803,37 @@ describe('ListingsList', () => {
       expect(location()).toBe('/listings?q=Both');
       expect(screen.getByRole('searchbox', { name: /search/i })).toHaveValue('Both');
     });
+
+    it("Back onto an entry the page itself wrote is still adopted", async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      // A chip writes a STAMPED entry; the count then pushes past it.
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+      await userEvent.click(screen.getByRole('link', { name: 'Show 1 coming soon property for DCA' }));
+      expect(statusSelect().value).toBe('setup');
+      // Back lands on the stamped entry: a POP is always adopted, stamp or not.
+      await userEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+      expect(location()).toBe('/listings?voucher=2');
+      expect(statusSelect().value).toBe('available');
+      expect(within(haGroup()).queryAllByRole('button', { pressed: true })).toHaveLength(0);
+    });
+
+    it('a blur while the view loads keeps the authority filter in the URL', async () => {
+      activeState = { status: 'loading', units: [] };
+      deletedState = {
+        status: 'ready',
+        units: [{ unitId: 'd1', landlordId: 'l1', status: 'off_market', address: { line1: '1 Gone St' } }],
+      };
+      renderAt('/listings/deleted', '/listings?ha=dca');
+      const box = screen.getByRole('searchbox', { name: /search/i });
+      box.focus();
+      // Back to the Active tab, which is still loading, then the box loses focus.
+      fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+      expect(location()).toBe('/listings?ha=dca');
+      fireEvent.blur(box);
+      // Nothing loaded means nothing to prune against: the filter must survive.
+      expect(location()).toBe('/listings?ha=dca');
+    });
   });
 
   // Under a REAL browser history (BrowserRouter), a write must never land on an
@@ -812,7 +843,36 @@ describe('ListingsList', () => {
       window.history.replaceState(null, '', '/');
     });
 
-    it('skips a filter write while a navigation is pending, so that navigation wins', async () => {
+    it('records the committed history index INSIDE the commit: a tap right after a navigation is written', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      window.history.replaceState(null, '', '/listings');
+      render(
+        <BrowserRouter>
+          <Routes>
+            <Route path="/listings" element={<ListingsList />} />
+          </Routes>
+        </BrowserRouter>,
+      );
+      // Tap 2-BR the moment the count's navigation COMMITS - from a mutation
+      // observer, which runs right after the commit's DOM writes and before any
+      // after-paint (passive) effect. Raw events outside act(), so React's own
+      // scheduling decides the order, as in a browser.
+      const observer = new MutationObserver(() => {
+        if (!window.location.search.includes('ha=dca')) return;
+        const chip = within(voucherGroup()).queryByRole('button', { name: '2-BR' });
+        if (chip === null) return;
+        observer.disconnect();
+        chip.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      });
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+      screen
+        .getByRole('link', { name: 'Show 1 coming soon property for DCA' })
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      await waitFor(() => expect(window.location.search).toContain('voucher=2'));
+      observer.disconnect();
+    });
+
+    it('leaves the entry of a still-pending navigation untouched (the filter write is skipped)', async () => {
       activeState = { status: 'ready', units: SUMMARY_UNITS };
       window.history.replaceState(null, '', '/listings');
       render(

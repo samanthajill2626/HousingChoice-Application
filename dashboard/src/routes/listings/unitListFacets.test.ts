@@ -1,4 +1,4 @@
-// propertyFacets - the pure engine behind the Properties list's filters and its
+// unitListFacets - the pure engine behind the Properties list's filters and its
 // by-housing-authority summary (docs/superpowers/specs/
 // 2026-10-01-properties-available-view-design.md). Written test-first: these
 // assertions are the module's specification.
@@ -6,20 +6,21 @@ import { describe, expect, it } from 'vitest';
 import type { UnitItem } from '../../api/index.js';
 import { NONE_KEY } from '../contacts/tenantFacets.js';
 import {
-  applyPropertyFilters,
-  applyPropertySelection,
+  applyUnitListFilters,
+  applyUnitListSelection,
   authorityOptions,
   buildAuthoritySummary,
   countSelection,
   defaultStatus,
+  isDefaultSelection,
   matchesAuthority,
   matchesVoucher,
-  parsePropertySelection,
+  parseUnitListSelection,
   pruneSelection,
   unitAuthorityKeys,
   unitVoucherBuckets,
-  type PropertySelection,
-} from './propertyFacets.js';
+  type UnitListSelection,
+} from './unitListFacets.js';
 
 let seq = 0;
 /** A unit fixture with a stable id and a run-unique address line. */
@@ -32,7 +33,7 @@ const u = (over: Partial<UnitItem>): UnitItem =>
     ...over,
   }) as UnitItem;
 
-const sel = (over: Partial<PropertySelection> = {}): PropertySelection => ({
+const sel = (over: Partial<UnitListSelection> = {}): UnitListSelection => ({
   status: 'available',
   ha: new Set<string>(),
   voucher: new Set<string>(),
@@ -47,23 +48,23 @@ describe('defaultStatus', () => {
   });
 });
 
-describe('parsePropertySelection', () => {
+describe('parseUnitListSelection', () => {
   it('an empty query reads as the view default with no facets', () => {
-    const active = parsePropertySelection(new URLSearchParams(''), 'active');
+    const active = parseUnitListSelection(new URLSearchParams(''), 'active');
     expect(active.status).toBe('available');
     expect([...active.ha]).toEqual([]);
     expect([...active.voucher]).toEqual([]);
     expect(active.q).toBe('');
-    expect(parsePropertySelection(new URLSearchParams(''), 'deleted').status).toBe('all');
+    expect(parseUnitListSelection(new URLSearchParams(''), 'deleted').status).toBe('all');
   });
   it('reads every status value and all; an unknown status falls back to the default', () => {
-    expect(parsePropertySelection(new URLSearchParams('status=setup'), 'active').status).toBe('setup');
-    expect(parsePropertySelection(new URLSearchParams('status=all'), 'active').status).toBe('all');
-    expect(parsePropertySelection(new URLSearchParams('status=bogus'), 'active').status).toBe('available');
-    expect(parsePropertySelection(new URLSearchParams('status=bogus'), 'deleted').status).toBe('all');
+    expect(parseUnitListSelection(new URLSearchParams('status=setup'), 'active').status).toBe('setup');
+    expect(parseUnitListSelection(new URLSearchParams('status=all'), 'active').status).toBe('all');
+    expect(parseUnitListSelection(new URLSearchParams('status=bogus'), 'active').status).toBe('available');
+    expect(parseUnitListSelection(new URLSearchParams('status=bogus'), 'deleted').status).toBe('all');
   });
   it('reads repeated facets; unknown voucher values drop one by one; empty values are ignored', () => {
-    const parsed = parsePropertySelection(
+    const parsed = parseUnitListSelection(
       new URLSearchParams('voucher=2&voucher=7&voucher=4plus&voucher=__none__&ha=dca&ha=&ha=atlanta+housing'),
       'active',
     );
@@ -71,21 +72,21 @@ describe('parsePropertySelection', () => {
     expect([...parsed.ha]).toEqual(['dca', 'atlanta housing']);
   });
   it('reads the raw search text', () => {
-    expect(parsePropertySelection(new URLSearchParams('q=peach+tree'), 'active').q).toBe('peach tree');
+    expect(parseUnitListSelection(new URLSearchParams('q=peach+tree'), 'active').q).toBe('peach tree');
   });
 });
 
-describe('applyPropertySelection', () => {
+describe('applyUnitListSelection', () => {
   it('omits the view default and every empty facet', () => {
     const params = new URLSearchParams();
-    applyPropertySelection(params, sel(), 'active');
+    applyUnitListSelection(params, sel(), 'active');
     expect(params.toString()).toBe('');
-    applyPropertySelection(params, sel({ status: 'all' }), 'deleted');
+    applyUnitListSelection(params, sel({ status: 'all' }), 'deleted');
     expect(params.toString()).toBe('');
   });
   it('writes a non-default status, repeated facets, and the search; leaves other params alone', () => {
     const params = new URLSearchParams('keep=1&status=occupied&ha=old');
-    applyPropertySelection(
+    applyUnitListSelection(
       params,
       sel({ status: 'setup', voucher: new Set(['2', '3']), ha: new Set(['dca']), q: 'oak' }),
       'active',
@@ -99,8 +100,8 @@ describe('applyPropertySelection', () => {
   it('round-trips through parse', () => {
     const original = sel({ status: 'all', voucher: new Set(['0', NONE_KEY]), ha: new Set(['a b']), q: 'x y' });
     const params = new URLSearchParams();
-    applyPropertySelection(params, original, 'active');
-    const back = parsePropertySelection(params, 'active');
+    applyUnitListSelection(params, original, 'active');
+    const back = parseUnitListSelection(params, 'active');
     expect(back.status).toBe('all');
     expect([...back.voucher]).toEqual(['0', NONE_KEY]);
     expect([...back.ha]).toEqual(['a b']);
@@ -108,7 +109,7 @@ describe('applyPropertySelection', () => {
   });
   it('writes Available explicitly on the Deleted tab (not its default there)', () => {
     const params = new URLSearchParams();
-    applyPropertySelection(params, sel({ status: 'available' }), 'deleted');
+    applyUnitListSelection(params, sel({ status: 'available' }), 'deleted');
     expect(params.get('status')).toBe('available');
   });
 });
@@ -201,17 +202,17 @@ describe('matchesAuthority', () => {
   });
 });
 
-describe('applyPropertyFilters', () => {
+describe('applyUnitListFilters', () => {
   const avail2 = u({ status: 'available', voucher_size_accepted: 2, accepted_authorities: ['DCA'], address: { line1: '1 Oak Ave' } });
   const avail3 = u({ status: 'available', voucher_size_accepted: 3, accepted_authorities: ['DCA'], address: { line1: '2 Elm St' } });
   const setup2 = u({ status: 'setup', voucher_size_accepted: 2, accepted_authorities: ['Fulton'], address: { line1: '3 Oak Ct' } });
   const units = [avail2, avail3, setup2];
   it('ANDs status, voucher, authority and search', () => {
-    expect(applyPropertyFilters(units, sel())).toEqual([avail2, avail3]);
-    expect(applyPropertyFilters(units, sel({ status: 'all', voucher: new Set(['2']) }))).toEqual([avail2, setup2]);
-    expect(applyPropertyFilters(units, sel({ status: 'all', ha: new Set(['fulton']) }))).toEqual([setup2]);
-    expect(applyPropertyFilters(units, sel({ status: 'all', q: '  OAK ' }))).toEqual([avail2, setup2]);
-    expect(applyPropertyFilters(units, sel({ status: 'setup', ha: new Set(['dca']) }))).toEqual([]);
+    expect(applyUnitListFilters(units, sel())).toEqual([avail2, avail3]);
+    expect(applyUnitListFilters(units, sel({ status: 'all', voucher: new Set(['2']) }))).toEqual([avail2, setup2]);
+    expect(applyUnitListFilters(units, sel({ status: 'all', ha: new Set(['fulton']) }))).toEqual([setup2]);
+    expect(applyUnitListFilters(units, sel({ status: 'all', q: '  OAK ' }))).toEqual([avail2, setup2]);
+    expect(applyUnitListFilters(units, sel({ status: 'setup', ha: new Set(['dca']) }))).toEqual([]);
   });
 });
 
@@ -245,9 +246,36 @@ describe('buildAuthoritySummary', () => {
     expect(summary.all).toEqual({ available: 1, comingSoon: 1 });
     expect(summary.rows).toEqual([{ key: 'dca', label: 'DCA', available: 1, comingSoon: 1 }]);
   });
+  it('counts the available/coming-soon units a size filter left out for recording no size', () => {
+    // 2-BR: the setup unit with no authority and the available DCA unit with no
+    // size are unrecorded; the 3-BR unit is left out too, but it RECORDS a size;
+    // the occupied unit is outside the summary altogether.
+    expect(buildAuthoritySummary(units, new Set(['2']), authority).unrecordedExcluded).toBe(2);
+  });
+  it('excludes nothing unrecorded with no voucher filter, or with Not recorded selected', () => {
+    expect(buildAuthoritySummary(units, new Set<string>(), authority).unrecordedExcluded).toBe(0);
+    const withNone = buildAuthoritySummary(units, new Set(['2', NONE_KEY]), authority);
+    expect(withNone.unrecordedExcluded).toBe(0);
+    expect(withNone.all).toEqual({ available: 2, comingSoon: 2 });
+  });
   it('an empty world yields a zero All row and no authority rows', () => {
     const summary = buildAuthoritySummary([], new Set<string>(), authorityOptions([]));
-    expect(summary).toEqual({ all: { available: 0, comingSoon: 0 }, rows: [] });
+    expect(summary).toEqual({ all: { available: 0, comingSoon: 0 }, rows: [], unrecordedExcluded: 0 });
+  });
+});
+
+describe('isDefaultSelection', () => {
+  it('is true only for the bare view default', () => {
+    expect(isDefaultSelection(sel(), 'active')).toBe(true);
+    expect(isDefaultSelection(sel({ status: 'all' }), 'deleted')).toBe(true);
+    expect(isDefaultSelection(sel({ q: '   ' }), 'active')).toBe(true);
+  });
+  it('is false once anything else constrains the list', () => {
+    expect(isDefaultSelection(sel({ status: 'all' }), 'active')).toBe(false);
+    expect(isDefaultSelection(sel({ status: 'available' }), 'deleted')).toBe(false);
+    expect(isDefaultSelection(sel({ ha: new Set(['dca']) }), 'active')).toBe(false);
+    expect(isDefaultSelection(sel({ voucher: new Set(['2']) }), 'active')).toBe(false);
+    expect(isDefaultSelection(sel({ q: 'oak' }), 'active')).toBe(false);
   });
 });
 

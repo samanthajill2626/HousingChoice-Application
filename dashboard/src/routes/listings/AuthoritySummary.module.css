@@ -1,4 +1,4 @@
-/* PropertySummary - the Properties page's by-housing-authority summary (Active
+/* AuthoritySummary - the Properties page's by-housing-authority summary (Active
  * tab only; tracker #1). A compact card-styled table: authority name, then the
  * Available and Coming soon counts. All values from tokens.css. */
 
@@ -70,20 +70,25 @@
   white-space: nowrap;
 }
 
+/* The All row reads as a total by weight and a heavier rule under it - NOT a
+ * tinted fill: the brand link color on --c-surface-2 falls under 4.5:1, and a
+ * filled last row would square off the table's rounded corners. */
 .allRow th,
 .allRow td {
-  background: var(--c-surface-2);
   font-weight: var(--fw-semibold);
+  border-bottom-color: var(--c-border-strong);
 }
 
+/* Underlined, not color alone, so a linked count reads as a link to everyone. */
 .count {
   color: var(--c-brand);
   font-weight: var(--fw-semibold);
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .count:hover {
-  text-decoration: underline;
+  color: var(--c-brand-hover);
 }
 
 .count:focus-visible {
@@ -92,8 +97,9 @@
   border-radius: var(--radius-sm);
 }
 
+/* A zero is plain text in the muted (AA) tone; the subtler tone failed contrast. */
 .zero {
-  color: var(--c-text-subtle);
+  color: var(--c-text-muted);
 }
 
 .note {

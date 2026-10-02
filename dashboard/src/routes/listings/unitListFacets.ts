@@ -1,12 +1,15 @@
-// propertyFacets - the PURE engine behind the Properties list's filters and its
+// unitListFacets - the PURE engine behind the Properties list's filters and its
 // by-housing-authority summary (docs/superpowers/specs/
 // 2026-10-01-properties-available-view-design.md). No React, no hooks:
-// ListingsList owns the URL and renders what this returns.
+// ListingsList owns the state and the URL and renders what this returns. Code
+// says `unit` (documentation/GLOSSARY.md); staff-facing copy says "property".
 //
-// Every rule that already exists for the Tenants list is REUSED from
+// The facet RULES that already exist for the Tenants list are REUSED from
 // tenantFacets rather than restated - the normalized authority key, the
 // most-frequent display spelling, the voucher buckets and their labels, and the
-// Not-recorded sentinel - so the two lists cannot drift apart.
+// Not-recorded sentinel and label - so the two lists cannot drift apart on
+// them. The chip UI is deliberately simpler here (no per-chip counts: the
+// summary carries the counts).
 import { LISTING_STATUSES, type UnitItem, type UnitStatus } from '../../api/index.js';
 import {
   displaySpelling,
@@ -19,7 +22,7 @@ import {
 import { authoritiesOf, shortAddress, voucherSizesOf } from '../listing/listingFormat.js';
 
 /** Which property list is showing: the Active tab or the Deleted tab. */
-export type PropertyView = 'active' | 'deleted';
+export type UnitListView = 'active' | 'deleted';
 
 /** The status dropdown's value: one listing status, or every status. */
 export type StatusFilter = UnitStatus | 'all';
@@ -34,12 +37,12 @@ export const NO_AUTHORITY_LABEL = 'No authority recorded';
 
 /** The Active tab opens on Available (Sam's default); the Deleted tab keeps
  *  every status, since a deleted property can hold any of them. */
-export function defaultStatus(view: PropertyView): StatusFilter {
+export function defaultStatus(view: UnitListView): StatusFilter {
   return view === 'active' ? 'available' : 'all';
 }
 
 /** The list's filter state - parsed from, and written back to, the URL. */
-export interface PropertySelection {
+export interface UnitListSelection {
   status: StatusFilter;
   /** NORMALIZED authority keys, or NONE_KEY for "no authority recorded". */
   ha: ReadonlySet<string>;
@@ -66,7 +69,7 @@ const OWNED_PARAMS = ['status', 'voucher', 'ha', 'q'] as const;
  * one; empty values are ignored. An `ha` key no loaded unit carries is pruned
  * later (pruneSelection), never here - parsing does not know the data.
  */
-export function parsePropertySelection(params: URLSearchParams, view: PropertyView): PropertySelection {
+export function parseUnitListSelection(params: URLSearchParams, view: UnitListView): UnitListSelection {
   const rawStatus = params.get('status');
   const status =
     rawStatus !== null && STATUS_VALUES.has(rawStatus) ? (rawStatus as StatusFilter) : defaultStatus(view);
@@ -82,10 +85,10 @@ export function parsePropertySelection(params: URLSearchParams, view: PropertyVi
  * deleted and re-added; the view's default status, empty facets and an empty
  * search are omitted, so the default view has a bare URL.
  */
-export function applyPropertySelection(
+export function applyUnitListSelection(
   params: URLSearchParams,
-  sel: PropertySelection,
-  view: PropertyView,
+  sel: UnitListSelection,
+  view: UnitListView,
 ): void {
   for (const name of OWNED_PARAMS) params.delete(name);
   if (sel.status !== defaultStatus(view)) params.set('status', sel.status);
@@ -159,7 +162,7 @@ export function authorityOptions(units: UnitItem[]): AuthorityOptions {
  * screen, so they pass through. The URL is not rewritten here; the next
  * interaction re-serializes the pruned selection.
  */
-export function pruneSelection(sel: PropertySelection, authority: AuthorityOptions): PropertySelection {
+export function pruneSelection(sel: UnitListSelection, authority: AuthorityOptions): UnitListSelection {
   const valid = new Set(authority.options.map((o) => o.key));
   const ha = new Set<string>();
   for (const key of sel.ha) {
@@ -204,7 +207,7 @@ function matchesQuery(unit: UnitItem, q: string): boolean {
 }
 
 /** Apply the selection: AND across status, voucher, authority and search. */
-export function applyPropertyFilters(units: UnitItem[], sel: PropertySelection): UnitItem[] {
+export function applyUnitListFilters(units: UnitItem[], sel: UnitListSelection): UnitItem[] {
   return units.filter(
     (unit) =>
       (sel.status === 'all' || unit.status === sel.status) &&
@@ -227,9 +230,15 @@ export interface SummaryRow extends SummaryCounts {
 }
 
 /** The whole summary: the All row plus the per-authority rows. */
-export interface AuthoritySummary {
+export interface AuthoritySummaryModel {
   all: SummaryCounts;
   rows: SummaryRow[];
+  /** Available or coming-soon units the voucher selection left out BECAUSE
+   *  they record no voucher size at all (0 when no voucher filter is on, or
+   *  when Not recorded is selected). The summary says so out loud: without it
+   *  a size filter would silently shrink the counts on data that was simply
+   *  never filled in (the import never writes the field). */
+  unrecordedExcluded: number;
 }
 
 /** Which summary column a status lands in, if any. */
@@ -251,12 +260,17 @@ export function buildAuthoritySummary(
   units: UnitItem[],
   voucherKeys: ReadonlySet<string>,
   authority: AuthorityOptions,
-): AuthoritySummary {
+): AuthoritySummaryModel {
   const all: SummaryCounts = { available: 0, comingSoon: 0 };
   const byKey = new Map<string, SummaryCounts>();
+  let unrecordedExcluded = 0;
   for (const unit of units) {
     const column = columnOf(unit.status);
-    if (column === null || !matchesVoucher(unit, voucherKeys)) continue;
+    if (column === null) continue;
+    if (!matchesVoucher(unit, voucherKeys)) {
+      if (unitVoucherBuckets(unit).size === 0) unrecordedExcluded += 1;
+      continue;
+    }
     all[column] += 1;
     const keys = unitAuthorityKeys(unit);
     for (const key of keys.length > 0 ? keys : [NONE_KEY]) {
@@ -274,7 +288,16 @@ export function buildAuthoritySummary(
   };
   for (const option of authority.options) push(option.key, option.label);
   push(NONE_KEY, NO_AUTHORITY_LABEL);
-  return { all, rows };
+  return { all, rows, unrecordedExcluded };
+}
+
+/** True when nothing but the view's default status constrains the list - the
+ *  state a user did not choose, so an empty result must not blame "the
+ *  selected filters". */
+export function isDefaultSelection(sel: UnitListSelection, view: UnitListView): boolean {
+  return (
+    sel.status === defaultStatus(view) && sel.ha.size === 0 && sel.voucher.size === 0 && sel.q.trim() === ''
+  );
 }
 
 /**
@@ -284,10 +307,10 @@ export function buildAuthoritySummary(
  * so the list then shows exactly the properties the count counted.
  */
 export function countSelection(
-  current: PropertySelection,
+  current: UnitListSelection,
   column: keyof SummaryCounts,
   key: string | null,
-): PropertySelection {
+): UnitListSelection {
   return {
     status: column === 'available' ? 'available' : COMING_SOON_STATUS,
     ha: key === null ? new Set<string>() : new Set([key]),

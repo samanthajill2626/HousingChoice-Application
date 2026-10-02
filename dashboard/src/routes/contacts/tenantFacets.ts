@@ -10,8 +10,9 @@ import { voucherSizeLabel } from '../broadcasts/broadcastFormat.js';
 /** URL + option key for the "nothing recorded" bucket of a value facet. */
 export const NONE_KEY = '__none__';
 
-/** The Not-recorded chip label (rendered as `Not recorded (N)`). */
-const NONE_LABEL = 'Not recorded';
+/** The Not-recorded chip label (rendered here as `Not recorded (N)`). Exported
+ *  so the Properties list's chips say the same words (routes/listings). */
+export const NONE_LABEL = 'Not recorded';
 
 // The row separator is U+00B7 with spaces. ONE construction form, in this module
 // AND in the tests: String.fromCharCode(0xB7) - never a literal middot
@@ -90,7 +91,7 @@ export interface TenantFacetModel {
  * Studio, mirroring `voucherSizeLabel`'s `<= 0` guard; NaN has no bucket.
  *
  * The ONE size-to-bucket rule: the Tenants facet below and the Properties
- * list's voucher filter (routes/listings/propertyFacets.ts) both read through
+ * list's voucher filter (routes/listings/unitListFacets.ts) both read through
  * it, so a tenant and a property of the same size share a bucket.
  */
 export function voucherBucketOfSize(size: unknown): VoucherBucketKey | null {
@@ -194,10 +195,11 @@ function matchesPorting(c: Contact, on: boolean): boolean {
  * member, untransformed. Ties break deterministically by sort order (the
  * spellings are visited sorted, and only a STRICTLY greater count wins).
  *
- * Exported because the PROPERTIES list's authority chips group by the same rule
- * (spec section 8 defers to section 5) - routes/listings/ListingsList.tsx tallies
- * raw spellings per normalized key and asks this for the label, so the two facets
- * cannot drift apart on the tie-break.
+ * Exported because the PROPERTIES list's authority chips and summary rows group
+ * by the same rule (spec section 8 defers to section 5) -
+ * routes/listings/unitListFacets.ts (`authorityOptions`) tallies raw spellings
+ * per normalized key and asks this for the label, so the two lists cannot drift
+ * apart on the tie-break.
  */
 export function displaySpelling(spellings: Map<string, number>): string {
   let best = '';

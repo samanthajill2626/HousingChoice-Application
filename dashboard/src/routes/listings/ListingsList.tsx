@@ -4,34 +4,50 @@
 // by-housing-authority summary Sam asked for (tracker #1:
 // docs/superpowers/specs/2026-10-01-properties-available-view-design.md).
 //
-// ALL filter state lives in the URL (status / voucher / ha / q, parsed and
-// written by propertyFacets). The component stays MOUNTED across /listings and
-// /listings/deleted (sibling routes in the same element position, App.tsx), so
-// component state would carry from one tab to the other - which is how an
-// authority picked on Active once locked the Deleted tab at zero rows
-// (docs/issues/properties-authority-filter-invisible-lock.md). The one piece of
-// local state is the search box's text; see the note on it below.
-import { useMemo, useState } from 'react';
+// FILTER STATE (status / voucher / ha / q) is LOCAL component state, and the URL
+// is its persistence - parsed and written by unitListFacets. Why not read the
+// URL directly: react-router 7's BrowserRouter applies every URL change inside a
+// transition, so URL-driven controls lag the event that changed them - a second
+// tap before the first commits used to drop the first, and a box bound to the
+// URL can drop keystrokes. Local state updates urgently instead.
+//
+//   - Chips and the dropdown write the URL at once (REPLACE).
+//   - The search box writes it on BLUR (and with any other filter write), never
+//     per keystroke: WebKit throttles replaceState (100 calls per 10 s) and
+//     throws past that, which would kill every URL write on the page.
+//   - The URL is ADOPTED into local state on mount and on every navigation that
+//     is not one of this page's own REPLACE writes: Back/Forward, a tab switch,
+//     a nav link, a summary count. A count also applies its selection in place on
+//     a plain click, because the router turns a same-URL link into a REPLACE.
+//
+// The component stays MOUNTED across /listings and /listings/deleted (sibling
+// routes in the same element position, App.tsx); the tab switch is a PUSH to a
+// bare path, so it re-adopts a clean selection - which is what keeps an
+// authority picked on Active from locking the Deleted tab
+// (docs/issues/properties-authority-filter-invisible-lock.md), with
+// pruneSelection as the second defense.
+import { useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom';
 import { LISTING_STATUSES, LISTING_STATUS_LABELS, type UnitItem } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
-import { NONE_KEY, VOUCHER_BUCKETS } from '../contacts/tenantFacets.js';
+import { NONE_KEY, NONE_LABEL, VOUCHER_BUCKETS } from '../contacts/tenantFacets.js';
 import { formatBedsBaths, formatRent, shortAddress, statusLabel } from '../listing/listingFormat.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
-import { PropertySummary } from './PropertySummary.js';
+import { AuthoritySummary } from './AuthoritySummary.js';
 import {
-  applyPropertyFilters,
-  applyPropertySelection,
+  applyUnitListFilters,
+  applyUnitListSelection,
   authorityOptions,
   buildAuthoritySummary,
   countSelection,
-  parsePropertySelection,
+  isDefaultSelection,
+  parseUnitListSelection,
   pruneSelection,
-  type PropertySelection,
-  type PropertyView,
   type StatusFilter,
   type SummaryCounts,
-} from './propertyFacets.js';
+  type UnitListSelection,
+  type UnitListView,
+} from './unitListFacets.js';
 import { useListings } from './useListings.js';
 import styles from './ListingsList.module.css';
 
@@ -40,13 +56,10 @@ const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   ...LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] })),
 ];
 
-/** The "nothing recorded" chip label - the Tenants list's word for it. */
-const NOT_RECORDED = 'Not recorded';
-
 /** The voucher chips: the Tenants list's fixed five, then Not recorded. */
 const VOUCHER_CHIPS: ReadonlyArray<{ key: string; label: string }> = [
   ...VOUCHER_BUCKETS,
-  { key: NONE_KEY, label: NOT_RECORDED },
+  { key: NONE_KEY, label: NONE_LABEL },
 ];
 
 /** Toggle one key in a facet set, returning a new set. */
@@ -54,6 +67,13 @@ function toggled(keys: ReadonlySet<string>, key: string): Set<string> {
   const next = new Set(keys);
   if (!next.delete(key)) next.add(key);
   return next;
+}
+
+/** The query string a selection serializes to on this view (other params kept). */
+function searchFor(base: URLSearchParams, sel: UnitListSelection, view: UnitListView): string {
+  const params = new URLSearchParams(base);
+  applyUnitListSelection(params, sel, view);
+  return params.toString();
 }
 
 function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
@@ -92,12 +112,13 @@ function ChipGroup({
   selected: ReadonlySet<string>;
   onChange: (next: Set<string>) => void;
 }): React.JSX.Element {
+  const chipsRef = useRef<HTMLDivElement>(null);
   return (
     <div className={styles.control}>
       <span className={styles.controlLabel} id={labelId}>
         {label}
       </span>
-      <div className={styles.chips} role="group" aria-labelledby={labelId}>
+      <div className={styles.chips} role="group" aria-labelledby={labelId} ref={chipsRef}>
         {options.map((o) => {
           const on = selected.has(o.key);
           return (
@@ -117,7 +138,12 @@ function ChipGroup({
             type="button"
             className={styles.clear}
             aria-label={`Clear ${label.toLowerCase()} filter`}
-            onClick={() => onChange(new Set<string>())}
+            onClick={() => {
+              // Clear unmounts itself; hand keyboard focus to the group's first
+              // chip first, so it does not fall back to the page body.
+              chipsRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+              onChange(new Set<string>());
+            }}
           >
             Clear
           </button>
@@ -145,62 +171,68 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
   const navigationType = useNavigationType();
   const [searchParams, setSearchParams] = useSearchParams();
   const { status, units } = useListings(deleted);
-  const view: PropertyView = deleted ? 'deleted' : 'active';
+  const view: UnitListView = deleted ? 'deleted' : 'active';
   // The "New property" dialog (Active view only) with an empty landlord picker.
   const [creating, setCreating] = useState(false);
 
-  // The search box keeps its OWN text, and the URL's `q` only persists it. The
-  // router applies every URL change inside a transition (react-router 7's
-  // BrowserRouter), so an input bound straight to the URL would lag a keystroke
-  // and could drop characters. Typing REPLACES the URL and is never read back;
-  // the URL's `q` is adopted only on a navigation that did not come from the box
-  // - Back/Forward, a tab switch, a summary count (PUSH or POP) - and on mount
-  // (a reload, or Back from a property page, which remounts this list).
-  const urlQuery = parsePropertySelection(searchParams, view).q;
-  const [query, setQuery] = useState(urlQuery);
+  // Local filter state, adopted from the URL on mount and on every navigation
+  // that is not this page's own REPLACE write (see the header). The REPLACE skip
+  // also keeps a LATE commit of an earlier write from reverting a newer choice.
+  const urlSelection = parseUnitListSelection(searchParams, view);
+  const [chosen, setChosen] = useState<UnitListSelection>(urlSelection);
   const [syncedKey, setSyncedKey] = useState(location.key);
   if (location.key !== syncedKey) {
     setSyncedKey(location.key);
-    if (navigationType !== 'REPLACE' && query !== urlQuery) setQuery(urlQuery);
+    if (navigationType !== 'REPLACE') setChosen(urlSelection);
   }
 
   // Authority chips and summary rows come from EVERY loaded unit of this view
   // (never the filtered rows), labelled with the STORED spelling.
   const authority = useMemo(() => authorityOptions(units), [units]);
-  // The effective selection: the URL's, minus anything no chip shows (the
-  // invisible-lock invariant - propertyFacets.pruneSelection), plus the box's text.
-  const selection = useMemo<PropertySelection>(
-    () => ({ ...pruneSelection(parsePropertySelection(searchParams, view), authority), q: query }),
-    [searchParams, view, authority, query],
-  );
-  const visible = useMemo(() => applyPropertyFilters(units, selection), [units, selection]);
+  // The effective selection: the chosen one minus anything no chip shows (the
+  // invisible-lock invariant - unitListFacets.pruneSelection).
+  const selection = useMemo(() => pruneSelection(chosen, authority), [chosen, authority]);
+  const visible = useMemo(() => applyUnitListFilters(units, selection), [units, selection]);
   // The summary is the Active tab's alone; its counts follow the voucher filter.
   const summary = useMemo(
     () => (deleted ? null : buildAuthoritySummary(units, selection.voucher, authority)),
     [deleted, units, selection.voucher, authority],
   );
 
-  /** Serialize a new selection, REPLACING the history entry: Back leaves the
-   *  page rather than walking chip toggles (the Tenants-list rule). */
-  function update(next: PropertySelection): void {
-    const params = new URLSearchParams(searchParams);
-    applyPropertySelection(params, next, view);
-    setSearchParams(params, { replace: true });
+  /** Persist a selection to the URL - a REPLACE, so Back leaves the page rather
+   *  than walking filter changes (the Tenants-list rule). */
+  function persist(next: UnitListSelection): void {
+    setSearchParams(new URLSearchParams(searchFor(searchParams, next, view)), { replace: true });
   }
 
-  /** Where a summary count links. A count is a drill-down NAVIGATION (a push),
-   *  so Back returns to the view it was clicked from. */
+  /** A filter change: apply it now, persist it now. Always writes: comparing
+   *  against the COMMITTED URL could wrongly skip while an earlier write is
+   *  still in flight (a chip toggled on and straight back off). */
+  function change(next: UnitListSelection): void {
+    setChosen(next);
+    persist(next);
+  }
+
+  /** Leaving the search box persists its text - only when that changes the URL,
+   *  so tabbing through the page spends no history calls. (Comparing against
+   *  the committed URL could only skip wrongly after a blur, a refocus, an edit
+   *  back to the committed text and a second blur, all inside one router
+   *  transition - not a human sequence.) */
+  function persistSearch(): void {
+    if (searchFor(searchParams, selection, view) !== searchParams.toString()) persist(selection);
+  }
+
+  /** Where a summary count links (a PUSH, so Back undoes the drill-down). */
   function countLink(column: keyof SummaryCounts, key: string | null): { pathname: string; search: string } {
-    const params = new URLSearchParams(searchParams);
-    applyPropertySelection(params, countSelection(selection, column, key), view);
-    const search = params.toString();
+    const search = searchFor(searchParams, countSelection(selection, column, key), view);
     return { pathname: location.pathname, search: search.length > 0 ? `?${search}` : '' };
   }
 
   const showControls = status === 'ready' && units.length > 0;
   const authorityChips = authority.hasUnrecorded
-    ? [...authority.options, { key: NONE_KEY, label: NOT_RECORDED }]
+    ? [...authority.options, { key: NONE_KEY, label: NONE_LABEL }]
     : authority.options;
+  const currentSearch = searchFor(searchParams, selection, view);
 
   return (
     <div className={styles.page}>
@@ -227,7 +259,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
               // Only the CURRENT tab carries the query (re-clicking it keeps the
               // filters); the other tab is the bare path, so switching views
               // always starts clean.
-              to={current ? { pathname: t.to, search: searchParams.toString() } : t.to}
+              to={current ? { pathname: t.to, search: currentSearch } : t.to}
               className={`${styles.tab} ${current ? styles.tabActive : ''}`}
               {...(current && { 'aria-current': 'page' })}
             >
@@ -237,7 +269,13 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
         })}
       </nav>
 
-      {showControls && summary !== null ? <PropertySummary summary={summary} linkFor={countLink} /> : null}
+      {showControls && summary !== null ? (
+        <AuthoritySummary
+          summary={summary}
+          linkFor={countLink}
+          onCount={(column, key) => setChosen(countSelection(selection, column, key))}
+        />
+      ) : null}
 
       {showControls ? (
         <div className={styles.controls}>
@@ -249,7 +287,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
               id="listings-status"
               className={styles.select}
               value={selection.status}
-              onChange={(e) => update({ ...selection, status: e.target.value as StatusFilter })}
+              onChange={(e) => change({ ...selection, status: e.target.value as StatusFilter })}
             >
               {STATUS_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -264,7 +302,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
             label="Voucher size"
             options={VOUCHER_CHIPS}
             selected={selection.voucher}
-            onChange={(voucher) => update({ ...selection, voucher })}
+            onChange={(voucher) => change({ ...selection, voucher })}
           />
 
           <ChipGroup
@@ -272,7 +310,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
             label="Housing authority"
             options={authorityChips}
             selected={selection.ha}
-            onChange={(ha) => update({ ...selection, ha })}
+            onChange={(ha) => change({ ...selection, ha })}
           />
         </div>
       ) : null}
@@ -286,11 +324,14 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
           type="search"
           className={styles.searchInput}
           placeholder="Search by address"
-          value={query}
+          value={chosen.q}
+          // Typing filters at once but never touches history; leaving the box
+          // persists the text (see the header).
           onChange={(e) => {
-            setQuery(e.target.value);
-            update({ ...selection, q: e.target.value });
+            const q = e.target.value;
+            setChosen((prev) => ({ ...prev, q }));
           }}
+          onBlur={persistSearch}
           disabled={status !== 'ready'}
         />
       </div>
@@ -319,11 +360,24 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
               <Row key={unit.unitId} unit={unit} />
             ))}
           </ul>
+        ) : isDefaultSelection(selection, view) ? (
+          // Nothing but the default status is in play - the user chose no
+          // filter, so do not blame "the selected filters".
+          <div className={styles.noMatches}>
+            <p className={styles.noMatchesText}>No available properties right now.</p>
+            <button
+              type="button"
+              className={styles.clear}
+              onClick={() => change({ ...selection, status: 'all' })}
+            >
+              Show all statuses
+            </button>
+          </div>
         ) : (
           <p className={styles.noMatches}>
             {/* Entity quotes, never literal curly ones - added lines stay ASCII. */}
-            {query.trim() ? (
-              <>No matches for &ldquo;{query.trim()}&rdquo;.</>
+            {selection.q.trim() ? (
+              <>No matches for &ldquo;{selection.q.trim()}&rdquo;.</>
             ) : (
               'No properties match the selected filters.'
             )}

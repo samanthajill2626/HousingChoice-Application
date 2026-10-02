@@ -107,14 +107,16 @@ function BackButton(): React.JSX.Element {
 
 /** The two list routes exactly as App.tsx mounts them (siblings, same element
  *  position - so the list stays MOUNTED across a tab switch), plus a property
- *  page to navigate into and back out of. */
-function renderAt(entry = '/listings'): void {
+ *  page to navigate into and back out of. `from` puts an earlier history entry
+ *  behind the list, so a test can prove Back LEAVES the page. */
+function renderAt(entry = '/listings', from?: string): void {
   render(
-    <MemoryRouter initialEntries={[entry]}>
+    <MemoryRouter initialEntries={from === undefined ? [entry] : [from, entry]} initialIndex={from === undefined ? 0 : 1}>
       <Routes>
         <Route path="/listings" element={<ListingsList />} />
         <Route path="/listings/deleted" element={<ListingsList deleted />} />
         <Route path="/listings/:unitId" element={<p>Property page</p>} />
+        <Route path="/elsewhere" element={<p>Somewhere else</p>} />
       </Routes>
       <LocationProbe />
       <BackButton />
@@ -215,7 +217,7 @@ describe('ListingsList', () => {
   });
 
   describe('search', () => {
-    it('filters the rows by address and keeps the text in the URL', async () => {
+    it('filters as you type and saves the text to the URL when the box loses focus', async () => {
       activeState = { status: 'ready', units: UNITS };
       renderAt('/listings?status=all');
       expect(rows()).toHaveLength(2);
@@ -224,7 +226,21 @@ describe('ListingsList', () => {
       await userEvent.type(search, 'decatur');
       expect(rowText()).toEqual([expect.stringContaining('88 Oak Ave')]);
       expect(search).toHaveValue('decatur');
+      // No history write per keystroke (WebKit throttles replaceState)...
+      expect(location()).toBe('/listings?status=all');
+      // ...the text is saved when focus moves on.
+      await userEvent.tab();
       expect(location()).toBe('/listings?status=all&q=decatur');
+    });
+
+    it('typing never adds history: Back after typing leaves the page', async () => {
+      activeState = { status: 'ready', units: UNITS };
+      renderAt('/listings', '/elsewhere');
+      await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'Peach');
+      await userEvent.tab();
+      expect(location()).toBe('/listings?q=Peach');
+      await userEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+      expect(location()).toBe('/elsewhere');
     });
 
     it('shows a no-matches state when the search excludes every row', async () => {
@@ -616,6 +632,95 @@ describe('ListingsList', () => {
       renderAt('/listings/deleted?ha=atlanta+housing&ha=__none__');
       expect(rowText()).toEqual([expect.stringContaining('1 Gone St')]);
       expect(within(haGroup()).queryAllByRole('button', { pressed: true })).toHaveLength(0);
+    });
+
+    it('never rewrites the URL on load; the next change drops a stale authority key', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt('/listings?status=all&ha=stale&ha=dca');
+      expect(location()).toBe('/listings?status=all&ha=stale&ha=dca');
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+      expect(location()).toBe('/listings?status=all&voucher=2&ha=dca');
+    });
+
+    it('chip and dropdown changes replace history: Back leaves the page', async () => {
+      activeState = { status: 'ready', units: UNITS };
+      renderAt('/listings', '/elsewhere');
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+      await userEvent.selectOptions(statusSelect(), 'all');
+      expect(location()).toBe('/listings?status=all&voucher=2');
+      await userEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+      expect(location()).toBe('/elsewhere');
+    });
+  });
+
+  describe('labels, copy and layout', () => {
+    it('the dropdown and the row badge still say Setup; only the summary says Coming soon', () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt('/listings?status=setup');
+      expect(statusSelect().selectedOptions[0]?.textContent).toBe('Setup');
+      expect(within(statusSelect()).queryByRole('option', { name: /coming soon/i })).not.toBeInTheDocument();
+      const firstRow = screen.getByRole('link', { name: /3 Soon Two Ct/ });
+      expect(within(firstRow).getByText('Setup')).toBeInTheDocument();
+      expect(within(summaryTable()).getByRole('columnheader', { name: 'Housing authority' })).toBeInTheDocument();
+    });
+
+    it('the summary ignores the search box', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt('/listings?q=zzz');
+      expect(rows()).toHaveLength(0);
+      expect(countsOf('All authorities')).toEqual(['2', '2']);
+      expect(countsOf('DCA')).toEqual(['2', '1']);
+    });
+
+    it('with nothing to move: an All row of 0/0 without links, and an honest empty state', async () => {
+      activeState = {
+        status: 'ready',
+        units: [{ unitId: 'o9', landlordId: 'l1', status: 'occupied', accepted_authorities: ['DCA'], address: { line1: '9 Taken Way' } }],
+      };
+      renderAt();
+      expect(countsOf('All authorities')).toEqual(['0', '0']);
+      expect(within(summaryTable()).queryAllByRole('link')).toHaveLength(0);
+      expect(within(summaryTable()).getAllByRole('rowheader')).toHaveLength(1);
+      // The user chose nothing: say what is true, not "the selected filters".
+      expect(screen.getByText('No available properties right now.')).toBeInTheDocument();
+      expect(screen.queryByText(/no properties match the selected filters/i)).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: 'Show all statuses' }));
+      expect(statusSelect().value).toBe('all');
+      expect(rowText()).toEqual([expect.stringContaining('9 Taken Way')]);
+      expect(location()).toBe('/listings?status=all');
+    });
+
+    it('says how many properties a size filter leaves out for recording no size', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      expect(screen.queryByText(/no voucher size recorded/i)).not.toBeInTheDocument();
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+      // s2 (coming soon, no size) is the one unrecorded property left out.
+      expect(screen.getByText('1 property has no voucher size recorded and is not counted.')).toBeInTheDocument();
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: 'Not recorded' }));
+      expect(screen.queryByText(/no voucher size recorded/i)).not.toBeInTheDocument();
+    });
+
+    it('puts the summary above the filter controls', () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      const order = summaryTable().compareDocumentPosition(statusSelect());
+      expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('keeps the Deleted subtitle', () => {
+      deletedState = { status: 'ready', units: [] };
+      renderAt('/listings/deleted');
+      expect(screen.getByText('Soft-deleted properties. Open one to restore it.')).toBeInTheDocument();
+    });
+
+    it('Clear hands keyboard focus to the first chip of its group', async () => {
+      activeState = { status: 'ready', units: SUMMARY_UNITS };
+      renderAt();
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: /clear voucher size filter/i }));
+      expect(within(voucherGroup()).getByRole('button', { name: 'Studio' })).toHaveFocus();
     });
   });
 });

@@ -1,10 +1,13 @@
 // TourActionsMenu - the tour header kebab. A popover menu (outside-click + Escape
 // close) mirroring ContactActionsMenu, holding the STATUS-BRANCH actions that
-// aren't the one guided primary CTA: Reschedule, Mark already toured, Cancel,
-// Mark no-show, and Open relay group.
-// Each item is shown only when its guard passes (the parent computes
-// the guards from the tour status); an item that needs input opens a Modal that
-// the parent owns. When no item qualifies the parent renders nothing (no empty
+// aren't the one guided primary CTA, in menu order: Reschedule, Mark already
+// toured, Mark no-show, Send no-show check-in, Open relay group, Cancel tour,
+// and Reopen tour - last, and only on a closed, unconverted, convertible tour,
+// where "Start placement" holds the primary slot (anywhere else Reopen IS the
+// primary CTA, never both - spec 9.2).
+// Each item is shown only when its guard passes (the parent computes the guards
+// from the tour); an item that needs input or a confirm opens a Modal that the
+// parent owns. When no item qualifies this menu renders nothing (no empty
 // kebab).
 import { useEffect, useRef, useState } from 'react';
 import styles from './TourActionsMenu.module.css';
@@ -37,6 +40,12 @@ export interface TourActionsMenuProps {
    *  this reason, instead of failing at click time with the route's
    *  400 relay_member_unresolvable. Same gate the pane's own button obeys. */
   openGroupDisabledReason?: string;
+  /** Reopen (closed, not converted, reopenable - spec 9.2). The parent passes
+   *  it only while "Start placement" holds the primary slot; otherwise Reopen
+   *  is the primary CTA. Both optional: the item shows only when canReopen is
+   *  true AND onReopen is given (never a dead control). */
+  canReopen?: boolean;
+  onReopen?: () => void;
   /** True while a mutation is in flight (disables the items). */
   busy?: boolean;
 }
@@ -55,6 +64,8 @@ export function TourActionsMenu({
   canOpenGroup,
   onOpenGroup,
   openGroupDisabledReason,
+  canReopen = false,
+  onReopen,
   busy = false,
 }: TourActionsMenuProps): React.JSX.Element | null {
   const [open, setOpen] = useState(false);
@@ -76,15 +87,22 @@ export function TourActionsMenu({
     };
   }, [open]);
 
-  // Nothing qualifies -> no kebab at all (a closed tour with a group has no branch
-  // actions, so the parent shows only the header + primary CTA).
+  // Reopen's handler, present only while its guard passes - the one value both
+  // the item and the "nothing qualifies" check read, so a guard without a
+  // handler is neither an item nor a reason to show the kebab.
+  const reopen = canReopen ? onReopen : undefined;
+
+  // Nothing qualifies -> no kebab at all. A closed tour's only branch action is
+  // Reopen, passed only when "Start placement" holds the primary slot - any
+  // other closed tour shows just the header + its primary CTA.
   if (
     !canReschedule &&
     !canMarkAlreadyToured &&
     !canCancel &&
     !canMarkNoShow &&
     !canOpenGroup &&
-    !canSendNoShowCheckin
+    !canSendNoShowCheckin &&
+    reopen === undefined
   )
     return null;
 
@@ -175,6 +193,17 @@ export function TourActionsMenu({
               onClick={() => run(onCancel)}
             >
               Cancel tour
+            </button>
+          ) : null}
+          {reopen !== undefined ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              disabled={busy}
+              onClick={() => run(reopen)}
+            >
+              Reopen tour
             </button>
           ) : null}
         </div>

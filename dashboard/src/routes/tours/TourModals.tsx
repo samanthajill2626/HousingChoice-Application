@@ -18,9 +18,13 @@
 //     the tour goes (REOPEN_BODY, tourReopen.ts); the parent POSTs /reopen.
 //
 // Each dialog owns ONLY its input + validation + busy/error UX; the parent owns
-// the mutation (patchTour -> setTour) via the async onConfirm it passes. onConfirm
-// resolves on success (the dialog closes) and throws on failure (inline error,
-// dialog stays open). ScheduleTourForm is create-only and deliberately NOT reused.
+// the mutation (patchTour / reopenTour -> setTour) via the async onConfirm it
+// passes. onConfirm resolves on success (the dialog closes) and throws on
+// failure (inline error, dialog stays open). That error is SHARED for a 409 in
+// every dialog: TOUR_CHANGED_COPY ("reload and try again" - the tour closed or
+// changed while the dialog was open, so a retry cannot succeed; spec 9.2 /
+// D14). Any other failure keeps the dialog's own "Couldn't ... - please try
+// again." ScheduleTourForm is create-only and deliberately NOT reused.
 import { useState } from 'react';
 import { ApiError, type StaffTourOutcome } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
@@ -33,6 +37,13 @@ import styles from './TourDetail.module.css';
  *  closed or changed while the dialog was open, so "please try again" cannot
  *  succeed - only a reload shows its real state. One constant, every dialog. */
 export const TOUR_CHANGED_COPY = 'This tour changed since the page loaded - reload and try again.';
+
+/** A writing dialog's inline error for a failed onConfirm: any ApiError 409
+ *  (illegal_status_transition, illegal_exit_gate, tour_changed, a reopen
+ *  refusal) reads TOUR_CHANGED_COPY; anything else the dialog's own copy. */
+function failureCopy(err: unknown, retryCopy: string): string {
+  return err instanceof ApiError && err.status === 409 ? TOUR_CHANGED_COPY : retryCopy;
+}
 
 /** Normalize a zoneless datetime-local value to a full ISO instant. */
 function toIso(local: string): string {
@@ -91,8 +102,8 @@ function DateTimeModal({
     try {
       await onConfirm(toIso(value));
       onClose();
-    } catch {
-      setError(errorText);
+    } catch (err) {
+      setError(failureCopy(err, errorText));
       setBusy(false);
     }
   };
@@ -225,8 +236,8 @@ export function MarkAlreadyTouredModal({
       // tour stays off the byScheduledAt index exactly as it is today.
       await onConfirm(value === '' ? undefined : toIso(value));
       onClose();
-    } catch {
-      setError("Couldn't mark the tour as toured - please try again.");
+    } catch (err) {
+      setError(failureCopy(err, "Couldn't mark the tour as toured - please try again."));
       setBusy(false);
     }
   };
@@ -309,8 +320,8 @@ export function RecordOutcomeModal({
         moveForward,
       });
       onClose();
-    } catch {
-      setError("Couldn't record the outcome - please try again.");
+    } catch (err) {
+      setError(failureCopy(err, "Couldn't record the outcome - please try again."));
       setBusy(false);
     }
   };
@@ -383,8 +394,8 @@ export function CancelTourModal({
     try {
       await onConfirm();
       onClose();
-    } catch {
-      setError("Couldn't cancel the tour - please try again.");
+    } catch (err) {
+      setError(failureCopy(err, "Couldn't cancel the tour - please try again."));
       setBusy(false);
     }
   };
@@ -448,11 +459,7 @@ export function ReopenTourModal({
       await onConfirm();
       onClose();
     } catch (err) {
-      setError(
-        err instanceof ApiError && err.status === 409
-          ? TOUR_CHANGED_COPY
-          : "Couldn't reopen the tour - please try again.",
-      );
+      setError(failureCopy(err, "Couldn't reopen the tour - please try again."));
       setBusy(false);
     }
   };

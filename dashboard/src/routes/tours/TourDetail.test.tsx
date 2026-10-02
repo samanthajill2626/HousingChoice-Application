@@ -82,6 +82,7 @@ vi.mock('react-router-dom', async () => {
 });
 
 import { TourDetail } from './TourDetail.js';
+import { TOUR_CHANGED_COPY } from './TourModals.js';
 
 /** The default resolved roster: the same two people the page used to hard-code
  *  (tenant + the unit's landlord), now served by GET /api/tours/:id/roster. */
@@ -553,7 +554,9 @@ describe('TourDetail - Mark already toured', () => {
   });
 
   it('a failed PATCH keeps the dialog open with an inline error and no outcome modal', async () => {
-    patchTour.mockRejectedValue(new ApiError(409, 'illegal_status_transition', 'nope'));
+    // A NON-409 failure keeps the dialog's own retry copy (a 409 says reload -
+    // the next test).
+    patchTour.mockRejectedValue(new ApiError(500, 'internal_error', 'internal_error'));
     renderDetail();
     await waitLoaded();
     await openMarkAlreadyToured();
@@ -563,6 +566,20 @@ describe('TourDetail - Mark already toured', () => {
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(/couldn't mark the tour as toured/i),
     );
+    expect(screen.getByRole('form', { name: 'Mark already toured form' })).toBeInTheDocument();
+    expect(screen.queryByRole('form', { name: 'Record outcome form' })).not.toBeInTheDocument();
+  });
+
+  it('a 409 (the tour changed while the dialog was open) says reload, not retry', async () => {
+    patchTour.mockRejectedValue(new ApiError(409, 'illegal_status_transition', 'nope'));
+    renderDetail();
+    await waitLoaded();
+    await openMarkAlreadyToured();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(TOUR_CHANGED_COPY));
+    expect(screen.queryByText(/couldn't mark the tour as toured/i)).not.toBeInTheDocument();
     expect(screen.getByRole('form', { name: 'Mark already toured form' })).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Record outcome form' })).not.toBeInTheDocument();
   });
@@ -793,6 +810,114 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     });
     expect(createPlacementFromTour).not.toHaveBeenCalled();
   });
+});
+
+// Every writing tour dialog (spec 9.2 / D14): a 409 means the tour closed or
+// changed while the dialog was open (illegal_status_transition,
+// illegal_exit_gate, tour_changed), so "please try again" cannot succeed - the
+// dialog says reload (TOUR_CHANGED_COPY) and stays open. Any other failure
+// keeps the dialog's own "Couldn't ... - please try again." copy. Mark already
+// toured has its pair in its own describe above; the Reopen dialog is tested
+// directly in TourModals.test.tsx.
+describe('TourDetail - a 409 in a writing tour dialog says reload, not retry', () => {
+  interface DialogCase {
+    dialog: string;
+    tour: Partial<Tour>;
+    /** Opens the dialog and submits it once. */
+    submit: () => Promise<void>;
+    conflict: ApiError;
+    other: unknown;
+    retryCopy: string;
+  }
+
+  const CASES: DialogCase[] = [
+    {
+      dialog: 'Schedule tour',
+      tour: { status: 'requested', scheduledAt: undefined },
+      submit: async () => {
+        await userEvent.click(screen.getByRole('button', { name: 'Schedule tour' }));
+        // An ORDINARY time (future, under 14 days): an odd one stops on the
+        // time warning first and never sends the PATCH.
+        fireEvent.change(screen.getByLabelText('Date and time'), {
+          target: { value: localDatetime(2 * DAY) },
+        });
+        await userEvent.click(screen.getByRole('button', { name: 'Confirm schedule' }));
+      },
+      conflict: new ApiError(409, 'illegal_status_transition', 'illegal_status_transition'),
+      other: new ApiError(400, 'bad_request', 'bad_request'),
+      retryCopy: "Couldn't schedule the tour - please try again.",
+    },
+    {
+      dialog: 'Reschedule tour',
+      tour: { status: 'scheduled' },
+      submit: async () => {
+        await userEvent.click(screen.getByRole('button', { name: 'Reschedule tour' }));
+        fireEvent.change(screen.getByLabelText('New date and time'), {
+          target: { value: localDatetime(2 * DAY) },
+        });
+        await userEvent.click(screen.getByRole('button', { name: 'Confirm reschedule' }));
+      },
+      conflict: new ApiError(409, 'tour_changed', 'tour_changed', {
+        error: 'tour_changed',
+        detail: 'This tour changed while you were saving - reload and try again.',
+      }),
+      other: new ApiError(500, 'internal_error', 'internal_error'),
+      retryCopy: "Couldn't reschedule the tour - please try again.",
+    },
+    {
+      dialog: 'Record outcome',
+      tour: { status: 'toured' },
+      submit: async () => {
+        await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+        await userEvent.click(screen.getByRole('radio', { name: 'Yes - move forward' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+      },
+      conflict: new ApiError(409, 'illegal_exit_gate', 'illegal_exit_gate'),
+      other: new Error('offline'),
+      retryCopy: "Couldn't record the outcome - please try again.",
+    },
+    {
+      dialog: 'Cancel tour?',
+      tour: { status: 'scheduled' },
+      submit: async () => {
+        await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+        await userEvent.click(screen.getByRole('menuitem', { name: 'Cancel tour' }));
+        const dialog = screen.getByRole('dialog', { name: 'Cancel tour?' });
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel tour' }));
+      },
+      conflict: new ApiError(409, 'illegal_status_transition', 'illegal_status_transition'),
+      other: new ApiError(404, 'tour_not_found', 'tour_not_found'),
+      retryCopy: "Couldn't cancel the tour - please try again.",
+    },
+  ];
+
+  for (const c of CASES) {
+    it(`${c.dialog}: a 409 shows the reload copy and the dialog stays open`, async () => {
+      getTour.mockResolvedValue(makeTour(c.tour));
+      patchTour.mockRejectedValue(c.conflict);
+      renderDetail();
+      await waitLoaded();
+      await c.submit();
+      const dialog = screen.getByRole('dialog', { name: c.dialog });
+      await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent(TOUR_CHANGED_COPY));
+      expect(within(dialog).queryByText(c.retryCopy)).not.toBeInTheDocument();
+      expect(patchTour).toHaveBeenCalledTimes(1);
+      // Nothing chains off the refused write (Record outcome's move-forward
+      // would convert next).
+      expect(createPlacementFromTour).not.toHaveBeenCalled();
+    });
+
+    it(`${c.dialog}: any other failure keeps the dialog's own retry copy`, async () => {
+      getTour.mockResolvedValue(makeTour(c.tour));
+      patchTour.mockRejectedValue(c.other);
+      renderDetail();
+      await waitLoaded();
+      await c.submit();
+      const dialog = screen.getByRole('dialog', { name: c.dialog });
+      await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent(c.retryCopy));
+      expect(within(dialog).queryByText(TOUR_CHANGED_COPY)).not.toBeInTheDocument();
+    });
+  }
 });
 
 describe('TourDetail - close the relay group after a terminal outcome (relay number lifecycle)', () => {

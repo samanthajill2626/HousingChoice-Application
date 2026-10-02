@@ -141,3 +141,85 @@ const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
 export function canReschedule(status: TourStatus): boolean {
   return RESCHEDULABLE.has(status);
 }
+
+// --- Auto-close (Sam #18, 2026-10-01) ----------------------------------------
+// A tour that still has no outcome two weeks after its CLOCK START is closed by
+// the sweep (jobs/tourAutoClose.ts) with outcome `no_outcome`. The clock starts
+// at the LATEST of: the tour's creation, its scheduled time (when it has one),
+// and its MARK - the last time a person marked / rescheduled / reopened it
+// (`lastMarkedAt`), or, for a tour nobody has marked since this shipped, its
+// last change (`updatedAt`, never earlier than a pre-deploy mark). So a visit
+// recorded late, a reopened tour, or one marked just before the deploy still
+// gets its full two weeks. Pure: the job, the dev tick and the tests share it.
+
+/** Two weeks, exactly (336 hours). */
+export const AUTO_CLOSE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** The statuses the sweep may close. Never `requested` (no date to count
+ *  from), `canceled` (already an exit) or `closed`. */
+export const AUTO_CLOSE_STATUSES = ['scheduled', 'toured', 'no_show'] as const satisfies readonly TourStatus[];
+
+export type AutoCloseStatus = (typeof AUTO_CLOSE_STATUSES)[number];
+
+const AUTO_CLOSE_STATUS_SET: ReadonlySet<string> = new Set(AUTO_CLOSE_STATUSES);
+
+export function isAutoCloseStatus(x: unknown): x is AutoCloseStatus {
+  return typeof x === 'string' && AUTO_CLOSE_STATUS_SET.has(x);
+}
+
+/** The fields the clock reads. A stored tour item satisfies it. */
+export interface AutoCloseClockInput {
+  status: unknown;
+  outcome?: unknown;
+  convertible?: unknown;
+  convertedPlacementId?: unknown;
+  scheduledAt?: unknown;
+  createdAt?: unknown;
+  lastMarkedAt?: unknown;
+  updatedAt?: unknown;
+}
+
+/** Epoch ms of a non-empty ISO string, or null. */
+function parseIsoMs(x: unknown): number | null {
+  if (typeof x !== 'string' || x.length === 0) return null;
+  const ms = Date.parse(x);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * The epoch-ms instant this tour becomes due for auto-close, or null when it
+ * is not a candidate at all (wrong status, already decided, convertible, or a
+ * conversion claimed or finished). A present-but-unparseable instant is null:
+ * never close on a date we cannot read.
+ */
+export function autoCloseDueAtMs(tour: AutoCloseClockInput): number | null {
+  if (!isAutoCloseStatus(tour.status)) return null;
+  if (tour.outcome !== undefined) return null;
+  if (tour.convertible === true) return null;
+  if (typeof tour.convertedPlacementId === 'string') return null;
+  const created = parseIsoMs(tour.createdAt);
+  if (created === null) return null;
+  let start = created;
+  if (tour.scheduledAt !== undefined && tour.scheduledAt !== '') {
+    const at = parseIsoMs(tour.scheduledAt);
+    if (at === null) return null;
+    start = Math.max(start, at);
+  }
+  // The mark: lastMarkedAt once a person has marked / rescheduled / reopened
+  // the tour since this shipped; before that, updatedAt stands in (no
+  // migration - spec 5.3). Once lastMarkedAt exists, unrelated writes that
+  // bump updatedAt (a roster edit, a group open) no longer move the clock.
+  const mark = tour.lastMarkedAt !== undefined ? tour.lastMarkedAt : tour.updatedAt;
+  if (mark !== undefined) {
+    const markedMs = parseIsoMs(mark);
+    if (markedMs === null) return null;
+    start = Math.max(start, markedMs);
+  }
+  return start + AUTO_CLOSE_AFTER_MS;
+}
+
+/** True when the sweep should close this tour at `nowMs` (inclusive). */
+export function isAutoCloseDue(tour: AutoCloseClockInput, nowMs: number): boolean {
+  const due = autoCloseDueAtMs(tour);
+  return due !== null && due <= nowMs;
+}

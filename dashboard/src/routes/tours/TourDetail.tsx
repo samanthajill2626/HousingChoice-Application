@@ -39,8 +39,8 @@ import {
   TOUR_TYPE_LABELS,
   type Contact,
   type RosterPreview,
+  type StaffTourOutcome,
   type Tour,
-  type TourOutcome,
   type TourStatus,
   type UnitItem,
 } from '../../api/index.js';
@@ -529,7 +529,7 @@ function TourDetailLoaded({
     setModal('outcome');
   };
   const confirmOutcome = async (decision: {
-    outcome: TourOutcome;
+    outcome: StaffTourOutcome;
     moveForward: boolean;
   }): Promise<void> => {
     // not-a-fit ALSO closes the tour (diagram) in the same PATCH; move-forward

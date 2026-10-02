@@ -129,6 +129,7 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   entry(ENDPOINTS, 'unsubscribePush', 'request:DELETE', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'sendPushTest', 'request:POST', '/api/push/test'),
   entry(ENDPOINTS, 'createTour', 'request:POST', '/api/tours'),
+  entry(ENDPOINTS, 'reopenTour', 'request:POST', '/api/tours/:tourId/reopen'),
   entry(ENDPOINTS, 'addTourRosterMember', 'request:POST', '/api/tours/:tourId/roster/members'),
   entry(ENDPOINTS, 'removeTourRosterMember', 'request:DELETE', '/api/tours/:tourId/roster/members/:memberKey'),
   entry(ENDPOINTS, 'resetTourRoster', 'request:POST', '/api/tours/:tourId/roster/reset'),

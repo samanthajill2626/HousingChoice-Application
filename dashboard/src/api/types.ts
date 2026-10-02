@@ -896,14 +896,24 @@ export const TOUR_STATUS_LABELS: Readonly<Record<TourStatus, string>> = {
   closed: 'Closed',
 };
 
-/** Exit-gate outcome (mirrors app/src/lib/toursModel.ts TourOutcome). */
-export type TourOutcome = 'move_forward' | 'not_a_fit';
+/** Tour outcome (mirrors app/src/lib/toursModel.ts TourOutcome). A person
+ *  records `move_forward` / `not_a_fit` at the exit gate; `no_outcome` is
+ *  written ONLY by the server's auto-close sweep, when nobody recorded a
+ *  decision two weeks after the tour's clock start. */
+export type TourOutcome = 'move_forward' | 'not_a_fit' | 'no_outcome';
 
 /** Human-readable labels for tour outcomes (staff-facing). */
 export const TOUR_OUTCOME_LABELS: Readonly<Record<TourOutcome, string>> = {
   move_forward: 'Move forward',
   not_a_fit: 'Not a fit',
+  no_outcome: 'No outcome recorded',
 };
+
+/** The outcomes a PERSON may record (mirrors app/src/lib/toursModel.ts
+ *  StaffTourOutcome - the PATCH exit-gate allowlist). `no_outcome` is the
+ *  auto-close sweep's alone, so patchTour and the Record outcome dialog take
+ *  this type and the client cannot type-check a request the server refuses. */
+export type StaffTourOutcome = Exclude<TourOutcome, 'no_outcome'>;
 
 /**
  * A first-class Tour entity (GET /api/tours/:tourId → { tour }).
@@ -923,7 +933,9 @@ export interface Tour {
   status: TourStatus;
   /** The relay-group conversationId, set when POST /api/tours/:tourId/relay is called. */
   groupThreadId?: string;
-  /** Exit-gate decision (set via PATCH { outcome, moveForward }). */
+  /** The tour's outcome: a person's exit-gate decision (PATCH { outcome,
+   *  moveForward }), or `no_outcome` when the auto-close sweep closed the tour
+   *  with no decision recorded. Reopen removes it. */
   outcome?: TourOutcome;
   /** True when the navigator decided to move forward after the tour. */
   moveForward?: boolean;
@@ -932,6 +944,15 @@ export interface Tour {
   /** The placementId this tour was converted into (Post-Tour & Application).
    *  Set by POST /api/placements/from-tour; presence means the tour is spent. */
   convertedPlacementId?: string;
+  /** Auto-close: ISO 8601 instant the server's sweep closed this tour (outcome
+   *  `no_outcome`). Present only while it stays closed; reopen removes it. */
+  autoClosedAt?: string;
+  /** Auto-close: the status the sweep closed the tour FROM - POST
+   *  /api/tours/:tourId/reopen returns it there. Removed by reopen. */
+  autoClosedFrom?: 'scheduled' | 'toured' | 'no_show';
+  /** ISO 8601 - the latest time a person changed this tour's status or time,
+   *  or reopened it. The two-week auto-close clock never starts before it. */
+  lastMarkedAt?: string;
   /** ISO 8601 — when the tour was created. camelCase to match the server's TourItem shape. */
   createdAt?: string;
   /** ISO 8601 — when the tour was last updated. camelCase to match the server's TourItem shape. */

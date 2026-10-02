@@ -74,7 +74,7 @@ import type {
   TransitionSource,
   Tour,
   TourActivityEvent,
-  TourOutcome,
+  StaffTourOutcome,
   TourStatus,
   TourType,
   ToursPage,
@@ -2662,22 +2662,39 @@ export async function getTours(
   return res.tours;
 }
 
-/** PATCH /api/tours/:tourId — partial update: reschedule, change status, or
- *  record the exit-gate decision (outcome + moveForward). Sending
- *  { outcome, moveForward } closes the tour and sets convertible.
+/** PATCH /api/tours/:tourId - partial update: reschedule, change status, or
+ *  record the exit-gate decision on a toured tour (outcome + moveForward; sets
+ *  convertible). Recording a decision does not close the tour by itself - only
+ *  not-a-fit sent WITH `status: 'closed'` closes it. `outcome` is a
+ *  StaffTourOutcome: `no_outcome` is the auto-close sweep's alone. A 409
+ *  (illegal_status_transition, illegal_exit_gate, tour_changed) means the tour
+ *  is not in a state that accepts this patch - reload, not retry.
  *  Returns the updated tour (unwrapped from { tour }). */
 export async function patchTour(
   tourId: string,
   patch: {
     scheduledAt?: string;
     status?: TourStatus;
-    outcome?: TourOutcome;
+    outcome?: StaffTourOutcome;
     moveForward?: boolean;
   },
 ): Promise<Tour> {
   const res = await request<{ tour: Tour }>(`/api/tours/${encodeURIComponent(tourId)}`, {
     method: 'PATCH',
     body: patch,
+  });
+  return res.tour;
+}
+
+/** POST /api/tours/:tourId/reopen - reopen a closed tour (Sam #18): it goes
+ *  back to the state it closed from, its outcome cleared; nothing is sent.
+ *  Returns the updated tour (unwrapped from { tour }). 404 tour_not_found;
+ *  409s: tour_not_closed, tour_converted, tour_reopen_unsupported,
+ *  tour_changed (none carries a detail). */
+export async function reopenTour(tourId: string): Promise<Tour> {
+  const res = await request<{ tour: Tour }>(`/api/tours/${encodeURIComponent(tourId)}/reopen`, {
+    method: 'POST',
+    body: {},
   });
   return res.tour;
 }

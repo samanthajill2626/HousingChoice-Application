@@ -20,7 +20,7 @@
 // resolves on success (the dialog closes) and throws on failure (inline error,
 // dialog stays open). ScheduleTourForm is create-only and deliberately NOT reused.
 import { useState } from 'react';
-import { type TourOutcome } from '../../api/index.js';
+import { type StaffTourOutcome } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { currentHourLocal, pastTourTimeWarning, tourTimeWarning } from './tourTime.js';
@@ -282,8 +282,9 @@ export function RecordOutcomeModal({
   onConfirm,
 }: {
   onClose: () => void;
-  /** PATCH the exit-gate decision; resolves on success, throws to stay open. */
-  onConfirm: (decision: { outcome: TourOutcome; moveForward: boolean }) => Promise<void>;
+  /** PATCH the exit-gate decision; resolves on success, throws to stay open.
+   *  A person's outcome only - `no_outcome` is the auto-close sweep's. */
+  onConfirm: (decision: { outcome: StaffTourOutcome; moveForward: boolean }) => Promise<void>;
 }): React.JSX.Element {
   const [moveForward, setMoveForward] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);

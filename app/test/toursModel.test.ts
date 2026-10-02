@@ -4,8 +4,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   canReschedule,
+  isStaffTourOutcome,
   isTourOutcome,
   isTourStatus,
+  STAFF_TOUR_OUTCOMES,
   TOUR_OUTCOME_LABELS,
   TOUR_OUTCOMES,
   TOUR_STATUS_LABELS,
@@ -118,8 +120,8 @@ describe('toursModel — canReschedule', () => {
 });
 
 describe('toursModel — TOUR_OUTCOMES', () => {
-  it('contains exactly the two outcomes', () => {
-    expect([...TOUR_OUTCOMES]).toEqual(['move_forward', 'not_a_fit']);
+  it('contains exactly the three outcomes', () => {
+    expect([...TOUR_OUTCOMES]).toEqual(['move_forward', 'not_a_fit', 'no_outcome']);
   });
 });
 
@@ -138,6 +140,10 @@ describe('toursModel — isTourOutcome guard', () => {
     expect(isTourOutcome(undefined)).toBe(false);
     expect(isTourOutcome(null)).toBe(false);
   });
+
+  it('accepts no_outcome (system-only: the auto-close sweep writes it)', () => {
+    expect(isTourOutcome('no_outcome')).toBe(true);
+  });
 });
 
 describe('toursModel — TOUR_OUTCOME_LABELS', () => {
@@ -146,5 +152,28 @@ describe('toursModel — TOUR_OUTCOME_LABELS', () => {
       expect(typeof TOUR_OUTCOME_LABELS[o]).toBe('string');
       expect(TOUR_OUTCOME_LABELS[o].length).toBeGreaterThan(0);
     }
+  });
+
+  it("labels no_outcome as 'No outcome recorded'", () => {
+    expect(TOUR_OUTCOME_LABELS.no_outcome).toBe('No outcome recorded');
+  });
+});
+
+describe('toursModel - STAFF_TOUR_OUTCOMES (the PATCH outcome allowlist)', () => {
+  it('is exactly the two outcomes a person may record', () => {
+    expect([...STAFF_TOUR_OUTCOMES]).toEqual(['move_forward', 'not_a_fit']);
+  });
+
+  it('isStaffTourOutcome accepts both staff outcomes', () => {
+    expect(isStaffTourOutcome('move_forward')).toBe(true);
+    expect(isStaffTourOutcome('not_a_fit')).toBe(true);
+  });
+
+  it('isStaffTourOutcome rejects no_outcome (system-only) and non-outcomes', () => {
+    expect(isStaffTourOutcome('no_outcome')).toBe(false);
+    expect(isStaffTourOutcome('')).toBe(false);
+    expect(isStaffTourOutcome(undefined)).toBe(false);
+    expect(isStaffTourOutcome(null)).toBe(false);
+    expect(isStaffTourOutcome('converted')).toBe(false);
   });
 });

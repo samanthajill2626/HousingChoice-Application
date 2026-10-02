@@ -400,6 +400,28 @@ describe('PATCH /api/tours/:tourId', () => {
     expect(badOutcome.status).toBe(400);
   });
 
+  // no_outcome is a real TourOutcome (the auto-close sweep writes it) but it is
+  // SYSTEM-ONLY: the PATCH exit gate validates against the STAFF allowlist, so a
+  // person can never record it. Green on the pre-feature code (whose 400 text
+  // is identical); it goes red only if the model widens without the validator.
+  it('PATCH { outcome: no_outcome } is a 400 listing only the staff outcomes; nothing is stored', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'no_outcome', moveForward: false });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'outcome must be one of: move_forward, not_a_fit' });
+    const stored = world.toursMap.get(tourId);
+    expect(stored?.status).toBe('toured');
+    expect(stored?.outcome).toBeUndefined();
+    expect(stored?.moveForward).toBeUndefined();
+  });
+
   it("PATCH { status: 'confirmed' } is a plain 400 invalid-status error (the status was removed 2026-07-08)", async () => {
     const { app, world } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);

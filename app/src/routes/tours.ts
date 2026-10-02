@@ -49,13 +49,12 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { parseIntroBody } from '../lib/relayIntroBody.js';
 import {
   canReschedule,
-  isTourOutcome,
+  isStaffTourOutcome,
   isTourStatus,
   isTourType,
+  STAFF_TOUR_OUTCOMES,
   TOUR_STATUSES,
-  TOUR_OUTCOMES,
   TOUR_TYPES,
-  type TourOutcome,
   type TourStatus,
   type TourType,
 } from '../lib/toursModel.js';
@@ -1044,8 +1043,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       res.status(400).json({ error: `status must be one of: ${TOUR_STATUSES.join(', ')}` });
       return;
     }
-    if (newOutcome !== undefined && !isTourOutcome(newOutcome)) {
-      res.status(400).json({ error: `outcome must be one of: ${TOUR_OUTCOMES.join(', ')}` });
+    if (newOutcome !== undefined && !isStaffTourOutcome(newOutcome)) {
+      res.status(400).json({ error: `outcome must be one of: ${STAFF_TOUR_OUTCOMES.join(', ')}` });
       return;
     }
     if (newMoveForward !== undefined && typeof newMoveForward !== 'boolean') {

@@ -61,12 +61,13 @@ export function isTourStatus(x: unknown): x is TourStatus {
   return typeof x === 'string' && TOUR_STATUS_SET.has(x);
 }
 
-// --- Tour outcomes (exit gate) -----------------------------------------------
-// Recorded on the tour when it moves to `closed`. `move_forward` means the
-// tenant is worth pursuing for a placement; `not_a_fit` ends the tour thread.
-// The actual placement creation is deferred — this model captures only the
-// decision so the conversion can happen later with full placement logic.
-export const TOUR_OUTCOMES = ['move_forward', 'not_a_fit'] as const;
+// --- Tour outcomes (exit gate + auto-close) ----------------------------------
+// Recorded on the tour when it is decided. `move_forward` means the tenant is
+// worth pursuing for a placement; `not_a_fit` ends the tour thread;
+// `no_outcome` is written ONLY by the auto-close sweep (jobs/tourAutoClose.ts)
+// when nobody recorded a decision two weeks after the tour's clock start
+// (Sam #18, 2026-10-01). People record only STAFF_TOUR_OUTCOMES.
+export const TOUR_OUTCOMES = ['move_forward', 'not_a_fit', 'no_outcome'] as const;
 
 export type TourOutcome = (typeof TOUR_OUTCOMES)[number];
 
@@ -75,11 +76,25 @@ const TOUR_OUTCOME_SET: ReadonlySet<string> = new Set(TOUR_OUTCOMES);
 export const TOUR_OUTCOME_LABELS: Readonly<Record<TourOutcome, string>> = {
   move_forward: 'Move forward',
   not_a_fit: 'Not a fit',
+  no_outcome: 'No outcome recorded',
 };
 
-/** Is `x` a known tour outcome? */
+/** Is `x` a known tour outcome (any writer, including the sweep)? */
 export function isTourOutcome(x: unknown): x is TourOutcome {
   return typeof x === 'string' && TOUR_OUTCOME_SET.has(x);
+}
+
+/** The outcomes a PERSON may record through PATCH /api/tours/:id. `no_outcome`
+ *  is system-only: the auto-close sweep writes it and nothing else may. */
+export const STAFF_TOUR_OUTCOMES = ['move_forward', 'not_a_fit'] as const satisfies readonly TourOutcome[];
+
+export type StaffTourOutcome = (typeof STAFF_TOUR_OUTCOMES)[number];
+
+const STAFF_TOUR_OUTCOME_SET: ReadonlySet<string> = new Set(STAFF_TOUR_OUTCOMES);
+
+/** Is `x` an outcome a person may record (the PATCH exit-gate allowlist)? */
+export function isStaffTourOutcome(x: unknown): x is StaffTourOutcome {
+  return typeof x === 'string' && STAFF_TOUR_OUTCOME_SET.has(x);
 }
 
 // --- Tour types --------------------------------------------------------------
